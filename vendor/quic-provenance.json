@@ -86,8 +86,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "a63bf8516128c5dd7ac7fb2e63450886873990f2084ff91b39737c4cf41c6c32",
-        "patched_sha256": "b28292b73e3369763dd625cd01ceba15f7d30170ac93369632bd57348faefff4",
-        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored; cfg(test) endpoint consumer barrier while real socket ingress continues; r3: classify an unbound routed protocol handle as InvalidOwner, reserving OwnerSlotsFull for actual capacity exhaustion"
+        "patched_sha256": "6c73b8d7a067212fb69862b525e28ddf97fa65f7f6f077fbcc2f0d72032a4150",
+        "delta": "SPDX; Opt-in bounded handle-to-owner-slot map, typed capacity refusals before connection creation, independent test-only copy/delivery witnesses, gated idempotent close; upstream import order restored; cfg(test) endpoint consumer barrier while real socket ingress continues; r3: classify an unbound routed protocol handle as InvalidOwner, reserving OwnerSlotsFull for actual capacity exhaustion; Dormant stateless response configuration and owner-capacity validation; all endpoint connectionless producers use typed bounded output and one retained sender, cancellation on close/destruction; default responses retain legacy direct try_send"
       },
       "src/incoming.rs": {
         "upstream_sha256": "d10fcb0efd956d2d4f53e6600737520c04179d0c5850a8c89792c86a762eef98",
@@ -96,8 +96,8 @@
       },
       "src/lib.rs": {
         "upstream_sha256": "36660f7859142bfa1777092c8eb3016c079cadaf1daf2c48b41186130b2fcaf8",
-        "patched_sha256": "5cd91a7420d0bb593062da0a8995e350f855b778c3c29efe23d64c42a4e2a70b",
-        "delta": "SPDX; Export typed raw queue refusal and opt-in configuration"
+        "patched_sha256": "97f2b75da699c223c9eae3b8209766778bd857b1e5108a05d2553e8fba3f4949",
+        "delta": "SPDX; Export typed raw queue refusal and opt-in configuration; Export retained stateless sender cancellation/join ownership"
       },
       "src/mutex.rs": {
         "upstream_sha256": "9b78cec294b00b15768e2d97b74e3371a59ff9048ce1b2d970f43fcc3f1b7814",
@@ -150,26 +150,34 @@
         "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
       },
       "src/rawq.rs": {
-        "patched_sha256": "772366c6599275bc735985560d84d841621594cf7046efaeb06cd96a154c040d",
-        "delta": "SPDX; Separate incoming owner and bounded established slots, typed source/owner exhaustion and refusal counters; raw backing credits"
+        "patched_sha256": "79f50a2e68bc1d4069c4899a0f6bcfe44cbf7ca88d09790a0218da75e19b98bb",
+        "delta": "SPDX; Separate incoming owner and bounded established slots, typed source/owner exhaustion and refusal counters; raw backing credits; Declare cohesive stateless response sender module"
       },
       "src/rawq_mailbox.rs": {
         "patched_sha256": "b83e3876bd0a7d3600617a2286d2aaf92342039fbec7de95c611a348730e729c",
         "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics; cfg(test) reverse consumer barrier while raw pause/resume is driven normally"
       },
       "src/rawq_tests.rs": {
-        "patched_sha256": "67063209277d149c197ca9db3f5bc50cfd6bf5a0a3ee00510d407aec230c6de0",
-        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix"
+        "patched_sha256": "5273d3ee212b48491e6f25e33695ddc3c11dbbd320d175a8ab08fb7a869fc0fe",
+        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration"
       },
       "src/rawq_tests/control_driver.rs": {
         "patched_sha256": "0a5a1e4488b2be6baa8ccb17ae384a69632fc5f570f0b6ac3f96ae8e746de89e",
         "delta": "Real Tokio endpoint/connection r10(a/b/c) matrix with 4096-byte/4-item binding limits, independent payload/frame/dedup/ACK/raw-dequeue/waker oracles; both directions full, pending producer, duplicate/retransmit, repeated-RETIRE oversize, terminal metadata adapter, independent drains and concurrent timer; r3: wait for independent consumers and the concurrent timer to drain before a later RETIRE retransmission, then assert unchanged local CID issuance for it and a duplicate"
+      },
+      "src/rawq/stateless_response.rs": {
+        "patched_sha256": "c6f6ab0d90a89107ae481cf09522f334ab32f8d5b21e05ebfff6b84f34038aac",
+        "delta": "Pre-sized ring, exactly one endpoint worker, queued plus active proto permits until completion/error/cancel-and-drop, no per-response spawn/completion list; expose cancellation/join and ownership diagnostics"
+      },
+      "src/rawq_tests/stateless_response_tests.rs": {
+        "patched_sha256": "24b4c8ac57be461304a6f00a687e2f646251aec4f007f6f301c61f6e31e74e2d",
+        "delta": "Zero-admitted-connection negotiation/Retry/refusal floods with independent item/byte ceilings, actual runtime spawn counts, full/oversize allocation suppression, recovery/healthy TLS admission; full protocol arena, blocked cancellation, endpoint-drop join and buffer release"
       }
     },
     "formatting": {
-      "current_policy": "Scoped changed-module rustfmt, then restore upstream import prefixes and whitespace-only hunks; no whole-vendor formatting",
+      "current_policy": "No rustfmt on vendor. Restore pinned upstream style by hand; root cargo fmt --all excludes vendor packages.",
       "product_command": "cargo fmt --all",
-      "vendor_command": "none (excluded from product workspace)",
+      "vendor_command": "none; vendor/rustfmt.toml removed in A3 as directed",
       "rustfmt_version": "rustfmt 1.10.0-stable (b940084d7e 2026-09-28)",
       "r1_command": "cargo fmt --all (toolchain 1.99.0; vendor/rustfmt.toml edition=2021,max_width=100; root rustfmt.toml also applied during r1 import)",
       "toolchain": "1.99.0 (rust-toolchain.toml)",
@@ -220,7 +228,7 @@
           "vendor/quinn/src/rawq_tests/control_driver.rs"
         ]
       ],
-      "restoration": "Restore unchanged upstream import prefixes from verified archive. r3 restores proto cid_state and endpoint prefixes byte-for-byte and tests/mod.rs layout/import order from the PR main baseline, retaining only pub(crate) utility visibility. Its 4182-line baseline is preserved.",
+      "restoration": "A3 restores the final upstream tests/mod.rs blank line. That file matches upstream layout plus SPDX and pub(crate) utility visibility (4183 lines). Historical formatter argv below is provenance only, not an instruction to rerun it.",
       "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted.",
       "r2_restoration_history": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
       "r3_command": [
@@ -348,8 +356,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "0a751989a73faeea3462968f20a8bb6b8db2970ce70d942af74ba398f3d047dd",
-        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior"
+        "patched_sha256": "f29a9a0b3c71df7f45656feef3c63ed098a12718fdbd1d88ab797692d8438cba",
+        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -443,8 +451,8 @@
       },
       "src/endpoint.rs": {
         "upstream_sha256": "eb9cc82040621b95670e1d9ca9e82e902029766f7303b4329fcb169fb73d3bfc",
-        "patched_sha256": "6541c6e3669d0fde335fd5593c9c43fb5b38ed858a6ae6422aa39214cca17915",
-        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser; r3: restore exact pinned upstream import prefix"
+        "patched_sha256": "8565736e50472812034d4a698c719ba176880e0a2b199c78e2a79bf0c7bfeb10",
+        "delta": "SPDX; Bounded endpoint control emission census, typed outgoing endpoint-capacity error and shared ingress parser; r3: restore exact pinned upstream import prefix; Typed legacy/bounded stateless output adapter and bounded handle/accept/refuse/retry APIs; preflight all negotiation/reset/Initial-close/Retry bounds before response backing grows; legacy default behavior retained"
       },
       "src/frame.rs": {
         "upstream_sha256": "ff9bc94eed5eaa96400c41f40dc0d73c68b71a60b98acbaf045885d0522341e3",
@@ -453,8 +461,8 @@
       },
       "src/lib.rs": {
         "upstream_sha256": "cf40840076b56b9b2c61b207604f60226157728d2af7b206bc3e4a2bebbb4488",
-        "patched_sha256": "13e8dd1698109163ed7c4460be146884bb0c2b3aca203ad9f7998b8df4f4b236",
-        "delta": "SPDX; Export bounded control configuration/error types"
+        "patched_sha256": "4b6b6028364fed85fe9c8efdb4d120ff096d060ecd77ce0363d047181321209d",
+        "delta": "SPDX; Export bounded control configuration/error types; Export typed stateless response pool, builder, owned response and fixed diagnostics"
       },
       "src/packet.rs": {
         "upstream_sha256": "b73d99c36983c4c0cb47e6cc38ba7f723e2f924e397aedd63bf9b8e4cf6a57a9",
@@ -488,8 +496,8 @@
       },
       "src/tests/mod.rs": {
         "upstream_sha256": "a4f0907c8c39c02646602e628d0a7c9090db601bfb35edc4deb52b51d6245dd1",
-        "patched_sha256": "368bdd2f6c1e5448a19f8644cf6a5949dace4511cdd5b382b6897c5e1466f918",
-        "delta": "SPDX and expose deterministic packet test utility module; r3 restores the reviewed import order and blank lines to the original PR main baseline (4182 lines), preserving baseline no-growth"
+        "patched_sha256": "40946c87720ff1a74b628a4375bab86c1098545e3f867f1d7b940e3639990bdb",
+        "delta": "SPDX; expose deterministic packet test utility module; restore every upstream blank line/import order, including the explicitly requested blank line before assert_matches (4183 lines including SPDX, original upstream 4182)"
       },
       "src/tests/token.rs": {
         "upstream_sha256": "f648dd0c171d1f2c498e0363b68c6211d5e9ec2f2b305db4a262d3ec47ebbc79",
@@ -503,8 +511,8 @@
       },
       "src/token.rs": {
         "upstream_sha256": "b0364bcc2aa821a85e66f476f2314c9dedf01e1a24c456a70f9f9e79bc31d18c",
-        "patched_sha256": "b63235cfecf79eb1ad05c3bf7213cd74d381c855a4ad853d22a1842da506bcba",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
+        "patched_sha256": "8af0600590aecde087c4786539f6d834b6ff5f2fd99d9739ed901f19d0d4e55e",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Retry-only 128-byte bounded token scratch after response permit; legacy token encoding retains original allocation behavior"
       },
       "src/token_memory_cache.rs": {
         "upstream_sha256": "79d40926f4707fd65b7c497fbde62f1cf40df29af5b5b4c49e840abd669ea03d",
@@ -531,26 +539,30 @@
         "delta": "Extract unchanged idle timeout negotiation and tests with pub(super) visibility and SPDX"
       },
       "src/connection/control.rs": {
-        "patched_sha256": "e69a53312c09fa72cae8b182be8446783dc39e1c01e3d7d25b8494b37c7788a0",
-        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume"
+        "patched_sha256": "75b4fba4540ab2dd2d6887d996367f458f8d1de092a8246146770a7c7d7afc6e",
+        "delta": "SPDX; Generation-gated pending packet/timer revalidation, aggregate emitted-control reservation census and debug assertion; fresh resume time; Disarm the consumed waiter before retry; re-arm atomically and schedule if a concurrent release changed the generation; avoid duplicate wake on successful resume; A3 first commit: carry uncredited whole-datagram length across parked migrating heads and retry transfers; count only after successful head resume selects its path"
       },
       "src/connection/packet_processing.rs": {
-        "patched_sha256": "7aee8879c00237465e339347d8bf1ff8fdf848c4867bda6a282a437e561860cc",
-        "delta": "SPDX; Coalesced packet resume without duplicate UDP receive byte accounting"
+        "patched_sha256": "526dc82c1510297f98cc82f98b2de6ad8424b322c08c4daca316a4d5c571d393",
+        "delta": "SPDX; Coalesced packet resume without duplicate UDP receive byte accounting; Initialize pending packet deferred path-byte ownership; coalesced tails use zero because their datagram was already counted"
       },
       "src/connection/control/tests.rs": {
-        "patched_sha256": "f53147a49bcfd5510d91559fd496f21e77c740d40bc3cfb6b43b818ede8addba",
-        "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses"
+        "patched_sha256": "187236ea61240ae13b61129714dcfc5cff14094907943bb6629a5f126a6e1fe0",
+        "delta": "SPDX; Aggregate directional byte/item ceilings, generation retry gates, head/tail datagram accounting, fresh timer time and census overrun witnesses; A3 first commit: bounded authenticated migration parks with zero free control credit, preserves old path until resume, then credits new path once and unblocks anti-amplification"
       },
       "src/connection/control/probe.rs": {
         "patched_sha256": "ed808be94bdf7a57cbaf355c98fe26388f24820e54fb33b066214dd3ea87d47e",
         "delta": "Non-default test-only negotiated-key encrypted packet construction, directional census, dedup/ACK/effect observations and real timer arming; no product activation"
+      },
+      "src/endpoint/response_credit.rs": {
+        "patched_sha256": "1b75a4470f2e8fdaf491e880a43667af46916d926e45abb1232035e5a21d162a",
+        "delta": "Separate endpoint response item/slab/512-byte metadata permits, held through builder/queue/active send destruction; nonblocking full/oversize suppression, frozen overrides and cancellation seal"
       }
     },
     "formatting": {
-      "current_policy": "Scoped changed-module rustfmt, then restore upstream import prefixes and whitespace-only hunks; no whole-vendor formatting",
+      "current_policy": "No rustfmt on vendor. Restore pinned upstream style by hand; root cargo fmt --all excludes vendor packages.",
       "product_command": "cargo fmt --all",
-      "vendor_command": "none (excluded from product workspace)",
+      "vendor_command": "none; vendor/rustfmt.toml removed in A3 as directed",
       "rustfmt_version": "rustfmt 1.10.0-stable (b940084d7e 2026-09-28)",
       "r1_command": "cargo fmt --all (toolchain 1.99.0; vendor/rustfmt.toml edition=2021,max_width=100; root rustfmt.toml also applied during r1 import)",
       "toolchain": "1.99.0 (rust-toolchain.toml)",
@@ -601,7 +613,7 @@
           "vendor/quinn/src/rawq_tests/control_driver.rs"
         ]
       ],
-      "restoration": "Restore unchanged upstream import prefixes from verified archive. r3 restores proto cid_state and endpoint prefixes byte-for-byte and tests/mod.rs layout/import order from the PR main baseline, retaining only pub(crate) utility visibility. Its 4182-line baseline is preserved.",
+      "restoration": "A3 restores the final upstream tests/mod.rs blank line. That file matches upstream layout plus SPDX and pub(crate) utility visibility (4183 lines). Historical formatter argv below is provenance only, not an instruction to rerun it.",
       "r2b_restoration": "Preserve existing import prefixes and restore whitespace-only replace hunks against pre-format text using difflib.SequenceMatcher(autojunk=False); semantic hunks remain formatted.",
       "r2_restoration_history": "Restore unchanged upstream import prefixes from verified archive; restore replace hunks whose whitespace-stripped bytes match using difflib.SequenceMatcher(autojunk=False); preserve semantic hunks and SPDX. Remove four blank lines in proto tests/mod.rs to maintain no-growth.",
       "r3_command": [

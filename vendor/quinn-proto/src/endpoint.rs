@@ -634,10 +634,12 @@ impl Endpoint {
 
     /// Attempt to accept this incoming connection (an error may still occur)
     /// Accept with bounded stateless failure responses.
+    #[allow(clippy::result_large_err)]
     pub fn accept_buffered(&mut self, incoming: Incoming, now: Instant, buf: &mut ResponseBuffer, server_config: Option<Arc<ServerConfig>>) -> Result<(ConnectionHandle, Connection), AcceptError> {
         self.accept_output(incoming, now, &mut Output::Bounded(buf), server_config)
     }
     /// Accept using the legacy unbounded response buffer.
+    #[allow(clippy::result_large_err)]
     pub fn accept(&mut self, incoming: Incoming, now: Instant, buf: &mut Vec<u8>, server_config: Option<Arc<ServerConfig>>) -> Result<(ConnectionHandle, Connection), AcceptError> {
         self.accept_output(incoming, now, &mut Output::Legacy(buf), server_config)
     }
@@ -868,6 +870,7 @@ impl Endpoint {
         self.clean_up_incoming(&incoming);
         incoming.improper_drop_warner.dismiss();
 
+        let bounded = matches!(buf, Output::Bounded(_));
         let Some(buf) = buf.prepare(512) else { return Ok(None); };
         // First Initial
         // The peer will use this as the DCID of its following Initials. Initial DCIDs are
@@ -882,7 +885,8 @@ impl Endpoint {
             orig_dst_cid: incoming.packet.header.dst_cid,
             issued: server_config.time_source.now(),
         };
-        let token = Token::new(payload, &mut self.rng).encode_response(&*server_config.token_key);
+        let token = Token::new(payload, &mut self.rng);
+        let token = if bounded { token.encode_response(&*server_config.token_key) } else { token.encode(&*server_config.token_key) };
 
         let header = Header::Retry {
             src_cid: loc_cid,

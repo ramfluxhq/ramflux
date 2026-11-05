@@ -32,6 +32,14 @@ for package in ("quinn", "quinn-proto"):
     tests = [line[:-6] for line in listing.stdout.splitlines() if line.endswith(": test")]
     if not tests:
         raise SystemExit(f"{package}: zero library tests selected")
+    if package == "quinn":
+        required = {
+            "rawq_tests::packet_credit_covers_enqueue_processing_and_backing_release",
+            "rawq_tests::control_credit_preserves_cid_close_and_drained",
+            "rawq_tests::stateless_responses_bound_allocations_and_sender_tasks",
+        }
+        if missing := required.difference(tests):
+            raise SystemExit(f"{package}: missing required raw/control/response tests: {sorted(missing)}")
     print(f"{package}: {len(tests)} library tests selected", flush=True)
     if not args.list_only:
         subprocess.run(command, cwd=ROOT, check=True)

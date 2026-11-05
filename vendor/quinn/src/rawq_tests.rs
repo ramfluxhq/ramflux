@@ -17,6 +17,9 @@ use tokio::time::timeout;
 
 #[derive(Debug, Default)]
 struct Wire {
+    write_blocked: AtomicBool,
+    write_wake: Mutex<Option<Waker>>,
+    send_attempts: AtomicUsize,
     held: AtomicBool,
     pause_after_recv: AtomicBool,
     suppress_send: AtomicBool,
@@ -33,17 +36,19 @@ struct Socket {
     outbound: Arc<Wire>,
 }
 #[derive(Debug)]
-struct Writable;
+struct Writable(Arc<Wire>);
 impl UdpPoller for Writable {
-    fn poll_writable(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_writable(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        if self.0.write_blocked.load(Ordering::SeqCst) { *self.0.write_wake.lock().unwrap()=Some(cx.waker().clone()); Poll::Pending } else { Poll::Ready(Ok(())) }
     }
 }
 impl AsyncUdpSocket for Socket {
     fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
-        Box::pin(Writable)
+        Box::pin(Writable(self.outbound.clone()))
     }
     fn try_send(&self, t: &udp::Transmit<'_>) -> io::Result<()> {
+        self.outbound.send_attempts.fetch_add(1,Ordering::SeqCst);
+        if self.outbound.write_blocked.load(Ordering::SeqCst) { return Err(io::ErrorKind::WouldBlock.into()); }
         assert!(t.segment_size.is_none());
         if t.destination != self.remote {
             return Ok(());
@@ -464,3 +469,8 @@ async fn owner_slots_refuse_capacity_and_rebind_sparse_protocol_handles() {
 }
 
 mod control_driver;
+
+mod stateless_response_tests;
+
+#[tokio::test]
+async fn stateless_responses_bound_allocations_and_sender_tasks() { stateless_response_tests::run().await; }
