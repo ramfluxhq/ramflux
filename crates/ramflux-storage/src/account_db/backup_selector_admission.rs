@@ -7,11 +7,12 @@ use ramflux_crypto::{blake3_256_base64url, object_erasure_commitment, object_era
 use rusqlite::{Connection, params};
 use serde_json::Value;
 
-const TABLES: [&str; 4] = [
+const TABLES: [&str; 5] = [
     "backup_reference_admission",
     "backup_selector_admission",
     "backup_lookup_origin",
     "backup_target_delete",
+    "backup_group_delete",
 ];
 
 pub(super) fn is_scratch(table: &str) -> bool {
@@ -56,6 +57,7 @@ CREATE INDEX main.backup_target_message ON backup_target_delete(message_id,refer
 INSERT INTO main.backup_lookup_origin SELECT 'target',lookup,commitment FROM main.object_erasure_lookup;
 INSERT INTO main.backup_lookup_origin SELECT 'incoming',lookup,commitment FROM incoming.object_erasure_lookup;
 ")?;
+    restrictions::prepare(db)?;
     replacements::prepare(db)?;
     Ok(())
 }
@@ -212,3 +214,8 @@ mod history_tests;
 
 #[cfg(test)]
 pub(super) mod staging_tests;
+
+pub(super) mod restrictions;
+
+#[cfg(test)]
+mod budget_tests;

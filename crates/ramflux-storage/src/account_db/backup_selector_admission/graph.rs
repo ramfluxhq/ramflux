@@ -6,18 +6,13 @@ use crate::StorageError;
 use ramflux_crypto::blake3_256_base64url;
 use rusqlite::{Connection, params};
 
-pub(in crate::account_db) fn classify(db: &Connection) -> Result<(), StorageError> {
-    // Authenticated identities must agree even when one side would later be erased.
-    let conflict: bool = db.query_row(r"
+pub(super) const CONFLICT: &str = r"
 SELECT EXISTS(SELECT 1 FROM main.object_erasure_lookup l JOIN incoming.object_erasure_lookup r USING(lookup) WHERE l.commitment<>r.commitment)
 OR EXISTS(SELECT 1 FROM main.object_retention_reference l JOIN incoming.object_retention_reference r USING(reference_hash) WHERE l.selector<>r.selector OR l.commitment<>r.commitment OR l.selector_lookup<>r.selector_lookup)
 OR EXISTS(SELECT 1 FROM main.object_retention_reference l JOIN incoming.object_retention_reference r USING(selector_lookup) WHERE l.commitment<>r.commitment)
 OR EXISTS(SELECT 1 FROM main.object_erasure_lookup l JOIN incoming.object_retention_reference r ON l.lookup=r.selector_lookup WHERE l.commitment<>r.commitment)
-OR EXISTS(SELECT 1 FROM incoming.object_erasure_lookup l JOIN main.object_retention_reference r ON l.lookup=r.selector_lookup WHERE l.commitment<>r.commitment)", [], |r| r.get(0))?;
-    if conflict {
-        return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
-    }
-    db.execute_batch(r"
+OR EXISTS(SELECT 1 FROM incoming.object_erasure_lookup l JOIN main.object_retention_reference r ON l.lookup=r.selector_lookup WHERE l.commitment<>r.commitment)";
+pub(super) const FENCES: &str = r"
 INSERT OR IGNORE INTO main.object_erasure_fence SELECT commitment FROM incoming.object_erasure_fence;
 INSERT OR IGNORE INTO main.object_erasure_lookup SELECT lookup,commitment FROM incoming.object_erasure_lookup;
 INSERT OR IGNORE INTO main.object_erasure_fence
@@ -32,7 +27,24 @@ INSERT OR IGNORE INTO main.object_erasure_lookup
 SELECT wire_lookup,commitment FROM main.object_retention_payload WHERE commitment IN (SELECT commitment FROM main.object_erasure_fence);
 INSERT OR IGNORE INTO main.object_erasure_lookup
 SELECT wire_lookup,commitment FROM incoming.object_retention_payload WHERE commitment IN (SELECT commitment FROM main.object_erasure_fence);
-")?;
+";
+pub(super) const DECISIONS: &str = r"
+DELETE FROM backup_reference_admission AS a WHERE side='incoming'
+AND EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN backup_lookup_origin o ON o.lookup=r.selector_lookup AND o.side='target' WHERE r.reference_hash=a.reference_hash)
+AND NOT EXISTS(SELECT 1 FROM backup_reference_admission t WHERE t.side='target' AND t.selector=a.selector AND t.commitment=a.commitment);
+INSERT INTO backup_selector_admission
+SELECT 'target',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='target' AND a.selector=r.selector AND a.commitment=r.commitment) THEN 'keep' ELSE 'erase' END FROM main.object_retention_reference r GROUP BY r.selector,r.commitment;
+INSERT INTO backup_selector_admission
+SELECT 'incoming',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='incoming' AND a.selector=r.selector AND a.commitment=r.commitment) THEN 'keep' ELSE 'erase' END FROM incoming.object_retention_reference r GROUP BY r.selector,r.commitment;
+";
+
+pub(in crate::account_db) fn classify(db: &Connection) -> Result<(), StorageError> {
+    // Authenticated identities must agree even when one side would later be erased.
+    let conflict: bool = db.query_row(CONFLICT, [], |r| r.get(0))?;
+    if conflict {
+        return Err(StorageError::ObjectOwnershipUnverified { schema_version: 13 });
+    }
+    db.execute_batch(FENCES)?;
     #[cfg(test)]
     checkpoint(db, "fence_union")?;
     // Both owner sets are inspected before decisions. These encrypted operation
@@ -75,15 +87,7 @@ SELECT wire_lookup,commitment FROM incoming.object_retention_payload WHERE commi
     // Only pre-union target origin vetoes incoming same-identity owners. A
     // surviving target witness keeps a partial lookup live. Incoming-only
     // history may retain its own independently surviving owners.
-    db.execute_batch(r"
-DELETE FROM backup_reference_admission AS a WHERE side='incoming'
-AND EXISTS(SELECT 1 FROM incoming.object_retention_reference r JOIN backup_lookup_origin o ON o.lookup=r.selector_lookup AND o.side='target' WHERE r.reference_hash=a.reference_hash)
-AND NOT EXISTS(SELECT 1 FROM backup_reference_admission t WHERE t.side='target' AND t.selector=a.selector AND t.commitment=a.commitment);
-INSERT INTO backup_selector_admission
-SELECT 'target',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='target' AND a.selector=r.selector AND a.commitment=r.commitment) THEN 'keep' ELSE 'erase' END FROM main.object_retention_reference r GROUP BY r.selector,r.commitment;
-INSERT INTO backup_selector_admission
-SELECT 'incoming',r.selector,r.commitment,CASE WHEN EXISTS(SELECT 1 FROM backup_reference_admission a WHERE a.side='incoming' AND a.selector=r.selector AND a.commitment=r.commitment) THEN 'keep' ELSE 'erase' END FROM incoming.object_retention_reference r GROUP BY r.selector,r.commitment;
-")?;
+    db.execute_batch(DECISIONS)?;
     #[cfg(test)]
     checkpoint(db, "graph_admission")?;
     Ok(())
@@ -118,17 +122,9 @@ fn deleted_with_bindings(
     message: &str,
     bindings: &str,
 ) -> Result<bool, StorageError> {
-    let projected: bool = db.query_row(
-        &format!(
-            r"SELECT
-EXISTS(SELECT 1 FROM {schema}.direct_message_projection WHERE message_id=?1 AND deleted=1)
-OR EXISTS(SELECT 1 FROM {schema}.message_tombstone_projection WHERE message_id=?1)
-OR EXISTS(SELECT 1 FROM {schema}.group_message_tombstone_projection WHERE message_id=?1)"
-        ),
-        [message],
-        |r| r.get(0),
-    )?;
-    let group_deleted: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {schema}.group_message_tombstone_projection t WHERE EXISTS(SELECT 1 FROM ({bindings}) b WHERE b.message_id=?1 AND b.copy_id='group:'||t.group_id||':'||t.message_id))"), [message], |r|r.get(0))?;
+    let queries = super::restrictions::queries(schema, bindings);
+    let projected: bool = db.query_row(&queries[0], [message], |r| r.get(0))?;
+    let group_deleted: bool = db.query_row(&queries[1], [message], |r| r.get(0))?;
     if projected || group_deleted || marker(db, schema, message)? {
         return Ok(true);
     }
