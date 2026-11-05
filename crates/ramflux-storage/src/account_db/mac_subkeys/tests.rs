@@ -404,3 +404,101 @@ fn rekey_preserves_routed_seen_replay_refusal() -> TestResult {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn fresh_device_pre_bundle_restore_never_derives_authority_from_backup_key() -> TestResult {
+    for version in [12, 13] {
+        let (root, db) = legacy_db(&format!("mac-prebundle-restore-{version}"))?;
+        seed_deleted(&db)?;
+        remove_bundle_schema(&db)?;
+        if version == 12 {
+            db.connection.execute_batch("DELETE FROM schema_migration WHERE schema_version=13; DROP INDEX IF EXISTS runtime_outbox_object_selector;")?;
+            db.connection.execute(
+                "UPDATE schema_migration SET checksum=?1 WHERE schema_version=1",
+                params![crate::schema_object_erasure::V12_SENTINEL],
+            )?;
+        }
+        let archive_path = root.join("archive.db");
+        let snapshot = db.write_backup_snapshot(&archive_path)?;
+        let staging_path = root.join("input.db");
+        std::fs::copy(&archive_path, &staging_path)?;
+        let archive = crate::BackupDatabase::open(&staging_path, &snapshot.key)?;
+        let imported = load(&archive.db)?;
+        let prohibited = Bundle::derive(snapshot.key.bytes());
+        for (actual, prohibited) in
+            imported.keys.as_chunks::<32>().0.iter().zip(prohibited.keys.as_chunks::<32>().0)
+        {
+            assert!(actual != prohibited, "archive key became MAC authority");
+        }
+        let device_root = root.join("fresh-device");
+        let index = AccountIndex::open(&device_root)?;
+        assert!(matches!(index.account("acct"), Err(StorageError::AccountNotFound(_))));
+        let relative = "accounts/acct/restored/account.db";
+        std::fs::create_dir_all(device_root.join("accounts/acct/restored"))?;
+        let installed_key = AccountDbKey::generate()?;
+        archive.copy_to(&device_root.join(relative), &installed_key)?;
+        let (nonce, wrapped_key) = crate::wrap_with_vault_secret(&[9; 32], installed_key.bytes())?;
+        index.install_backup_generation(&crate::BackupIndexInstall {
+            account_id: "acct",
+            principal_commitment: "principal",
+            db_relative_path: relative,
+            object_relative_path: "accounts/acct/restored",
+            manifest_json: b"{}",
+            wrapped_key: &crate::WrappedAccountDbKey {
+                key_wrapping_provider: "local-vault".into(),
+                key_wrapping_ref: "test".into(),
+                nonce,
+                wrapped_key,
+            },
+        })?;
+        drop(index);
+        let restored = AccountDb::open(&AccountIndex::open(&device_root)?, "acct", &installed_key)?;
+        let restored_bundle = restored.connection.call(|raw| Ok(load(raw)))??;
+        assert!(
+            restored_bundle.keys == imported.keys,
+            "fresh install changed independent authority"
+        );
+        // Pre-bundle marker authority cannot be reconstructed from an archive key.
+        assert!(!restored.message_is_deleted("erased")?);
+        assert!(!restored.envelope_refers_to_deleted_message("envelope")?);
+        drop(restored);
+        // The same pre-bundle live file legitimately preserves the live-key HKDF bytes.
+        let live_path = db.path.clone();
+        drop(db);
+        let live = crate::BackupDatabase::open_live_account(
+            &live_path,
+            &AccountDbKey::from_bytes([0x42; 32]),
+        )?;
+        assert!(
+            load(&live.db)?.keys == Bundle::derive(&[0x42; 32]).keys,
+            "live migration lost old bytes"
+        );
+        drop(live);
+        drop(archive);
+        std::fs::remove_dir_all(root)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn existing_empty_account_file_still_gets_independent_random_subkeys() -> TestResult {
+    let root = crate::tests::temp_root("mac-empty-existing-file");
+    let index = AccountIndex::open(&root)?;
+    index.create_account("acct", "principal")?;
+    let path = root.join(index.account("acct")?.db_relative_path);
+    let key = AccountDbKey::from_bytes([0x42; 32]);
+    // Reproduce a first open that created the encrypted file but installed no account key.
+    let connection = crate::database::Connection::open(&path)?;
+    crate::encryption::apply_key(&connection, &key)?;
+    drop(connection);
+    assert!(path.exists());
+    let db = AccountDb::open(&index, "acct", &key)?;
+    let actual = db.connection.call(|raw| Ok(load(raw)))??;
+    assert!(
+        actual.keys != Bundle::derive(key.bytes()).keys,
+        "existing empty file used its DB key as a seed"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

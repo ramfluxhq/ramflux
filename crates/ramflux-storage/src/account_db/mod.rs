@@ -102,7 +102,6 @@ impl AccountDb {
         let writer = crate::account_writer::AccountWriter::acquire(index.root(), local_account_id)?;
         let account = index.account(local_account_id)?;
         let path = index.root().join(account.db_relative_path);
-        let fresh = !path.exists();
         let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
         crate::schema_generation::validate_worker(&connection)?;
@@ -112,6 +111,13 @@ impl AccountDb {
             return Err(StorageError::EncryptionUnavailable { mode });
         }
         migrate_account_db(&connection)?;
+        // An earlier failed open may have created an empty encrypted file.
+        // Account contents, rather than file existence, distinguish new authority.
+        let fresh: bool = connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM account_key_check WHERE singleton_id=1)",
+            [],
+            |row| row.get(0),
+        )?;
         verify_or_install_key_fingerprint(&connection, key)?;
         let db = Self {
             local_account_id: local_account_id.to_owned(),

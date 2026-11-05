@@ -82,11 +82,14 @@ fn keyed_hash(key: &[u8; 32], chunks: &[&[u8]]) -> Zeroizing<[u8; 32]> {
     for chunk in chunks {
         inner.update(chunk);
     }
-    let inner_hash = Zeroizing::new(<[u8; 32]>::from(inner.finalize()));
+    let mut inner_hash = Zeroizing::new([0; 32]);
+    sha2::digest::FixedOutput::finalize_into(inner, (&mut *inner_hash).into());
     let mut outer = Sha256::new();
     outer.update(outer_pad.as_slice());
     outer.update(inner_hash.as_slice());
-    Zeroizing::new(outer.finalize().into())
+    let mut output = Zeroizing::new([0; 32]);
+    sha2::digest::FixedOutput::finalize_into(outer, (&mut *output).into());
+    output
 }
 
 fn bundle_id(keys: &[u8]) -> String {

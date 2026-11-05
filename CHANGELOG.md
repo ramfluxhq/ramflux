@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Keep account MAC authority independent of backup encryption keys. Only in-place
+  migration with a live account key preserves legacy HKDF bytes. Pre-bundle
+  archives receive fresh random authority when opened for restore; their old
+  markers remain unmatched, as before schema14. Existing bundles survive copies
+  and rekeys unchanged.
+
 - Ed25519 batch wrappers now use per-signature verify_strict, eliminating batch/strict acceptance differences.
 
 ### Changed

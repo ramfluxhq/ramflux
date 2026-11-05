@@ -35,6 +35,13 @@ pub struct BackupInputObservation {
     pub schema_version: i64,
 }
 
+// Only an in-place live migration may preserve HKDF(live DB key) authority.
+#[derive(Clone, Copy)]
+enum MarkerAuthoritySource {
+    LiveAccountKey,
+    ArchiveInput,
+}
+
 pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
     original_input: BackupInputObservation,
@@ -48,6 +55,19 @@ impl BackupDatabase {
         Self::open_restore_input(path, key, BackupOpenMode::Normalized)
     }
 
+    /// Opens an owner-guarded live account before copying its generation for restore.
+    /// The supplied key must be the live account key, never a snapshot or archive key.
+    /// # Errors
+    /// Returns authentication, schema, ownership or I/O errors.
+    pub fn open_live_account(path: &Path, key: &AccountDbKey) -> Result<Self, StorageError> {
+        Self::open_with_source(
+            path,
+            key,
+            BackupOpenMode::Normalized,
+            MarkerAuthoritySource::LiveAccountKey,
+        )
+    }
+
     /// Opens an internal candidate restore input with an explicit validation boundary.
     /// This does not normalize rows or select a generation for installation.
     /// # Errors
@@ -57,6 +77,15 @@ impl BackupDatabase {
         path: &Path,
         key: &AccountDbKey,
         mode: BackupOpenMode,
+    ) -> Result<Self, StorageError> {
+        Self::open_with_source(path, key, mode, MarkerAuthoritySource::ArchiveInput)
+    }
+
+    fn open_with_source(
+        path: &Path,
+        key: &AccountDbKey,
+        mode: BackupOpenMode,
+        source: MarkerAuthoritySource,
     ) -> Result<Self, StorageError> {
         let mut db = rusqlite::Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -81,7 +110,15 @@ impl BackupDatabase {
             crate::encryption::apply_key(&writer, key)?;
             crate::schema_object_erasure::upgrade_private(&writer)?;
         }
-        super::mac_subkeys::initialize(&mut db, key, false)?;
+        // A pre-bundle archive has lost its original live-key authority. Its
+        // enclosing key ships in backup metadata and must never become marker
+        // authority. Mint independent subkeys; old archive markers stay unmatched,
+        // as before schema14. Existing complete bundles are preserved unchanged.
+        super::mac_subkeys::initialize(
+            &mut db,
+            key,
+            matches!(source, MarkerAuthoritySource::ArchiveInput),
+        )?;
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
         // P1's schema-only private upgrade never omits rows. Capture before any

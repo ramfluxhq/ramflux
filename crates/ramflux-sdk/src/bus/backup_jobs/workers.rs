@@ -539,7 +539,7 @@ impl BackupJobs {
                     crate::SdkError::Storage(error) => storage_error(&error),
                     _ => failure(BackupFailureCode::Unreadable),
                 })?;
-                BackupDatabase::open(&path, &local_key)
+                BackupDatabase::open_live_account(&path, &local_key)
                     .map_err(|error| storage_error(&error))?
                     .check_backup_pins(incoming, key)
                     .map_err(|_| failure(BackupFailureCode::RootConflict))?;

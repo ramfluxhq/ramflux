@@ -148,8 +148,11 @@ impl BackupJobs {
             )?;
             let key =
                 existing_key(&self.index, &self.data_root, &id, local.account_secret.as_bytes())?;
-            BackupDatabase::open(&self.data_root.join(&record.db_relative_path), &key)?
-                .copy_to(&target, &installed_key)?;
+            BackupDatabase::open_live_account(
+                &self.data_root.join(&record.db_relative_path),
+                &key,
+            )?
+            .copy_to(&target, &installed_key)?;
             let mut merged = BackupDatabase::open(&target, &installed_key)?;
             let report = merge_shared_backup(&mut merged, &incoming, &incoming_key, &local)?;
             metadata.identity = format::Identity::Legacy { manifest: Box::new(local) };

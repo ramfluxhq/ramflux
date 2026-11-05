@@ -195,8 +195,10 @@ impl BackupJobs {
         let previous = self.index.account(id)?;
         let incoming = staging.directory().join("account.db");
         let incoming_key = AccountDbKey::from_bytes(metadata.database_key);
-        let source =
-            BackupDatabase::open(&self.data_root.join(&previous.db_relative_path), &local_key)?;
+        let source = BackupDatabase::open_live_account(
+            &self.data_root.join(&previous.db_relative_path),
+            &local_key,
+        )?;
         install_step("pins", source.check_backup_pins(&incoming, &incoming_key))?;
         let parent = self.data_root.join("accounts").join(id);
         check_space(

@@ -150,7 +150,6 @@ fn c2_v12_archive_restores_into_v13_store_with_base_semantics() -> Result<(), St
         // Restore consumes a private input copy, preserving the published archive.
         let input = root.join(format!("input-{native}.db"));
         std::fs::copy(&source_path, &input)?;
-        drop(BackupDatabase::open(&input, &source.key)?);
         if native {
             merged.merge_native_backup(&input, &source.key, || Ok(()))?;
         } else {
