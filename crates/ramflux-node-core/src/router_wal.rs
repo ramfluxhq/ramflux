@@ -5,6 +5,9 @@ use crate::{InboxEntry, NodeCoreError, durability_io};
 
 #[cfg(test)]
 mod durability_tests;
+mod identity;
+#[cfg(test)]
+pub(crate) mod identity_tests;
 #[cfg(test)]
 mod segment_tests;
 #[cfg(test)]
@@ -80,6 +83,10 @@ enum StoredRouterWalPayload {
         accepted_at: i64,
         entry: Option<Box<StoredRouterWalInboxEntry>>,
         local_delivery: RouterWalLocalDelivery,
+    },
+    Incarnated {
+        incarnation_id: String,
+        payload: Box<StoredRouterWalPayload>,
     },
 }
 
@@ -157,6 +164,7 @@ impl TryFrom<StoredRouterWalPayload> for RouterWalPayload {
 
     fn try_from(payload: StoredRouterWalPayload) -> Result<Self, Self::Error> {
         match payload {
+            StoredRouterWalPayload::Incarnated { payload, .. } => (*payload).try_into(),
             StoredRouterWalPayload::Submission { replay_key, replay_expires_at, entry } => {
                 // Records from before acceptance times were logged. The router store resolves
                 // and persists their deadline once, so it is never rebased at a later restart.
@@ -318,6 +326,8 @@ struct RouterWalState {
         HashMap<String, HashMap<(String, String), RouterWalLocalDeliveryIndex>>,
     /// Highest sequence ever logged per mailbox, including records that later expired.
     issued_by_target: BTreeMap<String, u64>,
+    incarnations: BTreeMap<String, String>,
+    incarnation_conflict: bool,
     replay_due: BTreeSet<(i64, String)>,
     entry_due: BTreeSet<(i64, String)>,
 }
@@ -522,6 +532,7 @@ pub struct RouterWalStore {
     root: PathBuf,
     state: Arc<Mutex<RouterWalState>>,
     writer: RouterWalWriter,
+    association: Option<Arc<identity::Association>>,
 }
 
 impl RouterWalStore {
@@ -557,7 +568,7 @@ impl RouterWalStore {
             &state,
             pipeline,
         )?;
-        Ok(Self { root, state, writer })
+        Ok(Self { root, state, writer, association: None })
     }
 
     /// # Errors
@@ -715,8 +726,14 @@ impl RouterWalStore {
                     .and_then(|modified| modified.elapsed().ok())
                     .is_some_and(|age| age.as_secs() > retire_after);
                 if expired {
+                    if let Some(association) = &self.association
+                        && !association.retire(&root, id)?
+                    {
+                        continue;
+                    }
                     fs::remove_file(&path)
                         .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
+                    durability_io::sync_dir(&root).map_err(identity::error)?;
                     removed += 1;
                 }
             }
@@ -813,6 +830,30 @@ impl RouterWalWriter {
         wal_state: &Arc<Mutex<RouterWalState>>,
         pipeline: bool,
     ) -> Result<Self, NodeCoreError> {
+        Self::start_associated(
+            root,
+            segment_bytes,
+            shard_count,
+            recovered_shards,
+            wal_state,
+            pipeline,
+            None,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal writer configuration preserves existing constructor"
+    )]
+    fn start_associated(
+        root: &Path,
+        segment_bytes: u64,
+        shard_count: usize,
+        recovered_shards: &BTreeMap<usize, RouterWalRecoveredShard>,
+        wal_state: &Arc<Mutex<RouterWalState>>,
+        pipeline: bool,
+        association: Option<&Arc<identity::Association>>,
+    ) -> Result<Self, NodeCoreError> {
         let batch_max =
             router_wal_usize_env(ROUTER_WAL_BATCH_MAX_ENV, ROUTER_WAL_BATCH_MAX_DEFAULT).max(1);
         let queue_capacity =
@@ -826,11 +867,12 @@ impl RouterWalWriter {
         for shard_id in 0..shard_count {
             let shard_root = router_wal_shard_root(root, shard_id);
             let recovered = recovered_shards.get(&shard_id).cloned().unwrap_or_default();
-            let state = RouterWalWriterState::open(
+            let state = RouterWalWriterState::open_associated(
                 shard_root,
                 recovered.last_segment_id.unwrap_or(0),
                 recovered.current_offset,
                 segment_bytes,
+                association.cloned(),
             )?;
             let wal_state = Arc::clone(wal_state);
             let (sender, receiver) = mpsc::sync_channel(queue_capacity);
@@ -975,14 +1017,28 @@ struct RouterWalWriterState {
     segment_id: u64,
     offset: u64,
     file: Arc<File>,
+    association: Option<Arc<identity::Association>>,
+    poisoned: bool,
+    header_len: u64,
 }
 
 impl RouterWalWriterState {
+    #[cfg(test)]
     fn open(
         root: PathBuf,
         segment_id: u64,
         offset: u64,
         segment_bytes: u64,
+    ) -> Result<Self, NodeCoreError> {
+        Self::open_associated(root, segment_id, offset, segment_bytes, None)
+    }
+
+    fn open_associated(
+        root: PathBuf,
+        segment_id: u64,
+        offset: u64,
+        segment_bytes: u64,
+        association: Option<Arc<identity::Association>>,
     ) -> Result<Self, NodeCoreError> {
         durability_io::create_dir_all(&root)
             .map_err(|source| NodeCoreError::StoreDirectory { path: root.clone(), source })?;
@@ -994,13 +1050,19 @@ impl RouterWalWriterState {
             .open(&path)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         if offset == 0 && file.metadata().map_or(0, |metadata| metadata.len()) == 0 {
-            durability_io::write_header(&mut file, &path, ROUTER_WAL_MAGIC)
+            let header = identity::header(association.as_deref(), &root, segment_id)?;
+            durability_io::write_header(&mut file, &path, &header)
                 .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
             durability_io::sync_file(&file, &path)
                 .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
             durability_io::sync_dir(&root)
                 .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         }
+        if let Some(association) = &association {
+            association.record_head(&root, segment_id)?;
+        }
+        file.rewind().map_err(identity::error)?;
+        let header_len = read_router_wal_magic(&mut file)?;
         let offset = file
             .seek(io::SeekFrom::End(0))
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
@@ -1008,7 +1070,17 @@ impl RouterWalWriterState {
             .metadata()
             .and_then(|metadata| metadata.modified())
             .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
-        Ok(Self { root, segment_bytes, segment_born, segment_id, offset, file: Arc::new(file) })
+        Ok(Self {
+            root,
+            segment_bytes,
+            segment_born,
+            segment_id,
+            offset,
+            file: Arc::new(file),
+            association,
+            poisoned: false,
+            header_len,
+        })
     }
 
     fn append_batch(
@@ -1018,13 +1090,16 @@ impl RouterWalWriterState {
         let mut locations = Vec::with_capacity(payloads.len());
         let write_started = Instant::now();
         for payload in payloads {
-            let stored = StoredRouterWalPayload::try_from(payload)?;
+            if self.poisoned {
+                return Err(identity::error("router WAL writer fenced"));
+            }
+            let stored = identity::encode_payload(self.association.as_deref(), payload)?;
             let encoded = postcard::to_allocvec(&stored)
                 .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
             let frame_len = 8_u64
                 .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
                 .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
-            if self.offset > u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0)
+            if self.offset > self.header_len
                 && (self.offset.saturating_add(frame_len) > self.segment_bytes
                     || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
             {
@@ -1055,13 +1130,16 @@ impl RouterWalWriterState {
         let mut sync_files = Vec::with_capacity(1);
         let write_started = Instant::now();
         for payload in payloads {
-            let stored = StoredRouterWalPayload::try_from(payload)?;
+            if self.poisoned {
+                return Err(identity::error("router WAL writer fenced"));
+            }
+            let stored = identity::encode_payload(self.association.as_deref(), payload)?;
             let encoded = postcard::to_allocvec(&stored)
                 .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
             let frame_len = 8_u64
                 .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
                 .ok_or_else(|| NodeCoreError::ItestJson("router WAL frame too large".to_owned()))?;
-            if self.offset > u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0)
+            if self.offset > self.header_len
                 && (self.offset.saturating_add(frame_len) > self.segment_bytes
                     || self.segment_born.elapsed().is_ok_and(|age| age.as_secs() >= 3600))
             {
@@ -1100,15 +1178,23 @@ impl RouterWalWriterState {
             .read(true)
             .open(&path)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-        durability_io::write_header(&mut file, &path, ROUTER_WAL_MAGIC)
+        let header = identity::header(self.association.as_deref(), &self.root, self.segment_id)?;
+        durability_io::write_header(&mut file, &path, &header)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         durability_io::sync_file(&file, &path)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         durability_io::sync_dir(&self.root)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
+        if let Some(association) = &self.association
+            && let Err(error) = association.record_head(&self.root, self.segment_id)
+        {
+            self.poisoned = true;
+            return Err(error);
+        }
         self.file = Arc::new(file);
         self.segment_born = std::time::SystemTime::now();
-        self.offset = u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0);
+        self.offset = u64::try_from(header.len()).unwrap_or(0);
+        self.header_len = self.offset;
         Ok(())
     }
 }
@@ -1311,11 +1397,23 @@ struct RouterWalRecoveredShard {
 }
 
 fn recover_router_wal(root: &Path) -> Result<RouterWalRecovery, NodeCoreError> {
+    recover_router_wal_at(root, &BTreeMap::new())
+}
+
+fn recover_router_wal_at(
+    root: &Path,
+    anchors: &BTreeMap<String, u64>,
+) -> Result<RouterWalRecovery, NodeCoreError> {
     let mut state = RouterWalState::default();
-    let _legacy = recover_router_wal_directory(root, &mut state)?;
+    let _legacy = recover_router_wal_directory(root, &mut state, anchors.get("").copied())?;
     let mut shards = BTreeMap::new();
     for (shard_id, shard_root) in router_wal_existing_shard_roots(root)? {
-        let recovered = recover_router_wal_directory(&shard_root, &mut state)?;
+        let key = shard_root.strip_prefix(root).map_err(identity::error)?.to_string_lossy();
+        let recovered = recover_router_wal_directory(
+            &shard_root,
+            &mut state,
+            anchors.get(key.as_ref()).copied(),
+        )?;
         durability_io::sync_dir(&shard_root)
             .map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         if recovered.last_segment_id.is_some() {
@@ -1329,8 +1427,12 @@ fn recover_router_wal(root: &Path) -> Result<RouterWalRecovery, NodeCoreError> {
 fn recover_router_wal_directory(
     root: &Path,
     state: &mut RouterWalState,
+    anchor: Option<u64>,
 ) -> Result<RouterWalRecoveredShard, NodeCoreError> {
     let mut segments = router_wal_segment_ids(root)?;
+    if let Some(anchor) = anchor {
+        segments.retain(|segment| *segment >= anchor);
+    }
     segments.sort_unstable();
     let newest = segments.last().copied();
     let mut current_offset = 0_u64;
@@ -1372,14 +1474,16 @@ fn recover_router_wal_segment(
             file.rewind().map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
         }
     }
+    identity::repair_empty_header(&mut file, &path, newest)?;
     let mut offset = read_router_wal_magic(&mut file)?;
     loop {
         let record_offset = offset;
-        let Some((payload, len)) = read_router_wal_record(&mut file)? else {
+        let Some((stored, len)) = read_router_wal_record(&mut file)? else {
             break;
         };
         offset = offset.saturating_add(8 + u64::from(len));
         let location = RouterWalRecordLocation { segment_id, offset: record_offset, len };
+        let payload = identity::decode_payload(stored, state)?;
         state.apply(payload, location);
     }
     durability_io::set_len(&file, &path, offset)
@@ -1390,18 +1494,12 @@ fn recover_router_wal_segment(
 }
 
 fn read_router_wal_magic(file: &mut File) -> Result<u64, NodeCoreError> {
-    let mut magic = vec![0_u8; ROUTER_WAL_MAGIC.len()];
-    let bytes =
-        file.read(&mut magic).map_err(|source| NodeCoreError::ItestJson(source.to_string()))?;
-    if bytes != ROUTER_WAL_MAGIC.len() || magic != ROUTER_WAL_MAGIC {
-        return Err(NodeCoreError::ItestJson("invalid router WAL segment magic".to_owned()));
-    }
-    Ok(u64::try_from(ROUTER_WAL_MAGIC.len()).unwrap_or(0))
+    identity::read_header(file).map(|header| header.0)
 }
 
 fn read_router_wal_record(
     file: &mut File,
-) -> Result<Option<(RouterWalPayload, u32)>, NodeCoreError> {
+) -> Result<Option<(StoredRouterWalPayload, u32)>, NodeCoreError> {
     let mut header = [0_u8; 8];
     match file.read_exact(&mut header) {
         Ok(()) => {}
@@ -1422,7 +1520,7 @@ fn read_router_wal_record(
     }
     let payload = postcard::from_bytes::<StoredRouterWalPayload>(&payload)
         .map_err(|source| NodeCoreError::SnapshotSerialization(source.to_string()))?;
-    Ok(Some((payload.try_into()?, len)))
+    Ok(Some((payload, len)))
 }
 
 fn router_wal_segment_ids(root: &Path) -> Result<Vec<u64>, NodeCoreError> {

@@ -160,6 +160,8 @@ impl From<&CursorAckState> for InboxCursorResponse {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OpaqueDeviceInbox {
     next_seq: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    incarnations: BTreeMap<String, String>,
     pending: BTreeMap<String, Vec<InboxEntry>>,
     cursors: BTreeMap<String, CursorAckState>,
     /// Server-assigned retention deadline per pending sequence.
@@ -181,6 +183,7 @@ struct InboxExpiryIndex {
 impl PartialEq for OpaqueDeviceInbox {
     fn eq(&self, other: &Self) -> bool {
         self.next_seq == other.next_seq
+            && self.incarnations == other.incarnations
             && self.pending == other.pending
             && self.cursors == other.cursors
             && self.retain_until == other.retain_until
@@ -662,6 +665,16 @@ impl OpaqueDeviceInbox {
         self.cursors.get(target_delivery_id)
     }
 
+    /// The persisted incarnation installed by store recovery, if the target exists.
+    #[must_use]
+    pub fn incarnation_id(&self, target: &str) -> Option<&str> {
+        self.incarnations.get(target).map(String::as_str)
+    }
+
+    pub(crate) fn restore_incarnation(&mut self, target: &str, id: String) {
+        self.incarnations.insert(target.into(), id);
+    }
+
     pub(crate) fn pending_entries(&self) -> impl Iterator<Item = &InboxEntry> {
         self.pending.values().flat_map(|entries| entries.iter())
     }
@@ -730,6 +743,7 @@ impl OpaqueDeviceInbox {
     }
 
     pub(crate) fn merge_from(&mut self, other: &Self) {
+        self.incarnations.extend(other.incarnations.clone());
         for (entry, deadline) in other.pending_entries_with_deadline() {
             self.restore_pending_entry_until(entry.clone(), Some(deadline));
         }
@@ -739,6 +753,7 @@ impl OpaqueDeviceInbox {
     }
 
     pub(crate) fn remove_target(&mut self, target_delivery_id: &str) -> usize {
+        self.incarnations.remove(target_delivery_id);
         let pending_count =
             self.pending.remove(target_delivery_id).map_or(0, |entries| entries.len());
         if self.retain_until.remove(target_delivery_id).is_some() {

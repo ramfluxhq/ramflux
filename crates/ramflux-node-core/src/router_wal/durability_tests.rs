@@ -40,12 +40,16 @@ fn capture(root: &Path) -> (crate::durability_test_hooks::Registration, Events) 
 
 #[test]
 fn recovery_sync_before_ready() -> TestResult {
+    if std::env::var_os("RAMFLUX_P2_RESTART_CHILD").is_some() {
+        return super::identity_tests::restart_crashes();
+    }
     if std::env::var_os("RAMFLUX_STARTUP_MATRIX_CHILD").is_some() {
         return super::startup_tests::child();
     }
     if let Some(root) = std::env::var_os("RAMFLUX_RECORD_K_CHILD") {
         return record_k_child(PathBuf::from(root));
     }
+    super::identity_tests::restart_crashes()?;
     for pipeline in [false, true] {
         let root = fixture("recovery");
         let wal_root = root.join("wal");
@@ -120,6 +124,7 @@ fn recovery_sync_before_ready() -> TestResult {
 
 #[test]
 fn segment_directory_before_ack() -> TestResult {
+    super::identity_tests::head_matrix()?;
     super::segment_tests::matrix()?;
     for pipeline in [false, true] {
         let root = fixture("segment");
@@ -227,6 +232,9 @@ fn failed_recovery_sync_refuses_open() -> TestResult {
 
 #[test]
 fn interrupted_roll_empty_header() -> TestResult {
+    if std::env::var_os("RAMFLUX_P2_ROTATION_CHILD").is_some() {
+        return super::identity_tests::loss_matrix();
+    }
     if let Some(root) = std::env::var_os("RAMFLUX_EMPTY_HEADER_CHILD") {
         let root = PathBuf::from(root);
         let wal = RouterWalStore::open_with_shards_config(&root, 1, false)?;
@@ -242,6 +250,7 @@ fn interrupted_roll_empty_header() -> TestResult {
         fs::write(router_wal_segment_path(&root, 1), residue)?;
         std::process::abort();
     }
+    super::identity_tests::loss_matrix()?;
     for kind in ["empty", "partial", "zero", "torn"] {
         let root = fixture("residue");
         fs::create_dir_all(&root)?;

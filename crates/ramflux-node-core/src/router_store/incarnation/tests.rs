@@ -68,6 +68,7 @@ fn reopen(path: &Path) -> std::result::Result<RouterRedbStore, NodeCoreError> {
 
 #[test]
 fn inbox_incarnation_lifecycle() -> Result {
+    crate::router_wal::identity_tests::lifecycle()?;
     let root = fixture("lifecycle");
     let path = root.join("db");
     let store = reopen(&path)?;
@@ -115,6 +116,8 @@ fn inbox_incarnation_lifecycle() -> Result {
 
 #[test]
 fn pre_s6_store_upgrade() -> Result {
+    crate::router_wal::identity_tests::upgrade()?;
+    crate::router_wal::identity_tests::empty_head_crash()?;
     let root = fixture("upgrade");
     let path = root.join("db");
     let store = reopen(&path)?;

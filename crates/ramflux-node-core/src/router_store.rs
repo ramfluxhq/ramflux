@@ -37,7 +37,7 @@ pub use custody_accounts::CustodyPublicationBudgetRow;
 mod custody_history;
 pub(crate) mod expiry_index;
 mod identity_registry;
-mod incarnation;
+pub(crate) mod incarnation;
 mod migration_barrier;
 mod retention;
 mod submission_barrier;
@@ -91,6 +91,10 @@ struct RouterCommitRequest {
 }
 
 enum RouterCommitOp {
+    Incarnated {
+        ids: BTreeMap<String, String>,
+        inner: Box<RouterCommitOp>,
+    },
     Forwarded {
         replay_key: String,
         replay_expires_at: i64,
@@ -248,6 +252,12 @@ fn router_apply_commit_op(
     op: &RouterCommitOp,
 ) -> Result<(), NodeCoreError> {
     match op {
+        RouterCommitOp::Incarnated { ids, inner } => {
+            for (target, id) in ids {
+                incarnation::set_cursor(write_txn, target, 0, id, false)?;
+            }
+            router_apply_commit_op(write_txn, inner)
+        }
         RouterCommitOp::Forwarded { replay_key, replay_expires_at, entry, root, retain_until } => {
             record_replay_tuple_in_txn(write_txn, replay_key, *replay_expires_at)?;
             record_inbox_entry_until_in_txn(write_txn, entry, *retain_until)?;
@@ -484,7 +494,9 @@ impl RouterRedbStore {
         } else {
             None
         };
-        let submission_wal = wal_root.map(RouterWalStore::open).transpose()?;
+        let submission_wal = wal_root
+            .map(|root| RouterWalStore::open_associated(root, Arc::clone(&db), path))
+            .transpose()?;
         let custody_new_principals_per_day =
             custody_budget_env(CUSTODY_NEW_PRINCIPALS_PER_DAY_ENV, 256, 32, 65_536)?;
         let custody_new_principals_per_prefix_per_day =
@@ -971,10 +983,14 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
         let _lease = lease;
+        if self.inbox_status(&cursor.target_delivery_id)?.0.is_none() {
+            return Ok(());
+        }
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        self.checkpoint_incarnation(&write_txn, cursor)?;
         let cursor_bytes = retention::cursor_bytes(&write_txn, cursor)?;
         {
             let mut cursor_table = write_txn
@@ -1017,10 +1033,14 @@ impl RouterRedbStore {
     ) -> Result<(), NodeCoreError> {
         self.validate_target_lease(&cursor.target_delivery_id, &lease)?;
         let _lease = lease;
+        if self.inbox_status(&cursor.target_delivery_id)?.0.is_none() {
+            return Ok(());
+        }
         let save_started = Instant::now();
         let inbox_started = Instant::now();
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
+        self.checkpoint_incarnation(&write_txn, cursor)?;
         let cursor_bytes = retention::cursor_bytes(&write_txn, cursor)?;
         {
             let mut cursor_table = write_txn
@@ -1252,6 +1272,32 @@ impl RouterRedbStore {
     }
 
     fn commit_router_op(&self, op: RouterCommitOp) -> Result<(), NodeCoreError> {
+        let op = if let Some(wal) = &self.submission_wal {
+            let entries: Vec<&InboxEntry> = match &op {
+                RouterCommitOp::Submission { entry, .. } => {
+                    entry.iter().map(AsRef::as_ref).collect()
+                }
+                RouterCommitOp::Forwarded { entry, .. } | RouterCommitOp::InboxEntry { entry } => {
+                    vec![entry.as_ref()]
+                }
+                RouterCommitOp::Fanout { entries, .. } => entries.iter().collect(),
+                RouterCommitOp::ReplayTuple { .. } | RouterCommitOp::Incarnated { .. } => {
+                    Vec::new()
+                }
+            };
+            let ids = entries
+                .into_iter()
+                .map(|entry| {
+                    Ok((
+                        entry.target_delivery_id.clone(),
+                        wal.reserve_incarnation(&entry.target_delivery_id)?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, NodeCoreError>>()?;
+            RouterCommitOp::Incarnated { ids, inner: Box::new(op) }
+        } else {
+            op
+        };
         if let Some(writer) = &self.commit_writer {
             return writer.commit(op);
         }
@@ -1317,6 +1363,15 @@ impl RouterRedbStore {
                 .unwrap_or_default();
         if self.submission_wal.is_none() {
             incarnation::upgrade_redb(&self.db, &self.path, &inbox)?;
+            let targets = inbox
+                .cursor_states()
+                .map(|cursor| cursor.target_delivery_id.clone())
+                .collect::<Vec<_>>();
+            for target in targets {
+                if let Some(id) = self.inbox_status(&target)?.0 {
+                    inbox.restore_incarnation(&target, id);
+                }
+            }
         }
         let router_is_empty = registry == SessionRegistry::default()
             && inbox == OpaqueDeviceInbox::default()
@@ -1392,8 +1447,18 @@ impl RouterRedbStore {
         for cursor in incremental_cursors {
             inbox.restore_cursor_state(cursor);
         }
+        inbox.requeue_checkpoints(issued_watermarks.keys().cloned());
         for (target, seq) in issued_watermarks {
             inbox.observe_issued_seq(&target, seq);
+        }
+        let targets = inbox
+            .cursor_states()
+            .map(|cursor| cursor.target_delivery_id.clone())
+            .collect::<Vec<_>>();
+        for target in targets {
+            if let Some(id) = self.inbox_status(&target)?.0 {
+                inbox.restore_incarnation(&target, id);
+            }
         }
         inbox.bound_retained_receipts();
         let mut replay_guard_state = if has_incremental_replay {
@@ -1513,11 +1578,22 @@ impl RouterRedbStore {
         let cursor_state_bytes = cursor_states
             .iter()
             .map(|cursor| {
-                incarnation::ensure_cursor(
-                    &write_txn,
-                    &cursor.target_delivery_id,
-                    cursor.issued_inbox_seq,
-                )?;
+                if let Some(wal) = &self.submission_wal {
+                    let id = wal.reserve_incarnation(&cursor.target_delivery_id)?;
+                    incarnation::set_cursor(
+                        &write_txn,
+                        &cursor.target_delivery_id,
+                        cursor.issued_inbox_seq,
+                        &id,
+                        false,
+                    )?;
+                } else {
+                    incarnation::ensure_cursor(
+                        &write_txn,
+                        &cursor.target_delivery_id,
+                        cursor.issued_inbox_seq,
+                    )?;
+                }
                 retention::cursor_bytes(&write_txn, cursor)
             })
             .collect::<Result<Vec<_>, _>>()?;
