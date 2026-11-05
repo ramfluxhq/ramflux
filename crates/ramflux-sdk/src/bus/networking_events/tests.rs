@@ -350,3 +350,37 @@ async fn custody_record_preserves_session_and_session_record_preserves_custody()
     }
     Ok(())
 }
+
+struct HeldSession;
+impl super::super::connection_manager::SessionConnector for HeldSession {
+    fn connect(
+        &self,
+        _config: crate::GatewaySessionConfig,
+        _deadline: tokio::time::Instant,
+    ) -> super::super::connection_manager::SessionFuture<'_, crate::GatewaySessionEngine> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn start_connection_resets_stored_session_to_connecting() -> TestResult {
+    let (_root, mut account) = session_account("session-start").await?;
+    record_session(&account, &snapshot())?;
+    let old = projected(&account)?.pop().ok_or("old live")?;
+    assert_eq!(old["session"]["state"], "live");
+    account.test_connector = Some(std::sync::Arc::new(HeldSession));
+    account.start_connection()?;
+    let reset = projected(&account)?.pop().ok_or("reset event")?;
+    assert_eq!(reset["state"], "live");
+    assert_eq!(reset["session"]["state"], "networking_pending");
+    assert_eq!(reset["session"]["phase"], "connecting");
+    assert!(reset["session"]["cause"].is_null());
+    let stored = account
+        .client
+        .account_db()?
+        .load_actor_state::<Value>("account/networking")?
+        .ok_or("stored reset")?;
+    assert_eq!(stored, reset);
+    account.connection.as_ref().ok_or("handle")?.stop().await;
+    Ok(())
+}

@@ -37,7 +37,6 @@ fn custody_body(
     }))
 }
 
-#[allow(dead_code)] // Wired to runtime observations in the following part.
 pub(super) fn record_session(
     account: &LocalBusAccountState,
     snapshot: &super::connection_manager::NetworkingSnapshot,

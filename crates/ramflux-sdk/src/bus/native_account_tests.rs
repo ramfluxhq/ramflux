@@ -220,6 +220,11 @@ async fn next_networking_event(
             json!({"topics":["account.networking.changed"],"since_seq":since_seq}),
         )
         .await?;
+    if since_seq == 0 {
+        let initial = tokio::time::timeout(Duration::from_secs(2), events.next_event()).await??;
+        assert_eq!(initial.body["session"]["phase"], "connecting");
+        assert!(initial.body["networking_reason"].is_null());
+    }
     let event = tokio::time::timeout(Duration::from_secs(2), events.next_event()).await??;
     assert_eq!(event.method, "account.networking.changed");
     assert!(tokio::time::timeout(Duration::from_millis(150), events.next_event()).await.is_err());
@@ -493,6 +498,9 @@ async fn ordinary_creation_confirms_into_unlocked_actor_and_cancels_failed_attem
                 json!({"topics":["account.networking.changed"],"since_seq":0}),
             )
             .await?;
+        let initial = tokio::time::timeout(Duration::from_secs(2), ordinary.next_event()).await??;
+        assert_eq!(initial.body["session"]["phase"], "connecting");
+        assert!(initial.body["networking_reason"].is_null());
         let networking =
             tokio::time::timeout(Duration::from_secs(2), ordinary.next_event()).await??;
         assert_eq!(networking.method, "account.networking.changed");

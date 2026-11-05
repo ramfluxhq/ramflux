@@ -399,6 +399,11 @@ impl LocalBusAccountState {
                 connector,
                 self.connection_work.clone(),
             ));
+            if self.client.born_v3_account.is_some()
+                && let Some(handle) = &self.connection
+            {
+                super::networking_events::record_session(self, &handle.snapshot())?;
+            }
         }
         Ok(())
     }
