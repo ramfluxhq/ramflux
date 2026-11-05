@@ -13,6 +13,8 @@ struct Scope {
     resources: Vec<String>,
     core: Option<Arc<PublicationCore>>,
     assigned: BTreeSet<(String, u64)>,
+    retries: Vec<crate::router_store::sender_retry::SenderAssignment>,
+    retry_owners: Vec<crate::router_store::sender_retry::RetryAbort>,
 }
 thread_local! {
     static CURRENT: RefCell<Option<Scope>> = const { RefCell::new(None) };
@@ -34,11 +36,18 @@ impl Drop for Reset {
 pub struct PublishedOperation<T> {
     value: T,
     guards: Vec<AssignmentGuard>,
+    retries: Vec<crate::router_store::sender_retry::SenderAssignment>,
+    core: Option<Arc<PublicationCore>>,
 }
 impl<T> PublishedOperation<T> {
     /// Asynchronously await every assigned target. Cancellation cannot undo a
     /// durable acceptance; guards only signal the store-owned resolver on Drop.
     pub async fn published(self) -> T {
+        if let Some(core) = &self.core {
+            for assignment in &self.retries {
+                core.wait_sender_assignment(assignment).await;
+            }
+        }
         for guard in &self.guards {
             if let Some(shared) = guard.shared.upgrade() {
                 loop {
@@ -65,16 +74,18 @@ impl<T> PublishedOperation<T> {
     /// # Errors
     /// Returns runtime creation errors.
     pub fn published_blocking(self) -> Result<T, NodeCoreError> {
-        if self.guards.iter().all(|guard| {
-            guard.shared.upgrade().is_none_or(|shared| {
-                let registry = super::lock(&shared);
-                crate::fatal_durability::check().is_ok()
-                    && registry
-                        .inboxes
-                        .get(&guard.descriptor.key)
-                        .is_some_and(|inbox| inbox.published >= guard.sequence())
+        if self.retries.is_empty()
+            && self.guards.iter().all(|guard| {
+                guard.shared.upgrade().is_none_or(|shared| {
+                    let registry = super::lock(&shared);
+                    crate::fatal_durability::check().is_ok()
+                        && registry
+                            .inboxes
+                            .get(&guard.descriptor.key)
+                            .is_some_and(|inbox| inbox.published >= guard.sequence())
+                })
             })
-        }) {
+        {
             return Ok(self.value);
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -104,10 +115,8 @@ pub fn capture<T>(f: impl FnOnce() -> T) -> Result<PublishedOperation<T>, NodeCo
     for guard in &scope.guards {
         guard.definite_non_write();
     }
-    if let Some(core) = &scope.core {
-        core.release_unallocated(&scope.resources);
-    }
-    Ok(PublishedOperation { value, guards: scope.guards })
+    if let Some(core) = &scope.core { core.release_unallocated(&scope.resources); }
+    Ok(PublishedOperation { value, guards: scope.guards, retries: scope.retries, core: scope.core })
 }
 
 #[cfg(test)]
@@ -159,6 +168,7 @@ pub(crate) fn reserve_targets(
             })
             .collect::<Vec<_>>();
         let guards = core.reserve_batch(&requests).map_err(NodeCoreError::Publication)?;
+        for guard in &guards { attach_retry(scope, guard); }
         scope.guards.extend(guards);
         Ok(())
     })
@@ -182,8 +192,8 @@ pub(crate) fn allocate(
             scope.assigned.insert((target.into(), sequence));
             return Ok(sequence);
         }
-        let guard =
-            core.reserve(target, id, &scope.resources).map_err(NodeCoreError::Publication)?;
+        let guard = core.reserve(target, id, &scope.resources).map_err(NodeCoreError::Publication)?;
+        attach_retry(scope, &guard);
         let sequence = guard.sequence();
         scope.assigned.insert((target.into(), sequence));
         scope.guards.push(guard);
@@ -224,4 +234,44 @@ pub(crate) fn complete_unassigned() {
             core.complete_unassigned(&scope.resources);
         }
     });
+}
+
+/// Add an accepted retry's original assignment to the current reply gate.
+/// # Errors
+/// Returns an error when called outside a publication preparation scope.
+pub fn await_sender_assignment(
+    core: &Arc<PublicationCore>,
+    assignment: &crate::router_store::sender_retry::SenderAssignment,
+) -> Result<(), NodeCoreError> {
+    CURRENT.with(|current| {
+        let mut current = current.borrow_mut();
+        let scope = current
+            .as_mut()
+            .ok_or_else(|| NodeCoreError::Redb("retry requires publication scope".into()))?;
+        scope.core = Some(Arc::clone(core));
+        scope.retries.push(assignment.clone());
+        Ok(())
+    })
+}
+
+pub(crate) fn bind_retry(
+    owner: crate::router_store::sender_retry::RetryAbort,
+) -> Result<(), NodeCoreError> {
+    CURRENT.with(|current| {
+        let mut current = current.borrow_mut();
+        let scope = current
+            .as_mut()
+            .ok_or_else(|| NodeCoreError::Redb("retry requires publication scope".into()))?;
+        scope.retry_owners.push(owner);
+        Ok(())
+    })
+}
+fn attach_retry(scope: &Scope, guard: &AssignmentGuard) {
+    let owners = scope
+        .retry_owners
+        .iter()
+        .filter(|owner| owner.bind(&guard.descriptor.key.target))
+        .cloned()
+        .collect();
+    let _ = guard.descriptor.retry_abort.set(owners);
 }
