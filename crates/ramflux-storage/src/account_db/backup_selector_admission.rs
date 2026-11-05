@@ -164,5 +164,7 @@ EXISTS(SELECT 1 FROM {database}.object_erasure_lookup l JOIN {database}.object_r
     Ok(())
 }
 
+pub(super) mod graph;
+
 #[cfg(test)]
 mod tests;

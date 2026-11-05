@@ -200,11 +200,12 @@ impl BackupDatabase {
         let result = (|| {
             let tables = self.incoming_tables()?;
             self.begin_message_merge()?;
-            let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
             if candidate {
                 super::backup_selector_admission::prepare(&self.db)?;
                 after_capture(&self.db)?;
+                super::backup_selector_admission::graph::classify(&self.db)?;
             }
+            let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
             self.merge_object_erasure(progress)?;
             let legacy_verifications = self.begin_legacy_verification_import(native_data_only)?;
             let shared_groups = self.select_backup_shared_groups(mode)?;

@@ -115,6 +115,24 @@ pub(super) fn all_macs(
     merge::load_set(db, "main")?.iter().map(|b| b.mac(label, value)).collect()
 }
 
+/// Evaluate one authenticated input without borrowing another input's authority.
+pub(super) fn input_macs(
+    db: &Connection,
+    schema: &str,
+    label: &[u8],
+    value: &[u8],
+) -> Result<Vec<String>, StorageError> {
+    let modern: bool = db.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM {schema}.schema_migration WHERE schema_version=14)"),
+        [],
+        |r| r.get(0),
+    )?;
+    if !modern {
+        return Ok(Vec::new());
+    }
+    merge::load_set(db, schema)?.iter().map(|b| b.mac(label, value)).collect()
+}
+
 pub(super) mod merge;
 
 pub(super) fn initialize(
