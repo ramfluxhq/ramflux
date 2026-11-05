@@ -273,58 +273,198 @@ async fn renamed_group_fixture() -> TestResult<(Fixture, Fixture, GatewayInboxEn
     Ok((alice, bob, entry))
 }
 
+fn assert_freshness_refusal<T>(result: &Result<T, SdkError>) {
+    assert!(
+        matches!(result, Err(SdkError::InboundPending(reason)) if reason ==
+        "native current-head freshness expired; refresh directory"),
+        "{:?}",
+        result.as_ref().err()
+    );
+}
+
+fn install_gateway(account: &mut LocalBusAccountState, entries: Vec<GatewayInboxEntry>) {
+    let mut gateway = crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
+        std::sync::Arc::default(),
+    );
+    gateway.inbox = entries;
+    gateway.ack_target = account.gateway_config.target_delivery_id.clone();
+    account.install_test_session(GatewaySessionEngine::with_test_transport(
+        account.gateway_config.clone(),
+        Box::new(gateway),
+    ));
+}
+
 #[tokio::test]
 async fn owner_failure_chain_is_characterised() -> TestResult {
     let (alice, bob, entry) = renamed_group_fixture().await?;
-    *alice.client.native_head_freshness.borrow_mut() =
-        crate::client::identity_authority::NativeHeadFreshness::default();
     let mut account = LocalBusAccountState::disconnected(
         alice.client,
         alice.config,
         alice.manifest.principal_commitment.clone(),
     );
-    account.install_test_session(GatewaySessionEngine::with_test_transport(
-        account.gateway_config.clone(),
-        Box::new(crate::bus::dispatch::surface_transport::fixture::RecordingGateway::new(
-            std::sync::Arc::default(),
-        )),
-    ));
+    install_gateway(&mut account, vec![entry.clone()]);
+    let mut state = daemon(account, &alice.root.0);
+    let received = read_group(&mut state, "group.receive").await?;
+    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    let messages = account.client.direct_messages("thread")?;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        account.client.account_db()?.message_content(&messages[0].message_id)?,
+        Some(b"after rename".to_vec())
+    );
+    assert_eq!(account.pending_deliveries.len(), 1);
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
+    let key = account.client.inbox_admission_key(&entry)?;
+    assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
+    // Isolate a stale local head: the stored projection authenticates Bob, not Alice.
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    assert_freshness_refusal(
+        &account
+            .client
+            .require_current_device_authorization(&account.client.owned_device_identity()?),
+    );
+    for method in ["group.read", "group.receive"] {
+        assert_eq!(
+            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+            "after rename"
+        );
+    }
+    // Both stale and peer-only stale fail on actual admitted content, with no gateway entry.
+    for local_fresh in [false, true] {
+        let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+        *account.client.native_head_freshness.borrow_mut() =
+            crate::client::identity_authority::NativeHeadFreshness::default();
+        if local_fresh {
+            account.client.persist_fetched_identity_directory(&alice.manifest)?;
+        }
+        assert_freshness_refusal(&account.client.committed_routing(&entry));
+        for method in ["group.read", "group.receive"] {
+            assert_freshness_refusal(&read_group(&mut state, method).await);
+        }
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert_eq!(
+        account.client.account_db()?.message_content(&messages[0].message_id)?,
+        Some(b"after rename".to_vec())
+    );
+    // Differential probe localizes the failure to pending-delivery re-projection.
+    let projected = std::mem::take(&mut account.pending_deliveries);
+    for method in ["group.read", "group.receive"] {
+        assert_eq!(
+            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+            "after rename"
+        );
+    }
+    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
+    account.pending_deliveries = projected;
+    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    for method in ["group.read", "group.receive"] {
+        assert_eq!(
+            read_group(&mut state, method).await?.response_body["decrypted_messages"][0]["body_utf8"],
+            "after rename"
+        );
+    }
+    Ok(())
+}
+
+fn assert_retry_retained(account: &LocalBusAccountState, key: &str) -> TestResult {
+    let db = account.client.account_db()?;
+    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
+    assert_eq!(db.unrouted_count()?, 0);
+    assert!(db.has_inbox_retry(key)?);
+    assert!(!db.journal_after(0, 100)?.iter().any(|event| event.topic == "message.undeliverable"));
+    Ok(())
+}
+
+async fn characterise_gateway_admission(local_fresh: bool, peer_fresh: bool) -> TestResult {
+    let (alice, bob, entry) = renamed_group_fixture().await?;
+    // The peer refresh really reaches a TLS directory and fails with a deterministic 404.
+    let (address, directory) =
+        crate::bus::dispatch::surface_transport::fixture::directory(&alice.root.0, BTreeMap::new())
+            .await?;
+    let mut config = alice.config;
+    config.transport_kind = crate::GatewaySessionTransportKind::TcpTls;
+    config.gateway_addr = address;
+    config.tcp_gateway_addr = Some(address);
+    config.server_name = "test-gateway".into();
+    config.ca_cert = alice.root.0.join("ca.pem");
+    let mut account = LocalBusAccountState::disconnected(
+        alice.client,
+        config,
+        alice.manifest.principal_commitment.clone(),
+    );
+    *account.client.native_head_freshness.borrow_mut() =
+        crate::client::identity_authority::NativeHeadFreshness::default();
+    if local_fresh {
+        account.client.persist_fetched_identity_directory(&alice.manifest)?;
+    }
+    if peer_fresh {
+        account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    }
+    for (identity, fresh) in [
+        (account.client.owned_device_identity()?, local_fresh),
+        (bob.client.owned_device_identity()?, peer_fresh),
+    ] {
+        let result = account.client.require_current_device_authorization(&identity);
+        if fresh {
+            result?;
+        } else {
+            assert_freshness_refusal(&result);
+        }
+    }
+    assert_eq!(
+        account.client.inbound_device_manifest_request(&entry)?,
+        (!peer_fresh).then(|| bob.manifest.principal_commitment.clone())
+    );
+    let key = account.client.inbox_admission_key(&entry)?;
+    install_gateway(&mut account, vec![entry]);
+    // Same driver and quarantine path as the bus; only its existing receive clock is injected.
+    let at = now_unix_timestamp() + 60;
+    crate::bus::sync_driver::run_at(&mut account, at).await?;
+    assert_retry_retained(&account, &key)?;
+    assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 1)?.len(), 0);
+    assert_eq!(account.client.account_db()?.due_inbox_retry_rows(at + 2)?.len(), 1);
     let mut state = daemon(account, &alice.root.0);
     for method in ["group.read", "group.receive"] {
-        let result = read_group(&mut state, method).await;
-        assert!(
-            result.is_ok(),
-            "admitted display {method}: {:?}",
-            result.as_ref().map(|response| &response.response_body)
-        );
+        let result = read_group(&mut state, method).await?;
+        assert_eq!(result.response_body["decrypted_messages"], json!([]));
     }
     let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    account.client.persist_fetched_identity_directory(&bob.manifest)?;
-    let local = account.client.owned_device_identity()?;
-    assert!(account.client.require_current_device_authorization(&local).is_err());
-    account.client.require_current_device_authorization(&bob.client.owned_device_identity()?)?;
-    account.client.account_db()?.hold_unrouted(
-        &account.client.inbox_admission_key(&entry)?,
-        entry.inbox_seq,
-        &serde_json::to_vec(&entry)?,
-        now_unix_timestamp(),
-    )?;
-    for method in ["group.read", "group.receive"] {
-        let result = read_group(&mut state, method).await;
-        assert!(
-            matches!(&result, Err(SdkError::InboundPending(reason)) if reason ==
-            "native current-head freshness expired; refresh directory"),
-            "new admission {method}: {:?}",
-            result.as_ref().map(|response| &response.response_body)
-        );
-    }
-    let account = state.accounts.get_mut("owner").ok_or("Alice")?;
-    assert_eq!(account.client.direct_messages("thread")?.len(), 0);
-    assert_eq!(account.client.account_db()?.unrouted_count()?, 1);
+    assert_retry_retained(account, &key)?;
     account.client.persist_fetched_identity_directory(&alice.manifest)?;
-    let received = read_group(&mut state, "group.receive").await?;
-    let account = state.accounts.get("owner").ok_or("Alice")?;
-    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    account.client.persist_fetched_identity_directory(&bob.manifest)?;
+    crate::bus::sync_driver::run_at(account, at + 1).await?;
+    assert_retry_retained(account, &key)?;
+    crate::bus::sync_driver::run_at(account, at + 2).await?;
     assert_eq!(account.client.direct_messages("thread")?.len(), 1);
+    assert!(!account.client.account_db()?.has_inbox_retry(&key)?);
+    assert_eq!(account.client.account_db()?.unrouted_count()?, 0);
+    let received = read_group(&mut state, "group.receive").await?;
+    assert_eq!(received.response_body["decrypted_messages"][0]["body_utf8"], "after rename");
+    assert_eq!(
+        state.accounts.get("owner").ok_or("Alice")?.client.direct_messages("thread")?.len(),
+        1
+    );
+    directory.abort();
     Ok(())
+}
+
+#[tokio::test]
+async fn stale_local_head_gateway_admission_is_deferred_until_retry_due() -> TestResult {
+    Box::pin(characterise_gateway_admission(false, true)).await
+}
+
+#[tokio::test]
+async fn stale_peer_head_after_rename_gateway_admission_is_deferred_until_retry_due() -> TestResult
+{
+    Box::pin(characterise_gateway_admission(true, false)).await
+}
+
+#[tokio::test]
+async fn both_stale_heads_gateway_admission_is_deferred_until_retry_due() -> TestResult {
+    Box::pin(characterise_gateway_admission(false, false)).await
 }
