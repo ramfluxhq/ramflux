@@ -312,7 +312,12 @@ fn scan_objects(
                 [lookup],
                 |r| r.get(0),
             )?;
-            let explicit=exists(db,"incoming","object_identity_replacement")? && db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.object_identity_replacement WHERE commitment=?1)",[digest],|r|r.get::<_,bool>(0))?;
+            let explicit=exists(db,"incoming","object_identity_replacement")? && db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.object_identity_replacement WHERE commitment=?1)",[&digest],|r|r.get::<_,bool>(0))?;
+            let explicit = if candidate && explicit {
+                super::backup_selector_admission::replacements::checked(db, "incoming", &digest)?
+            } else {
+                explicit
+            };
             if reused && !explicit {
                 return Err(StorageError::ObjectIdentityConflict);
             }

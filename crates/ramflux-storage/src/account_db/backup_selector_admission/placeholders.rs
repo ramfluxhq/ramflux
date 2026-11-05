@@ -34,9 +34,8 @@ pub(in crate::account_db) fn classify(db: &Connection, root: &str) -> Result<(),
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut inherited = false;
-            if identities.is_empty() {
-                let (other_schema, other_side) =
-                    if side == "target" { ("incoming", "incoming") } else { ("main", "target") };
+            if identities.is_empty() && side == "incoming" {
+                let (other_schema, other_side) = ("main", "target");
                 let mut other = db.prepare_cached(&format!("SELECT DISTINCT p.wire_id,p.manifest_hash,r.commitment FROM {other_schema}.object_retention_reference r JOIN {other_schema}.object_retention_payload p USING(commitment) JOIN backup_reference_admission a ON a.side=?2 AND a.reference_hash=r.reference_hash WHERE r.selector=?1 AND EXISTS(SELECT 1 FROM backup_selector_admission s WHERE s.side=a.side AND s.selector=r.selector AND s.commitment=r.commitment AND s.decision='keep')"))?;
                 identities = other
                     .query_map(params![selector, other_side], |r| {
@@ -44,13 +43,13 @@ pub(in crate::account_db) fn classify(db: &Connection, root: &str) -> Result<(),
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 inherited = !identities.is_empty();
-                if identities.is_empty()
-                    && side == "target"
-                    && let Some(identity) = legacy_target_identity(db, root, &selector, &manifest)?
-                {
-                    identities.push(identity);
-                    inherited = true;
-                }
+            }
+            if identities.is_empty()
+                && side == "target"
+                && let Some(identity) = legacy_target_identity(db, root, &selector, &manifest)?
+            {
+                identities.push(identity);
+                inherited = true;
             }
             if identities.len() > 1
                 || identities
@@ -75,6 +74,9 @@ pub(in crate::account_db) fn classify(db: &Connection, root: &str) -> Result<(),
                 )?;
             }
             let keep: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM backup_selector_admission WHERE side=?1 AND selector=?2 AND commitment=?3 AND decision='keep')",params![side,selector,commitment],|r|r.get(0))?;
+            if keep && original_legacy_zero && side == "target" {
+                db.execute("UPDATE main.object_index SET manifest_hash=?1,chunk_manifest_hash=?1 WHERE rowid=?2", params![identities[0].1.as_bytes(),id])?;
+            }
             let pending_target: bool = side == "target" && db.query_row("SELECT EXISTS(SELECT 1 FROM backup_target_delete WHERE selector=?1 AND commitment=?2) AND NOT EXISTS(SELECT 1 FROM object_erasure_fence WHERE commitment=?2)",params![selector,commitment],|r|r.get(0))?;
             if !keep && !pending_target {
                 db.execute(
@@ -126,6 +128,19 @@ pub(in crate::account_db) fn erased(
                 |r| r.get(0),
             )?);
         }
+        return Ok(false);
+    }
+    let replacement_manifest = match manifest {
+        Some(value) => Some(value.to_owned()),
+        None => db.query_row(&format!("SELECT CAST(manifest_hash AS TEXT) FROM {schema}.object_index WHERE object_id=?1"),[selector],|r|r.get::<_,String>(0)).optional()?,
+    };
+    if let Some(value) = replacement_manifest
+        && super::replacements::checked(
+            db,
+            schema,
+            &object_erasure_commitment(root, selector, &value),
+        )?
+    {
         return Ok(false);
     }
     let rejected: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM backup_selector_admission WHERE side=?1 AND selector=?2 AND decision<>'keep') OR EXISTS(SELECT 1 FROM object_erasure_lookup WHERE lookup=?3)",params![side,selector,object_erasure_lookup(root,selector)],|r|r.get(0))?;

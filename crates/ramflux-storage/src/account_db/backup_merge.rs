@@ -563,7 +563,11 @@ impl BackupDatabase {
                 }
             }
             // A legacy payload-free fence can inherit the live identity it revokes.
-            if original_legacy_zero && let Some(manifest) = current_manifest {
+            if original_legacy_zero && let Some(manifest) = current_manifest.or(
+                if super::backup_selector_admission::placeholders::active(&self.db)? {
+                    self.db.query_row("SELECT p.manifest_hash FROM backup_selector_admission a JOIN object_retention_payload p USING(commitment) WHERE a.side='incoming' AND a.selector=?1 AND a.decision='keep'", [&id], |r| r.get(0)).optional()?
+                } else { None }
+            ) {
                 self.db.execute(
                     "UPDATE object_index SET manifest_hash=?1,chunk_manifest_hash=?1 WHERE rowid=?2",
                     params![manifest.as_bytes(), target_row],

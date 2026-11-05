@@ -40,9 +40,6 @@ SELECT a.* FROM incoming.object_transport_actor a
 WHERE NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=a.commitment)
 AND NOT EXISTS(SELECT 1 FROM incoming.runtime_actor_state r JOIN backup_erased_copy e ON e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid WHERE r.state_kind=a.state_kind)
 ON CONFLICT DO NOTHING;
-INSERT INTO object_identity_replacement
-SELECT * FROM incoming.object_identity_replacement WHERE 1 ON CONFLICT DO NOTHING;
-
 INSERT INTO message_copy_binding
 SELECT 'object:'||a.selector,a.message_id FROM backup_reference_admission a
 WHERE a.side='incoming'
@@ -56,6 +53,7 @@ AND NOT EXISTS(SELECT 1 FROM object_erasure_fence f WHERE f.commitment=a.commitm
 ON CONFLICT DO NOTHING;
 
 ")?;
+    super::replacements::merge(db)?;
     import_reference_actors(db)
 }
 
