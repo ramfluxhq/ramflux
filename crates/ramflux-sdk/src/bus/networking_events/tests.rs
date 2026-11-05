@@ -221,3 +221,132 @@ async fn capacity_to_busy_same_hint_emits_networking_changed() -> TestResult {
     assert_eq!(projected(&account)?, Vec::<Value>::new());
     Ok(())
 }
+
+fn snapshot() -> super::super::connection_manager::NetworkingSnapshot {
+    use super::super::connection_manager::{ConnectionPhase, NetworkingSnapshot, NetworkingState};
+    NetworkingSnapshot {
+        state: NetworkingState::Live,
+        phase: ConnectionPhase::Live,
+        generation: 1,
+        attempt: 1,
+        attempt_started: None,
+        attempt_started_at_ms: None,
+        next_retry_at_ms: None,
+        retry_after_ms: None,
+        last_reason: None,
+        cause: None,
+        active_transport_kind: None,
+        session_id: None,
+    }
+}
+
+async fn session_account(
+    id: &str,
+) -> Result<(crate::custody::tests::Root, LocalBusAccountState), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new(id).await?;
+    let mut native =
+        crate::custody::load_account(&fixture.root.0, id, crate::custody::network_now()?)?;
+    native.mark_live_for_test(&fixture.root.0)?;
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config,
+        fixture.manifest.principal_commitment,
+    );
+    account.client.born_v3_account = Some(Box::new(native));
+    record_networking_at(&mut account, None, crate::custody::network_now()?)?;
+    let _ = projected(&account)?;
+    Ok((fixture.root, account))
+}
+
+#[tokio::test]
+async fn session_loss_and_reconnect_of_live_account_emit_pending_then_live() -> TestResult {
+    use super::super::connection_manager::{ConnectionPhase, NetworkingState};
+    let (_root, account) = session_account("session-cycle").await?;
+    let mut view = snapshot();
+    record_session(&account, &view)?;
+    let mut events = projected(&account)?;
+    view.state = NetworkingState::NetworkingPending;
+    view.phase = ConnectionPhase::Backoff;
+    record_session(&account, &view)?;
+    events.extend(projected(&account)?);
+    view = snapshot();
+    view.generation += 1;
+    record_session(&account, &view)?;
+    events.extend(projected(&account)?);
+    assert_eq!(events.len(), 3);
+    for event in &events {
+        assert_eq!(event["state"], "live");
+    }
+    assert_eq!(events[0]["session"]["state"], "live");
+    assert_eq!(events[1]["session"]["state"], "networking_pending");
+    assert_eq!(events[2]["session"]["state"], "live");
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_attempt_failures_with_same_cause_emit_once() -> TestResult {
+    let (_root, account) = session_account("session-dedupe").await?;
+    let mut view = snapshot();
+    view.cause = Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 1000, capacity: None });
+    record_session(&account, &view)?;
+    view.generation += 1;
+    view.retry_after_ms = Some(42);
+    view.cause = Some(AccountNetworkingReason::NodeBusy { retry_after_ms: 42, capacity: None });
+    assert!(!record_session(&account, &view)?);
+    assert_eq!(projected(&account)?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_kind_refusal_code_or_capacity_change_emits_event() -> TestResult {
+    use ramflux_protocol::custody::CustodyRefusal;
+    let (_root, account) = session_account("session-semantics").await?;
+    let mut view = snapshot();
+    for code in [CustodyRefusal::PrincipalIdTaken, CustodyRefusal::Busy] {
+        view.cause = Some(AccountNetworkingReason::RegistrationRefused { code });
+        assert!(record_session(&account, &view)?);
+    }
+    for reason in [
+        ramflux_protocol::home_migration::Refusal::HomeFork,
+        ramflux_protocol::home_migration::Refusal::BaseMismatch,
+    ] {
+        view.cause = Some(AccountNetworkingReason::RegistrationRefused {
+            code: CustodyRefusal::HomeMigration { reason, nack: None },
+        });
+        assert!(record_session(&account, &view)?);
+    }
+    for (scope, resets_at_unix) in [
+        (CapacityScope::PrefixDaily, 100),
+        (CapacityScope::PrefixDaily, 200),
+        (CapacityScope::GlobalDaily, 200),
+    ] {
+        view.cause = Some(AccountNetworkingReason::NodeBusy {
+            retry_after_ms: 1000,
+            capacity: Some(CapacityHint { scope, resets_at_unix }),
+        });
+        assert!(record_session(&account, &view)?);
+    }
+    assert_eq!(projected(&account)?.len(), 7);
+    Ok(())
+}
+
+#[tokio::test]
+async fn custody_record_preserves_session_and_session_record_preserves_custody() -> TestResult {
+    let (_root, mut account) = session_account("session-halves").await?;
+    let view = snapshot();
+    record_session(&account, &view)?;
+    let first = projected(&account)?.pop().ok_or("session event")?;
+    account.gateway_config.custody.as_mut().ok_or("custody config")?.node_id =
+        "other.example".into();
+    record_networking_at(&mut account, None, crate::custody::network_now()?)?;
+    let second = projected(&account)?.pop().ok_or("custody event")?;
+    assert_eq!(first["session"], second["session"]);
+    let mut changed = snapshot();
+    changed.phase = super::super::connection_manager::ConnectionPhase::Backoff;
+    record_session(&account, &changed)?;
+    let third = projected(&account)?.pop().ok_or("changed session")?;
+    for field in ["account_id", "state", "node_binding", "networking_reason"] {
+        assert_eq!(second[field], third[field]);
+    }
+    Ok(())
+}

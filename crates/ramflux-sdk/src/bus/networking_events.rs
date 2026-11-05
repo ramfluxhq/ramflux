@@ -11,22 +11,65 @@ pub(super) fn record(
     native: &BornAccount,
     now: u64,
 ) -> Result<bool, SdkError> {
+    let mut body = custody_body(account, native, now)?;
+    let db = account.client.account_db()?;
+    let previous = db.load_actor_state::<Value>("account/networking")?;
+    if let Some(session) = previous.as_ref().and_then(|body| body.get("session")) {
+        body["session"] = session.clone();
+    }
+    persist(account, previous.as_ref(), &body)
+}
+
+fn custody_body(
+    account: &LocalBusAccountState,
+    native: &BornAccount,
+    now: u64,
+) -> Result<Value, SdkError> {
     let id = &account.client.account_db()?.local_account_id;
     let binding = account.gateway_config.custody.as_ref().map(|config| {
         crate::custody::capacity_hint::node_identity(&config.node_id, &config.node_public_key)
     });
-    let body = serde_json::json!({
+    Ok(serde_json::json!({
         "account_id":id,
         "state":native.state(),
         "node_binding":binding,
         "networking_reason":native.networking_view(now),
+    }))
+}
+
+#[allow(dead_code)] // Wired to runtime observations in the following part.
+pub(super) fn record_session(
+    account: &LocalBusAccountState,
+    snapshot: &super::connection_manager::NetworkingSnapshot,
+) -> Result<bool, SdkError> {
+    let previous = account.client.account_db()?.load_actor_state::<Value>("account/networking")?;
+    let mut body = match previous.clone() {
+        Some(body) => body,
+        None => custody_body(
+            account,
+            account.client.born_v3_account.as_deref().ok_or(SdkError::AccountDbNotUnlocked)?,
+            crate::custody::network_now()?,
+        )?,
+    };
+    body["session"] = serde_json::json!({
+        "state": snapshot.state,
+        "phase": snapshot.phase,
+        "generation": snapshot.generation,
+        "cause": snapshot.cause,
+        "retry_after_ms": snapshot.retry_after_ms,
     });
-    let db = account.client.account_db()?;
-    let previous = db.load_actor_state::<Value>("account/networking")?;
-    if previous.as_ref().map(cause_and_binding) == Some(cause_and_binding(&body)) {
+    persist(account, previous.as_ref(), &body)
+}
+
+fn persist(
+    account: &LocalBusAccountState,
+    previous: Option<&Value>,
+    body: &Value,
+) -> Result<bool, SdkError> {
+    if previous.map(cause_and_binding) == Some(cause_and_binding(body)) {
         return Ok(false);
     }
-    db.persist_actor_state("account/networking", &body)?;
+    account.client.account_db()?.persist_actor_state("account/networking", body)?;
     Ok(true)
 }
 
@@ -40,6 +83,13 @@ fn cause_and_binding(body: &Value) -> Value {
         // These describe the countdown at capture time; they are not a new cause.
         for field in ["retry_after_ms", "remaining_ms", "resets_at", "clamped"] {
             cause.remove(field);
+        }
+    }
+    if let Some(session) = key.get_mut("session").and_then(Value::as_object_mut) {
+        session.remove("generation");
+        session.remove("retry_after_ms");
+        if let Some(cause) = session.get_mut("cause").and_then(Value::as_object_mut) {
+            cause.remove("retry_after_ms");
         }
     }
     key
