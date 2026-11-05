@@ -24,7 +24,7 @@ fn refusal_router() -> anyhow::Result<RefusalRouter> {
         .map_err(|e| anyhow::Error::msg(e.to_string()))?;
     let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &router.tls)?;
     let mut client_tls = gateway.tls;
-    client_tls.ca_cert = router.tls.ca_cert.clone();
+    client_tls.ca_cert.clone_from(&router.tls.ca_cert);
     let client = crate::RouterMeshClient {
         endpoint: server.local_addr()?.to_string(),
         server_name: "ramflux-router".into(),
