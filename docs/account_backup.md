@@ -119,6 +119,7 @@ output and encrypted staging are removed on cancellation or failure.
 
 Typed failures: `account_busy` (retryable, message `account in use by another
 process`), `wrong_passphrase`, `tampered`, `truncated`, `unsupported_version`,
+`schema_reset_required` (`SchemaResetRequired`, C ABI code 23),
 `insufficient_space` (needed_bytes, available_bytes), `unreadable`, `not_writable`,
 `staging_expired`, `interrupted`, `attachment_mismatch`, `attachments_unavailable`, `identity_rollback`,
 `root_conflict`. A wrong passphrase fails immediately after header authentication,
