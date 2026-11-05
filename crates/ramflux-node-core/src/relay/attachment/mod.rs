@@ -4,9 +4,10 @@
 //! Dormant native attachment accounting. No endpoint calls this module yet.
 //! The service authenticates the original owner before constructing its context;
 //! this ledger is not a grant verifier or a local-reference retirement authority.
+mod identity;
 mod quota;
 mod retention;
-pub use retention::AttachmentPolicy;
+pub use retention::{AttachmentDebtPage, AttachmentPolicy};
 #[cfg(test)]
 mod tests;
 use ramflux_protocol::large_attachment::SegmentLayout;
@@ -94,6 +95,8 @@ pub struct AttachmentQuota {
     pub used: u64,
     pub reserved: u64,
     pub records: u64,
+    #[serde(default)]
+    pub fences: u64,
 }
 #[derive(Clone)]
 pub struct AttachmentLedger {
@@ -108,6 +111,7 @@ pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), crate::NodeCore
     let _ = tx.open_table(OBJECTS).map_err(map)?;
     let _ = tx.open_table(DEADLINES).map_err(map)?;
     let _ = tx.open_table(DEBTS).map_err(map)?;
+    identity::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     Ok(())
 }
 impl AttachmentLedger {

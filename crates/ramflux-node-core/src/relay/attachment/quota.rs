@@ -23,6 +23,9 @@ impl AttachmentLedger {
         }
         let record_key = key(owner, &request.upload_id);
         let tx = self.db.begin_write().map_err(store)?;
+        if super::identity::fenced(&tx, &record_key)? {
+            return Err(AttachmentLedgerError::State);
+        }
         let mut records = tx.open_table(RECORDS).map_err(store)?;
         if let Some(found) = records.get(record_key.as_slice()).map_err(store)? {
             let record: AttachmentReservation = decode(found.value())?;
@@ -45,7 +48,14 @@ impl AttachmentLedger {
         }
         let mut objects = tx.open_table(OBJECTS).map_err(store)?;
         let object_key = key(owner, &request.object_id);
-        if objects.get(object_key.as_slice()).map_err(store)?.is_some() {
+        if tx
+            .open_table(super::identity::FENCE_OBJECTS)
+            .map_err(store)?
+            .get(object_key.as_slice())
+            .map_err(store)?
+            .is_some()
+            || objects.get(object_key.as_slice()).map_err(store)?.is_some()
+        {
             return Err(AttachmentLedgerError::Conflict);
         }
         let mut totals = tx.open_table(TOTALS).map_err(store)?;
@@ -53,7 +63,12 @@ impl AttachmentLedger {
             .get(owner.0.as_str())
             .map_err(store)?
             .map_or(Ok(AttachmentQuota::default()), |v| decode(v.value()))?;
-        if total.records >= self.policy.max_records_per_owner {
+        if total.records >= self.policy.max_records_per_owner
+            || total
+                .fences
+                .checked_add(total.records)
+                .is_none_or(|n| n >= self.policy.max_identity_fences_per_owner)
+        {
             return Err(AttachmentLedgerError::Capacity);
         }
         let occupied = total

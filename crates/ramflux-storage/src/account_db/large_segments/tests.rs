@@ -403,3 +403,40 @@ fn startup_recovery_is_once_per_account_and_isolates_busy_or_corrupt_transfers()
     drop(db);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn startup_quarantines_conflicting_chunk_size_and_generation_without_blocking_healthy() {
+    for (column, value) in
+        [("chunk_size", 0_i64), ("segment_generation", 0), ("segment_generation", -1)]
+    {
+        let (bad, bad_bytes) = fixture(1);
+        let (good, good_bytes) = fixture(6);
+        let (root, db) = crate::tests::test_db("conflicting-segment-row").unwrap();
+        let mut store = db.segment_store().unwrap();
+        for (id, native, bytes) in [("bad", &bad, &bad_bytes), ("good", &good, &good_bytes)] {
+            store.admit(id, 1, SegmentDirection::Download, native).unwrap();
+            store.checkpoint(id, 1, 0, 0, &bytes[0]).unwrap();
+        }
+        db.connection
+            .execute(
+                &format!("UPDATE object_transfer_state SET {column}=?1 WHERE transfer_id='bad'"),
+                params![value],
+            )
+            .unwrap();
+        drop(store);
+        drop(db);
+        let db = reopen(&root);
+        let mut store = db.segment_store().unwrap();
+        assert_eq!(store.read_chunk("good", 1, 0, 0).unwrap(), good_bytes[0]);
+        let state: String = db
+            .connection
+            .query_row("SELECT state FROM object_transfer_state WHERE transfer_id='bad'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(state, "segment_quarantined");
+        drop(store);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

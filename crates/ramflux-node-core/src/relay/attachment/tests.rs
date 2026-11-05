@@ -4,6 +4,7 @@
 use super::*;
 use crate::RelayRedbStore;
 use ramflux_protocol::large_attachment::ContentManifest;
+use redb::ReadableTableMetadata;
 use std::{fs, path::PathBuf};
 fn root() -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -66,6 +67,8 @@ fn large_account_quota_includes_concurrent_reservations() {
     let policy = AttachmentPolicy { quota_bytes: 48, ..Default::default() };
     let ledger = store.attachment_ledger(policy).unwrap();
     let owner = AttachmentOwner::from_authenticated_session("owner-anchor").unwrap();
+    let empty = ledger.usage(&owner).unwrap();
+    assert_eq!((empty.used, empty.reserved, empty.records, empty.fences), (0, 0, 0, 0));
     let native = fixture();
     let mut first = request(1);
     first.object_id = native.manifest().object_id;
@@ -200,15 +203,18 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
         ledger.committed(&owner, &req.upload_id, 8000).unwrap().expires_at,
         Some(200 + 604_800)
     );
-    assert_eq!(ledger.cleanup_page(&owner, None, 128).unwrap().len(), 1);
+    assert_eq!(ledger.cleanup_page(&owner, None, 64).unwrap().len(), 1);
     ledger.reclaim(&owner, &pending.upload_id, |_| Ok(())).unwrap();
-    // Separate owner/upload generation admits the same frozen codec fixture.
-    let other = AttachmentOwner::from_authenticated_session("owner-anchor").unwrap();
-    let second_native = fixture();
-    let mut later = request(3);
-    later.object_id = second_native.manifest().object_id;
-    // The original object identity is immutable, so a new upload id cannot retarget it.
-    assert!(ledger.reserve(&other, later, 8000).is_err());
+    let foreign = AttachmentOwner::from_authenticated_session("foreign-owner").unwrap();
+    let mut foreign_request = request(3);
+    foreign_request.object_id = native.manifest().object_id;
+    ledger.reserve(&foreign, foreign_request, 8000).unwrap();
+    let before = ledger.usage(&foreign).unwrap().reserved;
+    assert!(matches!(
+        ledger.bind(&foreign, &foreign_request.upload_id, &native, 8000),
+        Err(AttachmentLedgerError::Conflict)
+    ));
+    assert_eq!(ledger.usage(&foreign).unwrap().reserved, before);
     drop(ledger);
     drop(store);
     let second_root = root.join("override");
@@ -233,8 +239,12 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
         ledger.reserve(&owner, request(4), 1000),
         Err(AttachmentLedgerError::AccountQuotaExceeded { .. })
     ));
-    assert!(ledger.gc_due(200 + 14 * 86_400 - 1, 128).unwrap().is_empty());
-    assert_eq!(ledger.gc_due(200 + 14 * 86_400, 128).unwrap().len(), 1);
+    assert!(ledger.gc_due(200 + 14 * 86_400 - 1, 64).unwrap().is_empty());
+    assert!(matches!(
+        ledger.committed(&owner, &req.upload_id, 200 + 14 * 86_400),
+        Err(AttachmentLedgerError::Expired)
+    ));
+    assert_eq!(ledger.gc_due(200 + 14 * 86_400, 64).unwrap().len(), 1);
     assert!(matches!(
         ledger.committed(&owner, &req.upload_id, 200 + 14 * 86_400),
         Err(AttachmentLedgerError::Expired)
@@ -246,4 +256,157 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
     drop(ledger);
     drop(store);
     fs::remove_dir_all(root).unwrap();
+}
+
+fn memory_ledger(policy: AttachmentPolicy) -> AttachmentLedger {
+    let db = redb::Database::builder()
+        .create_with_backend(redb::backends::InMemoryBackend::new())
+        .unwrap();
+    let tx = db.begin_write().unwrap();
+    install(&tx).unwrap();
+    tx.commit().unwrap();
+    AttachmentLedger::new(Arc::new(db), policy).unwrap()
+}
+fn cycle_request(index: u64) -> AttachmentReservationRequest {
+    let mut id = [0; 32];
+    id[..8].copy_from_slice(&index.to_be_bytes());
+    AttachmentReservationRequest {
+        upload_id: id,
+        object_id: id,
+        layout: SegmentLayout { plaintext_length: 0, network_chunk_bytes: 524_288 },
+    }
+}
+#[test]
+fn released_records_free_live_capacity_and_compact_expiring_identity_fences() {
+    let owner = AttachmentOwner::from_authenticated_session("owner").unwrap();
+    let ledger = memory_ledger(AttachmentPolicy { max_records_per_owner: 1, ..Default::default() });
+    let first = cycle_request(0);
+    ledger.reserve(&owner, first, 100).unwrap();
+    assert!(matches!(
+        ledger.reserve(&owner, cycle_request(1), 100),
+        Err(AttachmentLedgerError::Capacity)
+    ));
+    ledger.abandon_pending(&owner, &first.upload_id).unwrap();
+    ledger.reclaim(&owner, &first.upload_id, |_| Ok(())).unwrap();
+    assert_eq!(ledger.usage(&owner).unwrap().records, 0);
+    for index in 1..=16_385 {
+        let request = cycle_request(index);
+        ledger.reserve(&owner, request, 100).unwrap();
+        ledger.abandon_pending(&owner, &request.upload_id).unwrap();
+        ledger.reclaim(&owner, &request.upload_id, |_| Ok(())).unwrap();
+    }
+    let tx = ledger.db.begin_read().unwrap();
+    assert_eq!(tx.open_table(RECORDS).unwrap().len().unwrap(), 0);
+    let fences = tx.open_table(super::identity::FENCES).unwrap();
+    assert_eq!(fences.len().unwrap(), 16_386);
+    assert!(fences.iter().unwrap().all(|entry| entry.unwrap().1.value().len() == 40));
+    assert_eq!(ledger.usage(&owner).unwrap().records, 0);
+    drop(fences);
+    drop(tx);
+    assert!(ledger.reserve(&owner, first, 200).is_err());
+    // Fence horizon exceeds both the maximum lease and any token skew window.
+    let until = 100 + 86_400 + 305;
+    assert!(ledger.gc_due(until - 1, 64).unwrap().is_empty());
+    assert!(ledger.reserve(&owner, first, until - 1).is_err());
+    while ledger.usage(&owner).unwrap().fences != 0 {
+        ledger.gc_due(until, 64).unwrap();
+    }
+    ledger.reserve(&owner, first, until).unwrap();
+    assert!(ledger.gc_due(until, 65).is_err());
+    assert!(ledger.cleanup_page(&owner, None, 65).is_err());
+}
+#[test]
+fn global_debt_page_recovers_cleanup_after_gc_worker_restart() {
+    let root = root();
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("relay.redb");
+    // Historical relay DB has the old tables but none of the native tables.
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        let _ = tx.open_table(crate::RELAY_CACHE_TABLE).unwrap();
+        let _ = tx.open_table(crate::RELAY_CHUNK_ENTRY_TABLE).unwrap();
+        let _ = tx.open_table(crate::RELAY_TOMBSTONE_TABLE).unwrap();
+        tx.commit().unwrap();
+    }
+    let store = RelayRedbStore::open(&path).unwrap();
+    let ledger = store.attachment_ledger(AttachmentPolicy::default()).unwrap();
+    let a = AttachmentOwner::from_authenticated_session("a").unwrap();
+    let b = AttachmentOwner::from_authenticated_session("bb").unwrap();
+    assert_eq!(ledger.usage(&a).unwrap().records, 0);
+    assert_eq!(ledger.debt_page(None, 64).unwrap().jobs.len(), 0);
+    ledger.reserve(&a, request(1), 100).unwrap();
+    ledger.reserve(&b, request(2), 100).unwrap();
+    assert_eq!(ledger.gc_due(3700, 64).unwrap().len(), 2);
+    drop(ledger);
+    drop(store);
+    let store = RelayRedbStore::open(&path).unwrap();
+    let ledger = store.attachment_ledger(AttachmentPolicy::default()).unwrap();
+    let mut cursor = None;
+    let mut found = 0;
+    loop {
+        let page = ledger.debt_page(cursor.as_deref(), 1).unwrap();
+        for job in page.jobs {
+            let owner = AttachmentOwner::from_authenticated_session(&job.owner).unwrap();
+            assert_eq!(ledger.usage(&owner).unwrap().reserved, 16);
+            ledger.reclaim(&owner, &job.upload_id, |_| Ok(())).unwrap();
+            assert_eq!(ledger.usage(&owner).unwrap().reserved, 0);
+            found += 1;
+        }
+        let Some(next) = page.next else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    assert_eq!(found, 2);
+    assert_eq!(ledger.debt_page(None, 64).unwrap().jobs.len(), 0);
+    assert!(ledger.debt_page(None, 65).is_err());
+    assert!(ledger.debt_page(Some(&[1; 500]), 1).is_err());
+    drop(ledger);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn historical_released_records_compact_on_normal_schema_install() {
+    let policy = AttachmentPolicy { max_records_per_owner: 1, ..Default::default() };
+    let ledger = memory_ledger(policy);
+    let owner = AttachmentOwner::from_authenticated_session("historical-owner").unwrap();
+    let request = cycle_request(1);
+    let mut released = ledger.reserve(&owner, request, 100).unwrap();
+    released.state = AttachmentReservationState::Released;
+    let tx = ledger.db.begin_write().unwrap();
+    {
+        tx.open_table(RECORDS)
+            .unwrap()
+            .insert(
+                key(&owner, &request.upload_id).as_slice(),
+                serde_json::to_vec(&released).unwrap().as_slice(),
+            )
+            .unwrap();
+        tx.open_table(TOTALS)
+            .unwrap()
+            .insert("historical-owner", br#"{"used":0,"reserved":0,"records":1}"#.as_slice())
+            .unwrap();
+        let schema: TableDefinition<&str, u64> =
+            TableDefinition::new("native_attachment_ledger_schema");
+        tx.open_table(schema).unwrap().remove("compact_releases_v1").unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = ledger.db.begin_write().unwrap();
+    install(&tx).unwrap();
+    tx.commit().unwrap();
+    let total = ledger.usage(&owner).unwrap();
+    assert_eq!((total.used, total.reserved, total.records, total.fences), (0, 0, 0, 1));
+    assert!(ledger.reserve(&owner, request, 101).is_err());
+    let bounded = AttachmentLedger::new(
+        Arc::clone(&ledger.db),
+        AttachmentPolicy { max_identity_fences_per_owner: 1, ..policy },
+    )
+    .unwrap();
+    assert!(matches!(
+        bounded.reserve(&owner, cycle_request(2), 101),
+        Err(AttachmentLedgerError::Capacity)
+    ));
+    ledger.reserve(&owner, cycle_request(2), 101).unwrap();
 }
