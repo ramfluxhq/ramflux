@@ -948,6 +948,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         E::ObjectIdentityConflict => RamfluxErrorCode::ObjectIdentityConflict,
         E::ObjectOwnershipUnverified { .. } => RamfluxErrorCode::ObjectOwnershipUnverified,
         E::SchemaResetRequired { .. } => RamfluxErrorCode::SchemaResetRequired,
+        E::OperationReconciliationRequired { .. } => RamfluxErrorCode::InvalidArgument,
         E::AccountSchemaTooNew { .. } => RamfluxErrorCode::UnsupportedVersion,
         E::Integrity(_)
         | E::Protocol(_)
@@ -980,7 +981,6 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         | E::GroupEpochAccessDenied
         | E::MessageNotFound(_)
         | E::MessageIdConflict(_)
-        | E::OperationReconciliationRequired { .. }
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
         | E::InvalidRecoveryState { .. } => RamfluxErrorCode::StorageFailed,

@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - All pending mutation receipts now return the bus code
-  `OperationReconciliationRequired`, preserving the reconciliation message.
+  `OperationReconciliationRequired`, preserving the reconciliation message while
+  dropping its former `event id conflict:` prefix. The C ABI maps both lifecycle
+  and account mutation reconciliation errors to `InvalidArgument` (1).
   Ordinary event ID and changed-intent conflicts retain `ValidationFailed`.
 
 - Native `account.networking.changed` events now include resident session state,
