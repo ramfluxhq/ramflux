@@ -202,12 +202,13 @@ pub struct OpaqueDeviceInbox {
     /// One row per retained live delivery, rebuilt from durable rows at startup.
     /// ACK, NACK retirement, expiry, abort cleanup and target removal release it.
     #[serde(with = "pending_rows")]
-    pending: BTreeMap<String, BTreeMap<u64, InboxEntry>>,
+    pub(crate) pending: BTreeMap<String, BTreeMap<crate::inbox_page::SequenceKey, InboxEntry>>,
     cursors: BTreeMap<String, CursorAckState>,
     /// At most `ROUTER_DEAD_LETTER_LIMIT` per target; rebuilt on restore, released
     /// on metadata eviction, expiry, snapshot filtering, or target removal.
     #[serde(skip)]
-    dead_letter_index: BTreeMap<String, BTreeMap<u64, DeadLetterRecord>>,
+    pub(crate) dead_letter_index:
+        BTreeMap<String, BTreeMap<crate::inbox_page::SequenceKey, DeadLetterRecord>>,
     /// Server-assigned retention deadline per pending sequence.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     retain_until: BTreeMap<String, BTreeMap<u64, i64>>,
@@ -326,7 +327,7 @@ impl OpaqueDeviceInbox {
         self.pending
             .entry(target_delivery_id.clone())
             .or_default()
-            .insert(entry.inbox_seq, entry.clone());
+            .insert(entry.inbox_seq.into(), entry.clone());
         self.cursors
             .entry(target_delivery_id.clone())
             .or_insert(CursorAckState { target_delivery_id, ..CursorAckState::default() })
@@ -426,7 +427,10 @@ impl OpaqueDeviceInbox {
             .get(target_delivery_id)
             .map(|entries| {
                 entries
-                    .range((std::ops::Bound::Excluded(after_inbox_seq), std::ops::Bound::Unbounded))
+                    .range((
+                        std::ops::Bound::Excluded(crate::inbox_page::SequenceKey(after_inbox_seq)),
+                        std::ops::Bound::Unbounded,
+                    ))
                     .map(|(_, entry)| entry)
                     .take_while(|entry| entry.inbox_seq <= self.published_limit(target_delivery_id))
                     .take(limit)
@@ -449,7 +453,10 @@ impl OpaqueDeviceInbox {
             .get(target_delivery_id)
             .map(|entries| {
                 entries
-                    .range((std::ops::Bound::Excluded(after_inbox_seq), std::ops::Bound::Unbounded))
+                    .range((
+                        std::ops::Bound::Excluded(crate::inbox_page::SequenceKey(after_inbox_seq)),
+                        std::ops::Bound::Unbounded,
+                    ))
                     .map(|(_, entry)| entry)
                     .take_while(|entry| entry.inbox_seq <= self.published_limit(target_delivery_id))
                     .filter(|entry| self.retain_until(entry) > now)
@@ -578,7 +585,7 @@ impl OpaqueDeviceInbox {
             let head = self
                 .pending
                 .get(target)
-                .and_then(|entries| entries.range(..entry_seq).next().map(|(&seq, _)| seq));
+                .and_then(|entries| entries.range(..entry_seq).next().map(|(&seq, _)| seq.0));
             let Some(head) = head else {
                 return;
             };
@@ -713,7 +720,7 @@ impl OpaqueDeviceInbox {
             .pending
             .get(target)
             .and_then(BTreeMap::first_key_value)
-            .map_or(boundary, |(&first, _)| boundary.min(first.saturating_sub(1)));
+            .map_or(boundary, |(&first, _)| boundary.min(first.0.saturating_sub(1)));
         if let Some(cursor) = self.cursors.get_mut(target) {
             cursor.issued_inbox_seq = cursor.issued_inbox_seq.max(issued);
             cursor.settled_inbox_seq = cursor.settled_inbox_seq.max(settled);
@@ -869,7 +876,7 @@ impl OpaqueDeviceInbox {
         let deadline = retain_until
             .unwrap_or_else(|| inbox_legacy_retain_until(&entry.envelope, server_now()));
         let entries = self.pending.entry(target.clone()).or_default();
-        if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(seq) {
+        if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(seq.into()) {
             slot.insert(entry);
             self.set_deadline(&target, seq, deadline);
         }
@@ -881,7 +888,7 @@ impl OpaqueDeviceInbox {
             .get(target)
             .into_iter()
             .flat_map(|cursor| cursor.dead_letters.iter())
-            .map(|record| (record.inbox_seq, record.clone()))
+            .map(|record| (record.inbox_seq.into(), record.clone()))
             .collect();
         if rows.is_empty() {
             self.dead_letter_index.remove(target);

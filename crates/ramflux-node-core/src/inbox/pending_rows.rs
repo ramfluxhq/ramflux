@@ -4,7 +4,7 @@
 //! Preserve the historical snapshot array while maintaining ordered live rows.
 use super::{BTreeMap, InboxEntry};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-type Rows = BTreeMap<String, BTreeMap<u64, InboxEntry>>;
+type Rows = BTreeMap<String, BTreeMap<crate::inbox_page::SequenceKey, InboxEntry>>;
 pub(super) fn serialize<S: Serializer>(rows: &Rows, serializer: S) -> Result<S::Ok, S::Error> {
     let arrays: BTreeMap<_, Vec<_>> =
         rows.iter().map(|(target, entries)| (target, entries.values().collect())).collect();
@@ -15,7 +15,7 @@ pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<
     Ok(arrays
         .into_iter()
         .map(|(target, entries)| {
-            (target, entries.into_iter().map(|entry| (entry.inbox_seq, entry)).collect())
+            (target, entries.into_iter().map(|entry| (entry.inbox_seq.into(), entry)).collect())
         })
         .collect())
 }
