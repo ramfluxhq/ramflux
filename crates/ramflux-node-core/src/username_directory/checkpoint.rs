@@ -22,6 +22,7 @@ pub struct CheckpointWitness {
     head: CheckpointHead,
     clock: Arc<dyn CheckpointClock>,
     last_monotonic: u64,
+    safe_wall: u64,
 }
 impl CheckpointWitness {
     /// Privileged initialization only. Service adapters must authenticate controller authority.
@@ -52,6 +53,7 @@ impl CheckpointWitness {
             .insert("initialized", b"1".as_slice())
             .map_err(storage)?;
         put_head(&tx, &head)?;
+        put_safe_wall(&tx, head.clock_floor)?;
         tx.commit().map_err(storage)?;
         Self::from_db(db, head, clock)
     }
@@ -83,12 +85,13 @@ impl CheckpointWitness {
         head: CheckpointHead,
         clock: Arc<dyn CheckpointClock>,
     ) -> Result<Self> {
+        let safe_wall = read_safe_wall(&db, head.clock_floor)?;
         let time = clock.now();
         require(
-            time.wall >= head.clock_floor && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
+            time.wall >= safe_wall && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
             "clock",
         )?;
-        Ok(Self { db, head, clock, last_monotonic: time.monotonic })
+        Ok(Self { db, head, clock, last_monotonic: time.monotonic, safe_wall })
     }
     #[must_use]
     pub fn head(&self) -> CheckpointHead {
@@ -112,7 +115,7 @@ impl CheckpointWitness {
         let time = self.clock.now();
         require(
             time.monotonic >= self.last_monotonic
-                && time.wall >= self.head.clock_floor
+                && time.wall >= self.safe_wall
                 && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
             "clock",
         )?;
@@ -176,9 +179,11 @@ impl CheckpointWitness {
             .insert(checkpoint.delta.tx_id.as_str(), lsn)
             .map_err(storage)?;
         put_head(&tx, &next)?;
+        put_safe_wall(&tx, time.wall)?;
 
         tx.commit().map_err(storage)?;
         self.head = next;
+        self.safe_wall = time.wall;
 
         Ok(checkpoint)
     }
@@ -215,7 +220,7 @@ impl CheckpointWitness {
         let time = self.clock.now();
         require(
             time.monotonic >= self.last_monotonic
-                && time.wall >= self.head.clock_floor
+                && time.wall >= self.safe_wall
                 && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
             "clock",
         )?;
@@ -238,29 +243,9 @@ impl CheckpointWitness {
         let now = time.wall;
         let mut compacted = tx.open_table(COMPACTED).map_err(storage)?;
         for (lsn, id, at, frame) in &entries {
-            let mut meta = tx.open_table(META).map_err(storage)?;
-            let owner_key = format!("redo_owner:{lsn}");
-            let owner: String = serde_json::from_slice(
-                meta.get(owner_key.as_str())
-                    .map_err(storage)?
-                    .ok_or(CheckpointError::Refused("redo_owner"))?
-                    .value(),
-            )?;
-            let count_key = format!("redo_root:{owner}");
-            let count: u64 = serde_json::from_slice(
-                meta.get(count_key.as_str())
-                    .map_err(storage)?
-                    .ok_or(CheckpointError::Refused("redo_root"))?
-                    .value(),
-            )?;
-            require(count > 0, "redo_root")?;
-            if count == 1 {
-                meta.remove(count_key.as_str()).map_err(storage)?;
-            } else {
-                meta.insert(count_key.as_str(), canonical(&(count - 1))?.as_slice())
-                    .map_err(storage)?;
+            if now.saturating_sub(*at) >= 86400 {
+                release_result_owner(&tx, *lsn)?;
             }
-            meta.remove(owner_key.as_str()).map_err(storage)?;
             redo.remove(*lsn).map_err(storage)?;
             if now.saturating_sub(*at) < 86400 {
                 compacted.insert(*lsn, frame.as_slice()).map_err(storage)?;
@@ -271,7 +256,9 @@ impl CheckpointWitness {
         drop(compacted);
         drop(ids);
         drop(redo);
+        put_safe_wall(&tx, time.wall)?;
         tx.commit().map_err(storage)?;
+        self.safe_wall = time.wall;
         Ok(entries.len())
     }
 }
@@ -292,6 +279,52 @@ fn prune_results(tx: &redb::WriteTransaction, now: u64) -> Result<()> {
     for (lsn, id) in expired {
         compacted.remove(lsn).map_err(storage)?;
         ids.remove(id.as_str()).map_err(storage)?;
+        release_result_owner(tx, lsn)?;
     }
+    Ok(())
+}
+
+// Retained results consume the same root budget as physical redo until safe expiry.
+fn release_result_owner(tx: &redb::WriteTransaction, lsn: u64) -> Result<()> {
+    let mut meta = tx.open_table(META).map_err(storage)?;
+    let owner_key = format!("redo_owner:{lsn}");
+    let owner: String = serde_json::from_slice(
+        meta.get(owner_key.as_str())
+            .map_err(storage)?
+            .ok_or(CheckpointError::Refused("redo_owner"))?
+            .value(),
+    )?;
+    let count_key = format!("redo_root:{owner}");
+    let count: u64 = serde_json::from_slice(
+        meta.get(count_key.as_str())
+            .map_err(storage)?
+            .ok_or(CheckpointError::Refused("redo_root"))?
+            .value(),
+    )?;
+    require(count > 0, "redo_root")?;
+    if count == 1 {
+        meta.remove(count_key.as_str()).map_err(storage)?;
+    } else {
+        meta.insert(count_key.as_str(), canonical(&(count - 1))?.as_slice()).map_err(storage)?;
+    }
+    meta.remove(owner_key.as_str()).map_err(storage)?;
+    Ok(())
+}
+fn read_safe_wall(db: &redb::Database, head_floor: u64) -> Result<u64> {
+    let tx = db.begin_read().map_err(storage)?;
+    let meta = tx.open_table(META).map_err(storage)?;
+    let row =
+        meta.get("safe_clock").map_err(storage)?.ok_or(CheckpointError::Refused("clock_marker"))?;
+    let value: u64 =
+        serde_json::from_slice(row.value()).map_err(|_| CheckpointError::Refused("clock"))?;
+    require(value >= head_floor && value <= ramflux_protocol::MAX_SAFE_JSON_INTEGER, "clock")?;
+    require(canonical(&value)? == row.value(), "clock_canonical")?;
+    Ok(value)
+}
+fn put_safe_wall(tx: &redb::WriteTransaction, value: u64) -> Result<()> {
+    tx.open_table(META)
+        .map_err(storage)?
+        .insert("safe_clock", canonical(&value)?.as_slice())
+        .map_err(storage)?;
     Ok(())
 }

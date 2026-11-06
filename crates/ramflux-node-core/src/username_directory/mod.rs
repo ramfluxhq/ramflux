@@ -131,8 +131,8 @@ pub(crate) fn read_head(db: &redb::Database) -> Result<CheckpointHead> {
     let row =
         table.get("head").map_err(storage)?.ok_or(CheckpointError::Refused("uninitialized"))?;
     let head: CheckpointHead = serde_json::from_slice(row.value())?;
-    require(canonical(&head)? == row.value(), "head_canonical")?;
     head.validate()?;
+    require(canonical(&head)? == row.value(), "head_canonical")?;
     Ok(head)
 }
 pub(crate) fn put_head(tx: &redb::WriteTransaction, head: &CheckpointHead) -> Result<()> {
