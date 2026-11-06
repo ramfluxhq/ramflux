@@ -26,6 +26,11 @@ pub use vault::{
     VAULT_CLASS_PROTECTED,
 };
 
+#[cfg(any(target_os = "linux", test))]
+pub use vault::linux::{
+    LinuxCredentialPaths, LinuxVaultConfig, LinuxVaultConfigError, LinuxVaultMode, LinuxVaultRole,
+};
+
 use crate::SdkError;
 fn invalid() -> SdkError {
     SdkError::CustodySetupInvalid

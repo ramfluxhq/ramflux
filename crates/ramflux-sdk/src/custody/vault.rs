@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Non-synchronizing primary credentials; never falls back to the data vault or a file.
+#[cfg(any(target_os = "linux", test))]
+pub(super) mod linux;
+
 use super::HomeAuthorizationRequest;
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;

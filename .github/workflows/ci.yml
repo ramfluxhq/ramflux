@@ -313,6 +313,31 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  linux-vault-platform:
+    name: Linux vault platform fixture
+    needs: build-rest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          persist-credentials: false
+      - name: Install platform fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y systemd dbus dbus-x11 gnome-keyring libsecret-tools libsecret-1-dev zstd
+      - name: Install nextest
+        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
+        with:
+          tool: nextest@0.9.150
+      - name: Download default-feature rest archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-rest
+      - name: Private user, D-Bus and actual systemd credential smoke
+        run: sudo --preserve-env=PATH bash scripts/linux-vault-ci.sh rest.tar.zst
+
   # The C ABI smoke test (crates/ramflux-sdk/tests/c_abi_smoke.rs) is excluded from PR CI below:
   # it runs a nested cargo build, and nothing consumes the C ABI while mobile is frozen. It runs
   # again when mobile/ABI integration starts. The all-features clippy job still compiles c_abi.
