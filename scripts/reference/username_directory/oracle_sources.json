@@ -16,7 +16,7 @@
   },
   "sha256": {
     "schema.json": "32afd09342c20ce0e01f54fb7c9663a09ee1e7bbe05a5136419200dcb53eb931",
-    "wire_vectors.json": "5df6a428edaf5e26a35b1e539fad2b84c035fba7d1336421dc54e679c23e89a6",
-    "codec_oracle.py": "b11ebd6a3f31ffd49ce56963404ac9d64990a36c250a2c3f8902780580e41e8e"
+    "wire_vectors.json": "711ba183e073ff8e2a32540e535637710ba3fc90647d01e4fbd1b619774d0025",
+    "codec_oracle.py": "121479619c9bd84a5ee11fd0fa7bc83bf4c7a5a78e60399ac63e0dd8dc4b0859"
   }
 }
