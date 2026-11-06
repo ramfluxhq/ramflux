@@ -3,7 +3,7 @@
 
 //! Verified directory handles and bounded ciphertext reads. No secret ownership.
 use super::codec::{self, Binding, MAX_RECORD};
-use rustix::fs::{self, AtFlags, Mode, OFlags};
+use rustix::fs::{self, Mode, OFlags};
 use std::{
     fs::File,
     io::Read,
@@ -172,9 +172,5 @@ impl Store {
         codec::validate_record(self.binding(kind, reference, generation), &bytes)
             .map_err(Error::Record)?;
         Ok(bytes)
-    }
-    pub(super) fn unlink(&self, name: &str) -> Result<(), Error> {
-        fs::unlinkat(&self.realm_dir, name, AtFlags::empty())?;
-        Ok(())
     }
 }

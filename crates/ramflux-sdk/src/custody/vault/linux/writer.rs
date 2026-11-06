@@ -6,10 +6,11 @@ use super::{
     codec,
     files::{Error, Store, open_file},
 };
-use rustix::fs::{self, FlockOperation, OFlags, RenameFlags};
+use rustix::fs::{self, AtFlags, FlockOperation, OFlags, RenameFlags};
 use std::{
     fs::File,
     io::Write,
+    os::fd::OwnedFd,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -32,44 +33,34 @@ impl Drop for Slot {
     }
 }
 
-/// Ordered steps seen by the crash and durability oracles. `Cut` marks a test cut point;
-/// the other variants are emitted only after the real syscall succeeded, so an observer
-/// error fails the operation exactly as a failed syscall would.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Event {
-    Cut(&'static str),
-    FileSync,
-    Rename,
-    Unlink,
-    DirSync,
+/// FD-scoped durability operations. The writer performs every fsync, rename and unlink only
+/// through this trait, so an oracle that implements it observes (and can fail) the real calls.
+pub(super) trait DurabilityOps {
+    fn fsync_file(&self, file: &File) -> Result<(), Error>;
+    fn fsync_dir(&self, dir: &OwnedFd) -> Result<(), Error>;
+    fn rename(&self, dir: &OwnedFd, from: &str, to: &str, flags: RenameFlags) -> Result<(), Error>;
+    fn unlink(&self, dir: &OwnedFd, name: &str) -> Result<(), Error>;
 }
 
-/// Durability wrappers. Each one performs the real syscall and reports its event only after that
-/// call succeeded. The event is produced by the wrapper itself, so a call site that skips the
-/// wrapper cannot still report the step, and the oracle sees only syscalls that actually ran.
-type Observer<'a> = &'a dyn Fn(Event) -> Result<(), Error>;
-fn file_sync(file: &File, observe: Observer<'_>) -> Result<(), Error> {
-    file.sync_all().map_err(|_| Error::Io)?;
-    observe(Event::FileSync)
+/// Production implementation: the real syscalls and nothing else.
+pub(super) struct RealDurabilityOps;
+impl DurabilityOps for RealDurabilityOps {
+    fn fsync_file(&self, file: &File) -> Result<(), Error> {
+        file.sync_all().map_err(|_| Error::Io)
+    }
+    fn fsync_dir(&self, dir: &OwnedFd) -> Result<(), Error> {
+        fs::fsync(dir).map_err(Error::from)
+    }
+    fn rename(&self, dir: &OwnedFd, from: &str, to: &str, flags: RenameFlags) -> Result<(), Error> {
+        fs::renameat_with(dir, from, dir, to, flags).map_err(Error::from)
+    }
+    fn unlink(&self, dir: &OwnedFd, name: &str) -> Result<(), Error> {
+        fs::unlinkat(dir, name, AtFlags::empty()).map_err(Error::from)
+    }
 }
-fn rename_reported(
-    store: &Store,
-    from: &str,
-    to: &str,
-    flags: RenameFlags,
-    observe: Observer<'_>,
-) -> Result<(), Error> {
-    fs::renameat_with(&store.realm_dir, from, &store.realm_dir, to, flags).map_err(Error::from)?;
-    observe(Event::Rename)
-}
-fn unlink_reported(store: &Store, name: &str, observe: Observer<'_>) -> Result<(), Error> {
-    store.unlink(name)?;
-    observe(Event::Unlink)
-}
-fn sync_realm_reported(store: &Store, observe: Observer<'_>) -> Result<(), Error> {
-    fs::fsync(&store.realm_dir).map_err(Error::from)?;
-    observe(Event::DirSync)
-}
+
+/// Test cut point; the crash harness parks or kills the process here.
+type Cut<'a> = &'a dyn Fn(&'static str) -> Result<(), Error>;
 
 pub(super) enum Operation {
     Read { reference: String, kind: u8, generation: u64 },
@@ -91,17 +82,18 @@ impl Store {
     pub(super) fn apply(
         &self,
         operation: Operation,
-        cut: impl Fn(Event),
+        cut: impl Fn(&'static str),
     ) -> Result<Vec<u8>, Error> {
-        self.observe(operation, |event| {
-            cut(event);
+        self.publish(operation, &RealDurabilityOps, &|point| {
+            cut(point);
             Ok(())
         })
     }
-    pub(super) fn observe(
+    pub(super) fn publish(
         &self,
         operation: Operation,
-        observe: impl Fn(Event) -> Result<(), Error>,
+        ops: &dyn DurabilityOps,
+        cut: Cut<'_>,
     ) -> Result<Vec<u8>, Error> {
         let lock = open_file(&self.account_dir, ".writer.lock", OFlags::RDWR | OFlags::CREATE)?;
         // Immediate refusal is within the five-second maximum; never sleep on a lock.
@@ -113,11 +105,11 @@ impl Store {
             }
             Operation::Delete { reference, kind, generation } => {
                 self.read(&reference, kind, generation)?;
-                observe(Event::Cut("before_delete"))?;
-                unlink_reported(self, &reference, &observe)?;
-                observe(Event::Cut("after_delete"))?;
-                sync_realm_reported(self, &observe)?;
-                observe(Event::Cut("delete_synced"))?;
+                cut("before_delete")?;
+                ops.unlink(&self.realm_dir, &reference)?;
+                cut("after_delete")?;
+                ops.fsync_dir(&self.realm_dir)?;
+                cut("delete_synced")?;
                 return Ok(Vec::new());
             }
             Operation::Insert { reference, kind, record } => (reference, kind, record, false),
@@ -163,21 +155,21 @@ impl Store {
         let result = (|| {
             let mut file = File::from(fd);
             file.write_all(&record).map_err(|_| Error::Io)?;
-            observe(Event::Cut("written"))?;
-            file_sync(&file, &observe)?;
-            observe(Event::Cut("file_synced"))?;
+            cut("written")?;
+            ops.fsync_file(&file)?;
+            cut("file_synced")?;
             let flags = if replace { RenameFlags::empty() } else { RenameFlags::NOREPLACE };
-            observe(Event::Cut("before_publish"))?;
-            rename_reported(self, &temp, &reference, flags, &observe)?;
-            observe(Event::Cut("published"))?;
-            sync_realm_reported(self, &observe)?;
-            observe(Event::Cut("parent_synced"))?;
+            cut("before_publish")?;
+            ops.rename(&self.realm_dir, &temp, &reference, flags)?;
+            cut("published")?;
+            ops.fsync_dir(&self.realm_dir)?;
+            cut("parent_synced")?;
             Ok(Vec::new())
         })();
         // Only this operation's exclusive temporary can be removed on failure.
         if result.is_err() {
-            match self.unlink(&temp) {
-                Ok(()) => fs::fsync(&self.realm_dir)?,
+            match ops.unlink(&self.realm_dir, &temp) {
+                Ok(()) => ops.fsync_dir(&self.realm_dir)?,
                 Err(Error::Missing) => {}
                 Err(e) => return Err(e),
             }

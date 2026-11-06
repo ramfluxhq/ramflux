@@ -77,11 +77,52 @@ fn read(name: &str, kind: u8, generation: u64) -> Operation {
 fn remove(name: &str, kind: u8, generation: u64) -> Operation {
     Operation::Delete { reference: name.into(), kind, generation }
 }
-/// Runs one operation and returns its result with the ordered durability steps it emitted.
-fn observed(store: &Store, operation: Operation) -> (Result<Vec<u8>, Error>, Vec<Event>) {
-    let log = RefCell::new(Vec::new());
-    let result = store.apply(operation, |event| log.borrow_mut().push(event));
-    (result, log.into_inner())
+/// One durability operation as invoked by the writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    FileSync,
+    Rename,
+    Unlink,
+    DirSync,
+}
+/// Records each operation when it is invoked, then either performs the real syscall or, for the
+/// injected operation, returns an error instead of performing it.
+struct RecordingOps {
+    log: RefCell<Vec<Op>>,
+    fail: Option<Op>,
+}
+impl RecordingOps {
+    fn new(fail: Option<Op>) -> Self {
+        Self { log: RefCell::new(Vec::new()), fail }
+    }
+    fn step(&self, op: Op, real: impl FnOnce() -> Result<(), Error>) -> Result<(), Error> {
+        self.log.borrow_mut().push(op);
+        if self.fail == Some(op) { Err(Error::Io) } else { real() }
+    }
+}
+impl DurabilityOps for RecordingOps {
+    fn fsync_file(&self, file: &File) -> Result<(), Error> {
+        self.step(Op::FileSync, || RealDurabilityOps.fsync_file(file))
+    }
+    fn fsync_dir(&self, dir: &OwnedFd) -> Result<(), Error> {
+        self.step(Op::DirSync, || RealDurabilityOps.fsync_dir(dir))
+    }
+    fn rename(&self, dir: &OwnedFd, from: &str, to: &str, flags: RenameFlags) -> Result<(), Error> {
+        self.step(Op::Rename, || RealDurabilityOps.rename(dir, from, to, flags))
+    }
+    fn unlink(&self, dir: &OwnedFd, name: &str) -> Result<(), Error> {
+        self.step(Op::Unlink, || RealDurabilityOps.unlink(dir, name))
+    }
+}
+/// Runs one operation and returns its result with the ordered durability operations invoked.
+fn observed(
+    store: &Store,
+    operation: Operation,
+    fail: Option<Op>,
+) -> (Result<Vec<u8>, Error>, Vec<Op>) {
+    let ops = RecordingOps::new(fail);
+    let result = store.publish(operation, &ops, &|_| Ok(()));
+    (result, ops.log.into_inner())
 }
 
 #[test]
@@ -186,48 +227,89 @@ fn linux_vault_publication_call_order_is_durable() -> TestResult {
     let n = "unlock:alice";
     let a = record(&store, 4, n, 1, 1)?;
     let b = record(&store, 4, n, 2, 2)?;
-    let publish = [
-        Event::Cut("written"),
-        Event::FileSync,
-        Event::Cut("file_synced"),
-        Event::Cut("before_publish"),
-        Event::Rename,
-        Event::Cut("published"),
-        Event::DirSync,
-        Event::Cut("parent_synced"),
-    ];
-    let (result, events) = observed(&store, insert(n, 4, &a));
+    let publish = [Op::FileSync, Op::Rename, Op::DirSync];
+    let (result, ops) = observed(&store, insert(n, 4, &a), None);
     result?;
-    assert_eq!(events, publish, "insert: file fsync, then rename, then parent fsync");
-    let (result, events) =
-        observed(&store, Operation::Replace { reference: n.into(), expected: 1, record: b });
+    assert_eq!(ops, publish, "insert: file fsync, then rename, then parent fsync");
+    let (result, ops) =
+        observed(&store, Operation::Replace { reference: n.into(), expected: 1, record: b }, None);
     result?;
-    assert_eq!(events, publish, "replace: file fsync, then rename, then parent fsync");
-    let (result, events) = observed(&store, remove(n, 4, 2));
+    assert_eq!(ops, publish, "replace: file fsync, then rename, then parent fsync");
+    let (result, ops) = observed(&store, remove(n, 4, 2), None);
     result?;
-    assert_eq!(
-        events,
-        [
-            Event::Cut("before_delete"),
-            Event::Unlink,
-            Event::Cut("after_delete"),
-            Event::DirSync,
-            Event::Cut("delete_synced"),
-        ],
-        "delete: unlink, then parent fsync"
-    );
-    // A failed sync is an error to the caller and never a durable success.
+    assert_eq!(ops, [Op::Unlink, Op::DirSync], "delete: unlink, then parent fsync");
+    // An injected syscall failure replaces the syscall: it is an error to the caller and never a
+    // durable success, and the failed step is the last one recorded before cleanup.
     let dir = tempfile::tempdir()?;
     let store = setup(dir.path(), 3)?;
-    let failed = store
-        .observe(insert(n, 4, &a), |e| if e == Event::FileSync { Err(Error::Io) } else { Ok(()) });
+    let (failed, ops) = observed(&store, insert(n, 4, &a), Some(Op::FileSync));
     assert_eq!(failed, Err(Error::Io));
+    assert_eq!(ops, [Op::FileSync, Op::Unlink, Op::DirSync], "failed file fsync cleans up");
     assert!(!dir.path().join("alice/3").join(n).exists(), "unsynced file must not publish");
     let dir = tempfile::tempdir()?;
     let store = setup(dir.path(), 3)?;
-    let failed = store
-        .observe(insert(n, 4, &a), |e| if e == Event::DirSync { Err(Error::Io) } else { Ok(()) });
+    let (failed, _) = observed(&store, insert(n, 4, &a), Some(Op::DirSync));
     assert_eq!(failed, Err(Error::Io), "parent fsync failure must not report success");
+    Ok(())
+}
+/// Child of the strace proof: one insert and one delete through the production operations.
+#[test]
+fn strace_child() -> TestResult {
+    let Some(root) = std::env::var_os("RF_VAULT_STRACE_ROOT") else { return Ok(()) };
+    let store = setup(Path::new(&root), 3)?;
+    let n = "unlock:alice";
+    let a = record(&store, 4, n, 1, 1)?;
+    store.apply(insert(n, 4, &a), |_| {})?;
+    store.apply(remove(n, 4, 1), |_| {})?;
+    Ok(())
+}
+/// Proves `RealDurabilityOps` itself: the real syscalls, in order, as seen by strace.
+#[test]
+#[ignore = "needs strace; run on QA"]
+fn real_durability_ops_issue_syscalls_in_durable_order() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root)?;
+    let trace = dir.path().join("trace.txt");
+    let status = Command::new("strace")
+        .args(["-f", "-o"])
+        .arg(&trace)
+        .args(["-e", "trace=fsync,fdatasync,rename,renameat,renameat2,unlink,unlinkat"])
+        .arg(std::env::current_exe()?)
+        .args(["--exact", "custody::vault::linux::writer::tests::strace_child", "--nocapture"])
+        .env("RF_VAULT_STRACE_ROOT", &root)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("strace is required for this test and could not run: {e}"))?;
+    assert!(status.success(), "traced child failed: {status}");
+    let text = std::fs::read_to_string(&trace)?;
+    let calls: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let call = line.split_once(' ').map_or(line, |(_, rest)| rest).trim_start();
+            let name = call.split('(').next()?;
+            let interesting = matches!(
+                name,
+                "fsync" | "fdatasync" | "rename" | "renameat" | "renameat2" | "unlink" | "unlinkat"
+            );
+            let ours =
+                !name.contains("at") || call.contains(".pending-") || call.contains("unlock:alice");
+            (interesting && ours).then(|| name.to_string())
+        })
+        .collect();
+    let rename = |c: &String| c.starts_with("rename");
+    // Store::open syncs its own directories first; the publication starts at the file fsync
+    // immediately before the rename.
+    let at = calls.iter().position(rename).ok_or("no rename in strace output")?;
+    let calls = calls[at.saturating_sub(1)..].to_vec();
+    let sync = |c: &String| c == "fsync" || c == "fdatasync";
+    // insert: file fsync, rename, parent fsync; delete: unlink, parent fsync.
+    assert_eq!(calls.len(), 5, "unexpected syscall sequence: {calls:?}\n{text}");
+    assert!(sync(&calls[0]), "file fsync first: {calls:?}");
+    assert!(rename(&calls[1]), "then rename: {calls:?}");
+    assert!(sync(&calls[2]), "then parent fsync: {calls:?}");
+    assert!(calls[3].starts_with("unlink"), "then unlink: {calls:?}");
+    assert!(sync(&calls[4]), "then parent fsync: {calls:?}");
     Ok(())
 }
 fn invalid_store_configs(root: &Path) {
@@ -482,8 +564,8 @@ fn crash_child() -> TestResult {
         "replace" => Operation::Replace { reference: n.into(), expected: 1, record: candidate },
         _ => remove(n, 4, 1),
     };
-    store.apply(op, |event| {
-        if matches!(event, Event::Cut(point) if point == stage) {
+    store.apply(op, |point| {
+        if point == stage {
             let Ok(mut socket) = UnixStream::connect(Path::new(&root).join("barrier")) else {
                 std::process::exit(93)
             };
