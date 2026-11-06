@@ -13,6 +13,7 @@ mod checkpoint;
 pub(crate) mod control;
 pub(crate) mod decision;
 mod global_capacity;
+mod generated;
 mod historical;
 mod intervention;
 mod lifecycle;
