@@ -102,3 +102,24 @@ async fn queued_wrong_incarnation_retires_without_write() -> anyhow::Result<()> 
     assert!(frames.lock().map_err(|_| anyhow::anyhow!("poison"))?.is_empty());
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn direct_control_sink_write_has_the_same_deadline() -> anyhow::Result<()> {
+    let (closed, _) = tokio::sync::watch::channel(false);
+    let q = PushQueue::new(16, closed);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let send: GatewaySendHandle = Arc::new(tokio::sync::Mutex::new(Box::new(Held {
+        entered: entered.clone(),
+        release,
+        calls,
+    })));
+    q.install(&send, Some(ID.into())).await?;
+    let task = tokio::spawn(async move { send.lock().await.send_frame(b"control").await });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified()).await?;
+    tokio::time::advance(Duration::from_secs(15)).await;
+    assert!(tokio::time::timeout(Duration::from_secs(1), task).await??.is_err());
+    assert!(q.is_closed());
+    Ok(())
+}

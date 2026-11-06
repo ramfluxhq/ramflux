@@ -90,10 +90,16 @@ async fn restore_rotation_stopped_gateway_captures_new_incarnation() -> anyhow::
         let reopened = publication::open_durability_fixture(&root, mode)?;
         let fresh = reopened.inbox_status("target")?.0.ok_or_else(|| anyhow::anyhow!("new E"))?;
         assert_ne!(old, fresh);
-        let hub = Arc::new(GatewaySessionHub::default());
+        let mut gateway = crate::session_push::tests::support::Fixture::new(&format!(
+            "restarted-gateway-{mode}"
+        ))?;
+        let captured =
+            crate::session_push::tests::support::negotiate_incarnation(&mut gateway, &fresh)
+                .await?;
+        assert_eq!(captured, fresh);
+        let hub = gateway.context.hub.clone();
         let (send, rows) = sink();
-        hub.register_session("target".into(), "after-start".into(), send, Some(fresh.clone()))
-            .await?;
+        hub.register_session("target".into(), "after-start".into(), send, Some(captured)).await?;
         release.add_permits(1);
         assert!(hub.send_delivery("target", &frame(2), Some((&fresh, 12345))).await);
         hub.flushed("target").await?;

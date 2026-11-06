@@ -400,7 +400,11 @@ impl GatewaySessionFrameSink for GuardedSink {
                 return Err(TransportError::Quic("registration retired".into()));
             }
             let mut cancellation = CancelledWrite { queue: self.queue.clone(), completed: false };
-            let result = self.sink.send_frame(bytes).await;
+            let result = tokio::time::timeout(WRITE_DEADLINE, self.sink.send_frame(bytes))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(TransportError::Quic("gateway sink write deadline".into()))
+                });
             cancellation.completed = result.is_ok();
             result
         })
