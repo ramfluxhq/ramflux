@@ -165,32 +165,35 @@ impl ScopedGrantRegistry {
         right: u32,
         now: u64,
     ) -> Result<GrantPublicationLease, AttachmentLedgerError> {
-        self.lease_with_admission(grant, right, now, |_| Ok(now))
+        self.lease_with_admission(grant, right, now, Into::into, |_| Ok(now))
     }
-    pub(super) fn lease_with_admission<E: From<AttachmentLedgerError>>(
+    /// `map` classifies every pre-admission ledger refusal (rights, lease capacity,
+    /// live grant state, clock fence, storage) into the caller's error type.
+    pub(super) fn lease_with_admission<E>(
         &self,
         grant: &VerifiedScopedGrant,
         right: u32,
         now: u64,
+        map: impl Fn(AttachmentLedgerError) -> E,
         admit: impl FnOnce(&redb::WriteTransaction) -> Result<u64, E>,
     ) -> Result<GrantPublicationLease, E> {
         if !matches!(right, 1 | 2 | 4 | 8 | 16) || grant.grant().rights & right == 0 {
-            return Err(AttachmentLedgerError::Conflict.into());
+            return Err(map(AttachmentLedgerError::Conflict));
         }
-        let mut leases = self.leases.lock()?;
+        let mut leases = self.leases.lock().map_err(&map)?;
         leases.retain(|_, v| {
             v.retain(|w| w.strong_count() > 0);
             !v.is_empty()
         });
         if leases.values().map(Vec::len).sum::<usize>() >= 32 {
-            return Err(AttachmentLedgerError::Capacity.into());
+            return Err(map(AttachmentLedgerError::Capacity));
         }
-        self.current(grant, now)?;
+        self.current(grant, now).map_err(&map)?;
         // Fence clock rollback durably, sharing the registration clock owner.
-        let tx = self.ledger.db.begin_write().map_err(store)?;
+        let tx = self.ledger.db.begin_write().map_err(store).map_err(&map)?;
         let admitted_now = admit(&tx)?;
-        clock(&tx, admitted_now)?;
-        tx.commit().map_err(store)?;
+        clock(&tx, admitted_now).map_err(&map)?;
+        tx.commit().map_err(store).map_err(&map)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         leases.entry(grant.grant().grant_id).or_default().push(Arc::downgrade(&cancelled));
         Ok(GrantPublicationLease {

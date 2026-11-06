@@ -48,7 +48,9 @@ impl ScopedGrantRegistry {
         proof: &AttachmentReplayProof,
         now: u64,
     ) -> Result<super::GrantPublicationLease, AttachmentReplayError> {
-        self.lease_with_admission(grant, right, now, |tx| self.admit_in(tx, grant, proof, now))
+        self.lease_with_admission(grant, right, now, Into::into, |tx| {
+            self.admit_in(tx, grant, proof, now)
+        })
     }
     /// Re-reads authority and consumes the nonce in the caller's write transaction.
     pub(super) fn admit_in(
@@ -118,4 +120,33 @@ impl ScopedGrantRegistry {
         tx.commit().map_err(store)?;
         Ok(count)
     }
+}
+
+/// Shared with the renewal admission transaction: the same nonce ledger, fence and charge.
+pub(super) fn nonce_consumed(
+    tx: &redb::WriteTransaction,
+    source: &str,
+    requester: &ramflux_protocol::large_attachment::QualifiedOwner,
+    nonce: &[u8; 32],
+) -> Result<bool, AttachmentReplayError> {
+    use redb::ReadableTable;
+    let mut key = storage::principal(source, requester).to_vec();
+    key.extend(nonce);
+    let rows = tx.open_table(storage::NONCES).map_err(store)?;
+    Ok(rows.get(key.as_slice()).map_err(store)?.is_some())
+}
+pub(super) fn fence_clock(
+    tx: &redb::WriteTransaction,
+    now: u64,
+) -> Result<u64, AttachmentReplayError> {
+    storage::clock(tx, now)
+}
+pub(super) fn consume_nonce(
+    tx: &redb::WriteTransaction,
+    source: &str,
+    requester: &ramflux_protocol::large_attachment::QualifiedOwner,
+    proof: &AttachmentReplayProof,
+    now: u64,
+) -> Result<(), AttachmentReplayError> {
+    consume(tx, source, requester, proof, now, storage::Limits::default())
 }
