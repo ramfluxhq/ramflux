@@ -149,11 +149,43 @@ existing error policy. See `backup_jobs/storage_error_tests.rs` and
 | Before index selection | e14_fault_before_index_selection | Previous generation selected; staged generation discarded/recovered |
 | After index commit | e14_fault_after_index_commit | Selected generation already normalized; existing recovery applies |
 | Private schema advance | e14_staged_v12_upgrade_rollback | Production guard disposes failed stage; actual archive retry retains original version/counts |
+| Archive generation admission | require_archive_generation; e14_v12_unowned_actor_with_placeholder_check_and_install_omits; e14_p1_upgraded_target_inherited_unowned_state_restores | A declared archive generation other than the active storage generation is refused with SchemaResetRequired before any import; an absent declaration means the existing generation zero. Witnesses cover v12 and v13 account payloads, and the v12 input carried through the staged private schema upgrade |
 
 The final deleted-message pass retires pending target links before the bounded
 postcheck and operation-table cleanup. Index publication is a separate durable
 boundary. Failure preserves the source archive and selected account; another
 archive can be retried without accepting a partial import.
+
+## Receive-side refusal consumption
+
+Restore admission and receive-side registration share the `ObjectErased` surface
+but are separate boundaries. For each reference caller the delivered policy
+consumes only the typed registration refusal; storage, I/O and authorization
+errors keep propagating, and a refusal never leaves the whole message in retry.
+Automatic import receives the admitted subset, not the original attachment list.
+
+| Caller | Path | Delivered outcome |
+| --- | --- | --- |
+| Routed receive | client/routed/receive.rs | Erased item skipped; message body and admitted attachments commit |
+| Legacy direct receive | client/dm/legacy_receive.rs | Same skip; terminal, ratchet and cursor still commit so a second receive is not a retry |
+| Pending-contact release | client/contact_requests/messages.rs | Held item survives until release; at release the refused item is skipped and the remaining content commits |
+| Own outgoing after a successful send | client/dm/post_send.rs | The message stays sent; the refusal is skipped with a warning that identifies no attachment or peer |
+| Own-copy historical page | client/own_device_sync.rs and client/object.rs | The page commits its other content without indefinite retry and without a fresh-message exception |
+
+These five policies stay unselected on public paths until the final activation
+part; only the candidate paths are exercised before it. `ObjectErased` keeps its
+existing surfaces: the bus error code, the `rf` attachment fetch failure exit,
+and C ABI status `RAMFLUX_ERR_OBJECT_ERASED` (19). It remains distinct from the
+non-retryable `attachment deleted` fetch diagnostic. A rejected signed control
+entry is quarantined with a dead-letter diagnostic and then acknowledged; a
+failed acknowledgement retains the complete entry for a deterministic replay
+that changes no durable state. Export authorization rechecks the erasure
+generation before publication, so an alias-only or payload-only deletion
+overtakes a paused export.
+
+Witnesses are the `e16_*` caller tests (including the import-subset and
+registration-to-import barrier cases), the `e11_*` control/ACK tests and the
+`e13_*` publication-ordering tests.
 
 ## Regression ports and work bounds
 
@@ -175,7 +207,7 @@ b2_classification_linear_in_incoming_candidates.
 
 Cross-service acceptance and broader SDK/restore regression coverage remain
 separate from these process-local checks. This contract does not claim network
-lifecycle acceptance or change receive-side refusal consumption.
+lifecycle acceptance.
 
 Group restrictions are mirrored independently of copy-binding provenance.
 `archive_only_group_tombstone_with_target_binding_vetoes_candidate` requires an
