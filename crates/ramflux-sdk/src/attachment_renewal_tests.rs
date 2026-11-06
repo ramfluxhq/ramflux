@@ -12,7 +12,8 @@ fn sdk_renewal_uses_current_account_branch_and_pinned_home() -> Result {
     let now = 1_700_000_001;
     let root = Root::new()?;
     let vault = MemoryPrimaryVault::default();
-    let account = create(&root.0, "human", &vault, now)?;
+    let mut account = create(&root.0, "human", &vault, now)?;
+    account.mark_live_for_test(&root.0)?;
     let (device, credentials) = account.credentials(&vault, "primary", now)?;
     let q = QualifiedOwner {
         account_anchor: device.account_anchor,

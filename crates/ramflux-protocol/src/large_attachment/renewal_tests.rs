@@ -24,7 +24,7 @@ fn fixture() -> Result<RenewalRequest> {
 fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
     let request = fixture()?;
     let (renew, target) = request.target()?;
-    operation_bounds(&target)?;
+    operation_bounds(&target);
     for field in 0..7 {
         let mut r = renew.clone();
         match field {
@@ -35,7 +35,7 @@ fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
             4 => r.authority_generation += 1,
             5 => r.payload_generation += 1,
             _ => r.operation_id = target.operation_id,
-        };
+        }
         let changed = RenewalRequest { operation: r.canonical_bytes()?, ..request.clone() };
         assert_eq!(changed.target(), Err(FormatError("renewal target binding")));
     }
@@ -45,7 +45,7 @@ fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
             0 => r.segment_index = 1,
             1 => r.offset = 1,
             _ => r.length = 1,
-        };
+        }
         assert_eq!(r.canonical_bytes(), Err(FormatError("operation unused range")));
     }
     let mut r = renew.clone();
@@ -99,7 +99,7 @@ fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
             1 => t.length = 257,
             2 => t.offset = u64::MAX,
             _ => t.segment_index = 1,
-        };
+        }
         assert_eq!(t.canonical_bytes(), Err(FormatError("operation page")));
     }
     assert_eq!(
@@ -149,7 +149,7 @@ fn renewal_proof_lifetime_and_requester_identity_bounds() -> Result {
     Ok(())
 }
 
-fn operation_bounds(target: &AttachmentOperation) -> Result {
+fn operation_bounds(target: &AttachmentOperation) {
     for (field, error) in [
         (0, "operation kind"),
         (1, "operation endpoint"),
@@ -176,7 +176,7 @@ fn operation_bounds(target: &AttachmentOperation) -> Result {
             8 => t.offset = u64::MAX,
             9 => t.body_digest[0] ^= 1,
             _ => t.audience = "x".repeat(257),
-        };
+        }
         assert_eq!(t.canonical_bytes(), Err(FormatError(error)));
     }
     let mut max = target.clone();
@@ -187,7 +187,6 @@ fn operation_bounds(target: &AttachmentOperation) -> Result {
     let mut empty = target.clone();
     empty.audience.clear();
     assert_eq!(empty.canonical_bytes(), Err(FormatError("native identity length")));
-    Ok(())
 }
 #[test]
 fn renewal_attestation_and_pop_refuse_each_signed_binding() -> Result {
@@ -220,7 +219,7 @@ fn renewal_attestation_and_pop_refuse_each_signed_binding() -> Result {
             5 => bad.challenge[0] ^= 1,
             6 => bad.operation_hash[0] ^= 1,
             _ => bad.requester.home_node_id.push('x'),
-        };
+        }
         assert_eq!(
             bad.validate(&request, &grant, &w.requester, &w.challenge, now),
             Err(FormatError("forward request binding"))
@@ -232,7 +231,7 @@ fn renewal_attestation_and_pop_refuse_each_signed_binding() -> Result {
             0 => bad.operation_hash[0] ^= 1,
             1 => bad.requester_digest[0] ^= 1,
             _ => bad.forward_digest[0] ^= 1,
-        };
+        }
         assert_eq!(bad.validate(&w, now), Err(FormatError("pop binding")));
     }
     assert_eq!(p.validate(&w, p.expires_at), Err(FormatError("pop time")));
