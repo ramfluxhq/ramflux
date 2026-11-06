@@ -498,3 +498,5 @@ fn maximal_objects(original: &Value) -> TestResult {
 mod native_relay;
 
 mod channel_local;
+
+mod local_vectors;
