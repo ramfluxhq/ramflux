@@ -225,8 +225,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let now = now_unix_timestamp();
     for (key, mut work) in pending_ordered(&account.client, now)? {
         if (!work.local_manifest && message_owner(&work).is_some())
-            || work.intent.created_at.saturating_add(i64::from(account.client.content_ttl()?))
-                <= now
+            || work.intent.expiry() <= now
             || (work.packet.is_none() && work.attempts >= 10)
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
@@ -344,7 +343,7 @@ fn draft(
             .map_err(|_| SdkError::LocalBus("own-device intent encoding".into()))?,
     );
     let intent = &plan.work.intent;
-    let prepared = account.client.prepare_own_copy_draft(
+    let prepared = account.client.prepare_own_copy_draft_until(
         &plan.config,
         OwnMessageInput {
             id: &intent.id,
@@ -354,6 +353,7 @@ fn draft(
             body: &body,
         },
         manifest,
+        intent.expiry(),
     );
     let prepared = match prepared {
         Err(SdkError::InboundRejected(reason))
@@ -421,7 +421,10 @@ fn envelope(
         target_delivery_id: plan.config.target_delivery_id.clone(),
         encrypted_body: packet.bytes()?,
         created_at: now_unix_timestamp(),
-        ttl: account.client.content_ttl()?,
+        ttl: account.client.content_ttl()?.min(
+            u32::try_from(plan.work.intent.expiry().saturating_sub(now_unix_timestamp()).max(1))
+                .map_err(|_| SdkError::LocalBus("own-copy TTL overflow".into()))?,
+        ),
     };
     let mut envelope = gateway_direct_message_envelope(&plan.config, &message, None)?;
     envelope.delivery_class = ramflux_protocol::DeliveryClass::SelfDeviceControl;
