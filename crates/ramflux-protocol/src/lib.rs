@@ -129,5 +129,9 @@ mod identity_name;
 mod identity_profile;
 pub use identity_name::{
     DisplayNameSecurity, normalize_profile_display_name, profile_display_name_security,
+    username_comparison_key,
 };
 pub use identity_profile::{SignedIdentityProfile, identity_profile_signing_bytes};
+
+pub mod identity_profile_v2;
+pub mod username_directory;

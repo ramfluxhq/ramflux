@@ -1,0 +1,22 @@
+{
+  "codec_only": true,
+  "crypto_verification": false,
+  "encoder": "codec_oracle.py: independent Python standard-library UTF-8 JSON encoder; no Rust call or crypto dependency",
+  "domains": {
+    "USERNAME_BINDING": "ramflux.identity.username_binding.v1",
+    "IDENTITY_PROFILE_V2": "ramflux.identity.profile.v2",
+    "USERNAME_OPERATION": "ramflux.identity.username_operation.v1",
+    "USERNAME_OPERATION_HASH": "ramflux.identity.username_operation_hash.v1",
+    "USERNAME_CHECKPOINT": "ramflux.identity.username_checkpoint.v1",
+    "USERNAME_PROFILE_HASH": "ramflux.identity.username_profile_hash.v1",
+    "USERNAME_BINDING_HASH": "ramflux.identity.username_binding_hash.v1",
+    "USERNAME_RECEIPT": "ramflux.identity.username_receipt.v1",
+    "USERNAME_RESOLVE": "ramflux.identity.username_resolve.v1",
+    "AVATAR_CONTENT": "ramflux.identity.avatar_content.v1"
+  },
+  "sha256": {
+    "schema.json": "32afd09342c20ce0e01f54fb7c9663a09ee1e7bbe05a5136419200dcb53eb931",
+    "wire_vectors.json": "5df6a428edaf5e26a35b1e539fad2b84c035fba7d1336421dc54e679c23e89a6",
+    "codec_oracle.py": "b11ebd6a3f31ffd49ce56963404ac9d64990a36c250a2c3f8902780580e41e8e"
+  }
+}

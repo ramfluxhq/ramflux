@@ -1,0 +1,307 @@
+{
+  "codec_version": 1,
+  "policy": "username-ascii-uts39-us0.1.2-v1",
+  "records": {
+    "UsernameBindingBody": {
+      "fields": "name:String,node:String,principal_commitment:String,epoch:u64",
+      "limit": 1024
+    },
+    "ProfileRef": {
+      "fields": "version:u8,epoch:u64,hash:Option<String>",
+      "limit": 128
+    },
+    "AvatarRef": {
+      "fields": "content_hash:String,media_type:MediaType,size:u64,relay_ref:String",
+      "limit": 260
+    },
+    "IdentityProfileV2Body": {
+      "fields": "schema:String,principal_id:String,principal_commitment:String,kind:ProfileKind,display_name:String,bio:String,avatar:Option<AvatarRef>,epoch:u64",
+      "limit": 4096
+    },
+    "UsernameOperationBody": {
+      "fields": "action:Action,operation_id:String,principal_commitment:String,expected_epoch:u64,next_epoch:u64,expected_profile:ProfileRef,profile:ProfileRef,old_name:Option<String>,binding:Option<UsernameBinding>,discoverable:bool,issued_at:u64,expires_at:u64",
+      "limit": 4096
+    },
+    "DirectoryReceiptBody": {
+      "fields": "center_id:String,operation_id:String,operation_hash:String,principal_commitment:String,epoch:u64,state:ReceiptState,binding_hash:Option<String>,profile:ProfileRef,discoverable:bool,committed_at:u64,expires_at:u64",
+      "limit": 2048
+    },
+    "DirectoryResolveBody": {
+      "fields": "center_id:String,name:String,node:String,principal_commitment:String,epoch:u64,binding_hash:String,profile:ProfileRef,request_nonce:String,issued_at:u64,expires_at:u64",
+      "limit": 2048
+    },
+    "ReceiptDecision": {
+      "fields": "committed_at:u64",
+      "limit": 64
+    },
+    "RootRow": {
+      "fields": "epoch:u64,name:Option<String>,node:String,discoverable:bool,deleted:bool,profile:ProfileRef,binding_hash:Option<String>,current_binding:Option<UsernameBinding>,receipt_decision:Option<ReceiptDecision>,last_operation_id:Option<String>,last_operation_hash:Option<String>,pending_operation_id:Option<String>,changes:Vec<u64>,hold_deadlines:Vec<u64>",
+      "limit": 2048
+    },
+    "NameRow": {
+      "fields": "root:String,state:IndexState,operation_id:Option<String>",
+      "limit": 2048
+    },
+    "SkeletonRow": {
+      "fields": "name:String,root:String,state:IndexState,operation_id:Option<String>",
+      "limit": 2048
+    },
+    "HoldKey": {
+      "fields": "name:String,skeleton:String",
+      "limit": 256
+    },
+    "HoldRow": {
+      "fields": "release_at:u64,hold_until:u64",
+      "limit": 2048
+    },
+    "OperationKey": {
+      "fields": "root:String,operation_id:String",
+      "limit": 256
+    },
+    "OperationRow": {
+      "fields": "operation:UsernameOperation,operation_hash:String,state:ReceiptState,reserved_at:u64,reservation_expires_at:u64,finished_at:Option<u64>,retain_until:Option<u64>",
+      "limit": 8192
+    },
+    "OperationOwnerRow": {
+      "fields": "root:String,operation_hash:String",
+      "limit": 2048
+    },
+    "DueRow": {
+      "fields": "count:u64",
+      "limit": 2048
+    },
+    "CounterRow": {
+      "fields": "value:u64",
+      "limit": 2048
+    },
+    "CheckpointDelta": {
+      "fields": "kind:DeltaKind,tx_id:String,writer_incarnation:String,clock_floor:u64,operation:Option<UsernameOperation>,rows:Vec<Replacement>",
+      "limit": 65536
+    },
+    "Checkpoint": {
+      "fields": "center_id:String,generation:u64,lsn:u64,previous_digest:String,delta:CheckpointDelta",
+      "limit": 67584
+    },
+    "HomeRevalidateRequest": {
+      "fields": "root:String,known_directory_epoch:u64,operation_id:Option<String>,nonce:String",
+      "limit": 1024
+    },
+    "HomeRevalidateResult": {
+      "fields": "root:String,nonce:String,current_binding:Option<UsernameBinding>,current_receipt:Option<DirectoryReceipt>,pending_receipt:Option<DirectoryReceipt>,lookup_allowed:bool,issued_at:u64,expires_at:u64",
+      "limit": 8192
+    },
+    "DirectoryFailure": {
+      "fields": "code:DirectoryCode,retry_after_ms:Option<u64>",
+      "limit": 1024
+    }
+  },
+  "enums": {
+    "Action": [
+      "claim",
+      "rename",
+      "release",
+      "set_visibility",
+      "delete",
+      "move_home",
+      "profile_update"
+    ],
+    "ProfileKind": [
+      "human",
+      "headless_ai",
+      "bot"
+    ],
+    "MediaType": [
+      "image/jpeg",
+      "image/png"
+    ],
+    "ReceiptState": [
+      "reserved",
+      "committed",
+      "aborted"
+    ],
+    "IndexState": [
+      "active",
+      "reserved"
+    ],
+    "DeltaKind": [
+      "reserve",
+      "commit",
+      "abort",
+      "expire",
+      "gc",
+      "clock"
+    ],
+    "DuePhase": [
+      "reservation",
+      "detail"
+    ],
+    "Metric": [
+      "root_slots",
+      "active_names",
+      "held_names",
+      "pending_operations",
+      "operation_details"
+    ],
+    "DirectoryCode": [
+      "authentication_required",
+      "invalid_username",
+      "invalid_profile",
+      "invalid_avatar",
+      "username_taken",
+      "username_held",
+      "username_reserved",
+      "rate_limited",
+      "capacity",
+      "directory_unavailable",
+      "unsupported_version",
+      "operation_pending",
+      "stale_epoch",
+      "replay",
+      "ownership_mismatch",
+      "signature_invalid",
+      "not_found",
+      "key_changed",
+      "name_changed",
+      "stale_profile",
+      "profile_rollback",
+      "profile_equivocation",
+      "profile_downgrade",
+      "clock_unsafe",
+      "migration_required",
+      "account_deleted"
+    ]
+  },
+  "format": "ramflux.username_directory.closed_codec.v1",
+  "required_nulls": true,
+  "additional_fields": false,
+  "aliases": {
+    "UsernameBinding": "Signed<UsernameBindingBody>",
+    "SignedIdentityProfileV2": "Signed<IdentityProfileV2Body>",
+    "UsernameOperation": "Signed<UsernameOperationBody>",
+    "DirectoryReceipt": "Signed<DirectoryReceiptBody>",
+    "DirectoryResolve": "Signed<DirectoryResolveBody>"
+  },
+  "unions": {
+    "Replacement": {
+      "tag": "table",
+      "variants": {
+        "root": [
+          "String",
+          "RootRow"
+        ],
+        "name": [
+          "String",
+          "NameRow"
+        ],
+        "skeleton": [
+          "String",
+          "SkeletonRow"
+        ],
+        "hold": [
+          "HoldKey",
+          "HoldRow"
+        ],
+        "operation": [
+          "OperationKey",
+          "OperationRow"
+        ],
+        "op_owner": [
+          "String",
+          "OperationOwnerRow"
+        ],
+        "due": [
+          "DueKey",
+          "DueRow"
+        ],
+        "counter": [
+          "CounterKey",
+          "CounterRow"
+        ]
+      },
+      "fields": "key,old,new; old/new are required nullable images"
+    },
+    "DueKey": {
+      "tag": "kind",
+      "variants": {
+        "hold": "at:u64,name:Name,skeleton:Skeleton",
+        "operation": "at:u64,root:Root,operation_id:Id,phase:DuePhase",
+        "root_window": "at:u64,root:Root",
+        "home_hold_credit": "at:u64,home:Node"
+      }
+    },
+    "CounterKey": {
+      "tag": "scope",
+      "variants": {
+        "global": "metric:Metric",
+        "home": "home:Node,metric:Metric"
+      }
+    },
+    "ServeCandidate": {
+      "tag": "kind",
+      "common": "generation:u64,witness_boot:Id,writer_incarnation:Id,primary_lsn:u64,primary_digest:Hash,call_id:Id",
+      "variants": {
+        "receipt": "response:DirectoryReceipt",
+        "status": "response:DirectoryReceipt",
+        "resolve": "response:DirectoryResolve",
+        "refusal": "response:DirectoryFailure"
+      }
+    }
+  },
+  "grammar": {
+    "safe_integer": [
+      0,
+      9007199254740991
+    ],
+    "id_hash_root": {
+      "encoding": "base64url_unpadded",
+      "decoded_bytes": 32
+    },
+    "signature": {
+      "encoding": "base64url_unpadded",
+      "decoded_bytes": 64
+    },
+    "name": {
+      "ascii_pattern": "[a-z0-9_]{5,32}"
+    },
+    "node": {
+      "max_bytes": 253,
+      "label_max_bytes": 63,
+      "ip_literal": false
+    },
+    "bio": {
+      "nfc": true,
+      "max_scalars": 140,
+      "max_utf8_bytes": 560
+    },
+    "display_name": {
+      "existing_normalized_policy": true,
+      "max_scalars": 128,
+      "max_utf8_bytes": 256
+    },
+    "avatar_size": [
+      1,
+      524288
+    ],
+    "changes_max": 3,
+    "hold_deadlines_max": 4,
+    "retry_ms": [
+      1000,
+      60000
+    ],
+    "delta_bytes": 65536,
+    "checkpoint_bytes": 67584,
+    "depth": 12,
+    "string_bytes": 2048
+  },
+  "maxima": {
+    "root": 1449,
+    "binding": 510,
+    "receipt_decision": 33,
+    "operation": 1191,
+    "operation_row": 1424,
+    "home_revalidate_result": 2482,
+    "delta_gc32": 65282,
+    "checkpoint_gc32": 65677,
+    "delta_gc33": 67301
+  }
+}

@@ -319,6 +319,17 @@ pub const ALL: [&str; 140] = [
     DM_FS_V3_REQUEST_HASH,
 ];
 
+pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
+pub const IDENTITY_PROFILE_V2: &str = "ramflux.identity.profile.v2";
+pub const USERNAME_OPERATION: &str = "ramflux.identity.username_operation.v1";
+pub const USERNAME_OPERATION_HASH: &str = "ramflux.identity.username_operation_hash.v1";
+pub const USERNAME_CHECKPOINT: &str = "ramflux.identity.username_checkpoint.v1";
+pub const USERNAME_PROFILE_HASH: &str = "ramflux.identity.username_profile_hash.v1";
+pub const USERNAME_BINDING_HASH: &str = "ramflux.identity.username_binding_hash.v1";
+pub const USERNAME_RECEIPT: &str = "ramflux.identity.username_receipt.v1";
+pub const USERNAME_RESOLVE: &str = "ramflux.identity.username_resolve.v1";
+pub const AVATAR_CONTENT: &str = "ramflux.identity.avatar_content.v1";
+
 #[cfg(test)]
 mod tests {
     #[test]

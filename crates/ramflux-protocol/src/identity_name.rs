@@ -130,6 +130,16 @@ fn invalid() -> crate::ProtocolError {
     crate::ProtocolError::InvalidIdentityRecord("invalid public identity profile")
 }
 
+/// Computes the separately versioned bounded username comparison key.
+/// # Errors
+/// Rejects noncanonical or oversized usernames without modifying remote bytes.
+pub fn username_comparison_key(
+    value: &str,
+) -> Result<String, crate::username_directory::CodecError> {
+    crate::username_directory::validate_username(value)?;
+    Ok(warning_skeleton(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
