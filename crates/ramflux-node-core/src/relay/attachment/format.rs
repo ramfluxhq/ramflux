@@ -74,7 +74,6 @@ impl crate::RelayRedbStore {
     pub fn ensure_generic_attachment_format(
         &self,
         object: &str,
-        manifest: Option<&str>,
     ) -> Result<(), crate::NodeCoreError> {
         let Some(object) = identifier(object) else {
             return Ok(());
@@ -86,7 +85,6 @@ impl crate::RelayRedbStore {
             .begin_read()
             .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
         let table = tx.open_table(NATIVE).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
-        let _ = manifest;
         let native = table
             .range(object.as_slice()..)
             .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?
