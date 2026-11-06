@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub const MAX_COMMON_BYTES: usize = 15_872;
 pub const MAX_ROLE_BYTES: usize = 20_480;
 pub const MAX_TRANSCRIPT_BYTES: usize = 2 * MAX_ROLE_BYTES + 512;
+pub mod channel;
+pub mod local_dto;
 pub mod native;
 pub mod relay;
 
@@ -78,6 +80,10 @@ pub trait PairingWire: Serialize + DeserializeOwned + Clone {
     /// Returns the exact invalid field or size error.
     fn validate(&self) -> Result<()>;
     fn normalize(&mut self) {}
+    /// Selected complete input cap, including a tagged result arm.
+    fn received_limit(&self) -> usize {
+        Self::LIMIT
+    }
     /// Encode, sorting declared ordered collections without dropping duplicates.
     /// # Errors
     /// Rejects invalid fields, duplicates and excess bytes.
@@ -99,6 +105,9 @@ pub trait PairingWire: Serialize + DeserializeOwned + Clone {
         let value: Self = serde_json::from_value(raw.clone()).map_err(|_| WireError::Shape)?;
         if serde_json::to_value(&value).map_err(|_| WireError::Json)? != raw {
             return Err(WireError::Shape);
+        }
+        if input.len() > value.received_limit() {
+            return Err(WireError::Size);
         }
         value.validate()?;
         if bytes(&value)? != input {
