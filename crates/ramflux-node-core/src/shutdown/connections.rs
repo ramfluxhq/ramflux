@@ -182,6 +182,27 @@ impl ConnectionGuard {
         self.set.len().saturating_sub(1)
     }
 
+    /// Wait for every other connection to release its socket and context.
+    /// Returns the remaining count when the caller's hang guard expires.
+    #[cfg(feature = "itest-http")]
+    #[must_use]
+    pub fn wait_for_other_connections(&self, deadline: Instant) -> usize {
+        let mut state = self.set.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while state.entries.len() > 1 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, _) = self
+                .set
+                .empty
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = next;
+        }
+        state.entries.len().saturating_sub(1)
+    }
+
     /// Admit a parsed request atomically with idle-socket cancellation.
     #[must_use]
     pub fn begin_request(&self) -> Option<ConnectionRequestGuard> {

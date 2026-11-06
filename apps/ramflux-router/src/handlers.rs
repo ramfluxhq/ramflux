@@ -329,12 +329,22 @@ pub(crate) fn handle_mesh_request(
         return Ok(false);
     };
     #[cfg(feature = "itest-http")]
-    if request.path == "/__itest/shutdown-connections" {
+    if matches!(
+        request.path.as_str(),
+        "/__itest/shutdown-connections" | "/__itest/shutdown-connections/drain"
+    ) {
+        let remaining = if request.path.ends_with("/drain") {
+            connection.wait_for_other_connections(
+                std::time::Instant::now() + std::time::Duration::from_secs(20),
+            )
+        } else {
+            connection.other_connection_count()
+        };
         ramflux_transport::write_mesh_json_response(
             stream,
             "200 OK",
             &serde_json::json!({
-                "other_connections": connection.other_connection_count(),
+                "other_connections": remaining,
                 "root_workers": ramflux_node_core::service_worker_count(),
             }),
         )?;
