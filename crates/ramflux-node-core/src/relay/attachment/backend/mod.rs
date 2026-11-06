@@ -74,6 +74,11 @@ impl BackendSegment {
             digest: *m.segment_digests.get(index as usize).ok_or(BackendError::Bounds)?,
         })
     }
+    /// Payload generation this segment was built for.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
     #[must_use]
     pub fn length(&self) -> u64 {
         self.length

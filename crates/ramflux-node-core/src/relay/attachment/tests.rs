@@ -3,6 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 use super::*;
 
+mod lifecycle;
+
 use crate::RelayRedbStore;
 use ramflux_protocol::large_attachment::ContentManifest;
 use redb::ReadableTableMetadata;
