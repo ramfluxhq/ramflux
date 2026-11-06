@@ -26,13 +26,24 @@ pub(super) fn copy_payload(
     credit: &Arc<MetadataCredit>,
     class: MetadataClass,
 ) -> Result<Bytes, ResourceExhausted> {
-    let charge = Some(credit.reserve(source.len(), class)?);
+    copy_payload_with(source.len(),raw_owner,credit,class,|bytes|bytes.extend_from_slice(source))
+}
+
+pub(super) fn copy_payload_with(
+    length: usize,
+    raw_owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    credit: &Arc<MetadataCredit>,
+    class: MetadataClass,
+    fill: impl FnOnce(&mut Vec<u8>),
+) -> Result<Bytes, ResourceExhausted> {
+    let charge = Some(credit.reserve(length, class)?);
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(source.len()).map_err(|_| credit.fail(class))?;
-    assert_eq!(bytes.capacity(), source.len(), "receive-copy layout differs from admitted capacity");
+    bytes.try_reserve_exact(length).map_err(|_| credit.fail(class))?;
+    assert_eq!(bytes.capacity(), length, "receive-copy layout differs from admitted capacity");
     credit.allocated();
     credit.receive_backing_capacity(bytes.capacity());
-    bytes.extend_from_slice(source);
+    fill(&mut bytes);
+    assert_eq!(bytes.len(),length,"receive compaction plan differs from its copied length");
     metadata_owned_bytes::into_bytes(PayloadBacking::new(bytes, raw_owner, charge), credit, class)
 }
 

@@ -61,6 +61,7 @@ pub(crate) mod control;
 pub(crate) mod metadata_credit;
 mod metadata_backing;
 mod metadata_owned_bytes;
+mod metadata_heap;
 mod metadata_scratch;
 mod loss_detection;
 pub(crate) mod metadata_vec;
@@ -2111,6 +2112,8 @@ impl Connection {
             return Err(TransportError::CRYPTO_BUFFER_EXCEEDED(""));
         }
 
+        space.crypto_stream.bind(self.metadata.clone(), MetadataClass::CryptoAssemblers)
+            .map_err(|_| TransportError::INTERNAL_ERROR("crypto descriptor admission refused"))?;
         space
             .crypto_stream
             .insert(crypto.offset, crypto.data.clone(), payload_len)

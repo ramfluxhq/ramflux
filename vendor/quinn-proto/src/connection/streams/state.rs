@@ -267,6 +267,13 @@ impl StreamsState {
         self.data_blocked_limit = None;
     }
 
+    #[cfg(feature="__control-test")]
+    pub(crate) fn metadata_receive_storage(&self) -> (usize,usize) {
+        self.recv.values().flatten().chain(self.free_recv.iter()).map(|recv| {
+            let recv=match recv { StreamRecv::Open(recv)|StreamRecv::Free(recv)=>recv };
+            recv.assembler.metadata_storage()
+        }).fold((0,0),|(a,b),(c,d)|(a+c,b+d))
+    }
     /// Process incoming stream frame
     ///
     /// If successful, returns whether a `MAX_DATA` frame needs to be transmitted
@@ -297,6 +304,8 @@ impl StreamsState {
             return Ok(ShouldTransmit(false));
         }
 
+        rs.assembler.bind(self.metadata.clone(),super::super::metadata_credit::MetadataClass::StreamAssemblers)
+            .map_err(|_|TransportError::INTERNAL_ERROR("stream descriptor admission refused"))?;
         let (new_bytes, closed) =
             rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
         self.data_recvd = self.data_recvd.saturating_add(new_bytes);

@@ -272,7 +272,12 @@ impl<'a> Chunks<'a> {
                 false => entry.remove().unwrap().into_inner(), // this can't fail due to the previous get_or_insert_with
             };
 
-        recv.assembler.ensure_ordering(ordered)?;
+        if recv.assembler.bind(streams.metadata.clone(),super::super::metadata_credit::MetadataClass::StreamAssemblers).is_err()
+            || recv.assembler.ensure_ordering(ordered).is_err()
+        {
+            streams.recv.insert(id,Some(StreamRecv::Open(recv)));
+            return Err(ReadableError::IllegalOrderedRead);
+        }
         Ok(Self {
             id,
             ordered,

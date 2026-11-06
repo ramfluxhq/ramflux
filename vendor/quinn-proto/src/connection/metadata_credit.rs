@@ -105,6 +105,11 @@ impl MetadataProbe {
     /// Dependency-test fault injection: freeze the ceiling at actual currently live charges.
     pub fn freeze_at_live_allocations(&self) {let mut s=self.0.state.lock().unwrap();assert!(!s.exhausted);s.limit=s.used;}
 
+    /// Freeze a test-only ceiling with an exact additional allocation allowance.
+    pub fn freeze_with_additional_bytes(&self, bytes: usize) {
+        let mut state=self.0.state.lock().unwrap();assert!(!state.exhausted);
+        let limit=state.used.checked_add(bytes).unwrap();assert!(limit<=state.limit);state.limit=limit;
+    }
     /// Current shared capacity and allocation-site counters.
     pub fn stats(&self) -> MetadataStats { self.0.stats() }
 }
@@ -127,6 +132,12 @@ impl super::Connection {
         self.metadata=Some(credit.clone());
         MetadataProbe(credit)
     }
+    /// Actual STREAM receive descriptor capacities and count, including retained free owners.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_receive_storage(&self) -> (usize,usize) { self.streams.metadata_receive_storage() }
+    /// Actual receive descriptor layout used by replacement heaps.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_receive_descriptor_size(&self) -> usize { super::assembler::Assembler::metadata_descriptor_size() }
     /// Production receive owner's compiler layout, queried without allocation.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_receive_owner_layout(&self) -> usize { super::metadata_owned_bytes::owner_layout().size() }

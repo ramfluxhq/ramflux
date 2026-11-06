@@ -375,12 +375,19 @@ impl RecvStream {
         let status = match self.reset {
             Some(code) => ReadStatus::Failed(None, Reset(code)),
             None => {
-                let mut recv = conn.inner.recv_stream(self.stream);
-                let mut chunks = recv.read(ordered)?;
-                let status = read_fn(&mut chunks);
-                if chunks.finalize().should_transmit() {
-                    conn.wake();
+                let outcome = (|| -> Result<_,ReadableError> {
+                    let mut recv = conn.inner.recv_stream(self.stream);
+                    let mut chunks = recv.read(ordered)?;
+                    let status = read_fn(&mut chunks);
+                    let transmit=chunks.finalize().should_transmit();
+                    Ok((status,transmit))
+                })();
+                if conn.inner.metadata_exhausted() {
+                    conn.fail_metadata();
+                    return Poll::Ready(Err(ReadError::ConnectionLost(conn.error.clone().unwrap_or(ConnectionError::LocallyClosed))));
                 }
+                let(status,transmit)=outcome?;
+                if transmit { conn.wake(); }
                 status
             }
         };

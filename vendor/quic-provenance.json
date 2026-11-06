@@ -106,8 +106,8 @@
       },
       "src/recv_stream.rs": {
         "upstream_sha256": "f4982d0a827c296f98c1da25672a6504b54a548416f6e293c9c8d2f899a48b73",
-        "patched_sha256": "d00d1429604a6e6b287ff3711d49cb82b3196e7d2b9f60a58e891356f67b28ff",
-        "delta": "Prepend original-license SPDX header; remove redundant formatting borrow for strict Rust 1.99 linting; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests"
+        "patched_sha256": "4b7349cdfd471e9e3dac27067969dc464b2a4da80e291c5381819d368fbf0483",
+        "delta": "Prepend original-license SPDX header; remove redundant formatting borrow for strict Rust 1.99 linting; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; Normalize read-time metadata admission failure through terminal adapter before returning connection loss"
       },
       "src/runtime/async_io.rs": {
         "upstream_sha256": "bf2244735eb22438d1d0bedce0417d9d8553b3408d9922eb393cd87af8d21bb9",
@@ -158,8 +158,8 @@
         "delta": "SPDX; Bounded-mode control-first lanes and coalesced Close/Rebind; default-mode events retain FIFO semantics; cfg(test) reverse consumer barrier while raw pause/resume is driven normally"
       },
       "src/rawq_tests.rs": {
-        "patched_sha256": "b16d8ac8e370ccdc89c49f1ae424eb71ac2d8241c4c1053bcbfedabea4d02cb4",
-        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Partial owned metadata exhaustion test: actual send deque/vector capacities, unchanged failed source, no partial wire STREAM packet, payload/ACK lifecycle and retained owners through Drained/final drop; other classes expressly not covered; Real record/ACK-scratch/loss-scratch/PendingAcks refusals with independent wire/frame/map/dedup observations; retain original source/payload/ACK/storage ownership tests; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal; PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; PR1B-2a review Lows folded into 2b: independent decrypted admission length, held Bytes across STOP_SENDING and received RESET_STREAM, targeted formatting cleanup; Real-driver exact owner refusal and shared payload/wrapper lifetime through reset/Drained; retain backing regression"
+        "patched_sha256": "85096d1dcb940323437d4d34fe5879298fdafdfda9e8e50fdb4cda55c70dc887",
+        "delta": "SPDX; Independent ingress witnesses, sparse protocol-handle slot mapping, typed owner-capacity refusal and retained backing tests; Bounded wire history and flight barriers; card-named control test owns the full real-driver r10 matrix; Real blocked socket write/poller barriers and card-named stateless response test registration; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Partial owned metadata exhaustion test: actual send deque/vector capacities, unchanged failed source, no partial wire STREAM packet, payload/ACK lifecycle and retained owners through Drained/final drop; other classes expressly not covered; Real record/ACK-scratch/loss-scratch/PendingAcks refusals with independent wire/frame/map/dedup observations; retain original source/payload/ACK/storage ownership tests; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal; PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; PR1B-2a review Lows folded into 2b: independent decrypted admission length, held Bytes across STOP_SENDING and received RESET_STREAM, targeted formatting cleanup; Real-driver exact owner refusal and shared payload/wrapper lifetime through reset/Drained; retain backing regression; Real receive compaction heap/copy refusal, exact data/capacity and held-owner lifetime oracle; use valid peer uni ID in prior owner-refusal input"
       },
       "src/rawq_tests/control_driver.rs": {
         "patched_sha256": "0a5a1e4488b2be6baa8ccb17ae384a69632fc5f570f0b6ac3f96ae8e746de89e",
@@ -342,8 +342,8 @@
       },
       "src/connection/assembler.rs": {
         "upstream_sha256": "5e205df22a27e1735536378836eb5c8d06cb88358c37f72f9935da09b5575852",
-        "patched_sha256": "1e5ed826974298d28e52c1048699ae00573fe41f6d72582f0ac0ed2ed005f697",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes"
+        "patched_sha256": "4789bb28ada2ab8332ace878557a2cffd65e1bdee83f62441555280fb5453800",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Use actual-capacity receive heap admission; preserve leases across clear/reinit; fallible compaction and descriptor insertion"
       },
       "src/connection/cid_state.rs": {
         "upstream_sha256": "485b3821af4b706789b9ef6d78aaa60b1d49f54dbb2c6785daee801ad2696d24",
@@ -357,8 +357,8 @@
       },
       "src/connection/mod.rs": {
         "upstream_sha256": "8b5665fa7dc83e2bb9154fceed34733768633756adc900bb8ec50f24be0ba2b7",
-        "patched_sha256": "385416b2c1a820440a385b6697a8ee5f4d4044894a2e8d2e06f0f8628cfe8321",
-        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Dormant metadata owner and terminal checks; abort refused outbound packet build and immediately restart with resource-close; all other metadata classes remain unimplemented; Record builder failure restarts terminal close immediately; charged ACK scratch aborts before retirement; extract loss detection; metadata close suppresses ACK serialization of refused processing; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal; PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; Declare the guarded receive-owner envelope module"
+        "patched_sha256": "8f3fa7eb4e753345b30768eff192f47d24407c99758d957606dd712838387538",
+        "delta": "SPDX; Packet-atomic control admission, whole-datagram receive accounting once before park, timer retry generation; upstream import order restored; r3: charge the whole datagram exactly once on the path selected by handle_decode, or at the pending/closed early return; preserve default migration anti-amplification behavior; A3 first commit: defer whole-datagram accounting when head parks before migration, storing its length in PendingPacket; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle); Dormant metadata owner and terminal checks; abort refused outbound packet build and immediately restart with resource-close; all other metadata classes remain unimplemented; Record builder failure restarts terminal close immediately; charged ACK scratch aborts before retirement; extract loss detection; metadata close suppresses ACK serialization of refused processing; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal; PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; Declare the guarded receive-owner envelope module; Bind per-space CRYPTO assembler metadata and declare receive heap module"
       },
       "src/connection/mtud.rs": {
         "upstream_sha256": "3a2917c053a6ec79e277a2fc895cf20ba8cde2b1fe8b3b8b1c96584062acf782",
@@ -412,8 +412,8 @@
       },
       "src/connection/streams/recv.rs": {
         "upstream_sha256": "fc6aeb34b4e5fe9781a571a34ce5b95014f60c18613f5bfecf44411f6bb662d5",
-        "patched_sha256": "cf1f61efbddd695ea58525688a977f2f81dfecb46c0c512686bce5b495736919",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests"
+        "patched_sha256": "5a6fe6f923a26eec65f6a5cffe889c2d5faef41b2aff8168ff5e221802528d68",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; Restore removed receive owner on read-time ordering/compaction failure"
       },
       "src/connection/streams/send.rs": {
         "upstream_sha256": "cb9ef9cfa35aaf8794454130d27c6233602cacf0cf038bb61c6dbe54f1fcc7f0",
@@ -422,8 +422,8 @@
       },
       "src/connection/streams/state.rs": {
         "upstream_sha256": "f3e993c4cdb34ac89bd379a601f19a3c928332445e98233de921f153ccb6a59e",
-        "patched_sha256": "fdcd463f10c2c25000eae3574f3fcd507972293e0d2e98561d9b7644b1d7355a",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Carry the shared metadata ledger, preflight STREAM vector spill before stream mutation, expose dependency-test actual storage observations; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests"
+        "patched_sha256": "1414b707d863962b90f3505e3e6245284fe35a2b3c063567f14d4a042698b72c",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Carry the shared metadata ledger, preflight STREAM vector spill before stream mutation, expose dependency-test actual storage observations; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; Bind STREAM assembler metadata and observe actual retained receive capacities"
       },
       "src/connection/timer.rs": {
         "upstream_sha256": "7deb170226d84472f4c0b1cc0badc384948458894b65f17277fe15a5705af7e3",
@@ -560,8 +560,8 @@
         "delta": "Separate endpoint response item/slab/512-byte metadata permits, held through builder/queue/active send destruction; nonblocking full/oversize suppression, frozen overrides and cancellation seal; B1 first commit: A3 review Low fixes (correct comment/indent/doc, separate closed response drops and independent delivered-wire oracle)"
       },
       "src/connection/metadata_credit.rs": {
-        "patched_sha256": "888962de11ba103a335c0fa2218d36b053125d1a6c319a968e20deb1820a1b42",
-        "delta": "Partial metadata foundation: one shared actual-capacity ledger, align_up(capacity,64)+64 leases, terminal failure latch and diagnostic classes; configuration/probes remain __control-test only pending remaining coverage; Record and pending-ACK actual-storage observations plus test-only freeze-at-live fault injection; preserve first metadata failure cause; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal; PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; PR1B-2a review Lows folded into 2b: independent decrypted admission length, held Bytes across STOP_SENDING and received RESET_STREAM, targeted formatting cleanup; Observe actual wrapper layout/allocation and expose isolated owner-layout probe"
+        "patched_sha256": "1bc4d4663af40973bf10e3d141b48b44430d8c2a2e07401e332099f1f9d36274",
+        "delta": "Partial metadata foundation: one shared actual-capacity ledger, align_up(capacity,64)+64 leases, terminal failure latch and diagnostic classes; configuration/probes remain __control-test only pending remaining coverage; Record and pending-ACK actual-storage observations plus test-only freeze-at-live fault injection; preserve first metadata failure cause; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal; PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; PR1B-2a review Lows folded into 2b: independent decrypted admission length, held Bytes across STOP_SENDING and received RESET_STREAM, targeted formatting cleanup; Observe actual wrapper layout/allocation and expose isolated owner-layout probe; Isolated actual receive descriptor observations and exact extra-credit fault injection"
       },
       "src/connection/metadata_vec.rs": {
         "patched_sha256": "f52054b6b2bf29580fcc3777b0247c350c1357ce72ee4002062c3cbe05c2a9a7",
@@ -596,8 +596,8 @@
         "delta": "PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; PR1B-1 r2: deterministic controlled-ACK driver ordering and late-ACK wire regression; reserve committed PTO owners before taking; preserve finished datagram prefixes on populate refusal"
       },
       "src/connection/metadata_backing.rs": {
-        "patched_sha256": "65692d6a3381777c9041bfc549d61cea73d8d8ecaf9fbd465e20c79a52d53701",
-        "delta": "PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; Keep separate payload admission; construct shared receive backing through guarded owner envelope"
+        "patched_sha256": "50f96914bc784a61fc223182c529c174efd5910b82945d2cc23e7881596b7ed4",
+        "delta": "PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; Keep separate payload admission; construct shared receive backing through guarded owner envelope; Allow guarded exact-capacity compaction copies to fill directly without uncharged scratch backing"
       },
       "src/connection/metadata_owned_bytes.rs": {
         "patched_sha256": "4f041e4914aaab7325f821f2aaab47ba834bd8df274154abdaec2cfea28392e4",
@@ -606,6 +606,14 @@
       "src/connection/metadata_owned_bytes/tests.rs": {
         "patched_sha256": "9c4e53736633ca9c76f28e1c03bcaa810d7529b2be78bae4d51cfe39c98f0ca7",
         "delta": "Test-only System allocator observes actual production payload/wrapper extents and final-free barrier; Observe raw ownership retained at the actual wrapper deallocation barrier"
+      },
+      "src/connection/assembler/metadata.rs": {
+        "patched_sha256": "391bf561bed4cad4bc4976f80d7b15ee49cff49d279f14cfabd943c5a2de2e5c",
+        "delta": "Fallible old/new heap plus guarded-copy compaction; sorted storage retains old lease; restore original heap on refusal; independent capacity/lifetime and three-space tests"
+      },
+      "src/connection/metadata_heap.rs": {
+        "patched_sha256": "d98d8302de39455e73e47d940281313736fa29b20ce046a21bf02bf2791f43ea",
+        "delta": "Receive descriptor heap leases reserve before exact fallible allocation and retain old/new overlap until actual free"
       }
     },
     "formatting": {

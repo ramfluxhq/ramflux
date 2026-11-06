@@ -886,8 +886,8 @@ async fn receive_owner_refuses_before_stream() {
     wire.held.store(true,Ordering::SeqCst);
     wire.suppress_send.store(true,Ordering::SeqCst);
     let number=connection.control_test(|p|p.metadata_test_next_received());
-    // STREAM with explicit length, server-initiated unidirectional stream 3, one byte.
-    let(packet,payload_len)=peer.control_test(|p|p.control_test_packet_with_payload_len(number,false,&[0x0a,3,1,0x5a]));
+    // STREAM with explicit length, client-initiated unidirectional stream 2, one byte.
+    let(packet,payload_len)=peer.control_test(|p|p.control_test_packet_with_payload_len(number,false,&[0x0a,2,1,0x5a]));
     let owner_layout=connection.control_test(|p|p.metadata_test_receive_owner_layout());
     let payload_charge=((payload_len+63)&!63)+64;
     let owner_charge=((owner_layout+63)&!63)+64;
@@ -912,4 +912,57 @@ async fn receive_owner_refuses_before_stream() {
     assert!(stats.peak<=stats.limit);
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+}
+
+#[tokio::test]
+async fn receive_assemblers_charge_compaction_peaks() {
+    // Refuse the replacement heap, refuse its copy, then admit the real read compaction.
+    for case in 0..3 {
+        let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
+        gate.closed.store(true,Ordering::SeqCst);
+        let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
+        let mut send=peer.open_uni().await.unwrap();
+        let before=connection.stats().frame_rx.stream;
+        send.write_chunk(bytes::Bytes::from_static(b"abc")).await.unwrap();gate.open();
+        until(||connection.stats().frame_rx.stream>before).await;
+        gate.closed.store(true,Ordering::SeqCst);
+        let before=connection.stats().frame_rx.stream;
+        send.write_chunk(bytes::Bytes::from_static(b"def")).await.unwrap();gate.open();
+        until(||connection.stats().frame_rx.stream>before).await;
+        gate.closed.store(true,Ordering::SeqCst);
+        let mut recv=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+        let storage=connection.control_test(|p|p.metadata_test_receive_storage());
+        assert_eq!(storage.1,2,"two actual retained receive descriptors");
+        let descriptor=connection.control_test(|p|p.metadata_test_receive_descriptor_size());
+        let replacement_bytes=storage.1*descriptor;
+        let replacement_charge=((replacement_bytes+63)&!63)+64;
+        let before=probe.stats();
+        if case<2 { probe.freeze_with_additional_bytes(if case==0 {0}else{replacement_charge}); }
+        let result=recv.read_chunk(64,false).await;
+        if case<2 {
+            assert!(matches!(result,Err(ReadError::ConnectionLost(ConnectionError::LocallyClosed))));
+            assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()),storage,"read refusal restores the removed receive owner and its old heap");
+            assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::StreamAssemblers));
+            assert_eq!(probe.stats().allocations,before.allocations+u64::from(case==1),"only an admitted replacement heap may allocate");
+            gate.open();
+            assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+        } else {
+            let bytes=result.unwrap().unwrap().bytes;
+            assert_eq!(&bytes[..],b"abcdef");
+            assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()),(replacement_bytes,0));
+            assert_eq!(probe.stats().receive_backing_capacity,6,"real compaction copy capacity matches returned data");
+            assert_eq!(probe.stats().receive_owner_allocations,before.receive_owner_allocations+1);
+            assert!(probe.stats().peak>before.used,"old heap and backing overlap the replacements");
+            let held=bytes.slice(1..);let clone=held.clone();drop((bytes,held));
+            let owner_charge=((probe.stats().receive_owner_layout+63)&!63)+64;
+            gate.open();connection.close(0u32.into(),b"done");
+            timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+            drop((recv,send,connection,peer,endpoint,peer_endpoint));
+            until(||probe.stats().used==128+owner_charge).await;
+            assert_eq!(&clone[..],b"bcdef");drop(clone);until(||probe.stats().used==0).await;
+            continue;
+        }
+        timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+        drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    }
 }
