@@ -6,6 +6,7 @@
 pub mod backup_stream;
 pub mod custody;
 mod device_reference;
+pub mod dm_fs_v3;
 pub mod large_attachment;
 mod object_erasure;
 pub mod object_verification;
