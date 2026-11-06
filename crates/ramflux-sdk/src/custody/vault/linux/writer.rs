@@ -32,6 +32,29 @@ impl Drop for Slot {
     }
 }
 
+/// Ordered steps seen by the crash and durability oracles. `Cut` marks a test cut point;
+/// the other variants are emitted only after the real syscall succeeded, so an observer
+/// error fails the operation exactly as a failed syscall would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Event {
+    Cut(&'static str),
+    FileSync,
+    Rename,
+    Unlink,
+    DirSync,
+}
+
+/// Runs one durability syscall, then reports it. The event exists only if the syscall succeeded,
+/// so a call site cannot report a step without performing it.
+fn step(
+    observe: &impl Fn(Event) -> Result<(), Error>,
+    event: Event,
+    syscall: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
+    syscall()?;
+    observe(event)
+}
+
 pub(super) enum Operation {
     Read { reference: String, kind: u8, generation: u64 },
     Insert { reference: String, kind: u8, record: Vec<u8> },
@@ -49,7 +72,21 @@ impl Store {
         .await
         .map_err(|_| Error::Io)?
     }
-    pub(super) fn apply(&self, operation: Operation, cut: impl Fn(&str)) -> Result<Vec<u8>, Error> {
+    pub(super) fn apply(
+        &self,
+        operation: Operation,
+        cut: impl Fn(Event),
+    ) -> Result<Vec<u8>, Error> {
+        self.observe(operation, |event| {
+            cut(event);
+            Ok(())
+        })
+    }
+    pub(super) fn observe(
+        &self,
+        operation: Operation,
+        observe: impl Fn(Event) -> Result<(), Error>,
+    ) -> Result<Vec<u8>, Error> {
         let lock = open_file(&self.account_dir, ".writer.lock", OFlags::RDWR | OFlags::CREATE)?;
         // Immediate refusal is within the five-second maximum; never sleep on a lock.
         fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
@@ -60,11 +97,11 @@ impl Store {
             }
             Operation::Delete { reference, kind, generation } => {
                 self.read(&reference, kind, generation)?;
-                cut("before_delete");
-                self.unlink(&reference)?;
-                cut("after_delete");
-                fs::fsync(&self.realm_dir)?;
-                cut("delete_synced");
+                observe(Event::Cut("before_delete"))?;
+                step(&observe, Event::Unlink, || self.unlink(&reference))?;
+                observe(Event::Cut("after_delete"))?;
+                step(&observe, Event::DirSync, || fs::fsync(&self.realm_dir).map_err(Error::from))?;
+                observe(Event::Cut("delete_synced"))?;
                 return Ok(Vec::new());
             }
             Operation::Insert { reference, kind, record } => (reference, kind, record, false),
@@ -110,15 +147,18 @@ impl Store {
         let result = (|| {
             let mut file = File::from(fd);
             file.write_all(&record).map_err(|_| Error::Io)?;
-            cut("written");
-            file.sync_all().map_err(|_| Error::Io)?;
-            cut("file_synced");
+            observe(Event::Cut("written"))?;
+            step(&observe, Event::FileSync, || file.sync_all().map_err(|_| Error::Io))?;
+            observe(Event::Cut("file_synced"))?;
             let flags = if replace { RenameFlags::empty() } else { RenameFlags::NOREPLACE };
-            cut("before_publish");
-            fs::renameat_with(&self.realm_dir, &temp, &self.realm_dir, &reference, flags)?;
-            cut("published");
-            fs::fsync(&self.realm_dir)?;
-            cut("parent_synced");
+            observe(Event::Cut("before_publish"))?;
+            step(&observe, Event::Rename, || {
+                fs::renameat_with(&self.realm_dir, &temp, &self.realm_dir, &reference, flags)
+                    .map_err(Error::from)
+            })?;
+            observe(Event::Cut("published"))?;
+            step(&observe, Event::DirSync, || fs::fsync(&self.realm_dir).map_err(Error::from))?;
+            observe(Event::Cut("parent_synced"))?;
             Ok(Vec::new())
         })();
         // Only this operation's exclusive temporary can be removed on failure.
