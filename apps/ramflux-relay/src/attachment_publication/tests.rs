@@ -4,7 +4,7 @@
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_node_core::attachment::{
-    RetirementOutcome,
+    AttachmentReplayProof, RetirementOutcome,
     backend::{BackendCommit, BackendEntry},
     fixture::RetirementFixture,
 };
@@ -99,7 +99,14 @@ fn relay_guard_holds_backend_until_join_and_refuses_late_write_and_flush() {
         length: 0,
     };
     assert!(matches!(
-        read_after_operation_admission(&registry, &backend, &request, &mut output, &|| now),
+        read_after_operation_admission(
+            &registry,
+            &backend,
+            &request,
+            &replay_proof(now, 0),
+            &mut output,
+            &|| now
+        ),
         Err(BackendError::Bounds)
     ));
     let mut wrong = grant.grant().clone();
@@ -113,16 +120,34 @@ fn relay_guard_holds_backend_until_join_and_refuses_late_write_and_flush() {
     request.length = 16;
     request.grant = &wrong;
     assert!(matches!(
-        read_after_operation_admission(&registry, &backend, &request, &mut output, &|| now),
+        read_after_operation_admission(
+            &registry,
+            &backend,
+            &request,
+            &replay_proof(now, 0),
+            &mut output,
+            &|| now
+        ),
         Err(BackendError::Conflict)
     ));
     // Capacity is retryable Busy, never a retired identity.
     let holders = (0..32)
-        .map(|_| registry.lease_after_operation_admission(&grant, 1, now).unwrap())
+        .map(|n| {
+            registry
+                .admit_operation_after_authentication(&grant, 1, &replay_proof(now, n), now)
+                .unwrap()
+        })
         .collect::<Vec<_>>();
     request.grant = &grant;
     assert!(matches!(
-        read_after_operation_admission(&registry, &backend, &request, &mut output, &|| now),
+        read_after_operation_admission(
+            &registry,
+            &backend,
+            &request,
+            &replay_proof(now, 0),
+            &mut output,
+            &|| now
+        ),
         Err(BackendError::Busy)
     ));
     drop(holders);
@@ -138,12 +163,25 @@ fn relay_guard_holds_backend_until_join_and_refuses_late_write_and_flush() {
                 offset: 0,
                 length: 16,
             },
+            &replay_proof(now, 33),
             &mut output,
             &|| now,
         )
     });
     wait.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(spy.0.lock().unwrap().0, vec![42; 8]);
+    assert!(
+        matches!(
+            fixture.registry.admit_operation_after_authentication(
+                &fixture.grant,
+                1,
+                &replay_proof(now, 33),
+                now
+            ),
+            Err(ramflux_node_core::attachment::AttachmentReplayError::Replay)
+        ),
+        "read must consume the exact admitted nonce"
+    );
     let retire = fixture.request();
     assert_eq!(fixture.retire(&retire).unwrap(), RetirementOutcome::RevocationPending);
     assert_eq!(fixture.retire(&retire).unwrap(), RetirementOutcome::RevocationPending);
@@ -154,4 +192,8 @@ fn relay_guard_holds_backend_until_join_and_refuses_late_write_and_flush() {
     assert_eq!(fixture.retire(&retire).unwrap(), RetirementOutcome::Retired);
     drop(fixture);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+fn replay_proof(now: u64, n: u8) -> AttachmentReplayProof {
+    AttachmentReplayProof { nonce: [n; 32], issued_at: now, expires_at: now + 30 }
 }

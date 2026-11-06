@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 //! Server backup classification: NONCES and META.clock are authority restrictions.
-//! EXPIRY, PRINCIPALS and META.rows/bytes are derived and rebuilt on normal open.
+//! EXPIRY, PRINCIPALS and META.rows/bytes/blocked are derived and rebuilt on normal open.
 //! SDK backups import none of these tables; server rollback needs a fresh,
 //! externally fenced authority generation, as required by grant registration.
 use super::{AttachmentReplayError as Error, AttachmentReplayProof};
@@ -17,56 +17,73 @@ pub(super) const PRINCIPALS: TableDefinition<&[u8], u64> =
 pub(super) const META: TableDefinition<&str, u64> =
     TableDefinition::new("native_attachment_proof_meta_v1");
 // Fixed encoded rows: nonce96+expiry8, expiry104, principal64+counter8. Reserve
-// 1024 bytes per row, including every index/counter and B-tree space, plus roots.
-pub(super) const ROW_CHARGE: u64 = 1024;
+// Measured at the default 16384-row capacity, including indexes/counters and
+// B-tree space. 16384 * 511 + the 16KiB root reserve is exactly 8MiB.
+pub(super) const ROW_CHARGE: u64 = 511;
 pub(super) const ROOT_CHARGE: u64 = 16 * 1024;
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub entries: u64,
     pub bytes: u64,
     pub principal: u64,
+    pub charge: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { entries: 16384, bytes: 8 * 1024 * 1024, principal: 1024 }
+        Self { entries: 16384, bytes: 8 * 1024 * 1024, principal: 1024, charge: ROW_CHARGE }
     }
 }
 /// Normal server open rebuilds derived indexes and budgets from authoritative nonce
 /// rows. The clock fence is preserved. Disaster rollback requires externally fenced
 /// authority generation rotation; a copied server DB is not rollback detection.
 pub(crate) fn install(tx: &WriteTransaction) -> Result<(), AttachmentLedgerError> {
-    let rows = tx.open_table(NONCES).map_err(store)?;
-    if rows.len().map_err(store)? > 16384 {
-        return Err(AttachmentLedgerError::State);
-    }
-    let records = rows
-        .iter()
-        .map_err(store)?
-        .map(|v| {
-            let (k, v) = v.map_err(store)?;
-            Ok((k.value().to_vec(), v.value()))
-        })
-        .collect::<Result<Vec<_>, AttachmentLedgerError>>()?;
-    drop(rows);
+    rebuild(tx, crate::now_unix_seconds(), Limits::default())
+}
+// Startup can revisit a previous version's larger limits/charge without losing
+// serving availability. Live/malformed primary evidence is never discarded.
+pub(super) fn rebuild(
+    tx: &WriteTransaction,
+    now: u64,
+    limits: Limits,
+) -> Result<(), AttachmentLedgerError> {
+    let saved =
+        tx.open_table(META).map_err(store)?.get("clock").map_err(store)?.map_or(0, |v| v.value());
+    let now = now.max(saved);
+    let mut rows = tx.open_table(NONCES).map_err(store)?;
+    let had_evidence = rows.len().map_err(store)? != 0;
+    rows.retain(|key, end| key.len() != 96 || end.checked_add(5).is_none_or(|end| end > now))
+        .map_err(store)?;
     let _ = tx.delete_table(EXPIRY).map_err(store)?;
     let _ = tx.delete_table(PRINCIPALS).map_err(store)?;
     let mut expiry = tx.open_table(EXPIRY).map_err(store)?;
     let mut counts = tx.open_table(PRINCIPALS).map_err(store)?;
-    for (key, end) in &records {
+    let mut blocked = false;
+    for entry in rows.iter().map_err(store)? {
+        let (key, end) = entry.map_err(store)?;
+        let key = key.value();
+        let end = end.value();
         if key.len() != 96 || end.checked_add(5).is_none() {
-            return Err(AttachmentLedgerError::State);
+            blocked = true;
+            continue;
         }
-        expiry.insert(expiry_key(*end, key).as_slice(), ()).map_err(store)?;
+        expiry.insert(expiry_key(end, key).as_slice(), ()).map_err(store)?;
         let count = counts.get(&key[..64]).map_err(store)?.map_or(0, |v| v.value());
-        counts.insert(&key[..64], count + 1).map_err(store)?;
+        counts.insert(&key[..64], count.saturating_add(1)).map_err(store)?;
     }
-    if ROOT_CHARGE + records.len() as u64 * ROW_CHARGE > Limits::default().bytes {
-        return Err(AttachmentLedgerError::State);
-    }
+    let total = rows.len().map_err(store)?;
     let mut meta = tx.open_table(META).map_err(store)?;
-    meta.insert("rows", records.len() as u64).map_err(store)?;
-    meta.insert("bytes", ROOT_CHARGE + records.len() as u64 * ROW_CHARGE).map_err(store)?;
+    meta.insert("rows", total).map_err(store)?;
+    meta.insert("bytes", charge(total, limits.charge)).map_err(store)?;
+    meta.insert("blocked", u64::from(blocked)).map_err(store)?;
+    // GC and its time fence commit together: a clock correction after startup
+    // cannot revive a proof whose durable nonce was just expired.
+    if had_evidence {
+        meta.insert("clock", now).map_err(store)?;
+    }
     Ok(())
+}
+fn charge(rows: u64, row_charge: u64) -> u64 {
+    ROOT_CHARGE.saturating_add(rows.saturating_mul(row_charge))
 }
 fn expiry_key(expires: u64, key: &[u8]) -> Vec<u8> {
     let mut out = (expires + 5).to_be_bytes().to_vec();
@@ -140,11 +157,13 @@ pub(super) fn consume(
         return Err(Error::Replay);
     }
     let mut meta = tx.open_table(META).map_err(store)?;
-    let bytes = meta.get("bytes").map_err(store)?.map_or(ROOT_CHARGE, |v| v.value());
+    let blocked = meta.get("blocked").map_err(store)?.map_or(0, |v| v.value()) != 0;
+    let bytes = charge(rows.len().map_err(store)?, limits.charge);
     let mut counts = tx.open_table(PRINCIPALS).map_err(store)?;
     let count = counts.get(owner.as_slice()).map_err(store)?.map_or(0, |v| v.value());
-    if rows.len().map_err(store)? >= limits.entries
-        || bytes.saturating_add(ROW_CHARGE) > limits.bytes
+    if blocked
+        || rows.len().map_err(store)? >= limits.entries
+        || bytes.checked_add(limits.charge).is_none_or(|next| next > limits.bytes)
         || count >= limits.principal
     {
         return Err(Error::ReplayProtectionCapacity);
@@ -156,7 +175,7 @@ pub(super) fn consume(
         .map_err(store)?;
     counts.insert(owner.as_slice(), count + 1).map_err(store)?;
     meta.insert("rows", rows.len().map_err(store)?).map_err(store)?;
-    meta.insert("bytes", bytes + ROW_CHARGE).map_err(store)?;
+    meta.insert("bytes", bytes + limits.charge).map_err(store)?;
     Ok(())
 }
 pub(super) fn gc(tx: &WriteTransaction, now: u64, limit: usize) -> Result<usize, Error> {
@@ -197,6 +216,6 @@ pub(super) fn gc(tx: &WriteTransaction, now: u64, limit: usize) -> Result<usize,
     let mut meta = tx.open_table(META).map_err(store)?;
     let total = rows.len().map_err(store)?;
     meta.insert("rows", total).map_err(store)?;
-    meta.insert("bytes", ROOT_CHARGE + total * ROW_CHARGE).map_err(store)?;
+    meta.insert("bytes", charge(total, ROW_CHARGE)).map_err(store)?;
     Ok(keys.len())
 }

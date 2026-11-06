@@ -26,8 +26,19 @@ impl RetirementFixture {
     /// Panics on fixture I/O or invalid fixed signing material.
     #[must_use]
     pub fn new(path: &std::path::Path) -> Self {
-        let (native, grant) = fixtures();
-        let now = 1_700_000_001;
+        Self::new_at(path, 1_700_000_001)
+    }
+    /// # Panics
+    /// Panics on invalid fixture setup. The supplied clock keeps replay startup deterministic.
+    #[must_use]
+    pub fn new_at(path: &std::path::Path, now: u64) -> Self {
+        let (native, mut grant) = fixtures();
+        if now != 1_700_000_001 {
+            let mut current = grant.grant().clone();
+            current.issued_at = now - 1;
+            current.expires_at = now + 600;
+            grant = signed(&current);
+        }
         let store = RelayRedbStore::open(path).unwrap();
         let ledger = store.attachment_ledger(super::super::AttachmentPolicy::default()).unwrap();
         let upload = [21; 32];

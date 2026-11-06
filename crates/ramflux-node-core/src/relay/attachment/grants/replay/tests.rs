@@ -9,17 +9,17 @@ use crate::relay::attachment::grants::test_support::{auth, signed};
 use crate::relay::attachment::{AttachmentAuthority, AttachmentPolicy};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::{Arc, Barrier};
-fn path(name: &str) -> std::path::PathBuf {
+pub(super) fn path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "rf-replay-{name}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ))
 }
-fn proof(now: u64, n: u8) -> AttachmentReplayProof {
+pub(super) fn proof(now: u64, n: u8) -> AttachmentReplayProof {
     AttachmentReplayProof { nonce: [n; 32], issued_at: now, expires_at: now + 30 }
 }
-fn authority() -> AttachmentAuthority {
+pub(super) fn authority() -> AttachmentAuthority {
     AttachmentAuthority {
         source: "node-a".into(),
         generation: 4,
@@ -31,7 +31,7 @@ fn authority() -> AttachmentAuthority {
 #[test]
 fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
     let path = path("once");
-    let f = RetirementFixture::new(&path);
+    let f = RetirementFixture::new_at(&path, crate::now_unix_seconds());
     let now = f.now;
     let p = proof(now, 1);
     let barrier = Arc::new(Barrier::new(3));
@@ -109,7 +109,7 @@ fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
 #[test]
 fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
     let path = path("fields");
-    let f = RetirementFixture::new(&path);
+    let f = RetirementFixture::new_at(&path, crate::now_unix_seconds());
     let now = f.now;
     let good = proof(now, 1);
     for bad in [
@@ -263,7 +263,7 @@ fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
 }
 fn assert_replay_budgets_and_indexed_gc_keep_unrelated_principals_live() {
     let path = path("capacity");
-    let f = RetirementFixture::new(&path);
+    let f = RetirementFixture::new_at(&path, crate::now_unix_seconds());
     let now = f.now;
     let requester = f.grant.grant().grantee.clone();
     let tx = f.registry.ledger.db.begin_write().unwrap();

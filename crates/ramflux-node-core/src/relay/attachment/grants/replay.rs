@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 //! Source-authoritative replay restrictions. SDK backups never import this server state.
+#[cfg(test)]
+mod capacity_tests;
+#[cfg(test)]
+mod rebuild_tests;
 mod storage;
 #[cfg(test)]
 mod tests;

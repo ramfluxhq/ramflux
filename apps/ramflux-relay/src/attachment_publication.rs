@@ -3,7 +3,7 @@
 //! Dormant publication guard shared by local and S3 data paths after operation admission.
 //! Native token/PoP verification and nonce consumption must precede this helper.
 use ramflux_node_core::attachment::{
-    AttachmentLedgerError, GrantPublicationLease, ScopedGrantRegistry,
+    AttachmentReplayError, AttachmentReplayProof, GrantPublicationLease, ScopedGrantRegistry,
     backend::{AttachmentBackend, BackendError, BackendSegment},
 };
 use ramflux_protocol::large_attachment::{VerifiedContentManifest, VerifiedScopedGrant};
@@ -49,6 +49,7 @@ pub fn read_after_operation_admission(
     registry: &ScopedGrantRegistry,
     backend: &dyn AttachmentBackend,
     request: &ScopedAttachmentRange<'_>,
+    proof: &AttachmentReplayProof,
     output: &mut dyn Write,
     clock: &dyn Fn() -> u64,
 ) -> Result<(), BackendError> {
@@ -67,12 +68,15 @@ pub fn read_after_operation_admission(
     {
         return Err(BackendError::Bounds);
     }
-    let lease = registry.lease_after_operation_admission(request.grant, 1, clock()).map_err(
-        |e| match e {
-            AttachmentLedgerError::Capacity => BackendError::Busy,
+    let lease = registry
+        .admit_operation_after_authentication(request.grant, 1, proof, clock())
+        .map_err(|e| match e {
+            AttachmentReplayError::ReplayProtectionCapacity
+            | AttachmentReplayError::Ledger(
+                ramflux_node_core::attachment::AttachmentLedgerError::Capacity,
+            ) => BackendError::Busy,
             _ => BackendError::Retired,
-        },
-    )?;
+        })?;
     let mut writer = PublicationWriter { output, lease: &lease, clock, remaining: request.length };
     backend.read_range(&spec, request.offset, request.length, &mut writer)?;
     if writer.remaining != 0 {

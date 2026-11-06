@@ -157,7 +157,8 @@ impl ScopedGrantRegistry {
     /// Rights are one of GET1, HEAD2, Missing4, Renew8, Ack16.
     /// # Errors
     /// Refuses noncurrent state, expiry, missing rights and more than32 live leases.
-    pub fn lease_after_operation_admission(
+    #[cfg(test)]
+    pub(crate) fn lease_after_operation_admission(
         &self,
         grant: &VerifiedScopedGrant,
         right: u32,
