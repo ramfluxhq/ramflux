@@ -28,6 +28,7 @@ mod database_checkpoint;
 pub mod durability_test_hooks;
 #[cfg(all(feature = "durability-test-hooks", ramflux_production))]
 compile_error!("durability-test-hooks must not be enabled in a production build");
+pub use account_db::receive::stage::{ReceiveStage, ReceiveStageResult};
 pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction};
 mod encryption;
 mod error;
