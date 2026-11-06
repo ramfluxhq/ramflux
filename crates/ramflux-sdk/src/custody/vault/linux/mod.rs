@@ -13,3 +13,8 @@ pub use error::LinuxVaultConfigError;
 mod cleanup;
 #[cfg(all(target_os = "linux", test))]
 mod codec;
+
+#[cfg(all(target_os = "linux", test))]
+mod files;
+#[cfg(all(target_os = "linux", test))]
+mod writer;

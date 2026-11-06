@@ -82,6 +82,14 @@ fn valid_fields(realm: u8, kind: u8, generation: u64, len: usize) -> Result<(), 
 }
 
 impl Binding<'_> {
+    pub(super) fn validate_name(self) -> Result<(), Error> {
+        self.validate(match self.kind {
+            1 => 32,
+            2 => 64,
+            _ => 1,
+        })
+    }
+
     fn validate(self, len: usize) -> Result<(), Error> {
         valid_fields(self.realm, self.kind, self.generation, len)?;
         crate::custody::valid_id(self.account).map_err(|_| Error::Account)?;
@@ -281,3 +289,13 @@ pub(super) fn open(
 
 #[cfg(test)]
 mod tests;
+
+/// Check encrypted framing and the expected public context without copying secrets.
+pub(super) fn validate_record(binding: Binding<'_>, record: &[u8]) -> Result<(), Error> {
+    let header = Header::decode(record)?;
+    binding.validate(header.len as usize)?;
+    if !header.matches(binding) {
+        return Err(Error::Authentication);
+    }
+    Ok(())
+}
