@@ -1508,5 +1508,74 @@
         "ceiling": 12288
       }
     }
+  },
+  "service_value_sets": {
+    "owner": "P05 canonical service codecs; authenticated semantics belong to consumers",
+    "action": [
+      "lease",
+      "publish",
+      "status"
+    ],
+    "result_kind": [
+      "lease",
+      "publish",
+      "status",
+      "refusal"
+    ],
+    "refusal": [
+      "native_publication_requires_custody",
+      "native_account_required",
+      "prekey_profile_inactive",
+      "prekey_cross_home_unavailable",
+      "prekey_clock_untrusted",
+      "prekey_capacity",
+      "prekey_repair_required",
+      "prekey_refresh_required",
+      "prekey_lease_unavailable",
+      "bootstrap_key_unavailable",
+      "update_required",
+      "replay",
+      "busy",
+      "persistence_unavailable",
+      "capacity"
+    ],
+    "retry_scope": [
+      "pre_auth_source",
+      "node_capacity"
+    ],
+    "frame_type": [
+      "native_prekey_lease",
+      "native_prekey_publish",
+      "native_prekey_status",
+      "native_prekey_result"
+    ],
+    "empty_rules": "Empty action/result_kind/frame_type reject. Empty refusal means absent only for successful result. Empty retry_scope requires retry_after_ms=0; a present scope reuses S1 RetryScope and clamps via RetryHint. A hint is permitted only for busy; pre_auth_source must originate in that admission budget.",
+    "combination_rules": "Request action matches carrier. lease result requires exactly lease; status requires exactly status; publish success has neither; refusal requires a known refusal and neither payload. Bootstrap OPK ID and key are both present or both absent. Request expires_at >= issued_at and difference <=300; consumers own freshness/signatures/hashes/current authority.",
+    "result_binding": "validate_for compares correlation_id, caller-verified request_hash, authenticated request node_id and session_id, and action/success kind before returning any retry hint."
+  },
+  "json_size_policy": {
+    "construction": "Compact JSON carrier with unpadded base64url of the conservative simultaneous binary maximum; 2% headroom rounded up to 1 KiB. Whitespace is accepted only inside this total bound.",
+    "table": {
+      "native_prekey_lease": {
+        "binary_type": "NativePrekeyLease",
+        "worst_case_bytes": 5791,
+        "ceiling": 6144
+      },
+      "native_prekey_publish": {
+        "binary_type": "NativePrekeyPublish",
+        "worst_case_bytes": 68667,
+        "ceiling": 70656
+      },
+      "native_prekey_status": {
+        "binary_type": "NativePrekeyStatus",
+        "worst_case_bytes": 25456,
+        "ceiling": 26624
+      },
+      "native_prekey_result": {
+        "binary_type": "NativePrekeyResult",
+        "worst_case_bytes": 53532,
+        "ceiling": 55296
+      }
+    }
   }
 }

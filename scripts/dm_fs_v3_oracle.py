@@ -534,6 +534,54 @@ def check_size_policy(wire):
                 and field['max_bytes'] < TYPES['BootstrapHeader']['ceiling'], 'routed AD ceiling')
 
 
+
+def service_maximum_values(name):
+    """Maximal typed values with full IDs/lists and owned code combinations."""
+    values = maximum_values(name)
+    for field in TYPES[name]['fields']:
+        kind, key = field['kind'], field['name']
+        if kind.startswith('opt@'):
+            values[key] = service_maximum_values(kind[4:])
+        elif kind.startswith('@'):
+            values[key] = service_maximum_values(kind[1:])
+        elif kind.startswith('list'):
+            count, child = kind[4:].split('@')
+            values[key] = [service_maximum_values(child)] * int(count)
+    if name == 'NativePrekeyRequest':
+        values.update(action='publish', issued_at=(1 << 64)-301)
+    elif name in ('NativePrekeyLease','NativePrekeyPublish','NativePrekeyStatus'):
+        values['request']['action'] = name.removeprefix('NativePrekey').lower()
+    elif name == 'PrekeyLeaseResult':
+        values['fallback'] = 'none'
+    elif name == 'OwnerStatusEntry':
+        values['state'] = 'unleased'
+    elif name == 'NativePrekeyResult':
+        values.update(result_kind='status', lease=None, refusal='', retry_scope='', retry_after_ms=0)
+    return values
+
+
+def check_service_policy(wire):
+    names = {'NativePrekeyRequest','NativePrekeyLease','NativePrekeyPublish','NativePrekeyStatus',
+             'NativePrekeyResult','BootstrapHeader','BootstrapTranscript'}
+    records = wire['service_maximum']
+    require({r['type'] for r in records} == names and len(records) == len(names), 'typed maximum coverage')
+    for record in records:
+        raw = encode(record['type'], service_maximum_values(record['type']))
+        require(record['bytes'] == raw.hex() and record['byte_length'] == len(raw), 'typed maximum bytes')
+        scan(record['type'], raw)
+    table = SCHEMA['json_size_policy']['table']
+    expected_labels = {'native_prekey_'+suffix for suffix in ('lease','publish','status','result')}
+    require(set(table) == expected_labels, 'JSON carrier size coverage')
+    for label, row in table.items():
+        name = 'NativePrekey'+label.removeprefix('native_prekey_').title()
+        raw_size = maximum_size(name)
+        worst = len(jcs(dict(frame_type=label,payload=''))) + (raw_size*8+5)//6
+        ceiling = ((worst*102+102399)//102400)*1024
+        require(row == dict(binary_type=name,worst_case_bytes=worst,ceiling=ceiling), 'JSON worst-case '+label)
+        actual = jcs(dict(frame_type=label,payload=b64(encode(name,service_maximum_values(name)))))
+        require(len(actual) <= worst <= ceiling, 'JSON maximum does not fit')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', required=True)
@@ -552,6 +600,7 @@ def main():
         require(hashlib.sha256((FIXTURES/name).read_bytes()).hexdigest() == digest, 'fixture integrity: ' + name)
     wire, crypto, custody = (load(n) for n in ('wire_vectors.json','crypto_vectors.json','custody_vectors.json'))
     check_size_policy(wire)
+    check_service_policy(wire)
     check_wire(wire)
     check_crypto(crypto)
     check_custody(custody)
