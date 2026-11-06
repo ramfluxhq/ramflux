@@ -202,7 +202,16 @@ impl SegmentStore<'_> {
                 &wire,
                 &manifest,
             ),
-            (None, None, None) => self.check_provisional(&wire, &manifest),
+            (None, None, None) => {
+                // A successful send converts the provisional hold into message ownership.
+                // Such owned-upload bytes remain payload-scoped until the last retainer leaves.
+                let retained:bool=authority.query_row("SELECT EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND owner_count>0)",params![ramflux_crypto::object_erasure_commitment(&self.db.principal_commitment,&wire,&manifest)],|r|r.get(0))?;
+                if retained {
+                    self.db.check_object_identity(&wire, &manifest)
+                } else {
+                    self.check_provisional(&wire, &manifest)
+                }
+            }
             _ => Err(StorageError::ObjectErased),
         }
     }

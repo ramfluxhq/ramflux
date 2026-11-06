@@ -163,7 +163,7 @@ fn large_restore_and_late_worker_cannot_resurrect_revoked_segments() {
         second_gen.merge_backup(&old_path, &old.key, || Ok(())).unwrap();
         let restored_root = root.join(format!("restored-{incoming_erased}"));
         let index = crate::AccountIndex::open(&restored_root).unwrap();
-        let record = index.create_account("acct", "root").unwrap();
+        let record = index.create_account("acct", "principal").unwrap();
         assert_eq!(
             second_gen
                 .db
@@ -202,6 +202,7 @@ fn cleanup_query_plan(db: &AccountDb) {
         for i in 0..1000u32 {
             let dir=ramflux_protocol::encode_base64url(blake3::hash(&i.to_le_bytes()).as_bytes());
             let key=format!("unrelated-{i}");
+            db.connection.execute("INSERT INTO object_segment_reference_veto VALUES(?1)",params![blake3::hash(&i.to_le_bytes()).as_bytes().as_slice()])?;
             db.connection.execute("INSERT INTO object_segment_resource VALUES(?1,2,?2,'wire','hash',?2,NULL,NULL,NULL,0)",params![dir,key])?;
             db.connection.execute("INSERT INTO object_segment_floor VALUES(?1,1)",params![dir])?;
             db.connection.execute("INSERT INTO object_retention_payload VALUES(?1,?1,?1,?1,'message',NULL,0)",params![key])?;
@@ -212,6 +213,9 @@ fn cleanup_query_plan(db: &AccountDb) {
     }).unwrap();
     for sql in [
         "EXPLAIN QUERY PLAN SELECT generation FROM object_segment_floor WHERE directory='probe'",
+        "EXPLAIN QUERY PLAN SELECT 1 FROM object_segment_reference_veto WHERE reference_id=x'01'",
+        "EXPLAIN QUERY PLAN SELECT 1 FROM object_retention_payload WHERE commitment='probe' AND owner_count>0",
+        "EXPLAIN QUERY PLAN SELECT 1 FROM object_retention_payload WHERE commitment='probe' AND retention_class='pre_send' AND hold_expires_at>1",
         "EXPLAIN QUERY PLAN SELECT retired FROM object_segment_resource WHERE directory='probe' AND generation=1",
         "EXPLAIN QUERY PLAN SELECT 1 FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) JOIN object_retention_payload p USING(commitment) WHERE m.message_id='probe' AND m.reference_hash='probe' AND r.selector='probe' AND p.wire_id='probe' AND p.manifest_hash='probe'",
     ] {
@@ -328,6 +332,23 @@ fn provisional_segments_follow_hold_release_and_expiry() {
     ));
     assert!(!store.location("expired", 1).try_exists().unwrap());
     drop(hold2);
+    let mut converted = m.clone();
+    converted.object_id = [100; 32];
+    let signature = key.sign(&converted.signing_bytes().unwrap()).to_bytes();
+    let converted = ramflux_protocol::large_attachment::ContentManifest::decode_signed(
+        &converted.signed_bytes(&signature).unwrap(),
+    )
+    .unwrap();
+    let wire3 = ramflux_protocol::encode_base64url(converted.manifest().object_id);
+    let hash3 = ramflux_protocol::encode_base64url(converted.manifest().hash().unwrap());
+    let hold3 = db.pre_send_object_hold(&wire3, &hash3).unwrap();
+    store.admit_pre_send("converted", 1, &converted, &hold3).unwrap();
+    store.checkpoint("converted", 1, 0, 0, &cipher[0]).unwrap();
+    bind(&db, &converted, "converted-message", "converted-reference");
+    hold3.release().unwrap();
+    assert_eq!(store.read_chunk("converted", 1, 0, 0).unwrap(), cipher[0]);
+    db.delete_direct_message("thread", "converted-message", "local", "delete").unwrap();
+    assert!(!store.location("converted", 1).try_exists().unwrap());
     drop(store);
     drop(db);
     fs::remove_dir_all(root).unwrap();
