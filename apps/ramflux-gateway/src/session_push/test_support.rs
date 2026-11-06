@@ -156,3 +156,27 @@ impl ramflux_transport::GatewaySessionFrameSource for Source {
         })
     }
 }
+
+/// Exercise the real capable registration adapter with an authoritative store E.
+pub(crate) async fn negotiate_incarnation(
+    fixture: &mut Fixture,
+    id: &str,
+) -> anyhow::Result<String> {
+    fixture.context.hub.readiness.ready.store(true, super::Ordering::Release);
+    fixture.context.hub.readiness.started.store(true, super::Ordering::Release);
+    let context = fixture.context.clone();
+    let auth = super::negotiation::auth(true)?;
+    let descriptor = super::negotiation::descriptor();
+    let task =
+        tokio::spawn(
+            async move { crate::session_push::negotiate(&context, &auth, &descriptor).await },
+        );
+    let request = fixture.next().await?;
+    assert_eq!(request.path, "/s1/session");
+    let mut reply = serde_json::to_value(super::negotiation::descriptor())?;
+    reply["incarnation_id"] = json!(id);
+    request.respond.send((200, reply)).map_err(|_| anyhow::anyhow!("registration cancelled"))?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await???
+        .ok_or_else(|| anyhow::anyhow!("capability not selected"))
+}
