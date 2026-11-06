@@ -12,7 +12,7 @@ use std::{
     },
     path::Path,
     process::{Child, Command},
-    sync::{Mutex, MutexGuard, atomic::AtomicBool, mpsc},
+    sync::{atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
 };
 
@@ -38,20 +38,6 @@ impl Drop for Reaper {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-/// A forked child inherits every open descriptor until it execs, including a held `flock`
-/// description, so a spawn overlapping a publication can make that publication's next lock
-/// attempt see `Busy`. Production already opens every descriptor with CLOEXEC, which cannot
-/// close the fork-to-exec window. The order oracle therefore holds this gate for its whole run
-/// and every subprocess fixture spawns under it.
-static FORK_GATE: Mutex<()> = Mutex::new(());
-fn fork_gate() -> MutexGuard<'static, ()> {
-    FORK_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-fn spawn_fixture(command: &mut Command) -> std::io::Result<Child> {
-    let _gate = fork_gate();
-    command.spawn()
 }
 
 fn setup(root: &Path, realm: u8) -> TestResult<Arc<Store>> {
@@ -141,6 +127,17 @@ fn observed(
 
 #[test]
 fn linux_vault_file_store_is_insert_only_and_crash_durable() -> TestResult {
+    run_in_child("file_store_body")
+}
+/// Out-of-process body of the file-store test; a no-op unless launched by `run_in_child`.
+#[test]
+fn file_store_body() -> TestResult {
+    if std::env::var_os(BODY_ENV).is_none() {
+        return Ok(());
+    }
+    file_store_is_insert_only_and_crash_durable()
+}
+fn file_store_is_insert_only_and_crash_durable() -> TestResult {
     let dir = tempfile::tempdir()?;
     let store = setup(dir.path(), 1)?;
     let name = reference(3);
@@ -236,84 +233,15 @@ fn linux_vault_file_store_is_insert_only_and_crash_durable() -> TestResult {
 /// Durability oracle: the real fsync, rename and unlink steps must occur in D5 order.
 #[test]
 fn linux_vault_publication_call_order_is_durable() -> TestResult {
-    let _gate = fork_gate();
-    order_oracle()
+    run_in_child("order_oracle_body")
 }
-/// One fixture spawn on its own thread. It reports the attempt before it calls the gated spawn
-/// and the outcome after the child was waited for. The child is reaped by `Reaper` on every
-/// path, the wait is bounded, and `Drop` waits a bounded time for the thread before joining.
-struct OneSpawn {
-    attempted: mpsc::Receiver<()>,
-    completed: mpsc::Receiver<Result<(), String>>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-impl OneSpawn {
-    fn start() -> Self {
-        let (attempt_tx, attempted) = mpsc::channel();
-        let (done_tx, completed) = mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            let _ = attempt_tx.send(());
-            let outcome = spawn_fixture(&mut Command::new("true"))
-                .map(Reaper)
-                .map_err(|e| format!("spawn failed: {e}"))
-                .and_then(|mut child| {
-                    let end = Instant::now() + GUARD;
-                    loop {
-                        match child.0.try_wait() {
-                            Ok(Some(_)) => return Ok(()),
-                            Ok(None) if Instant::now() < end => {
-                                std::thread::sleep(Duration::from_millis(2));
-                            }
-                            Ok(None) => return Err("fixture child still running after 10s".into()),
-                            Err(e) => return Err(format!("wait failed: {e}")),
-                        }
-                    }
-                });
-            let _ = done_tx.send(outcome);
-        });
-        Self { attempted, completed, handle: Some(handle) }
-    }
-}
-impl Drop for OneSpawn {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            // Bounded: never join a thread that has not finished.
-            let _ = self.completed.recv_timeout(GUARD);
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-        }
-    }
-}
-/// Deterministic window: a fixture spawn is attempted while the oracle holds the fork gate, must
-/// not complete while the gate is held, and completes only after the gate is released.
+/// Out-of-process body of the order oracle; a no-op unless launched by `run_in_child`.
 #[test]
-fn subprocess_fixtures_cannot_race_the_order_oracle() -> TestResult {
-    let gate = fork_gate();
-    let spawn = OneSpawn::start();
-    let held = (|| -> TestResult {
-        spawn
-            .attempted
-            .recv_timeout(GUARD)
-            .map_err(|e| format!("no fixture spawn attempt within 10s: {e}"))?;
-        order_oracle()?;
-        // The attempt is on record; give a missing gate every chance to let the spawn finish.
-        let window = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < window {
-            if spawn.completed.try_recv().is_ok() {
-                return Err("fixture spawn completed while the oracle held the gate".into());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Ok(())
-    })();
-    drop(gate);
-    held?;
-    spawn
-        .completed
-        .recv_timeout(GUARD)
-        .map_err(|e| format!("fixture spawn did not complete within 10s of release: {e}"))??;
-    Ok(())
+fn order_oracle_body() -> TestResult {
+    if std::env::var_os(BODY_ENV).is_none() {
+        return Ok(());
+    }
+    order_oracle()
 }
 fn order_oracle() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -357,6 +285,35 @@ fn strace_child() -> TestResult {
     store.apply(remove(n, 4, 1), |_| {})?;
     Ok(())
 }
+/// Set in the child that runs a lock-holding test body.
+const BODY_ENV: &str = "RF_VAULT_TEST_BODY";
+/// Runs a lock-holding test body in its own process (re-exec of this test binary).
+///
+/// `flock` locks belong to the open file description, which a forked child shares with its
+/// parent until it execs. A fixture spawned by another test thread would therefore keep a copy of
+/// a lock held at that instant, and the holder's next lock attempt would see `Busy`. CLOEXEC
+/// cannot close the fork-to-exec window. Bodies that take the realm lock run here, so no other
+/// test's fork can ever see their descriptors, and no timing window or gate is needed. The wait
+/// is bounded, the child is killed and reaped on every path, and its output is propagated.
+fn run_in_child(body: &str) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("child.log");
+    let out = File::create(&log)?;
+    let status = run_bounded(
+        Command::new(std::env::current_exe()?)
+            .args(["--exact", &format!("custody::vault::linux::writer::tests::{body}")])
+            .arg("--nocapture")
+            .env(BODY_ENV, "1")
+            .stdout(out.try_clone()?)
+            .stderr(out),
+        Duration::from_secs(60),
+    )?;
+    if !status.success() {
+        let output = std::fs::read_to_string(&log).unwrap_or_default();
+        return Err(format!("{body} failed ({status}):\n{output}").into());
+    }
+    Ok(())
+}
 /// Kills the whole process group of a traced run on every exit path and reaps the leader.
 struct GroupReaper(Child);
 impl Drop for GroupReaper {
@@ -372,7 +329,7 @@ impl Drop for GroupReaper {
 /// killed and reaped when this returns, however it returns.
 fn run_bounded(command: &mut Command, deadline: Duration) -> TestResult<std::process::ExitStatus> {
     use std::os::unix::process::CommandExt;
-    let mut child = GroupReaper(spawn_fixture(command.process_group(0))?);
+    let mut child = GroupReaper(command.process_group(0).spawn()?);
     let end = Instant::now() + deadline;
     loop {
         if let Some(status) = child.0.try_wait()? {
@@ -747,14 +704,15 @@ fn crash_cuts() -> TestResult {
 fn crash_at(root: &Path, operation: &str, stage: &str) -> TestResult {
     let listener = UnixListener::bind(root.join("barrier"))?;
     listener.set_nonblocking(true)?;
-    let mut child = Reaper(spawn_fixture(
+    let mut child = Reaper(
         Command::new(std::env::current_exe()?)
             .args(["--exact", "custody::vault::linux::writer::tests::crash_child", "--nocapture"])
             .env("RF_VAULT_CRASH_ROOT", root)
             .env("RF_VAULT_CRASH_OPERATION", operation)
             .env("RF_VAULT_CRASH_STAGE", stage)
-            .stdout(std::process::Stdio::null()),
-    )?);
+            .stdout(std::process::Stdio::null())
+            .spawn()?,
+    );
     let deadline = Instant::now() + GUARD;
     let mut stream = loop {
         match listener.accept() {
