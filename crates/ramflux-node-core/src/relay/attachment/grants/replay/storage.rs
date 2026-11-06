@@ -16,11 +16,19 @@ pub(super) const PRINCIPALS: TableDefinition<&[u8], u64> =
     TableDefinition::new("native_attachment_proof_principals_v1");
 pub(super) const META: TableDefinition<&str, u64> =
     TableDefinition::new("native_attachment_proof_meta_v1");
-// Fixed encoded rows: nonce96+expiry8, expiry104, principal64+counter8. Reserve
-// Measured at the default 16384-row capacity, including indexes/counters and
-// B-tree space. 16384 * 511 + the 16KiB root reserve is exactly 8MiB.
-pub(super) const ROW_CHARGE: u64 = 511;
+// Fixed encoded rows: nonce96+expiry8, expiry104, principal64+counter8. Every
+// admitted nonce may also create its own principal counter, so each row carries
+// one full principal row plus B-tree page slack. Measured on file-backed redb with
+// one commit per admission and distinct principals: about 605 B/row on disk
+// (7909376 B at 13081 rows) and 617 B/row in the storage probe. ROW_CHARGE adds
+// about 11% margin over the worst measured row.
+pub(super) const ROW_CHARGE: u64 = 672;
 pub(super) const ROOT_CHARGE: u64 = 16 * 1024;
+pub(super) const CAP_BYTES: u64 = 8 * 1024 * 1024;
+// Largest entry count whose worst-case charge still fits CAP_BYTES. At this count
+// the byte cap and the entry cap refuse together; 16384 rows cannot fit at the
+// measured worst case within 8 MiB.
+pub(super) const DEFAULT_ENTRIES: u64 = (CAP_BYTES - ROOT_CHARGE) / ROW_CHARGE;
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub entries: u64,
@@ -30,7 +38,7 @@ pub(super) struct Limits {
 }
 impl Default for Limits {
     fn default() -> Self {
-        Self { entries: 16384, bytes: 8 * 1024 * 1024, principal: 1024, charge: ROW_CHARGE }
+        Self { entries: DEFAULT_ENTRIES, bytes: CAP_BYTES, principal: 1024, charge: ROW_CHARGE }
     }
 }
 /// Normal server open rebuilds derived indexes and budgets from authoritative nonce
