@@ -452,3 +452,10 @@ impl RamfluxClient {
         )
     }
 }
+
+#[cfg(test)]
+impl RamfluxClient {
+    pub(crate) fn test_release_contact_messages(&self, root: &str) -> Result<(), SdkError> {
+        self.release_contact_messages(root, true)
+    }
+}

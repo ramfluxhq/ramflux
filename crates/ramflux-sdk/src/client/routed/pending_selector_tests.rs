@@ -138,8 +138,20 @@ async fn e16_pending_contact_fenced_attachment_held_item_survives_until_release(
         f.c.b.client.account_db()?.check_object_access("refused"),
         Err(ramflux_storage::StorageError::ObjectErased)
     ));
-    f.accept()?;
+    f.c.b.client.test_release_contact_messages(&f.root)?;
     assert_eq!(f.c.b.client.direct_messages("pending-thread")?.len(), 2);
+    assert_eq!(
+        f.c.b.client.account_db()?.actor_state_keys("attachment/reference/good-one")?.len(),
+        1
+    );
+    assert_eq!(
+        f.c.b.client.account_db()?.actor_state_keys("attachment/reference/good-two")?.len(),
+        1
+    );
+    assert_eq!(
+        f.c.b.client.account_db()?.actor_state_keys("attachment/reference/refused")?.len(),
+        0
+    );
     Ok(())
 }
 #[tokio::test]
@@ -208,9 +220,10 @@ async fn e16_fresh_m3_via_pending_contact_release() -> TestResult {
 async fn pending_release_storage_error_rolls_back_consent_and_keeps_held_content() -> TestResult {
     let mut f = Box::pin(PendingCase::new()).await?;
     let id = f.hold("pending-write-error", b"retained on failure", f.c.refs.clone()).await?;
+    f.c.fence()?;
     let before = f.c.b.client.account_db()?.held_contact_messages(&f.root)?;
     let sql = super::selector_reopen::connection(&f.c)?;
-    sql.execute_batch("CREATE TRIGGER refuse_pending_reference BEFORE INSERT ON object_retention_reference BEGIN SELECT RAISE(ABORT,'pending writer failed'); END;")?;
+    sql.execute_batch("CREATE TRIGGER refuse_pending_reference BEFORE INSERT ON object_retention_reference WHEN NEW.selector='good-two' BEGIN SELECT RAISE(ABORT,'pending writer failed'); END;")?;
     let error = f.accept().err().ok_or("failed storage write accepted")?;
     assert!(matches!(error, SdkError::Storage(ramflux_storage::StorageError::Sqlite(_))));
     assert!(error.to_string().contains("pending writer failed"));
