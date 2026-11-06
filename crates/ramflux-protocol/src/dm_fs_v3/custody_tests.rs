@@ -25,10 +25,10 @@ fn dm_fs_v3_custody_action_hash_vectors() -> Result {
         assert_eq!(action.capability(), "register");
         match action {
             CustodyProofAction::PrekeyStatus { query } => {
-                assert_eq!(decode_base64url(&query)?, hex_bytes(&row["embedded_rfs1"])?)
+                assert_eq!(decode_base64url(&query)?, hex_bytes(&row["embedded_rfs1"])?);
             }
             CustodyProofAction::RegisterUpdate { update } => {
-                assert_eq!(decode_base64url(&update)?, hex_bytes(&row["embedded_rfs1"])?)
+                assert_eq!(decode_base64url(&update)?, hex_bytes(&row["embedded_rfs1"])?);
             }
             CustodyProofAction::Register { prekey_bundle } => assert_eq!(
                 prekey_bundle,
