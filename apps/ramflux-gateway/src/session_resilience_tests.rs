@@ -37,6 +37,7 @@ impl GatewaySessionFrameSink for Sink {
 }
 fn runtime() -> anyhow::Result<GatewaySessionRuntime> {
     Ok(GatewaySessionRuntime {
+        session_push: None,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &ramflux_crypto::create_identity_root("alice", [1; 32]),
             &ramflux_crypto::create_device_branch("alice", "device", 1, [2; 32]),

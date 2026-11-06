@@ -34,7 +34,7 @@ pub(super) fn route(
         || path == "/mvp1/session-push-capabilities"
         || capable_page
         || entry
-        || path == "/mvp0/ack-bound";
+        || path == "/mvp0/ack-bound" || (path == "/mvp0/nack-bound" && serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|v|v.get("incarnation_id").is_some()));
     if !handled {
         return Ok(None);
     }
@@ -70,6 +70,15 @@ pub(super) fn route(
             }
         }
         ("POST", "/mvp0/ack-bound") => bound_ack(body, router),
+        ("POST", "/mvp0/nack-bound") => {
+            let value:serde_json::Value=serde_json::from_slice(body)?;
+            let request:ramflux_node_core::TargetNackRequest=serde_json::from_value(value.clone())?;
+            let id=value["incarnation_id"].as_str().unwrap_or("");
+            match router.state().session_nack(router.store(),&request,id) {
+                Ok(cursor)=>reply(&serde_json::json!({"incarnation_id":id,"cursor":cursor})),
+                Err(error)=>Ok(MeshResponse::json("400 Bad Request",serde_json::to_vec(&error)?)),
+            }
+        }
         ("POST", "/mvp0/issued-seqs") => issued(body, router),
         ("GET", _) if capable_page => page(path, router),
         ("GET", _) if entry => point(path, router),

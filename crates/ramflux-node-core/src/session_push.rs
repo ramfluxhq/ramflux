@@ -304,3 +304,22 @@ impl RouterCore {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+impl RouterCore {
+    /// Persist a capable NACK under the same bounded namespace fence as ACK.
+    /// # Errors
+    /// Refuses invalid sequences or an old E before touching the live inbox.
+    pub fn session_nack(&self, store:&crate::RouterRedbStore, request:&crate::TargetNackRequest, incarnation:&str)->Result<crate::InboxCursorResponse,SessionPushError> {
+        let target=&request.target_delivery_id;
+        let failure=|reason|SessionPushError::new(reason,self.session_push_status(target).incarnation_id);
+        self.bind_publication(store).map_err(|_|failure(SessionPushReason::InternalError))?;
+        let lease=store.acquire_acknowledgement(target).map_err(|_|failure(SessionPushReason::Busy))?;
+        let issued=self.session_push_status(target).inbox_seq;
+        let seq=request.nack.ext.ext.get("inbox_seq").and_then(serde_json::Value::as_u64);
+        if seq.is_none_or(|s|s==0 || s>issued) { return Err(failure(SessionPushReason::InvalidSeq)); }
+        self.check_inbox_incarnation(target,incarnation)?;
+        let cursor=self.apply_nack_for_target(target,&request.nack).map_err(|_|failure(SessionPushReason::InvalidSeq))?;
+        store.record_leased_nack(&cursor,lease).map_err(|_|failure(SessionPushReason::InternalError))?;
+        Ok(crate::InboxCursorResponse::from(&cursor))
+    }
+}
