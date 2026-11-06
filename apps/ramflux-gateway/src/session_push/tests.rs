@@ -344,3 +344,6 @@ async fn scoped_resume_and_router_refusal() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[path = "compatibility_tests.rs"]
+mod compatibility;

@@ -91,9 +91,12 @@ pub(crate) async fn write(
         bytes.len() <= ramflux_node_core::ENTRY_FRAME_BYTE_CAP,
         "capable frame too large"
     );
+    write_bytes(send, &bytes).await
+}
+async fn write_bytes(send: &GatewaySendHandle, bytes: &[u8]) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let mut sink = send.lock().await;
-        ramflux_transport::GatewaySessionFrameSink::send_frame(&mut **sink, &bytes)
+        ramflux_transport::GatewaySessionFrameSink::send_frame(&mut **sink, bytes)
             .await
             .map_err(crate::session_response::ClientWriteFailure)
     })
@@ -141,10 +144,14 @@ fn mesh_result(
             );
             Ok(value)
         }
-        _ => {
+        Ok(Err(ramflux_transport::TransportError::HttpStatus {
+            status: 404 | 405 | 410, ..
+        })) => {
             readiness.ready.store(false, Ordering::Release);
             Err(Retired.into())
         }
+        // Transport/5xx failures retire this session. They do not demote other sessions.
+        _ => Err(Retired.into()),
     }
 }
 fn check_epoch(value: &Value, id: &str) -> anyhow::Result<()> {
@@ -208,6 +215,30 @@ pub(crate) async fn handle_authorized(
     bytes: &[u8],
     native: Option<&crate::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
+    if let Some(grant) = native
+        && !matches!(
+            tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                crate::session::validate_native_frame(
+                    context,
+                    runtime,
+                    grant,
+                    &ramflux_node_core::GatewayClientFrame::Heartbeat { now: 0 }
+                )
+            )
+            .await,
+            Ok(Ok(()))
+        )
+    {
+        crate::session::write_gateway_handle(
+            send,
+            &ramflux_node_core::GatewayServerFrame::Nack {
+                reason: "native_session_authority_refused".into(),
+            },
+        )
+        .await?;
+        return Err(Retired.into());
+    }
     let Some(id) = runtime.session_push.as_deref() else {
         return crate::session::write_gateway_handle(
             send,
@@ -228,25 +259,6 @@ pub(crate) async fn handle_authorized(
     }
     if let Some(reason) = input_refusal(&frame, runtime) {
         return nack(send, id, reason).await;
-    }
-    if let Some(grant) = native
-        && crate::session::validate_native_frame(
-            context,
-            runtime,
-            grant,
-            &ramflux_node_core::GatewayClientFrame::Heartbeat { now: 0 },
-        )
-        .await
-        .is_err()
-    {
-        crate::session::write_gateway_handle(
-            send,
-            &ramflux_node_core::GatewayServerFrame::Nack {
-                reason: "native_session_authority_refused".into(),
-            },
-        )
-        .await?;
-        return Err(Retired.into());
     }
     match frame {
         Client::Resume { resume, .. } => resume_page(send, context, runtime, id, &resume).await,
@@ -269,8 +281,8 @@ pub(crate) async fn handle_authorized(
                 return Ok(());
             }
             check_epoch(&response, id)?;
-            validation::point(&response, &runtime.target_delivery_id, inbox_seq)?;
-            write(send, &response).await
+            let bytes = validation::point(&response, &runtime.target_delivery_id, inbox_seq)?;
+            write_bytes(send, &bytes).await
         }
         Client::AckBatch { inbox_seqs, .. } => {
             batch(send, context, runtime, id, inbox_seqs, false).await
@@ -373,13 +385,13 @@ async fn resume_page(
     }
     check_epoch(&response, id)?;
     response["frame_type"] = json!("resume_page");
-    validation::page(
+    let bytes = validation::page(
         &response,
         &runtime.target_delivery_id,
         resume.after_inbox_seq,
         resume.limit.min(256),
     )?;
-    write(send, &response).await
+    write_bytes(send, &bytes).await
 }
 
 async fn batch(
@@ -482,53 +494,76 @@ pub(crate) async fn negotiate(
             .iter()
             .any(|s| s == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY);
     if capable {
-        let request = ramflux_node_core::SessionPushSessionRequest {
-            session: descriptor.clone(),
-            session_push: true,
-        };
-        let response = post(context, "/s1/session", &serde_json::to_value(request)?).await?;
-        let id = response["incarnation_id"]
-            .as_str()
-            .filter(|id| ramflux_node_core::valid_inbox_incarnation(id))
-            .ok_or(Retired)?;
-        anyhow::ensure!(
-            response["target_delivery_id"] == descriptor.target_delivery_id
-                && response["session_id"] == descriptor.session_id,
-            Retired
-        );
-        Ok(Some(id.into()))
-    } else {
-        let _: ramflux_node_core::SessionDescriptor = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            crate::router_post_json_async(&context.router, "/s1/session/upsert", descriptor),
-        )
-        .await??;
-        Ok(None)
+        match capable_registration(context, descriptor).await {
+            Ok(id) => return Ok(Some(id)),
+            Err(error) => {
+                tracing::debug!(%error,"capable registration unavailable; selecting compatibility");
+                context.hub.readiness.ready.store(false, Ordering::Release);
+            }
+        }
     }
+    let _: ramflux_node_core::SessionDescriptor = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        crate::router_post_json_async(&context.router, "/s1/session/upsert", descriptor),
+    )
+    .await??;
+    Ok(None)
 }
+async fn capable_registration(
+    context: &GatewayQuicContext,
+    descriptor: &ramflux_node_core::SessionDescriptor,
+) -> anyhow::Result<String> {
+    let request = ramflux_node_core::SessionPushSessionRequest {
+        session: descriptor.clone(),
+        session_push: true,
+    };
+    let response = post(context, "/s1/session", &serde_json::to_value(request)?).await?;
+    let id = response["incarnation_id"]
+        .as_str()
+        .filter(|id| ramflux_node_core::valid_inbox_incarnation(id))
+        .ok_or(Retired)?;
+    anyhow::ensure!(
+        response["target_delivery_id"] == descriptor.target_delivery_id
+            && response["session_id"] == descriptor.session_id,
+        Retired
+    );
+    Ok(id.into())
+}
+
 pub(crate) async fn established(
     send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
     session: ramflux_node_core::GatewaySessionEstablishedFrame,
     id: Option<&str>,
 ) -> anyhow::Result<()> {
-    let value = if let Some(id) = id {
-        serde_json::to_value(ramflux_node_core::SessionPushServerFrame::SessionEstablished {
-            session: ramflux_node_core::SessionPushEstablishedFrame {
-                session,
-                capabilities: vec![ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into()],
-                inbox_incarnation_id: id.into(),
-            },
-        })?
-    } else {
-        serde_json::to_value(ramflux_node_core::GatewayServerFrame::SessionEstablished { session })?
-    };
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        ramflux_transport::write_gateway_session_json(send, &value),
-    )
-    .await
-    .map_err(|_| Retired)??;
-    Ok(())
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        if let Some(id) = id {
+            crate::session::write_gateway_frame(
+                send,
+                &ramflux_node_core::SessionPushServerFrame::SessionEstablished {
+                    session: ramflux_node_core::SessionPushEstablishedFrame {
+                        session,
+                        capabilities: vec![
+                            ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into(),
+                        ],
+                        inbox_incarnation_id: id.into(),
+                    },
+                },
+            )
+            .await
+        } else {
+            crate::session::write_gateway_frame(
+                send,
+                &ramflux_node_core::GatewayServerFrame::SessionEstablished { session },
+            )
+            .await
+        }
+    })
+    .await;
+    result.map_err(|_| {
+        crate::session_response::ClientWriteFailure(ramflux_transport::TransportError::Quic(
+            "session establishment write deadline".into(),
+        ))
+    })?
 }
 
 #[cfg(test)]

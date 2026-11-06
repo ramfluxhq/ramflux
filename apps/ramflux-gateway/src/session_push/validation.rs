@@ -3,7 +3,12 @@
 
 //! Validate router authority before forwarding a capable reply.
 use super::{Retired, Value};
-pub(super) fn page(value: &Value, target: &str, after: u64, limit: usize) -> anyhow::Result<()> {
+pub(super) fn page(
+    value: &Value,
+    target: &str,
+    after: u64,
+    limit: usize,
+) -> anyhow::Result<Vec<u8>> {
     let issued = value["issued_inbox_seq"].as_u64().ok_or(Retired)?;
     let settled = value["settled_through_seq"].as_u64().ok_or(Retired)?;
     let covered = value["covered_through_seq"].as_u64().ok_or(Retired)?;
@@ -54,10 +59,11 @@ pub(super) fn page(value: &Value, target: &str, after: u64, limit: usize) -> any
     if !value["oversize_next"].is_null() {
         anyhow::ensure!(value["oversize_next"].as_u64() == covered.checked_add(1), Retired);
     }
-    anyhow::ensure!(serde_json::to_vec(value)?.len() <= ramflux_node_core::PAGE_BYTE_CAP, Retired);
-    Ok(())
+    let bytes = serde_json::to_vec(value)?;
+    anyhow::ensure!(bytes.len() <= ramflux_node_core::PAGE_BYTE_CAP, Retired);
+    Ok(bytes)
 }
-pub(super) fn point(value: &Value, target: &str, seq: u64) -> anyhow::Result<()> {
+pub(super) fn point(value: &Value, target: &str, seq: u64) -> anyhow::Result<Vec<u8>> {
     match value["frame_type"].as_str() {
         Some("entry") => anyhow::ensure!(
             value["record"]["entry"]["target_delivery_id"] == target
@@ -81,11 +87,9 @@ pub(super) fn point(value: &Value, target: &str, seq: u64) -> anyhow::Result<()>
         ),
         _ => return Err(Retired.into()),
     }
-    anyhow::ensure!(
-        serde_json::to_vec(value)?.len() <= ramflux_node_core::ENTRY_FRAME_BYTE_CAP,
-        Retired
-    );
-    Ok(())
+    let bytes = serde_json::to_vec(value)?;
+    anyhow::ensure!(bytes.len() <= ramflux_node_core::ENTRY_FRAME_BYTE_CAP, Retired);
+    Ok(bytes)
 }
 pub(super) fn batch(value: &Value, target: &str, seqs: &[u64]) -> anyhow::Result<()> {
     anyhow::ensure!(value["cursor"]["target_delivery_id"] == target, Retired);
