@@ -123,6 +123,8 @@ async fn session_push_capability_negotiation() -> anyhow::Result<()> {
 }
 #[tokio::test]
 async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
+    assert_eq!(DISCOVERY_INTERVAL, Duration::from_secs(60));
+    let retry_interval = Duration::from_secs(1);
     for (label, status, body) in [
         ("push-missing-cap", 404, json!({})),
         ("push-invalid-cap", 200, json!({"capabilities":[7]})),
@@ -131,10 +133,20 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         let mut fixture = Fixture::new(label)?;
         fixture.context.hub.readiness.ready.store(true, Ordering::Release);
         let started = tokio::time::Instant::now();
-        fixture.context.hub.readiness.start(&fixture.context.router);
+        if status == 404 {
+            fixture
+                .context
+                .hub
+                .readiness
+                .start_with_interval(&fixture.context.router, retry_interval);
+        } else {
+            fixture.context.hub.readiness.start(&fixture.context.router);
+        }
         let req = fixture.next().await?;
         if body.is_null() {
-            tokio::time::sleep(Duration::from_millis(2100)).await;
+            // Keep the request alive until the discovery deadline clears readiness.
+            ready(&fixture, false).await?;
+            assert!(started.elapsed() >= Duration::from_secs(2));
             drop(req);
         } else {
             req.respond.send((status, body)).map_err(|_| Retired)?;
@@ -142,10 +154,10 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         ready(&fixture, false).await?;
         assert_eq!(registration(&mut fixture, true, false).await?, None);
         if status == 404 {
-            let retry = tokio::time::timeout(Duration::from_secs(65), fixture.requests.recv())
+            let retry = tokio::time::timeout(Duration::from_secs(5), fixture.requests.recv())
                 .await?
                 .ok_or(Retired)?;
-            assert!(started.elapsed() >= Duration::from_secs(60));
+            assert!(started.elapsed() >= retry_interval);
             assert_eq!(retry.path, "/mvp1/session-push-capabilities");
             retry
                 .respond
