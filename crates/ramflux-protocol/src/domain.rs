@@ -129,7 +129,54 @@ pub const HOME_PEER_STATUS: &str = "ramflux.identity.home_peer_status.v1";
 
 pub const HOME_PEER_QUERY: &str = "ramflux.identity.home_peer_query.v1";
 
-pub const ALL: [&str; 117] = [
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.base.v1`.
+pub const DM_FS_V3_BASE: &str = "ramflux.dm_bootstrap_fs.base.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.opk.v1`.
+pub const DM_FS_V3_OPK: &str = "ramflux.dm_bootstrap_fs.opk.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.branch_binding.v1`.
+pub const DM_FS_V3_BRANCH_BINDING: &str = "ramflux.dm_bootstrap_fs.branch_binding.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.owner_update.v1`.
+pub const DM_FS_V3_OWNER_UPDATE: &str = "ramflux.dm_bootstrap_fs.owner_update.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.publication_snapshot.v1`.
+pub const DM_FS_V3_PUBLICATION_SNAPSHOT: &str = "ramflux.dm_bootstrap_fs.publication_snapshot.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.public_view.v1`.
+pub const DM_FS_V3_PUBLIC_VIEW: &str = "ramflux.dm_bootstrap_fs.public_view.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.lease_intent.v1`.
+pub const DM_FS_V3_LEASE_INTENT: &str = "ramflux.dm_bootstrap_fs.lease_intent.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.lease_operation_id.v1`.
+pub const DM_FS_V3_LEASE_OPERATION_ID: &str = "ramflux.dm_bootstrap_fs.lease_operation_id.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.lease_result.v1`.
+pub const DM_FS_V3_LEASE_RESULT: &str = "ramflux.dm_bootstrap_fs.lease_result.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.owner_status.v1`.
+pub const DM_FS_V3_OWNER_STATUS: &str = "ramflux.dm_bootstrap_fs.owner_status.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.request.v1`.
+pub const DM_FS_V3_REQUEST: &str = "ramflux.dm_bootstrap_fs.request.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_argument.v1`.
+pub const DM_FS_V3_REQUEST_ARGUMENT: &str = "ramflux.dm_bootstrap_fs.request_argument.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.base_hash.v1`.
+pub const DM_FS_V3_BASE_HASH: &str = "ramflux.dm_bootstrap_fs.base_hash.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.bundle_hash.v1`.
+pub const DM_FS_V3_BUNDLE_HASH: &str = "ramflux.dm_bootstrap_fs.bundle_hash.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.header.v1`.
+pub const DM_FS_V3_HEADER: &str = "ramflux.dm_bootstrap_fs.header.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.transcript.v1`.
+pub const DM_FS_V3_TRANSCRIPT: &str = "ramflux.dm_bootstrap_fs.transcript.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.x3dh_root.v1`.
+pub const DM_FS_V3_X3DH_ROOT: &str = "ramflux.dm_bootstrap_fs.x3dh_root.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.frame_lease.v1`.
+pub const DM_FS_V3_FRAME_LEASE: &str = "ramflux.dm_bootstrap_fs.frame_lease.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.frame_publish.v1`.
+pub const DM_FS_V3_FRAME_PUBLISH: &str = "ramflux.dm_bootstrap_fs.frame_publish.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.frame_status.v1`.
+pub const DM_FS_V3_FRAME_STATUS: &str = "ramflux.dm_bootstrap_fs.frame_status.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.frame_result.v1`.
+pub const DM_FS_V3_FRAME_RESULT: &str = "ramflux.dm_bootstrap_fs.frame_result.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.retirement_list.v1`.
+pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_list.v1";
+/// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
+pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
+
+pub const ALL: [&str; 140] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -247,6 +294,29 @@ pub const ALL: [&str; 117] = [
     HOME_ATTEST_REQUEST,
     HOME_PEER_STATUS,
     HOME_PEER_QUERY,
+    DM_FS_V3_BASE,
+    DM_FS_V3_OPK,
+    DM_FS_V3_BRANCH_BINDING,
+    DM_FS_V3_OWNER_UPDATE,
+    DM_FS_V3_PUBLICATION_SNAPSHOT,
+    DM_FS_V3_PUBLIC_VIEW,
+    DM_FS_V3_LEASE_INTENT,
+    DM_FS_V3_LEASE_OPERATION_ID,
+    DM_FS_V3_LEASE_RESULT,
+    DM_FS_V3_OWNER_STATUS,
+    DM_FS_V3_REQUEST,
+    DM_FS_V3_REQUEST_ARGUMENT,
+    DM_FS_V3_BASE_HASH,
+    DM_FS_V3_BUNDLE_HASH,
+    DM_FS_V3_HEADER,
+    DM_FS_V3_TRANSCRIPT,
+    DM_FS_V3_X3DH_ROOT,
+    DM_FS_V3_FRAME_LEASE,
+    DM_FS_V3_FRAME_PUBLISH,
+    DM_FS_V3_FRAME_STATUS,
+    DM_FS_V3_FRAME_RESULT,
+    DM_FS_V3_RETIREMENT_LIST,
+    DM_FS_V3_REQUEST_HASH,
 ];
 
 #[cfg(test)]
@@ -269,7 +339,7 @@ mod tests {
                 );
             }
         }
-        for label in &super::ALL[66..] {
+        for label in &super::ALL[66..117] {
             assert!(
                 label.starts_with("ramflux.identity.") || *label == super::CUSTODY_BRANCH_EXPORTER
             );

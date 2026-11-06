@@ -31,3 +31,17 @@ pub use deadline::{BootstrapMode, DeadlineError, DeadlineInputs, validate_bootst
 mod deadline_tests;
 #[cfg(test)]
 mod lease_tests;
+
+mod request;
+pub use request::{NativePrekeyAction, NativePrekeyRequest};
+mod refusal;
+pub use refusal::DmFsV3Refusal;
+mod frames;
+pub use frames::{
+    NativePrekeyFrame, NativePrekeyLease, NativePrekeyPublish, NativePrekeyResult,
+    NativePrekeyResultKind, NativePrekeyStatus,
+};
+mod header;
+pub use header::{BootstrapHeader, BootstrapTranscript};
+#[cfg(test)]
+mod service_tests;

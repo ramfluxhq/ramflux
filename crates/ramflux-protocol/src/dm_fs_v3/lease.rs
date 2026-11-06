@@ -427,7 +427,7 @@ impl OwnerPrekeyStatus {
     }
 }
 
-fn encode_fields(kind: WireType, fields: &[&[u8]]) -> Result<Vec<u8>> {
+pub(super) fn encode_fields(kind: WireType, fields: &[&[u8]]) -> Result<Vec<u8>> {
     let specs = kind.specs();
     if fields.len() != specs.len() {
         return Err(DecodeError::Fields);
