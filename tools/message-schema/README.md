@@ -17,7 +17,8 @@ not maintain a second Rust model. A deterministic visitor transformation tracks
 field discriminants independently of values, rejecting repeated fields and
 aliases even after null while preserving arbitrary protobuf map keys. Enum
 fields use a shared adapter that keeps known names and unknown i32 numbers. Every output has deterministic SPDX headers.
-Rustfmt comes from the repository's pinned toolchain. All schema imports are
+Rustfmt comes from the repository's pinned toolchain and explicitly uses
+its `rustfmt.toml`, including for staged files outside the repository. All schema imports are
 local; no host protoc is used. The descriptor is also available as
 `ramflux_protocol::message::FILE_DESCRIPTOR_SET`.
 

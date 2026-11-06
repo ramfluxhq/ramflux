@@ -136,7 +136,7 @@ fn generate(root: &Path, check: bool) -> Result<(), Box<dyn Error>> {
             )?;
         }
         outputs.insert("generated/mod.rs".into(), index.into_bytes());
-        format_outputs(&mut outputs, &temporary)?;
+        format_outputs(&mut outputs, &temporary, root)?;
         check_obsolete(&message, &outputs, check)?;
         for (name, bytes) in outputs {
             let destination = message.join(name);
@@ -233,6 +233,7 @@ fn strict_duplicates(source: &str) -> Result<String, Box<dyn Error>> {
 fn format_outputs(
     outputs: &mut BTreeMap<String, Vec<u8>>,
     temporary: &Path,
+    root: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let mut files = Vec::new();
     for (name, bytes) in &*outputs {
@@ -243,8 +244,12 @@ fn format_outputs(
             files.push(path);
         }
     }
+    // Staged files live outside the repository, so rustfmt cannot discover its
+    // configuration from their paths. Use the same explicit config as cargo fmt.
     let status = std::process::Command::new("rustfmt")
         .args(["--edition", "2024", "--config", "skip_children=true"])
+        .arg("--config-path")
+        .arg(root.join("rustfmt.toml"))
         .args(&files)
         .status()?;
     if !status.success() {
