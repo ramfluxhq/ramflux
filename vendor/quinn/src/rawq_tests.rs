@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, Weak,
     },
     task::{Context, Poll, Waker},
 };
@@ -119,27 +119,54 @@ impl AsyncUdpSocket for Socket {
 struct Gate {
     closed: AtomicBool,
     wake: Mutex<Option<Waker>>,
+    driver: Mutex<Weak<ScheduledDriver>>,
+    poll_on_open: AtomicBool,
+    now: Mutex<Option<Instant>>,
 }
 impl Gate {
     fn open(&self) {
         self.closed.store(false, Ordering::SeqCst);
+        if self.poll_on_open.swap(false, Ordering::SeqCst) {
+            // Poll before yielding to the endpoint task. With no admission barrier,
+            // this deliberately lets the expired timer run before the queued ACK.
+            let driver = self.driver.lock().unwrap().upgrade().unwrap();
+            let wake = self.wake.lock().unwrap().clone().unwrap();
+            let _ = driver.poll(&mut Context::from_waker(&wake));
+            *self.now.lock().unwrap() = None;
+        }
         if let Some(w) = self.wake.lock().unwrap().take() {
             w.wake();
         }
     }
 }
+type DriverFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+struct ScheduledDriver(Mutex<Option<DriverFuture>>);
+impl std::fmt::Debug for ScheduledDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScheduledDriver")
+    }
+}
+impl ScheduledDriver {
+    fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let mut inner = self.0.lock().unwrap();
+        let Some(future) = inner.as_mut() else { return Poll::Ready(()); };
+        let result = future.as_mut().poll(cx);
+        if result.is_ready() { *inner = None; }
+        result
+    }
+}
 struct Gated {
-    inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+    inner: Arc<ScheduledDriver>,
     gate: Arc<Gate>,
 }
 impl Future for Gated {
     type Output = ();
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+        *self.gate.wake.lock().unwrap() = Some(cx.waker().clone());
         if self.gate.closed.load(Ordering::SeqCst) {
-            *self.gate.wake.lock().unwrap() = Some(cx.waker().clone());
             Poll::Pending
         } else {
-            self.inner.as_mut().poll(cx)
+            self.inner.poll(cx)
         }
     }
 }
@@ -149,6 +176,9 @@ struct RuntimeGate {
     spawned: AtomicUsize,
 }
 impl Runtime for RuntimeGate {
+    fn now(&self) -> Instant {
+        self.gate.now.lock().unwrap().unwrap_or_else(Instant::now)
+    }
     fn new_timer(&self, at: Instant) -> Pin<Box<dyn AsyncTimer>> {
         TokioRuntime.new_timer(at)
     }
@@ -156,10 +186,9 @@ impl Runtime for RuntimeGate {
         if self.spawned.fetch_add(1, Ordering::SeqCst) == 0 {
             TokioRuntime.spawn(future);
         } else {
-            TokioRuntime.spawn(Box::pin(Gated {
-                inner: future,
-                gate: self.gate.clone(),
-            }));
+            let inner = Arc::new(ScheduledDriver(Mutex::new(Some(future))));
+            *self.gate.driver.lock().unwrap() = Arc::downgrade(&inner);
+            TokioRuntime.spawn(Box::pin(Gated { inner, gate: self.gate.clone() }));
         }
     }
     fn wrap_udp_socket(&self, socket: std::net::UdpSocket) -> io::Result<Arc<dyn AsyncUdpSocket>> {
@@ -496,7 +525,7 @@ async fn send_metadata_credit_covers_allocation_families(){
 }
 
 async fn send_metadata_cases(){
-    metadata_send_ack_ranges_refuse_before_third_range().await;
+    metadata_send_ack_ranges_refuse_before_third_range(false).await;
     metadata_record_growth_refuses_before_ping_or_record_effects().await;
     metadata_scratch_and_ack_growth_use_real_driver_boundaries().await;
     metadata_stream_frame_growth_aborts_wire_packet_before_effects().await;
@@ -665,7 +694,12 @@ async fn metadata_scratch_and_ack_growth_use_real_driver_boundaries() {
 }
 
 
-async fn metadata_send_ack_ranges_refuse_before_third_range() {
+#[tokio::test]
+async fn send_range_admission_precedes_expired_loss_timer() {
+    metadata_send_ack_ranges_refuse_before_third_range(true).await;
+}
+
+async fn metadata_send_ack_ranges_refuse_before_third_range(force_expiry: bool) {
     let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
     gate.closed.store(true,Ordering::SeqCst);
     wire.held.store(true,Ordering::SeqCst);
@@ -689,7 +723,15 @@ async fn metadata_send_ack_ranges_refuse_before_third_range() {
         let number=connection.control_test(|p|p.metadata_test_next_received());
         let packet=peer.control_test(|p|p.control_test_ack_packet(number,&[packet_number]));
         wire.packets.lock().unwrap().clear();
-        if index==2 {probe.freeze_at_live_allocations();}
+        if index==2 {
+            probe.freeze_at_live_allocations();
+            if force_expiry {
+                assert_eq!(endpoint.rawq_pool().snapshot().0.items,0);
+                let deadline=connection.control_test(|p|p.poll_timeout().unwrap());
+                *gate.now.lock().unwrap()=Some(deadline+Duration::from_secs(1));
+                gate.poll_on_open.store(true,Ordering::SeqCst);
+            }
+        }
         wire.packets.lock().unwrap().push_back(packet);
         wire.held.store(false,Ordering::SeqCst);
         if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
