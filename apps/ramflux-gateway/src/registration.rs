@@ -61,9 +61,10 @@ pub(crate) async fn forward_async(
         Ok(request) => request,
         Err(response) => return response,
     };
+    let deadline = std::time::Instant::now() + REGISTRATION_TIMEOUT;
     match tokio::time::timeout(
         REGISTRATION_TIMEOUT,
-        crate::router_post_json_async(router, "/mvp1/identity/register", &request),
+        crate::router_post_json_until(router, "/mvp1/identity/register", &request, deadline),
     )
     .await
     {
@@ -77,9 +78,10 @@ pub(crate) async fn publish_prekey(
     router: &crate::RouterMeshClient,
     request: &ramflux_node_core::PrekeyPublishRequest,
 ) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
+    let deadline = std::time::Instant::now() + REGISTRATION_TIMEOUT;
     Ok(tokio::time::timeout(
         REGISTRATION_TIMEOUT,
-        crate::router_post_json_async(router, "/mvp1/prekey/publish", request),
+        crate::router_post_json_until(router, "/mvp1/prekey/publish", request, deadline),
     )
     .await??)
 }

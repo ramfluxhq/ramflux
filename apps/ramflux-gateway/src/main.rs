@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) use clients::{
     gateway_state, notify_http_client, notify_offline_wake, router_cursor_async,
     router_get_json_async, router_inbox_async, router_mesh_client, router_post_json,
-    router_post_json_async, router_session_async,
+    router_post_json_async, router_post_json_until, router_session_async,
 };
 #[cfg(feature = "itest-http")]
 pub(crate) use clients::{is_timeout_error, pre_auth_gate, router_get_json};

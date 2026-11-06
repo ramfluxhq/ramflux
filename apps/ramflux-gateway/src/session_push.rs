@@ -112,9 +112,10 @@ async fn nack(send: &GatewaySendHandle, id: &str, reason: Reason) -> anyhow::Res
     .await
 }
 async fn post(context: &GatewayQuicContext, path: &str, body: &Value) -> anyhow::Result<Value> {
+    let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
     let result = tokio::time::timeout(
         REQUEST_TIMEOUT,
-        crate::router_post_json_async(&context.router, path, body),
+        crate::router_post_json_until(&context.router, path, body, deadline),
     )
     .await;
     mesh_result(&context.hub.readiness, result)
@@ -517,9 +518,10 @@ pub(crate) async fn negotiate(
             }
         }
     }
+    let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
     let _: ramflux_node_core::SessionDescriptor = tokio::time::timeout(
         REQUEST_TIMEOUT,
-        crate::router_post_json_async(&context.router, "/s1/session/upsert", descriptor),
+        crate::router_post_json_until(&context.router, "/s1/session/upsert", descriptor, deadline),
     )
     .await??;
     Ok(None)

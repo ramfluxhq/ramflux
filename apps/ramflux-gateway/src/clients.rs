@@ -225,75 +225,129 @@ where
     T: serde::Serialize,
     R: serde::de::DeserializeOwned,
 {
-    if let Some(async_mesh) = &router.async_mesh {
-        // Only the router's envelope hot path accepts the postcard wire format.
-        let response = if path == "/mvp0/envelope" {
-            ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
-                &async_mesh.endpoint,
-                path,
-                &async_mesh.tls,
-                &async_mesh.server_name,
-                &async_mesh.peer_ca_pems,
-                value,
-            )
-            .await
-        } else {
-            ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(
-                &async_mesh.endpoint,
-                path,
-                &async_mesh.tls,
-                &async_mesh.server_name,
-                &async_mesh.peer_ca_pems,
-                value,
-            )
-            .await
-        };
-        match response {
-            Ok(response) => return Ok(response),
-            Err(error @ ramflux_transport::TransportError::Quic(_)) => {
-                tracing::warn!(%error, "router async QUIC mesh failed; falling back to blocking mesh");
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    router_post_json_blocking_async(router, path, value).await
+    router_post_json_until(router, path, value, std::time::Instant::now() + ROUTER_POST_BUDGET)
+        .await
 }
 
-async fn router_post_json_blocking_async<T, R>(
+/// Total budget for a router POST whose caller names no deadline of its own.
+const ROUTER_POST_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn deadline_exceeded() -> ramflux_transport::TransportError {
+    ramflux_transport::TransportError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "router request deadline exceeded",
+    ))
+}
+
+/// Posts to the router, bounded end to end by the caller's absolute `deadline`: the QUIC attempt,
+/// the blocking fallback after a QUIC failure and its stale-connection retry all share it.
+pub(crate) async fn router_post_json_until<T, R>(
     router: &RouterMeshClient,
     path: &str,
     value: &T,
+    deadline: std::time::Instant,
 ) -> Result<R, ramflux_transport::TransportError>
 where
     T: serde::Serialize,
     R: serde::de::DeserializeOwned,
 {
-    // Without a configured async router endpoint, fall back to the blocking mesh client.
-    // That client blocks on a std mpsc recv, so it must not run directly on the async
-    // gateway QUIC worker (it would stall the runtime and the gateway never becomes ready).
-    // Run it on a blocking thread instead. The thread carries an absolute deadline of its own:
-    // the async waiter's timeout alone would leave the thread, and its retry, running.
-    let deadline = std::time::Instant::now() + ROUTER_BLOCKING_FALLBACK_TIMEOUT;
+    if let Some(async_mesh) = &router.async_mesh {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        // Only the router's envelope hot path accepts the postcard wire format.
+        let quic = async {
+            if path == "/mvp0/envelope" {
+                ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
+                    &async_mesh.endpoint,
+                    path,
+                    &async_mesh.tls,
+                    &async_mesh.server_name,
+                    &async_mesh.peer_ca_pems,
+                    value,
+                )
+                .await
+            } else {
+                ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(
+                    &async_mesh.endpoint,
+                    path,
+                    &async_mesh.tls,
+                    &async_mesh.server_name,
+                    &async_mesh.peer_ca_pems,
+                    value,
+                )
+                .await
+            }
+        };
+        match tokio::time::timeout(remaining, quic).await {
+            Err(_elapsed) => return Err(deadline_exceeded()),
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(error @ ramflux_transport::TransportError::Quic(_))) => {
+                tracing::warn!(%error, "router async QUIC mesh failed; falling back to blocking mesh");
+            }
+            Ok(Err(error)) => return Err(error),
+        }
+    }
+    // Without a configured async router endpoint, or after a QUIC failure, fall back to the
+    // blocking mesh client. That client blocks on a std mpsc recv, so it must not run directly on
+    // the async gateway QUIC worker (it would stall the runtime and the gateway never becomes
+    // ready). It runs on a blocking thread that carries the same absolute deadline.
     let body = serde_json::to_value(value)?;
     let response = router_post_json_blocking_until(router, path, &body, deadline).await?;
     Ok(serde_json::from_value(response)?)
 }
 
-/// Caller budget for the blocking mesh fallback (matches the 10 s registration/prekey timeout).
-const ROUTER_BLOCKING_FALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Raises a flag when the awaiting future is dropped, so a worker that has not started yet
+/// skips its request instead of dialing for a caller that is gone.
+struct CancelOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-/// Runs one blocking router POST that cannot outlive `deadline`, across connect, handshake,
-/// every read and the stale-connection retry. Returns only after the blocking thread exits.
-pub(crate) async fn router_post_json_blocking_until(
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Runs one blocking router POST that cannot outlive `deadline`, across DNS, connect, handshake,
+/// every read and the stale-connection retry.
+///
+/// Ownership: the shutdown admission (`begin_service_request`) is taken here and moved into the
+/// blocking worker, so it is released only when the worker actually exits, even when the awaiting
+/// caller times out or is dropped first.
+async fn router_post_json_blocking_until(
     router: &RouterMeshClient,
     path: &str,
     body: &serde_json::Value,
     deadline: std::time::Instant,
 ) -> Result<serde_json::Value, ramflux_transport::TransportError> {
+    let admission = ramflux_node_core::begin_service_request().ok_or_else(|| {
+        ramflux_transport::TransportError::Quic("gateway is shutting down".to_owned())
+    })?;
+    router_post_json_blocking_owned(router, path, body, deadline, admission).await
+}
+
+/// Same as [`router_post_json_blocking_until`] with the admission guard supplied by the caller.
+///
+/// Resource owners: the blocking worker owns the router clone, the request body, the `admission`
+/// guard and the socket it dials; it drops the guard last, as it exits. The awaiting future owns
+/// only the `CancelOnDrop` flag, which tells a worker that has not started to skip its dial.
+async fn router_post_json_blocking_owned<A: Send + 'static>(
+    router: &RouterMeshClient,
+    path: &str,
+    body: &serde_json::Value,
+    deadline: std::time::Instant,
+    admission: A,
+) -> Result<serde_json::Value, ramflux_transport::TransportError> {
+    if std::time::Instant::now() >= deadline {
+        return Err(deadline_exceeded());
+    }
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _cancel_on_drop = CancelOnDrop(std::sync::Arc::clone(&cancelled));
     let router = router.clone();
     let path = path.to_owned();
     let body = body.clone();
     tokio::task::spawn_blocking(move || {
+        let _admission = admission;
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(deadline_exceeded());
+        }
         router.client.post_json_with_deadline(
             &router.endpoint,
             &path,
@@ -498,6 +552,10 @@ pub(crate) fn notification_class_for_envelope(
         _ => ramflux_protocol::NotificationDeliveryClass::UserContentNotification,
     }
 }
+
+#[cfg(test)]
+#[path = "clients_deadline_tests.rs"]
+mod deadline_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
