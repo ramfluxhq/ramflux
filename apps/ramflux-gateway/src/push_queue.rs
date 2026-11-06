@@ -3,13 +3,17 @@
 
 //! Registration-owned bounded delivery admission and frame-atomic output.
 mod element;
+mod state_mutex;
 use crate::GatewaySendHandle;
 use element::Element;
 use ramflux_transport::{GatewaySessionFrameSink, TransportError};
+use state_mutex::StateMutex;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -66,7 +70,7 @@ pub(crate) struct PushQueue {
     inner: Arc<Inner>,
 }
 struct Inner {
-    state: Mutex<State>,
+    state: StateMutex,
     incarnation: std::sync::OnceLock<Option<String>>,
     #[cfg(test)]
     before_write: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>)>>,
@@ -99,7 +103,7 @@ impl PushQueue {
                 before_write: Mutex::new(None),
                 #[cfg(test)]
                 admission_probe: Mutex::new(None),
-                state: Mutex::new(State {
+                state: StateMutex::new(State {
                     durable: VecDeque::with_capacity(limit),
                     _transient: VecDeque::new(),
                     frames: 0,

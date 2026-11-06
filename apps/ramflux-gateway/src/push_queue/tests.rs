@@ -63,22 +63,20 @@ fn contended_admission_waits_and_queues() -> anyhow::Result<()> {
     let queue = PushQueue::new(16, closed);
     let guard = queue.inner.state.lock().map_err(|_| anyhow::anyhow!("admission poisoned"))?;
     let (started, ready) = std::sync::mpsc::channel();
+    queue.inner.state.observe_contention(started);
     let (result, received) = std::sync::mpsc::channel();
     let producer = queue.clone();
     let worker = std::thread::spawn(move || {
-        let _ = started.send(());
         let _ = result.send(producer.try_push(vec![0], 1));
     });
-    ready.recv_timeout(Duration::from_secs(2))?;
-    let premature = received.recv_timeout(Duration::from_millis(50));
+    // This gate fires only after the real mutex reported contention.
+    ready.recv_timeout(Duration::from_secs(10))?;
+    assert!(
+        matches!(received.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+        "admission returned while the state mutex is held"
+    );
     drop(guard);
-    let admitted = match premature {
-        Ok(value) => value,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            received.recv_timeout(Duration::from_secs(2))?
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let admitted = received.recv_timeout(Duration::from_secs(10))?;
     worker.join().map_err(|_| anyhow::anyhow!("admission worker panicked"))?;
     assert_eq!(admitted, Admission::Queued);
     assert!(matches!(queue.next(), Next::Frame(_)));
