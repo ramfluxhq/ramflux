@@ -6,6 +6,7 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 mod legacy_receive;
+mod post_send;
 pub(crate) struct LegacyReceive<'a> {
     pub conversation_id: &'a str,
     pub auto_fetch_attachments: bool,
@@ -193,6 +194,32 @@ impl RamfluxClient {
             plaintext,
             attachments,
             true,
+            false,
+        )
+        .await
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "post-send candidate awaits complete caller activation")
+    )]
+    pub(crate) async fn send_plaintext_direct_message_with_attachments_via_gateway_candidate(
+        &mut self,
+        engine: &mut impl GatewaySessionAccess,
+        pool: &ramflux_transport::RelayQuicPool,
+        mut message: GatewayDirectMessage,
+        plaintext: &[u8],
+        attachments: &[LocalBusMessageAttachmentInput],
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        message.ttl = self.content_ttl()?;
+        self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
+            engine,
+            pool,
+            message,
+            plaintext,
+            attachments,
+            true,
+            true,
         )
         .await
     }
@@ -206,6 +233,7 @@ impl RamfluxClient {
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
         include_franking_ext: bool,
+        consume_erased: bool,
     ) -> Result<GatewayInboxEntry, SdkError> {
         let mut refs = Vec::with_capacity(attachments.len());
         let mut holds = Vec::with_capacity(attachments.len());
@@ -246,24 +274,17 @@ impl RamfluxClient {
                 crate::client::routed::Route::attachments(),
             )
             .await;
-        if result.is_ok() {
-            self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-                for reference in &envelope.attachments {
-                    self.persist_received_reference_prepared(
-                        reference,
-                        &owner,
-                        &conversation,
-                        &message_id,
-                        None,
-                    )?;
-                }
-                Ok(())
-            })?;
-        }
-        for hold in holds {
-            hold.release()?;
-        }
-        result
+        self.finish_attachment_send(
+            result,
+            &envelope.attachments,
+            crate::client::deferred_attachment::ReferenceContext {
+                owner: &owner,
+                conversation: &conversation,
+                message: &message_id,
+            },
+            holds,
+            consume_erased,
+        )
     }
 
     /// # Errors
