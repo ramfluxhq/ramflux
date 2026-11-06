@@ -488,6 +488,21 @@ const INVENTORY: &[(&str, &str)] = &[
     ("I07", "renewal.rs:409 expires_at <= now"),
     ("J01", "grant.rs:150 W verify_strict Err (grant signature)"),
     ("J02", "grant.rs:150 P verify_strict Err (grant signature)"),
+    ("R1", "renewal.rs:43 match arm op 1 (GET) selects endpoint"),
+    ("R2", "renewal.rs:43 match arm op 2 (HEAD) selects endpoint"),
+    ("R3", "renewal.rs:43 match arm op 3 (Missing) selects endpoint"),
+    ("R8", "renewal.rs:43 match arm op 8 (renew) selects endpoint"),
+    ("A07a", "renewal.rs:53 matches!(op, 2 | 8) alternative 2 (HEAD unused range)"),
+    ("A07b", "renewal.rs:53 matches!(op, 2 | 8) alternative 8 (renew unused range)"),
+    ("S2", "renewal.rs:54 segment_index != 0 under op 2 (HEAD)"),
+    ("O2", "renewal.rs:54 offset != 0 under op 2 (HEAD)"),
+    ("L2", "renewal.rs:54 length != 0 under op 2 (HEAD)"),
+    ("A21a", "renewal.rs:76 matches!(op, 1 | 2) alternative 1 (GET read digest)"),
+    ("A21b", "renewal.rs:76 matches!(op, 1 | 2) alternative 2 (HEAD read digest)"),
+    ("H22", "renewal.rs:76 body_digest != body_digest(&[]) under op 2 (HEAD)"),
+    ("D07a", "renewal.rs:187 !matches!(target.op, 1..=3) alternative 1 (GET target)"),
+    ("D07b", "renewal.rs:187 !matches!(target.op, 1..=3) alternative 2 (HEAD target)"),
+    ("D07c", "renewal.rs:187 !matches!(target.op, 1..=3) alternative 3 (Missing target)"),
 ];
 
 type Fe = std::result::Result<(), FormatError>;
@@ -498,6 +513,16 @@ type Fe = std::result::Result<(), FormatError>;
 struct Rows {
     hits: Vec<&'static str>,
     failures: Vec<String>,
+}
+
+/// One vector that isolates several predicate instances (e.g. an alternative and the operand it
+/// gates). Each id is recorded; the mismatch, if any, is reported once.
+fn rowm(r: &mut Rows, ids: &[&'static str], label: &str, got: Fe, want: Option<&'static str>) {
+    r.hits.extend_from_slice(ids);
+    let expect = want.map_or(Ok(()), |e| Err(FormatError(e)));
+    if got != expect {
+        r.failures.push(format!("{} {label}: got {got:?}, want {expect:?}", ids.join(",")));
+    }
 }
 
 /// `want` is the exact refusal, or `None` when the row must be accepted.
@@ -853,6 +878,94 @@ fn rows_operation_range(v: &Vectors, r: &mut Rows) -> Result {
         Some("read body"),
     );
     Ok(())
+}
+
+/// HEAD (op 2) control: method HEAD, path segments/0, segment 0, offset 0, length 0, empty digest.
+fn head_base(v: &Vectors) -> AttachmentOperation {
+    let mut op = v.target.clone();
+    op.op = 2;
+    op.method = "HEAD".into();
+    op.segment_index = 0;
+    op.path = format!("/attachments/{}/{}/segments/0", hex(&op.object_id), hex(&op.manifest_hash));
+    op.offset = 0;
+    op.length = 0;
+    op.body_digest = body_digest(&[]);
+    op
+}
+
+fn rows_head_and_arms(v: &Vectors, r: &mut Rows) -> Result {
+    let ro = &v.ro;
+    let read = read_base(v).canonical_bytes()?;
+    let head = head_base(v).canonical_bytes()?;
+    let page = page_base(v).canonical_bytes()?;
+    row(r, "R1", "arm op 1 selects GET", dec_o(&read), None);
+    row(r, "R2", "arm op 2 selects HEAD (valid control)", dec_o(&head), None);
+    row(r, "R3", "arm op 3 selects Missing", dec_o(&page), None);
+    row(r, "R8", "arm op 8 selects renew", dec_o(ro), None);
+    let unused = Some("operation unused range");
+    rowm(
+        r,
+        &["A07a", "S2"],
+        "HEAD segment index 1",
+        dec_o(&mutated(&head, |b| put_from_end(b, 56, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    row(
+        r,
+        "O2",
+        "HEAD offset 1",
+        dec_o(&mutated(&head, |b| put_from_end(b, 48, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    row(
+        r,
+        "L2",
+        "HEAD length 1",
+        dec_o(&mutated(&head, |b| put_from_end(b, 40, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    row(
+        r,
+        "A07b",
+        "renew segment index 1 (op 8 alternative)",
+        dec_o(&mutated(ro, |b| put_from_end(b, 56, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    row(
+        r,
+        "A21a",
+        "GET nonempty digest (op 1 alternative)",
+        dec_o(&mutated(&read, |b| flip_from_end(b, 32))),
+        Some("read body"),
+    );
+    rowm(
+        r,
+        &["A21b", "H22"],
+        "HEAD nonempty digest",
+        dec_o(&mutated(&head, |b| flip_from_end(b, 32))),
+        Some("read body"),
+    );
+    Ok(())
+}
+
+fn rows_target_alternatives(v: &Vectors, r: &mut Rows) {
+    let accept = |t: &AttachmentOperation| {
+        RenewalRequest::new(t, &v.renew.audience, v.renew.operation_id)
+            .and_then(|q| q.target())
+            .map(|_| ())
+    };
+    row(r, "D07a", "embedded GET target accepted", accept(&v.target), None);
+    let mut head = v.target.clone();
+    head.op = 2;
+    head.method = "HEAD".into();
+    head.segment_index = 0;
+    head.path =
+        format!("/attachments/{}/{}/segments/0", hex(&head.object_id), hex(&head.manifest_hash));
+    head.offset = 0;
+    head.length = 0;
+    head.body_digest = body_digest(&[]);
+    row(r, "D07b", "embedded HEAD target accepted", accept(&head), None);
+    row(r, "D07c", "embedded Missing target accepted", accept(&page_base(v)), None);
 }
 
 fn rows_operation_decode(v: &Vectors, r: &mut Rows) {
@@ -1513,6 +1626,15 @@ fn renewal_rows_renewal_body() -> Result {
 }
 
 #[test]
+fn renewal_rows_head_arms_and_alternatives() -> Result {
+    family(|v, r| {
+        rows_head_and_arms(v, r)?;
+        rows_target_alternatives(v, r);
+        Ok(())
+    })
+}
+
+#[test]
 fn renewal_rows_renewal_grant() -> Result {
     family(rows_renewal_grant)
 }
@@ -1547,7 +1669,9 @@ fn renewal_predicate_rows_match_inventory() -> Result {
     rows_operation_canonical(&v, &mut r)?;
     rows_operation_decode(&v, &mut r);
     rows_identity(&v, &mut r)?;
+    rows_head_and_arms(&v, &mut r)?;
     rows_renewal_body(&v, &mut r)?;
+    rows_target_alternatives(&v, &mut r);
     rows_renewal_grant(&v, &mut r)?;
     rows_forward_decode(&v, &mut r)?;
     rows_forward_validate(&v, &mut r)?;
@@ -1560,7 +1684,7 @@ fn renewal_predicate_rows_match_inventory() -> Result {
     let mut inv: Vec<&str> = INVENTORY.iter().map(|(id, _)| *id).collect();
     inv.sort_unstable();
     assert_eq!(hits, inv, "each predicate instance has exactly one row");
-    assert_eq!(INVENTORY.len(), 118);
+    assert_eq!(INVENTORY.len(), 133);
     Ok(())
 }
 
