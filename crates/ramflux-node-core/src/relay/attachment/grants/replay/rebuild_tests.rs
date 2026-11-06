@@ -20,13 +20,13 @@ fn insert_rows(tx: &redb::WriteTransaction, count: u64, expires: u64) {
 #[test]
 fn replay_rebuild_keeps_store_open_over_budget_and_prunes_expired_first() {
     let path = path("rebuild-budget");
-    let now = crate::now_unix_seconds();
+    let mut now = crate::now_unix_seconds();
     let f = RetirementFixture::new_at(&path, now);
     let grant = f.grant.clone();
     drop(f);
     let db = redb::Database::open(&path).unwrap();
     let tx = db.begin_write().unwrap();
-    insert_rows(&tx, 16385, now + 30);
+    insert_rows(&tx, 16385, now + 3600);
     tx.commit().unwrap();
     drop(db);
     let store = RelayRedbStore::open(&path).unwrap();
@@ -35,6 +35,17 @@ fn replay_rebuild_keeps_store_open_over_budget_and_prunes_expired_first() {
         .unwrap()
         .scoped_grants(authority())
         .unwrap();
+    now = registry
+        .ledger
+        .db
+        .begin_read()
+        .unwrap()
+        .open_table(META)
+        .unwrap()
+        .get("clock")
+        .unwrap()
+        .unwrap()
+        .value();
     assert!(matches!(
         registry.admit_operation_after_authentication(&grant, 1, &proof(now, 1), now),
         Err(AttachmentReplayError::ReplayProtectionCapacity)
@@ -79,6 +90,17 @@ fn replay_rebuild_keeps_store_open_over_budget_and_prunes_expired_first() {
         .unwrap()
         .scoped_grants(authority())
         .unwrap();
+    now = registry
+        .ledger
+        .db
+        .begin_read()
+        .unwrap()
+        .open_table(META)
+        .unwrap()
+        .get("clock")
+        .unwrap()
+        .unwrap()
+        .value();
     assert_eq!(
         registry.ledger.db.begin_read().unwrap().open_table(NONCES).unwrap().len().unwrap(),
         0
@@ -98,11 +120,11 @@ fn replay_rebuild_keeps_store_open_over_budget_and_prunes_expired_first() {
 #[test]
 fn replay_rebuild_preserves_malformed_evidence_and_refuses_new_admissions() {
     for (name, key, end) in [
-        ("length", vec![7; 95], crate::now_unix_seconds() + 30),
+        ("length", vec![7; 95], crate::now_unix_seconds() + 3600),
         ("overflow", vec![7; 96], u64::MAX),
     ] {
         let path = path(name);
-        let now = crate::now_unix_seconds();
+        let mut now = crate::now_unix_seconds();
         let f = RetirementFixture::new_at(&path, now);
         let grant = f.grant.clone();
         drop(f);
@@ -117,6 +139,17 @@ fn replay_rebuild_preserves_malformed_evidence_and_refuses_new_admissions() {
             .unwrap()
             .scoped_grants(authority())
             .unwrap();
+        now = registry
+            .ledger
+            .db
+            .begin_read()
+            .unwrap()
+            .open_table(META)
+            .unwrap()
+            .get("clock")
+            .unwrap()
+            .unwrap()
+            .value();
         assert!(matches!(
             registry.admit_operation_after_authentication(&grant, 1, &proof(now, 1), now),
             Err(AttachmentReplayError::ReplayProtectionCapacity)

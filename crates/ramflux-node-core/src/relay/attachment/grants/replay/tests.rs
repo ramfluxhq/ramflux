@@ -69,7 +69,7 @@ fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
     tx.delete_table(PRINCIPALS).unwrap();
     tx.commit().unwrap();
     drop(db);
-    let store = RelayRedbStore::open(&path).unwrap();
+    let store = RelayRedbStore::open_at(&path, now).unwrap();
     let registry = store
         .attachment_ledger(AttachmentPolicy::default())
         .unwrap()
@@ -105,6 +105,7 @@ fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
     drop(store);
     std::fs::remove_file(path).unwrap();
     assert_replay_budgets_and_indexed_gc_keep_unrelated_principals_live();
+    super::capacity_tests::assert_default_capacity_through_public_admission();
 }
 #[test]
 fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {

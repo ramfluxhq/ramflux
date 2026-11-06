@@ -108,7 +108,10 @@ pub struct AttachmentLedger {
     policy: AttachmentPolicy,
 }
 
-pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), crate::NodeCoreError> {
+pub(super) fn install(
+    tx: &redb::WriteTransaction,
+    replay_now: u64,
+) -> Result<(), crate::NodeCoreError> {
     backend::install(tx)?;
     let map = |error: redb::TableError| crate::NodeCoreError::Redb(error.to_string());
     let _ = tx.open_table(RECORDS).map_err(map)?;
@@ -118,7 +121,7 @@ pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), crate::NodeCore
     let _ = tx.open_table(DEBTS).map_err(map)?;
     identity::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     format::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
-    grants::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
+    grants::install(tx, replay_now).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     Ok(())
 }
 impl AttachmentLedger {

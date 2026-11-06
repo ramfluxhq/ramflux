@@ -67,14 +67,17 @@ pub struct ScopedRegistrationAuth<'a> {
     pub certificate: &'a GatewayIssuerCertificate,
     pub pinned_trust: &'a RelayTrustSnapshotCache,
 }
-pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), AttachmentLedgerError> {
+pub(super) fn install(
+    tx: &redb::WriteTransaction,
+    replay_now: u64,
+) -> Result<(), AttachmentLedgerError> {
     let _ = tx.open_table(GRANTS).map_err(store)?;
     let _ = tx.open_table(EXPIRY).map_err(store)?;
     let _ = tx.open_table(CONFIG).map_err(store)?;
     let _ = tx.open_table(REFERENCES).map_err(store)?;
     admission::install(tx)?;
     retirement::install(tx)?;
-    replay::install(tx)?;
+    replay::install(tx, replay_now)?;
     Ok(())
 }
 fn invalid(_: impl std::fmt::Display) -> AttachmentLedgerError {

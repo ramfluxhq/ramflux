@@ -36,8 +36,8 @@ impl Default for Limits {
 /// Normal server open rebuilds derived indexes and budgets from authoritative nonce
 /// rows. The clock fence is preserved. Disaster rollback requires externally fenced
 /// authority generation rotation; a copied server DB is not rollback detection.
-pub(crate) fn install(tx: &WriteTransaction) -> Result<(), AttachmentLedgerError> {
-    rebuild(tx, crate::now_unix_seconds(), Limits::default())
+pub(crate) fn install(tx: &WriteTransaction, now: u64) -> Result<(), AttachmentLedgerError> {
+    rebuild(tx, now, Limits::default())
 }
 // Startup can revisit a previous version's larger limits/charge without losing
 // serving availability. Live/malformed primary evidence is never discarded.

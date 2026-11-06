@@ -50,6 +50,11 @@ impl RelayRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
+        Self::open_at(path, crate::now_unix_seconds())
+    }
+    // Trusted startup time. Keeping the clock explicit permits deterministic
+    // restart tests without changing the public store-open API.
+    pub(crate) fn open_at(path: impl AsRef<Path>, replay_now: u64) -> Result<Self, NodeCoreError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -73,7 +78,7 @@ impl RelayRedbStore {
                 .open_table(RELAY_TOMBSTONE_TABLE)
                 .map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         }
-        super::attachment::install(&write_txn)?;
+        super::attachment::install(&write_txn, replay_now)?;
         write_txn.commit().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let commit_writer = RelayCommitWriter::start(std::sync::Arc::clone(&db))?;
         Ok(Self { db, commit_writer })
