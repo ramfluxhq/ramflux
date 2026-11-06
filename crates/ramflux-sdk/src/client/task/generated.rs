@@ -268,7 +268,14 @@ fn value_json(value: &g::JsonValue) -> Result<Value, SdkError> {
         match value.value.as_ref().ok_or_else(|| invalid("task extension choice missing"))? {
             J::Null(_) => Value::Null,
             J::Boolean(value) => Value::Bool(*value),
-            J::Number(token) => serde_json::from_str(token)?,
+            J::Number(token) => {
+                let value: Value = serde_json::from_str(token)
+                    .map_err(|_| invalid("invalid task extension number"))?;
+                if !value.is_number() || value.to_string().as_bytes() != token.as_bytes() {
+                    return Err(invalid("noncanonical task extension number"));
+                }
+                value
+            }
             J::Text(text) => Value::String(text.clone()),
             J::Array(array) => {
                 Value::Array(array.values.iter().map(value_json).collect::<Result<_, _>>()?)

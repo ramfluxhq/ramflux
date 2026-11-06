@@ -238,8 +238,8 @@ fn approval_packet()
         step_id: "step".into(),
         opening_revision: 2,
         requester: "human".into(),
-        assignee: "human".into(),
-        executor_device_id: "device".into(),
+        assignee: "agent".into(),
+        executor_device_id: "executor".into(),
     };
     let native_binding = crate::TaskApprovalBinding {
         conversation_id: binding.conversation_id.clone(),
@@ -638,3 +638,6 @@ fn t17a_event_carrier_approval_scenarios_round_trip() -> TestResult {
     generated_approval_preserves_native_grant_signature_and_rejects_every_grant_field()?;
     Ok(())
 }
+
+#[path = "review_tests.rs"]
+mod review_tests;

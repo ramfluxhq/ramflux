@@ -69,6 +69,10 @@ impl RamfluxClient {
         let Some(g::task::Payload::Carrier(carrier)) = task.payload else {
             return Err(invalid("generated task carrier required"));
         };
+        // P17b replaces this temporary refusal with certificate verification and bindings.
+        if carrier.decision_proof.is_some() {
+            return Err(invalid("generated task decision proof verification unavailable"));
+        }
         if carrier.content_type != "task"
             || carrier.message_id.is_empty()
             || carrier.principal_id.is_empty()
