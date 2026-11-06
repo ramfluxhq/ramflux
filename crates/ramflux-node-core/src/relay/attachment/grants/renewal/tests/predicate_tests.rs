@@ -302,18 +302,41 @@ fn mint_home_and_verdict_operands_are_each_checked_in_isolation() {
 }
 
 #[test]
-fn every_refusal_has_a_stable_unique_mapping() {
-    let mut codes = std::collections::BTreeSet::new();
-    for (i, r) in RenewalRefusal::ALL.into_iter().enumerate() {
+fn every_refusal_has_a_pinned_wire_code_status_and_retry_class() {
+    use RenewalRefusal as R;
+    // The declared N5/N6 table, pinned independently of the implementation.
+    let pinned: [(R, &str, u16, bool); 21] = [
+        (R::Replay, "replay", 409, false),
+        (R::Expired, "expired", 410, false),
+        (R::ChallengeUnknown, "challenge_unknown", 404, false),
+        (R::ChallengeConsumed, "challenge_consumed", 409, false),
+        (R::ChallengeMismatch, "challenge_mismatch", 422, false),
+        (R::ChallengeExpired, "challenge_expired", 410, false),
+        (R::GrantNotActive, "grant_not_active", 403, false),
+        (R::PayloadGenerationMismatch, "payload_generation_mismatch", 409, false),
+        (R::AuthorityGenerationMismatch, "authority_generation_mismatch", 409, false),
+        (R::TargetInvalid, "target_invalid", 400, false),
+        (R::RightsInsufficient, "rights_insufficient", 403, false),
+        (R::HomeMismatch, "home_mismatch", 403, false),
+        (R::HomeTrustUnavailable, "home_trust_unavailable", 503, true),
+        (R::CapabilityUnavailable, "capability_unavailable", 503, true),
+        (R::CapabilityInvalid, "capability_invalid", 400, false),
+        (R::SourceUnknown, "source_unknown", 404, false),
+        (R::ReplayProtectionCapacity, "replay_protection_capacity", 429, true),
+        (R::ClockUncertain, "clock_uncertain", 503, true),
+        (R::Busy, "busy", 503, true),
+        (R::Invalid, "invalid", 400, false),
+        (R::Storage, "storage", 500, false),
+    ];
+    assert_eq!(pinned.len(), RenewalRefusal::COUNT);
+    for (i, (r, code, status, retry)) in pinned.into_iter().enumerate() {
+        assert_eq!(RenewalRefusal::ALL[i], r);
         assert_eq!(r.ordinal(), i);
-        assert!(codes.insert(r.wire_code()), "duplicate {}", r.wire_code());
-        assert!((400..=599).contains(&r.http_status()));
-        // Status class agrees with the retry class: only 429/503 are retryable.
-        assert_eq!(r.retryable(), matches!(r.http_status(), 429 | 503), "{}", r.wire_code());
-        let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(serde_json::from_str::<RenewalRefusal>(&json).unwrap(), r);
+        assert_eq!((r.wire_code(), r.http_status(), r.retryable()), (code, status, retry));
+        // Serialization emits the declared code, not the variant name, and parses back.
+        assert_eq!(serde_json::to_string(&r).unwrap(), format!("\"{code}\""));
+        assert_eq!(serde_json::from_str::<RenewalRefusal>(&format!("\"{code}\"")).unwrap(), r);
     }
-    assert_eq!(codes.len(), RenewalRefusal::COUNT);
-    assert!(!RenewalRefusal::Storage.retryable());
-    assert!(RenewalRefusal::Busy.retryable());
+    assert!(serde_json::from_str::<RenewalRefusal>("\"ChallengeUnknown\"").is_err());
+    assert!(serde_json::from_str::<RenewalRefusal>("\"nope\"").is_err());
 }

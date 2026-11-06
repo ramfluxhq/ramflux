@@ -27,7 +27,7 @@ const RENEW_RIGHT: u32 = 8;
 
 /// Typed refusals shared by every hop. `Invalid` (malformed input) and `Storage`
 /// (fail-closed ledger failure) are the only additions to the design list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RenewalRefusal {
     #[error("proof nonce already consumed")]
     Replay,
@@ -186,6 +186,22 @@ impl RenewalRefusal {
                 | Self::ClockUncertain
                 | Self::Busy
         )
+    }
+}
+
+/// The wire form is the declared `snake_case` code, never the Rust variant name.
+impl Serialize for RenewalRefusal {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_code())
+    }
+}
+impl<'de> Deserialize<'de> for RenewalRefusal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = String::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|r| r.wire_code() == code)
+            .ok_or_else(|| serde::de::Error::custom("unknown refusal code"))
     }
 }
 

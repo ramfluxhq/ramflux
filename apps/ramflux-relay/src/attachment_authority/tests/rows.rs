@@ -264,3 +264,58 @@ fn inclusive_time_bounds_are_accepted() {
         assert!(e.run(&r).is_ok(), "positive {name}");
     }
 }
+
+#[test]
+fn w_expiry_is_bounded_by_the_grant_and_the_source_key_is_pinned() {
+    let e = Env::new("grant-expiry");
+    // Registered grant expiring at t+20.
+    let short = e.f.register_edited(|g| {
+        g.grant_id = [0x74; 32];
+        g.expires_at = e.now + 20;
+    });
+    let cap = capability(&e.f, [0x74; 32]);
+    let t = operation(short.grant(), 1, 16);
+    let request = RenewalRequest::new(&t, ISSUER, [0xb2; 32]).unwrap();
+    // W (and Prenew) at t+30 outlive the grant: Expired, nothing consumed.
+    let c1 = e.mint(short.grant(), &cap, &t);
+    let beyond = e.forge(short.grant(), &cap, &request, c1, 1, &Tweak::none());
+    assert_eq!(e.refused(&beyond), RenewalRefusal::Expired);
+    // Equality is accepted: W and Prenew expiring exactly at the grant expiry, same challenge.
+    let at_expiry = Tweak {
+        w: &|w| w.expires_at = w.issued_at + 20,
+        p: &|p| p.expires_at = p.issued_at + 20,
+        ..Tweak::none()
+    };
+    let equal = e.forge(short.grant(), &cap, &request, c1, 2, &at_expiry);
+    let token = e.run(&equal).unwrap();
+    let key = e.f.source_signer().verifying_key().to_bytes();
+    let verified = AttachmentToken::decode_signed(&token, &key).unwrap();
+    assert_eq!(verified.token().expires_at, e.now + 20);
+
+    // Source key control: an issuer built on a key other than the pinned source key is refused.
+    let wrong = SigningKey::from_bytes(&[1; 32]);
+    assert!(matches!(
+        SourceIssuer::new(e.f.registry.clone(), wrong, policy()),
+        Err(RenewalRefusal::CapabilityUnavailable)
+    ));
+    assert!(SourceIssuer::new(e.f.registry.clone(), e.f.source_signer(), policy()).is_ok());
+}
+
+#[test]
+fn response_frames_are_golden_bytes_with_declared_codes() {
+    let unknown = RenewAdmitResponse::Refused { code: RenewalRefusal::ChallengeUnknown };
+    assert_eq!(
+        serde_json::to_vec(&unknown).unwrap(),
+        br#"{"Refused":{"code":"challenge_unknown"}}"#
+    );
+    let replay = RenewAdmitResponse::Refused { code: RenewalRefusal::Replay };
+    assert_eq!(serde_json::to_vec(&replay).unwrap(), br#"{"Refused":{"code":"replay"}}"#);
+    // The frame the adapter actually writes to the transport.
+    let e = Env::new("golden");
+    let t = e.target();
+    let bad = e.build(e.g(), &e.cap, &t, [0xee; 32], 1);
+    let mut sink = VecSink::default();
+    let outcome = e.issuer.respond(&bad, &|| e.now, &mut sink, &IssueHooks::none());
+    assert_eq!(outcome, Ok(Outcome::Refused(RenewalRefusal::ChallengeUnknown)));
+    assert_eq!(sink.bytes, br#"{"Refused":{"code":"challenge_unknown"}}"#);
+}
