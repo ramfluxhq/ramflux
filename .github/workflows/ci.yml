@@ -733,6 +733,17 @@ jobs:
           cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
           ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
 
+      - name: Build same-tree router for the session push real-router gate
+        run: |
+          cargo build -p ramflux-router --bin ramflux-router
+          router="$GITHUB_WORKSPACE/target/debug/ramflux-router"
+          test -x "$router"
+          echo "RAMFLUX_P17_ROUTER_BINARY=$router" >> "$GITHUB_ENV"
+
+      - name: Session push real-router gate (explicit, ignored by default)
+        run: |
+          cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
+
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
