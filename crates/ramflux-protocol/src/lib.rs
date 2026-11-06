@@ -107,7 +107,7 @@ pub const fn crate_name() -> &'static str {
 
 /// Existing gateway rejection used by read-only pre-account probes.
 pub const GATEWAY_FIRST_FRAME_NACK_REASON: &str = "first gateway frame must be open";
-/// Device-proof capability requesting a typed acknowledgement for a submit forwarded to a new home.
+/// Negotiated capability for incarnation-bound durable session push.
 pub const GATEWAY_SESSION_PUSH_CAPABILITY: &str = "gateway.session_push.v1";
 /// Device-proof capability requesting typed forwarding acknowledgement.
 pub const GATEWAY_FORWARD_ACK_CAPABILITY: &str = "gateway.forward_ack";
