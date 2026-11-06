@@ -3,7 +3,13 @@
 
 use crate::{CustodyService, RouterCore, RouterRedbStore, tests::custody_sessions::Driver};
 use ed25519_dalek::{Signer, SigningKey};
-use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
+use ramflux_crypto::{
+    CryptoError,
+    custody::{
+        ProofChannel, VerifiedRecord, branch_exporter_hash, sign_branch_proof_v3,
+        sign_proxy_acceptance, verify_branch_proof_v3,
+    },
+};
 use ramflux_protocol::{custody::*, domain, encode_base64url};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde_json::{Value, json};
@@ -32,6 +38,7 @@ fn dm_fs_v3_custody_proof_grammar_vectors() -> Result {
         assert_eq!(sign_branch_proof_v3(&branch, proof.body.clone())?, proof);
         let bytes = signing_bytes(domain::BRANCH_PROOF_V3, &proof.body)?;
         assert_eq!(bytes, hex_bytes(row["proof_transcript"].as_str().ok_or("transcript")?)?);
+        // Grammar oracle only: the fixed record/certificate hashes have no authority behind them.
         assert_eq!(
             branch.signing_key.verifying_key().to_bytes().as_slice(),
             hex_bytes(row["branch_public"].as_str().ok_or("public")?)?
@@ -44,20 +51,18 @@ fn dm_fs_v3_custody_proof_grammar_vectors() -> Result {
         assert_eq!(proof.body.action_hash, custody_action_hash(&action)?);
         let mut wrong = proof.body.clone();
         wrong.action_hash = encode_base64url([0; 32]);
-        assert!(
-            branch
-                .signing_key
-                .verifying_key()
-                .verify_strict(&signing_bytes(domain::BRANCH_PROOF_V3, &wrong)?, &signature)
-                .is_err()
-        );
-        assert!(
-            branch
-                .signing_key
-                .verifying_key()
-                .verify_strict(&signing_bytes(domain::DM_FS_V3_REQUEST, &proof.body)?, &signature)
-                .is_err()
-        );
+        let verifying = branch.signing_key.verifying_key();
+        match verifying.verify_strict(&signing_bytes(domain::BRANCH_PROOF_V3, &wrong)?, &signature)
+        {
+            Err(error) => assert_eq!(error.to_string(), "signature error"),
+            Ok(()) => return Err("mutated action hash verified".into()),
+        }
+        match verifying
+            .verify_strict(&signing_bytes(domain::DM_FS_V3_REQUEST, &proof.body)?, &signature)
+        {
+            Err(error) => assert_eq!(error.to_string(), "signature error"),
+            Ok(()) => return Err("foreign domain verified".into()),
+        }
     }
     Ok(())
 }
@@ -284,4 +289,200 @@ fn proof_negatives(
         &CustodyRefusal::BindingRefused,
     );
     Ok(())
+}
+
+/// Exact production-verifier refusal; `Signature` is the only signature-stage error.
+enum Refusal {
+    Reason(&'static str),
+    Signature,
+}
+fn exact(error: &CryptoError, expected: &Refusal) -> bool {
+    match (error, expected) {
+        (CryptoError::IdentityAuthority(actual), Refusal::Reason(reason)) => actual == reason,
+        (CryptoError::VerifyFailed, Refusal::Signature) => true,
+        _ => false,
+    }
+}
+/// Verify a proof against the live authority through the production verifier.
+/// The authority and receipt come from the original proof and are reused for mutated
+/// bodies, so a mutated anchor reaches the verifier instead of a lookup miss.
+fn live_verify(
+    driver: &Driver,
+    authority: &VerifiedRecord,
+    challenge: &BranchChallenge,
+    proof: &Envelope<BranchProofV3>,
+    receipt: &Envelope<RelayAcceptance>,
+    capability: &str,
+) -> std::result::Result<(), CryptoError> {
+    verify_branch_proof_v3(
+        authority,
+        proof,
+        challenge,
+        capability,
+        ProofChannel::HomeRelayReceipt {
+            receipt,
+            historical_node: &driver.node,
+            current_node: &driver.node,
+        },
+        NOW,
+    )
+}
+#[test]
+fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result {
+    let path = std::env::temp_dir().join(format!(
+        "ramflux-dm-fs-v3-verifier-{}.redb",
+        encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.bootstrap_router(&router)?;
+    let driver = Driver::new("dm-fs-verifier", 11)?;
+    let service = CustodyService::new(driver.node.clone(), false, &store, NOW)?;
+    assert!(matches!(
+        run(&driver, &service, &router, &store, driver.publish())?,
+        CustodyServerFrame::Published { .. }
+    ));
+    for row in &vectors()? {
+        let action: CustodyProofAction = serde_json::from_value(row["action"].clone())?;
+        let capability = action.capability();
+        let challenge = driver.challenge(&service, &router, &store, action.clone())?;
+        // The fixed P01 action goldens are the same bytes the live challenge commits to.
+        assert_eq!(challenge.action_hash, row["action_hash"].as_str().ok_or("action hash")?);
+        let proof = driver.proof(&challenge)?;
+        let receipt = sign_proxy_acceptance(
+            &driver.proxy,
+            &driver.node,
+            &proof,
+            &branch_exporter_hash(&[5; 32]),
+            encode_base64url(ramflux_crypto::random_32()?),
+            NOW,
+        )?;
+        let publication = router
+            .custody_record(&proof.body.device_ref.account_anchor, NOW)?
+            .ok_or("custody record unavailable")?;
+        let authority = router.verify_custody_possession_authority(&publication, NOW, true)?;
+        live_verify(&driver, &authority, &challenge, &proof, &receipt, capability)
+            .map_err(|error| format!("live proof rejected: {error:?}"))?;
+        // Fixture proof bodies bind a fixture audience and dummy record hash: the production
+        // verifier refuses them at the audience stage, which is why they stay grammar-only.
+        let fixed: Envelope<BranchProofV3> = serde_json::from_value(row["proof_envelope"].clone())?;
+        match live_verify(&driver, &authority, &challenge, &fixed, &receipt, capability) {
+            Err(error)
+                if exact(
+                    &error,
+                    &Refusal::Reason("branch proof audience differs from receiving node"),
+                ) => {}
+            other => return Err(format!("fixed fixture proof: {other:?}").into()),
+        }
+        let mut stale = challenge.clone();
+        stale.action_hash = encode_base64url([1; 32]);
+        match live_verify(&driver, &authority, &stale, &proof, &receipt, capability) {
+            Err(error)
+                if exact(
+                    &error,
+                    &Refusal::Reason("branch proof challenge or current head mismatch"),
+                ) => {}
+            other => return Err(format!("action substitution: {other:?}").into()),
+        }
+        let table = mutated_refusals(&proof)?;
+        for (bad, expected) in &table {
+            match live_verify(&driver, &authority, &challenge, bad, &receipt, capability) {
+                Err(error) if exact(&error, expected) => {}
+                other => return Err(format!("{}: {other:?}", row["action"]["operation"]).into()),
+            }
+        }
+    }
+    drop(service);
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Field mutations that must each reach the production verifier and be refused for
+/// one exact stage reason. Mutated bodies are re-signed by a foreign key on purpose.
+fn mutated_refusals(
+    proof: &Envelope<BranchProofV3>,
+) -> Result<Vec<(Envelope<BranchProofV3>, Refusal)>> {
+    let signed = |body: &BranchProofV3| -> Result<Envelope<BranchProofV3>> {
+        Ok(Envelope {
+            body: body.clone(),
+            signature: encode_base64url(
+                SigningKey::from_bytes(&[12; 32])
+                    .sign(&signing_bytes(domain::BRANCH_PROOF_V3, body)?)
+                    .to_bytes(),
+            ),
+        })
+    };
+    let future = NOW + 301;
+    let reason = Refusal::Reason;
+    let mut table: Vec<(Envelope<BranchProofV3>, Refusal)> = Vec::new();
+    let mutate = |field: &str, value: Value| -> Result<BranchProofV3> {
+        let mut body = serde_json::to_value(&proof.body)?;
+        body[field] = value;
+        Ok(serde_json::from_value(body)?)
+    };
+    let mutate_device = |field: &str, value: Value| -> Result<BranchProofV3> {
+        let mut body = serde_json::to_value(&proof.body)?;
+        body["device_ref"][field] = value;
+        Ok(serde_json::from_value(body)?)
+    };
+    table.push((signed(&mutate("schema", json!("wrong"))?)?, reason("unsupported branch proof")));
+    table.push((signed(&mutate("version", json!(4))?)?, reason("unsupported branch proof")));
+    table.push((
+        signed(&mutate("certificate_hash", json!(encode_base64url([1; 32])))?)?,
+        reason("branch certificate hash mismatch"),
+    ));
+    table.push((
+        signed(&mutate("record_hash", json!(encode_base64url([1; 32])))?)?,
+        reason("branch proof challenge or current head mismatch"),
+    ));
+    table.push((
+        signed(&mutate("proof_id", json!(""))?)?,
+        reason("noncanonical custody binary length"),
+    ));
+    table.push((
+        signed(&mutate("challenge_nonce", json!(encode_base64url([1; 32])))?)?,
+        reason("branch proof challenge or current head mismatch"),
+    ));
+    table.push((
+        signed(&mutate("action_hash", json!(encode_base64url([1; 32])))?)?,
+        reason("branch proof challenge or current head mismatch"),
+    ));
+    table.push((
+        signed(&mutate("audience", json!("wrong-node"))?)?,
+        reason("branch proof audience differs from receiving node"),
+    ));
+    table.push((
+        signed(&mutate("binding_mode", json!("no_channel_binding"))?)?,
+        reason("branch proof challenge or current head mismatch"),
+    ));
+    table.push((
+        signed(&mutate("transport_binding", json!(encode_base64url([1; 32])))?)?,
+        Refusal::Signature,
+    ));
+    table.push((
+        signed(&mutate("issued_at", json!(future))?)?,
+        reason("branch proof or challenge expired"),
+    ));
+    table.push((
+        signed(&mutate("expires_at", json!(future))?)?,
+        reason("branch proof or challenge expired"),
+    ));
+    table.push((
+        signed(&mutate_device("account_anchor", json!(encode_base64url([1; 32])))?)?,
+        reason("custody device anchor or revocation mismatch"),
+    ));
+    table.push((
+        signed(&mutate_device("device_id", json!("other"))?)?,
+        reason("custody device unavailable"),
+    ));
+    table.push((
+        signed(&mutate_device("device_epoch", json!(2))?)?,
+        reason("custody device unavailable"),
+    ));
+    table.push((
+        Envelope { body: proof.body.clone(), signature: encode_base64url([0; 64]) },
+        Refusal::Signature,
+    ));
+    Ok(table)
 }

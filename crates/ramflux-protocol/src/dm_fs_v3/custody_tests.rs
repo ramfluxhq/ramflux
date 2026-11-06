@@ -53,13 +53,22 @@ fn hex_bytes(v: &Value) -> Result<Vec<u8>> {
     let text = v.as_str().ok_or("hex")?;
     (0..text.len()).step_by(2).map(|i| Ok(u8::from_str_radix(&text[i..i + 2], 16)?)).collect()
 }
-fn rejects(value: &Value) -> Result {
-    assert!(matches!(
-        decode::<CustodyProofAction>(&serde_json::to_vec(value)?, MAX_CUSTODY_FRAME_BYTES),
-        Err(crate::ProtocolError::Canonical(_))
-    ));
+/// Every carrier refusal surfaces as `Canonical` with its own exact reason, so the
+/// reason is the discriminator; a different refusal cannot satisfy the expectation.
+fn rejects(value: &Value, expected: &str) -> Result {
+    match decode::<CustodyProofAction>(&serde_json::to_vec(value)?, MAX_CUSTODY_FRAME_BYTES) {
+        Err(crate::ProtocolError::Canonical(error)) => assert_eq!(error.to_string(), expected),
+        other => {
+            return Err(
+                format!("expected Canonical({expected}), got {:?}", other.map(|_| ())).into()
+            );
+        }
+    }
     Ok(())
 }
+const RFS1: &str = "native custody carrier RFS1";
+const BASE64URL: &str = "native custody carrier base64url";
+const BYTE_LIMIT: &str = "native custody carrier byte limit";
 #[test]
 fn dm_fs_v3_custody_carriers_reject_each_field_and_cross_field() -> Result {
     let rows = vectors()?;
@@ -67,48 +76,51 @@ fn dm_fs_v3_custody_carriers_reject_each_field_and_cross_field() -> Result {
         let action = &row["action"];
         let field = if action["operation"] == "prekey_status" { "query" } else { "update" };
         let other = if field == "query" { "update" } else { "query" };
-        for bad in [
-            json!(""),
-            json!("="),
-            json!("-_=="),
-            json!("not base64!"),
-            Value::Null,
-            json!(4),
-            json!({}),
+        for (bad, reason) in [
+            (json!(""), RFS1),
+            (json!("="), BASE64URL),
+            (json!("-_=="), BASE64URL),
+            (json!("not base64!"), BASE64URL),
+            (Value::Null, "invalid type: null, expected a string"),
+            (json!(4), "invalid type: integer `4`, expected a string"),
+            (json!({}), "invalid type: map, expected a string"),
         ] {
             let mut v = action.clone();
             v[field] = bad;
-            rejects(&v)?;
+            rejects(&v, reason)?;
         }
         let mut v = action.clone();
         v.as_object_mut().ok_or("action")?.remove(field);
-        rejects(&v)?;
+        rejects(&v, &format!("missing field `{field}`"))?;
         let mut v = action.clone();
         v[other] = json!("unexpected");
-        rejects(&v)?;
+        rejects(&v, &format!("unknown field `{other}`, expected `{field}`"))?;
         let mut v = action.clone();
         v.as_object_mut().ok_or("action")?.remove("operation");
-        rejects(&v)?;
+        rejects(&v, "missing field `operation`")?;
         let mut v = action.clone();
         v["operation"] = json!("unknown");
-        rejects(&v)?;
+        rejects(
+            &v,
+            "unknown variant `unknown`, expected one of `publish`, `register`, `open_session`, `home_migration`, `prekey_status`, `register_update`",
+        )?;
         let mut v = action.clone();
         v[field] = json!(format!("{}=", action[field].as_str().ok_or("carrier")?));
-        rejects(&v)?;
+        rejects(&v, BASE64URL)?;
         let other_row = if field == "query" { &rows[2] } else { &rows[1] };
         let mut v = action.clone();
         v[field] = other_row["action"][other].clone();
-        rejects(&v)?;
+        rejects(&v, RFS1)?;
         let mut bytes = decode_base64url(action[field].as_str().ok_or("carrier")?)?;
         bytes.push(0);
         let mut v = action.clone();
         v[field] = json!(encode_base64url(bytes));
-        rejects(&v)?;
+        rejects(&v, RFS1)?;
         let kind =
             if field == "query" { WireType::OwnerStatusQuery } else { WireType::OwnerPrekeyUpdate };
         let mut v = action.clone();
         v[field] = json!(encode_base64url(vec![0; kind.ceiling() + 1]));
-        rejects(&v)?;
+        rejects(&v, BYTE_LIMIT)?;
         let raw = serde_json::to_string(action)?;
         for duplicate in [
             format!(
@@ -122,17 +134,21 @@ fn dm_fs_v3_custody_carriers_reject_each_field_and_cross_field() -> Result {
                 serde_json::to_string(&action["operation"])?
             ),
         ] {
-            assert!(
-                decode::<CustodyProofAction>(duplicate.as_bytes(), MAX_CUSTODY_FRAME_BYTES)
-                    .is_err()
-            );
+            assert!(matches!(
+                decode::<CustodyProofAction>(duplicate.as_bytes(), MAX_CUSTODY_FRAME_BYTES),
+                Err(crate::ProtocolError::IJson(error))
+                    if error.to_string().contains("duplicate I-JSON member")
+            ));
         }
         let invalid = if field == "query" {
             CustodyProofAction::PrekeyStatus { query: String::new() }
         } else {
             CustodyProofAction::RegisterUpdate { update: String::new() }
         };
-        assert!(matches!(custody_action_hash(&invalid), Err(crate::ProtocolError::Canonical(_))));
+        match custody_action_hash(&invalid) {
+            Err(crate::ProtocolError::Canonical(error)) => assert_eq!(error.to_string(), RFS1),
+            other => return Err(format!("expected empty carrier refusal, got {other:?}").into()),
+        }
     }
     Ok(())
 }
@@ -177,7 +193,7 @@ fn dm_fs_v3_custody_carrier_collection_limits() -> Result {
         }
         let mut action = rows[index]["action"].clone();
         action[name] = json!(encode_base64url(bytes));
-        rejects(&action)?;
+        rejects(&action, RFS1)?;
     }
     Ok(())
 }
