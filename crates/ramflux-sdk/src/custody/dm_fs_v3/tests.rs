@@ -12,7 +12,9 @@ use serde_json::Value;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn decode(hex: &str) -> Result<Vec<u8>> {
     hex.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
         .collect()
 }
@@ -224,7 +226,12 @@ fn dm_fs_v3_new_apis_do_no_io() -> Result {
         assert_eq!(verify_lease_result(&bytes, &intent, &key)?.to_bytes()?, bytes);
     }
     let status = p::OwnerPrekeyStatus::from_bytes(&raw("OwnerPrekeyStatus")?)?;
-    let query = p::OwnerStatusQuery::from_bytes(&raw("OwnerStatusQuery")?)?;
+    let mismatched_query = p::OwnerStatusQuery::from_bytes(&raw("OwnerStatusQuery")?)?;
+    assert_eq!(
+        verify_owner_status(&status.to_bytes()?, &mismatched_query, &status.base_hash, &key),
+        Err(c::NativePrekeyError::Binding)
+    );
+    let query = status_query(&status);
     assert_eq!(
         verify_owner_status(&raw("OwnerPrekeyStatus")?, &query, &status.base_hash, &key)?,
         status
@@ -233,6 +240,7 @@ fn dm_fs_v3_new_apis_do_no_io() -> Result {
 }
 #[test]
 fn dm_fs_v3_sdk_handoff_contains_only_scoped_secrets() -> Result {
+    fn zeroizing<T: zeroize::ZeroizeOnDrop>(_: &T) {}
     macro_rules! no_impl {
         ($ty:ty, $trait:path) => {{
             trait AmbiguousIfImpl<A> {
@@ -278,7 +286,6 @@ fn dm_fs_v3_sdk_handoff_contains_only_scoped_secrets() -> Result {
         for secret in [initial_sk.as_ref(), ratchet_seed.as_ref()] {
             assert!(!bytes.windows(32).any(|w| w == secret));
         }
-        fn zeroizing<T: zeroize::ZeroizeOnDrop>(_: &T) {}
         zeroizing(&initial_sk);
         zeroizing(&ratchet_seed);
         drop((initial_sk, ratchet_seed));
@@ -286,11 +293,9 @@ fn dm_fs_v3_sdk_handoff_contains_only_scoped_secrets() -> Result {
     Ok(())
 }
 
-fn verifier_contract() -> Result {
+fn public_view_contract() -> Result {
     let binding = c::NativePrekeyError::Binding;
     let signature = c::NativePrekeyError::Signature;
-    let node = signer("PrekeyLeaseResult")?;
-    let key = c::NativePrekeySigner::public_key(&node);
     let view = p::PublicPrekeyView::from_bytes(&raw("PublicPrekeyView")?)?;
     let mut changed = view.clone();
     changed.home_generation += 1;
@@ -317,6 +322,15 @@ fn verifier_contract() -> Result {
         verify_public_view(&changed.to_bytes()?, &view.authority, view.home_generation),
         Err(signature)
     );
+    Ok(())
+}
+
+fn verifier_contract() -> Result {
+    public_view_contract()?;
+    let binding = c::NativePrekeyError::Binding;
+    let signature = c::NativePrekeyError::Signature;
+    let node = signer("PrekeyLeaseResult")?;
+    let key = c::NativePrekeySigner::public_key(&node);
     let intent = p::PrekeyLeaseIntent::from_bytes(&raw("PrekeyLeaseIntent")?)?;
     for mode in ["opk", "spk_only"] {
         let lease = p::PrekeyLeaseResult::from_bytes(&raw(&format!("lease_{mode}"))?)?;
@@ -342,19 +356,7 @@ fn verifier_contract() -> Result {
         assert_eq!(verify_lease_result(&lease.to_bytes()?, &intent, &[0; 32]), Err(signature));
     }
     let status = p::OwnerPrekeyStatus::from_bytes(&raw("OwnerPrekeyStatus")?)?;
-    let query = p::OwnerStatusQuery {
-        profile: status.profile.clone(),
-        owner: status.owner.clone(),
-        requested_ids: status
-            .entries
-            .iter()
-            .map(|e| p::RetirementRef {
-                generation: e.generation,
-                serial: e.serial,
-                key_id: e.key_id,
-            })
-            .collect(),
-    };
+    let query = status_query(&status);
     assert_eq!(verify_owner_status(&status.to_bytes()?, &query, &status.base_hash, &key)?, status);
     let mut changed = status.clone();
     changed.owner.principal_id.push('x');
@@ -387,6 +389,15 @@ fn verifier_contract() -> Result {
         verify_owner_status(&status.to_bytes()?, &query, &status.base_hash, &[0; 32]),
         Err(signature)
     );
+    received_bytes_contract()
+}
+
+fn received_bytes_contract() -> Result {
+    let view = p::PublicPrekeyView::from_bytes(&raw("PublicPrekeyView")?)?;
+    let intent = p::PrekeyLeaseIntent::from_bytes(&raw("PrekeyLeaseIntent")?)?;
+    let status = p::OwnerPrekeyStatus::from_bytes(&raw("OwnerPrekeyStatus")?)?;
+    let query = status_query(&status);
+    let key = c::NativePrekeySigner::public_key(&signer("PrekeyLeaseResult")?);
     // Mutate the actual received bytes; encode/decode round trips cannot hide these errors.
     for (name, kind) in [
         ("PublicPrekeyView", p::WireType::PublicPrekeyView),
@@ -590,4 +601,20 @@ fn request_status_bounds() -> Result {
         }
     }
     Ok(())
+}
+
+fn status_query(status: &p::OwnerPrekeyStatus) -> p::OwnerStatusQuery {
+    p::OwnerStatusQuery {
+        profile: status.profile.clone(),
+        owner: status.owner.clone(),
+        requested_ids: status
+            .entries
+            .iter()
+            .map(|e| p::RetirementRef {
+                generation: e.generation,
+                serial: e.serial,
+                key_id: e.key_id,
+            })
+            .collect(),
+    }
 }
