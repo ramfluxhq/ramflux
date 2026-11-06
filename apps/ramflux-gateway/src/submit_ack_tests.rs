@@ -336,7 +336,7 @@ fn submit_confirmation_requires_an_accepted_outcome_matching_target_and_committe
     Ok(())
 }
 
-pub(super) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
+pub(crate) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     let root = ramflux_crypto::create_identity_root("agent", [3; 32]);
     let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
     Ok(crate::GatewaySessionRuntime {
@@ -389,7 +389,7 @@ async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox
         };
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            super::deliver_own_device_fanout_entry(&context, &runtime, &delivery, &submitted),
+            super::deliver_own_device_fanout_entry(&context, &runtime, &delivery, &submitted, None),
         )
         .await??;
         assert_eq!(
@@ -454,7 +454,7 @@ impl GatewaySessionFrameSink for DelayedReply {
     }
 }
 
-pub(super) fn signed_submit(
+pub(crate) fn signed_submit(
     runtime: &super::GatewaySessionRuntime,
     now: i64,
 ) -> anyhow::Result<ramflux_node_core::GatewaySubmitFrame> {

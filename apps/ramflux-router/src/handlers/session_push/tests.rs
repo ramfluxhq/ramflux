@@ -339,3 +339,60 @@ fn fanout_metadata_case(quic: bool) -> anyhow::Result<()> {
 }
 
 mod revocation_tests;
+
+#[test]
+fn capable_nack_is_incarnation_fenced_and_durable() -> anyhow::Result<()> {
+    let (router, path, response) = seed("capable-nack")?;
+    let id = response["incarnation_id"].as_str().ok_or_else(|| anyhow::anyhow!("E"))?;
+    let before = router.state().resume("target", 0, 10);
+    let envelope_id = before[0].envelope.envelope_id.clone();
+    let nack = |seq| json!({"schema":"ramflux.nack.v1","version":1,"domain":"ramflux.nack.v1","signing_key_id":"test","signature_alg":"ed25519","signature":"fixture","nack_id":"nack","envelope_id":envelope_id,"receiver_device_id":"device","reason":"invalid_signature","received_at":1,"ext":{"inbox_seq":seq}});
+    let stale = call(
+        &router,
+        "POST",
+        "/mvp0/nack-bound",
+        json!({"target_delivery_id":"target","incarnation_id":"ffffffffffffffffffffffffffffffff","nack":nack(u64::MAX)}),
+    )?;
+    assert_eq!(stale["reason"], "incarnation_mismatch");
+    for seq in [0, 2] {
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                "/mvp0/nack-bound",
+                json!({"target_delivery_id":"target","incarnation_id":id,"nack":nack(seq)})
+            )?["reason"],
+            "invalid_seq"
+        );
+    }
+    assert_eq!(router.state().resume("target", 0, 10), before);
+    let held = router.store().acquire_acknowledgement("target")?;
+    let started = std::time::Instant::now();
+    let busy = call(
+        &router,
+        "POST",
+        "/mvp0/nack-bound",
+        json!({"target_delivery_id":"target","incarnation_id":id,"nack":nack(1)}),
+    )?;
+    assert_eq!(busy["reason"], "busy");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    drop(held);
+    for _ in 0..3 {
+        let reply = call(
+            &router,
+            "POST",
+            "/mvp0/nack-bound",
+            json!({"target_delivery_id":"target","incarnation_id":id,"nack":nack(1)}),
+        )?;
+        assert_eq!(reply["incarnation_id"], id);
+        assert_eq!(reply["cursor"]["target_delivery_id"], "target");
+    }
+    assert_eq!(router.state().resume("target", 0, 10), []);
+    drop(router);
+    let store = ramflux_node_core::RouterRedbStore::open(&path)?;
+    let restored = store.load_router()?.ok_or_else(|| anyhow::anyhow!("router restore"))?;
+    assert_eq!(restored.resume("target", 0, 10), []);
+    drop(store);
+    std::fs::remove_file(path)?;
+    Ok(())
+}

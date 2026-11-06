@@ -259,7 +259,7 @@ async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reco
         cursor: None,
         nack: None,
     };
-    super::reply_and_deliver_submitted(&send, &context, &runtime()?, &response, &frame, &envelope)
+    super::reply_and_deliver_submitted(&send, &context, &runtime()?, &response, &frame, None)
         .await?;
     assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert!(!context.hub.send_to("peer", &frame).await);
@@ -282,7 +282,8 @@ async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reco
         .await?;
     // Re-delivery of the retained inbox entry now reaches the new recipient session.
     // This is delivery work, not another request or reply on A's stream.
-    super::deliver_submitted_to_peer(&context, &runtime()?, &response, &frame, &envelope).await?;
+    super::deliver_submitted_to_peer(&context, &runtime()?, &response, &frame, &envelope, None)
+        .await?;
     let received = received.lock().map_err(|_| anyhow::anyhow!("received"))?;
     assert_eq!(received.len(), 1);
     assert_eq!(

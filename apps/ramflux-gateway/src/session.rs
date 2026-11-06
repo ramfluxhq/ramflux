@@ -369,7 +369,7 @@ pub(crate) fn native_handoff_matches(
     }
 }
 
-async fn validate_native_frame(
+pub(crate) async fn validate_native_frame(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     grant: &super::custody::GatewayGrant,
@@ -408,8 +408,15 @@ async fn run_registered_gateway_session(
     let target_delivery_id = runtime.target_delivery_id.clone();
     let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
-    let registration =
-        context.hub.register(target_delivery_id.clone(), session_id, Arc::clone(&send)).await?;
+    let registration = context
+        .hub
+        .register_session(
+            target_delivery_id.clone(),
+            session_id,
+            Arc::clone(&send),
+            runtime.session_push.clone(),
+        )
+        .await?;
     let result = run_gateway_session_loop_until_closed(
         send,
         recv,
@@ -443,7 +450,9 @@ async fn establish_gateway_session_or_reject(
     {
         Ok(runtime) => Ok(Some(runtime)),
         Err(error) => {
-            if error.downcast_ref::<super::session_response::ClientWriteFailure>().is_some() {
+            if error.downcast_ref::<super::session_response::ClientWriteFailure>().is_some()
+                || error.downcast_ref::<crate::session_push::Retired>().is_some()
+            {
                 return Err(error);
             }
             tracing::warn!(%error,request_kind="open","gateway session establishment failed");
@@ -595,8 +604,7 @@ pub(crate) async fn establish_gateway_session(
         push_alias_hash: None,
         lifecycle: ramflux_node_core::SessionLifecycle::Live,
     };
-    let _: ramflux_node_core::SessionDescriptor =
-        router_post_json(&context.router, "/s1/session/upsert", &descriptor)?;
+    let session_push = crate::session_push::negotiate(context, auth_frame, &descriptor).await?;
     let resume_token = {
         let mut gateway = gateway_state(&context.state)?;
         let resume = gateway.issue_resume_token(ramflux_node_core::GatewayResumeIssueInput {
@@ -619,21 +627,16 @@ pub(crate) async fn establish_gateway_session(
         resume.token
     };
     let accepted_cursor = router_cursor_async(&context.router, &open.target_delivery_id).await?;
-    write_gateway_frame(
-        send,
-        &ramflux_node_core::GatewayServerFrame::SessionEstablished {
-            session: ramflux_node_core::GatewaySessionEstablishedFrame {
-                session_id: session_id.clone(),
-                gateway_id: context.gateway_id.clone(),
-                accepted_cursor,
-                resume_token: resume_token.clone(),
-                resume_window_seconds,
-            },
-        },
-    )
-    .await?;
+    let established = ramflux_node_core::GatewaySessionEstablishedFrame {
+        session_id: session_id.clone(),
+        gateway_id: context.gateway_id.clone(),
+        accepted_cursor,
+        resume_token: resume_token.clone(),
+        resume_window_seconds,
+    };
+    crate::session_push::established(send, established, session_push.as_deref()).await?;
     Ok(GatewaySessionRuntime {
-        session_push: None,
+        session_push,
         source_identity,
         session_id,
         resume_token,
@@ -772,6 +775,23 @@ async fn run_gateway_session_loop_until_closed(
                 return Ok(());
             }
         };
+        if bytes.len() > ramflux_node_core::ENTRY_FRAME_BYTE_CAP
+            || crate::session_push::recognizes(&bytes, runtime.session_push.is_some())
+        {
+            let Some(_request) = ramflux_node_core::begin_service_request() else {
+                return Ok(());
+            };
+            refresh_session_activity(&context, &runtime)?;
+            crate::session_push::handle_authorized(
+                &send,
+                &context,
+                &runtime,
+                &bytes,
+                native.as_ref(),
+            )
+            .await?;
+            continue;
+        }
         let frame = match ramflux_protocol::parse_i_json::<ramflux_node_core::GatewayClientFrame>(
             &bytes,
         ) {
@@ -960,7 +980,9 @@ async fn run_gateway_session_loop_until_closed(
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(error) => {
-                if error.downcast_ref::<super::session_response::ClientWriteFailure>().is_some() {
+                if error.downcast_ref::<super::session_response::ClientWriteFailure>().is_some()
+                    || error.downcast_ref::<crate::session_push::Retired>().is_some()
+                {
                     return Err(error);
                 }
                 tracing::warn!(%error,request_kind,"gateway session request failed");
@@ -1282,20 +1304,15 @@ pub(crate) async fn handle_gateway_submit(
             "envelope": &envelope,
         }),
     );
-    let response: ramflux_node_core::EnvelopeSubmitResponse =
+    let mesh: serde_json::Value =
         router_post_json_async(&context.router, "/mvp0/envelope", &envelope).await?;
-    if response.outcome.starts_with("rejected_")
-        || matches!(
-            response.outcome.as_str(),
-            "forward_in_progress"
-                | "capacity_retry_after"
-                | "incarnation_mismatch"
-                | "invalid_seq"
-                | "aborted_retry_safe"
-                | "idempotency_conflict"
-                | "payload_too_large"
-        )
-    {
+    let response: ramflux_node_core::EnvelopeSubmitResponse = serde_json::from_value(mesh.clone())?;
+    let metadata = crate::session_push::metadata(
+        &mesh,
+        runtime.session_push.is_some()
+            && matches!(response.outcome.as_str(), "online" | "offline_queued"),
+    )?;
+    if crate::session_push::submit_refused(&response.outcome) {
         write_gateway_handle(
             send,
             &ramflux_node_core::GatewayServerFrame::Nack { reason: response.outcome.clone() },
@@ -1333,7 +1350,7 @@ pub(crate) async fn handle_gateway_submit(
             "frame": &frame,
         }),
     );
-    reply_and_deliver_submitted(send, context, runtime, &response, &frame, &envelope).await
+    reply_and_deliver_submitted(send, context, runtime, &response, &frame, metadata.as_ref()).await
 }
 
 async fn reply_and_deliver_submitted(
@@ -1342,11 +1359,16 @@ async fn reply_and_deliver_submitted(
     runtime: &GatewaySessionRuntime,
     response: &ramflux_node_core::EnvelopeSubmitResponse,
     frame: &ramflux_node_core::GatewayServerFrame,
-    envelope: &ramflux_protocol::Envelope,
+    metadata: Option<&(String, i64)>,
 ) -> anyhow::Result<()> {
-    write_gateway_handle(send, frame).await?;
+    let ramflux_node_core::GatewayServerFrame::Deliver { entry } = frame else {
+        anyhow::bail!("submit reply requires accepted entry");
+    };
+    let envelope = &entry.envelope;
+    crate::session_push::submit_reply(send, runtime, response, envelope, frame, metadata).await?;
     // After this reply, peer forwarding and notification cannot send a second response.
-    if let Err(error) = deliver_submitted_to_peer(context, runtime, response, frame, envelope).await
+    if let Err(error) =
+        deliver_submitted_to_peer(context, runtime, response, frame, envelope, metadata).await
     {
         tracing::warn!(%error, target_delivery_id = %response.target_delivery_id, "post-submit delivery deferred to durable inbox");
     }
@@ -1359,13 +1381,22 @@ async fn deliver_submitted_to_peer(
     response: &ramflux_node_core::EnvelopeSubmitResponse,
     frame: &ramflux_node_core::GatewayServerFrame,
     envelope: &ramflux_protocol::Envelope,
+    metadata: Option<&(String, i64)>,
 ) -> anyhow::Result<()> {
     if response.outcome == "offline_queued" {
         dispatch_offline_wake(context, &response.target_delivery_id, envelope).await?;
     } else if response.outcome == "online"
-        && response.target_delivery_id != runtime.target_delivery_id
+        && (response.target_delivery_id != runtime.target_delivery_id
+            || runtime.session_push.is_some())
     {
-        let delivered = context.hub.send_to(&response.target_delivery_id, frame).await;
+        let delivered = context
+            .hub
+            .send_delivery(
+                &response.target_delivery_id,
+                frame,
+                metadata.map(|(id, deadline)| (id.as_str(), *deadline)),
+            )
+            .await;
         if !delivered
             && !forward_deliver_on_local_miss(context, &response.target_delivery_id, frame).await?
         {
@@ -1440,24 +1471,51 @@ pub(crate) async fn handle_gateway_own_device_fanout(
             "envelope": &request.envelope,
         }),
     );
+    let mesh: serde_json::Value = match router_post_json_async(
+        &context.router,
+        "/mvp10/own-devices/fanout",
+        &request,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            write_gateway_handle(
+                send,
+                &ramflux_node_core::GatewayServerFrame::Nack {
+                    reason: format!("own-device fanout rejected: {error}"),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     let shim_response: ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse =
-        match router_post_json(&context.router, "/mvp10/own-devices/fanout", &request) {
-            Ok(response) => response,
-            Err(error) => {
-                write_gateway_handle(
-                    send,
-                    &ramflux_node_core::GatewayServerFrame::Nack {
-                        reason: format!("own-device fanout rejected: {error}"),
-                    },
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        serde_json::from_value(mesh.clone())?;
     let response = ramflux_node_core::GatewayOwnDeviceFanoutResponse::from(shim_response);
-    for delivery in &response.delivered {
-        if let Err(error) =
-            deliver_own_device_fanout_entry(context, runtime, delivery, &request.envelope).await
+    let rows = mesh["delivered"].as_array().ok_or(crate::session_push::Retired)?;
+    anyhow::ensure!(rows.len() == response.delivered.len(), crate::session_push::Retired);
+    for (delivery, row) in response.delivered.iter().zip(rows) {
+        let metadata = crate::session_push::metadata(
+            row,
+            runtime.session_push.is_some() && delivery.inbox_seq.is_some(),
+        )?;
+        if delivery.target_delivery_id == runtime.target_delivery_id
+            && runtime.session_push.is_some()
+        {
+            anyhow::ensure!(
+                metadata.as_ref().map(|m| m.0.as_str()) == runtime.session_push.as_deref(),
+                crate::session_push::Retired
+            );
+        }
+        if let Err(error) = deliver_own_device_fanout_entry(
+            context,
+            runtime,
+            delivery,
+            &request.envelope,
+            metadata.as_ref(),
+        )
+        .await
         {
             tracing::warn!(%error, target_delivery_id = %delivery.target_delivery_id, "fanout peer delivery deferred to durable inbox");
         }
@@ -1471,12 +1529,23 @@ async fn deliver_own_device_fanout_entry(
     runtime: &GatewaySessionRuntime,
     delivery: &ramflux_node_core::GatewayOwnDeviceFanoutDelivery,
     envelope: &ramflux_protocol::Envelope,
+    metadata: Option<&(String, i64)>,
 ) -> anyhow::Result<()> {
     let Some(entry) = committed_fanout_entry(delivery, envelope)? else { return Ok(()) };
     let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry: entry.clone() };
     match delivery.outcome.as_str() {
-        "online" if delivery.target_delivery_id != runtime.target_delivery_id => {
-            let local_delivered = context.hub.send_to(&delivery.target_delivery_id, &frame).await;
+        "online"
+            if delivery.target_delivery_id != runtime.target_delivery_id
+                || runtime.session_push.is_some() =>
+        {
+            let local_delivered = context
+                .hub
+                .send_delivery(
+                    &delivery.target_delivery_id,
+                    &frame,
+                    metadata.map(|(id, deadline)| (id.as_str(), *deadline)),
+                )
+                .await;
             if !local_delivered
                 && !forward_deliver_on_local_miss(context, &delivery.target_delivery_id, &frame)
                     .await?
@@ -1686,8 +1755,11 @@ pub(crate) async fn handle_gateway_ack(
         target_delivery_id: runtime.target_delivery_id.clone(),
         ack: ack.clone(),
     };
-    let response: ramflux_node_core::RouterAckResponse =
-        router_post_json(&context.router, "/mvp0/ack-bound", &request)?;
+    let response: ramflux_node_core::RouterAckResponse = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        router_post_json_async(&context.router, "/mvp0/ack-bound", &request),
+    )
+    .await??;
     let cursor = match response {
         ramflux_node_core::RouterAckResponse::Cursor(cursor) => cursor,
         ramflux_node_core::RouterAckResponse::Rejected { reason } => {
@@ -1720,8 +1792,11 @@ pub(crate) async fn handle_gateway_nack(
         target_delivery_id: runtime.target_delivery_id.clone(),
         nack: nack.clone(),
     };
-    let cursor: ramflux_node_core::InboxCursorResponse =
-        router_post_json(&context.router, "/mvp0/nack-bound", &request)?;
+    let cursor: ramflux_node_core::InboxCursorResponse = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        router_post_json_async(&context.router, "/mvp0/nack-bound", &request),
+    )
+    .await??;
     write_gateway_handle(
         send,
         &ramflux_node_core::GatewayServerFrame::Cursor { cursor: Some(cursor) },
@@ -1735,7 +1810,9 @@ pub(crate) async fn handle_gateway_resume(
     runtime: &GatewaySessionRuntime,
     resume: &ramflux_node_core::GatewayResumeFrame,
 ) -> anyhow::Result<()> {
-    if resume.resume_token != runtime.resume_token {
+    if resume.resume_token != runtime.resume_token
+        || resume.target_delivery_id != runtime.target_delivery_id
+    {
         write_gateway_handle(
             send,
             &ramflux_node_core::GatewayServerFrame::Nack {
@@ -1980,7 +2057,7 @@ pub(crate) mod tests {
     #[test]
     fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
-        session_push: None,
+            session_push: None,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root("principal_a", [1; 32]),
                 &ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [2; 32]),
@@ -2216,7 +2293,7 @@ pub(crate) mod tests {
         envelope
     }
 
-    pub(super) fn test_envelope() -> ramflux_protocol::Envelope {
+    pub(crate) fn test_envelope() -> ramflux_protocol::Envelope {
         ramflux_protocol::Envelope {
             schema: "ramflux.envelope.v1".to_owned(),
             version: 1,
@@ -2269,7 +2346,7 @@ pub(crate) mod tests {
         branch: &ramflux_crypto::DeviceBranch,
     ) -> anyhow::Result<crate::GatewaySessionRuntime> {
         Ok(crate::GatewaySessionRuntime {
-        session_push: None,
+            session_push: None,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root(&branch.principal_id, [0x91; 32]),
                 branch,
@@ -2431,7 +2508,7 @@ mod principal_directory_tests;
 mod resilience_tests;
 #[cfg(all(test, feature = "itest-local-mint"))]
 #[path = "submit_ack_tests.rs"]
-mod submit_ack_tests;
+pub(crate) mod submit_ack_tests;
 
 #[cfg(all(test, feature = "itest-local-mint"))]
 #[path = "publication_tests.rs"]

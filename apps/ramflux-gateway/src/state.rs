@@ -164,15 +164,22 @@ impl GatewaySessionHub {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) async fn register(
         &self,
         target_delivery_id: String,
         session_id: String,
         sender: GatewaySendHandle,
     ) -> anyhow::Result<GatewayRegistration> {
-        self.register_session(target_delivery_id,session_id,sender,None).await
+        self.register_session(target_delivery_id, session_id, sender, None).await
     }
-    pub(crate) async fn register_session(&self,target_delivery_id:String,session_id:String,sender:GatewaySendHandle,incarnation:Option<String>)->anyhow::Result<GatewayRegistration> {
+    pub(crate) async fn register_session(
+        &self,
+        target_delivery_id: String,
+        session_id: String,
+        sender: GatewaySendHandle,
+        incarnation: Option<String>,
+    ) -> anyhow::Result<GatewayRegistration> {
         use std::sync::atomic::Ordering;
         let sequence = self
             .next_registration
@@ -180,11 +187,10 @@ impl GatewaySessionHub {
             .map_err(|_| anyhow::anyhow!("gateway registration counter exhausted"))?;
         let token = GatewayRegistrationToken(sequence);
         let (closed, receiver) = tokio::sync::watch::channel(false);
-        let old = self
-            .senders_by_target
-            .lock()
-            .await
-            .insert(target_delivery_id, GatewayHubEntry { session_id, token, closed, sender, incarnation });
+        let old = self.senders_by_target.lock().await.insert(
+            target_delivery_id,
+            GatewayHubEntry { session_id, token, closed, sender, incarnation },
+        );
         if let Some(old) = old {
             let _ = old.closed.send(true);
         }
@@ -208,25 +214,45 @@ impl GatewaySessionHub {
         target_delivery_id: &str,
         frame: &ramflux_node_core::GatewayServerFrame,
     ) -> bool {
-        self.send_delivery(target_delivery_id,frame,None).await
+        self.send_delivery(target_delivery_id, frame, None).await
     }
-    pub(crate) async fn send_delivery(&self,target_delivery_id:&str,frame:&ramflux_node_core::GatewayServerFrame,metadata:Option<(&str,i64)>)->bool {
+    pub(crate) async fn send_delivery(
+        &self,
+        target_delivery_id: &str,
+        frame: &ramflux_node_core::GatewayServerFrame,
+        metadata: Option<(&str, i64)>,
+    ) -> bool {
         let entry = self.senders_by_target.lock().await.get(target_delivery_id).cloned();
         let Some(entry) = entry else {
             return false;
         };
-        let wire=match (&entry.incarnation,frame) {
-            (Some(expected),ramflux_node_core::GatewayServerFrame::Deliver {entry:row}) => {
-                let Some((id,deadline))=metadata else {return false;};
-                if id != expected {let _=entry.closed.send(true); self.unregister(target_delivery_id,entry.token).await; return false;}
-                serde_json::to_value(ramflux_node_core::SessionPushServerFrame::Deliver {entry:row.clone(),incarnation_id:id.into(),retain_until:deadline})
+        let wire = match (&entry.incarnation, frame) {
+            (Some(expected), ramflux_node_core::GatewayServerFrame::Deliver { entry: row }) => {
+                let Some((id, deadline)) = metadata else {
+                    return false;
+                };
+                if id != expected {
+                    let _ = entry.closed.send(true);
+                    self.unregister(target_delivery_id, entry.token).await;
+                    return false;
+                }
+                serde_json::to_vec(&ramflux_node_core::SessionPushServerFrame::Deliver {
+                    entry: row.clone(),
+                    incarnation_id: id.into(),
+                    retain_until: deadline,
+                })
             }
-            _ => serde_json::to_value(frame),
+            _ => serde_json::to_vec(frame),
         };
-        let Ok(wire)=wire else {return false;};
+        let Ok(wire) = wire else {
+            return false;
+        };
+        if entry.incarnation.is_some() && wire.len() > ramflux_node_core::ENTRY_FRAME_BYTE_CAP {
+            return false;
+        }
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             let mut sender = entry.sender.lock().await;
-            ramflux_transport::write_gateway_session_json(&mut **sender, &wire).await
+            ramflux_transport::GatewaySessionFrameSink::send_frame(&mut **sender, &wire).await
         })
         .await;
         if !matches!(result, Ok(Ok(()))) {
