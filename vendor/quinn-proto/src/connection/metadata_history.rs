@@ -40,7 +40,8 @@ impl ReceiveHistory {
             Self::Bounded {ranges,credit}=>{
                 if credit.stats().exhausted { return Err(ResourceExhausted {class:MetadataClass::UnorderedHistory}); }
                 ranges.reserve_insert(&range)?;
-                Ok(HistoryReplace::Bounded {ranges,range,index:0})
+                let index=ranges.first_intersection_index(range.start);
+                Ok(HistoryReplace::Bounded {ranges,range,index})
             }
         }
     }
@@ -116,5 +117,55 @@ mod tests {
         let credit=MetadataCredit::new(0);assert!(legacy.bind(Some(credit.clone())).is_err());
         let ReceiveHistory::Legacy(ranges)=legacy else {panic!("refused conversion replaced original tree")};
         assert_eq!(ranges.len(),3);assert!(ranges.contains(3));assert_eq!(credit.stats().used,0);
+    }
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    #[test]
+    fn gapped_history_starts_at_the_relevant_suffix() {
+        let credit=MetadataCredit::new(1<<20);let mut history=ReceiveHistory::new(Some(credit.clone()));
+        for index in 0..256 { history.insert(index*4+1..index*4+2).unwrap(); }
+        {
+            let mut tail=history.replace(1025..1026).unwrap();
+            let HistoryReplace::Bounded {index,..}=&tail else {unreachable!()};
+            assert_eq!(*index,256,"new tail must skip every earlier range before iteration");
+            assert_eq!(tail.next(),None);
+        }
+        {
+            let mut last=history.replace(1021..1022).unwrap();
+            let HistoryReplace::Bounded {index,..}=&last else {unreachable!()};
+            assert_eq!(*index,255);assert_eq!(last.next(),Some(1021..1022));assert_eq!(last.next(),None);
+        }
+        drop(history);assert_eq!(credit.stats().used,0);
+    }
+    #[test]
+    fn inline_adjacency_and_empty_ranges_do_not_require_growth() {
+        let credit=MetadataCredit::new(0);let mut history=ReceiveHistory::new(Some(credit.clone()));
+        for range in [1..2,5..6,2..3,3..5,0..1] { assert!(history.insert(range).unwrap()); }
+        assert!(!history.insert(7..7).unwrap());assert!(!history.insert(Range {start:9,end:8}).unwrap());
+        assert!(history.replace(3..3).unwrap().next().is_none());
+        let ReceiveHistory::Bounded {ranges,..}=&history else {unreachable!()};
+        let mut actual=ranges.iter();assert_eq!(actual.next(),Some(0..6));assert_eq!(actual.next(),None);
+        assert_eq!(history.storage(),(0,1));assert_eq!(credit.stats().used,0);assert!(!credit.stats().exhausted);
+    }
+}
+
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn maximum_endpoints_preserve_exclusive_intersections_and_adjacency() {
+        let credit=MetadataCredit::new(0);let mut history=ReceiveHistory::new(Some(credit.clone()));
+        history.insert(u64::MAX-2..u64::MAX).unwrap();
+        let replaced=history.replace(u64::MAX-1..u64::MAX).unwrap().collect::<Vec<_>>();
+        assert_eq!(replaced.len(),1);assert_eq!(replaced[0],u64::MAX-1..u64::MAX);
+        assert!(!history.insert(u64::MAX..u64::MAX).unwrap());history.insert(0..1).unwrap();
+        assert!(history.replace(1..u64::MAX-2).unwrap().next().is_none());
+        let ReceiveHistory::Bounded {ranges,..}=&history else {unreachable!()};
+        assert_eq!(ranges.len(),1);assert_eq!(ranges.min(),Some(0));assert_eq!(ranges.max(),Some(u64::MAX-1));
+        assert_eq!(credit.stats().used,0);assert!(!credit.stats().exhausted);
     }
 }
