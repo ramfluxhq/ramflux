@@ -530,8 +530,33 @@ mod tests {
                 Err(reject(&format!("/dataModel/nested/0/{key}"), "prototype"))
             );
         }
-        assert!(crate::A2uiConversationEvent::from_wire_bytes(br#"{"schema":"ramflux.a2ui.conversation.v2","schema":"ramflux.a2ui.conversation.v2"}"#).is_err());
     }
+    #[test]
+    fn webui_duplicate_member_rejects_complete_event()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let command = crate::A2uiConversationCommand::CreateSurface(content(samples().remove(0)));
+        let valid = crate::encode_a2ui_conversation_event("conv", 1, &command)?;
+        assert_eq!(crate::A2uiConversationEvent::from_wire_bytes(&valid)?.command(), &command);
+        let mut duplicate = valid.clone();
+        assert_eq!(duplicate.pop(), Some(b'}'));
+        duplicate.extend_from_slice(br#","schema""#);
+        let column = duplicate.len();
+        duplicate.extend_from_slice(br#":"ramflux.a2ui.conversation.v2"}"#);
+        let error = crate::A2uiConversationEvent::from_wire_bytes(&duplicate)
+            .err()
+            .ok_or("accepted duplicate member")?;
+        let crate::ProtocolError::IJson(error) = error else {
+            return Err("duplicate failed outside I-JSON ingress".into());
+        };
+        assert_eq!(error.classify(), serde_json::error::Category::Data);
+        assert_eq!(error.to_string(), format!("duplicate I-JSON member at line 1 column {column}"));
+        // Dropping the duplicate with an ordinary JSON parser yields exactly the
+        // original valid event; no unrelated missing field can satisfy this test.
+        let collapsed: Value = serde_json::from_slice(&duplicate)?;
+        assert_eq!(crate::canonical_json_bytes(&collapsed)?, valid);
+        Ok(())
+    }
+
     fn assert_basic_golden() {
         let mut c = content(Value::Null);
         c.catalog = "basic".into();
@@ -605,7 +630,21 @@ mod tests {
     fn webui_literal_cross_fields_reject_exact_errors() {
         let s = samples();
         negative(&s[8], "/data/min", json!(3), "/components/0/data/min", "rangeOrder");
+        negative(&s[8], "/data/value", json!(-1), "/components/0/data/value", "range");
         negative(&s[8], "/data/value", json!(3), "/components/0/data/value", "range");
+        negative(&s[8], "/data/max", json!(-1), "/components/0/data/min", "rangeOrder");
+        for (min, max) in [(-2, 0), (0, 2), (1, 1)] {
+            let mut number = s[8].clone();
+            number["data"]["min"] = json!(min);
+            number["data"]["max"] = json!(max);
+            for value in [min, max] {
+                number["data"]["value"] = json!(value);
+                assert_eq!(super::super::validate(&content(number.clone())), Ok(()));
+            }
+            negative(&number, "/data/value", json!(min - 1), "/components/0/data/value", "range");
+            negative(&number, "/data/value", json!(max + 1), "/components/0/data/value", "range");
+        }
+
         negative(&s[9], "/data/value", json!("missing"), "/components/0/data/value", "option");
         negative(&s[13], "/data/value", json!(-1), "/components/0/data/value", "range");
         negative(&s[13], "/data/value", json!(3), "/components/0/data/value", "range");
@@ -617,7 +656,7 @@ mod tests {
             "/components/0/data/rows",
             "cellCount",
         );
-        for value in ["-0", "01", "+1", " 1", "1.0", "9007199254740992"] {
+        for value in ["-0", "01", "+1", " 1", "1.0", "9007199254740992", "-9007199254740992"] {
             negative(&s[7], "/data/value", json!(value), "/components/0/data/value", "integerText");
         }
         for (index, field) in [
