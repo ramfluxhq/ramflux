@@ -9,6 +9,7 @@ pub use contact_card::*;
 mod network;
 mod node;
 pub use network::*;
+pub mod pairing;
 mod proof;
 mod types;
 use crate::{MAX_SAFE_JSON_INTEGER, ProtocolError, canonical_json_bytes, domain, encode_base64url};
