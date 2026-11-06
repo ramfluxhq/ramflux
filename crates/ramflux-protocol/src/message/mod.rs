@@ -11,6 +11,7 @@
 #[allow(clippy::all, clippy::pedantic)]
 mod generated;
 pub use generated::*;
+mod canonical;
 mod protojson;
 pub mod registry;
 mod scanner;
@@ -26,3 +27,6 @@ mod tests;
 
 #[cfg(test)]
 mod registry_tests;
+
+#[cfg(test)]
+mod boundary_tests;

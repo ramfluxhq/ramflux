@@ -210,7 +210,37 @@ fn verify_every_operation() -> TestResult {
                         Value::EnumNumber(i32::try_from(operation.operation)?),
                     );
                 }
+                if message.name() == "OwnMessageCopy" {
+                    for name in ["source", "target"] {
+                        let field = message.get_field_by_name(name).ok_or("device missing")?;
+                        let Kind::Message(device) = field.kind() else {
+                            return Err("device type".into());
+                        };
+                        let mut device = DynamicMessage::new(device);
+                        device
+                            .set_field_by_name("account_anchor", Value::String("principal".into()));
+                        device.set_field_by_name("device_id", Value::String("device".into()));
+                        device.set_field_by_name("device_epoch", Value::U64(1));
+                        body.set_field(&field, Value::Message(device));
+                    }
+                    body.set_field_by_name("created_at", Value::I64(7));
+                    body.set_field_by_name("expires_at", Value::I64(9));
+                }
                 let bytes = body.encode_to_vec();
+                if message.name() == "OwnMessageCopy" {
+                    let generated = OwnMessageCopy::decode(bytes.as_slice())?;
+                    assert_eq!(generated.encode_to_vec(), bytes, "generated field order");
+                    assert_eq!(generated.encoded_len(), bytes.len());
+                    let content = Content {
+                        value: Some(content::Value::Control(Control {
+                            operation: 15,
+                            payload: Some(control::Payload::OwnMessageCopy(generated)),
+                        })),
+                    };
+                    let (kind, encoded) = encode_body(&content)?;
+                    assert_eq!(decode_body(kind, &encoded, 2)?, content);
+                    validate_content(&content)?;
+                }
                 // JsonValue.number/string/bool are primitive arms, covered by conformance;
                 // all message-valued operation arms, including unit markers, are exercised.
                 assert_eq!(
@@ -261,13 +291,14 @@ fn entity_unknown_is_projection_only_and_reaction_token_is_bounded() -> TestResu
     for remove in [false, true] {
         let reaction = Reaction { token: over_cap.clone(), remove, ..Default::default() };
         let bytes = reaction.encode_to_vec();
-        assert!(scan_message("Reaction", &bytes, 2).is_err());
-        assert!(
-            validate_content(&Content { value: Some(content::Value::Reaction(reaction)) }).is_err()
+        assert_eq!(scan_message("Reaction", &bytes, 2), Err(ValidationError::Content));
+        assert_eq!(
+            validate_content(&Content { value: Some(content::Value::Reaction(reaction)) }),
+            Err(ValidationError::Content)
         );
     }
     for invalid in ["", " ", "\n", "👍👍"] {
-        assert!(validate_reaction_token(invalid).is_err());
+        assert_eq!(validate_reaction_token(invalid), Err(ValidationError::Content));
     }
     message.entities.first_mut().ok_or("entity missing")?.kind = 1;
     message.entities.first_mut().ok_or("entity missing")?.length = 3;
