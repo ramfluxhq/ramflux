@@ -31,7 +31,9 @@ use crate::{
     quic_gateway::{read_quic_raw_frame, write_quic_raw_frame},
     read_quic_json_frame, write_quic_json_message,
 };
+mod raw_request;
 use arc_swap::ArcSwap;
+pub use raw_request::{MeshQuicRawPost, mesh_quic_post_raw_with_peer_ca_pems_async};
 use tokio::sync::{Mutex, Notify};
 
 const MESH_QUIC_CONNECT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(3);
@@ -107,6 +109,7 @@ struct MeshQuicPoolKey {
 struct MeshQuicClientJob {
     request: MeshQuicClientRequestJob,
     response: MeshQuicClientResponse,
+    raw: Option<raw_request::RawRequestControl>,
 }
 
 struct MeshQuicClientRequestJob {
@@ -119,11 +122,13 @@ struct MeshQuicClientRequestJob {
 }
 
 enum MeshQuicClientRequestPayload {
+    RawJson(GatewayQuicRequest),
     Json(GatewayQuicRequest),
     Postcard(MeshQuicPostcardRequest),
 }
 
 enum MeshQuicClientResponsePayload {
+    RawJson(Vec<u8>),
     Json(GatewayQuicResponse),
     Postcard(MeshQuicPostcardResponse),
 }
@@ -974,13 +979,15 @@ impl MeshQuicClientRuntime {
                     enqueued_at: std::time::Instant::now(),
                 },
                 response: MeshQuicClientResponse::Sync(response),
+                raw: None,
             })
             .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?;
         match receiver.recv().map_err(|error| {
             TransportError::Quic(format!("mesh QUIC runtime stopped: {error}"))
         })?? {
             MeshQuicClientResponsePayload::Json(response) => Ok(response),
-            MeshQuicClientResponsePayload::Postcard(_response) => Err(crate::quic_errors::wire(
+            MeshQuicClientResponsePayload::Postcard(_)
+            | MeshQuicClientResponsePayload::RawJson(_) => Err(crate::quic_errors::wire(
                 "mesh QUIC runtime returned postcard response for JSON request".to_owned(),
             )),
         }
@@ -1006,13 +1013,15 @@ impl MeshQuicClientRuntime {
                     enqueued_at: std::time::Instant::now(),
                 },
                 response: MeshQuicClientResponse::Async(response),
+                raw: None,
             })
             .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?;
         match receiver.await.map_err(|error| {
             TransportError::Quic(format!("mesh QUIC runtime stopped: {error}"))
         })?? {
             MeshQuicClientResponsePayload::Json(response) => Ok(response),
-            MeshQuicClientResponsePayload::Postcard(_response) => Err(crate::quic_errors::wire(
+            MeshQuicClientResponsePayload::Postcard(_)
+            | MeshQuicClientResponsePayload::RawJson(_) => Err(crate::quic_errors::wire(
                 "mesh QUIC runtime returned postcard response for JSON request".to_owned(),
             )),
         }
@@ -1038,15 +1047,18 @@ impl MeshQuicClientRuntime {
                     enqueued_at: std::time::Instant::now(),
                 },
                 response: MeshQuicClientResponse::Async(response),
+                raw: None,
             })
             .map_err(|error| TransportError::Quic(format!("mesh QUIC runtime stopped: {error}")))?;
         match receiver.await.map_err(|error| {
             TransportError::Quic(format!("mesh QUIC runtime stopped: {error}"))
         })?? {
             MeshQuicClientResponsePayload::Postcard(response) => Ok(response),
-            MeshQuicClientResponsePayload::Json(_response) => Err(crate::quic_errors::wire(
-                "mesh QUIC runtime returned JSON response for postcard request".to_owned(),
-            )),
+            MeshQuicClientResponsePayload::Json(_) | MeshQuicClientResponsePayload::RawJson(_) => {
+                Err(crate::quic_errors::wire(
+                    "mesh QUIC runtime returned JSON response for postcard request".to_owned(),
+                ))
+            }
         }
     }
 }
@@ -1083,7 +1095,12 @@ fn run_mesh_quic_client_runtime(
         let sched_started = std::time::Instant::now();
         handle.spawn(async move {
             record_mesh_client_task_sched(sched_started.elapsed());
-            let MeshQuicClientJob { request, response: mut response_sender } = job;
+            let MeshQuicClientJob { request, response: mut response_sender, raw } = job;
+            if let Some(control) = raw {
+                raw_request::run(pools, breakers, request, response_sender, control, pool_size)
+                    .await;
+                return;
+            }
             // The caller dropping its receiver (deadline or cancellation) aborts the whole
             // attempt, including acquisition and the cached-connection retry.
             let response = tokio::select! {
@@ -1104,7 +1121,14 @@ async fn mesh_quic_cached_request(
     pool_size: usize,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
     record_mesh_client_request();
-    let peer_addr = resolve_endpoint(&job.endpoint)?;
+    let peer_addr = if matches!(&job.request, MeshQuicClientRequestPayload::RawJson(_)) {
+        tokio::net::lookup_host(job.endpoint.as_str())
+            .await?
+            .next()
+            .ok_or_else(|| crate::quic_errors::wire("mesh QUIC endpoint did not resolve"))?
+    } else {
+        resolve_endpoint(&job.endpoint)?
+    };
     let key = MeshQuicPoolKey {
         endpoint: job.endpoint.clone(),
         server_name: job.server_name.clone(),
@@ -1356,7 +1380,8 @@ async fn mesh_quic_request_on_connection(
         let request_write_started = std::time::Instant::now();
         let request_write_result = async {
             match request {
-                MeshQuicClientRequestPayload::Json(request) => {
+                MeshQuicClientRequestPayload::Json(request)
+                | MeshQuicClientRequestPayload::RawJson(request) => {
                     write_quic_json_message(&mut send, request).await?;
                 }
                 MeshQuicClientRequestPayload::Postcard(request) => {
@@ -1371,6 +1396,9 @@ async fn mesh_quic_request_on_connection(
         let response_read_started = std::time::Instant::now();
         let response_read_result = async {
             let response = match request {
+                MeshQuicClientRequestPayload::RawJson(_) => {
+                    MeshQuicClientResponsePayload::RawJson(read_quic_raw_frame(&mut recv).await?)
+                }
                 MeshQuicClientRequestPayload::Json(_request) => {
                     MeshQuicClientResponsePayload::Json(read_quic_json_frame(&mut recv).await?)
                 }
@@ -2139,7 +2167,8 @@ mod tests {
             for _ in 0..3 {
                 let job = receiver.recv().map_err(|e| e.to_string())?;
                 let response = match job.request.request {
-                    MeshQuicClientRequestPayload::Json(_) => {
+                    MeshQuicClientRequestPayload::Json(_)
+                    | MeshQuicClientRequestPayload::RawJson(_) => {
                         MeshQuicClientResponsePayload::Postcard(MeshQuicPostcardResponse {
                             status: 200,
                             body: Vec::new(),

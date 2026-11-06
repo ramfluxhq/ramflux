@@ -159,7 +159,13 @@ async fn population_probe() -> anyhow::Result<()> {
                 for _ in 0..width {
                     held.push(fixture.next().await?);
                 }
-                assert!(fixture.requests.try_recv().is_err(), "more than four concurrent requests");
+                assert!(
+                    matches!(
+                        fixture.requests.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ),
+                    "more than four concurrent requests"
+                );
                 for request in held {
                     assert_eq!(request.path, "/mvp0/issued-seqs");
                     let targets = request.body["targets"]
@@ -219,8 +225,11 @@ async fn probe_timeout_resets_confirmation() -> anyhow::Result<()> {
     assert_eq!(held.path, "/mvp0/issued-seqs");
     tokio::time::pause();
     tokio::time::advance(Duration::from_millis(1501)).await;
-    assert!(task.await?, "held request must fail at its 1.5 second probe deadline");
     tokio::time::resume();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), task).await??,
+        "held request must fail at its 1.5 second probe deadline"
+    );
     drop(held);
     hub.probe_observation(&row.0, row.1.token, Some(&observed)).await;
     assert!(!row.1.queue.probe_pending(), "timeout reset the first confirmation");
@@ -301,5 +310,99 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
     drop(wire);
     drop(store);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn issued_raw_reply_duplicates_and_identity() -> anyhow::Result<()> {
+    let targets = vec!["target".into()];
+    let raw = br#"{"status":200,"body":{"issued":[{"target_delivery_id":"target","incarnation_id":null,"inbox_seq":0}]}}"#;
+    let wire: IssuedWireResponse = ramflux_protocol::parse_i_json(raw)?;
+    assert_eq!(serde_json::to_vec(&wire)?, raw);
+    assert_eq!(decode(&targets, raw, true)?["target"].inbox_seq, 0);
+    for (raw, message) in [
+        (br#"{"status":200,"status":200,"body":{"issued":[]}}"#.as_slice(), "I-JSON ingress rejected: duplicate I-JSON member at line 1 column 22"),
+        (br#"{"issued":[],"issued":[]}"#.as_slice(), "I-JSON ingress rejected: duplicate I-JSON member at line 1 column 21"),
+        (br#"{"issued":[{"target_delivery_id":"target","incarnation_id":null,"inbox_seq":0,"inbox_seq":0}]}"#.as_slice(), "I-JSON ingress rejected: duplicate I-JSON member at line 1 column 89"),
+        (br#"{"issued":[{"target_delivery_id":"target","target_delivery_id":"target","inbox_seq":0}]}"#.as_slice(), "I-JSON ingress rejected: duplicate I-JSON member at line 1 column 62"),
+    ] {
+        let error = decode(&targets, raw, raw.starts_with(b"{\"status"))
+            .err().ok_or_else(|| anyhow::anyhow!("duplicate reply accepted"))?;
+        assert_eq!(error.to_string(), message);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_raw_wire_bytes_are_preserved() -> anyhow::Result<()> {
+    use crate::session_push::tests::support::Fixture;
+    let mut fixture = Fixture::raw("probe-raw-bytes")?;
+    let router = fixture.context.router.clone();
+    let requests = std::sync::Arc::new(Requests::default());
+    let running = requests.clone();
+    let task =
+        tokio::spawn(async move { request::post(&router, vec!["target".into()], &running).await });
+    let request = fixture.next().await?;
+    let raw = r#"{ "status": 200, "body": {"issued":[{"target_delivery_id":"target","incarnation_id":null,"inbox_seq":0,"inbox_seq":1}]}}"#;
+    request.respond.send((200, json!(raw))).map_err(|_| anyhow::anyhow!("probe cancelled"))?;
+    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    assert!(reply.mesh_frame);
+    assert_eq!(
+        reply.bytes,
+        raw.as_bytes(),
+        "transport must preserve the bytes checked by the decoder"
+    );
+    let error = decode(&["target".into()], &reply.bytes, true)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("raw duplicate accepted"))?;
+    assert_eq!(
+        error.to_string(),
+        "I-JSON ingress rejected: duplicate I-JSON member at line 1 column 114"
+    );
+    assert_eq!(requests.0.available_permits(), 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_live_requests_across_batches_and_rounds() -> anyhow::Result<()> {
+    use crate::session_push::tests::support::{Fixture, sink};
+    let mut fixture = Fixture::raw("probe-live-budget")?;
+    let (send, _) = sink();
+    fixture.context.hub.population_fixture(5120, ID, &send).await;
+    for _round in 0..2 {
+        let hub = fixture.context.hub.clone();
+        let router = fixture.context.router.clone();
+        let task = tokio::spawn(async move { round(&hub, &router).await });
+        let mut held = Vec::new();
+        for _ in 0..4 {
+            held.push(fixture.next().await?);
+        }
+        assert_eq!(fixture.context.hub.probe_requests.0.available_permits(), 0);
+        assert!(matches!(
+            fixture.requests.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1501)).await;
+        tokio::time::resume();
+        for request in &mut held {
+            tokio::time::timeout(Duration::from_secs(10), request.respond.closed()).await?;
+        }
+        let mut fifth = fixture.next().await?;
+        assert_eq!(
+            fifth.body["targets"].as_array().ok_or_else(|| anyhow::anyhow!("targets"))?.len(),
+            1024
+        );
+        assert!(
+            held.iter().all(|request| request.respond.is_closed()),
+            "new batch outlived earlier live transport work"
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1501)).await;
+        tokio::time::resume();
+        tokio::time::timeout(Duration::from_secs(10), fifth.respond.closed()).await?;
+        assert!(tokio::time::timeout(Duration::from_secs(10), task).await??);
+        assert_eq!(fixture.context.hub.probe_requests.0.available_permits(), 4);
+    }
     Ok(())
 }

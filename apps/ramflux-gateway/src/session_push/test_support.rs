@@ -70,6 +70,12 @@ impl Drop for Fixture {
 }
 impl Fixture {
     pub fn new(label: &str) -> anyhow::Result<Self> {
+        Self::with_raw_replies(label, false)
+    }
+    pub fn raw(label: &str) -> anyhow::Result<Self> {
+        Self::with_raw_replies(label, true)
+    }
+    fn with_raw_replies(label: &str, raw: bool) -> anyhow::Result<Self> {
         use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
         let root = temp_cert_root(label).map_err(|e| anyhow::anyhow!("{e}"))?;
         let gateway = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-gateway")
@@ -102,7 +108,7 @@ impl Fixture {
             let mut tasks = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
-                 result=server.accept_connection()=> {let Ok(connection)=result else {return;};let send=send.clone();let cancel_send=cancel_send.clone();tasks.spawn(async move {let _=serve(connection,send,cancel_send).await;});}
+                 result=server.accept_connection()=> {let Ok(connection)=result else {return;};let send=send.clone();let cancel_send=cancel_send.clone();tasks.spawn(async move {if raw {let _=serve_raw(connection,send).await;} else {let _=serve(connection,send,cancel_send).await;}});}
                  _=tasks.join_next(),if !tasks.is_empty()=>{}
                 }
             }
@@ -196,4 +202,31 @@ pub(crate) async fn negotiate_incarnation(
     tokio::time::timeout(std::time::Duration::from_secs(10), task)
         .await???
         .ok_or_else(|| anyhow::anyhow!("capability not selected"))
+}
+
+// Unlike the compatibility fixture, observe response-stream cancellation while replies are held.
+async fn serve_raw(
+    connection: ramflux_transport::MeshQuicConnection,
+    requests: tokio::sync::mpsc::Sender<Request>,
+) -> anyhow::Result<()> {
+    loop {
+        let mut stream = MeshQuicServer::accept_bi_on_connection(&connection).await?;
+        let request: ramflux_transport::GatewayQuicRequest =
+            ramflux_transport::read_quic_json_frame(&mut stream.recv).await?;
+        let (respond, response) = tokio::sync::oneshot::channel();
+        requests.send(Request { path: request.path, body: request.body, respond }).await?;
+        let reply = tokio::select! {
+            biased;
+            _ = stream.send.stopped() => continue,
+            reply = response => reply?,
+        };
+        let bytes = if let Some(raw) = reply.1.as_str() {
+            raw.as_bytes().to_vec()
+        } else {
+            serde_json::to_vec(&json!({"status":reply.0,"body":reply.1}))?
+        };
+        stream.send.write_all(&u32::try_from(bytes.len())?.to_be_bytes()).await?;
+        stream.send.write_all(&bytes).await?;
+        stream.send.finish()?;
+    }
 }
