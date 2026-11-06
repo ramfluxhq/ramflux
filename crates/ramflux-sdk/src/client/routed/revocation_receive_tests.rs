@@ -13,15 +13,46 @@ type Snapshot = Vec<Vec<Vec<rusqlite::types::Value>>>;
 struct WireState {
     attempts: usize,
     failures: usize,
+    accepted: usize,
     codes: Vec<String>,
     resumes: usize,
     redeliver: bool,
+    /// In-flight mutation of the transmitted ACK: `envelope`, `sequence` or `signature`.
+    tamper: Option<&'static str>,
 }
 struct Wire {
     sql: rusqlite::Connection,
     state: Arc<Mutex<WireState>>,
     queued: VecDeque<Vec<u8>>,
     entry: GatewayInboxEntry,
+    device_public_key: String,
+}
+/// Gateway-side verification of a transmitted ACK against the delivered entry.
+fn ack_refusal(
+    entry: &GatewayInboxEntry,
+    device_public_key: &str,
+    ack: &ramflux_protocol::Ack,
+) -> Option<&'static str> {
+    if ack.envelope_id != entry.envelope.envelope_id {
+        return Some("ACK envelope mismatch");
+    }
+    if ack.ext.ext.get("inbox_seq").and_then(Value::as_u64) != Some(entry.inbox_seq) {
+        return Some("ACK sequence mismatch");
+    }
+    let signed = ramflux_protocol::signed_bytes(ack).ok();
+    match signed {
+        Some(bytes)
+            if ramflux_crypto::verify_canonical_signature(
+                &bytes,
+                &ack.signed.signature,
+                device_public_key,
+            )
+            .is_ok() =>
+        {
+            None
+        }
+        _ => Some("ACK signature invalid"),
+    }
 }
 impl ramflux_transport::GatewaySessionFrameSink for Wire {
     fn finish(&mut self) -> Result<(), ramflux_transport::TransportError> {
@@ -60,9 +91,22 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                     })?;
                     state.attempts += 1;
                     state.codes.push(code);
-                    if state.attempts <= state.failures {
+                    let mut ack: ramflux_protocol::Ack =
+                        serde_json::from_value(value["ack"].clone())?;
+                    match state.tamper {
+                        Some("envelope") => ack.envelope_id = "forged-envelope".to_owned(),
+                        Some("sequence") => {
+                            ack.ext.ext.insert("inbox_seq".into(), json!(self.entry.inbox_seq + 1));
+                        }
+                        Some("signature") => ack.signed.signature = "AAAA".to_owned(),
+                        _ => {}
+                    }
+                    if let Some(reason) = ack_refusal(&self.entry, &self.device_public_key, &ack) {
+                        GatewayServerFrame::Nack { reason: reason.into() }
+                    } else if state.attempts <= state.failures {
                         GatewayServerFrame::Nack { reason: "injected ACK refusal".into() }
                     } else {
+                        state.accepted += 1;
                         let cursor = GatewayCursor {
                             target_delivery_id: "bob".into(),
                             inbox_seq: self.entry.inbox_seq,
@@ -145,11 +189,15 @@ impl Case {
         Ok(Self { _a: a, b, sql, entry, state })
     }
     fn account(&mut self) -> Result<LocalBusAccountState, Box<dyn std::error::Error>> {
+        let branch = self.b.config()?.device_branch.ok_or("bob device branch")?;
         let wire = Wire {
             sql: connection(&self.b)?,
             state: self.state.clone(),
             queued: VecDeque::new(),
             entry: self.entry.clone(),
+            device_public_key: ramflux_crypto::public_key_base64url_from_seed(
+                branch.signing_key.to_bytes(),
+            ),
         };
         let engine = GatewaySessionEngine::with_test_transport(self.b.config()?, Box::new(wire));
         Ok(LocalBusAccountState::new(std::mem::take(&mut self.b.client), engine, "bob".into()))
@@ -269,7 +317,11 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
             let outcome =
                 sync_driver::finish_prepared_ack(&account, &prepared.state, cursor, &mut pressure);
             if failures > 0 {
-                assert!(outcome.is_err());
+                let error = outcome.err().ok_or("injected ACK refusal was accepted")?;
+                assert!(
+                    matches!(&error, SdkError::GatewaySessionRejected(reason) if reason == "injected ACK refusal"),
+                    "{error:?}"
+                );
             } else {
                 assert!(!outcome?);
             }
@@ -364,4 +416,69 @@ async fn e11_storage_io_failure_still_propagates() -> TestResult {
         assert_eq!(account.client.account_db()?.due_inbox_retries(i64::MAX)?.len(), 0);
         Ok(())
     })).await
+}
+async fn refused_forged_ack(tamper: &'static str, reason: &'static str) -> TestResult {
+    let mut c = Case::new(false, 0)?;
+    c.state.lock().map_err(|_| "wire mutex")?.tamper = Some(tamper);
+    let mut account = c.account()?;
+    let key = account.client.inbox_admission_key(&c.entry)?;
+    account.client.account_db()?.hold_unrouted(
+        &key,
+        c.entry.inbox_seq,
+        &serde_json::to_vec(&c.entry)?,
+        now_unix_timestamp(),
+    )?;
+    let mut engine = account.session_client().await?;
+    let pressure = sync_driver::prepare_receive(&account)?.backpressure;
+    let (prepared, mut pressure) = sync_driver::apply_prepared_receive(
+        &mut account,
+        crate::bus::connection_manager::ReceiveEntry {
+            entry: c.entry.clone(),
+            retry_key: None,
+            replay: false,
+        },
+        None,
+        pressure,
+    )
+    .await?;
+    let prepared = prepared.ok_or("missing managed rejection ACK")?;
+    let cursor = engine.ack(prepared.ack).await;
+    let error = cursor.as_ref().err().ok_or("forged ACK was accepted")?;
+    assert!(
+        matches!(error, SdkError::GatewaySessionRejected(found) if found == reason),
+        "{error:?}"
+    );
+    let outcome =
+        sync_driver::finish_prepared_ack(&account, &prepared.state, cursor, &mut pressure);
+    let error = outcome.err().ok_or("forged ACK finished as success")?;
+    assert!(
+        matches!(&error, SdkError::GatewaySessionRejected(found) if found == reason),
+        "{error:?}"
+    );
+    c.rejected(&account.client)?;
+    {
+        let state = c.state.lock().map_err(|_| "wire mutex")?;
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.accepted, 0, "a refused ACK must never be accepted by the gateway");
+    }
+    assert_eq!(account.client.account_db()?.due_inbox_retries(i64::MAX)?.len(), 1);
+    Ok(())
+}
+#[tokio::test]
+async fn e11_forged_ack_envelope_is_refused() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(refused_forged_ack("envelope", "ACK envelope mismatch")))
+        .await
+}
+#[tokio::test]
+async fn e11_forged_ack_sequence_is_refused() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(refused_forged_ack("sequence", "ACK sequence mismatch")))
+        .await
+}
+#[tokio::test]
+async fn e11_forged_ack_signature_is_refused() -> TestResult {
+    tokio::task::LocalSet::new()
+        .run_until(Box::pin(refused_forged_ack("signature", "ACK signature invalid")))
+        .await
 }
