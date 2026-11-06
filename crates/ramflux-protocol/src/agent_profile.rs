@@ -115,14 +115,18 @@ impl AgentProfileV1 {
                 return Err(E::Field(name));
             }
         }
-        if self.responsibility.len() > 256
+        if self.responsibility.trim().is_empty()
+            || self.responsibility.len() > 256
             || !crate::text_safety::single_line_is_safe(&self.responsibility)
             || !is_nfc(&self.responsibility)
         {
             return Err(E::Field("responsibility"));
         }
         for (value, name) in [(&self.provider, "provider"), (&self.model, "model")] {
-            if value.len() > 128 || !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+            if value.trim().is_empty()
+                || value.len() > 128
+                || !value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+            {
                 return Err(E::Field(name));
             }
         }
@@ -174,6 +178,7 @@ pub fn agent_profile_digest(envelope: &AgentProfileEnvelope) -> Result<String, E
 #[cfg(test)]
 mod tests {
     use super::*;
+    type Label = fn(&mut AgentProfileV1) -> &mut String;
     #[test]
     fn agent_profile_codec_preserves_received_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let anchor = crate::encode_base64url([0; 32]);
@@ -191,17 +196,37 @@ mod tests {
                 },
                 kind: "headless_ai".into(),
                 profile_epoch: 1,
-                responsibility: String::new(),
-                provider: String::new(),
-                model: String::new(),
+                responsibility: "Research".into(),
+                provider: "local".into(),
+                model: "model".into(),
                 persona_version: 1,
                 persona_hash: anchor,
             },
             signature: crate::encode_base64url([0; 64]),
         };
-        // Empty public labels are permitted; byte ceilings do not impose extra content policy.
         let bytes = encode_agent_profile(&profile)?;
         assert_eq!(decode_agent_profile(&bytes)?, profile);
+        // Blank public labels (empty or whitespace-only) are refused by encoder and decoder alike.
+        let labels: [(&str, usize, Label); 3] = [
+            ("responsibility", 256, |b| &mut b.responsibility),
+            ("provider", 128, |b| &mut b.provider),
+            ("model", 128, |b| &mut b.model),
+        ];
+        for (field, max, select) in labels {
+            for blank in ["", " ", "   "] {
+                let mut refused = profile.clone();
+                *select(&mut refused.body) = blank.into();
+                assert_eq!(encode_agent_profile(&refused), Err(E::Field(field)));
+                let wire = crate::canonical_json_bytes(&refused)?;
+                assert_eq!(decode_agent_profile(&wire), Err(E::Field(field)));
+            }
+            for length in [1, max] {
+                let mut accepted = profile.clone();
+                *select(&mut accepted.body) = "x".repeat(length);
+                let wire = encode_agent_profile(&accepted)?;
+                assert_eq!(decode_agent_profile(&wire)?, accepted);
+            }
+        }
         profile.body.responsibility = "e\u{301}".into();
         assert_eq!(encode_agent_profile(&profile), Err(E::Field("responsibility")));
         profile.body = profile.body.normalize_local()?;
