@@ -17,23 +17,38 @@ impl RamfluxClient {
     pub fn encode_generated_task_event(event: &TaskEvent) -> Result<Vec<u8>, SdkError> {
         event.validate().map_err(|error| crate::task_refusal::protocol(&error))?;
         let native = serde_json::to_value(event.event())?;
-        let kind = native.get("type").and_then(Value::as_str).ok_or_else(|| invalid("task event type missing"))?;
-        let mut payload = native.get("body").cloned().ok_or_else(|| invalid("task event body missing"))?;
-        payload_shape(&mut payload,true)?;
+        let kind = native
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("task event type missing"))?;
+        let mut payload =
+            native.get("body").cloned().ok_or_else(|| invalid("task event body missing"))?;
+        payload_shape(&mut payload, true)?;
         let body = serde_json::from_value::<g::TaskEventBody>(json!({kind:{"value":payload}}))?;
-        let ext = json_object(&event.extensions().ext.iter().map(|(key,value)|(key.clone(),value.clone())).collect())?;
+        let ext = json_object(
+            &event
+                .extensions()
+                .ext
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )?;
         let generated = g::TaskEvent {
-            schema: ramflux_protocol::TASK_EVENT_SCHEMA.into(), version:1,
-            domain:ramflux_protocol::domain::TASK_EVENT.into(),
-            ext:Some(g::Ext {ext:Some(ext)}),
-            signed:Some(g::SignedFields {
-                signing_key_id:event.signed().signing_key_id.clone(),
-                signature_alg:Some(g::SignatureAlg {value:Some(g::signature_alg::Value::Ed25519(g::SignatureAlgEd25519 {}))}),
-                signature:event.signed().signature.clone(),
+            schema: ramflux_protocol::TASK_EVENT_SCHEMA.into(),
+            version: 1,
+            domain: ramflux_protocol::domain::TASK_EVENT.into(),
+            ext: Some(g::Ext { ext: Some(ext) }),
+            signed: Some(g::SignedFields {
+                signing_key_id: event.signed().signing_key_id.clone(),
+                signature_alg: Some(g::SignatureAlg {
+                    value: Some(g::signature_alg::Value::Ed25519(g::SignatureAlgEd25519 {})),
+                }),
+                signature: event.signed().signature.clone(),
             }),
-            conversation_id:event.conversation_id().into(),event:Some(body),
+            conversation_id: event.conversation_id().into(),
+            event: Some(body),
         };
-        let bytes=generated.encode_to_vec();
+        let bytes = generated.encode_to_vec();
         check_wire(&bytes)?;
         Ok(bytes)
     }
@@ -44,133 +59,242 @@ impl RamfluxClient {
     /// # Errors
     /// Rejects noncanonical bytes before decoding/signature hashing, missing fields,
     /// invalid native invariants, or signatures not matching the caller's pinned key.
-    pub fn decode_generated_task_event(bytes: &[u8], signer: &TaskSigner<'_>) -> Result<TaskEvent,SdkError> {
+    pub fn decode_generated_task_event(
+        bytes: &[u8],
+        signer: &TaskSigner<'_>,
+    ) -> Result<TaskEvent, SdkError> {
         check_wire(bytes)?;
-        let generated=g::TaskEvent::decode(bytes).map_err(|_| invalid("invalid generated task event"))?;
-        if generated.schema!=ramflux_protocol::TASK_EVENT_SCHEMA || generated.version!=1 || generated.domain!=ramflux_protocol::domain::TASK_EVENT {
+        let generated =
+            g::TaskEvent::decode(bytes).map_err(|_| invalid("invalid generated task event"))?;
+        if generated.schema != ramflux_protocol::TASK_EVENT_SCHEMA
+            || generated.version != 1
+            || generated.domain != ramflux_protocol::domain::TASK_EVENT
+        {
             return Err(invalid("generated task framing mismatch"));
         }
-        let signed=generated.signed.ok_or_else(|| invalid("task signer fields missing"))?;
-        if !matches!(signed.signature_alg.and_then(|alg|alg.value),Some(g::signature_alg::Value::Ed25519(_))) {
+        let fields = generated.signed.ok_or_else(|| invalid("task signer fields missing"))?;
+        if !matches!(
+            fields.signature_alg.and_then(|alg| alg.value),
+            Some(g::signature_alg::Value::Ed25519(_))
+        ) {
             return Err(invalid("task signature algorithm missing"));
         }
-        let body=generated.event.ok_or_else(|| invalid("task body missing"))?;
-        let value=serde_json::to_value(body)?;
-        let choices=value.as_object().ok_or_else(||invalid("invalid task choice"))?;
-        if choices.len()!=1 {return Err(invalid("task must select exactly one event"));}
-        let (kind,wrapper)=choices.iter().next().ok_or_else(||invalid("task choice missing"))?;
-        let mut payload=wrapper.get("value").cloned().ok_or_else(||invalid("task payload missing"))?;
-        payload_shape(&mut payload,false)?;
-        let ext=generated.ext.and_then(|ext|ext.ext).ok_or_else(||invalid("task extensions missing"))?;
-        let native=json!({
-            "schema":generated.schema,"version":generated.version,"domain":generated.domain,
-            "conversation_id":generated.conversation_id,"signing_key_id":signed.signing_key_id,
-            "signature_alg":"ed25519","signature":signed.signature,
-            "ext":object_value(&ext)?,"event":{"type":kind,"body":payload},
-        });
-        let event=TaskEvent::from_wire_bytes(&ramflux_protocol::canonical_json_bytes(&native)?)
-            .map_err(|error|crate::task_refusal::protocol(&error))?;
-        event.verify(signer).map_err(|error|crate::task_refusal::protocol(&error))?;
+        let body = generated.event.ok_or_else(|| invalid("task body missing"))?;
+        let value = serde_json::to_value(body)?;
+        let choices = value.as_object().ok_or_else(|| invalid("invalid task choice"))?;
+        if choices.len() != 1 {
+            return Err(invalid("task must select exactly one event"));
+        }
+        let (kind, wrapper) =
+            choices.iter().next().ok_or_else(|| invalid("task choice missing"))?;
+        let mut payload =
+            wrapper.get("value").cloned().ok_or_else(|| invalid("task payload missing"))?;
+        payload_shape(&mut payload, false)?;
+        if matches!(kind.as_str(), "proposal" | "update") {
+            payload
+                .as_object_mut()
+                .ok_or_else(|| invalid("invalid task payload"))?
+                .entry("steps")
+                .or_insert_with(|| json!([]));
+        }
+        let ext = generated
+            .ext
+            .and_then(|ext| ext.ext)
+            .ok_or_else(|| invalid("task extensions missing"))?;
+        let native_body =
+            serde_json::from_value(json!({"type":kind,"body":payload})).map_err(|error| {
+                crate::task_refusal::protocol(&ramflux_protocol::TaskReject::Protocol(error.into()))
+            })?;
+        let native_ext = serde_json::from_value(object_value(&ext)?)?;
+        let event = TaskEvent::new(
+            generated.conversation_id,
+            native_body,
+            ramflux_protocol::SignedFields {
+                signing_key_id: fields.signing_key_id,
+                signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+                signature: fields.signature,
+            },
+        )
+        .and_then(|event| event.with_extensions(ramflux_protocol::Ext { ext: native_ext }))
+        .map_err(|error| crate::task_refusal::protocol(&error))?;
+        event.verify(signer).map_err(|error| crate::task_refusal::protocol(&error))?;
         Ok(event)
     }
 }
 
-fn check_wire(bytes: &[u8]) -> Result<(),SdkError> {
+fn check_wire(bytes: &[u8]) -> Result<(), SdkError> {
     super::check_delivery_size(bytes.len())?;
-    if g::validation::scan_message("TaskEvent",bytes,g::registry::COMPILED_LAYER)
-        .map_err(|_|invalid("noncanonical generated task event"))? != g::validation::ScanOutcome::Supported {
+    if g::validation::scan_message("TaskEvent", bytes, g::registry::COMPILED_LAYER)
+        .map_err(|_| invalid("noncanonical generated task event"))?
+        != g::validation::ScanOutcome::Supported
+    {
         return Err(invalid("unsupported generated task event"));
     }
     Ok(())
 }
 
 // Only typed Task payload fields pass here; arbitrary extension data uses JsonValue.
-fn payload_shape(value: &mut Value, to_generated: bool) -> Result<(),SdkError> {
-    let Some(object)=value.as_object_mut() else {return Err(invalid("task payload must be an object"));};
-    let original=std::mem::take(object);
-    for (key,mut value) in original {
-        let key=if to_generated {key} else {snake(&key)};
+fn payload_shape(value: &mut Value, to_generated: bool) -> Result<(), SdkError> {
+    let Some(object) = value.as_object_mut() else {
+        return Err(invalid("task payload must be an object"));
+    };
+    let original = std::mem::take(object);
+    for (key, mut value) in original {
+        let key = if to_generated { key } else { snake(&key) };
         match key.as_str() {
-            "state"|"decision" if !value.is_null() => {
+            "state" | "decision" if !value.is_null() => {
                 if to_generated {
-                    let name=value.as_str().ok_or_else(||invalid("invalid task enum"))?;
-                    value=json!({name:{}});
+                    let name = value.as_str().ok_or_else(|| invalid("invalid task enum"))?;
+                    value = json!({name:{}});
                 } else {
-                    let choices=value.as_object().ok_or_else(||invalid("invalid task enum"))?;
-                    if choices.len()!=1 {return Err(invalid("task enum choice missing"));}
-                    value=Value::String(snake(choices.keys().next().ok_or_else(||invalid("task enum missing"))?));
+                    let choices = value.as_object().ok_or_else(|| invalid("invalid task enum"))?;
+                    if choices.len() != 1 {
+                        return Err(invalid("task enum choice missing"));
+                    }
+                    value = Value::String(snake(
+                        choices.keys().next().ok_or_else(|| invalid("task enum missing"))?,
+                    ));
                 }
-            },
-            "needs_me"|"target" if !value.is_null() => target_shape(&mut value,to_generated)?,
-            "steps" => for step in value.as_array_mut().ok_or_else(||invalid("invalid task steps"))? {payload_shape(step,to_generated)?;},
-            "version"|"base_revision" if !to_generated => {
-                if let Some(number)=value.as_str() {value=Value::from(number.parse::<u64>().map_err(|_|invalid("invalid task revision"))?);}
-            },
-            _=>{},
+            }
+            "needs_me" | "target" if !value.is_null() => target_shape(&mut value, to_generated)?,
+            "steps" => {
+                for step in value.as_array_mut().ok_or_else(|| invalid("invalid task steps"))? {
+                    payload_shape(step, to_generated)?;
+                }
+            }
+            "version" | "base_revision" if !to_generated => {
+                if let Some(number) = value.as_str() {
+                    value = Value::from(
+                        number.parse::<u64>().map_err(|_| invalid("invalid task revision"))?,
+                    );
+                }
+            }
+            _ => {}
         }
-        object.insert(key,value);
+        object.insert(key, value);
     }
     Ok(())
 }
 
-fn target_shape(value: &mut Value, to_generated: bool) -> Result<(),SdkError> {
-    let mut object=value.as_object().cloned().ok_or_else(||invalid("invalid task intervention"))?;
+fn target_shape(value: &mut Value, to_generated: bool) -> Result<(), SdkError> {
+    let mut object =
+        value.as_object().cloned().ok_or_else(|| invalid("invalid task intervention"))?;
     if to_generated {
-        let kind=object.remove("kind").and_then(|value|value.as_str().map(str::to_owned)).ok_or_else(||invalid("task target kind missing"))?;
-        *value=json!({kind:object});
+        let kind = object
+            .remove("kind")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| invalid("task target kind missing"))?;
+        *value = json!({kind:object});
     } else {
-        if object.len()!=1 {return Err(invalid("task intervention choice missing"));}
-        let (kind,payload)=object.into_iter().next().ok_or_else(||invalid("task target missing"))?;
-        let mut fields=Map::new();
-        for (key,value) in payload.as_object().ok_or_else(||invalid("task target fields missing"))? {fields.insert(snake(key),value.clone());}
-        fields.insert("kind".into(),Value::String(kind));
-        *value=Value::Object(fields);
+        if object.len() != 1 {
+            return Err(invalid("task intervention choice missing"));
+        }
+        let (kind, payload) =
+            object.into_iter().next().ok_or_else(|| invalid("task target missing"))?;
+        let mut fields = Map::new();
+        for (key, value) in
+            payload.as_object().ok_or_else(|| invalid("task target fields missing"))?
+        {
+            fields.insert(snake(key), value.clone());
+        }
+        fields.insert("kind".into(), Value::String(kind));
+        *value = Value::Object(fields);
     }
     Ok(())
 }
 
 fn snake(value: &str) -> String {
-    let mut result=String::new();
-    for ch in value.chars() {if ch.is_ascii_uppercase() {result.push('_');result.push(ch.to_ascii_lowercase());} else {result.push(ch);}}
+    let mut result = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_uppercase() {
+            result.push('_');
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
     result
 }
 
-fn json_object(values: &Map<String,Value>) -> Result<g::JsonObject,SdkError> {
-    let mut members=values.iter().collect::<Vec<_>>();
-    members.sort_by(|(left,_),(right,_)|left.encode_utf16().cmp(right.encode_utf16()));
-    Ok(g::JsonObject {members:members.into_iter().map(|(key,value)|Ok(g::JsonMember {key:key.clone(),value:Some(json_value(value)?)})).collect::<Result<_,SdkError>>()?})
+fn json_object(values: &Map<String, Value>) -> Result<g::JsonObject, SdkError> {
+    let mut members = values.iter().collect::<Vec<_>>();
+    members.sort_by(|(left, _), (right, _)| left.encode_utf16().cmp(right.encode_utf16()));
+    Ok(g::JsonObject {
+        members: members
+            .into_iter()
+            .map(|(key, value)| {
+                Ok(g::JsonMember { key: key.clone(), value: Some(json_value(value)?) })
+            })
+            .collect::<Result<_, SdkError>>()?,
+    })
 }
 
-fn json_value(value: &Value) -> Result<g::JsonValue,SdkError> {
+fn json_value(value: &Value) -> Result<g::JsonValue, SdkError> {
     use g::json_value::Value as J;
     ramflux_protocol::validate_i_json_value(value)?;
-    Ok(g::JsonValue {value:Some(match value {
-        Value::Null=>J::Null(g::JsonNull {}),Value::Bool(value)=>J::Boolean(*value),
-        Value::Number(number)=>J::Number(number.to_string()),Value::String(text)=>J::Text(text.clone()),
-        Value::Array(values)=>J::Array(g::JsonArray {values:values.iter().map(json_value).collect::<Result<_,_>>()?}),
-        Value::Object(object)=>J::Object(json_object(object)?),
-    })})
+    Ok(g::JsonValue {
+        value: Some(match value {
+            Value::Null => J::Null(g::JsonNull {}),
+            Value::Bool(value) => J::Boolean(*value),
+            Value::Number(number) => J::Number(number.to_string()),
+            Value::String(text) => J::Text(text.clone()),
+            Value::Array(values) => J::Array(g::JsonArray {
+                values: values.iter().map(json_value).collect::<Result<_, _>>()?,
+            }),
+            Value::Object(object) => J::Object(json_object(object)?),
+        }),
+    })
 }
 
-fn object_value(object: &g::JsonObject) -> Result<Value,SdkError> {
-    let mut values=Map::new();
+fn object_value(object: &g::JsonObject) -> Result<Value, SdkError> {
+    let mut values = Map::new();
     for member in &object.members {
-        if values.contains_key(&member.key) {return Err(invalid("duplicate task extension key"));}
-        values.insert(member.key.clone(),value_json(member.value.as_ref().ok_or_else(||invalid("task extension value missing"))?)?);
+        if values.contains_key(&member.key) {
+            return Err(invalid("duplicate task extension key"));
+        }
+        values.insert(
+            member.key.clone(),
+            value_json(
+                member.value.as_ref().ok_or_else(|| invalid("task extension value missing"))?,
+            )?,
+        );
     }
     Ok(Value::Object(values))
 }
 
-fn value_json(value: &g::JsonValue) -> Result<Value,SdkError> {
+fn value_json(value: &g::JsonValue) -> Result<Value, SdkError> {
     use g::json_value::Value as J;
-    let value=match value.value.as_ref().ok_or_else(||invalid("task extension choice missing"))? {
-        J::Null(_)=>Value::Null,J::Boolean(value)=>Value::Bool(*value),J::Number(token)=>serde_json::from_str(token)?,
-        J::Text(text)=>Value::String(text.clone()),J::Array(array)=>Value::Array(array.values.iter().map(value_json).collect::<Result<_,_>>()?),
-        J::Object(object)=>object_value(object)?,
-    };
+    let value =
+        match value.value.as_ref().ok_or_else(|| invalid("task extension choice missing"))? {
+            J::Null(_) => Value::Null,
+            J::Boolean(value) => Value::Bool(*value),
+            J::Number(token) => serde_json::from_str(token)?,
+            J::Text(text) => Value::String(text.clone()),
+            J::Array(array) => {
+                Value::Array(array.values.iter().map(value_json).collect::<Result<_, _>>()?)
+            }
+            J::Object(object) => object_value(object)?,
+        };
     ramflux_protocol::validate_i_json_value(&value)?;
     Ok(value)
 }
 
+mod approval;
+mod carrier;
+
 #[cfg(test)]
 mod tests;
+
+fn typed_transcript(name: &str, bytes: &[u8]) -> Result<Vec<u8>, SdkError> {
+    let domain = format!("ramflux.message.typed.{name}.v1");
+    let mut result = Vec::new();
+    for field in [domain.as_bytes(), bytes] {
+        result.extend(
+            u32::try_from(field.len())
+                .map_err(|_| invalid("task transcript too large"))?
+                .to_be_bytes(),
+        );
+        result.extend(field);
+    }
+    Ok(result)
+}

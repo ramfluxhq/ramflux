@@ -339,7 +339,7 @@ impl RamfluxClient {
     }
 }
 
-fn validate_display(request: &Request) -> Result<(), SdkError> {
+pub(super) fn validate_display(request: &Request) -> Result<(), SdkError> {
     let arguments = request
         .approval
         .details
