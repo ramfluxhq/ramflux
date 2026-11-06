@@ -64,6 +64,7 @@ pub(crate) struct GatewayQuicContext {
 #[derive(Clone)]
 pub(crate) struct GatewaySessionRuntime {
     pub(crate) session_push: Option<String>,
+    pub(crate) push_limit: usize,
     pub(crate) source_identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub(crate) session_id: String,
     pub(crate) resume_token: String,
@@ -143,8 +144,7 @@ pub(crate) struct GatewayRegistration {
 pub(crate) struct GatewayHubEntry {
     session_id: String,
     token: GatewayRegistrationToken,
-    closed: tokio::sync::watch::Sender<bool>,
-    sender: GatewaySendHandle,
+    queue: crate::push_queue::PushQueue,
     incarnation: Option<String>,
 }
 
@@ -166,19 +166,30 @@ impl GatewaySessionHub {
 
     #[cfg(test)]
     pub(crate) async fn register(
-        &self,
+        self: &Arc<Self>,
         target_delivery_id: String,
         session_id: String,
         sender: GatewaySendHandle,
     ) -> anyhow::Result<GatewayRegistration> {
         self.register_session(target_delivery_id, session_id, sender, None).await
     }
+    #[cfg(test)]
     pub(crate) async fn register_session(
-        &self,
+        self: &Arc<Self>,
         target_delivery_id: String,
         session_id: String,
         sender: GatewaySendHandle,
         incarnation: Option<String>,
+    ) -> anyhow::Result<GatewayRegistration> {
+        self.register_with_limit(target_delivery_id, session_id, sender, incarnation, 256).await
+    }
+    pub(crate) async fn register_with_limit(
+        self: &Arc<Self>,
+        target_delivery_id: String,
+        session_id: String,
+        sender: GatewaySendHandle,
+        incarnation: Option<String>,
+        limit: usize,
     ) -> anyhow::Result<GatewayRegistration> {
         use std::sync::atomic::Ordering;
         let sequence = self
@@ -187,13 +198,27 @@ impl GatewaySessionHub {
             .map_err(|_| anyhow::anyhow!("gateway registration counter exhausted"))?;
         let token = GatewayRegistrationToken(sequence);
         let (closed, receiver) = tokio::sync::watch::channel(false);
+        let queue = crate::push_queue::PushQueue::new(limit, closed);
+        queue.install(&sender).await?;
         let old = self.senders_by_target.lock().await.insert(
-            target_delivery_id,
-            GatewayHubEntry { session_id, token, closed, sender, incarnation },
+            target_delivery_id.clone(),
+            GatewayHubEntry {
+                session_id,
+                token,
+                queue: queue.clone(),
+                incarnation: incarnation.clone(),
+            },
         );
         if let Some(old) = old {
-            let _ = old.closed.send(true);
+            old.queue.retire();
         }
+        let hub = Arc::downgrade(self);
+        tokio::spawn(async move {
+            queue.run(sender, target_delivery_id.clone(), incarnation).await;
+            if let Some(hub) = hub.upgrade() {
+                hub.unregister(&target_delivery_id, token).await;
+            }
+        });
         Ok(GatewayRegistration { token, closed: receiver })
     }
 
@@ -202,10 +227,25 @@ impl GatewaySessionHub {
         target_delivery_id: &str,
         token: GatewayRegistrationToken,
     ) {
-        let mut senders = self.senders_by_target.lock().await;
-        if senders.get(target_delivery_id).is_some_and(|entry| entry.token == token) {
-            senders.remove(target_delivery_id);
+        let removed = {
+            let mut senders = self.senders_by_target.lock().await;
+            if senders.get(target_delivery_id).is_some_and(|entry| entry.token == token) {
+                senders.remove(target_delivery_id)
+            } else {
+                None
+            }
+        };
+        if let Some(entry) = removed {
+            entry.queue.retire();
         }
+    }
+    #[cfg(test)]
+    pub(crate) async fn flushed(&self, target: &str) -> anyhow::Result<()> {
+        let queue = self.senders_by_target.lock().await.get(target).map(|e| e.queue.clone());
+        if let Some(queue) = queue {
+            queue.flushed().await?;
+        }
+        Ok(())
     }
 
     /// A peer sink failure is a delivery miss, never a failure of the calling session.
@@ -232,7 +272,7 @@ impl GatewaySessionHub {
                     return false;
                 };
                 if id != expected {
-                    let _ = entry.closed.send(true);
+                    entry.queue.retire();
                     self.unregister(target_delivery_id, entry.token).await;
                     return false;
                 }
@@ -250,23 +290,19 @@ impl GatewaySessionHub {
         if entry.incarnation.is_some() && wire.len() > ramflux_node_core::ENTRY_FRAME_BYTE_CAP {
             return false;
         }
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let mut sender = entry.sender.lock().await;
-            ramflux_transport::GatewaySessionFrameSink::send_frame(&mut **sender, &wire).await
-        })
-        .await;
-        if !matches!(result, Ok(Ok(()))) {
-            tracing::warn!(result = ?result, target_delivery_id, session_id = %entry.session_id,
-                "local peer delivery failed; closing registration");
-            // Wake this exact loop before dropping a possibly partially written sink.
-            let _ = entry.closed.send(true);
-            if let Ok(mut sender) = entry.sender.try_lock() {
-                let _ = sender.finish();
-            }
-            self.unregister(target_delivery_id, entry.token).await;
-            return false;
+        let seq = match frame {
+            ramflux_node_core::GatewayServerFrame::Deliver { entry } => entry.inbox_seq,
+            _ => 0,
+        };
+        entry.queue.try_push(wire, seq).handled()
+    }
+}
+
+impl Drop for GatewaySessionHub {
+    fn drop(&mut self) {
+        for entry in self.senders_by_target.get_mut().values() {
+            entry.queue.retire();
         }
-        true
     }
 }
 

@@ -85,6 +85,7 @@ fn runtime(
 ) -> anyhow::Result<GatewaySessionRuntime> {
     Ok(GatewaySessionRuntime {
         session_push: None,
+        push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
             &ramflux_crypto::verifying_key_from_base64url(&endpoint.root_public_key)?,
             manifest.signed_device_set.as_ref().ok_or_else(|| anyhow::anyhow!("set"))?,
@@ -197,6 +198,7 @@ fn native_runtime(
     let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
     Ok(GatewaySessionRuntime {
         session_push: None,
+        push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
             &verified,
             &endpoint.device_id,

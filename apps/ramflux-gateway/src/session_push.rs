@@ -571,4 +571,4 @@ pub(crate) async fn established(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

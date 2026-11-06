@@ -40,6 +40,7 @@ async fn self_submit(capable: bool) -> anyhow::Result<()> {
     assert_eq!(req.path, "/mvp0/envelope");
     req.respond.send((200,json!({"outcome":"online","target_delivery_id":"alice-target","inbox_seq":1,"cursor":null,"incarnation_id":ID,"retain_until":123_456}))).map_err(|_|Retired)?;
     tokio::time::timeout(Duration::from_secs(10), task).await???;
+    fixture.context.hub.flushed("alice-target").await?;
     let rows = frames.lock().map_err(|_| Retired)?.clone();
     if capable {
         assert_eq!(rows.len(), 2);

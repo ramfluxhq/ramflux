@@ -532,7 +532,7 @@ async fn handle_gateway_forward_request(
     handle_gateway_forward_deliver(&context.hub, forward).await
 }
 
-async fn handle_gateway_forward_deliver(
+pub(crate) async fn handle_gateway_forward_deliver(
     hub: &GatewaySessionHub,
     forward: GatewayForwardDeliverRequest,
 ) -> anyhow::Result<GatewayForwardDeliverResponse> {
@@ -568,8 +568,8 @@ mod tests {
     #[tokio::test]
     async fn gateway_forward_deliver_hits_remote_hub_and_reports_miss()
     -> Result<(), Box<dyn std::error::Error>> {
-        let source_hub = GatewaySessionHub::default();
-        let receiver_hub = GatewaySessionHub::default();
+        let source_hub = Arc::new(GatewaySessionHub::default());
+        let receiver_hub = Arc::new(GatewaySessionHub::default());
         let frames = Arc::new(Mutex::new(Vec::new()));
         receiver_hub
             .register(
@@ -592,6 +592,7 @@ mod tests {
         .await?;
 
         assert!(delivered.delivered);
+        receiver_hub.flushed("target_cross_gateway_bob").await?;
         let recorded_frame = {
             let recorded = frames.lock().map_err(|error| error.to_string())?;
             assert_eq!(recorded.len(), 1);

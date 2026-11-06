@@ -42,6 +42,7 @@ compio = { version = "=0.19.1", features = ["time"], optional = true }
 workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 ramflux-node-core = { workspace = true, features = ["durability-test-hooks"] }
 ramflux-sdk = { workspace = true }
 rcgen = { workspace = true }
