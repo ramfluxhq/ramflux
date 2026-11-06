@@ -53,16 +53,43 @@ impl MigrationPurpose {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CustodyProofAction {
-    Publish { publication: Box<Publication> },
-    Register { prekey_bundle: Value },
+    Publish {
+        publication: Box<Publication>,
+    },
+    Register {
+        prekey_bundle: Value,
+    },
     OpenSession,
-    HomeMigration { control_hash: String, publication: Box<Publication>, purpose: MigrationPurpose },
+    HomeMigration {
+        control_hash: String,
+        publication: Box<Publication>,
+        purpose: MigrationPurpose,
+    },
+    /// Dormant native carrier; authority/admission semantics belong to its consumer.
+    PrekeyStatus {
+        #[serde(
+            deserialize_with = "native_carrier::query",
+            serialize_with = "native_carrier::serialize_query"
+        )]
+        query: String,
+    },
+    /// Dormant native carrier, never a legacy Register prekey bundle.
+    RegisterUpdate {
+        #[serde(
+            deserialize_with = "native_carrier::update",
+            serialize_with = "native_carrier::serialize_update"
+        )]
+        update: String,
+    },
 }
 impl CustodyProofAction {
     #[must_use]
     pub const fn capability(&self) -> &'static str {
         match self {
-            Self::Publish { .. } | Self::Register { .. } => "register",
+            Self::Publish { .. }
+            | Self::Register { .. }
+            | Self::PrekeyStatus { .. }
+            | Self::RegisterUpdate { .. } => "register",
             Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }
@@ -409,5 +436,47 @@ mod retry_hint_tests {
         assert_eq!(legacy.code, CustodyRefusal::Busy);
         assert!(serde_json::from_slice::<OldRefusal>(vector).is_err());
         Ok(())
+    }
+}
+
+// Keep the enclosing action/proof in custody JCS. Only the embedded value is RFS1.
+mod native_carrier {
+    use crate::dm_fs_v3::{OwnerPrekeyUpdate, OwnerStatusQuery, WireType};
+    use serde::{Deserialize, Deserializer, Serializer};
+    fn validate(value: &str, update: bool) -> Result<(), &'static str> {
+        let kind = if update { WireType::OwnerPrekeyUpdate } else { WireType::OwnerStatusQuery };
+        let cap = kind.ceiling().min(65_536);
+        if value.len() > (cap * 4).div_ceil(3) {
+            return Err("native custody carrier byte limit");
+        }
+        let bytes =
+            crate::decode_base64url(value).map_err(|_| "native custody carrier base64url")?;
+        if bytes.len() > cap || crate::encode_base64url(&bytes) != value {
+            return Err("native custody carrier encoding");
+        }
+        if update {
+            OwnerPrekeyUpdate::from_bytes(&bytes).map(|_| ())
+        } else {
+            OwnerStatusQuery::from_bytes(&bytes).map(|_| ())
+        }
+        .map_err(|_| "native custody carrier RFS1")
+    }
+    pub(super) fn query<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        let value = String::deserialize(d)?;
+        validate(&value, false).map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+    pub(super) fn update<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+        let value = String::deserialize(d)?;
+        validate(&value, true).map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
+    pub(super) fn serialize_query<S: Serializer>(value: &str, s: S) -> Result<S::Ok, S::Error> {
+        validate(value, false).map_err(serde::ser::Error::custom)?;
+        s.serialize_str(value)
+    }
+    pub(super) fn serialize_update<S: Serializer>(value: &str, s: S) -> Result<S::Ok, S::Error> {
+        validate(value, true).map_err(serde::ser::Error::custom)?;
+        s.serialize_str(value)
     }
 }

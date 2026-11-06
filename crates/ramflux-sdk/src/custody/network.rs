@@ -555,5 +555,21 @@ fn proof_action_name(action: &CustodyProofAction) -> &'static str {
         CustodyProofAction::Register { .. } => "register",
         CustodyProofAction::OpenSession => "open_session",
         CustodyProofAction::HomeMigration { .. } => "home_migration",
+        CustodyProofAction::PrekeyStatus { .. } => "prekey_status",
+        CustodyProofAction::RegisterUpdate { .. } => "register_update",
+    }
+}
+
+#[cfg(test)]
+mod dm_fs_v3_tests {
+    #[test]
+    fn dm_fs_v3_custody_action_labels() -> Result<(), Box<dyn std::error::Error>> {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!("../../../ramflux-protocol/fixtures/dm_fs_v3/custody_vectors.json"))?;
+        for row in rows {
+            let action: ramflux_protocol::custody::CustodyProofAction = serde_json::from_value(row["action"].clone())?;
+            assert_eq!(super::proof_action_name(&action), row["action"]["operation"]);
+            assert_eq!(action.capability(), "register");
+        }
+        Ok(())
     }
 }
