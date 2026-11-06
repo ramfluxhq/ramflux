@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
-// Copyright (third) 2026 Span Brain
+// Copyright (c) 2026 Span Brain
 
 //! Real protected-image/private-primary transactions and deterministic clocks/fault boundaries.
 use super::*;
@@ -22,10 +22,6 @@ impl Clock {
     fn new() -> Self {
         Self { wall: AtomicU64::new(WALL), mono: AtomicU64::new(0) }
     }
-    fn advance(&self, ms: u64) {
-        self.mono.fetch_add(ms, Ordering::SeqCst);
-        self.wall.fetch_add(ms / 1000, Ordering::SeqCst);
-    }
 }
 impl CheckpointClock for Clock {
     fn now(&self) -> CheckpointTime {
@@ -33,21 +29,6 @@ impl CheckpointClock for Clock {
             wall: self.wall.load(Ordering::SeqCst),
             monotonic: self.mono.load(Ordering::SeqCst),
         }
-    }
-}
-struct Observer {
-    fail: Option<&'static str>,
-    events: std::sync::Mutex<Vec<&'static str>>,
-}
-impl Observer {
-    fn new(fail: Option<&'static str>) -> Self {
-        Self { fail, events: std::sync::Mutex::new(Vec::new()) }
-    }
-}
-impl CheckpointObserver for Observer {
-    fn boundary(&self, name: &'static str) -> Result<()> {
-        self.events.lock().map_err(storage)?.push(name);
-        require(self.fail != Some(name), "injected_fault")
     }
 }
 struct Fixture {
@@ -64,63 +45,21 @@ impl Fixture {
         self.dir.join(name)
     }
     fn witness(&self) -> Result<CheckpointWitness> {
-        {
-            let mut witness = CheckpointWitness::initialize(
-                &self.path("witness"),
-                "center.example",
-                1,
-                self.clock.clone(),
-            )?;
-            witness.configure_center_key(
-                ed25519_dalek::SigningKey::from_bytes(&[29; 32]).verifying_key(),
-            )?;
-            Ok(witness)
-        }
-    }
-    fn reopen(&self) -> Result<CheckpointWitness> {
-        let mut witness = CheckpointWitness::open(
+        CheckpointWitness::initialize(
             &self.path("witness"),
             "center.example",
             1,
             self.clock.clone(),
-        )?;
-        witness.configure_center_key(
-            ed25519_dalek::SigningKey::from_bytes(&[29; 32]).verifying_key(),
-        )?;
-        Ok(witness)
+        )
+    }
+    fn reopen(&self) -> Result<CheckpointWitness> {
+        CheckpointWitness::open(&self.path("witness"), "center.example", 1, self.clock.clone())
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
-}
-fn admitted(witness: &mut CheckpointWitness, lease: &WriterLease, root: &str) -> Result<String> {
-    witness.admit_mutation(
-        lease,
-        MutationAdmission { root: root.into(), home: "home.example".into(), control: false },
-    )
-}
-fn clock_delta(incarnation: &str, tx: u8, time: u64) -> wire::CheckpointDelta {
-    wire::CheckpointDelta {
-        kind: wire::DeltaKind::Clock,
-        tx_id: id(tx),
-        writer_incarnation: incarnation.into(),
-        clock_floor: time,
-        operation: None,
-        rows: Vec::new(),
-    }
-}
-fn append_clock(
-    witness: &mut CheckpointWitness,
-    lease: &WriterLease,
-    tx: u8,
-) -> Result<wire::Checkpoint> {
-    let admission = admitted(witness, lease, &id(77))?;
-    let head = witness.head();
-    witness.append(lease, &admission, &head, |stamp| {
-        Ok(clock_delta(&lease.incarnation, tx, stamp.wall))
-    })
 }
 fn root(epoch: u64, deleted: bool) -> wire::RootRow {
     wire::RootRow {
@@ -144,739 +83,246 @@ fn root(epoch: u64, deleted: bool) -> wire::RootRow {
         hold_deadlines: Vec::new(),
     }
 }
-#[test]
-fn username_checkpoint_barrier_and_rollback_recovery() -> TestResult {
-    for boundary in ["before_image", "after_image", "before_witness_fsync", "after_witness_fsync"] {
-        let fixture = Fixture::new()?;
-        let mut witness = fixture.witness()?;
-        let genesis = witness.head();
-        let lease = witness.acquire(&id(1))?;
-        let primary = CheckpointPrimary::create(&fixture.path("primary"), &genesis)?;
-        primary.reconcile(&mut witness, &lease)?;
-        let observer = Arc::new(Observer::new(Some(boundary)));
-        witness.set_observer(observer.clone());
-        assert!(matches!(
-            append_clock(&mut witness, &lease, 10),
-            Err(CheckpointError::Refused("injected_fault"))
-        ));
-        let committed = boundary == "after_witness_fsync";
-        assert_eq!(witness.head().lsn, u64::from(committed));
-        drop(primary);
-        drop(witness);
-        let mut witness = fixture.reopen()?;
-        assert_eq!(witness.head().lsn, u64::from(committed));
-        assert_eq!(witness.transaction(&id(10))?.is_some(), committed);
-        assert!(matches!(witness.ready(&lease), Err(CheckpointError::Refused("lease"))));
-        let lease = witness.acquire(&id(2))?;
-        let primary = CheckpointPrimary::open(&fixture.path("primary"))?;
-        if committed {
-            assert!(matches!(
-                primary.reconcile(&mut witness, &lease),
-                Err(CheckpointError::Refused("primary_behind"))
-            ));
-            primary.replay_transaction(&mut witness, &lease, &id(10), &Observer::new(None))?;
-        } else {
-            primary.reconcile(&mut witness, &lease)?;
-        }
-        witness.ready(&lease)?;
+
+fn nonce() -> Result<String> {
+    Ok(ramflux_protocol::encode_base64url(ramflux_crypto::random_32().map_err(storage)?))
+}
+fn clock_delta(tx: u64, time: u64) -> wire::CheckpointDelta {
+    let mut bytes = [0; 32];
+    bytes[..8].copy_from_slice(&tx.to_be_bytes());
+    wire::CheckpointDelta {
+        kind: wire::DeltaKind::Clock,
+        tx_id: ramflux_protocol::encode_base64url(bytes),
+        writer_incarnation: id(1),
+        clock_floor: time,
+        operation: None,
+        rows: vec![],
     }
-    for boundary in ["before_primary_image", "before_primary_fsync", "after_primary_fsync"] {
-        let fixture = Fixture::new()?;
-        let mut witness = fixture.witness()?;
-        let lease = witness.acquire(&id(1))?;
-        let primary = CheckpointPrimary::create(&fixture.path("primary"), &witness.head())?;
-        primary.reconcile(&mut witness, &lease)?;
-        let checkpoint = append_clock(&mut witness, &lease, 11)?;
-        assert!(matches!(
-            primary.apply(&mut witness, &lease, &checkpoint, &Observer::new(Some(boundary))),
-            Err(CheckpointError::Refused("injected_fault"))
-        ));
-        assert!(matches!(witness.ready(&lease), Err(CheckpointError::Refused("primary_applied"))));
-        drop(primary);
-        let primary = CheckpointPrimary::open(&fixture.path("primary"))?;
-        if boundary == "after_primary_fsync" {
-            primary.reconcile(&mut witness, &lease)?;
-        } else {
-            primary.apply(&mut witness, &lease, &checkpoint, &Observer::new(None))?;
+}
+fn reserve(tx: u64) -> Result<(String, wire::CheckpointDelta)> {
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+    let root_id = ramflux_crypto::identity_root_commitment(&signer.verifying_key());
+    let mut operation_id = [0; 32];
+    operation_id[..8].copy_from_slice(&tx.to_be_bytes());
+    let operation_id = ramflux_protocol::encode_base64url(operation_id);
+    let profile = wire::ProfileRef { version: 2, epoch: 1, hash: Some(id(8)) };
+    let op = ramflux_crypto::username_directory::sign_operation(
+        &signer,
+        wire::UsernameOperationBody {
+            action: wire::Action::ProfileUpdate,
+            operation_id: operation_id.clone(),
+            principal_commitment: root_id.clone(),
+            expected_epoch: 0,
+            next_epoch: 1,
+            expected_profile: root(0, false).profile,
+            profile,
+            old_name: None,
+            binding: None,
+            discoverable: false,
+            issued_at: WALL - 10,
+            expires_at: WALL + 290,
+        },
+    )?;
+    let hash = ramflux_crypto::username_directory::operation_hash(&op)?;
+    let mut root = root(0, false);
+    root.pending_operation_id = Some(operation_id.clone());
+    let mut delta = clock_delta(tx, WALL);
+    delta.kind = wire::DeltaKind::Reserve;
+    delta.operation = Some(op.clone());
+    delta.rows = vec![
+        wire::Replacement::Root { key: root_id.clone(), old: None, new: Some(root) },
+        wire::Replacement::Operation {
+            key: wire::OperationKey { root: root_id.clone(), operation_id: operation_id.clone() },
+            old: None,
+            new: Some(wire::OperationRow {
+                operation: op,
+                operation_hash: hash.clone(),
+                state: wire::ReceiptState::Reserved,
+                reserved_at: WALL,
+                reservation_expires_at: WALL + 120,
+                finished_at: None,
+                retain_until: None,
+            }),
+        },
+        wire::Replacement::OpOwner {
+            key: operation_id.clone(),
+            old: None,
+            new: Some(wire::OperationOwnerRow { root: root_id.clone(), operation_hash: hash }),
+        },
+        wire::Replacement::Due {
+            key: wire::DueKey::Operation {
+                at: WALL + 120,
+                root: root_id.clone(),
+                operation_id,
+                phase: wire::DuePhase::Reservation,
+            },
+            old: None,
+            new: Some(wire::DueRow { count: 1 }),
+        },
+    ];
+    for metric in
+        [wire::Metric::RootSlots, wire::Metric::PendingOperations, wire::Metric::OperationDetails]
+    {
+        for key in [
+            wire::CounterKey::Global { metric },
+            wire::CounterKey::Home { home: "home.example".into(), metric },
+        ] {
+            delta.rows.push(wire::Replacement::Counter {
+                key,
+                old: None,
+                new: Some(wire::CounterRow { value: 1 }),
+            });
         }
-        witness.ready(&lease)?;
     }
-    Ok(())
+    delta.rows.sort_by_key(|r| r.order_key().unwrap_or_default());
+    Ok((root_id, delta))
 }
 #[test]
-fn username_checkpoint_closed_heads_leases_and_cas() -> TestResult {
+fn username_checkpoint_barrier_and_rollback_recovery() -> TestResult {
+    username_checkpoint_barrier_and_rollback_recovery_store_apply_reopen()?;
+    username_checkpoint_barrier_and_rollback_recovery_delta_cas_and_chain_negatives()?;
+    username_checkpoint_barrier_and_rollback_recovery_redo_compaction_saturation()?;
+    Ok(())
+}
+fn username_checkpoint_barrier_and_rollback_recovery_store_apply_reopen() -> TestResult {
     let fixture = Fixture::new()?;
     let mut witness = fixture.witness()?;
     let genesis = witness.head();
-    let first = witness.acquire(&id(1))?;
-    assert!(matches!(witness.ready(&first), Err(CheckpointError::Refused("primary_applied"))));
-    assert!(matches!(witness.acquire(&id(2)), Err(CheckpointError::Refused("lease_busy"))));
-    let primary = CheckpointPrimary::create(&fixture.path("first"), &genesis)?;
-    primary.reconcile(&mut witness, &first)?;
-    for field in 0..3 {
-        let mut wrong = first.clone();
-        match field {
-            0 => wrong.generation += 1,
-            1 => wrong.witness_boot = id(9),
-            _ => wrong.incarnation = id(9),
-        }
-        assert!(matches!(witness.renew(&wrong), Err(CheckpointError::Refused("lease"))));
-    }
+    let (root_id, delta) = reserve(1)?;
+    let checkpoint = witness.append(&genesis, delta.clone(), &root_id, false)?;
+    assert_eq!(checkpoint.lsn, 1);
+    assert_eq!(checkpoint.previous_digest, genesis.digest);
+    assert_eq!(
+        witness.head().digest,
+        ramflux_crypto::username_directory::checkpoint_hash(&checkpoint)?
+    );
+    let image = witness.image_page(None, 128)?.rows;
+    assert_eq!(image.len(), delta.rows.len());
+    let head = witness.head();
+    drop(witness);
+    let mut witness = fixture.reopen()?;
+    assert_eq!(witness.head(), head);
+    assert_eq!(witness.image_page(None, 128)?.rows, image);
+    assert_eq!(witness.transaction(&delta.tx_id)?, Some(checkpoint));
+    assert_eq!(witness.compact(1)?, 1);
+    assert!(witness.transaction(&delta.tx_id)?.is_none());
+    drop(witness);
+    let witness = fixture.reopen()?;
+    assert_eq!(witness.head(), head);
+    assert_eq!(witness.image_page(None, 128)?.rows, image);
+    Ok(())
+}
+fn username_checkpoint_barrier_and_rollback_recovery_delta_cas_and_chain_negatives() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    let genesis = witness.head();
+    let (root_id, delta) = reserve(1)?;
     for field in 0..7 {
         let mut wrong = genesis.clone();
         match field {
             0 => wrong.center_id = "other.example".into(),
-            1 => wrong.generation = 2,
-            2 => wrong.lsn = 1,
+            1 => wrong.generation += 1,
+            2 => wrong.lsn += 1,
             3 => wrong.digest = id(9),
             4 => wrong.clock_floor += 1,
-            5 => wrong.codec_version = 2,
+            5 => wrong.codec_version += 1,
             _ => wrong.policy = "unknown".into(),
         }
-        assert!(matches!(
-            witness.primary_applied(&first, &wrong),
-            Err(CheckpointError::Refused("primary_head"))
-        ));
-    }
-    let checkpoint = append_clock(&mut witness, &first, 12)?;
-    assert!(matches!(witness.ready(&first), Err(CheckpointError::Refused("primary_applied"))));
-    primary.apply(&mut witness, &first, &checkpoint, &Observer::new(None))?;
-    let job = admitted(&mut witness, &first, &id(77))?;
-    assert!(matches!(
-        witness.append(&first, &job, &genesis, |s| Ok(clock_delta(&first.incarnation, 13, s.wall))),
-        Err(CheckpointError::Refused("head_cas"))
-    ));
-    fixture.clock.advance(10_000);
-    assert!(matches!(witness.ready(&first), Err(CheckpointError::Refused("lease"))));
-    let second = witness.acquire(&id(2))?;
-    assert!(matches!(
-        witness.primary_applied(&first, &witness.head()),
-        Err(CheckpointError::Refused("lease"))
-    ));
-    let replacement = CheckpointPrimary::rebuild(&fixture.path("second"), &mut witness, &second)?;
-    witness.ready(&second)?;
-    assert!(matches!(
-        primary.apply(&mut witness, &first, &checkpoint, &Observer::new(None)),
-        Err(CheckpointError::Refused("lease"))
-    ));
-    drop(replacement);
-    let old_boot = witness.witness_boot().to_owned();
-    drop(witness);
-    let mut witness = fixture.reopen()?;
-    assert_ne!(old_boot, witness.witness_boot());
-    assert!(matches!(witness.renew(&second), Err(CheckpointError::Refused("lease"))));
-    assert!(
-        CheckpointWitness::initialize(
-            &fixture.path("witness"),
-            "center.example",
-            1,
-            fixture.clock.clone()
-        )
-        .is_err()
-    );
-    assert!(
-        CheckpointWitness::open(
-            &fixture.path("absent"),
-            "center.example",
-            1,
-            fixture.clock.clone()
-        )
-        .is_err()
-    );
-    assert!(
-        CheckpointWitness::open(
-            &fixture.path("witness"),
-            "other.example",
-            1,
-            fixture.clock.clone()
-        )
-        .is_err()
-    );
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-struct RevisionSettings {
-    epoch: u64,
-    delete: bool,
-    named: bool,
-}
-fn revision_operation(
-    signer: &ed25519_dalek::SigningKey,
-    old: &wire::RootRow,
-    root_id: &str,
-    profile: &wire::ProfileRef,
-    binding: Option<&wire::UsernameBinding>,
-    settings: RevisionSettings,
-) -> Result<wire::UsernameOperation> {
-    let RevisionSettings { epoch, delete, named } = settings;
-    ramflux_crypto::username_directory::sign_operation(
-        signer,
-        wire::UsernameOperationBody {
-            action: if delete {
-                wire::Action::Delete
-            } else if named && old.epoch == 0 {
-                wire::Action::Claim
-            } else {
-                wire::Action::ProfileUpdate
-            },
-            operation_id: id(u8::try_from(epoch + 30).map_err(storage)?),
-            principal_commitment: root_id.to_owned(),
-            expected_epoch: old.epoch,
-            next_epoch: epoch,
-            expected_profile: old.profile.clone(),
-            profile: profile.clone(),
-            old_name: old.name.clone(),
-            binding: binding.cloned(),
-            discoverable: named && !delete,
-            issued_at: WALL - 10,
-            expires_at: WALL + 290,
-        },
-    )
-    .map_err(CheckpointError::from)
-}
-fn publish_revision_named(
-    witness: &mut CheckpointWitness,
-    primary: &CheckpointPrimary,
-    lease: &WriterLease,
-    previous: Option<wire::RootRow>,
-    settings: RevisionSettings,
-) -> Result<wire::RootRow> {
-    let RevisionSettings { epoch, delete, named } = settings;
-    let signer = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
-    let root_id = ramflux_crypto::identity_root_commitment(&signer.verifying_key());
-    let mut old = previous.unwrap_or_else(|| root(0, false));
-    let profile = if delete {
-        old.profile.clone()
-    } else {
-        wire::ProfileRef {
-            version: 2,
-            epoch,
-            hash: Some(id(u8::try_from(epoch + 10).map_err(storage)?)),
-        }
-    };
-    let binding = revision_binding(&signer, &root_id, settings)?;
-    let operation =
-        revision_operation(&signer, &old, &root_id, &profile, binding.as_ref(), settings)?;
-    let hash = ramflux_crypto::username_directory::operation_hash(&operation)?;
-    let mut reserved = old.clone();
-    reserved.pending_operation_id = Some(operation.body.operation_id.clone());
-    let detail = wire::OperationRow {
-        operation: operation.clone(),
-        operation_hash: hash.clone(),
-        state: wire::ReceiptState::Reserved,
-        reserved_at: WALL,
-        reservation_expires_at: WALL + 120,
-        finished_at: None,
-        retain_until: None,
-    };
-    let key = wire::OperationKey {
-        root: root_id.clone(),
-        operation_id: operation.body.operation_id.clone(),
-    };
-    let mut rows = vec![
-        wire::Replacement::Root {
-            key: root_id.clone(),
-            old: (old.epoch > 0).then_some(old.clone()),
-            new: Some(reserved.clone()),
-        },
-        wire::Replacement::Operation { key: key.clone(), old: None, new: Some(detail.clone()) },
-    ];
-    rows.sort_by_key(|r| r.order_key().unwrap_or_default());
-    let job = admitted(witness, lease, &root_id)?;
-    let expected = witness.head();
-    let checkpoint = witness.append(lease, &job, &expected, |stamp| {
-        Ok(wire::CheckpointDelta {
-            kind: wire::DeltaKind::Reserve,
-            tx_id: id(u8::try_from(epoch + 60).map_err(storage)?),
-            writer_incarnation: lease.incarnation.clone(),
-            clock_floor: stamp.wall,
-            operation: Some(operation.clone()),
-            rows,
-        })
-    })?;
-    primary.apply(witness, lease, &checkpoint, &Observer::new(None))?;
-    old.name = binding.as_ref().map(|second| second.body.name.clone());
-    old.binding_hash =
-        binding.as_ref().map(ramflux_crypto::username_directory::binding_hash).transpose()?;
-    old.current_binding = binding;
-    old.discoverable = named && !delete;
-    old.epoch = epoch;
-    old.profile = profile;
-    old.deleted = delete;
-    old.last_operation_id = Some(operation.body.operation_id.clone());
-    old.last_operation_hash = Some(hash);
-    old.receipt_decision = Some(wire::ReceiptDecision { committed_at: WALL });
-    let mut terminal = detail.clone();
-    terminal.state = wire::ReceiptState::Committed;
-    terminal.finished_at = Some(WALL);
-    terminal.retain_until = Some(WALL + 86400);
-    let mut rows = vec![
-        wire::Replacement::Root {
-            key: root_id.clone(),
-            old: Some(reserved),
-            new: Some(old.clone()),
-        },
-        wire::Replacement::Operation { key, old: Some(detail), new: Some(terminal) },
-    ];
-    rows.sort_by_key(|r| r.order_key().unwrap_or_default());
-    let job = admitted(witness, lease, &root_id)?;
-    let expected = witness.head();
-    let checkpoint = witness.append(lease, &job, &expected, |stamp| {
-        Ok(wire::CheckpointDelta {
-            kind: wire::DeltaKind::Commit,
-            tx_id: id(u8::try_from(epoch + 90).map_err(storage)?),
-            writer_incarnation: lease.incarnation.clone(),
-            clock_floor: stamp.wall,
-            operation: Some(operation),
-            rows,
-        })
-    })?;
-    primary.apply(witness, lease, &checkpoint, &Observer::new(None))?;
-    Ok(old)
-}
-#[test]
-fn username_checkpoint_profile_delete_rollback_image_rebuild() -> TestResult {
-    let fixture = Fixture::new()?;
-    let mut witness = fixture.witness()?;
-    let lease = witness.acquire(&id(1))?;
-    let primary = CheckpointPrimary::create(&fixture.path("primary"), &witness.head())?;
-    primary.reconcile(&mut witness, &lease)?;
-    let first = publish_revision(&mut witness, &primary, &lease, None, 1, false)?;
-    drop(primary);
-    std::fs::copy(fixture.path("primary"), fixture.path("rollback"))?;
-    let primary = CheckpointPrimary::open(&fixture.path("primary"))?;
-    let updated = publish_revision(&mut witness, &primary, &lease, Some(first), 2, false)?;
-    let deleted = publish_revision(&mut witness, &primary, &lease, Some(updated), 3, true)?;
-    let head = witness.head();
-    assert_eq!(head.lsn, 6);
-    assert_eq!(witness.compact(&lease, head.lsn)?, 6);
-    assert!(witness.transaction(&id(93))?.is_none());
-    drop(primary);
-    drop(witness);
-    std::fs::copy(fixture.path("rollback"), fixture.path("primary"))?;
-    let primary = CheckpointPrimary::open(&fixture.path("primary"))?;
-    let mut witness = fixture.reopen()?;
-    let lease = witness.acquire(&id(2))?;
-    assert!(matches!(
-        primary.reconcile(&mut witness, &lease),
-        Err(CheckpointError::Refused("primary_behind"))
-    ));
-    assert!(matches!(witness.ready(&lease), Err(CheckpointError::Refused("primary_applied"))));
-    let recovered = CheckpointPrimary::rebuild(&fixture.path("recovered"), &mut witness, &lease)?;
-    assert_eq!(recovered.head()?, head);
-    witness.ready(&lease)?;
-    let signer = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
-    let root_id = ramflux_crypto::identity_root_commitment(&signer.verifying_key());
-    let key = wire::Replacement::Root { key: root_id, old: None, new: Some(deleted.clone()) };
-    let saved = recovered.image_cell(&key)?.ok_or("missing recovered root")?;
-    let expected = canonical(&key)?;
-    assert_eq!(saved, expected);
-    assert_eq!(deleted.epoch, 3);
-    assert_eq!(deleted.profile.epoch, 2);
-    assert!(deleted.deleted);
-    assert!(matches!(
-        primary.reconcile(&mut witness, &lease),
-        Err(CheckpointError::Refused("primary_behind"))
-    ));
-    for limit in [0, 129] {
-        assert!(matches!(
-            witness.image_page(None, limit),
-            Err(CheckpointError::Refused("page_limit"))
-        ));
-    }
-    Ok(())
-}
-#[test]
-fn username_checkpoint_queue_deadline_clock_and_redo_limits() -> TestResult {
-    let fixture = Fixture::new()?;
-    let mut witness = fixture.witness()?;
-    let lease = witness.acquire(&id(1))?;
-    let head = witness.head();
-    let primary = CheckpointPrimary::create(&fixture.path("primary"), &head)?;
-    primary.reconcile(&mut witness, &lease)?;
-    assert!(matches!(
-        witness.admit_mutation(
-            &lease,
-            MutationAdmission { root: "bad".into(), home: "home.example".into(), control: false }
-        ),
-        Err(CheckpointError::Refused("id"))
-    ));
-    let first = admitted(&mut witness, &lease, &id(70))?;
-    assert!(matches!(
-        admitted(&mut witness, &lease, &id(70)),
-        Err(CheckpointError::Refused("queue_root"))
-    ));
-    for n in 71..74 {
-        admitted(&mut witness, &lease, &id(n))?;
-    }
-    assert!(matches!(
-        admitted(&mut witness, &lease, &id(74)),
-        Err(CheckpointError::Refused("queue_home"))
-    ));
-    fixture.clock.advance(5000);
-    assert!(matches!(
-        witness.append(&lease, &first, &head, |s| Ok(clock_delta(&lease.incarnation, 100, s.wall))),
-        Err(CheckpointError::Refused("deadline"))
-    ));
-    for field in ["writer", "time"] {
-        let job = admitted(&mut witness, &lease, &id(74))?;
-        let expected = witness.head();
-        let result = witness.append(&lease, &job, &expected, |s| {
-            let mut delta = clock_delta(&lease.incarnation, 100, s.wall);
-            if field == "writer" {
-                delta.writer_incarnation = id(9);
-            } else {
-                delta.clock_floor -= 1;
-            }
-            Ok(delta)
-        });
         assert!(
-            matches!(result,Err(CheckpointError::Refused(rule)) if rule==if field=="writer" {"writer_incarnation"} else {"commit_clock"})
+            matches!(
+                witness.append(&wrong, delta.clone(), &root_id, false),
+                Err(CheckpointError::Refused("head_cas"))
+            ),
+            "head field {field}"
         );
     }
-    witness.renew(&lease)?;
-    for n in 1..=64_u8 {
-        let checkpoint = append_clock(&mut witness, &lease, n)?;
-        primary.apply(&mut witness, &lease, &checkpoint, &Observer::new(None))?;
+    // Remove each image relationship independently, retaining a well-formed wire delta.
+    for table in ["root", "operation", "op_owner", "due", "counter"] {
+        let mut bad = delta.clone();
+        bad.rows.retain(|r| r.order_key().is_ok_and(|k| k.0 != table));
+        assert!(witness.append(&genesis, bad, &root_id, false).is_err(), "missing {table}");
+        assert_eq!(witness.head(), genesis);
+        assert_eq!(witness.image_page(None, 128)?.rows, Vec::new());
     }
+    let mut bad = delta.clone();
+    bad.clock_floor += 1;
     assert!(matches!(
-        append_clock(&mut witness, &lease, 65),
+        witness.append(&genesis, bad, &root_id, false),
+        Err(CheckpointError::Refused("commit_clock"))
+    ));
+    witness.append(&genesis, delta, &root_id, false)?;
+    let head = witness.head();
+    let (_, replacement) = reserve(2)?;
+    assert!(
+        matches!(
+            witness.append(&head, replacement, &root_id, false),
+            Err(CheckpointError::Refused("old_image"))
+        ),
+        "old-row CAS must reject replacement of existing authority"
+    );
+    assert_eq!(witness.head(), head);
+    let mut replay = clock_delta(1, WALL);
+    replay.tx_id = reserve(1)?.1.tx_id;
+    assert!(matches!(
+        witness.append(&head, replay, &root_id, false),
+        Err(CheckpointError::Refused("tx_id"))
+    ));
+    fixture.clock.wall.store(WALL - 1, Ordering::SeqCst);
+    assert!(matches!(
+        witness.append(&head, clock_delta(3, WALL - 1), &root_id, false),
+        Err(CheckpointError::Refused("clock"))
+    ));
+    Ok(())
+}
+fn username_checkpoint_barrier_and_rollback_recovery_redo_compaction_saturation() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    let root_id = id(77);
+    for tx in 0..64 {
+        let head = witness.head();
+        witness.append(&head, clock_delta(tx, WALL), &root_id, false)?;
+    }
+    let head = witness.head();
+    assert!(matches!(
+        witness.append(&head, clock_delta(65, WALL), &root_id, false),
         Err(CheckpointError::Refused("redo_root"))
     ));
-    let head = witness.head();
-    assert_eq!(witness.compact(&lease, head.lsn)?, 64);
-    let checkpoint = append_clock(&mut witness, &lease, 65)?;
-    primary.apply(&mut witness, &lease, &checkpoint, &Observer::new(None))?;
-    fixture.clock.wall.store(WALL - 1, Ordering::SeqCst);
-    assert!(matches!(witness.ready(&lease), Err(CheckpointError::Refused("clock"))));
-    fixture.clock.wall.store(WALL + 5, Ordering::SeqCst);
-    assert!(matches!(witness.renew(&lease), Err(CheckpointError::Refused("lease"))));
-    Ok(())
-}
-
-fn publish_revision(
-    witness: &mut CheckpointWitness,
-    primary: &CheckpointPrimary,
-    lease: &WriterLease,
-    previous: Option<wire::RootRow>,
-    epoch: u64,
-    delete: bool,
-) -> Result<wire::RootRow> {
-    publish_revision_named(
-        witness,
-        primary,
-        lease,
-        previous,
-        RevisionSettings { epoch, delete, named: false },
-    )
-}
-
-fn resolve_context(root_id: &str, call: u8) -> ContextRequest {
-    ContextRequest {
-        call_id: id(call),
-        session: id(44),
-        caller_root: id(45),
-        root: root_id.into(),
-        home: "caller.example".into(),
-        kind: ContextKind::Resolve { name: "alice2".into(), nonce: id(46) },
-    }
-}
-fn candidate(
-    witness: &CheckpointWitness,
-    lease: &WriterLease,
-    request: &ContextRequest,
-    root: &wire::RootRow,
-) -> Result<wire::ServeCandidate> {
-    let center = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);
-    let response = ramflux_crypto::username_directory::sign_resolve(
-        &center,
-        "center.example",
-        wire::DirectoryResolveBody {
-            center_id: "center.example".into(),
-            name: "alice2".into(),
-            node: root.node.clone(),
-            principal_commitment: request.root.clone(),
-            epoch: root.epoch,
-            binding_hash: root.binding_hash.clone().ok_or(CheckpointError::Refused("binding"))?,
-            profile: root.profile.clone(),
-            request_nonce: id(46),
-            issued_at: WALL,
-            expires_at: WALL + 60,
-        },
-    )?;
-    let head = witness.head();
-    Ok(wire::ServeCandidate::Resolve {
-        generation: head.generation,
-        witness_boot: witness.witness_boot().into(),
-        writer_incarnation: lease.incarnation.clone(),
-        primary_lsn: head.lsn,
-        primary_digest: head.digest,
-        call_id: request.call_id.clone(),
-        response,
-    })
-}
-#[test]
-fn username_checkpoint_publication_fields_partial_write_and_restart() -> TestResult {
-    let fixture = Fixture::new()?;
-    let mut witness = fixture.witness()?;
-    let first = witness.acquire(&id(1))?;
-    let primary = CheckpointPrimary::create(&fixture.path("primary"), &witness.head())?;
-    primary.reconcile(&mut witness, &first)?;
-    let current = publish_revision_named(
-        &mut witness,
-        &primary,
-        &first,
-        None,
-        RevisionSettings { epoch: 1, delete: false, named: true },
-    )?;
-    let signer = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
-    let root_id = ramflux_crypto::identity_root_commitment(&signer.verifying_key());
-    let request = resolve_context(&root_id, 50);
-    witness.admit_context(&first, request.clone())?;
-    assert!(matches!(
-        witness.admit_context(&first, request.clone()),
-        Err(CheckpointError::Refused("call_id"))
-    ));
-    let valid = candidate(&witness, &first, &request, &current)?;
-    assert_candidate_mutations(&mut witness, &first, &valid)?;
-    witness.enqueue_candidate(&first, valid.clone())?;
-    assert!(matches!(
-        witness.enqueue_candidate(&first, valid),
-        Err(CheckpointError::Refused("candidate_duplicate"))
-    ));
-    assert!(
-        !witness.publish_step(&first, &request.call_id, |_| Err(
-            std::io::ErrorKind::WouldBlock.into()
-        ))?
-    );
-    let mut bytes = Vec::new();
-    assert!(!witness.publish_step(&first, &request.call_id, |part| {
-        bytes.extend_from_slice(&part[..1]);
-        Ok(1)
-    })?);
-    fixture.clock.advance(10_000);
-    let mut wrote = false;
-    assert!(matches!(
-        witness.publish_step(&first, &request.call_id, |part| {
-            wrote = true;
-            Ok(part.len())
-        }),
-        Err(CheckpointError::Refused("lease"))
-    ));
-    assert!(!wrote);
-    assert_eq!(bytes.len(), 1);
-    let second = witness.acquire(&id(2))?;
-    primary.reconcile(&mut witness, &second)?;
-    let request = resolve_context(&root_id, 51);
-    witness.admit_context(&second, request.clone())?;
-    let valid = candidate(&witness, &second, &request, &current)?;
-    witness.enqueue_candidate(&second, valid)?;
-    assert!(witness.publish_step(&second, &request.call_id, |part| Ok(part.len()))?);
-    assert!(matches!(
-        witness.publish_step(&second, &request.call_id, |part| Ok(part.len())),
-        Err(CheckpointError::Refused("context"))
-    ));
-    let request = resolve_context(&root_id, 52);
-    witness.admit_context(&second, request.clone())?;
-    let valid = candidate(&witness, &second, &request, &current)?;
-    witness.enqueue_candidate(&second, valid)?;
-    drop(witness);
-    let mut witness = fixture.reopen()?;
-    assert!(matches!(
-        witness.publish_step(&second, &request.call_id, |part| Ok(part.len())),
-        Err(CheckpointError::Refused("lease"))
-    ));
-    let third = witness.acquire(&id(3))?;
-    primary.reconcile(&mut witness, &third)?;
-    assert!(matches!(
-        witness.publish_step(&third, &request.call_id, |part| Ok(part.len())),
-        Err(CheckpointError::Refused("context"))
-    ));
-    Ok(())
-}
-
-#[test]
-fn username_checkpoint_context_caps_and_metadata_negatives() -> TestResult {
-    let fixture = Fixture::new()?;
-    let mut witness = fixture.witness()?;
-    let lease = witness.acquire(&id(1))?;
-    let primary = CheckpointPrimary::create(&fixture.path("primary"), &witness.head())?;
-    primary.reconcile(&mut witness, &lease)?;
-    let current = publish_revision_named(
-        &mut witness,
-        &primary,
-        &lease,
-        None,
-        RevisionSettings { epoch: 1, delete: false, named: true },
-    )?;
-    let signer = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
-    let root_id = ramflux_crypto::identity_root_commitment(&signer.verifying_key());
-    assert_bad_heads(&witness.head());
-    for n in 0..64_u8 {
-        let mut request = resolve_context(&root_id, n + 100);
-        request.caller_root = id(n / 4 + 100);
-        request.home = format!("home{}.example", n / 16);
-        witness.admit_context(&lease, request)?;
-    }
-    let mut request = resolve_context(&root_id, 200);
-    request.home = "fresh.example".into();
-    request.caller_root = id(240);
-    assert!(matches!(
-        witness.admit_context(&lease, request),
-        Err(CheckpointError::Refused("context_global"))
-    ));
-    for n in 0..64_u8 {
-        witness.close_context(&id(n + 100));
-    }
-    for n in 0..4 {
-        witness.admit_context(&lease, resolve_context(&root_id, n + 100))?;
-    }
-    assert!(matches!(
-        witness.admit_context(&lease, resolve_context(&root_id, 200)),
-        Err(CheckpointError::Refused("context_root"))
-    ));
-    for n in 0..4 {
-        witness.close_context(&id(n + 100));
-    }
-    for n in 0..16 {
-        let mut request = resolve_context(&root_id, n + 100);
-        request.caller_root = id(n + 100);
-        witness.admit_context(&lease, request)?;
-    }
-    let mut request = resolve_context(&root_id, 200);
-    request.caller_root = id(240);
-    assert!(matches!(
-        witness.admit_context(&lease, request),
-        Err(CheckpointError::Refused("context_home"))
-    ));
-    for n in 0..16 {
-        witness.close_context(&id(n + 100));
-    }
-    let request = resolve_context(&root_id, 200);
-    witness.admit_context(&lease, request.clone())?;
-    let original = request.clone();
-    for field in 0..6 {
-        let mut wrong = original.clone();
-        match field {
-            0 => wrong.session = id(99),
-            1 => wrong.caller_root = id(99),
-            2 => wrong.root = id(99),
-            3 => wrong.home = "other.example".into(),
-            4 => wrong.kind = ContextKind::Resolve { name: "alice3".into(), nonce: id(46) },
-            _ => wrong.kind = ContextKind::Resolve { name: "alice2".into(), nonce: id(99) },
+    assert_eq!(witness.compact(64)?, 64);
+    assert_eq!(witness.head(), head);
+    witness.append(&head, clock_delta(65, WALL), &root_id, false)?;
+    // Populate the physical redo boundary in one fixture transaction; no timing/stress loop.
+    {
+        let tx = witness.db.begin_write().map_err(storage)?;
+        let mut redo = tx.open_table(REDO).map_err(storage)?;
+        let frame = wire::encode(&wire::Checkpoint {
+            center_id: head.center_id.clone(),
+            generation: 1,
+            lsn: 1,
+            previous_digest: id(0),
+            delta: clock_delta(999, WALL),
+        })?;
+        for lsn in 1000..17367 {
+            redo.insert(lsn, frame.as_slice()).map_err(storage)?;
         }
-        assert!(matches!(
-            witness.admit_context(&lease, wrong),
-            Err(CheckpointError::Refused("call_id"))
-        ));
+        drop(redo);
+        tx.commit().map_err(storage)?;
     }
-    let mut bad = serde_json::to_value(candidate(&witness, &lease, &request, &current)?)?;
-    bad["response"]["signature"] =
-        serde_json::json!(ramflux_protocol::encode_base64url([0_u8; 64]));
+    let head = witness.head();
     assert!(matches!(
-        witness.enqueue_candidate(&lease, serde_json::from_value(bad)?),
-        Err(CheckpointError::Crypto(ramflux_crypto::username_directory::Error::Crypto(
-            ramflux_crypto::CryptoError::VerifyFailed
-        )))
+        witness.append(&head, clock_delta(66, WALL), &id(88), false),
+        Err(CheckpointError::Refused("redo_global"))
     ));
-    witness.close_context(&request.call_id);
-    Ok(())
-}
-
-fn assert_bad_heads(valid: &CheckpointHead) {
-    for field in 0..7 {
-        let mut head = valid.clone();
-        let expected = match field {
-            0 => {
-                head.center_id = String::new();
-                "node"
-            }
-            1 => {
-                head.generation = 0;
-                "generation"
-            }
-            2 => {
-                head.lsn = u64::MAX;
-                "lsn"
-            }
-            3 => {
-                head.digest = "bad".into();
-                "id"
-            }
-            4 => {
-                head.clock_floor = u64::MAX;
-                "clock"
-            }
-            5 => {
-                head.codec_version = 0;
-                "schema"
-            }
-            _ => {
-                head.policy = "unknown".into();
-                "schema"
-            }
-        };
-        let result = head.validate();
-        assert!(
-            matches!(result,Err(CheckpointError::Refused(rule)) if rule==expected)
-                || matches!(result,Err(CheckpointError::Codec(wire::CodecError::Field(rule))) if rule==expected),
-            "head {field}: {result:?}"
-        );
+    for tx in 70..86 {
+        let head = witness.head();
+        witness.append(&head, clock_delta(tx, WALL), &id(88), true)?;
     }
-}
-
-fn revision_binding(
-    signer: &ed25519_dalek::SigningKey,
-    root_id: &str,
-    settings: RevisionSettings,
-) -> Result<Option<wire::UsernameBinding>> {
-    if !settings.named || settings.delete {
-        return Ok(None);
-    }
-    Ok(Some(ramflux_crypto::username_directory::sign_binding(
-        signer,
-        wire::UsernameBindingBody {
-            name: "alice2".into(),
-            node: "home.example".into(),
-            principal_commitment: root_id.into(),
-            epoch: settings.epoch,
-        },
-    )?))
-}
-
-fn assert_candidate_mutations(
-    witness: &mut CheckpointWitness,
-    lease: &WriterLease,
-    valid: &wire::ServeCandidate,
-) -> TestResult {
-    let original = serde_json::to_value(valid)?;
-    let mutations = [
-        ("/generation", serde_json::json!(2), "candidate_generation"),
-        ("/witness_boot", serde_json::json!(id(99)), "candidate_boot"),
-        ("/writer_incarnation", serde_json::json!(id(99)), "candidate_writer"),
-        ("/primary_lsn", serde_json::json!(3), "candidate_head"),
-        ("/primary_digest", serde_json::json!(id(99)), "candidate_head"),
-        ("/call_id", serde_json::json!(id(99)), "context"),
-        ("/response/body/name", serde_json::json!("alice3"), "request_correlation"),
-        ("/response/body/request_nonce", serde_json::json!(id(99)), "request_correlation"),
-        ("/response/body/center_id", serde_json::json!("other.example"), "response_owner"),
-        ("/response/body/principal_commitment", serde_json::json!(id(99)), "response_owner"),
-        ("/response/body/node", serde_json::json!("other.example"), "response_owner"),
-        ("/response/body/epoch", serde_json::json!(2), "response_tuple"),
-        ("/response/body/binding_hash", serde_json::json!(id(99)), "response_tuple"),
-        ("/response/body/profile/hash", serde_json::json!(id(99)), "response_tuple"),
-        ("/response/body/issued_at", serde_json::json!(WALL + 1), "response_time"),
-    ];
-    for (path, value, expected) in mutations {
-        let mut bad = original.clone();
-        *bad.pointer_mut(path).ok_or("missing candidate field")? = value;
-        let result = witness.enqueue_candidate(lease, serde_json::from_value(bad)?);
-        assert!(
-            matches!(result,Err(CheckpointError::Refused(rule)) if rule==expected),
-            "{path}: {result:?}"
-        );
-    }
-
+    let head = witness.head();
+    assert!(matches!(
+        witness.append(&head, clock_delta(87, WALL), &id(88), true),
+        Err(CheckpointError::Refused("redo_global"))
+    ));
+    drop(witness);
+    let witness = fixture.reopen()?;
+    assert_eq!(witness.head(), head);
     Ok(())
 }

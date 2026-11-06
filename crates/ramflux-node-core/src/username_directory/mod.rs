@@ -4,9 +4,7 @@
 //! Dormant independent checkpoint components. OS authentication, protected provisioning and
 //! actual transport writers belong to the service integration; no public route is installed.
 mod checkpoint;
-mod checkpoint_primary;
 pub use checkpoint::*;
-pub use checkpoint_primary::*;
 use ramflux_protocol::username_directory as wire;
 use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -47,9 +45,6 @@ pub(crate) fn fixed(value: &str) -> Result<()> {
     let bytes =
         ramflux_protocol::decode_base64url(value).map_err(|_| CheckpointError::Refused("id"))?;
     require(bytes.len() == 32 && ramflux_protocol::encode_base64url(bytes) == value, "id")
-}
-pub(crate) fn nonce() -> Result<String> {
-    Ok(ramflux_protocol::encode_base64url(ramflux_crypto::random_32().map_err(storage)?))
 }
 /// Exact durable equality fence; no saved READY flag or lease is persisted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
