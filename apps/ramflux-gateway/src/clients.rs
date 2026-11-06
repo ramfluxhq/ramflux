@@ -271,18 +271,42 @@ where
     // Without a configured async router endpoint, fall back to the blocking mesh client.
     // That client blocks on a std mpsc recv, so it must not run directly on the async
     // gateway QUIC worker (it would stall the runtime and the gateway never becomes ready).
-    // Run it on a blocking thread instead.
+    // Run it on a blocking thread instead. The thread carries an absolute deadline of its own:
+    // the async waiter's timeout alone would leave the thread, and its retry, running.
+    let deadline = std::time::Instant::now() + ROUTER_BLOCKING_FALLBACK_TIMEOUT;
+    let body = serde_json::to_value(value)?;
+    let response = router_post_json_blocking_until(router, path, &body, deadline).await?;
+    Ok(serde_json::from_value(response)?)
+}
+
+/// Caller budget for the blocking mesh fallback (matches the 10 s registration/prekey timeout).
+const ROUTER_BLOCKING_FALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Runs one blocking router POST that cannot outlive `deadline`, across connect, handshake,
+/// every read and the stale-connection retry. Returns only after the blocking thread exits.
+pub(crate) async fn router_post_json_blocking_until(
+    router: &RouterMeshClient,
+    path: &str,
+    body: &serde_json::Value,
+    deadline: std::time::Instant,
+) -> Result<serde_json::Value, ramflux_transport::TransportError> {
     let router = router.clone();
     let path = path.to_owned();
-    let body = serde_json::to_value(value)?;
-    let response: serde_json::Value = tokio::task::spawn_blocking(move || {
-        router_post_json::<serde_json::Value, serde_json::Value>(&router, &path, &body)
+    let body = body.clone();
+    tokio::task::spawn_blocking(move || {
+        router.client.post_json_with_deadline(
+            &router.endpoint,
+            &path,
+            &router.tls,
+            &router.server_name,
+            &body,
+            deadline,
+        )
     })
     .await
     .map_err(|error| {
         ramflux_transport::TransportError::Quic(format!("router blocking join failed: {error}"))
-    })??;
-    Ok(serde_json::from_value(response)?)
+    })?
 }
 
 pub(crate) fn router_get_json<R>(

@@ -21,10 +21,83 @@ use crate::{MeshHttpRequest, MeshTlsConfig, MeshTlsServerStream, TransportError}
 struct MeshHttpTimeouts {
     connect: Duration,
     total: Duration,
+    /// Absolute cap over connect, TLS handshake, every read and write, and retries.
+    deadline: Option<Instant>,
 }
 
 impl MeshHttpTimeouts {
-    const DEFAULT: Self = Self { connect: Duration::from_secs(5), total: Duration::from_secs(30) };
+    const DEFAULT: Self =
+        Self { connect: Duration::from_secs(5), total: Duration::from_secs(30), deadline: None };
+
+    const fn with_deadline(self, deadline: Instant) -> Self {
+        Self { deadline: Some(deadline), ..self }
+    }
+}
+
+/// Caps one socket operation at `per_io`, and at the remaining time when a deadline is set.
+/// Fails with `TimedOut` once the deadline has passed, so no zero-length socket timeout is set.
+fn bounded_io_timeout(timeouts: MeshHttpTimeouts, per_io: Duration) -> std::io::Result<Duration> {
+    let Some(deadline) = timeouts.deadline else {
+        return Ok(per_io);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "mesh HTTP request deadline exceeded",
+        ));
+    }
+    Ok(remaining.min(per_io))
+}
+
+/// TCP socket that re-arms its timeouts from the absolute request deadline before every read
+/// and write. rustls drives handshakes and reads through several socket calls, so a deadline
+/// checked only between those calls would let a trickling peer hold them open indefinitely.
+struct DeadlineSocket {
+    tcp: TcpStream,
+    deadline: Option<Instant>,
+    io_timeout: Duration,
+}
+
+impl DeadlineSocket {
+    fn new(tcp: TcpStream, timeouts: MeshHttpTimeouts) -> Self {
+        Self { tcp, deadline: timeouts.deadline, io_timeout: timeouts.total }
+    }
+
+    fn arm(
+        &self,
+        set: fn(&TcpStream, Option<Duration>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let Some(deadline) = self.deadline else {
+            return Ok(());
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "mesh HTTP request deadline exceeded",
+            ));
+        }
+        set(&self.tcp, Some(remaining.min(self.io_timeout)))
+    }
+}
+
+impl Read for DeadlineSocket {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.arm(TcpStream::set_read_timeout)?;
+        self.tcp.read(buf)
+    }
+}
+
+impl Write for DeadlineSocket {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.arm(TcpStream::set_write_timeout)?;
+        self.tcp.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tcp.flush()
+    }
 }
 
 pub(crate) const fn mesh_http_post_worst_case_timeout() -> Duration {
@@ -52,7 +125,7 @@ struct MeshHttpPoolKey {
 }
 
 struct MeshHttpPooledConnection {
-    stream: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    stream: rustls::StreamOwned<rustls::ClientConnection, DeadlineSocket>,
     created_at: Instant,
 }
 
@@ -167,6 +240,40 @@ impl MeshHttpClient {
         Ok(serde_json::from_slice(&response)?)
     }
 
+    /// Same as [`Self::post_json`], but every connect, handshake, read, write and retry is
+    /// bounded by one absolute `deadline`.
+    ///
+    /// # Errors
+    /// Returns a `TimedOut` I/O error once the deadline passes, or another error when the
+    /// JSON codec or the TLS/HTTP exchange fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_json_with_deadline<T, R>(
+        &self,
+        endpoint: &str,
+        path: &str,
+        tls: &MeshTlsConfig,
+        server_name: &str,
+        value: &T,
+        deadline: Instant,
+    ) -> Result<R, TransportError>
+    where
+        T: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        let body = serde_json::to_vec(value)?;
+        let response = self.json_request(MeshHttpClientRequest {
+            method: "POST",
+            endpoint,
+            path,
+            tls,
+            server_name,
+            peer_ca_pems: None,
+            body: Some(&body),
+            timeouts: MeshHttpTimeouts::DEFAULT.with_deadline(deadline),
+        })?;
+        Ok(serde_json::from_slice(&response)?)
+    }
+
     fn json_request(&self, request: MeshHttpClientRequest<'_>) -> Result<Vec<u8>, TransportError> {
         let endpoint = normalized_endpoint(request.endpoint);
         record_mesh_client_request();
@@ -178,7 +285,7 @@ impl MeshHttpClient {
             Some(connection) => (connection, true),
             None => (new_mesh_http_connection(endpoint, &request)?, false),
         };
-        let exchange = timed_mesh_http_exchange(&mut connection, &request_bytes);
+        let exchange = timed_mesh_http_exchange(&mut connection, &request_bytes, request.timeouts);
         match exchange {
             Ok(body) => {
                 self.checkin(key, connection);
@@ -186,8 +293,10 @@ impl MeshHttpClient {
             }
             Err(_error) if reused => {
                 close_mesh_client_connection(connection);
+                // The retry shares the same absolute deadline: its connect fails at once once
+                // the deadline has passed, so a stale-connection retry cannot outlive the caller.
                 let mut retry = new_mesh_http_connection(endpoint, &request)?;
-                let body = timed_mesh_http_exchange(&mut retry, &request_bytes)?;
+                let body = timed_mesh_http_exchange(&mut retry, &request_bytes, request.timeouts)?;
                 self.checkin(key, retry);
                 Ok(body)
             }
@@ -242,7 +351,10 @@ fn configured_max_idle_per_peer() -> usize {
 fn mesh_http_exchange(
     connection: &mut MeshHttpPooledConnection,
     request_bytes: &[u8],
+    timeouts: MeshHttpTimeouts,
 ) -> Result<Vec<u8>, TransportError> {
+    // Pooled sockets are reused across requests, so each exchange installs its own deadline.
+    connection.stream.sock.deadline = timeouts.deadline;
     connection.stream.write_all(request_bytes)?;
     connection.stream.flush()?;
     read_mesh_http_response(&mut connection.stream)
@@ -251,9 +363,10 @@ fn mesh_http_exchange(
 fn timed_mesh_http_exchange(
     connection: &mut MeshHttpPooledConnection,
     request_bytes: &[u8],
+    timeouts: MeshHttpTimeouts,
 ) -> Result<Vec<u8>, TransportError> {
     let started = Instant::now();
-    let result = mesh_http_exchange(connection, request_bytes);
+    let result = mesh_http_exchange(connection, request_bytes, timeouts);
     record_mesh_client_exchange(started.elapsed());
     result
 }
@@ -286,7 +399,7 @@ fn mesh_http_json_request_with_timeouts(
     let mut connection = new_mesh_http_connection(endpoint, &request)?;
     let request_bytes =
         mesh_http_request_bytes(request.method, endpoint, request.path, request.body, false)?;
-    let response = timed_mesh_http_exchange(&mut connection, &request_bytes);
+    let response = timed_mesh_http_exchange(&mut connection, &request_bytes, request.timeouts);
     close_mesh_client_connection(connection);
     response
 }
@@ -306,8 +419,11 @@ fn new_mesh_http_connection(
     };
     let connection = rustls::ClientConnection::new(Arc::new(client_config), tls_server_name)
         .map_err(|error| TransportError::Tls(error.to_string()))?;
-    let mut stream = rustls::StreamOwned::new(connection, tcp);
+    let mut stream =
+        rustls::StreamOwned::new(connection, DeadlineSocket::new(tcp, request.timeouts));
     while stream.conn.is_handshaking() {
+        // Every socket call inside complete_io re-arms from the deadline, so a trickling peer
+        // cannot hold the handshake past it.
         stream.conn.complete_io(&mut stream.sock)?;
     }
     record_mesh_client_tls_handshake();
@@ -448,11 +564,13 @@ fn connect_mesh_tcp(
         .to_socket_addrs()
         .map_err(|source| TransportError::Http(format!("bad endpoint {endpoint}: {source}")))?
     {
-        match TcpStream::connect_timeout(&addr, timeouts.connect) {
+        let connect_timeout = bounded_io_timeout(timeouts, timeouts.connect)?;
+        match TcpStream::connect_timeout(&addr, connect_timeout) {
             Ok(stream) => {
                 stream.set_nodelay(true)?;
-                stream.set_read_timeout(Some(timeouts.total))?;
-                stream.set_write_timeout(Some(timeouts.total))?;
+                let io_timeout = bounded_io_timeout(timeouts, timeouts.total)?;
+                stream.set_read_timeout(Some(io_timeout))?;
+                stream.set_write_timeout(Some(io_timeout))?;
                 return Ok(stream);
             }
             Err(error) => last_error = Some(error),
@@ -493,7 +611,7 @@ fn mesh_http_request_bytes(
 }
 
 fn read_mesh_http_response(
-    stream: &mut rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    stream: &mut rustls::StreamOwned<rustls::ClientConnection, DeadlineSocket>,
 ) -> Result<Vec<u8>, TransportError> {
     let mut reader = BufReader::new(stream);
     read_mesh_http_response_from_reader(&mut reader)
@@ -983,6 +1101,52 @@ mod tests {
     }
 
     #[test]
+    fn deadline_bounds_a_trickling_router_during_handshake_and_retries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?.to_string();
+        let router = thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            // A TLS record header that promises 16 KiB, then one byte per second. The client
+            // handshake can never complete, so only the absolute deadline can end the call.
+            stream.write_all(&[0x16, 0x03, 0x03, 0x40, 0x00])?;
+            for _ in 0..15 {
+                thread::sleep(Duration::from_secs(1));
+                stream.write_all(&[0])?;
+            }
+            Ok(())
+        });
+        let tls = test_mesh_tls_config("gateway")?;
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        let result = MeshHttpClient::new().post_json_with_deadline::<_, serde_json::Value>(
+            &endpoint,
+            "/mvp1/identity/register",
+            &tls,
+            "ramflux-router",
+            &serde_json::json!({"probe": true}),
+            deadline,
+        );
+        let elapsed = started.elapsed();
+        let Err(error) = result else {
+            return Err("trickling router must not complete a request".into());
+        };
+        assert!(
+            matches!(&error, crate::TransportError::Io(source) if source.kind() == std::io::ErrorKind::TimedOut),
+            "expected a deadline timeout, got {error:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(3500),
+            "call ran past the 2 s deadline plus margin: {elapsed:?}"
+        );
+        // The client dropped its socket on the error path, so the trickling peer ends early.
+        let _ = router.join();
+        Ok(())
+    }
+
+    #[test]
     fn mesh_request_to_unresponsive_endpoint_times_out() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
@@ -1005,6 +1169,7 @@ mod tests {
             timeouts: MeshHttpTimeouts {
                 connect: Duration::from_millis(50),
                 total: Duration::from_millis(100),
+                deadline: None,
             },
         });
         assert!(rejected.is_err());

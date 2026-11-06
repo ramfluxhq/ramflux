@@ -284,6 +284,56 @@ impl MeshQuicCircuitBreakers {
             }
         }
     }
+
+    /// Gives back a half-open probe whose attempt was cancelled before any outcome was recorded.
+    /// The breaker returns to the state the probe found, so the next dial can probe again.
+    fn release_connect_probe(&self, probe: &MeshQuicCircuitProbe) {
+        let Some(previous) = probe.previous else {
+            return;
+        };
+        if let Ok(mut states) = self.states.lock()
+            && matches!(states.get(&probe.key), Some(MeshQuicCircuitBreakerState::HalfOpen))
+        {
+            states.insert(probe.key.clone(), previous);
+        }
+    }
+}
+
+/// Owns a probe acquired by `before_connect`. Every connect outcome settles it; if the attempt
+/// is cancelled first, dropping the guard releases the half-open slot.
+struct MeshQuicCircuitProbeGuard<'a> {
+    breakers: &'a MeshQuicCircuitBreakers,
+    probe: MeshQuicCircuitProbe,
+    settled: bool,
+}
+
+impl<'a> MeshQuicCircuitProbeGuard<'a> {
+    fn new(breakers: &'a MeshQuicCircuitBreakers, probe: MeshQuicCircuitProbe) -> Self {
+        Self { breakers, probe, settled: false }
+    }
+
+    fn record_connect_failure(&mut self, now: Instant, cooldown: Duration) {
+        self.breakers.record_connect_failure(&self.probe, now, cooldown);
+        self.settled = true;
+    }
+
+    fn record_connect_error(&mut self, error: &TransportError, now: Instant, cooldown: Duration) {
+        self.breakers.record_connect_error(&self.probe, error, now, cooldown);
+        self.settled = true;
+    }
+
+    fn record_connect_success(&mut self) {
+        self.breakers.record_connect_success(&self.probe);
+        self.settled = true;
+    }
+}
+
+impl Drop for MeshQuicCircuitProbeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.breakers.release_connect_probe(&self.probe);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -308,6 +358,18 @@ impl MeshQuicPoolRegistry {
         next.insert(key, Arc::clone(&pool));
         self.pools.store(Arc::new(next));
         pool
+    }
+}
+
+/// Owns one `connecting` slot of a pool. Dropping it (success, error, timeout or cancellation)
+/// releases the slot and wakes waiters.
+struct MeshQuicConnectReservation<'a> {
+    pool: &'a MeshQuicConnectionPool,
+}
+
+impl Drop for MeshQuicConnectReservation<'_> {
+    fn drop(&mut self) {
+        self.pool.finish_connect_reservation();
     }
 }
 
@@ -1137,8 +1199,12 @@ async fn mesh_quic_acquire_connection(
         notified.as_mut().enable();
         if pool.try_reserve_connect(pool_size) {
             record_mesh_client_pool_miss();
+            // The guard owns the slot from here on: an error, timeout or cancellation of the
+            // connect releases it when the future is dropped.
+            let reservation = MeshQuicConnectReservation { pool };
             let connection =
-                mesh_quic_connect_and_insert(pool, breakers, peer_addr, job, pool_size).await?;
+                mesh_quic_connect_and_insert(reservation, breakers, peer_addr, job, pool_size)
+                    .await?;
             return Ok((connection, false));
         }
         if let Some(connection) = pool.select_connection() {
@@ -1151,15 +1217,17 @@ async fn mesh_quic_acquire_connection(
 }
 
 async fn mesh_quic_connect_and_insert(
-    pool: &MeshQuicConnectionPool,
+    reservation: MeshQuicConnectReservation<'_>,
     breakers: &MeshQuicCircuitBreakers,
     peer_addr: SocketAddr,
     job: &MeshQuicClientRequestJob,
     pool_size: usize,
 ) -> Result<MeshQuicSelectedConnection, TransportError> {
+    let pool = reservation.pool;
     let connect_result =
         mesh_quic_connect(peer_addr, &job.tls, &job.server_name, &job.peer_ca_pems, breakers).await;
-    pool.finish_connect_reservation();
+    // Release the connecting slot before the connection is inserted, as before the guard.
+    drop(reservation);
     let cached = connect_result?;
     Ok(pool.insert_connection(cached, pool_size).await)
 }
@@ -1229,10 +1297,14 @@ async fn mesh_quic_connect(
             .map_err(|error| TransportError::Quic(format!("bad QUIC bind addr: {error}")))?,
     )?;
     endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(tls, peer_ca_pems)?);
-    let probe = breakers.before_connect(peer_addr, server_name, Instant::now())?;
+    // From here on the guard owns any half-open probe: a cancelled dial releases it.
+    let mut probe = MeshQuicCircuitProbeGuard::new(
+        breakers,
+        breakers.before_connect(peer_addr, server_name, Instant::now())?,
+    );
     let connecting = endpoint.connect(peer_addr, server_name).map_err(|error| {
         let error = crate::quic_errors::connect(error);
-        breakers.record_connect_failure(&probe, Instant::now(), breaker_cooldown);
+        probe.record_connect_failure(Instant::now(), breaker_cooldown);
         error
     })?;
     tracing::info!(
@@ -1256,11 +1328,11 @@ async fn mesh_quic_connect(
         });
     let connection = match connection_result {
         Ok(connection) => {
-            breakers.record_connect_success(&probe);
+            probe.record_connect_success();
             connection
         }
         Err(error) => {
-            breakers.record_connect_error(&probe, &error, Instant::now(), breaker_cooldown);
+            probe.record_connect_error(&error, Instant::now(), breaker_cooldown);
             return Err(error);
         }
     };
@@ -1399,13 +1471,14 @@ mod tests {
 
     use super::{
         GatewayQuicRequest, GatewayQuicResponse, MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT,
-        MESH_QUIC_CONNECT_TIMEOUT_DEFAULT, MeshQuicAcceptedWireRequest, MeshQuicCircuitBreakers,
-        MeshQuicClientJob, MeshQuicClientRequestPayload, MeshQuicClientResponsePayload,
+        MESH_QUIC_CONNECT_TIMEOUT_DEFAULT, MeshQuicAcceptedWireRequest, MeshQuicCircuitBreakerKey,
+        MeshQuicCircuitBreakerState, MeshQuicCircuitBreakers, MeshQuicClientJob,
+        MeshQuicClientRequestJob, MeshQuicClientRequestPayload, MeshQuicClientResponsePayload,
         MeshQuicClientRuntime, MeshQuicConnectionPool, MeshQuicPoolKey, MeshQuicPoolRegistry,
         MeshQuicPostcardRequest, MeshQuicPostcardResponse, MeshQuicServer, MeshTlsConfig,
-        drain_quic_recv_to_fin, duration_from_millis_value, mesh_quic_get_json_with_peer_ca_pems,
-        mesh_quic_post_postcard_with_peer_ca_pems_async, postcard_from_bytes, postcard_to_allocvec,
-        resolve_endpoint, write_quic_json_message,
+        drain_quic_recv_to_fin, duration_from_millis_value, mesh_quic_acquire_connection,
+        mesh_quic_get_json_with_peer_ca_pems, mesh_quic_post_postcard_with_peer_ca_pems_async,
+        postcard_from_bytes, postcard_to_allocvec, resolve_endpoint, write_quic_json_message,
     };
     use crate::TransportError;
 
@@ -1637,6 +1710,122 @@ mod tests {
 
         assert_eq!(allowed.load(Ordering::Relaxed), 1);
         assert_eq!(skipped.load(Ordering::Relaxed), 15);
+        Ok(())
+    }
+
+    /// Waits on observed state with yields only (no timers), so the gate is causal.
+    async fn wait_until(mut ready: impl FnMut() -> bool) -> Result<(), Box<dyn std::error::Error>> {
+        for _ in 0..100_000 {
+            if ready() {
+                return Ok(());
+            }
+            tokio::task::yield_now().await;
+        }
+        Err(test_error("gate condition was never reached"))
+    }
+
+    #[test]
+    fn cancelled_handshakes_release_reservations_and_half_open_probes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_cert_root("cancelled_handshakes_release_reservations_and_half_open")?;
+        let ca = issue_test_ca(&root)?;
+        let client = issue_test_service_cert(&ca, "node-cancel-a", "ramflux-federation")?;
+        let server = issue_test_service_cert(&ca, "node-cancel-a", "ramflux-router")?;
+        // Nothing answers on this socket, so every dial stays in its handshake until cancelled.
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let peer_addr = socket.local_addr()?;
+        let pool = Arc::new(MeshQuicConnectionPool::default());
+        let breakers = Arc::new(MeshQuicCircuitBreakers::default());
+        let pool_size = 2;
+        let key = MeshQuicCircuitBreakerKey { peer_addr, server_name: "ramflux-router".to_owned() };
+        let make_job = || MeshQuicClientRequestJob {
+            endpoint: peer_addr.to_string(),
+            server_name: "ramflux-router".to_owned(),
+            tls: client.tls.clone(),
+            peer_ca_pems: vec![server.ca_pem.clone()],
+            request: MeshQuicClientRequestPayload::Json(GatewayQuicRequest {
+                method: "GET".to_owned(),
+                path: "/healthz".to_owned(),
+                body: serde_json::Value::Null,
+            }),
+            enqueued_at: Instant::now(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        runtime.block_on(async {
+            // Phase 1: four dials against a pool of two. Two hold reservations mid-handshake.
+            let mut dials = Vec::new();
+            for _ in 0..4 {
+                let (pool, breakers, job) = (Arc::clone(&pool), Arc::clone(&breakers), make_job());
+                dials.push(tokio::spawn(async move {
+                    mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &job, pool_size)
+                        .await
+                        .map(|_| ())
+                }));
+            }
+            wait_until(|| pool.connecting.load(Ordering::Acquire) == pool_size).await?;
+            for dial in &dials {
+                dial.abort();
+            }
+            for dial in dials {
+                let _ = dial.await;
+            }
+            assert_eq!(pool.connecting.load(Ordering::Acquire), 0, "reservations leaked");
+            assert!(breakers.states.lock().map_err(|_| test_error("poisoned"))?.is_empty());
+
+            // Phase 2: an expired Open breaker makes the next dial the half-open probe.
+            let now = Instant::now();
+            let seed = breakers.before_connect(peer_addr, "ramflux-router", now)?;
+            breakers.record_connect_failure(&seed, now, Duration::ZERO);
+            let probe_dial = {
+                let (pool, breakers, job) = (Arc::clone(&pool), Arc::clone(&breakers), make_job());
+                tokio::spawn(async move {
+                    mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &job, pool_size)
+                        .await
+                        .map(|_| ())
+                })
+            };
+            let half_open = |breakers: &MeshQuicCircuitBreakers| {
+                breakers.states.lock().ok().and_then(|states| states.get(&key).copied())
+            };
+            wait_until(|| {
+                matches!(half_open(&breakers), Some(MeshQuicCircuitBreakerState::HalfOpen))
+            })
+            .await?;
+            probe_dial.abort();
+            let _ = probe_dial.await;
+            assert!(
+                matches!(half_open(&breakers), Some(MeshQuicCircuitBreakerState::Open { .. })),
+                "cancelled probe stranded the breaker half-open"
+            );
+            assert_eq!(pool.connecting.load(Ordering::Acquire), 0, "reservation leaked on probe");
+
+            // Phase 3: the router answers on the same socket again, and a new dial succeeds.
+            let server_tls = server.tls.clone();
+            let trusted_client_ca = client.ca_pem.clone();
+            let roots = Arc::new(move || Ok(vec![trusted_client_ca.clone()]));
+            let mesh_server = MeshQuicServer::bind_with_udp_socket_and_pem_roots_provider(
+                socket,
+                &server_tls,
+                roots,
+            )?;
+            tokio::spawn(async move {
+                loop {
+                    if mesh_server.accept_connection().await.is_err() {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            });
+            let (_connection, reused) = tokio::time::timeout(
+                Duration::from_secs(10),
+                mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &make_job(), pool_size),
+            )
+            .await
+            .map_err(|_| test_error("recovery dial did not complete"))??;
+            assert!(!reused);
+            assert!(half_open(&breakers).is_none(), "successful dial must close the breaker");
+            assert_eq!(pool.connecting.load(Ordering::Acquire), 0);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
         Ok(())
     }
 
