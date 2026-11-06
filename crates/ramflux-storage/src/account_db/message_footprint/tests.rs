@@ -466,3 +466,51 @@ fn deleting_a_pointer_target_preserves_unread_and_other_message_receipts()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn replay_quarantine_envelope_is_footprinted_and_erased() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-replay-quarantine")?;
+    db.send_direct_message("thread", "message", "peer", b"secret")?;
+    let old = "routed/committed/quarantined";
+    let quarantined =
+        format!("legacy/replay/committed/{}", ramflux_protocol::encode_base64url(old.as_bytes()));
+    let envelope = json!({"routing":{"message_id":"message"},"entry":{"envelope":{
+        "envelope_id":"wire-private-id","payload_hash":"payload-private-hash",
+        "encrypted_payload":"quarantined-private-content"}}});
+    db.persist_actor_state(old, &envelope)?;
+    // The same two writes the SDK identity upgrade performs when it quarantines a receipt.
+    db.persist_actor_state(&quarantined, &envelope)?;
+    db.remove_actor_state(old)?;
+    let owner = |db: &AccountDb, kind: &str, locator: &str| -> Result<Vec<String>, StorageError> {
+        let mut query = db.connection.prepare(
+            "SELECT message_id FROM message_footprint WHERE kind=?1 AND locator=?2 \
+             ORDER BY message_id",
+        )?;
+        let rows = query.query_map(params![kind, locator], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    };
+    assert_eq!(owner(&db, "actor", &quarantined)?, vec!["message".to_owned()]);
+    assert_eq!(
+        db.connection.query_row(
+            "SELECT message_id FROM message_copy_binding WHERE copy_id='payload:payload-private-hash'",
+            [],
+            |row| row.get::<_, String>(0)
+        )?,
+        "message"
+    );
+    assert!(db.actor_state_exists(&quarantined)?);
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    assert!(!db.actor_state_exists(&quarantined)?);
+    assert_erased(&db, &["quarantined-private-content".to_owned(), "wire-private-id".to_owned()])?;
+    drop(db);
+    let db = AccountDb::open(
+        &AccountIndex::open(&root)?,
+        "acct",
+        &AccountDbKey::derive("acct", b"storage-test-secret"),
+    )?;
+    assert!(!db.actor_state_exists(&quarantined)?);
+    assert_erased(&db, &["quarantined-private-content".to_owned(), "wire-private-id".to_owned()])?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
