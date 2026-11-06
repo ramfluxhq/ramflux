@@ -72,3 +72,6 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 dbg_macro = "deny"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dbus-secret-service = { version = "=4.1.0", default-features = false, features = ["crypto-rust", "vendored"] }

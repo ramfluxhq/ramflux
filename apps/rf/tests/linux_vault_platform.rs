@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Real hosted-Linux fixture smoke only; this does not accept a vault provider.
+//! Real hosted-Linux provider contracts in private systemd and Secret Service fixtures.
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -195,6 +195,7 @@ async fn linux_vault_systemd_credential_roundtrip_and_mode_refusal()
             "vault_ready software_encrypted_file_systemd_host\n"
         );
     }
+    primary_contract(&root, LinuxVaultMode::SystemdHost).await?;
     Vault::status(root.clone(), LinuxVaultMode::SystemdHost).await?;
     assert_eq!(Vault::status(root.clone(), LinuxVaultMode::SystemdTpm2).await, Err(Error::Corrupt));
     let descriptor: serde_json::Value =
@@ -277,5 +278,186 @@ async fn linux_vault_secret_service_has_no_headless_fallback()
     assert!(!missing.status.success());
     assert!(String::from_utf8(missing.stderr)?.contains("vault_provider"));
     assert_eq!(descriptor, std::fs::read(root.join("descriptor.json"))?);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "private D-Bus and real gnome-keyring fixture"]
+async fn linux_vault_primary_branch_and_data_contract() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+    let mut daemon = Command::new("gnome-keyring-daemon")
+        .args(["--unlock", "--components=secrets"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()?;
+    daemon.stdin.take().ok_or("keyring stdin")?.write_all(b"rf-disposable-fixture-only")?;
+    assert!(daemon.wait()?.success());
+    let ss = dbus_secret_service::SecretService::connect_with_max_prompt_timeout(
+        dbus_secret_service::EncryptionType::Dh,
+        0,
+    )?;
+    let collection = ss.get_default_collection()?;
+    collection.set_label("ramflux-local-vault")?;
+    let root = std::path::PathBuf::from(
+        std::env::var_os("RF_LINUX_VAULT_FIXTURE_ROOT").ok_or("fixture root")?,
+    )
+    .join("p06-ss-vault");
+    std::fs::create_dir(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    ramflux_sdk::custody::LinuxVaultInstallation::initialize(
+        root.clone(),
+        ramflux_sdk::custody::LinuxVaultMode::DesktopSecretService,
+    )
+    .await?;
+    primary_contract(&root, ramflux_sdk::custody::LinuxVaultMode::DesktopSecretService).await
+}
+
+async fn primary_contract(
+    root: &Path,
+    mode: ramflux_sdk::custody::LinuxVaultMode,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_sdk::SdkError;
+    use ramflux_sdk::custody::{
+        LinuxDataCredentials, LinuxPrimaryVault, LinuxVaultConfig, LinuxVaultRole as Role,
+        PrimaryVault,
+    };
+    use zeroize::Zeroizing;
+    let mode_name = if mode == ramflux_sdk::custody::LinuxVaultMode::DesktopSecretService {
+        "desktop-secret-service"
+    } else {
+        "systemd-host"
+    };
+    let paths = contract_paths(root, mode_name)?;
+    let reference = ramflux_protocol::encode_base64url([6; 32]);
+    let branch = format!("branch:{reference}");
+    let provisioning = format!("agent-provisioning:{reference}");
+    let config = LinuxVaultConfig::new(mode_name, Role::AttendedPrimary, paths.clone())?;
+    let primary =
+        LinuxPrimaryVault::open(root.into(), "p06-account".into(), reference.clone(), config)
+            .await?;
+    assert_eq!(primary.vault_class(), mode.strength_class());
+    primary.preflight()?;
+    assert!(matches!(
+        primary.home_authorization_preflight(),
+        Err(SdkError::HomeMigrationRefused(
+            ramflux_protocol::home_migration::Refusal::CustodyUserPresenceUnavailable
+        ))
+    ));
+    let key = ramflux_crypto::custody::SelfSigningKey::from_vault_seed(&Zeroizing::new([7; 32]));
+    primary.store_new(&reference, &key)?;
+    assert_eq!(primary.load_primary(&reference)?.public_key(), key.public_key());
+    assert!(matches!(primary.store_new(&reference, &key), Err(SdkError::CustodyVaultUnavailable)));
+    primary.store_branch(&branch, &Zeroizing::new([8; 64]))?;
+    let device = ramflux_protocol::custody::DeviceRef {
+        account_anchor: "anchor".into(),
+        device_id: "desktop".into(),
+        device_epoch: 1,
+    };
+    drop(primary.load_branch(&branch, "principal", &device)?);
+    assert!(matches!(
+        primary.load_primary(&ramflux_protocol::encode_base64url([9; 32])),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    for length in [1, 8192] {
+        let secret = Zeroizing::new(vec![0x63; length]);
+        primary.store_provisioning_secret(&provisioning, &secret)?;
+        assert_eq!(primary.load_provisioning_secret(&provisioning)?.as_slice(), secret.as_slice());
+        primary.delete(&provisioning)?;
+    }
+    for length in [0, 8193] {
+        assert!(matches!(
+            primary.store_provisioning_secret(&provisioning, &Zeroizing::new(vec![0x63; length])),
+            Err(SdkError::CustodyVaultUnavailable)
+        ));
+    }
+    let mut service_paths = paths.clone();
+    service_paths.primary = None;
+    let device_config = LinuxVaultConfig::new(mode_name, Role::Device, service_paths)?;
+    let service = LinuxPrimaryVault::open(
+        root.into(),
+        "p06-account".into(),
+        reference.clone(),
+        device_config,
+    )
+    .await?;
+    drop(service.load_branch(&branch, "principal", &device)?);
+    assert!(matches!(service.load_primary(&reference), Err(SdkError::CustodyVaultUnavailable)));
+    assert!(matches!(service.store_new(&reference, &key), Err(SdkError::CustodyVaultUnavailable)));
+    let mut data_paths = paths;
+    data_paths.primary = None;
+    data_paths.device = None;
+    let data = LinuxDataCredentials::open(
+        root.into(),
+        "p06-account".into(),
+        LinuxVaultConfig::new(mode_name, Role::DataOnly, data_paths)?,
+    )
+    .await?;
+    data_contract(&data)?;
+    primary.delete(&reference)?;
+    primary.delete(&reference)?;
+    primary.delete(&branch)?;
+    primary.delete(&branch)?;
+    assert!(matches!(
+        service.load_branch(&branch, "principal", &device),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    Ok(())
+}
+
+fn contract_paths(
+    root: &Path,
+    mode_name: &str,
+) -> Result<ramflux_sdk::custody::LinuxCredentialPaths, Box<dyn std::error::Error>> {
+    use ramflux_sdk::custody::LinuxCredentialPaths as Paths;
+    use std::os::unix::fs::PermissionsExt;
+    use zeroize::Zeroizing;
+    let mut paths = Paths::default();
+    if mode_name == "systemd-host" {
+        let descriptor: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("descriptor.json"))?)?;
+        for (i, slot) in
+            [&mut paths.primary, &mut paths.device, &mut paths.data].into_iter().enumerate()
+        {
+            let name = ["rf-primary-kek", "rf-device-kek", "rf-data-kek"][i];
+            let id = descriptor["key_ids"][i].as_str().ok_or("key id")?;
+            let output = Command::new("systemd-creds")
+                .arg("decrypt")
+                .arg(format!("--name={name}"))
+                .arg(root.join(format!("{name}.{id}.cred")))
+                .arg("-")
+                .output()?;
+            let bytes = Zeroizing::new(output.stdout);
+            assert!(output.status.success());
+            assert_eq!(bytes.len(), 32);
+            let path = root.join(format!("injected-{i}"));
+            std::fs::write(&path, bytes.as_slice())?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
+            *slot = Some(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn data_contract(
+    data: &ramflux_sdk::custody::LinuxDataCredentials,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_sdk::SdkError;
+    use zeroize::Zeroizing;
+    for length in [1, 8192] {
+        let secret = Zeroizing::new(vec![0x64; length]);
+        data.store_new(&secret)?;
+        assert_eq!(data.load()?.as_slice(), secret.as_slice());
+        assert!(matches!(data.store_new(&secret), Err(SdkError::CustodyVaultUnavailable)));
+        data.delete()?;
+        data.delete()?;
+    }
+    for length in [0, 8193] {
+        assert!(matches!(
+            data.store_new(&Zeroizing::new(vec![0x64; length])),
+            Err(SdkError::CustodyVaultUnavailable)
+        ));
+    }
     Ok(())
 }
