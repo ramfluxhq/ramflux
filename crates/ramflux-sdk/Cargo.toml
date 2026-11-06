@@ -46,6 +46,7 @@ itest-restore-state = []
 object-ipc-crash-seam = []
 
 [dependencies]
+prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
 # path dep for local dev; switch to git tag dep when GitHub repos exist
