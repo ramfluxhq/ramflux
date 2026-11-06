@@ -91,6 +91,7 @@ set contains only source/table labels and row IDs, never private identifiers.
 | backup_selector_admission | side, selector, commitment, decision; (side,selector,commitment) | none; decision is keep/erase/unowned_legacy |
 | backup_lookup_origin | side, lookup, commitment; (side,lookup) | (lookup,side) |
 | backup_target_delete | reference_hash, message_id, selector, commitment; (reference_hash,message_id) | (selector,commitment), (message_id,reference_hash) |
+| backup_message_delete | side, message_id; (side,message_id) | pre-union DM tombstones and deleted projections from each input |
 | backup_group_delete | side, message_id, copy_id; (side,message_id,copy_id) | (side,copy_id); source-qualified before union |
 | backup_preserved_copy | table_name, row_id, body; (table_name,row_id) | none |
 | backup_replacement_hash | schema_name, object_row_id, ciphertext_hash; (schema_name,object_row_id) | target update/delete invalidation triggers |
@@ -164,7 +165,9 @@ faulted live account remains the failing boundary. No assertion is weakened.
 
 The exact `BackupDatabase.db` meter covers eleven fully stepped standalone
 classification statements and the shared grouped production point operations.
-Unrelated N=0/1000/10000 populations and M=1/10/100 distinct candidates exercise
+Unrelated N=0/1000/10000 populations include N DM tombstones and N deleted DM
+projections, with 2N rows checked in the indexed input-qualified restriction cache.
+M=1/10/100 distinct candidates exercise
 fixed-candidate independence and linear candidate work. Calibration observes a
 known scan. Setup, validation and whole-restore traversal are outside the window.
 Tests: b2_classification_independent_of_unrelated_local_n and
@@ -173,3 +176,11 @@ b2_classification_linear_in_incoming_candidates.
 Cross-service acceptance and broader SDK/restore regression coverage remain
 separate from these process-local checks. This contract does not claim network
 lifecycle acceptance or change receive-side refusal consumption.
+
+Group restrictions are mirrored independently of copy-binding provenance.
+`archive_only_group_tombstone_with_target_binding_vetoes_candidate` requires an
+archive-only group tombstone and a target-only binding to veto the candidate.
+`archive_only_group_tombstone_second_generation_vetoes_candidate` first restores
+without that binding, exports the kept candidate and restriction through the
+production encrypted backup-copy API, then checks the same veto on merge.
+Both exclude alternative DM deletion, fence and lookup explanations.
