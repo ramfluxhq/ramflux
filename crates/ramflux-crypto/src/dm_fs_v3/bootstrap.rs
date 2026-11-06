@@ -45,11 +45,11 @@ impl NativeBootstrapRng for NativeOsRng {
 }
 /// Scoped caller-buffer owner, without Clone, Debug or serialization.
 pub struct NativeBootstrapSecret<const N: usize> {
-    bytes: [u8; N],
+    pub(super) bytes: [u8; N],
     slot: &'static str,
 }
 impl<const N: usize> NativeBootstrapSecret<N> {
-    fn new(slot: &'static str) -> Self {
+    pub(super) fn new(slot: &'static str) -> Self {
         Self { bytes: [0; N], slot }
     }
 }
@@ -215,7 +215,11 @@ fn observe_dh(index: usize, bytes: &[u8; 32]) {
 fn observe_dh(_index: usize, _bytes: &[u8; 32]) {}
 #[cfg(test)]
 fn observe_wiped(slot: &'static str, bytes: &[u8]) {
-    super::initiator_tests::observe_wiped(slot, bytes);
+    if slot.starts_with("recipient_") {
+        super::secret_tests::observe(slot, bytes);
+    } else {
+        super::initiator_tests::observe_wiped(slot, bytes);
+    }
 }
 #[cfg(not(test))]
 fn observe_wiped(_slot: &'static str, _bytes: &[u8]) {}
