@@ -881,3 +881,6 @@ mod native_group_conversation;
 
 #[path = "selector_reopen.rs"]
 pub(super) mod selector_reopen;
+
+#[path = "legacy_selector_tests.rs"]
+pub(super) mod legacy_selector;
