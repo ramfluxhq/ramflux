@@ -57,6 +57,8 @@ pub(crate) struct Request {
 pub(crate) struct Fixture {
     pub context: crate::GatewayQuicContext,
     pub requests: tokio::sync::mpsc::Receiver<Request>,
+    /// Fires once per held request whose client stopped reading the response.
+    pub cancelled: tokio::sync::mpsc::Receiver<()>,
     task: tokio::task::JoinHandle<()>,
     root: std::path::PathBuf,
 }
@@ -93,16 +95,17 @@ impl Fixture {
             }),
         };
         let (send, requests) = tokio::sync::mpsc::channel(32);
+        let (cancel_send, cancelled) = tokio::sync::mpsc::channel(32);
         let task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
-                 result=server.accept_connection()=> {let Ok(connection)=result else {return;};let send=send.clone();tasks.spawn(async move {let _=serve(connection,send).await;});}
+                 result=server.accept_connection()=> {let Ok(connection)=result else {return;};let send=send.clone();let cancel_send=cancel_send.clone();tasks.spawn(async move {let _=serve(connection,send,cancel_send).await;});}
                  _=tasks.join_next(),if !tasks.is_empty()=>{}
                 }
             }
         });
-        Ok(Self { context, requests, task, root })
+        Ok(Self { context, requests, cancelled, task, root })
     }
     pub async fn next(&mut self) -> anyhow::Result<Request> {
         tokio::time::timeout(std::time::Duration::from_secs(10), self.requests.recv())
@@ -113,9 +116,10 @@ impl Fixture {
 async fn serve(
     connection: ramflux_transport::MeshQuicConnection,
     send: tokio::sync::mpsc::Sender<Request>,
+    cancelled: tokio::sync::mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
     loop {
-        let accepted =
+        let mut accepted =
             MeshQuicServer::accept_json_or_postcard_request_on_connection(&connection).await?;
         let (path, body) = match &accepted {
             Wire::Json(a) => (a.request.path.clone(), a.request.body.clone()),
@@ -123,8 +127,19 @@ async fn serve(
         };
         let (respond, response) = tokio::sync::oneshot::channel();
         send.send(Request { path, body, respond }).await?;
-        let (status, value) =
-            tokio::time::timeout(std::time::Duration::from_secs(12), response).await??;
+        let (status, value) = match &mut accepted {
+            Wire::Json(a) => tokio::select! {
+                biased;
+                () = a.response_stopped() => {
+                    cancelled.send(()).await?;
+                    return Ok(());
+                }
+                reply = tokio::time::timeout(std::time::Duration::from_secs(12), response) => reply??,
+            },
+            Wire::Postcard(_) => {
+                tokio::time::timeout(std::time::Duration::from_secs(12), response).await??
+            }
+        };
         match accepted {
             Wire::Json(a) => a.write_json_response(status, &value).await?,
             Wire::Postcard(a) => a.write_postcard_response(status, &value).await?,

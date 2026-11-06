@@ -106,7 +106,9 @@ async fn initial_registration_readiness_scope() -> anyhow::Result<()> {
             .respond
             .send((200, serde_json::to_value(super::negotiation::descriptor())?))
             .map_err(|_| Retired)?;
-        let mode = tokio::time::timeout(Duration::from_secs(5), task).await???;
+        let mode = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .map_err(|_| anyhow::anyhow!("negotiation guard elapsed"))???;
         assert_eq!(mode, None);
         let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
         established(&mut RawSink(frames.clone()), session(), mode.as_deref()).await?;

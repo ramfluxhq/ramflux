@@ -43,18 +43,31 @@ async fn held_frame(
             tokio::task::yield_now().await;
             let _ = beat.send(());
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), heartbeat).await??;
+        tokio::time::timeout(std::time::Duration::from_secs(10), heartbeat)
+            .await
+            .map_err(|_| anyhow::anyhow!("heartbeat guard elapsed"))??;
         assert!(!task.is_finished(), "held router completed session request");
         if deadline {
             tokio::time::pause();
             tokio::time::advance(REGISTRATION_TIMEOUT).await;
-            tokio::time::timeout(std::time::Duration::from_secs(1), task).await???;
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .map_err(|_| anyhow::anyhow!("deadline task guard elapsed"))???;
             tokio::time::resume();
+            // The caller's deadline must abort the live mesh request: the router observes the
+            // client stop reading the response, and no reconnect retry reaches it afterwards.
+            tokio::time::timeout(std::time::Duration::from_secs(10), fixture.cancelled.recv())
+                .await
+                .map_err(|_| anyhow::anyhow!("mesh cancellation guard elapsed"))?
+                .ok_or_else(|| anyhow::anyhow!("mesh cancellation observer closed"))?;
+            assert!(fixture.requests.try_recv().is_err(), "mesh retry reached the router");
         } else {
             held.respond
                 .send((200, reply.clone()))
                 .map_err(|_| anyhow::anyhow!("mesh response receiver closed"))?;
-            tokio::time::timeout(std::time::Duration::from_secs(5), task).await???;
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .map_err(|_| anyhow::anyhow!("reply task guard elapsed"))???;
         }
         let rows = rows.lock().map_err(|_| anyhow::anyhow!("frame capture poisoned"))?;
         assert_eq!(

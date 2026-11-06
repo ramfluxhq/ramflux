@@ -134,6 +134,15 @@ enum MeshQuicClientResponse {
 }
 
 impl MeshQuicClientResponse {
+    /// Resolves when the waiting caller has dropped its receiver. Sync callers
+    /// cannot signal cancellation, so their side never resolves.
+    async fn closed(&mut self) {
+        match self {
+            Self::Sync(_) => std::future::pending::<()>().await,
+            Self::Async(sender) => sender.closed().await,
+        }
+    }
+
     fn send(self, result: Result<MeshQuicClientResponsePayload, TransportError>) {
         match self {
             Self::Sync(sender) => {
@@ -603,6 +612,12 @@ pub(crate) fn quinn_peer_spiffe_uri(
 }
 
 impl MeshQuicAcceptedRequest {
+    /// Resolves when the peer stops reading the response, which happens when the
+    /// requesting client drops its stream before the response is complete.
+    pub async fn response_stopped(&mut self) {
+        let _stopped = self.send.stopped().await;
+    }
+
     /// # Errors
     /// Returns an error when response serialization or stream writes fail.
     pub async fn write_json_response<T: serde::Serialize>(
@@ -1006,8 +1021,14 @@ fn run_mesh_quic_client_runtime(
         let sched_started = std::time::Instant::now();
         handle.spawn(async move {
             record_mesh_client_task_sched(sched_started.elapsed());
-            let MeshQuicClientJob { request, response: response_sender } = job;
-            let response = mesh_quic_cached_request(pools, breakers, request, pool_size).await;
+            let MeshQuicClientJob { request, response: mut response_sender } = job;
+            // The caller dropping its receiver (deadline or cancellation) aborts the whole
+            // attempt, including acquisition and the cached-connection retry.
+            let response = tokio::select! {
+                biased;
+                () = response_sender.closed() => return,
+                response = mesh_quic_cached_request(pools, breakers, request, pool_size) => response,
+            };
             response_sender.send(response);
         });
     }
