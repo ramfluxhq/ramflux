@@ -7,6 +7,39 @@ use super::{g, invalid};
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 
+// This field conversion does not translate signatures between transcripts. The
+// candidate encoder below signs these fields with the local executor's key.
+impl TryFrom<&Certificate> for g::TaskCertificate {
+    type Error = SdkError;
+
+    fn try_from(native: &Certificate) -> Result<Self, Self::Error> {
+        let mut resolution = serde_json::to_value(&native.resolution)?;
+        super::payload_shape(&mut resolution, true)?;
+        Ok(Self {
+            conversation_id: native.conversation_id.clone(),
+            resolution: Some(serde_json::from_value(resolution)?),
+            assignee: native.assignee.clone(),
+            issuer_device: native.issuer_device.clone(),
+            issued_at: native.issued_at,
+            phase: Some(g::TaskCertificatePhase {
+                value: Some(match native.phase {
+                    Phase::Reserved => g::task_certificate_phase::Value::Reserved(
+                        g::TaskCertificatePhaseReserved {},
+                    ),
+                    Phase::Committed => g::task_certificate_phase::Value::Committed(
+                        g::TaskCertificatePhaseCommitted {},
+                    ),
+                }),
+            }),
+            committed_version: native.committed_version,
+            carrier_hash: native.carrier_hash.clone(),
+            decision_key: native.decision_key.clone(),
+            evidence_hash: native.evidence_hash.clone(),
+            signature: native.signature.clone(),
+        })
+    }
+}
+
 impl RamfluxClient {
     /// Sign a candidate certificate with the local executor using the typed transcript.
     /// This checks content and signature only; it does not admit a decision or write state.

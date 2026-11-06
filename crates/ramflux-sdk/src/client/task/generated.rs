@@ -290,12 +290,18 @@ mod approval;
 mod carrier;
 mod certificate;
 mod control;
+mod history;
+mod history_fields;
 mod manifest;
 
 #[cfg(test)]
 mod certificate_tests;
 #[cfg(test)]
 mod control_tests;
+#[cfg(test)]
+mod history_tests;
+#[cfg(test)]
+mod manifest_tests;
 #[cfg(test)]
 mod tests;
 

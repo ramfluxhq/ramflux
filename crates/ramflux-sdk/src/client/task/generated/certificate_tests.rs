@@ -26,25 +26,7 @@ pub(super) fn fixture(
         evidence_hash: "evidence-hash".into(),
         signature: String::new(),
     })?;
-    let mut resolution = serde_json::to_value(&native.resolution)?;
-    payload_shape(&mut resolution, true)?;
-    let generated = g::TaskCertificate {
-        conversation_id: native.conversation_id.clone(),
-        resolution: Some(serde_json::from_value(resolution)?),
-        assignee: native.assignee.clone(),
-        issuer_device: native.issuer_device.clone(),
-        issued_at: native.issued_at,
-        phase: Some(serde_json::from_value(if committed {
-            json!({"committed":{}})
-        } else {
-            json!({"reserved":{}})
-        })?),
-        committed_version: native.committed_version,
-        carrier_hash: native.carrier_hash.clone(),
-        decision_key: native.decision_key.clone(),
-        evidence_hash: native.evidence_hash.clone(),
-        signature: native.signature.clone(),
-    };
+    let generated = g::TaskCertificate::try_from(&native)?;
     let generated = g::TaskCertificate::decode(
         client.encode_generated_task_certificate(&generated)?.as_slice(),
     )?;

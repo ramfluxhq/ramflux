@@ -92,7 +92,7 @@ fn refusal(result: Result<TaskEvent, SdkError>, reason: crate::TaskRefusalCode) 
     );
 }
 #[test]
-fn all_seven_generated_task_events_preserve_native_signing_bytes() -> TestResult {
+pub(super) fn all_seven_generated_task_events_preserve_native_signing_bytes() -> TestResult {
     for body in body_variants() {
         let native = event(body)?;
         let bytes = RamfluxClient::encode_generated_task_event(&native)?;
