@@ -59,7 +59,9 @@ pub(super) fn route(
             reply(&ramflux_node_core::SessionPushSessionResponse { session, incarnation_id: id })
         }
         ("GET", "/mvp1/session-push-capabilities") => {
-            reply(&ramflux_node_core::SessionPushCapabilities { capabilities: Vec::new() })
+            reply(&ramflux_node_core::SessionPushCapabilities {
+                capabilities: vec![ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into()],
+            })
         }
         ("POST", "/mvp0/ack-bound-batch") => {
             match serde_json::from_slice::<ramflux_node_core::SessionAckBatchRequest>(body) {

@@ -58,6 +58,9 @@ struct State {
     frames: usize,
     bytes: usize,
     hint_inflight: bool,
+    coverage: crate::issued_probe::Coverage,
+    probe: Option<(u64, u64)>,
+    detached_watermark: u64,
 }
 impl State {
     fn occupancy(&self) -> (usize, usize) {
@@ -79,6 +82,7 @@ struct Inner {
     limit: usize,
     slot: AtomicU64,
     not_pushed: AtomicU64,
+    hint_watermark: AtomicU64,
     retirement_requested: AtomicBool,
     retired: Arc<AtomicBool>,
     wake: tokio::sync::Notify,
@@ -90,6 +94,7 @@ struct Inner {
 enum Next {
     Frame(Frame),
     Hint(u64, bool),
+    Probe(u64, u64),
     Idle,
     Closed,
 }
@@ -109,10 +114,14 @@ impl PushQueue {
                     frames: 0,
                     bytes: 0,
                     hint_inflight: false,
+                    coverage: crate::issued_probe::Coverage::default(),
+                    probe: None,
+                    detached_watermark: 0,
                 }),
                 limit,
                 slot: AtomicU64::new(EMPTY),
                 not_pushed: AtomicU64::new(EMPTY),
+                hint_watermark: AtomicU64::new(0),
                 retirement_requested: AtomicBool::new(false),
                 retired: Arc::new(AtomicBool::new(false)),
                 wake: tokio::sync::Notify::new(),
@@ -165,6 +174,7 @@ impl PushQueue {
         if self.is_closed() || self.inner.retirement_requested.load(Ordering::Acquire) {
             return false;
         }
+        self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);
         self.inner.not_pushed.fetch_min(seq.saturating_sub(1), Ordering::AcqRel);
         self.inner.wake.notify_one();
         true
@@ -201,6 +211,7 @@ impl PushQueue {
         if state.hint_inflight
             || self.inner.slot.load(Ordering::Acquire) != EMPTY
             || self.inner.not_pushed.load(Ordering::Acquire) != EMPTY
+            || state.probe.is_some()
             || frames >= self.inner.limit
             || bytes.len() > BYTE_CAP.saturating_sub(bytes_used)
         {
@@ -214,9 +225,62 @@ impl PushQueue {
         Admission::Queued
     }
     fn overflow(&self, seq: u64) -> Admission {
+        self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);
         self.inner.slot.fetch_min(seq.saturating_sub(1), Ordering::AcqRel);
         self.inner.wake.notify_one();
         Admission::Overflowed
+    }
+    #[cfg(test)]
+    pub(crate) fn probe_pending(&self) -> bool {
+        self.inner.state.lock().is_ok_and(|s| s.probe.is_some())
+    }
+    pub(crate) fn observe_issued(&self, issued: Option<u64>) {
+        if let Ok(mut state) = self.inner.state.lock() {
+            if let Some(hint) = state.coverage.observe(issued) {
+                state.probe = Some(hint);
+                self.inner.wake.notify_one();
+            } else if issued.is_none() {
+                state.probe = None;
+            }
+        }
+    }
+    fn offered_wire(&self, bytes: &[u8]) {
+        // Ignore ciphertext fields without allocating another payload-sized JSON tree.
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            inbox_seq: u64,
+        }
+        #[derive(serde::Deserialize)]
+        struct Offered<'a> {
+            frame_type: &'a str,
+            entry: Option<Entry>,
+            after_inbox_seq: Option<u64>,
+            covered_through_seq: Option<u64>,
+        }
+        if let Ok(value) = serde_json::from_slice::<Offered<'_>>(bytes)
+            && let Ok(mut state) = self.inner.state.lock()
+        {
+            let range = match value.frame_type {
+                "deliver" => value.entry.map(|e| (e.inbox_seq, e.inbox_seq)),
+                // The completed response is scoped to the client's requested cursor.
+                // Its covered watermark is the offered baseline for this registration.
+                "resume_page" => {
+                    value.after_inbox_seq.zip(value.covered_through_seq).map(|(_, b)| (1, b))
+                }
+                _ => None,
+            };
+            if let Some((first, last)) = range
+                && !state.coverage.offered(first, last)
+            {
+                self.inner.hint_watermark.fetch_max(last, Ordering::AcqRel);
+                self.inner.not_pushed.fetch_min(state.coverage.prefix, Ordering::AcqRel);
+                self.inner.wake.notify_one();
+            }
+            if state.probe.is_some_and(|(_, issued)| issued <= state.coverage.prefix) {
+                state.probe = None;
+                self.inner.changed.notify_waiters();
+            }
+        }
     }
     fn next(&self) -> Next {
         let Ok(mut state) = self.inner.state.lock() else {
@@ -232,8 +296,17 @@ impl PushQueue {
             let after = overflow.min(not_pushed);
             if after != EMPTY {
                 state.hint_inflight = true;
+                state.detached_watermark = self.inner.hint_watermark.swap(0, Ordering::AcqRel);
                 return Next::Hint(after, not_pushed != EMPTY);
             }
+        }
+        if frames <= self.inner.limit / 2
+            && bytes <= BYTE_CAP / 2
+            && let Some((after, issued)) = state.probe.take()
+            && issued > state.coverage.prefix
+        {
+            state.hint_inflight = true;
+            return Next::Probe(after.max(state.coverage.prefix), issued);
         }
         state.durable.pop_front().map_or(Next::Idle, |e| Next::Frame(e.into_frame()))
     }
@@ -277,6 +350,26 @@ impl PushQueue {
                     }
                     self.complete(Some(&frame));
                 }
+                Next::Probe(after, issued) => {
+                    if let Some(id) = incarnation.as_ref() {
+                        let wire = serde_json::to_vec(
+                            &ramflux_node_core::SessionPushServerFrame::Resync {
+                                incarnation_id: id.clone(),
+                                target_delivery_id: target.clone(),
+                                after_inbox_seq: after,
+                                reason: ramflux_node_core::SessionPushResyncReason::NotPushed,
+                            },
+                        );
+                        let Ok(wire) = wire else {
+                            break;
+                        };
+                        // Recheck under the sink mutex: a completed Resume may have filled the hole.
+                        if !self.write_probe(&send, &wire, issued).await {
+                            break;
+                        }
+                    }
+                    self.complete(None);
+                }
                 Next::Hint(after, not_pushed) => {
                     if let Some(id) = incarnation.as_ref() {
                         let wire = serde_json::to_vec(
@@ -298,6 +391,12 @@ impl PushQueue {
                             break;
                         }
                     }
+                    if let Ok(mut state) = self.inner.state.lock() {
+                        let first = state.coverage.prefix.saturating_add(1);
+                        let issued = state.detached_watermark;
+                        state.coverage.offered(first, issued);
+                        state.detached_watermark = 0;
+                    }
                     self.complete(None);
                     tokio::task::yield_now().await;
                 }
@@ -313,6 +412,25 @@ impl PushQueue {
         });
         drop(abandoned);
         self.inner.changed.notify_waiters();
+    }
+    async fn write_probe(&self, send: &GatewaySendHandle, wire: &[u8], issued: u64) -> bool {
+        let Ok(mut sink) = tokio::time::timeout(SINK_ADMISSION_DEADLINE, send.lock()).await else {
+            return false;
+        };
+        if self.inner.state.lock().is_ok_and(|s| s.coverage.prefix >= issued) {
+            return true;
+        }
+        if !tokio::time::timeout(WRITE_DEADLINE, sink.send_frame(wire))
+            .await
+            .is_ok_and(|r| r.is_ok())
+        {
+            return false;
+        }
+        if let Ok(mut state) = self.inner.state.lock() {
+            let first = state.coverage.prefix.saturating_add(1);
+            state.coverage.offered(first, issued);
+        }
+        true
     }
     async fn write(
         &self,
@@ -356,6 +474,7 @@ impl PushQueue {
                 let done = self.inner.state.lock().is_ok_and(|s| {
                     s.frames == 0
                         && !s.hint_inflight
+                        && s.probe.is_none()
                         && self.inner.slot.load(Ordering::Acquire) == EMPTY
                         && self.inner.not_pushed.load(Ordering::Acquire) == EMPTY
                 });
@@ -414,6 +533,9 @@ impl GatewaySessionFrameSink for GuardedSink {
                     Err(TransportError::Quic("gateway sink write deadline".into()))
                 });
             cancellation.completed = result.is_ok();
+            if result.is_ok() {
+                self.queue.offered_wire(bytes);
+            }
             result
         })
     }

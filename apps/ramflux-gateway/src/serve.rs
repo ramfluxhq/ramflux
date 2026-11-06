@@ -219,6 +219,7 @@ async fn run_gateway_quic(
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
     context.hub.readiness.start(&context.router);
+    crate::issued_probe::start(&context.hub, &context.router);
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     serve_gateway_quic_endpoint(endpoint, context).await
 }
@@ -288,6 +289,7 @@ async fn run_gateway_tcp_tls(
     context: GatewayListenerContext,
 ) -> anyhow::Result<()> {
     context.hub.readiness.start(&context.router);
+    crate::issued_probe::start(&context.hub, &context.router);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     serve_gateway_tcp_listener(listener, server_config, context).await
 }

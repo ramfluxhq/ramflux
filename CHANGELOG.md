@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Session push
+
+- Added `gateway.session_push.v1`: incarnation-bound resume pages, point fetch,
+  batched ACKs, compact sender acceptance and registration-owned recipient push.
+- Changed stalled-sink close to 15 seconds of actual I/O, ACK backpressure while
+  publication is pinned, admission `payload_too_large`, and fail-stop on uncertain
+  durability. Whole-population issued probing supplies recovery hints.
+- **BREAKING (operators):** in-place rollback to a pre-session-push router on an
+  upgraded store is unsupported. Isolate the old store before rollback; restores
+  require `--rotate-inbox-incarnations` with serving gateways stopped. Damaged
+  segments require `--quarantine-wal-segment`. Router and gateway require external
+  supervisor restart policies because fatal durability uncertainty aborts the
+  service. Reference compose files do not configure automatic restart.
+
 ### Security
 
 - Keep account MAC authority independent of backup encryption keys. Only in-place

@@ -71,14 +71,14 @@ fn legacy_child() -> anyhow::Result<()> {
     assert_eq!(accepted.outcome, "offline_queued");
     drop(handle);
     let listeners: Vec<_> =
-        (0..4).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<std::io::Result<_>>()?;
+        (0..7).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<std::io::Result<_>>()?;
     let mut clients: Vec<_> = listeners
         .iter()
         .map(|listener| TcpStream::connect(listener.local_addr()?))
         .collect::<std::io::Result<_>>()?;
     for client in &mut clients {
         client.write_all(b"pending legacy request")?;
-        client.set_read_timeout(Some(Duration::from_millis(30)))?;
+        client.set_nonblocking(true)?;
     }
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -120,12 +120,20 @@ fn legacy_child() -> anyhow::Result<()> {
         ));
     }
     release_tx.send(())?;
-    for client in &mut clients {
+    for (index, client) in clients.iter_mut().enumerate() {
+        client.set_nonblocking(false)?;
         client.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut response = String::new();
         client.read_to_string(&mut response)?;
         anyhow::ensure!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        anyhow::ensure!(response.contains("startup-accepted"), "{response}");
+        if index == 6 {
+            anyhow::ensure!(
+                response.contains("startup-target") && response.contains("\"inbox_seq\":1"),
+                "{response}"
+            );
+        } else {
+            anyhow::ensure!(response.contains("startup-accepted"), "{response}");
+        }
     }
     worker.join().expect("startup worker")?;
     drop(observer_guard);
@@ -165,7 +173,7 @@ fn response(
             assert_eq!(rows[0].envelope.envelope_id, envelope.envelope_id);
             serde_json::json!({"envelope_id": envelope.envelope_id, "reply": reply})
         }
-        _ => {
+        3 => {
             let mut gateway = GatewayState::new();
             gateway.open_session(GatewaySession {
                 session_id: "live".into(),
@@ -182,5 +190,45 @@ fn response(
             })?;
             serde_json::to_value(gateway)?
         }
+        4..=6 => {
+            let id = handle
+                .state()
+                .session_push_status("startup-target")
+                .incarnation_id
+                .ok_or_else(|| anyhow::anyhow!("startup incarnation"))?;
+            let (method, path, body) = match index {
+                4 => (
+                    "GET",
+                    format!(
+                        "/mvp1/inbox/startup-target?after=0&limit=256&session_push=1&incarnation_id={id}"
+                    ),
+                    Vec::new(),
+                ),
+                5 => (
+                    "GET",
+                    format!("/mvp1/inbox-entry/startup-target/1?incarnation_id={id}"),
+                    Vec::new(),
+                ),
+                _ => (
+                    "POST",
+                    "/mvp0/issued-seqs".into(),
+                    serde_json::to_vec(&serde_json::json!({"targets":["startup-target"]}))?,
+                ),
+            };
+            let response = crate::handlers::handle_mesh_request_value(
+                ramflux_transport::MeshHttpRequest { method: method.into(), path, body },
+                handle,
+                "ramflux-gateway",
+            )?;
+            assert_eq!(response.status, "200 OK");
+            let value: serde_json::Value = serde_json::from_slice(&response.body)?;
+            if index == 6 {
+                assert_eq!(value["issued"][0]["incarnation_id"], id);
+            } else {
+                assert_eq!(value["incarnation_id"], id);
+            }
+            value
+        }
+        _ => return Err(anyhow::anyhow!("unknown startup surface")),
     })
 }
