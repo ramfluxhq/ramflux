@@ -56,3 +56,6 @@ mod storage_error_tests;
 
 #[cfg(test)]
 mod schema_generation_tests;
+
+#[cfg(test)]
+mod selector_publication_tests;
