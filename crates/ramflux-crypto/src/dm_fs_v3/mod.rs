@@ -41,3 +41,11 @@ mod hkdf;
 pub use hkdf::{NativeHkdfError, NativeHkdfOutput, native_hkdf};
 #[cfg(test)]
 mod hkdf_tests;
+
+mod bootstrap;
+pub use bootstrap::{
+    NativeBootstrapError, NativeBootstrapPublic, NativeBootstrapRng, NativeBootstrapSecret,
+    NativeInitiatorHandoff, NativeInitiatorInput, NativeOsRng, native_initiator,
+};
+#[cfg(test)]
+mod initiator_tests;

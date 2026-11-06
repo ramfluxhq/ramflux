@@ -1,0 +1,345 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+use super::*;
+use ramflux_protocol::{dm_fs_v3 as p, domain};
+use serde_json::Value;
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
+use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
+type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+fn crypto() -> Result<Value> {
+    Ok(serde_json::from_str(include_str!(
+        "../../../ramflux-protocol/fixtures/dm_fs_v3/crypto_vectors.json"
+    ))?)
+}
+fn raw(name: &str) -> Result<Vec<u8>> {
+    let w: Value = serde_json::from_str(include_str!(
+        "../../../ramflux-protocol/fixtures/dm_fs_v3/wire_vectors.json"
+    ))?;
+    let v = w["positive"]
+        .as_array()
+        .ok_or("positive")?
+        .iter()
+        .find(|v| v["name"] == name)
+        .ok_or("vector")?;
+    Ok(hex::decode(v["bytes"].as_str().ok_or("bytes")?)?)
+}
+fn fixed<const N: usize>(value: &Value) -> Result<[u8; N]> {
+    hex::decode(value.as_str().ok_or("hex")?)?.try_into().map_err(|_| "width".into())
+}
+struct FixtureRng {
+    seeds: [[u8; 32]; 2],
+    cursor: usize,
+    fail_at: Option<usize>,
+}
+impl FixtureRng {
+    fn new(vector: &Value) -> Result<Self> {
+        Ok(Self {
+            seeds: [fixed(&vector["seeds"]["ephemeral"])?, fixed(&vector["seeds"]["ratchet"])?],
+            cursor: 0,
+            fail_at: None,
+        })
+    }
+}
+impl NativeBootstrapRng for FixtureRng {
+    fn fill_seed(
+        &mut self,
+        output: &mut [u8; 32],
+    ) -> std::result::Result<(), NativeBootstrapError> {
+        if self.fail_at == Some(self.cursor) {
+            output[..8].fill(0x5a);
+            return Err(NativeBootstrapError::Entropy);
+        }
+        output.copy_from_slice(self.seeds.get(self.cursor).ok_or(NativeBootstrapError::Entropy)?);
+        self.cursor += 1;
+        Ok(())
+    }
+}
+struct Observation {
+    expected: Vec<[u8; 32]>,
+    seen: BTreeSet<usize>,
+    wipes: BTreeMap<&'static str, usize>,
+}
+thread_local! {static OBS:RefCell<Option<Observation>>=const{RefCell::new(None)};}
+pub(super) fn observe_dh(index: usize, bytes: &[u8; 32]) {
+    OBS.with(|obs| {
+        if let Some(obs) = obs.borrow_mut().as_mut() {
+            assert!(
+                obs.expected.get(index).is_some_and(|v| v == bytes),
+                "independent DH mismatch at {index}"
+            );
+            assert!(obs.seen.insert(index));
+        }
+    });
+}
+pub(super) fn observe_wiped(slot: &'static str, bytes: &[u8]) {
+    assert!(bytes.iter().all(|b| *b == 0), "bootstrap slot not erased: {slot}");
+    OBS.with(|obs| {
+        if let Some(obs) = obs.borrow_mut().as_mut() {
+            *obs.wipes.entry(slot).or_insert(0) += 1;
+        }
+    });
+}
+struct Scope;
+impl Drop for Scope {
+    fn drop(&mut self) {
+        OBS.with(|obs| {
+            obs.replace(None);
+        });
+    }
+}
+fn parts(
+    vector: &Value,
+) -> Result<(p::PrekeyLeaseResult, p::BootstrapTranscript, Zeroizing<[u8; 32]>)> {
+    let mode = vector["mode"].as_str().ok_or("mode")?;
+    let lease = p::PrekeyLeaseResult::from_bytes(&raw(&format!("lease_{mode}"))?)?;
+    let transcript = p::BootstrapTranscript::from_bytes(&raw(&format!("transcript_{mode}"))?)?;
+    let identity = StaticSecret::from(fixed::<32>(&vector["seeds"]["initiator_identity"])?);
+    let dh1 =
+        Zeroizing::new(identity.diffie_hellman(&PublicKey::from(lease.base.spk_key)).to_bytes());
+    assert!(*dh1 == fixed::<32>(&vector["dh"][0])?, "agreement DH1 mismatch");
+    Ok((lease, transcript, dh1))
+}
+fn input<'a>(
+    lease: &'a p::PrekeyLeaseResult,
+    t: &p::BootstrapTranscript,
+    key: &'a [u8; 32],
+    dh1: &'a Zeroizing<[u8; 32]>,
+) -> NativeInitiatorInput<'a> {
+    NativeInitiatorInput {
+        lease,
+        header: t.header.clone(),
+        node_key: key,
+        agreement_dh1: dh1,
+        envelope_created_at: t.envelope_created_at,
+        envelope_ttl: t.envelope_ttl,
+        now: lease.issued_at,
+    }
+}
+fn node_key() -> [u8; 32] {
+    ed25519_dalek::SigningKey::from_bytes(&[60; 32]).verifying_key().to_bytes()
+}
+/// Shared independent output contract; recipient tests extend this same suite in the next part.
+pub(super) fn native_bootstrap_contract(
+    mut derive: impl FnMut(&Value) -> Result<NativeHkdfOutput<32>>,
+) -> Result {
+    let c = crypto()?;
+    let mut count = 0;
+    for vector in c["bootstrap"].as_array().ok_or("bootstrap")? {
+        let output = derive(vector)?;
+        let golden = fixed::<32>(&vector["kdf"]["output"])?;
+        assert!(output.as_ref() == golden, "independent native SK mismatch");
+        count += 1;
+    }
+    assert_eq!(count, 2);
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_x3dh_opk_and_spk_only_golden() -> Result {
+    native_bootstrap_contract(|vector| {
+        let (lease, t, dh1) = parts(vector)?;
+        let key = node_key();
+        let mut rng = FixtureRng::new(vector)?;
+        let expected = vector["dh"]
+            .as_array()
+            .ok_or("DH")?
+            .iter()
+            .map(fixed)
+            .collect::<Result<Vec<[u8; 32]>>>()?;
+        OBS.with(|obs| {
+            obs.replace(Some(Observation {
+                expected,
+                seen: BTreeSet::new(),
+                wipes: BTreeMap::new(),
+            }));
+        });
+        let scope = Scope;
+        let output = native_initiator(input(&lease, &t, &key, &dh1), &mut rng)?;
+        assert_eq!(rng.cursor, 2);
+        assert_eq!(output.public.transcript.to_bytes()?, t.to_bytes()?);
+        assert_eq!(output.public.bundle_hash, t.header.bundle_hash);
+        assert_eq!(output.public.transcript_hash, transcript_hash(&t)?);
+        let encoded = output.public.transcript.to_bytes()?;
+        for forbidden in [
+            fixed::<32>(&vector["seeds"]["ephemeral"])?,
+            fixed(&vector["seeds"]["ratchet"])?,
+            fixed(&vector["kdf"]["output"])?,
+        ] {
+            assert!(
+                !encoded.windows(32).any(|part| part == forbidden),
+                "private material in public projection"
+            );
+        }
+        let NativeInitiatorHandoff { initial_sk, public: _, ratchet_seed } = output;
+        drop(ratchet_seed);
+        let state = OBS.with(|obs| obs.take()).ok_or("observations")?;
+        assert_eq!(state.seen.len(), if lease.opk.is_some() { 4 } else { 3 });
+        let mut expected = BTreeMap::from([
+            ("e_seed", 1),
+            ("r0_seed", 1),
+            ("ephemeral_key", 1),
+            ("ratchet_key", 1),
+            ("dh2", 1),
+            ("dh3", 1),
+            ("ikm", 1),
+        ]);
+        if lease.opk.is_some() {
+            expected.insert("dh4", 1);
+        }
+        assert_eq!(state.wipes, expected);
+        drop(scope);
+        assert!(*dh1 == fixed::<32>(&vector["dh"][0])?, "borrowed DH1 changed");
+        Ok(initial_sk)
+    })
+}
+fn native_rng_contract(rng: &mut dyn NativeBootstrapRng) -> Result {
+    let mut first = Zeroizing::new([0; 32]);
+    let mut second = Zeroizing::new([0; 32]);
+    rng.fill_seed(&mut first)?;
+    rng.fill_seed(&mut second)?;
+    assert!(*first != *second, "RNG draw independence");
+    assert!(
+        PublicKey::from(&StaticSecret::from(*first))
+            != PublicKey::from(&StaticSecret::from(*second)),
+        "RNG effective key independence"
+    );
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_uses_independent_e_and_r0() -> Result {
+    let c = crypto()?;
+    let v = &c["bootstrap"][0];
+    let (lease, t, dh1) = parts(v)?;
+    let key = node_key();
+    native_rng_contract(&mut FixtureRng::new(v)?)?;
+    native_rng_contract(&mut NativeOsRng)?;
+    let mut rng = FixtureRng::new(v)?;
+    let result = native_initiator(input(&lease, &t, &key, &dh1), &mut rng);
+    assert!(result.is_ok(), "independent E/R0 handoff must succeed");
+    let result = result?;
+    assert_ne!(
+        result.public.transcript.header.ephemeral_key,
+        result.public.transcript.header.ratchet_key
+    );
+    assert_eq!(rng.cursor, 2);
+    // Retained R0 plus DH1/public data cannot reconstruct the captured E bootstrap.
+    let retained = StaticSecret::from(*result.ratchet_seed);
+    let mut ikm = Zeroizing::new([0u8; 160]);
+    ikm[..32].fill(0xff);
+    ikm[32..64].copy_from_slice(&*dh1);
+    ikm[64..96].copy_from_slice(
+        retained.diffie_hellman(&PublicKey::from(lease.target.agreement_key)).as_bytes(),
+    );
+    ikm[96..128]
+        .copy_from_slice(retained.diffie_hellman(&PublicKey::from(lease.base.spk_key)).as_bytes());
+    let len = if let Some(opk) = &lease.opk {
+        ikm[128..]
+            .copy_from_slice(retained.diffie_hellman(&PublicKey::from(opk.opk_key)).as_bytes());
+        160
+    } else {
+        128
+    };
+    let mut info = domain::DM_FS_V3_X3DH_ROOT.as_bytes().to_vec();
+    info.extend_from_slice(&result.public.transcript_hash);
+    let wrong = native_hkdf::<32>(&ikm[..len], &result.public.bundle_hash, &info)?;
+    assert!(
+        wrong.as_ref() != result.initial_sk.as_ref(),
+        "retained ratchet secret reconstructed old bootstrap"
+    );
+    let one = native_initiator(input(&lease, &t, &key, &dh1), &mut NativeOsRng)?;
+    let two = native_initiator(input(&lease, &t, &key, &dh1), &mut NativeOsRng)?;
+    assert_ne!(
+        one.public.transcript.header.ephemeral_key,
+        two.public.transcript.header.ephemeral_key
+    );
+    assert_ne!(one.public.transcript.header.ratchet_key, two.public.transcript.header.ratchet_key);
+    assert!(one.initial_sk.as_ref() != two.initial_sk.as_ref(), "fresh bootstrap repeated SK");
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_all_zero_dh_rejected() -> Result {
+    let c = crypto()?;
+    for fixture in c["dh_refusals"].as_array().ok_or("DH refusals")? {
+        let secret = StaticSecret::from(fixed::<32>(&fixture["private_seed"])?);
+        let peer = fixed(&fixture["peer_public"])?;
+        assert!(!secret.diffie_hellman(&PublicKey::from(peer)).was_contributory());
+        assert!(matches!(
+            super::bootstrap::checked_dh(&secret, &peer, "refusal_dh"),
+            Err(NativeBootstrapError::NonContributory)
+        ));
+        assert_eq!(fixed::<32>(&fixture["shared_secret"])?, [0; 32]);
+        assert_eq!(fixture["reject"], true);
+    }
+    let v = &c["bootstrap"][0];
+    let (lease, t, _) = parts(v)?;
+    let key = node_key();
+    let zero = Zeroizing::new([0; 32]);
+    let mut rng = FixtureRng::new(v)?;
+    assert!(matches!(
+        native_initiator(input(&lease, &t, &key, &zero), &mut rng),
+        Err(NativeBootstrapError::NonContributory)
+    ));
+    assert_eq!(rng.cursor, 0);
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_failure_and_limits() -> Result {
+    let c = crypto()?;
+    let v = &c["bootstrap"][0];
+    let (lease, t, dh1) = parts(v)?;
+    let key = node_key();
+    for failed_draw in [0, 1] {
+        OBS.with(|obs| {
+            obs.replace(Some(Observation {
+                expected: Vec::new(),
+                seen: BTreeSet::new(),
+                wipes: BTreeMap::new(),
+            }));
+        });
+        let scope = Scope;
+        let mut rng = FixtureRng::new(v)?;
+        rng.fail_at = Some(failed_draw);
+        assert!(matches!(
+            native_initiator(input(&lease, &t, &key, &dh1), &mut rng),
+            Err(NativeBootstrapError::Entropy)
+        ));
+        let state = OBS.with(|obs| obs.take()).ok_or("wipes")?;
+        let mut expected = BTreeMap::from([("e_seed", 1)]);
+        if failed_draw == 1 {
+            expected.insert("r0_seed", 1);
+        }
+        assert_eq!(state.wipes, expected);
+        drop(scope);
+    }
+    let mut rng = FixtureRng::new(v)?;
+    rng.seeds[1] = rng.seeds[0];
+    assert!(matches!(
+        native_initiator(input(&lease, &t, &key, &dh1), &mut rng),
+        Err(NativeBootstrapError::RepeatedKey)
+    ));
+    let mut bad = t.clone();
+    bad.header.routed_ad = vec![0; 4097];
+    let mut rng = FixtureRng::new(v)?;
+    assert!(matches!(
+        native_initiator(input(&lease, &bad, &key, &dh1), &mut rng),
+        Err(NativeBootstrapError::Decode(p::DecodeError::FieldCeiling))
+    ));
+    assert_eq!(rng.cursor, 0);
+    let mut expired = input(&lease, &t, &key, &dh1);
+    expired.now = t.header.deadline;
+    assert!(matches!(
+        native_initiator(expired, &mut rng),
+        Err(NativeBootstrapError::Deadline(p::DeadlineError::Expired))
+    ));
+    let mut broken = lease.clone();
+    broken.signature[0] ^= 1;
+    assert!(matches!(
+        native_initiator(input(&broken, &t, &key, &dh1), &mut rng),
+        Err(NativeBootstrapError::Proof(NativePrekeyError::Signature))
+    ));
+    Ok(())
+}
