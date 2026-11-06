@@ -10,12 +10,12 @@
       },
       "Cargo.lock": {
         "upstream_sha256": "19d1373831b5caa615f97316dc09d27866cce671efc65c54239c7d52834c97f3",
-        "patched_sha256": "b5f65b51e9080ea562462c3f2c90ea17e11d3c9e597a4ccdc4aa22ee0558d330",
+        "patched_sha256": "9143fe95c893b4fabc87d797f3ece90483a30ce1362ce41f24164ef1a223f697",
         "delta": "Resolve standalone dependency-test workspace; preserve only the reviewed local proto path in Quinn tests"
       },
       "Cargo.toml": {
         "upstream_sha256": "d399537966b571462de862af3cfe03318286d67b300c0db6b87fedfd5189a540",
-        "patched_sha256": "66092e9b298a8238da41238625e524d34b5193cc5aec3c6610bfc1292b30d17e",
+        "patched_sha256": "444bdb9731fb1b680c30b352b75f3acf21f88edb603bec6e41d52e17093e2bb5",
         "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests; freeze proto requirement to =0.11.18 so standalone tests cannot retain older registry proto; Enable sibling proto __control-test only in this isolated workspace dev-dependency graph"
       },
       "Cargo.toml.orig": {
@@ -255,11 +255,12 @@
       },
       "Cargo.lock": {
         "upstream_sha256": "89ff445ef2ba68a058ca7c0122b875ed6a29769560f9766751496bb7060a7535",
-        "patched_sha256": "89ff445ef2ba68a058ca7c0122b875ed6a29769560f9766751496bb7060a7535"
+        "patched_sha256": "3bf63fd039dd2ff72c5f6ecd9107e6b4f8130bef7293d936d8ec2373b9ca9319",
+        "delta": "Use the pinned patched Bytes in the isolated vendor test graph"
       },
       "Cargo.toml": {
         "upstream_sha256": "739f19627faef023b9c24932441d4e23b82b5786c8c57e37a1419d93189ef5c5",
-        "patched_sha256": "8c46232f4a3998c09816a652acf70e73e8f99d378ebd41f73f08c87110faef29",
+        "patched_sha256": "a7464c3c81c6120b2ea7e0da41983c464c4c0196d0ab57b6e0cf6cd59f0d7e1e",
         "delta": "Isolate dependency-test workspace and optimize its dependencies; Quinn also patches sibling quinn-proto for standalone tests; Declare non-default __control-test feature for dependency tests only"
       },
       "Cargo.toml.orig": {
@@ -667,6 +668,459 @@
         "vendor/quinn/src/rawq_tests/control_driver.rs"
       ],
       "r3_whitespace": "Restore whitespace-only changed hunks against the r2b file after scoped formatting; preserve new semantic hunks."
+    }
+  },
+  "bytes-1.12.0": {
+    "version": "1.12.0",
+    "archive_sha256": "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593",
+    "source": "https://static.crates.io/crates/bytes/bytes-1.12.0.crate",
+    "files": {
+      ".cargo_vcs_info.json": {
+        "upstream_sha256": "814b24f17cbdd2c238a42824c7a4253a2d9efcc19c645a326a649f80e5787fd5",
+        "patched_sha256": "814b24f17cbdd2c238a42824c7a4253a2d9efcc19c645a326a649f80e5787fd5"
+      },
+      "CHANGELOG.md": {
+        "upstream_sha256": "3e5f566fc98d18a8283d91670877f8590fc3c94a76c178f3220ec01d6f52c360",
+        "patched_sha256": "3e5f566fc98d18a8283d91670877f8590fc3c94a76c178f3220ec01d6f52c360"
+      },
+      "Cargo.lock": {
+        "upstream_sha256": "1842a96a1f67f7d692e280717d18802167450c45ede6cf0e1fcc337d1739d960",
+        "patched_sha256": "1842a96a1f67f7d692e280717d18802167450c45ede6cf0e1fcc337d1739d960"
+      },
+      "Cargo.toml": {
+        "upstream_sha256": "6a4d6e139590858e3c2b76cabce61b6169e1e4a95a988b3bdb56b44ebd20fd02",
+        "patched_sha256": "34f75f277fd53d22369589cf4a1d11c4ba6f7513933683426f7a67eef26ff2c1",
+        "delta": "Isolate vendor workspace and add explicit allocator oracle integration-test target"
+      },
+      "Cargo.toml.orig": {
+        "upstream_sha256": "f26f5c52911a85530d49a3b6886c2f22d18fe9905d21faa3154fd339cb387848",
+        "patched_sha256": "f26f5c52911a85530d49a3b6886c2f22d18fe9905d21faa3154fd339cb387848"
+      },
+      "LICENSE": {
+        "upstream_sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42",
+        "patched_sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42"
+      },
+      "README.md": {
+        "upstream_sha256": "275ac7bc295e3cc659d28f05261645ac5bd6286476afe2ee3c1ed719f7b6df02",
+        "patched_sha256": "275ac7bc295e3cc659d28f05261645ac5bd6286476afe2ee3c1ed719f7b6df02"
+      },
+      "SECURITY.md": {
+        "upstream_sha256": "a3335079977c2f13bad59e323fdc1056bdae5adfe55f18d15ac2c930d741828c",
+        "patched_sha256": "a3335079977c2f13bad59e323fdc1056bdae5adfe55f18d15ac2c930d741828c"
+      },
+      "clippy.toml": {
+        "upstream_sha256": "583b79f56f20c85fb7820fcfa97985e03a4b41da31c8bbe6c03b721d3df5e800",
+        "patched_sha256": "583b79f56f20c85fb7820fcfa97985e03a4b41da31c8bbe6c03b721d3df5e800"
+      },
+      "src/buf/buf_impl.rs": {
+        "upstream_sha256": "f1095872bba7c9d5170207750f4ebe4fa61c4e35a282569491c2ee8ea2dc6714",
+        "patched_sha256": "0cf579ddb5ca052f6527ab162fe0ea781b9eaff4083fed24ade2d7b0654a6282",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/buf_mut.rs": {
+        "upstream_sha256": "c76d0a846cf6e2c42af7acf0bbedc49a30ce3b9185392835c6a6f8b06a128b9e",
+        "patched_sha256": "3ed27516a101aa6bbb33248f0d077f5a7f997f9a1a57b0fa164be9815458314c",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/chain.rs": {
+        "upstream_sha256": "27ff0a6fce049c51a24d45003b9741b655c28330b48af23ad1514587760b0c93",
+        "patched_sha256": "16fb6bceb9524d759c5d2e5efb88e31168ad7421950f3c4302762eb3985524b1",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/iter.rs": {
+        "upstream_sha256": "d4dca5b7f9b1cb441f22ac1862e28b10086721879163a810955aefb5cd7f3e58",
+        "patched_sha256": "390268fae109f719aced745a42f74262c8af316d2cd61f2598d0fd65a3f54084",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/limit.rs": {
+        "upstream_sha256": "e005ba140b70f68654877c96b981a220477e415ff5c92438c1b0cb9bc866d872",
+        "patched_sha256": "7032f94228ae7b82687dc145f8dcc5cbf37ad44632faed3191a24fc208c2abe4",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/mod.rs": {
+        "upstream_sha256": "3f60295316d44b510b942abb31a0d975ae488bd4b52c87f5252d73f88f82715a",
+        "patched_sha256": "ccbee16369f17b77646b31e97c75acabcd9f510bd78011d39a98db932a9dd30d",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/reader.rs": {
+        "upstream_sha256": "cda8bc221a1de06c7395d5c6e80f8a5924198eafbc2decc0909082ce8781d789",
+        "patched_sha256": "ae2ea36db598374e19d24c2d39242579b1a81b463bff5ad4be7252d6cd477bca",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/take.rs": {
+        "upstream_sha256": "443766677fae38b398271693ed6134c7cc14949cdb9fce299c44dd55ecf84fb3",
+        "patched_sha256": "6317d5e4866e262884586e28f83196df8a0b30043e2bf9aad8d33bbeefdcc576",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/uninit_slice.rs": {
+        "upstream_sha256": "52629b93ff7a08db45fc69395580b34fa3609fd9309ea01f86e58488b02b08a3",
+        "patched_sha256": "b2c5cc511319139196606ecc0a80d4fa8d2ca36ed59466e16985bc7491896826",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/vec_deque.rs": {
+        "upstream_sha256": "baac165527d1bdfc3bb259380bb4722e70c3f11e8a901e8bab6e4f951b060711",
+        "patched_sha256": "dd9830fb4ebe4ae9f40f9ee90ca5e04aa0a475ed052dcf96e1611c6af1fe1801",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/writer.rs": {
+        "upstream_sha256": "b137608cb40944a5c3e061a73087c5a48e50048dae002d0334a23cf4d3547065",
+        "patched_sha256": "0ea5006fe9574342ae8259b22a6e84a39bc756671396e0bb1f68d17cc16a12aa",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/bytes.rs": {
+        "upstream_sha256": "a7912bba39aa74ce6ef1e422ed83d0e0e5c3302d53c249b7d0ff14ec53cbca7c",
+        "patched_sha256": "d4184b53df5e8be6caf9a076027c9384f6dbb97054e26315cc7ef93789ab0eee",
+        "delta": "Add original MIT SPDX header and export guarded-owner API/error"
+      },
+      "src/bytes_mut.rs": {
+        "upstream_sha256": "c79ccfbdcc4d913752759a11139bf1145bac88cfd9b5829f0c7fd8c2c756d74c",
+        "patched_sha256": "4d905592de0f09e0b768c0681e28d7832ed41e6897fcae3d22c4cf569e997565",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/fmt/debug.rs": {
+        "upstream_sha256": "4d217b8f43e489925bb6904010df617efc63b50a3cc1ab126eec54b43b66eb3e",
+        "patched_sha256": "2e20c314f897120e7bbeea3aa53bf27179b35691f7ab647433cabc46b3b7c639",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/fmt/hex.rs": {
+        "upstream_sha256": "54c05ab7d95d7381e499079d63773fabd2672f3c4929b56b02ab87d4495902b5",
+        "patched_sha256": "76905239f80e4351d03f447b67946440d1ddb0de9c9dc2f15508021d2ce11e64",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/fmt/mod.rs": {
+        "upstream_sha256": "b38222dcfff70eb3ffb6ce305b95f3fcfd9fa68cca85693eb2ed01d3da7ddb88",
+        "patched_sha256": "533a0ce544e106153300a8e8e0258e9a7d45176356c6bf884ad504a29edb85e2",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/lib.rs": {
+        "upstream_sha256": "053fc1b7e028cd1ccab019ea695f3e620129ef26a5b3f80a747b402a9871dfbf",
+        "patched_sha256": "aa4ad52bf7813a56215c506e8bd7d7d3a62a38c4bc628935b46eb1c46111aa99",
+        "delta": "Add original MIT SPDX header and export guarded-owner API/error"
+      },
+      "src/loom.rs": {
+        "upstream_sha256": "7c89f9f5f900d5b9b7c43d08d467957933eba90d5dcff1b38cf9a7e48494a577",
+        "patched_sha256": "f759abf4eb8f864e9f8b0c24505561e5eae0095125a3a3728403ff1f27380938",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/serde.rs": {
+        "upstream_sha256": "3ecd7e828cd4c2b7db93c807cb1548fad209e674df493edf7cda69a7b04d405d",
+        "patched_sha256": "134eef58ac5797acab7b96f4130df5a3e534ac106b95b9e9e609a5b51508af64",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_buf.rs": {
+        "upstream_sha256": "941b6ac1c547aa522a1576fefa3da98edc7636f1f322feebc5768701199caa83",
+        "patched_sha256": "399c02c7005d70a8a7d3a49e60f79c09a70b44c21ed015e3cc7f22326f7cad52",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_buf_mut.rs": {
+        "upstream_sha256": "1f28f3d125e98b81a813a414a89a8c9b5d45369b10dda187a68614ff285c820e",
+        "patched_sha256": "0efdff9026bf70d2c1f54016b0cabe0dd697932f32d68dfd8987f45450386548",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_bytes.rs": {
+        "upstream_sha256": "2b102b8c04cd45076940691d11ae3962c6e31f32ae8f283bcbcf0b8e93c46545",
+        "patched_sha256": "cb73f24ac888b9dc46dced4a30d37238fe53074f99febdadf5c0090cd808dbe4",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_bytes_odd_alloc.rs": {
+        "upstream_sha256": "ad5df84a35038359413199762c65017989d905e6e965a7b863beaa9962a7e1e8",
+        "patched_sha256": "18a1b8f594c30c9e26fb683cfa58c4ef66d34565648307e7664d1b68dfd7b6f4",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_bytes_vec_alloc.rs": {
+        "upstream_sha256": "5a0e77cab12b32374b2822df8d9a6479afe68b55c1cba1511ebf4199be532caa",
+        "patched_sha256": "6b2a56de4368ae4951e4d5044290b679861dec496d4d083890ec555548b23428",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_chain.rs": {
+        "upstream_sha256": "1784287560d45e0225b2cd9d24498264031c36f42cebb7e92108e11641d1cce0",
+        "patched_sha256": "9032d0cc9094e2ff6ea4db1c5aeb7058af2d6701eaafe88d459b44ff3327307b",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_debug.rs": {
+        "upstream_sha256": "13299107172809e8cbbd823964ac9450cd0d6b6de79f2e6a2e0f44b9225a0593",
+        "patched_sha256": "3bf9a9a9384e6a26401dabb83dc1512320bd9eb0d1e92106b7e5680505325f84",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_iter.rs": {
+        "upstream_sha256": "665e1837c1294d7695ffa352a666ce8673fb46fa603164556524e87d5517a6cb",
+        "patched_sha256": "0af3d7835c4957bafe31f9b6894acb391ff88c197562926d4418f9d21874385b",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_limit.rs": {
+        "upstream_sha256": "6c5801f1e94f0abb2b4994aa1ade8e36464f26bf9e13e3dcac02d0f2f6f08ed5",
+        "patched_sha256": "89629612c4e0bb7193038b236f199dd01b9872a9eb81f2ce7e1d6444349ed01c",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_reader.rs": {
+        "upstream_sha256": "050b872d89376b3b83841839b4334066d8357b01aaf3783a180aac25a5550f3d",
+        "patched_sha256": "170f17a3e5d866811ccc312129a8c23b8bf35038a617f95f9d1824c9b0a458df",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_serde.rs": {
+        "upstream_sha256": "2691f891796ba259de0ecf926de05c514f4912cc5fcd3e6a1591efbcd23ed4d0",
+        "patched_sha256": "86793cdd436fea25d4bb9c91baba93b104e6640a5ae99a520f2bca9d6bdc20cb",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_take.rs": {
+        "upstream_sha256": "fb34700a8ed75b3c6937a4dee0bffadb64f7c7f735bd9faa8730eb96a9e9b651",
+        "patched_sha256": "1e7029564eb80987601caea776cf9cd1007a1001bc4693771e5d6b01fe14f84c",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_guarded_owner.rs": {
+        "patched_sha256": "f2fa1310dcd1b63bf4d421298bd857e5d5a1eb052985ae018701f3c6cec5e225",
+        "delta": "Add isolated allocator-real free/refund barrier, refusal, allocation failure, last clone/slice, unwind and conversion oracle"
+      },
+      "src/bytes/guarded_owner.rs": {
+        "patched_sha256": "e8343091b210ef164a58956228d83fa8a6c27b4aff15515e06de2174f53aa728",
+        "delta": "Add fallible reservation-before-allocation owner constructor and after-free guard vtable; retain original constructor"
+      }
+    }
+  },
+  "bytes-1.11.1": {
+    "version": "1.11.1",
+    "archive_sha256": "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33",
+    "source": "https://static.crates.io/crates/bytes/bytes-1.11.1.crate",
+    "files": {
+      ".cargo_vcs_info.json": {
+        "upstream_sha256": "ad8751616b31c5b1fe757ac9d68493b513d526a9c914583440dca32ee1a27e25",
+        "patched_sha256": "ad8751616b31c5b1fe757ac9d68493b513d526a9c914583440dca32ee1a27e25"
+      },
+      ".github/workflows/ci.yml": {
+        "upstream_sha256": "1e635153dbcbee2afb3fd51a83340439f07f223b179e7cde28a68a8ee7385008",
+        "patched_sha256": "1e635153dbcbee2afb3fd51a83340439f07f223b179e7cde28a68a8ee7385008"
+      },
+      ".gitignore": {
+        "upstream_sha256": "c1e953ee360e77de57f7b02f1b7880bd6a3dc22d1a69e953c2ac2c52cc52d247",
+        "patched_sha256": "c1e953ee360e77de57f7b02f1b7880bd6a3dc22d1a69e953c2ac2c52cc52d247"
+      },
+      "CHANGELOG.md": {
+        "upstream_sha256": "98b59d530d4ee459b9183c8601aad783bdc5f5ce01c68f2df7f29438f47fe871",
+        "patched_sha256": "98b59d530d4ee459b9183c8601aad783bdc5f5ce01c68f2df7f29438f47fe871"
+      },
+      "Cargo.lock": {
+        "upstream_sha256": "3db4c23f448167dc361d799583456431062a6e3fbedf2ceb075adfa263da9c6c",
+        "patched_sha256": "3db4c23f448167dc361d799583456431062a6e3fbedf2ceb075adfa263da9c6c"
+      },
+      "Cargo.toml": {
+        "upstream_sha256": "ebdcb7f4b82227b25a075ca774a6021037502d6305d77fee8e01b157c84ffdaa",
+        "patched_sha256": "a42265de6e1f9e1cac3e7ab7d3fa1f16fd1596e846fa92717406ee920822461e",
+        "delta": "Isolate vendor workspace and add explicit allocator oracle integration-test target"
+      },
+      "Cargo.toml.orig": {
+        "upstream_sha256": "3a4815f3f9939b85f08ea5785f083f5153234de58e4125c64be33fe91459075f",
+        "patched_sha256": "3a4815f3f9939b85f08ea5785f083f5153234de58e4125c64be33fe91459075f"
+      },
+      "LICENSE": {
+        "upstream_sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42",
+        "patched_sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42"
+      },
+      "README.md": {
+        "upstream_sha256": "275ac7bc295e3cc659d28f05261645ac5bd6286476afe2ee3c1ed719f7b6df02",
+        "patched_sha256": "275ac7bc295e3cc659d28f05261645ac5bd6286476afe2ee3c1ed719f7b6df02"
+      },
+      "SECURITY.md": {
+        "upstream_sha256": "a3335079977c2f13bad59e323fdc1056bdae5adfe55f18d15ac2c930d741828c",
+        "patched_sha256": "a3335079977c2f13bad59e323fdc1056bdae5adfe55f18d15ac2c930d741828c"
+      },
+      "benches/buf.rs": {
+        "upstream_sha256": "72e6b6120b52d568da068f17c66a793d65602e400c595778581b63092e41d8dc",
+        "patched_sha256": "fb82e27956f1d3bbb99cf524b06b1aab7f5f582609e91a7299a8636204b0af81",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "benches/bytes.rs": {
+        "upstream_sha256": "7084e564f8568f52c9fdb76a06e58701aa7f0c776209d29a0f60c38a19748203",
+        "patched_sha256": "12b10baf839c8fb6adf6baa9e48e5156cd2b01d84091577551f3ef36c2b98ec8",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "benches/bytes_mut.rs": {
+        "upstream_sha256": "1326fe6224b26826228e02b4133151e756f38152c2d9cfe66adf83af76c3ec98",
+        "patched_sha256": "dad1748514ca75812488ca27efce400b6cf6a303a25be208a6d37354a792a20b",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "ci/miri.sh": {
+        "upstream_sha256": "e74475e7aec647a490a1f491b5dac6a60e3c03926a7c7e1898fa3e7c626415c7",
+        "patched_sha256": "e74475e7aec647a490a1f491b5dac6a60e3c03926a7c7e1898fa3e7c626415c7"
+      },
+      "ci/panic-abort.sh": {
+        "upstream_sha256": "aec2e5427117e533d7a9721a926eb6a9d72f264510066baf2c501357df2d936f",
+        "patched_sha256": "aec2e5427117e533d7a9721a926eb6a9d72f264510066baf2c501357df2d936f"
+      },
+      "ci/test-stable.sh": {
+        "upstream_sha256": "fb751f06f314f728c489b7a7854701f632e24de8d0540ea8cf3449c6a853ac3c",
+        "patched_sha256": "fb751f06f314f728c489b7a7854701f632e24de8d0540ea8cf3449c6a853ac3c"
+      },
+      "ci/tsan.sh": {
+        "upstream_sha256": "466b86b19225dd26c756cf2252cb1973f87a145642c99364b462ed7ceb55c7dd",
+        "patched_sha256": "466b86b19225dd26c756cf2252cb1973f87a145642c99364b462ed7ceb55c7dd"
+      },
+      "clippy.toml": {
+        "upstream_sha256": "583b79f56f20c85fb7820fcfa97985e03a4b41da31c8bbe6c03b721d3df5e800",
+        "patched_sha256": "583b79f56f20c85fb7820fcfa97985e03a4b41da31c8bbe6c03b721d3df5e800"
+      },
+      "src/buf/buf_impl.rs": {
+        "upstream_sha256": "a14aa7e5e7fac1d4d1a3617d616af0b478a9a31235b773bcec11255c8c78446e",
+        "patched_sha256": "44a7a2bdf4171d78a97baa48185ddac11334ed2af307ba99961d2ff944d7665a",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/buf_mut.rs": {
+        "upstream_sha256": "c76d0a846cf6e2c42af7acf0bbedc49a30ce3b9185392835c6a6f8b06a128b9e",
+        "patched_sha256": "3ed27516a101aa6bbb33248f0d077f5a7f997f9a1a57b0fa164be9815458314c",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/chain.rs": {
+        "upstream_sha256": "27ff0a6fce049c51a24d45003b9741b655c28330b48af23ad1514587760b0c93",
+        "patched_sha256": "16fb6bceb9524d759c5d2e5efb88e31168ad7421950f3c4302762eb3985524b1",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/iter.rs": {
+        "upstream_sha256": "d4dca5b7f9b1cb441f22ac1862e28b10086721879163a810955aefb5cd7f3e58",
+        "patched_sha256": "390268fae109f719aced745a42f74262c8af316d2cd61f2598d0fd65a3f54084",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/limit.rs": {
+        "upstream_sha256": "e005ba140b70f68654877c96b981a220477e415ff5c92438c1b0cb9bc866d872",
+        "patched_sha256": "7032f94228ae7b82687dc145f8dcc5cbf37ad44632faed3191a24fc208c2abe4",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/mod.rs": {
+        "upstream_sha256": "3f60295316d44b510b942abb31a0d975ae488bd4b52c87f5252d73f88f82715a",
+        "patched_sha256": "ccbee16369f17b77646b31e97c75acabcd9f510bd78011d39a98db932a9dd30d",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/reader.rs": {
+        "upstream_sha256": "cda8bc221a1de06c7395d5c6e80f8a5924198eafbc2decc0909082ce8781d789",
+        "patched_sha256": "ae2ea36db598374e19d24c2d39242579b1a81b463bff5ad4be7252d6cd477bca",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/take.rs": {
+        "upstream_sha256": "443766677fae38b398271693ed6134c7cc14949cdb9fce299c44dd55ecf84fb3",
+        "patched_sha256": "6317d5e4866e262884586e28f83196df8a0b30043e2bf9aad8d33bbeefdcc576",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/uninit_slice.rs": {
+        "upstream_sha256": "52629b93ff7a08db45fc69395580b34fa3609fd9309ea01f86e58488b02b08a3",
+        "patched_sha256": "b2c5cc511319139196606ecc0a80d4fa8d2ca36ed59466e16985bc7491896826",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/vec_deque.rs": {
+        "upstream_sha256": "baac165527d1bdfc3bb259380bb4722e70c3f11e8a901e8bab6e4f951b060711",
+        "patched_sha256": "dd9830fb4ebe4ae9f40f9ee90ca5e04aa0a475ed052dcf96e1611c6af1fe1801",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/buf/writer.rs": {
+        "upstream_sha256": "b137608cb40944a5c3e061a73087c5a48e50048dae002d0334a23cf4d3547065",
+        "patched_sha256": "0ea5006fe9574342ae8259b22a6e84a39bc756671396e0bb1f68d17cc16a12aa",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/bytes.rs": {
+        "upstream_sha256": "54568a31252a7cc4f1dcee26d2d34dc6e0af9c9d8bf09522b694c3bd6a2a04bc",
+        "patched_sha256": "d8611830193ca9f70c1d7554ee597b319f31896f588f67494218db9f1f5aa9a3",
+        "delta": "Add original MIT SPDX header and export guarded-owner API/error"
+      },
+      "src/bytes_mut.rs": {
+        "upstream_sha256": "aa9ce99a8c58100341f3fd33ee33c821fa89ebc3b7e98190ebe66f7632b4f6c2",
+        "patched_sha256": "d5e0c323e0206b5c01ffb67aaf8e22f4cf8b86a16320a8a0885a5244ddfa5541",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/fmt/debug.rs": {
+        "upstream_sha256": "4d217b8f43e489925bb6904010df617efc63b50a3cc1ab126eec54b43b66eb3e",
+        "patched_sha256": "2e20c314f897120e7bbeea3aa53bf27179b35691f7ab647433cabc46b3b7c639",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/fmt/hex.rs": {
+        "upstream_sha256": "54c05ab7d95d7381e499079d63773fabd2672f3c4929b56b02ab87d4495902b5",
+        "patched_sha256": "76905239f80e4351d03f447b67946440d1ddb0de9c9dc2f15508021d2ce11e64",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/fmt/mod.rs": {
+        "upstream_sha256": "b38222dcfff70eb3ffb6ce305b95f3fcfd9fa68cca85693eb2ed01d3da7ddb88",
+        "patched_sha256": "533a0ce544e106153300a8e8e0258e9a7d45176356c6bf884ad504a29edb85e2",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/lib.rs": {
+        "upstream_sha256": "037b377f32c52ea6cf5ebd0135ff80a6f8c4b25e663aa5a9786c6310c2f91e46",
+        "patched_sha256": "c81252bfdbc113a62d3ccccc83e910e6285fe01a87403c2baf63f3e38f05f25f",
+        "delta": "Add original MIT SPDX header and export guarded-owner API/error"
+      },
+      "src/loom.rs": {
+        "upstream_sha256": "7c89f9f5f900d5b9b7c43d08d467957933eba90d5dcff1b38cf9a7e48494a577",
+        "patched_sha256": "f759abf4eb8f864e9f8b0c24505561e5eae0095125a3a3728403ff1f27380938",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "src/serde.rs": {
+        "upstream_sha256": "3ecd7e828cd4c2b7db93c807cb1548fad209e674df493edf7cda69a7b04d405d",
+        "patched_sha256": "134eef58ac5797acab7b96f4130df5a3e534ac106b95b9e9e609a5b51508af64",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_buf.rs": {
+        "upstream_sha256": "c55dc7ab1a7392c2467a079dc77223fbec35ff54e9eda9b05cc1d4e22cb36626",
+        "patched_sha256": "db3c6abcfc8f2bb18824d9439ff6bc91362e3a813e70c5e274a4dffb7b48e534",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_buf_mut.rs": {
+        "upstream_sha256": "1f28f3d125e98b81a813a414a89a8c9b5d45369b10dda187a68614ff285c820e",
+        "patched_sha256": "0efdff9026bf70d2c1f54016b0cabe0dd697932f32d68dfd8987f45450386548",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_bytes.rs": {
+        "upstream_sha256": "57f461b6a05cfe58dff0c5d5eb46277557274eb4bedfecb9aa5d295963e0c9f4",
+        "patched_sha256": "bda3e13f8882a942ce17bfbc706ddb6db0cc0c60015a96fbafba6c2cf05b5060",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_bytes_odd_alloc.rs": {
+        "upstream_sha256": "ad5df84a35038359413199762c65017989d905e6e965a7b863beaa9962a7e1e8",
+        "patched_sha256": "18a1b8f594c30c9e26fb683cfa58c4ef66d34565648307e7664d1b68dfd7b6f4",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_bytes_vec_alloc.rs": {
+        "upstream_sha256": "5a0e77cab12b32374b2822df8d9a6479afe68b55c1cba1511ebf4199be532caa",
+        "patched_sha256": "6b2a56de4368ae4951e4d5044290b679861dec496d4d083890ec555548b23428",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_chain.rs": {
+        "upstream_sha256": "1784287560d45e0225b2cd9d24498264031c36f42cebb7e92108e11641d1cce0",
+        "patched_sha256": "9032d0cc9094e2ff6ea4db1c5aeb7058af2d6701eaafe88d459b44ff3327307b",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_debug.rs": {
+        "upstream_sha256": "13299107172809e8cbbd823964ac9450cd0d6b6de79f2e6a2e0f44b9225a0593",
+        "patched_sha256": "3bf9a9a9384e6a26401dabb83dc1512320bd9eb0d1e92106b7e5680505325f84",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_iter.rs": {
+        "upstream_sha256": "665e1837c1294d7695ffa352a666ce8673fb46fa603164556524e87d5517a6cb",
+        "patched_sha256": "0af3d7835c4957bafe31f9b6894acb391ff88c197562926d4418f9d21874385b",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_limit.rs": {
+        "upstream_sha256": "6c5801f1e94f0abb2b4994aa1ade8e36464f26bf9e13e3dcac02d0f2f6f08ed5",
+        "patched_sha256": "89629612c4e0bb7193038b236f199dd01b9872a9eb81f2ce7e1d6444349ed01c",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_reader.rs": {
+        "upstream_sha256": "050b872d89376b3b83841839b4334066d8357b01aaf3783a180aac25a5550f3d",
+        "patched_sha256": "170f17a3e5d866811ccc312129a8c23b8bf35038a617f95f9d1824c9b0a458df",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_serde.rs": {
+        "upstream_sha256": "2691f891796ba259de0ecf926de05c514f4912cc5fcd3e6a1591efbcd23ed4d0",
+        "patched_sha256": "86793cdd436fea25d4bb9c91baba93b104e6640a5ae99a520f2bca9d6bdc20cb",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_take.rs": {
+        "upstream_sha256": "fb34700a8ed75b3c6937a4dee0bffadb64f7c7f735bd9faa8730eb96a9e9b651",
+        "patched_sha256": "1e7029564eb80987601caea776cf9cd1007a1001bc4693771e5d6b01fe14f84c",
+        "delta": "Add original MIT SPDX header; remaining upstream source unchanged"
+      },
+      "tests/test_guarded_owner.rs": {
+        "patched_sha256": "f2fa1310dcd1b63bf4d421298bd857e5d5a1eb052985ae018701f3c6cec5e225",
+        "delta": "Add isolated allocator-real free/refund barrier, refusal, allocation failure, last clone/slice, unwind and conversion oracle"
+      },
+      "src/bytes/guarded_owner.rs": {
+        "patched_sha256": "380799d40b5700eaef6526d81eeefbf50b8c16a74a4b3502cdb51a986a49875f",
+        "delta": "Add fallible reservation-before-allocation owner constructor and after-free guard vtable; retain original constructor"
+      }
     }
   }
 }
