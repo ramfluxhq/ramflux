@@ -14,12 +14,93 @@ fn reject(path: &str, rule: &str) -> SurfaceReject {
 fn encoded(value: &Value) -> Result<usize> {
     crate::canonical_json_bytes(value).map(|v| v.len()).map_err(|_| SurfaceReject::Encoding)
 }
+fn pointer(path: &str, key: &str) -> String {
+    let safe: String = key
+        .chars()
+        .flat_map(|ch| {
+            if ch.is_control() || crate::text_safety::is_bidi_control(ch) {
+                ch.escape_unicode().collect::<Vec<_>>()
+            } else {
+                vec![ch]
+            }
+        })
+        .collect();
+    format!("{path}/{}", safe.replace('~', "~0").replace('/', "~1"))
+}
+fn schema_keywords(schema: &Value, path: &str) -> Result<()> {
+    let fields = schema.as_object().ok_or(SurfaceReject::Encoding)?;
+    for (key, value) in fields {
+        match key.as_str() {
+            "$defs" | "properties" => {
+                for (name, child) in value.as_object().ok_or(SurfaceReject::Encoding)? {
+                    schema_keywords(child, &pointer(&pointer(path, key), name))?;
+                }
+            }
+            "items" => schema_keywords(value, &pointer(path, key))?,
+            "anyOf" => {
+                for (n, child) in
+                    value.as_array().ok_or(SurfaceReject::Encoding)?.iter().enumerate()
+                {
+                    schema_keywords(child, &format!("{path}/anyOf/{n}"))?;
+                }
+            }
+            "$schema"
+            | "$id"
+            | "title"
+            | "description"
+            | "type"
+            | "required"
+            | "additionalProperties"
+            | "$ref"
+            | "const"
+            | "enum"
+            | "minimum"
+            | "maximum"
+            | "minItems"
+            | "maxItems"
+            | "minLength"
+            | "maxLength"
+            | "x-utf8Bytes"
+            | "x-encodedBytes" => (),
+            "x-format"
+                if matches!(
+                    value.as_str(),
+                    Some("identifier" | "safeText" | "objectId" | "digest32")
+                ) => {}
+            "x-crossFields"
+                if matches!(
+                    value.as_str(),
+                    Some(
+                        "text"
+                            | "card"
+                            | "list"
+                            | "table"
+                            | "chart"
+                            | "timeline"
+                            | "form"
+                            | "input"
+                            | "number"
+                            | "select"
+                            | "toggle"
+                            | "media"
+                            | "map"
+                            | "progress"
+                            | "status"
+                    )
+                ) => {}
+            _ => return Err(reject(&pointer(path, key), "unsupportedSchemaKeyword")),
+        }
+    }
+    Ok(())
+}
+fn load_schema(source: &str) -> Result<Value> {
+    let value = serde_json::from_str(source).map_err(|_| SurfaceReject::Encoding)?;
+    schema_keywords(&value, "")?;
+    Ok(value)
+}
 fn bundled() -> Result<&'static Value> {
-    static SCHEMA: OnceLock<std::result::Result<Value, serde_json::Error>> = OnceLock::new();
-    SCHEMA
-        .get_or_init(|| serde_json::from_str(super::SCHEMA))
-        .as_ref()
-        .map_err(|_| SurfaceReject::Encoding)
+    static SCHEMA: OnceLock<Result<Value>> = OnceLock::new();
+    SCHEMA.get_or_init(|| load_schema(super::SCHEMA)).as_ref().map_err(Clone::clone)
 }
 pub(super) fn validate(value: &Value) -> Result<()> {
     crate::validate_i_json_value(value).map_err(|_| SurfaceReject::InvalidJson)?;
@@ -37,7 +118,7 @@ fn forbidden_keys(value: &Value, path: &str) -> Result<()> {
     match value {
         Value::Object(map) => {
             for (key, child) in map {
-                let next = format!("{path}/{key}");
+                let next = pointer(path, key);
                 if matches!(key.as_str(), "__proto__" | "prototype" | "constructor") {
                     return Err(reject(&next, "prototype"));
                 }
@@ -120,12 +201,12 @@ fn check(value: &Value, schema: &Value, root: &Value, path: &str) -> Result<()> 
         if let Some(required) = schema.get("required").and_then(Value::as_array) {
             for key in required.iter().filter_map(Value::as_str) {
                 if !map.contains_key(key) {
-                    return Err(reject(&format!("{path}/{key}"), "required"));
+                    return Err(reject(&pointer(path, key), "required"));
                 }
             }
         }
         for (key, child) in map {
-            let next = format!("{path}/{key}");
+            let next = pointer(path, key);
             if let Some(property) = schema.get("properties").and_then(|p| p.get(key)) {
                 check(child, property, root, &next)?;
             } else if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
@@ -495,12 +576,12 @@ mod tests {
                     missing.as_object_mut().unwrap_or_else(|| unreachable!()).remove(key);
                     assert_eq!(
                         check(&missing, schema, root, path),
-                        Err(reject(&format!("{path}/{key}"), "required"))
+                        Err(reject(&pointer(path, key), "required"))
                     );
                 }
             }
             for (key, child) in map {
-                closed_fields(child, &schema["properties"][key], root, &format!("{path}/{key}"));
+                closed_fields(child, &schema["properties"][key], root, &pointer(path, key));
             }
         } else if let Some(array) = value.as_array() {
             for (i, child) in array.iter().enumerate() {
@@ -731,7 +812,7 @@ mod tests {
         }
         if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
             for (key, child) in properties {
-                bounds(child, root, &format!("{path}/{key}"));
+                bounds(child, root, &pointer(path, key));
             }
         }
         if let Some(items) = schema.get("items") {
@@ -742,5 +823,95 @@ mod tests {
                 bounds(child, root, path);
             }
         }
+    }
+    #[test]
+    fn webui_received_bytes_are_canonical_and_never_repaired()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for component in samples() {
+            let command = crate::A2uiConversationCommand::CreateSurface(content(component));
+            let bytes = crate::encode_a2ui_conversation_event("conv", 1, &command)?;
+            let event = crate::A2uiConversationEvent::from_wire_bytes(&bytes)?;
+            assert_eq!(crate::canonical_json_bytes(&event)?, bytes);
+            let mut padded = bytes.clone();
+            padded.push(b' ');
+            assert_eq!(
+                crate::A2uiConversationEvent::from_wire_bytes(&padded)
+                    .err()
+                    .ok_or("accepted whitespace")?
+                    .to_string(),
+                "I-JSON ingress rejected: web catalog : nonCanonicalBytes"
+            );
+        }
+        let bytes = crate::encode_a2ui_conversation_event(
+            "conv",
+            1,
+            &crate::A2uiConversationCommand::CreateSurface(content(samples().remove(0))),
+        )?;
+        let raw: Value = crate::parse_i_json(&bytes)?;
+        for (key, value, rule) in [
+            ("fallbackMarkdown", Value::Null, "unknownField"),
+            ("components", json!([]), "nonCanonicalField"),
+            ("dataModel", json!({}), "nonCanonicalField"),
+            ("allowedActions", json!([]), "nonCanonicalField"),
+        ] {
+            let mut changed = raw.clone();
+            changed["command"][key] = value;
+            let error = crate::A2uiConversationEvent::from_wire_bytes(
+                &crate::canonical_json_bytes(&changed)?,
+            )
+            .err()
+            .ok_or("accepted repaired member")?;
+            assert_eq!(
+                error.to_string(),
+                format!("I-JSON ingress rejected: web catalog /{key}: {rule}")
+            );
+        }
+        Ok(())
+    }
+    #[test]
+    fn webui_inclusive_timeline_number_and_progress_boundaries() {
+        let mut timeline = samples().remove(5);
+        timeline["data"]["events"] = json!([{"key":"a","at":1,"label":"A","state":"done"},{"key":"b","at":1,"label":"B","state":"done"}]);
+        assert_eq!(super::super::validate(&content(timeline)), Ok(()));
+        let mut number = samples().remove(8);
+        for (min, max, value) in [(1, 1, 1), (0, 2, 0), (0, 2, 2)] {
+            number["data"]["min"] = json!(min);
+            number["data"]["max"] = json!(max);
+            number["data"]["value"] = json!(value);
+            assert_eq!(super::super::validate(&content(number.clone())), Ok(()));
+        }
+        let mut progress = samples().remove(13);
+        progress["data"]["value"] = progress["data"]["total"].clone();
+        assert_eq!(super::super::validate(&content(progress)), Ok(()));
+    }
+    #[test]
+    fn webui_error_pointers_and_schema_keywords_are_closed()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut c = content(samples().remove(0));
+        c.components.push(c.components[0].clone());
+        assert_eq!(
+            super::super::super::snapshot::validated_hash(&c),
+            Err(SurfaceReject::DuplicateBlock)
+        );
+        c.components.pop();
+        c.surface_id = "a".repeat(25);
+        assert_eq!(super::super::validate(&c), Err(reject("/surfaceId", "identifier")));
+        c.surface_id = "surface".into();
+        let key = "a/b~c\u{1b}";
+        c.components[0][key] = json!(true);
+        let expected = "/components/0/a~1b~0c\\u{1b}";
+        let error = super::super::validate(&c).err().ok_or("accepted unknown field")?;
+        assert_eq!(error, reject(expected, "unknownField"));
+        assert!(!error.to_string().chars().any(char::is_control));
+        assert_eq!(pointer("", "a/b~c"), "/a~1b~0c");
+        let root = json!({"a/b~c":1});
+        assert_eq!(root.pointer(&pointer("", "a/b~c")), Some(&json!(1)));
+        let mut schema = load_schema(super::super::SCHEMA)?;
+        schema["$defs"]["Id"]["pattern"] = json!(".*");
+        assert_eq!(
+            load_schema(&serde_json::to_string(&schema)?),
+            Err(reject("/$defs/Id/pattern", "unsupportedSchemaKeyword"))
+        );
+        Ok(())
     }
 }

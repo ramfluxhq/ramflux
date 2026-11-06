@@ -74,7 +74,31 @@ impl A2uiConversationEvent {
     /// # Errors
     /// Rejects non-I-JSON original bytes and invalid v2 schemas/fields.
     pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, ProtocolError> {
-        crate::parse_i_json(bytes).map(Self)
+        let raw: Value = crate::parse_i_json(bytes)?;
+        let web = raw.pointer("/command/command").and_then(Value::as_str) == Some("createSurface")
+            && raw.pointer("/command/catalog").and_then(Value::as_str)
+                == Some(super::web_catalog::CATALOG);
+        let snapshot = if web {
+            let mut value = raw["command"].clone();
+            value.as_object_mut().ok_or(ProtocolError::NotObject)?.remove("command");
+            super::web_catalog::validate_raw(&value).map_err(web_ingress_error)?;
+            Some(value)
+        } else {
+            None
+        };
+        let event: EventFields = serde_json::from_value(raw).map_err(ProtocolError::IJson)?;
+        if let (Some(snapshot), A2uiConversationCommand::CreateSurface(content)) =
+            (snapshot, &event.command)
+        {
+            super::web_catalog::validate_received(&snapshot, content).map_err(web_ingress_error)?;
+            if crate::canonical_json_bytes(&event)? != bytes {
+                return Err(web_ingress_error(SurfaceReject::WebCatalog {
+                    path: String::new(),
+                    rule: "nonCanonicalBytes".into(),
+                }));
+            }
+        }
+        Ok(Self(event))
     }
     #[must_use]
     pub fn conversation_id(&self) -> &str {
@@ -288,4 +312,8 @@ pub fn encode_a2ui_conversation_event(
         command: command.clone(),
     };
     crate::canonical_json_bytes(&event)
+}
+
+fn web_ingress_error(error: SurfaceReject) -> ProtocolError {
+    ProtocolError::IJson(serde::de::Error::custom(error))
 }

@@ -20,3 +20,24 @@ pub(super) fn validate(content: &CreateSurfaceCommand) -> Result<(), SurfaceReje
     let value = serde_json::to_value(content).map_err(|_| SurfaceReject::Encoding)?;
     schema::validate(&value)
 }
+
+// Original raw snapshot validation must precede lossy DTO defaults/skip serialization.
+pub(super) fn validate_received(
+    raw: &serde_json::Value,
+    content: &CreateSurfaceCommand,
+) -> Result<(), SurfaceReject> {
+    schema::validate(raw)?;
+    let typed = serde_json::to_value(content).map_err(|_| SurfaceReject::Encoding)?;
+    for (key, value) in raw.as_object().ok_or(SurfaceReject::Encoding)? {
+        if typed.get(key) != Some(value) {
+            return Err(SurfaceReject::WebCatalog {
+                path: format!("/{key}"),
+                rule: "nonCanonicalField".into(),
+            });
+        }
+    }
+    Ok(())
+}
+pub(super) fn validate_raw(raw: &serde_json::Value) -> Result<(), SurfaceReject> {
+    schema::validate(raw)
+}
