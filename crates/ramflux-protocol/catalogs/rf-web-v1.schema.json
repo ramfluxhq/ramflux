@@ -1,0 +1,1209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ramflux:catalog:rf-web:v1",
+  "title": "Dormant rf-web/v1 declarative catalog, version 1",
+  "description": "Local references only. x-encodedBytes bounds canonical JSON bytes; x-format and x-crossFields are mandatory semantic validation annotations. Binding resolution, expansion and form/action ownership are required before activation. No renderer capability is enabled by this schema.",
+  "type": "object",
+  "properties": {
+    "surfaceId": {
+      "$ref": "#/$defs/Id"
+    },
+    "surfaceType": {
+      "enum": [
+        "message_card",
+        "approval_card",
+        "form_card",
+        "status_panel",
+        "task_card",
+        "file_preview",
+        "call_card",
+        "agent_result",
+        "notification_card"
+      ]
+    },
+    "catalog": {
+      "const": "rf-web/v1"
+    },
+    "catalogVersion": {
+      "const": "1"
+    },
+    "fallbackText": {
+      "type": "string",
+      "x-format": "safeText",
+      "x-encodedBytes": 512
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Component"
+      },
+      "minItems": 0,
+      "maxItems": 32
+    },
+    "dataModel": {
+      "type": "object",
+      "x-encodedBytes": 4096
+    },
+    "allowedActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Action"
+      },
+      "minItems": 0,
+      "maxItems": 16
+    }
+  },
+  "required": [
+    "surfaceId",
+    "surfaceType",
+    "catalog",
+    "catalogVersion",
+    "fallbackText"
+  ],
+  "additionalProperties": false,
+  "x-encodedBytes": 16384,
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,23}$",
+      "x-format": "identifier"
+    },
+    "ShortText": {
+      "type": "string",
+      "maxLength": 94,
+      "x-encodedBytes": 96,
+      "x-format": "safeText"
+    },
+    "LongText": {
+      "type": "string",
+      "maxLength": 254,
+      "x-format": "safeText"
+    },
+    "Integer": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "Binding": {
+      "type": "object",
+      "properties": {
+        "bind": {
+          "type": "string",
+          "maxLength": 96,
+          "x-utf8Bytes": 96
+        }
+      },
+      "required": [
+        "bind"
+      ],
+      "additionalProperties": false
+    },
+    "AttachmentRef": {
+      "type": "object",
+      "properties": {
+        "object_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 254,
+          "x-format": "objectId"
+        },
+        "manifest_digest": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "x-format": "digest32"
+        }
+      },
+      "required": [
+        "object_id",
+        "manifest_digest"
+      ],
+      "additionalProperties": false
+    },
+    "Item": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        },
+        "detail": {
+          "$ref": "#/$defs/ShortText"
+        }
+      },
+      "required": [
+        "key",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "Column": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        }
+      },
+      "required": [
+        "key",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "Primitive": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LongText"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      ]
+    },
+    "Row": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Id"
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Primitive"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "required": [
+        "key",
+        "cells"
+      ],
+      "additionalProperties": false
+    },
+    "Point": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "integer",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        },
+        "y": {
+          "type": "integer",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "Series": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Point"
+          },
+          "minItems": 0,
+          "maxItems": 16
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "points"
+      ],
+      "additionalProperties": false
+    },
+    "Event": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Id"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "active",
+            "done",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "at",
+        "label",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "Option": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "Marker": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Id"
+        },
+        "lat_e6": {
+          "type": "integer",
+          "minimum": -90000000,
+          "maximum": 90000000
+        },
+        "lon_e6": {
+          "type": "integer",
+          "minimum": -180000000,
+          "maximum": 180000000
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        }
+      },
+      "required": [
+        "key",
+        "lat_e6",
+        "lon_e6",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "text": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.text"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LongText"
+            },
+            {
+              "$ref": "#/$defs/Binding"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "text"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "text"
+    },
+    "card": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.card"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "body": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LongText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "tone": {
+              "enum": [
+                "neutral",
+                "info",
+                "warning"
+              ]
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "card"
+    },
+    "list": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.list"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Item"
+                  },
+                  "minItems": 0,
+                  "maxItems": 16
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "ordered": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "list"
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.table"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Column"
+              },
+              "minItems": 1,
+              "maxItems": 4
+            },
+            "rows": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Row"
+                  },
+                  "minItems": 0,
+                  "maxItems": 16
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "columns",
+            "rows"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "table"
+    },
+    "chart": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.chart"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "line",
+                "bar"
+              ]
+            },
+            "series": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Series"
+                  },
+                  "minItems": 1,
+                  "maxItems": 2
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "series"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "chart"
+    },
+    "timeline": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.timeline"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "events": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Event"
+                  },
+                  "minItems": 0,
+                  "maxItems": 16
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "events"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "timeline"
+    },
+    "form": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.form"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Id"
+              },
+              "minItems": 1,
+              "maxItems": 4
+            },
+            "submit": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "title",
+            "fields",
+            "submit"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "form"
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.input"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "mode": {
+              "enum": [
+                "text",
+                "integer"
+              ]
+            },
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "label",
+            "value",
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "input"
+    },
+    "number": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.number"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "min": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "max": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "label",
+            "value",
+            "min",
+            "max"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "number"
+    },
+    "select": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.select"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Option"
+                  },
+                  "minItems": 1,
+                  "maxItems": 8
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "label",
+            "options",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "select"
+    },
+    "toggle": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.toggle"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "label",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "toggle"
+    },
+    "media": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.media"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "image",
+                "audio",
+                "video"
+              ]
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AttachmentRef"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "alt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "ref",
+            "alt"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "media"
+    },
+    "map": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.map"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "center": {
+              "type": "object",
+              "properties": {
+                "lat_e6": {
+                  "type": "integer",
+                  "minimum": -90000000,
+                  "maximum": 90000000
+                },
+                "lon_e6": {
+                  "type": "integer",
+                  "minimum": -180000000,
+                  "maximum": 180000000
+                }
+              },
+              "required": [
+                "lat_e6",
+                "lon_e6"
+              ],
+              "additionalProperties": false
+            },
+            "zoom": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18
+            },
+            "markers": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Marker"
+                  },
+                  "minItems": 0,
+                  "maxItems": 8
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "tiles": {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/AttachmentRef"
+                    },
+                    {
+                      "$ref": "#/$defs/Binding"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "center",
+            "zoom",
+            "markers",
+            "tiles"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "map"
+    },
+    "progress": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.progress"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "total": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            }
+          },
+          "required": [
+            "label",
+            "value",
+            "total"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "progress"
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "type": {
+          "const": "rf.status"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ShortText"
+                },
+                {
+                  "$ref": "#/$defs/Binding"
+                }
+              ]
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled"
+              ]
+            }
+          },
+          "required": [
+            "label",
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 256,
+      "x-crossFields": "status"
+    },
+    "Component": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "$ref": "#/$defs/card"
+        },
+        {
+          "$ref": "#/$defs/list"
+        },
+        {
+          "$ref": "#/$defs/table"
+        },
+        {
+          "$ref": "#/$defs/chart"
+        },
+        {
+          "$ref": "#/$defs/timeline"
+        },
+        {
+          "$ref": "#/$defs/form"
+        },
+        {
+          "$ref": "#/$defs/input"
+        },
+        {
+          "$ref": "#/$defs/number"
+        },
+        {
+          "$ref": "#/$defs/select"
+        },
+        {
+          "$ref": "#/$defs/toggle"
+        },
+        {
+          "$ref": "#/$defs/media"
+        },
+        {
+          "$ref": "#/$defs/map"
+        },
+        {
+          "$ref": "#/$defs/progress"
+        },
+        {
+          "$ref": "#/$defs/status"
+        }
+      ]
+    },
+    "Action": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Id"
+        },
+        "label": {
+          "$ref": "#/$defs/ShortText"
+        },
+        "kind": {
+          "enum": [
+            "submit",
+            "select",
+            "request"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "label",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "x-encodedBytes": 112
+    }
+  }
+}

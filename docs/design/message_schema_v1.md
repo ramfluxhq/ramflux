@@ -4707,3 +4707,22 @@ These primary references support the specific construction/tooling facts:
 - [Protocol Buffers ProtoJSON](https://protobuf.dev/programming-guides/json/): field-name, integer, bytes and unknown-input mapping used by the generated local API.
 - [prost](https://docs.rs/prost/latest/prost/), [protox](https://docs.rs/protox/latest/protox/), [prost-build compile_fds](https://docs.rs/prost-build/latest/prost_build/struct.Config.html#method.compile_fds) and [pbjson-build](https://docs.rs/pbjson-build/latest/pbjson_build/): descriptor-driven Rust/ProtoJSON generation; this design requires locked regeneration and retained original peer bytes.
 - [Telegram messageService](https://core.telegram.org/constructor/messageService): explicit service-message constructor as a modeling reference; no Telegram protocol or trust model is imported.
+
+### Declarative web catalog amendment (P1, dormant)
+
+The existing kind 9 CreateSurfaceCommand catalog/version/components/data_model/
+allowed_actions fields also describe `rf-web/v1`, version `1`. The canonical local
+catalog is `crates/ramflux-protocol/catalogs/rf-web-v1.schema.json`; its mandatory
+byte and semantic annotations are executed by `a2ui_state::web_catalog`. Every
+object is closed; peers supply data only, never script URLs, HTML/CSS handlers,
+functions, regexes or a renderer bundle selector. Literal text stays literal.
+The complete typed snapshot retains the 16384-byte ceiling and the unchanged
+`ramflux.a2ui.surface_hash.v1` canonical JSON hash transcript. Original incoming
+bytes are validated without normalization; only existing local encoders produce
+canonical output. No generated kind, field tag or basic/1 hash changes.
+
+P1 adds schema validation/dispatch only. Binding resolution, reachable expansion,
+form/action authority, atomic updates and safe consumer delivery are required
+subsequent work. Renderer capability remains disabled until activation following
+consumer, bundle and platform admission. This amendment grants no execution,
+signing, attachment access or network authority.

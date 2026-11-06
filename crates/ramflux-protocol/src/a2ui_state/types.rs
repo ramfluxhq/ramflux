@@ -265,6 +265,8 @@ pub enum SurfaceReject {
     ArgumentsHashMismatch,
     #[error("invalid I-JSON")]
     InvalidJson,
+    #[error("web catalog {path}: {rule}")]
+    WebCatalog { path: String, rule: String },
     #[error("canonical encoding failed")]
     Encoding,
 }
