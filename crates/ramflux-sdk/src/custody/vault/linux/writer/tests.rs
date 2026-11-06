@@ -12,7 +12,7 @@ use std::{
     },
     path::Path,
     process::{Child, Command},
-    sync::{atomic::AtomicBool, mpsc},
+    sync::{Mutex, MutexGuard, atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
 };
 
@@ -38,6 +38,20 @@ impl Drop for Reaper {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+/// A forked child inherits every open descriptor until it execs, including a held `flock`
+/// description, so a spawn overlapping a publication can make that publication's next lock
+/// attempt see `Busy`. Production already opens every descriptor with CLOEXEC, which cannot
+/// close the fork-to-exec window. The order oracle therefore holds this gate for its whole run
+/// and every subprocess fixture spawns under it.
+static FORK_GATE: Mutex<()> = Mutex::new(());
+fn fork_gate() -> MutexGuard<'static, ()> {
+    FORK_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+fn spawn_fixture(command: &mut Command) -> std::io::Result<Child> {
+    let _gate = fork_gate();
+    command.spawn()
 }
 
 fn setup(root: &Path, realm: u8) -> TestResult<Arc<Store>> {
@@ -222,6 +236,44 @@ fn linux_vault_file_store_is_insert_only_and_crash_durable() -> TestResult {
 /// Durability oracle: the real fsync, rename and unlink steps must occur in D5 order.
 #[test]
 fn linux_vault_publication_call_order_is_durable() -> TestResult {
+    let _gate = fork_gate();
+    order_oracle()
+}
+/// Forced overlap: a thread spawns subprocess fixtures back to back while the order oracle runs
+/// repeatedly. Fixtures spawn under the fork gate, so the oracle never sees an inherited lock.
+#[test]
+fn subprocess_fixtures_cannot_race_the_order_oracle() -> TestResult {
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawner = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut count = 0_u32;
+            while !stop.load(Ordering::SeqCst) {
+                if let Ok(mut child) = spawn_fixture(&mut Command::new("true")) {
+                    let _ = child.wait();
+                    count += 1;
+                }
+            }
+            count
+        })
+    };
+    let mut result = Ok(());
+    for _ in 0..150 {
+        result = {
+            let _gate = fork_gate();
+            order_oracle()
+        };
+        if result.is_err() {
+            break;
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    let count = spawner.join().map_err(|_| "spawner panicked")?;
+    result?;
+    assert!(count > 0, "the spawner never overlapped the oracle");
+    Ok(())
+}
+fn order_oracle() -> TestResult {
     let dir = tempfile::tempdir()?;
     let store = setup(dir.path(), 3)?;
     let n = "unlock:alice";
@@ -263,7 +315,138 @@ fn strace_child() -> TestResult {
     store.apply(remove(n, 4, 1), |_| {})?;
     Ok(())
 }
-/// Proves `RealDurabilityOps` itself: the real syscalls, in order, as seen by strace.
+/// Kills the whole process group of a traced run on every exit path and reaps the leader.
+struct GroupReaper(Child);
+impl Drop for GroupReaper {
+    fn drop(&mut self) {
+        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id().cast_signed()) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+/// Runs `command` in its own process group with a fail-loud deadline; tracer and tracee are
+/// killed and reaped when this returns, however it returns.
+fn run_bounded(command: &mut Command, deadline: Duration) -> TestResult<std::process::ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    let mut child = GroupReaper(spawn_fixture(command.process_group(0))?);
+    let end = Instant::now() + deadline;
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= end {
+            return Err(format!("traced run timed out after {deadline:?}").into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+#[test]
+fn bounded_run_reports_stall_and_early_exit() -> TestResult {
+    let started = Instant::now();
+    let err = run_bounded(Command::new("sleep").arg("60"), Duration::from_millis(300))
+        .err()
+        .ok_or("stalled run must fail")?;
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(10), "stall must not wait for the child");
+    let status = run_bounded(Command::new("sh").args(["-c", "exit 3"]), GUARD)?;
+    assert_eq!(status.code(), Some(3), "early exit is reported, not hidden");
+    Ok(())
+}
+
+/// One syscall line of a `strace -f -y` trace: name, quoted/bare arguments and result.
+struct Call<'a> {
+    name: &'a str,
+    args: &'a str,
+    ok: bool,
+}
+fn parse_calls(text: &str) -> Vec<Call<'_>> {
+    text.lines()
+        .filter_map(|line| {
+            let call = line.split_once(' ').map_or(line, |(_, rest)| rest).trim_start();
+            let (name, rest) = call.split_once('(')?;
+            let (args, result) = rest.rsplit_once(") = ")?;
+            let ok = result.split_whitespace().next()? == "0";
+            matches!(
+                name,
+                "fsync" | "fdatasync" | "rename" | "renameat" | "renameat2" | "unlink" | "unlinkat"
+            )
+            .then_some(Call { name, args, ok })
+        })
+        .collect()
+}
+/// Checks the insert-then-delete publication by descriptor identity, not by syscall name:
+/// the temporary file's own fsync, then the rename of that temp name between the realm
+/// directory, then a realm-directory fsync, then unlink and a final directory fsync. Every call
+/// must have succeeded. Directory fsyncs from `Store::open` come before the temp file exists and
+/// cannot stand in for the file fsync.
+fn check_publication_trace(text: &str) -> Result<(), String> {
+    let calls = parse_calls(text);
+    let is_sync = |c: &Call<'_>| matches!(c.name, "fsync" | "fdatasync");
+    let first = calls
+        .iter()
+        .position(|c| is_sync(c) && c.args.contains("/.pending-"))
+        .ok_or("no fsync on the temporary file descriptor")?;
+    let seq = &calls[first..];
+    if seq.len() != 5 {
+        return Err(format!("expected 5 publication calls, saw {}", seq.len()));
+    }
+    let temp = seq[0].args.split_once("/.pending-").map(|(_, t)| t.trim_end_matches('>'));
+    let temp = temp.ok_or("temp fd path")?;
+    let realm = seq[1]
+        .args
+        .split_once(", \".pending-")
+        .map(|(dir, _)| dir)
+        .ok_or("rename source is not the temp name")?;
+    if !seq[1].name.starts_with("rename") || !realm.ends_with("/alice/3>") {
+        return Err(format!("second call is not a realm rename: {}", seq[1].args));
+    }
+    if !seq[1].args.contains(&format!(".pending-{temp}\""))
+        || !seq[1].args.contains("\"unlock:alice\"")
+    {
+        return Err("rename does not move the synced temp name to the reference".into());
+    }
+    if !(is_sync(&seq[2]) && seq[2].args == realm) {
+        return Err("rename is not followed by a realm-directory fsync".into());
+    }
+    if !(seq[3].name.starts_with("unlink")
+        && seq[3].args.starts_with(realm)
+        && seq[3].args.contains("\"unlock:alice\""))
+    {
+        return Err("delete is not a realm unlinkat of the reference".into());
+    }
+    if !(is_sync(&seq[4]) && seq[4].args == realm) {
+        return Err("unlink is not followed by a realm-directory fsync".into());
+    }
+    if let Some(bad) = seq.iter().find(|c| !c.ok) {
+        return Err(format!("syscall failed: {}({})", bad.name, bad.args));
+    }
+    Ok(())
+}
+const GOOD_TRACE: &str = "7 fsync(4</r/alice>) = 0
+7 fsync(6</r/alice/3/.pending-AbC>) = 0
+7 renameat2(5</r/alice/3>, \".pending-AbC\", 5</r/alice/3>, \"unlock:alice\", RENAME_NOREPLACE) = 0
+7 fsync(5</r/alice/3>) = 0
+7 unlinkat(5</r/alice/3>, \"unlock:alice\", 0) = 0
+7 fsync(5</r/alice/3>) = 0
+";
+#[test]
+fn trace_checker_pins_file_sync_identity_and_results() {
+    assert_eq!(check_publication_trace(GOOD_TRACE), Ok(()));
+    // Missing file fsync: Store::open's directory fsync is still there, yet the trace is refused.
+    let no_file_sync = GOOD_TRACE.replace("7 fsync(6</r/alice/3/.pending-AbC>) = 0\n", "");
+    assert!(check_publication_trace(&no_file_sync).is_err());
+    // Directory fsync standing in for the file fsync, immediately before the rename.
+    let swapped = GOOD_TRACE.replace("fsync(6</r/alice/3/.pending-AbC>)", "fsync(5</r/alice/3>)");
+    assert!(check_publication_trace(&swapped).is_err());
+    let failed =
+        GOOD_TRACE.replacen("fsync(5</r/alice/3>) = 0", "fsync(5</r/alice/3>) = -1 EIO", 1);
+    assert!(check_publication_trace(&failed).is_err(), "failed syscall result is refused");
+    let wrong_dir = GOOD_TRACE.replacen("fsync(5</r/alice/3>)", "fsync(4</r/alice>)", 1);
+    assert!(check_publication_trace(&wrong_dir).is_err());
+}
+/// Proves `RealDurabilityOps` itself: the real syscalls, on the right descriptors, in order.
 #[test]
 #[ignore = "needs strace; run on QA"]
 fn real_durability_ops_issue_syscalls_in_durable_order() -> TestResult {
@@ -271,45 +454,21 @@ fn real_durability_ops_issue_syscalls_in_durable_order() -> TestResult {
     let root = dir.path().join("root");
     std::fs::create_dir(&root)?;
     let trace = dir.path().join("trace.txt");
-    let status = Command::new("strace")
-        .args(["-f", "-o"])
-        .arg(&trace)
-        .args(["-e", "trace=fsync,fdatasync,rename,renameat,renameat2,unlink,unlinkat"])
-        .arg(std::env::current_exe()?)
-        .args(["--exact", "custody::vault::linux::writer::tests::strace_child", "--nocapture"])
-        .env("RF_VAULT_STRACE_ROOT", &root)
-        .stdout(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("strace is required for this test and could not run: {e}"))?;
+    let status = run_bounded(
+        Command::new("strace")
+            .args(["-f", "-y", "-o"])
+            .arg(&trace)
+            .args(["-e", "trace=fsync,fdatasync,rename,renameat,renameat2,unlink,unlinkat"])
+            .arg(std::env::current_exe()?)
+            .args(["--exact", "custody::vault::linux::writer::tests::strace_child", "--nocapture"])
+            .env("RF_VAULT_STRACE_ROOT", &root)
+            .stdout(std::process::Stdio::null()),
+        Duration::from_secs(30),
+    )
+    .map_err(|e| format!("strace is required for this test and failed: {e}"))?;
     assert!(status.success(), "traced child failed: {status}");
     let text = std::fs::read_to_string(&trace)?;
-    let calls: Vec<String> = text
-        .lines()
-        .filter_map(|line| {
-            let call = line.split_once(' ').map_or(line, |(_, rest)| rest).trim_start();
-            let name = call.split('(').next()?;
-            let interesting = matches!(
-                name,
-                "fsync" | "fdatasync" | "rename" | "renameat" | "renameat2" | "unlink" | "unlinkat"
-            );
-            let ours =
-                !name.contains("at") || call.contains(".pending-") || call.contains("unlock:alice");
-            (interesting && ours).then(|| name.to_string())
-        })
-        .collect();
-    let rename = |c: &String| c.starts_with("rename");
-    // Store::open syncs its own directories first; the publication starts at the file fsync
-    // immediately before the rename.
-    let at = calls.iter().position(rename).ok_or("no rename in strace output")?;
-    let calls = calls[at.saturating_sub(1)..].to_vec();
-    let sync = |c: &String| c == "fsync" || c == "fdatasync";
-    // insert: file fsync, rename, parent fsync; delete: unlink, parent fsync.
-    assert_eq!(calls.len(), 5, "unexpected syscall sequence: {calls:?}\n{text}");
-    assert!(sync(&calls[0]), "file fsync first: {calls:?}");
-    assert!(rename(&calls[1]), "then rename: {calls:?}");
-    assert!(sync(&calls[2]), "then parent fsync: {calls:?}");
-    assert!(calls[3].starts_with("unlink"), "then unlink: {calls:?}");
-    assert!(sync(&calls[4]), "then parent fsync: {calls:?}");
+    check_publication_trace(&text).map_err(|e| format!("{e}\n{text}"))?;
     Ok(())
 }
 fn invalid_store_configs(root: &Path) {
@@ -501,15 +660,14 @@ fn crash_cuts() -> TestResult {
 fn crash_at(root: &Path, operation: &str, stage: &str) -> TestResult {
     let listener = UnixListener::bind(root.join("barrier"))?;
     listener.set_nonblocking(true)?;
-    let mut child = Reaper(
+    let mut child = Reaper(spawn_fixture(
         Command::new(std::env::current_exe()?)
             .args(["--exact", "custody::vault::linux::writer::tests::crash_child", "--nocapture"])
             .env("RF_VAULT_CRASH_ROOT", root)
             .env("RF_VAULT_CRASH_OPERATION", operation)
             .env("RF_VAULT_CRASH_STAGE", stage)
-            .stdout(std::process::Stdio::null())
-            .spawn()?,
-    );
+            .stdout(std::process::Stdio::null()),
+    )?);
     let deadline = Instant::now() + GUARD;
     let mut stream = loop {
         match listener.accept() {
