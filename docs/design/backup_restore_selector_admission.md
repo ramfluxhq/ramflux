@@ -189,3 +189,10 @@ Target-side fence retention is pinned by `probe_r5r_target_fence_retained`, whic
 requires erasure, the original fence, and its selector lookup after merge.
 `probe_r5r_surviving_second_owner_keeps` compares restore with live deletion of
 one of two owners and requires the live surviving-owner control to remain kept.
+
+Target-only DM authority is pinned independently by
+`target_only_dm_tombstone_vetoes_incoming_candidate` and
+`target_only_deleted_dm_projection_vetoes_incoming_candidate`. Each requires an
+archive with a live candidate and no deletion authority. A numeric-only admission
+trace checks the production classification boundary before later deletion cleanup
+can hide an incorrect grant; no private identifier is copied into TEMP.
