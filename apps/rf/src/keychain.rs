@@ -77,8 +77,20 @@ pub(crate) struct OsKeychain;
 
 impl OsKeychain {
     fn entry(account_id: &str) -> Result<keyring::Entry, RfError> {
-        keyring::Entry::new(RAMFLUX_KEYCHAIN_SERVICE, account_id)
-            .map_err(|error| keyring_error(&error))
+        // Preserve main's backendless legacy Linux selection when dependency
+        // features enable Secret Service. Scoped vault activation replaces it explicitly.
+        #[cfg(target_os = "linux")]
+        {
+            let credential = keyring::mock::default_credential_builder()
+                .build(None, RAMFLUX_KEYCHAIN_SERVICE, account_id)
+                .map_err(|error| keyring_error(&error))?;
+            Ok(keyring::Entry::new_with_credential(credential))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            keyring::Entry::new(RAMFLUX_KEYCHAIN_SERVICE, account_id)
+                .map_err(|error| keyring_error(&error))
+        }
     }
 }
 
@@ -177,6 +189,32 @@ fn keyring_error(error: &keyring::Error) -> RfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_legacy_keychain_selection_stays_unchanged_with_secret_service() -> Result<(), RfError>
+    {
+        // The new capability is compiled in, independent of legacy selection.
+        let enabled = keyring::secret_service::default_credential_builder()
+            .build(None, RAMFLUX_KEYCHAIN_SERVICE, "legacy-dormancy-fixture")
+            .map_err(|error| keyring_error(&error))?;
+        assert!(enabled.as_any().is::<keyring::secret_service::SsCredential>());
+        let entry = OsKeychain::entry("legacy-dormancy-fixture")?;
+        assert!(entry.get_credential().is::<keyring::mock::MockCredential>());
+        assert!(matches!(entry.get_secret(), Err(keyring::Error::NoEntry)));
+        let store = OsKeychain;
+        assert!(matches!(store.load("legacy-dormancy-fixture"), Ok(None)));
+        assert_eq!(
+            store.status("legacy-dormancy-fixture"),
+            KeychainStatus { available: true, present: false, has_device_seed: false, error: None }
+        );
+        // Preserve the legacy per-entry lifetime, including its non-persistence.
+        store
+            .store("legacy-dormancy-fixture", &KeychainSecret::new("fixture-only".into(), None))?;
+        assert!(matches!(store.load("legacy-dormancy-fixture"), Ok(None)));
+        store.remove("legacy-dormancy-fixture")?;
+        Ok(())
+    }
 
     #[test]
     fn in_memory_key_store_round_trips_secret_bundle() -> Result<(), RfError> {
