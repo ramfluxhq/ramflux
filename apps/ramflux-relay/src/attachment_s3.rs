@@ -315,11 +315,12 @@ impl<C: AuthenticatedS3Client> S3AttachmentBackend<C> {
         &self,
         registry: &ramflux_node_core::attachment::ScopedGrantRegistry,
         request: &crate::attachment_publication::ScopedAttachmentRange<'_>,
+        proof: &ramflux_node_core::attachment::AttachmentReplayProof,
         output: &mut dyn std::io::Write,
         clock: &dyn Fn() -> u64,
     ) -> Result<(), BackendError> {
         crate::attachment_publication::read_after_operation_admission(
-            registry, self, request, output, clock,
+            registry, self, request, proof, output, clock,
         )
     }
 }
