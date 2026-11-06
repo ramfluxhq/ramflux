@@ -110,8 +110,11 @@ impl SegmentStore<'_> {
         self.db.check_object_identity(&wire, &hash)?;
         if let Some(reference) = reference {
             self.check_reference(reference, &wire, &hash)?;
+        } else {
+            self.check_provisional(&wire, &hash)?;
         }
-        self.record_resource(transfer_id, generation, &wire, &hash, reference)?;
+        let fresh_resource =
+            self.record_resource(transfer_id, generation, &wire, &hash, reference)?;
         let previous = self.db.connection.query_row("SELECT object_id,manifest_hash,direction,segment_generation,segment_manifest FROM object_transfer_state WHERE transfer_id=?1",params![transfer_id],|r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<i64>>(3)?,r.get::<_,Option<Vec<u8>>>(4)?))).optional()?;
         if let Some((old_wire, old_hash, old_direction, old_generation, old_manifest)) = previous {
             if old_wire != wire
@@ -122,7 +125,7 @@ impl SegmentStore<'_> {
             {
                 return Err(StorageError::ObjectIdentityConflict);
             }
-            if old_generation == Some(generation) {
+            if old_generation == Some(generation) && !fresh_resource {
                 tx.commit()?;
                 return Ok(());
             }

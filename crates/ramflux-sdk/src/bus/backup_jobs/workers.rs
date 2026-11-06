@@ -37,7 +37,9 @@ fn sdk_error(error: &crate::SdkError) -> BackupFailure {
 pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFailure {
     use ramflux_storage::StorageError as E;
     match error {
-        E::AccountWriterBusy(_) => BackupFailure::account_busy(),
+        E::SegmentResourceCapacity { .. } | E::AccountWriterBusy(_) => {
+            BackupFailure::account_busy()
+        }
         E::ObjectErased => failure(BackupFailureCode::ObjectErased),
         E::ObjectIdentityConflict => failure(BackupFailureCode::ObjectIdentityConflict),
         E::ObjectOwnershipUnverified { .. } => {

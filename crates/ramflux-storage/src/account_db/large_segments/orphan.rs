@@ -40,6 +40,7 @@ impl SegmentStore<'_> {
                 let tx = self.db.connection.immediate_transaction()?;
                 let exists:bool=self.db.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_segment_resource WHERE directory=?1 AND generation=?2)",params![dir,generation],|r|r.get(0))?;
                 if !exists {
+                    super::retirement::check_capacity(&self.db.connection)?;
                     self.db.connection.execute("INSERT INTO object_segment_resource VALUES(?1,?2,NULL,'','','',NULL,NULL,NULL,1)",params![dir,generation])?;
                     self.db.connection.execute("INSERT INTO object_segment_floor VALUES(?1,?2) ON CONFLICT(directory) DO UPDATE SET generation=max(generation,excluded.generation)",params![dir,generation])?;
                 }
