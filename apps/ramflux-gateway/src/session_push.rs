@@ -13,6 +13,7 @@ use std::sync::{
 use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Default)]
 pub(crate) struct Readiness {
     started: AtomicBool,
@@ -20,9 +21,14 @@ pub(crate) struct Readiness {
 }
 impl Readiness {
     pub(crate) fn start(self: &Arc<Self>, router: &RouterMeshClient) {
-        self.start_with_interval(router, DISCOVERY_INTERVAL);
+        self.start_with_interval(router, DISCOVERY_INTERVAL, DISCOVERY_PROBE_TIMEOUT);
     }
-    fn start_with_interval(self: &Arc<Self>, router: &RouterMeshClient, period: Duration) {
+    fn start_with_interval(
+        self: &Arc<Self>,
+        router: &RouterMeshClient,
+        period: Duration,
+        probe_timeout: Duration,
+    ) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -37,7 +43,7 @@ impl Readiness {
                     return;
                 }
                 let result = tokio::time::timeout(
-                    Duration::from_secs(2),
+                    probe_timeout,
                     crate::router_get_json_async::<Value>(
                         &router,
                         "/mvp1/session-push-capabilities",

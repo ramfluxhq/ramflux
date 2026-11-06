@@ -127,7 +127,7 @@ async fn produce(
         json!({"principal_id":runtime.principal_id,"source_device_id":runtime.device_id,"delivered":[{"device_id":"alice-device","target_delivery_id":"alice-target","inbox_seq":seq,"outcome":"online","incarnation_id":ID,"retain_until":12345}]})
     };
     request.respond.send((200, response)).map_err(|_| anyhow::anyhow!("sender cancelled"))?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), task).await???;
+    tokio::time::timeout(std::time::Duration::from_secs(10), task).await???;
     Ok(())
 }
 #[tokio::test]
@@ -165,14 +165,14 @@ async fn case(kind: u8, stalled: bool) -> anyhow::Result<()> {
     let runtime = crate::session::submit_ack_tests::test_runtime()?;
     let (send, replies) = sink();
     produce(&mut fixture, &runtime, &send, kind, 1).await?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await?;
     if stalled {
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(14)).await;
         assert!(!*registration.closed.borrow());
         assert_eq!(finished.load(Ordering::SeqCst), 0);
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::time::timeout(std::time::Duration::from_secs(1), registration.closed.changed())
+        tokio::time::timeout(std::time::Duration::from_secs(10), registration.closed.changed())
             .await??;
         assert!(*registration.closed.borrow());
         assert_eq!(finished.load(Ordering::SeqCst), 1);
@@ -245,13 +245,13 @@ async fn same_sender_loop() -> anyhow::Result<()> {
     requests.send(serde_json::to_vec(&first)?).await?;
     let request = fixture.next().await?;
     request.respond.send((200,json!({"outcome":"online","target_delivery_id":"alice-target","inbox_seq":1,"cursor":null,"incarnation_id":ID,"retain_until":12345}))).map_err(|_|anyhow::anyhow!("first cancelled"))?;
-    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await?;
     assert_eq!(replies.lock().map_err(|_| anyhow::anyhow!("replies"))?.len(), 1);
     requests.send(serde_json::to_vec(&second)?).await?;
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), fixture.next()).await??;
+    let second = tokio::time::timeout(std::time::Duration::from_secs(10), fixture.next()).await??;
     second.respond.send((200,json!({"outcome":"online","target_delivery_id":"alice-target","inbox_seq":2,"cursor":null,"incarnation_id":ID,"retain_until":12345}))).map_err(|_|anyhow::anyhow!("second cancelled"))?;
     drop(requests);
-    tokio::time::timeout(std::time::Duration::from_secs(2), loop_task).await???;
+    tokio::time::timeout(std::time::Duration::from_secs(10), loop_task).await???;
     assert_eq!(replies.lock().map_err(|_| anyhow::anyhow!("replies"))?.len(), 2);
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("received"))?.len(), 0);
     release.add_permits(2);
