@@ -328,3 +328,105 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
     );
     Ok(())
 }
+
+const RULE_ACCOUNT: &str = "account_a";
+
+fn rule_binding<'a>(realm: u8, kind: u8, account: &'a str, reference: &'a str) -> Binding<'a> {
+    Binding { realm, kind, vault_id: [1; 16], generation: 1, key_id: [2; 16], account, reference }
+}
+
+fn rule_len(kind: u8) -> usize {
+    if kind == 2 { 64 } else { 32 }
+}
+
+fn rule_seal(
+    realm: u8,
+    kind: u8,
+    account: &str,
+    reference: &str,
+    len: usize,
+) -> Result<(Vec<u8>, Secret<32>), Box<dyn std::error::Error>> {
+    let mut key = Secret::<32>::new("p02-kek");
+    key.bytes_mut().fill(9);
+    let input = Plaintext::new(&vec![7; len])?;
+    let binding = rule_binding(realm, kind, account, reference);
+    let record = seal(binding, &key, &input)?;
+    assert_eq!(open(binding, &key, &record)?.bytes().len(), len);
+    Ok((record, key))
+}
+
+#[test]
+fn linux_vault_reference_rules_are_isolated_per_kind() -> TestResult {
+    // Canonical 43-char base64url suffix of 32 bytes; the 0x5a tail char is 'o' (index 40).
+    let canonical = ramflux_protocol::encode_base64url([0x5a_u8; 32]);
+    assert_eq!(canonical.len(), 43);
+    // Same 43 chars with unused tail bits set (index 41 = 'p'): 43 chars, noncanonical.
+    let mut tail = canonical.clone();
+    tail.pop();
+    tail.push('p');
+    // Inclusive suffix bounds: all-zero and all-0xff bytes, both canonical 43-char strings.
+    let zero = ramflux_protocol::encode_base64url([0_u8; 32]);
+    let full = ramflux_protocol::encode_base64url([0xff_u8; 32]);
+    assert_eq!((zero.len(), full.len(), tail.len()), (43, 43, 43));
+
+    // Primary (realm 1, no prefix), branch (realm 2), agent-provisioning (realm 3).
+    for (realm, kind, prefix) in
+        [(1_u8, 1_u8, ""), (2, 2, "branch:"), (3, 3, "agent-provisioning:")]
+    {
+        let len = rule_len(kind);
+        let (record, key) =
+            rule_seal(realm, kind, RULE_ACCOUNT, &format!("{prefix}{canonical}"), len)?;
+        let mut cases: Vec<(&str, String)> = vec![
+            // Suffix length rule: 43 chars is exactly 32 decoded bytes.
+            ("suffix short 42", format!("{prefix}{}", &canonical[..42])),
+            ("suffix long 44", format!("{prefix}{canonical}A")),
+            // Canonical rule: decodable 43 chars whose unused tail bits are nonzero.
+            ("noncanonical tail", format!("{prefix}{tail}")),
+            // Alphabet rule: padding and standard-base64 characters are not base64url.
+            ("alphabet padding", format!("{prefix}{}=", &canonical[..42])),
+            ("alphabet plus", format!("{prefix}+{}", &canonical[1..])),
+        ];
+        if kind != 1 {
+            // Prefix rule: branch and agent-provisioning require their exact prefix.
+            cases.push(("prefix missing", canonical.clone()));
+            let other = if kind == 2 { "agent-provisioning:" } else { "branch:" };
+            cases.push(("prefix wrong", format!("{other}{canonical}")));
+        }
+        for (label, reference) in cases {
+            assert_eq!(
+                open(rule_binding(realm, kind, RULE_ACCOUNT, &reference), &key, &record).err(),
+                Some(Error::Reference),
+                "kind {kind}: {label}"
+            );
+        }
+        // Positive controls at the inclusive suffix bounds, with the same kind-specific length.
+        for bound in [&zero, &full] {
+            rule_seal(realm, kind, RULE_ACCOUNT, &format!("{prefix}{bound}"), len)?;
+        }
+    }
+
+    // Unlock (realm 3, kind 4): the reference must be exactly `unlock:<account>`.
+    let (record, key) = rule_seal(3, 4, RULE_ACCOUNT, "unlock:account_a", 32)?;
+    for (label, reference) in [
+        ("prefix missing", RULE_ACCOUNT.to_owned()),
+        ("prefix wrong", "lock:account_a".to_owned()),
+        ("subject other account", "unlock:account_b".to_owned()),
+        ("subject trailing space", "unlock:account_a ".to_owned()),
+    ] {
+        assert_eq!(
+            open(rule_binding(3, 4, RULE_ACCOUNT, &reference), &key, &record).err(),
+            Some(Error::Reference),
+            "kind 4: {label}"
+        );
+    }
+    // Positive controls at the inclusive bounds: 128-char account, plaintext 1 and 8192.
+    let max_account = "a".repeat(128);
+    let max_reference = format!("unlock:{max_account}");
+    rule_seal(3, 4, &max_account, &max_reference, 1)?;
+    rule_seal(3, 4, &max_account, &max_reference, MAX_PLAINTEXT)?;
+    // Agent-provisioning kind 3 at plaintext bounds 1 and 8192.
+    let kind3 = format!("agent-provisioning:{full}");
+    rule_seal(3, 3, RULE_ACCOUNT, &kind3, 1)?;
+    rule_seal(3, 3, RULE_ACCOUNT, &kind3, MAX_PLAINTEXT)?;
+    Ok(())
+}
