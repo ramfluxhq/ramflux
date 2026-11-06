@@ -251,10 +251,9 @@ where
     T: serde::Serialize,
     R: serde::de::DeserializeOwned,
 {
-    if let Some(async_mesh) = &router.async_mesh {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        // Only the router's envelope hot path accepts the postcard wire format.
-        let quic = async {
+    let quic = router.async_mesh.as_ref().map(|async_mesh| {
+        move |_deadline: std::time::Instant| async move {
+            // Only the router's envelope hot path accepts the postcard wire format.
             if path == "/mvp0/envelope" {
                 ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async(
                     &async_mesh.endpoint,
@@ -276,8 +275,37 @@ where
                 )
                 .await
             }
-        };
-        match tokio::time::timeout(remaining, quic).await {
+        }
+    });
+    // Without a configured async router endpoint, or after a QUIC failure, fall back to the
+    // blocking mesh client. That client blocks on a std mpsc recv, so it must not run directly on
+    // the async gateway QUIC worker (it would stall the runtime and the gateway never becomes
+    // ready). It runs on a blocking thread that carries the same absolute deadline.
+    let fallback = |deadline: std::time::Instant| async move {
+        let body = serde_json::to_value(value)?;
+        let response = router_post_json_blocking_until(router, path, &body, deadline).await?;
+        Ok(serde_json::from_value(response)?)
+    };
+    post_quic_then_fallback(deadline, quic, fallback).await
+}
+
+/// Runs the QUIC stage (when configured) and then the blocking fallback. Both stages are handed
+/// the caller's original absolute `deadline`; the QUIC stage is additionally cut off at it, and a
+/// QUIC transport failure leaves the fallback only what remains of that same bound.
+async fn post_quic_then_fallback<R, Q, QF, B, BF>(
+    deadline: std::time::Instant,
+    quic: Option<Q>,
+    fallback: B,
+) -> Result<R, ramflux_transport::TransportError>
+where
+    Q: FnOnce(std::time::Instant) -> QF,
+    QF: std::future::Future<Output = Result<R, ramflux_transport::TransportError>>,
+    B: FnOnce(std::time::Instant) -> BF,
+    BF: std::future::Future<Output = Result<R, ramflux_transport::TransportError>>,
+{
+    if let Some(quic) = quic {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, quic(deadline)).await {
             Err(_elapsed) => return Err(deadline_exceeded()),
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(error @ ramflux_transport::TransportError::Quic(_))) => {
@@ -286,13 +314,7 @@ where
             Ok(Err(error)) => return Err(error),
         }
     }
-    // Without a configured async router endpoint, or after a QUIC failure, fall back to the
-    // blocking mesh client. That client blocks on a std mpsc recv, so it must not run directly on
-    // the async gateway QUIC worker (it would stall the runtime and the gateway never becomes
-    // ready). It runs on a blocking thread that carries the same absolute deadline.
-    let body = serde_json::to_value(value)?;
-    let response = router_post_json_blocking_until(router, path, &body, deadline).await?;
-    Ok(serde_json::from_value(response)?)
+    fallback(deadline).await
 }
 
 /// Raises a flag when the awaiting future is dropped, so a worker that has not started yet
