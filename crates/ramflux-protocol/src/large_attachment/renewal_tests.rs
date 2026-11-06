@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
+use super::super::{ScopedAttachmentGrant, VerifiedScopedGrant};
 use super::*;
+use ed25519_dalek::Signer;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn bytes(s: &str) -> Result<Vec<u8>> {
     s.as_bytes()
@@ -19,6 +21,14 @@ fn fixture() -> Result<RenewalRequest> {
         operation: bytes(r["renewal_operation_hex"].as_str().ok_or("operation")?)?,
         body: bytes(r["renewal_body_hex"].as_str().ok_or("body")?)?,
     })
+}
+fn signed_grant(
+    mut grant: ScopedAttachmentGrant,
+    owner: &ed25519_dalek::SigningKey,
+) -> Result<VerifiedScopedGrant> {
+    grant.owner.signing_public_key = owner.verifying_key().to_bytes();
+    let signature = owner.sign(&grant.signing_bytes()?).to_bytes();
+    Ok(ScopedAttachmentGrant::decode_signed(&grant.signed_bytes(&signature)?)?)
 }
 #[test]
 fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
@@ -106,6 +116,84 @@ fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
         RenewalRequest::new(&renew, &renew.audience, [7; 32]),
         Err(FormatError("renewal target kind"))
     );
+    Ok(())
+}
+#[test]
+fn renewal_validation_refuses_each_independent_grant_and_policy_mismatch() -> Result {
+    let j: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/large_attachment_renewal_v1.json"
+    ))?;
+    let gbytes = bytes(j["case"]["grant_unsigned_hex"].as_str().ok_or("grant")?)?;
+    let mut container = b"RFC1".to_vec();
+    container.extend(u32::try_from(gbytes.len())?.to_be_bytes());
+    container.extend(gbytes);
+    container.extend(64_u32.to_be_bytes());
+    container.extend(bytes(j["case"]["grant_signature_hex"].as_str().ok_or("signature")?)?);
+    let original = ScopedAttachmentGrant::decode_signed(&container)?;
+    let owner = ed25519_dalek::SigningKey::from_bytes(&[81; 32]);
+    let baseline = signed_grant(original.grant().clone(), &owner)?;
+    let request = fixture()?;
+    let (renew, target) = request.target()?;
+    let requester = baseline.grant().grantee.clone();
+    let now = 1_700_000_001;
+
+    request.validate(&baseline, &requester, &renew.audience, &target.audience, now)?;
+
+    for field in 0..4 {
+        let mut changed = baseline.grant().clone();
+        match field {
+            0 => changed.object_id[0] ^= 1,
+            1 => changed.manifest_hash[0] ^= 1,
+            2 => changed.grant_id[0] ^= 1,
+            _ => changed.epoch += 1,
+        }
+        let changed = signed_grant(changed, &owner)?;
+        assert_eq!(
+            request.validate(&changed, &requester, &renew.audience, &target.audience, now),
+            Err(FormatError("renewal grant binding")),
+            "grant binding field {field}"
+        );
+    }
+
+    let mut changed_requester = requester.clone();
+    changed_requester.device_epoch += 1;
+    assert_eq!(
+        request.validate(&baseline, &changed_requester, &renew.audience, &target.audience, now),
+        Err(FormatError("renewal requester"))
+    );
+    assert_eq!(
+        request.validate(&baseline, &requester, "other-source", &target.audience, now),
+        Err(FormatError("renewal audience"))
+    );
+    assert_eq!(
+        request.validate(&baseline, &requester, &renew.audience, "other-relay", now),
+        Err(FormatError("renewal audience"))
+    );
+
+    for (rights, expected) in [(1, "renewal rights"), (8, "renewal rights")] {
+        let mut changed = baseline.grant().clone();
+        changed.rights = rights;
+        let changed = signed_grant(changed, &owner)?;
+        assert_eq!(
+            request.validate(&changed, &requester, &renew.audience, &target.audience, now),
+            Err(FormatError(expected))
+        );
+    }
+    for (field, issued_at, expires_at) in
+        [(0, now + 1, baseline.grant().expires_at), (1, baseline.grant().issued_at, now)]
+    {
+        let mut changed = baseline.grant().clone();
+        if field == 0 {
+            changed.issued_at = issued_at;
+        } else {
+            changed.expires_at = expires_at;
+        }
+        let changed = signed_grant(changed, &owner)?;
+        assert_eq!(
+            request.validate(&changed, &requester, &renew.audience, &target.audience, now),
+            Err(FormatError("renewal grant time"))
+        );
+    }
     Ok(())
 }
 #[test]
