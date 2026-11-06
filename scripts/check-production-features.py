@@ -33,6 +33,7 @@ def check_tree(graph):
         forbidden = {
             "ramflux-sdk": ("itest-memory-vault", "itest-legacy-accounts"),
             "ramflux-node-core": ("durability-test-hooks",),
+            "ramflux-storage": ("durability-test-hooks",),
         }.get(name, ())
         for feature in forbidden:
             if feature in features:

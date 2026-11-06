@@ -63,6 +63,7 @@ pub mod object;
 mod object_payload;
 pub mod object_retention;
 pub mod read_model;
+pub(crate) mod receive;
 pub mod recovery;
 mod replay_markers;
 pub mod runtime;

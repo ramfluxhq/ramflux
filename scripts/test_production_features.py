@@ -43,6 +43,10 @@ class ProductionFeatures(unittest.TestCase):
     def test_ordinary_fixture(self):
         checker.check_tree(self.graph_fixture("ordinary"))
 
+    def test_storage_hook_guard(self):
+        with self.assertRaisesRegex(ValueError, "production graph enables forbidden ramflux-storage durability-test-hooks"):
+            checker.check_tree("ramflux-storage v0.1.0 default,durability-test-hooks")
+
     def test_sdk_guard_remains(self):
         with self.assertRaisesRegex(ValueError, "itest-memory-vault"):
             checker.check_tree("ramflux-sdk v0.1.0 default,itest-memory-vault")

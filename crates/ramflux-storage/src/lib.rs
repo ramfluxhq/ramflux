@@ -24,6 +24,11 @@ mod database_work;
 #[cfg(feature = "itest-work-budget")]
 pub use database_work::{SqlWorkProbe, SqlWorkScope, SqlWorkSnapshot};
 mod database_checkpoint;
+#[cfg(any(test, feature = "durability-test-hooks"))]
+pub mod durability_test_hooks;
+#[cfg(all(feature = "durability-test-hooks", ramflux_production))]
+compile_error!("durability-test-hooks must not be enabled in a production build");
+pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction};
 mod encryption;
 mod error;
 mod event_store;

@@ -31,6 +31,7 @@ tracing = "0.1"
 itest-work-budget = []
 default = ["sqlcipher"]
 sqlcipher = ["rusqlite/bundled-sqlcipher"]
+durability-test-hooks = []
 test-instrumentation = ["rusqlite/hooks"]
 insecure-test-sqlite = ["rusqlite/bundled"]
 
