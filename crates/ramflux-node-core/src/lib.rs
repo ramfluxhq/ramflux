@@ -12,6 +12,7 @@ mod durability_io;
 #[cfg(any(test, feature = "durability-test-hooks"))]
 pub mod durability_test_hooks;
 mod fatal_durability;
+pub mod username_directory;
 pub use authority_refusal::*;
 pub use ramflux_core::environment;
 mod error;
