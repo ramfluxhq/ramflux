@@ -45,8 +45,9 @@ impl ArrayRangeSet {
         }Ok(())
     }
     pub(crate) fn reserve_insert(&mut self,x:&Range<u64>)->Result<(),crate::connection::metadata_credit::ResourceExhausted>{
-        if self.2.is_none(){return Ok(());}
-        let needs_slot=!x.is_empty()&&!self.0.iter().any(|r|r.start<=x.end&&x.start<=r.end);
+        if self.2.is_none() || x.is_empty(){return Ok(());}
+        let index=self.first_insert_index(x.start);
+        let needs_slot=self.0.get(index).is_none_or(|range|range.start>x.end);
         if needs_slot{self.reserve_extra()?;}Ok(())
     }
     fn reserve_extra(&mut self)->Result<(),crate::connection::metadata_credit::ResourceExhausted>{
@@ -62,6 +63,14 @@ impl ArrayRangeSet {
     /// Caller must reserve this insertion before exposing any related effects.
     pub(crate) fn insert_reserved(&mut self, range: Range<u64>) -> bool { self.insert_inner(range) }
     pub(crate) fn range_at(&self, index: usize) -> Option<Range<u64>> { self.0.get(index).cloned() }
+    fn first_insert_index(&self, start: u64) -> usize {
+        // Keep an adjacent predecessor: insertion must merge touching ranges.
+        self.0.partition_point(|range|range.end<start)
+    }
+    pub(crate) fn first_intersection_index(&self, start: u64) -> usize {
+        // An adjacent predecessor cannot contribute a nonempty intersection.
+        self.0.partition_point(|range|range.end<=start)
+    }
 
     pub fn new() -> Self {
         Default::default()
@@ -115,7 +124,7 @@ impl ArrayRangeSet {
             return false;
         }
 
-        let mut idx = 0;
+        let mut idx = self.first_insert_index(x.start);
         while idx != self.0.len() {
             let range = &mut self.0[idx];
 

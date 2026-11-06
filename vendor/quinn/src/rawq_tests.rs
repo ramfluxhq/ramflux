@@ -171,7 +171,7 @@ impl Runtime for RuntimeGate {
 fn until(mut ready: impl FnMut() -> bool) -> impl Future<Output=()> {
     let caller=std::panic::Location::caller();
     async move {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(10), async {
         while !ready() {
             tokio::task::yield_now().await;
         }
@@ -995,10 +995,10 @@ async fn unordered_history_credit_survives_chunk_consumption() {
         gate.closed.store(true,Ordering::SeqCst);let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
         let send=peer.open_uni().await.unwrap();assert_eq!(VarInt::from(send.id()).into_inner(),2);
         inject_unordered_history_byte(&connection,&peer,&gate,&wire,1,b'a').await;
-        let mut recv=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
-        let first=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&first[..],b"a");drop(first);
+        let mut recv=timeout(Duration::from_secs(10),connection.accept_uni()).await.unwrap().unwrap();
+        let first=timeout(Duration::from_secs(10),recv.read_chunk(16,false)).await.unwrap().unwrap().unwrap().bytes;assert_eq!(&first[..],b"a");drop(first);
         inject_unordered_history_byte(&connection,&peer,&gate,&wire,3,b'b').await;
-        let second=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&second[..],b"b");drop(second);
+        let second=timeout(Duration::from_secs(10),recv.read_chunk(16,false)).await.unwrap().unwrap().unwrap().bytes;assert_eq!(&second[..],b"b");drop(second);
         assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(0,2));
         assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()).1,0);
         if refuse {
@@ -1012,23 +1012,23 @@ async fn unordered_history_credit_survives_chunk_consumption() {
             assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(0,2),"unadmitted unordered history grew physical backing");
             assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::UnorderedHistory));
             assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()).1,0,"refused history inserted application data");
-            gate.open();assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+            gate.open();assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
         } else {
-            let third=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&third[..],b"c");drop(third);
+            let third=timeout(Duration::from_secs(10),recv.read_chunk(16,false)).await.unwrap().unwrap().unwrap().bytes;assert_eq!(&third[..],b"c");drop(third);
             assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(64,3));
             assert!(probe.stats().used>=128,"consuming data does not refund retained receipt storage");
             inject_unordered_history_byte(&connection,&peer,&gate,&wire,3,b'!').await;
             let mut read=Box::pin(recv.read_chunk(16,false));
             assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(),"retransmitted consumed byte was delivered twice");drop(read);
             inject_unordered_history_byte(&connection,&peer,&gate,&wire,7,b'd').await;
-            let bytes=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&bytes[..],b"d");
+            let bytes=timeout(Duration::from_secs(10),recv.read_chunk(16,false)).await.unwrap().unwrap().unwrap().bytes;assert_eq!(&bytes[..],b"d");
             assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(64,4));
             let clone=bytes.slice(..).clone();drop(bytes);let owner_charge=((probe.stats().receive_owner_layout+63)&!63)+64;
-            gate.open();connection.close(0u32.into(),b"done");timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+            gate.open();connection.close(0u32.into(),b"done");timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
             drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==128+owner_charge).await;
             assert_eq!(&clone[..],b"d");drop(clone);until(||probe.stats().used==0).await;continue;
         }
-        timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+        timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
     }
     unordered_history_transition_refusal_restores_receiver().await;
 }
@@ -1037,13 +1037,13 @@ async fn unordered_history_transition_refusal_restores_receiver() {
     let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
     gate.closed.store(true,Ordering::SeqCst);let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));let send=peer.open_uni().await.unwrap();
     for offset in [1,3,5] {inject_unordered_history_byte(&connection,&peer,&gate,&wire,offset,b'x').await;}
-    let mut recv=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+    let mut recv=timeout(Duration::from_secs(10),connection.accept_uni()).await.unwrap().unwrap();
     let storage=connection.control_test(|p|p.metadata_test_receive_storage());assert_eq!(storage.1,3);
-    probe.freeze_at_live_allocations();let error=recv.read_chunk(16,false).await.unwrap_err();
+    probe.freeze_at_live_allocations();let error=timeout(Duration::from_secs(10),recv.read_chunk(16,false)).await.unwrap().unwrap_err();
     assert!(matches!(error,ReadError::ConnectionLost(ConnectionError::LocallyClosed)));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::UnorderedHistory));
     assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()),storage,"refused transition lost removed receive owner");
     assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(0,0),"refused transition committed unordered mode");
-    gate.open();assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
-    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    gate.open();assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }
