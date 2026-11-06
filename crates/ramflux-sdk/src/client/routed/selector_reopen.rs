@@ -65,10 +65,11 @@ impl Case {
             let object = prepared.object().clone();
             let key = *prepared.object_key();
             let db = b.client.account_db()?;
+            // Received attachment payloads use imported ownership, not history-container lifetime.
             db.retain_object(
                 id,
                 &object.manifest_hash,
-                ramflux_storage::ObjectRetention::OwnDeviceTransport,
+                ramflux_storage::ObjectRetention::Imported,
             )?;
             db.upsert_object(&ramflux_storage::ObjectWrite {
                 object_id: id,
@@ -127,6 +128,37 @@ impl Case {
             });
         }
         Ok(Self { a, b, refs })
+    }
+    fn prepare_carol(&mut self) -> Result<(), SdkError> {
+        self.a = Fixture::new("carol", 51)?;
+        for (index, r) in self.refs.iter_mut().enumerate() {
+            r.owner_principal_id = "carol".into();
+            let conversation = format!("carol-slot-{index}");
+            let mut send = ramflux_crypto::DmSession::initiator(
+                [8; 32],
+                dm_device_id_hash("carol"),
+                dm_device_id_hash("bob"),
+                [4; 32],
+            )?;
+            let recv = ramflux_crypto::DmSession::recipient(
+                [8; 32],
+                dm_device_id_hash("bob"),
+                dm_device_id_hash("carol"),
+                [4; 32],
+            )?;
+            self.b.client.persist_dm_session(&conversation, "bootstrap", "recv", &recv)?;
+            r.key_slot.conversation_id = conversation.clone();
+            r.key_slot.ciphertext = send.encrypt(
+                &self.b.client.object_content_key(&r.object_id)?,
+                &object_key_slot_associated_data(&r.object_id, &conversation, "bob"),
+            )?;
+        }
+        self.b.client.establish_friend_link(
+            "carol-link",
+            self.a.client.owned_device_identity()?.root_commitment(),
+            self.b.client.owned_device_identity()?.root_commitment(),
+        )?;
+        Ok(())
     }
     fn fence(&self) -> Result<(), SdkError> {
         self.b.client.account_db()?.retain_object(
@@ -248,37 +280,9 @@ async fn e16_fresh_m3_reopens_closed_alias_via_routed_receive() -> TestResult {
     // A different authenticated sender already owns the shared wire identity.
     let reference = c.refs[0].clone();
     let first = c.entry("m1")?;
-    c.receive(&first, false).await?;
+    let m1 = c.receive(&first, false).await?.plaintext.ok_or("m1")?.message_id;
     // Keep m1's wire while the same wire from a second sender uses its deterministic alias.
-    let mut carol = Fixture::new("carol", 51)?;
-    std::mem::swap(&mut c.a, &mut carol);
-    for (index, r) in c.refs.iter_mut().enumerate() {
-        r.owner_principal_id = "carol".into();
-        let conversation = format!("carol-slot-{index}");
-        let mut send = ramflux_crypto::DmSession::initiator(
-            [8; 32],
-            dm_device_id_hash("carol"),
-            dm_device_id_hash("bob"),
-            [4; 32],
-        )?;
-        let recv = ramflux_crypto::DmSession::recipient(
-            [8; 32],
-            dm_device_id_hash("bob"),
-            dm_device_id_hash("carol"),
-            [4; 32],
-        )?;
-        c.b.client.persist_dm_session(&conversation, "bootstrap", "recv", &recv)?;
-        r.key_slot.conversation_id = conversation.clone();
-        r.key_slot.ciphertext = send.encrypt(
-            &c.b.client.object_content_key(&r.object_id)?,
-            &object_key_slot_associated_data(&r.object_id, &conversation, "bob"),
-        )?;
-    }
-    c.b.client.establish_friend_link(
-        "carol-link",
-        c.a.client.owned_device_identity()?.root_commitment(),
-        c.b.client.owned_device_identity()?.root_commitment(),
-    )?;
+    c.prepare_carol()?;
     let mut msg = message("m2", "carol-conversation");
     msg.source_principal_id = "carol".into();
     msg.sender_id = "carol".into();
@@ -305,7 +309,25 @@ async fn e16_fresh_m3_reopens_closed_alias_via_routed_receive() -> TestResult {
             .ok_or("alias")?
             .trim_start_matches("attachment/reference/")
             .to_owned();
+    let sql = connection(&c)?;
+    let retained = || -> rusqlite::Result<(String, i64)> {
+        sql.query_row(
+            "SELECT retention_class,owner_count FROM object_retention_payload WHERE wire_id=?1",
+            [&reference.object_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    };
+    assert_eq!(
+        retained()?,
+        ("imported".to_owned(), 2),
+        "both authenticated owners must precede deletion"
+    );
     c.b.client.account_db()?.delete_direct_message("carol-conversation", &id, "local", "erase")?;
+    assert_eq!(retained()?, ("imported".to_owned(), 1), "m1 must retain the imported payload");
+    assert!(c.b.client.direct_message_by_id(&m1)?.is_some_and(|m| !m.deleted));
+    c.b.client
+        .account_db()?
+        .check_object_identity(&reference.object_id, &reference.manifest_hash)?;
     assert!(matches!(
         c.b.client.account_db()?.check_object_access(&alias),
         Err(ramflux_storage::StorageError::ObjectErased)
@@ -324,6 +346,7 @@ async fn e16_fresh_m3_reopens_closed_alias_via_routed_receive() -> TestResult {
     let fresh = seal_as(&c.a, &c.b, msg, &body, Route::attachments())?;
     c.receive(&fresh, false).await.map_err(|e| format!("m3 receive: {e:?}"))?;
     c.b.client.account_db()?.check_object_access(&alias).map_err(|e| format!("m3 alias: {e:?}"))?;
+    assert_eq!(retained()?, ("imported".to_owned(), 2), "fresh m3 must restore alias ownership");
     assert_ne!(
         c.b.client.account_db()?.actor_state_keys(&format!("attachment/reference/{alias}"))?,
         Vec::<String>::new()
