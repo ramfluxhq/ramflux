@@ -284,6 +284,7 @@ impl PairingWire for RoleContext {
         )?;
         if let Some(v) = &self.hpke_key {
             b32(v, "hpke_key")?;
+            require(v != &self.sas_key, "independent_hpke_key")?;
         }
         require(
             self.display_name.len() <= 128
@@ -326,6 +327,11 @@ impl PairingWire for Transcript {
             "role_slots",
         )?;
         require(self.initiator.common == self.responder.common, "common_binding")?;
+        require(self.initiator.sas_key != self.responder.sas_key, "distinct_sas_keys")?;
+        if self.initiator.common.purpose == "primary_transfer" {
+            require(self.initiator.hpke_key != self.responder.hpke_key, "distinct_hpke_keys")?;
+        }
+
         require(
             self.initiator.device_ref.device_id != self.responder.device_ref.device_id,
             "distinct_devices",

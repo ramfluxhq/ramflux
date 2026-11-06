@@ -851,7 +851,7 @@ certificate and creation-time bounds; a valid codec grants no authority.
 ContextOffer has only common plus schema/version (≤16384 bytes). Commit has
 invitation_id, role, commitment:Hash plus schema/version (≤512 bytes). Reveal
 has invitation_id, role, salt:B32, context:RoleContext plus schema/version
-(≤20992 bytes); outer role/id must match context. Transcript has exactly
+(≤24576 bytes); outer role/id must match context. Transcript has exactly
 initiator:RoleContext and responder:RoleContext plus schema/version
 (≤41472 bytes). Fixed slots have the named role, distinct device refs and
 byte-identical Common objects. Reveals use bounded application chunking.
@@ -865,8 +865,18 @@ commitment cancels. Full-context commitment is SHA256 of
 where initiator=0 and responder=1. TH is SHA256 of
 `frame("ramflux.identity.pairing_transcript.v2", JCS(Transcript))`.
 V1 key-only commitments/transcripts remain control vectors and cannot negotiate
-into v2. Independent synthetic fixtures and source pins live in
-`crates/ramflux-protocol/fixtures/pairing_v2/`; `scripts/pairing_oracle.py --check`
+into v2.
+
+The simultaneous maximum fixture uses role-prefixed device IDs and measures:
+selection entry
+290/384 bytes (94 slack), Common 10513/15872 (5359 slack), RoleContext
+11477/20480 (9003 slack), and Transcript 23034/41472 (18438 slack).
+Field-valid objects cannot fill these larger defensive caps; the decoder also
+rejects raw input beyond each cap before parsing. SAS keys differ between roles;
+transfer HPKE keys differ from each role's SAS key and from the peer HPKE key.
+
+Independent synthetic fixtures and source pins live in
+`crates/ramflux-protocol/fixtures/pairing_v2/`; `scripts/check-pairing-oracle.py --check`
 uses OpenSSL SHA-256 and the official portable BLAKE3 C implementation.
 
 HKDF-SHA256 uses the X25519 shared secret as IKM, transcript hash as salt and

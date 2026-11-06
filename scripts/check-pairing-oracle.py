@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Span Brain
-"""Independent synthetic pairing vectors. --check never rewrites goldens.
+"""Check independent synthetic pairing vectors by default; --write regenerates.
 
 Restricted fixtures contain strings and safe integers only: sorted compact UTF-8
 JSON implements JCS for these values. SHA-256 uses the OpenSSL CLI; old custody
@@ -112,9 +112,9 @@ def generate():
     return output
 
 if __name__ == '__main__':
-    parser=argparse.ArgumentParser(); parser.add_argument('--check',action='store_true'); args=parser.parse_args()
+    parser=argparse.ArgumentParser(); mode=parser.add_mutually_exclusive_group(); mode.add_argument('--check',action='store_true'); mode.add_argument('--write',action='store_true'); args=parser.parse_args()
     result=generate(); path=FIX/'vectors.json'
-    if args.check:
+    if not args.write:
         expected=json.loads(path.read_text()); result['openssl']=expected['openssl']
         assert result == expected, 'independent pairing golden mismatch'
         print('pairing oracle: PASS (OpenSSL SHA-256, official BLAKE3 C, old controls)')

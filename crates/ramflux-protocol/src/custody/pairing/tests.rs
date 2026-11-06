@@ -298,14 +298,20 @@ fn bounds_role_cases(common: &Value, role: &Value, existing: &Value) -> TestResu
             },
         )?;
     }
-    field::<RoleContext>(role, "/hpke_key", role["sas_key"].clone(), "hpke_key")?;
+    field::<RoleContext>(role, "/hpke_key", json!(encode_base64url([14; 32])), "hpke_key")?;
     for bad in ["x".repeat(129), "\u{202e}".into()] {
         field::<RoleContext>(role, "/display_name", json!(bad), "display_name")?;
     }
     let mut transfer_role = role.clone();
     transfer_role["common"] = existing.clone();
-    transfer_role["hpke_key"] = role["sas_key"].clone();
+    transfer_role["hpke_key"] = json!(encode_base64url([14; 32]));
     closed::<RoleContext>(&transfer_role)?;
+    field::<RoleContext>(
+        &transfer_role,
+        "/hpke_key",
+        transfer_role["sas_key"].clone(),
+        "independent_hpke_key",
+    )?;
     field::<RoleContext>(&transfer_role, "/hpke_key", Value::Null, "hpke_key")?;
     field::<RoleContext>(&transfer_role, "/hpke_key", json!("bad"), "hpke_key")?;
     field::<RoleContext>(
@@ -328,6 +334,12 @@ fn transcript_controls(
 ) -> TestResult {
     field::<Transcript>(transcript, "/initiator/role", json!("responder"), "role_slots")?;
     field::<Transcript>(transcript, "/responder/common/issuer_seq", json!(2), "common_binding")?;
+    field::<Transcript>(
+        transcript,
+        "/responder/sas_key",
+        transcript["initiator"]["sas_key"].clone(),
+        "distinct_sas_keys",
+    )?;
     field::<Transcript>(
         transcript,
         "/responder/device_ref",
@@ -441,16 +453,38 @@ fn maximal_objects(original: &Value) -> TestResult {
             .map(|n| json!({"key_id":format!("{n:02}{}","\"".repeat(126)),"purpose":"attachment"}))
             .collect::<Vec<_>>()
     );
-    for name in ["initiator", "responder"] {
+    common["recipient_mode"] = json!("existing");
+    let mut destination = original["responder"]["device_ref"].clone();
+    destination["device_id"] = json!(format!("responder{}", "\"".repeat(119)));
+    destination["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+    common["destination_ref"] = destination;
+    for (index, name) in ["initiator", "responder"].into_iter().enumerate() {
         value[name]["common"] = common.clone();
         value[name]["device_ref"]["device_id"] =
             json!(format!("{name}{}", "\"".repeat(128 - name.len())));
         value[name]["device_ref"]["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
         value[name]["display_name"] = json!("\"".repeat(128));
-        value[name]["hpke_key"] = original[name]["sas_key"].clone();
+        for (offset, key) in
+            ["branch_key", "agreement_key", "sas_key", "hpke_key"].into_iter().enumerate()
+        {
+            value[name][key] =
+                json!(encode_base64url([20 + u8::try_from(index * 4 + offset)?; 32]));
+        }
         closed::<RoleContext>(&value[name])?;
     }
     closed::<Transcript>(&value)?;
+    assert_eq!(bytes(&common["data_selection"][0])?.len(), 290);
+    assert_eq!(bytes(&common)?.len(), 10513);
+    for role in ["initiator", "responder"] {
+        assert_eq!(bytes(&value[role])?.len(), 11477);
+    }
+    assert_eq!(bytes(&value)?.len(), 23034);
+    field::<Transcript>(
+        &value,
+        "/responder/hpke_key",
+        value["initiator"]["hpke_key"].clone(),
+        "distinct_hpke_keys",
+    )?;
     let offer = json!({"schema":"ramflux.pairing.ContextOffer.v2","version":2,"common":common});
     closed::<ContextOffer>(&offer)?;
     let reveal = json!({"schema":"ramflux.pairing.Reveal.v2","version":2,"invitation_id":common["invitation_id"],"role":"responder","salt":common["record_hash"],"context":value["responder"]});

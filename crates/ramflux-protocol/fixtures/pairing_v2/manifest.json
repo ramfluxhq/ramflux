@@ -19,10 +19,10 @@
     "auth_x25519_sha256_aes256gcm_cases": 1
   },
   "profile": "device_pairing_v2",
-  "oracle": "scripts/pairing_oracle.py",
+  "oracle": "scripts/check-pairing-oracle.py",
   "secrets": "synthetic only",
   "custody_control_sha256": "400efa43d0ba3b9262ff3ccc141fc60eec777cb9c0ac7015b3f9422ae233da87",
-  "oracle_sha256": "8178576cc3d39b522a7e76c5d1627b0f793056aafbb2b857aec7481099d18c3d",
+  "oracle_sha256": "7e560a850c5a31a14b5c5273bb330a7e1c07eec6d426c2e8dff7bdc9d771673e",
   "adapter_sha256": "4b09b62aa67bd582363e9eb3a36184eabf2970cc50798357f84ffbae8d6ae7b8",
   "openssl": {
     "version": "3.6.2",
