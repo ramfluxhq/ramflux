@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Installation-wide, resumable, insert-only systemd initialization. Dormant SDK API.
+//! Installation-wide, resumable, insert-only credential initialization. Dormant SDK API.
 use super::{
     LinuxVaultMode,
     cleanup::Secret,
     durability::{DurabilityOps, RealDurabilityOps},
-    systemd,
+    secret_service, systemd,
 };
 use rustix::fs::{self, FlockOperation, Mode, OFlags, RenameFlags};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use tokio::{sync::watch, time::Instant};
 /// Static refusal codes never include paths, provider output or secrets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LinuxVaultInitError {
-    /// Only explicit systemd modes are supported by this initializer.
+    /// An unsupported provider operation was requested.
     #[error("vault_mode")]
     Mode,
     /// Unsafe path, owner, permissions, link count or file type.
@@ -44,7 +44,7 @@ pub enum LinuxVaultInitError {
     /// Filesystem operation failed.
     #[error("vault_io")]
     Io,
-    /// systemd refused the requested operation or mode.
+    /// The selected provider refused the requested operation or mode.
     #[error("vault_provider")]
     Provider,
     /// Key or provider pipe exceeded its exact bounds.
@@ -125,7 +125,7 @@ impl Manifest {
         Ok(Self {
             version: 1,
             root: root.to_owned(),
-            mode: mode_name(mode)?.into(),
+            mode: mode_name(mode).into(),
             class: mode.strength_class().into(),
             vault_id: hex(&ids[..16]),
             key_ids: std::array::from_fn(|i| hex(&ids[16 + i * 16..32 + i * 16])),
@@ -138,7 +138,7 @@ impl Manifest {
         };
         if self.version != 1
             || self.root != root
-            || self.mode != mode_name(mode)?
+            || self.mode != mode_name(mode)
             || self.class != mode.strength_class()
             || self.names != systemd::NAMES.map(str::to_owned)
             || !id_ok(&self.vault_id)
@@ -155,11 +155,11 @@ impl Manifest {
         format!("{}.{}.cred", self.names[i], self.key_ids[i])
     }
 }
-fn mode_name(mode: LinuxVaultMode) -> Result<&'static str, Error> {
+fn mode_name(mode: LinuxVaultMode) -> &'static str {
     match mode {
-        LinuxVaultMode::SystemdHost => Ok("systemd-host"),
-        LinuxVaultMode::SystemdTpm2 => Ok("systemd-tpm2"),
-        LinuxVaultMode::DesktopSecretService => Err(Error::Mode),
+        LinuxVaultMode::SystemdHost => "systemd-host",
+        LinuxVaultMode::SystemdTpm2 => "systemd-tpm2",
+        LinuxVaultMode::DesktopSecretService => "desktop-secret-service",
     }
 }
 fn verify(fd: &OwnedFd, directory: bool) -> Result<(), Error> {
@@ -361,7 +361,6 @@ impl LinuxVaultInstallation {
         Self::run(root, mode, false).await
     }
     async fn run(root: PathBuf, mode: LinuxVaultMode, initialize: bool) -> Result<(), Error> {
-        mode_name(mode)?;
         let slot = Slot::acquire()?;
         let (sender, mut cancel) = watch::channel(false);
         let _cancel = Cancel(sender);
@@ -376,7 +375,7 @@ impl LinuxVaultInstallation {
     }
 }
 
-async fn attempt(
+pub(super) async fn attempt(
     root: &Path,
     mode: LinuxVaultMode,
     initialize: bool,
@@ -401,7 +400,9 @@ async fn attempt_with(
     cut: &impl Fn(&str),
 ) -> Result<(), Error> {
     let Plan { root, mode, initialize, deadline, ops } = *plan;
-    systemd::probe(cancel, deadline).await?;
+    if mode != LinuxVaultMode::DesktopSecretService {
+        systemd::probe(cancel, deadline).await?;
+    }
     let dir = root_fd(root)?;
     let lock = open(
         &dir,
@@ -452,6 +453,17 @@ async fn attempt_with(
         if Instant::now() >= deadline {
             return Err(Error::Timeout);
         }
+        if mode == LinuxVaultMode::DesktopSecretService {
+            secret_service::ensure(
+                &manifest.key_ids[realm],
+                realm,
+                !committed,
+                cancel,
+                deadline,
+                cut,
+            )?;
+            continue;
+        }
         let name = manifest.slot(realm);
         if let Some(blob) = optional(&dir, &name, systemd::CAP)? {
             let _original = systemd::decrypt(mode, realm, &blob, cancel, deadline).await?;
@@ -461,21 +473,7 @@ async fn attempt_with(
         if committed {
             return Err(Error::Corrupt);
         }
-        let mut key = Secret::<32>::new("p04-generated-key");
-        getrandom::fill(key.bytes_mut()).map_err(|_| Error::Random)?;
-        cut("generated");
-        let (blob, len) =
-            systemd::pipe::<{ systemd::CAP + 1 }>(mode, realm, true, key.bytes(), cancel, deadline)
-                .await?;
-        cut("encrypted");
-        let readback =
-            systemd::decrypt(mode, realm, &blob.bytes()[..len], cancel, deadline).await?;
-        if &readback.bytes()[..32] != key.bytes() {
-            return Err(Error::Corrupt);
-        }
-        cut("readback");
-        publish(&dir, &name, &blob.bytes()[..len], ops, cut)?;
-        cut("realm-durable");
+        create_systemd_key(&dir, &name, realm, plan, cancel, cut).await?;
     }
     if *cancel.borrow() {
         return Err(Error::Cancelled);
@@ -498,3 +496,29 @@ async fn attempt_with(
 
 #[cfg(test)]
 mod tests;
+
+async fn create_systemd_key(
+    dir: &OwnedFd,
+    name: &str,
+    realm: usize,
+    plan: &Plan<'_>,
+    cancel: &mut watch::Receiver<bool>,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
+    let (mode, deadline) = (plan.mode, plan.deadline);
+    let mut key = Secret::<32>::new("p04-generated-key");
+    getrandom::fill(key.bytes_mut()).map_err(|_| Error::Random)?;
+    cut("generated");
+    let (blob, len) =
+        systemd::pipe::<{ systemd::CAP + 1 }>(mode, realm, true, key.bytes(), cancel, deadline)
+            .await?;
+    cut("encrypted");
+    let readback = systemd::decrypt(mode, realm, &blob.bytes()[..len], cancel, deadline).await?;
+    if &readback.bytes()[..32] != key.bytes() {
+        return Err(Error::Corrupt);
+    }
+    cut("readback");
+    publish(dir, name, &blob.bytes()[..len], plan.ops, cut)?;
+    cut("realm-durable");
+    Ok(())
+}
