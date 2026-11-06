@@ -686,6 +686,78 @@
       "bytes": 368
     },
     {
+      "name": "batch_ExpectedHead",
+      "type": "ExpectedHead",
+      "wire": "{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740991}",
+      "bytes": 79
+    },
+    {
+      "name": "batch_DeletePreemptingPending",
+      "type": "DeletePreemptingPending",
+      "wire": "{\"expected_head\":{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740991},\"operation\":{\"body\":{\"action\":\"delete\",\"binding\":null,\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"requested_time\":9007199254740991,\"tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "bytes": 875
+    },
+    {
+      "name": "batch_BatchResult",
+      "type": "BatchResult",
+      "wire": "{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}",
+      "bytes": 155
+    },
+    {
+      "name": "batch_BatchRow",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "bytes": 481
+    },
+    {
+      "name": "batch_replacement",
+      "type": "Replacement",
+      "wire": "{\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"new\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"old\":null,\"table\":\"batch\"}",
+      "bytes": 568
+    },
+    {
+      "name": "batch_removal",
+      "type": "Replacement",
+      "wire": "{\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"new\":null,\"old\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"table\":\"batch\"}",
+      "bytes": 568
+    },
+    {
+      "name": "batch_result_clock_0",
+      "type": "BatchResult",
+      "wire": "{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":0,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}",
+      "bytes": 140
+    },
+    {
+      "name": "batch_result_clock_9007199254740991",
+      "type": "BatchResult",
+      "wire": "{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254740991,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}",
+      "bytes": 155
+    },
+    {
+      "name": "batch_request_boundary_0",
+      "type": "DeletePreemptingPending",
+      "wire": "{\"expected_head\":{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":0},\"operation\":{\"body\":{\"action\":\"delete\",\"binding\":null,\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"requested_time\":0,\"tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "bytes": 845
+    },
+    {
+      "name": "batch_request_boundary_9007199254740991",
+      "type": "DeletePreemptingPending",
+      "wire": "{\"expected_head\":{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740991},\"operation\":{\"body\":{\"action\":\"delete\",\"binding\":null,\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"requested_time\":9007199254740991,\"tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "bytes": 875
+    },
+    {
+      "name": "batch_row_min",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":1,\"lsn_n2\":2,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":0,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":86400,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "bytes": 425
+    },
+    {
+      "name": "batch_retention_above_min",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":0,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "bytes": 466
+    },
+    {
       "name": "review_control_commit_before_deadlines",
       "type": "OperationRow",
       "wire": "{\"finished_at\":9007199244741110,\"operation\":{\"body\":{\"action\":\"profile_update\",\"binding\":{\"body\":{\"epoch\":9007199254740990,\"name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"node\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740990,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"operation_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"reservation_expires_at\":9007199244741111,\"reserved_at\":9007199244740991,\"retain_until\":9007199244827510,\"state\":\"committed\"}",
@@ -2438,6 +2510,174 @@
       "type": "UsernameBinding",
       "wire": "{\"body\":{\"epoch\":9007199254740990,\"name\":\"\\u006dmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"node\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
       "field": ""
+    },
+    {
+      "name": "batch_ExpectedHead_lsn_unsafe",
+      "type": "ExpectedHead",
+      "wire": "{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740992}",
+      "field": "!i_json"
+    },
+    {
+      "name": "batch_ExpectedHead_digest",
+      "type": "ExpectedHead",
+      "wire": "{\"digest\":\"invalid!\",\"lsn\":9007199254740991}",
+      "field": "digest"
+    },
+    {
+      "name": "batch_DeletePreemptingPending_tx_id",
+      "type": "DeletePreemptingPending",
+      "wire": "{\"expected_head\":{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740991},\"operation\":{\"body\":{\"action\":\"delete\",\"binding\":null,\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"requested_time\":9007199254740991,\"tx_id\":\"invalid!\"}",
+      "field": "tx_id"
+    },
+    {
+      "name": "batch_DeletePreemptingPending_requested_time_unsafe",
+      "type": "DeletePreemptingPending",
+      "wire": "{\"expected_head\":{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740991},\"operation\":{\"body\":{\"action\":\"delete\",\"binding\":null,\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"requested_time\":9007199254740992,\"tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "!i_json"
+    },
+    {
+      "name": "batch_BatchResult_abort_digest",
+      "type": "BatchResult",
+      "wire": "{\"abort_digest\":\"invalid!\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}",
+      "field": "abort_digest"
+    },
+    {
+      "name": "batch_BatchResult_delete_digest",
+      "type": "BatchResult",
+      "wire": "{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"invalid!\"}",
+      "field": "delete_digest"
+    },
+    {
+      "name": "batch_BatchResult_clock_floor_unsafe",
+      "type": "BatchResult",
+      "wire": "{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254740992,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}",
+      "field": "!i_json"
+    },
+    {
+      "name": "batch_BatchRow_batch_id",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"invalid!\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "batch_id"
+    },
+    {
+      "name": "batch_BatchRow_root",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"invalid!\"}",
+      "field": "root"
+    },
+    {
+      "name": "batch_BatchRow_request_hash",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"invalid!\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "request_hash"
+    },
+    {
+      "name": "batch_BatchRow_abort_tx_id",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"invalid!\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "abort_tx_id"
+    },
+    {
+      "name": "batch_BatchRow_lsn_n1_unsafe",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740992,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "!i_json"
+    },
+    {
+      "name": "batch_BatchRow_lsn_n2_unsafe",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740992,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "!i_json"
+    },
+    {
+      "name": "batch_BatchRow_retain_until_unsafe",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740992,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "!i_json"
+    },
+    {
+      "name": "batch_lsn_n1_zero",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":0,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "lsn_n1"
+    },
+    {
+      "name": "batch_lsn_n2_zero",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":0,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "lsn_n2"
+    },
+    {
+      "name": "batch_same_ids",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "abort_tx_id"
+    },
+    {
+      "name": "batch_nonconsecutive",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740990,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "lsn_n2"
+    },
+    {
+      "name": "batch_lsn_exhaustion",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740991,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "lsn_n2"
+    },
+    {
+      "name": "batch_short_retention",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740990,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "retain_until"
+    },
+    {
+      "name": "batch_retention_exhaustion",
+      "type": "BatchRow",
+      "wire": "{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254740991,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "retain_until"
+    },
+    {
+      "name": "batch_other_action",
+      "type": "DeletePreemptingPending",
+      "wire": "{\"expected_head\":{\"digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn\":9007199254740991},\"operation\":{\"body\":{\"action\":\"profile_update\",\"binding\":{\"body\":{\"epoch\":9007199254740990,\"name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"node\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"discoverable\":false,\"expected_epoch\":9007199254740989,\"expected_profile\":{\"epoch\":9007199254740989,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2},\"expires_at\":9007199244741281,\"issued_at\":9007199244740981,\"next_epoch\":9007199254740990,\"old_name\":\"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\",\"operation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"principal_commitment\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"profile\":{\"epoch\":9007199254740990,\"hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"version\":2}},\"signature\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"requested_time\":9007199254740991,\"tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "field": "action"
+    },
+    {
+      "name": "batch_key_mismatch",
+      "type": "Replacement",
+      "wire": "{\"key\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"new\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"old\":null,\"table\":\"batch\"}",
+      "field": "batch_id"
+    },
+    {
+      "name": "batch_old_key_mismatch",
+      "type": "Replacement",
+      "wire": "{\"key\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"new\":null,\"old\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"table\":\"batch\"}",
+      "field": "batch_id"
+    },
+    {
+      "name": "batch_key_grammar",
+      "type": "Replacement",
+      "wire": "{\"key\":\"invalid!\",\"new\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"old\":null,\"table\":\"batch\"}",
+      "field": "batch_id"
+    },
+    {
+      "name": "batch_same_images",
+      "type": "Replacement",
+      "wire": "{\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"new\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"old\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"table\":\"batch\"}",
+      "field": "images"
+    },
+    {
+      "name": "batch_empty_images",
+      "type": "Replacement",
+      "wire": "{\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"new\":null,\"old\":null,\"table\":\"batch\"}",
+      "field": "images"
+    },
+    {
+      "name": "batch_caller_batch",
+      "type": "CheckpointDelta",
+      "wire": "{\"clock_floor\":9007199244827491,\"kind\":\"gc\",\"operation\":null,\"rows\":[{\"key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"new\":{\"abort_tx_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"batch_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"lsn_n1\":9007199254740990,\"lsn_n2\":9007199254740991,\"request_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"result\":{\"abort_digest\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"clock_floor\":9007199254654591,\"delete_digest\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"},\"retain_until\":9007199254740991,\"root\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"},\"old\":null,\"table\":\"batch\"}],\"tx_id\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"writer_incarnation\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}",
+      "field": "batch"
     },
     {
       "name": "review_reserved_claim_admin",

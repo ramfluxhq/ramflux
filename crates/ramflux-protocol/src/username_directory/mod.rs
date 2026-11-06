@@ -312,6 +312,47 @@ pub struct CounterRow {
     pub value: u64,
 }
 
+/// Single caller CAS for a witness-built delete pair.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedHead {
+    pub lsn: u64,
+    pub digest: String,
+}
+
+/// The witness derives both members; callers supply no rows or member identities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletePreemptingPending {
+    pub tx_id: String,
+    pub operation: UsernameOperation,
+    pub expected_head: ExpectedHead,
+    pub requested_time: u64,
+}
+
+/// Original decision returned for an identical whole-request retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchResult {
+    pub abort_digest: String,
+    pub delete_digest: String,
+    pub clock_floor: u64,
+}
+
+/// Witness-owned metadata retaining the identity and result of an atomic pair.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchRow {
+    pub batch_id: String,
+    pub root: String,
+    pub request_hash: String,
+    pub abort_tx_id: String,
+    pub lsn_n1: u64,
+    pub lsn_n2: u64,
+    pub retain_until: u64,
+    pub result: BatchResult,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointDelta {
@@ -365,6 +406,7 @@ pub struct DirectoryFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "table", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Replacement {
+    Batch { key: String, old: Option<BatchRow>, new: Option<BatchRow> },
     Root { key: String, old: Option<RootRow>, new: Option<RootRow> },
     Name { key: String, old: Option<NameRow>, new: Option<NameRow> },
     Skeleton { key: String, old: Option<SkeletonRow>, new: Option<SkeletonRow> },

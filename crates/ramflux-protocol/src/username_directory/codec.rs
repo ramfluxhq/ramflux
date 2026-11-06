@@ -3,12 +3,12 @@
 
 //! Strict canonical admission. Crypto verification and stateful authorization are later parts.
 use super::{
-    Action, AvatarRef, Checkpoint, CheckpointDelta, CounterKey, CounterRow, DeltaKind,
-    DirectoryCode, DirectoryFailure, DirectoryReceiptBody, DirectoryResolveBody, DueKey, DueRow,
-    HoldKey, HoldRow, HomeRevalidateRequest, HomeRevalidateResult, IdentityProfileV2Body,
-    IndexState, Metric, NameRow, OperationKey, OperationOwnerRow, OperationRow, ProfileRef,
-    ReceiptDecision, ReceiptState, Replacement, RootRow, ServeCandidate, Signed, SkeletonRow,
-    UsernameBindingBody, UsernameOperationBody,
+    Action, AvatarRef, BatchResult, BatchRow, Checkpoint, CheckpointDelta, CounterKey, CounterRow,
+    DeletePreemptingPending, DeltaKind, DirectoryCode, DirectoryFailure, DirectoryReceiptBody,
+    DirectoryResolveBody, DueKey, DueRow, ExpectedHead, HoldKey, HoldRow, HomeRevalidateRequest,
+    HomeRevalidateResult, IdentityProfileV2Body, IndexState, Metric, NameRow, OperationKey,
+    OperationOwnerRow, OperationRow, ProfileRef, ReceiptDecision, ReceiptState, Replacement,
+    RootRow, ServeCandidate, Signed, SkeletonRow, UsernameBindingBody, UsernameOperationBody,
 };
 use crate::ProtocolError;
 use serde::Serialize;
@@ -739,6 +739,58 @@ impl Wire for CounterRow {
     }
 }
 
+impl Wire for ExpectedHead {
+    const LIMIT: usize = 128;
+    fn validate(&self) -> Result<(), CodecError> {
+        safe(self.lsn, "lsn")?;
+        fixed(&self.digest, 32, "digest")?;
+        within(self, Self::LIMIT)
+    }
+}
+impl Wire for DeletePreemptingPending {
+    const LIMIT: usize = 2048;
+    fn validate(&self) -> Result<(), CodecError> {
+        fixed(&self.tx_id, 32, "tx_id")?;
+        self.operation.validate()?;
+        need(self.operation.body.action == Action::Delete, "action")?;
+        self.expected_head.validate()?;
+        safe(self.requested_time, "requested_time")?;
+        within(self, Self::LIMIT)
+    }
+}
+impl Wire for BatchResult {
+    const LIMIT: usize = 2048;
+    fn validate(&self) -> Result<(), CodecError> {
+        fixed(&self.abort_digest, 32, "abort_digest")?;
+        fixed(&self.delete_digest, 32, "delete_digest")?;
+        safe(self.clock_floor, "clock_floor")?;
+        within(self, Self::LIMIT)
+    }
+}
+impl Wire for BatchRow {
+    const LIMIT: usize = 2048;
+    fn validate(&self) -> Result<(), CodecError> {
+        fixed(&self.batch_id, 32, "batch_id")?;
+        fixed(&self.root, 32, "root")?;
+        fixed(&self.request_hash, 32, "request_hash")?;
+        fixed(&self.abort_tx_id, 32, "abort_tx_id")?;
+        positive(self.lsn_n1, "lsn_n1")?;
+        positive(self.lsn_n2, "lsn_n2")?;
+        safe(self.retain_until, "retain_until")?;
+        self.result.validate()?;
+        need(self.abort_tx_id != self.batch_id, "abort_tx_id")?;
+        need(self.lsn_n1.checked_add(1) == Some(self.lsn_n2), "lsn_n2")?;
+        need(
+            self.result
+                .clock_floor
+                .checked_add(86400)
+                .is_some_and(|minimum| self.retain_until >= minimum),
+            "retain_until",
+        )?;
+        within(self, Self::LIMIT)
+    }
+}
+
 impl Wire for CheckpointDelta {
     const LIMIT: usize = 65536;
     fn validate(&self) -> Result<(), CodecError> {
@@ -763,6 +815,7 @@ impl Wire for CheckpointDelta {
         {
             let v = &self.rows;
             for v in v {
+                need(!matches!(v, Replacement::Batch { .. }), "batch")?;
                 (v).validate()?;
             }
         }
@@ -1154,6 +1207,13 @@ impl Wire for Replacement {
     const LIMIT: usize = 65536;
     fn validate(&self) -> Result<(), CodecError> {
         match self {
+            Self::Batch { key, old, new } => {
+                fixed(key, 32, "batch_id")?;
+                images(old.as_ref(), new.as_ref())?;
+                for row in [old, new].into_iter().flatten() {
+                    need(row.batch_id == *key, "batch_id")?;
+                }
+            }
             Self::Root { key, old, new } => {
                 fixed(key, 32, "root")?;
                 images(old.as_ref(), new.as_ref())?;

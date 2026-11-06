@@ -15,8 +15,8 @@
     "AVATAR_CONTENT": "ramflux.identity.avatar_content.v1"
   },
   "sha256": {
-    "schema.json": "32afd09342c20ce0e01f54fb7c9663a09ee1e7bbe05a5136419200dcb53eb931",
-    "wire_vectors.json": "711ba183e073ff8e2a32540e535637710ba3fc90647d01e4fbd1b619774d0025",
-    "codec_oracle.py": "121479619c9bd84a5ee11fd0fa7bc83bf4c7a5a78e60399ac63e0dd8dc4b0859"
+    "schema.json": "198c077aeb0dd434d36095ece4b64b962835d0181a6f24aa1925954e17d268f6",
+    "wire_vectors.json": "bafa7cdd2725b7162ccdd2c5e0539d6bcb915fbab0cea2097316d94548835a83",
+    "codec_oracle.py": "262ba0b1f9be99f81c94edb15288940dc0ee742ad81211d985eefae52f3f6bbe"
   }
 }

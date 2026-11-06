@@ -93,6 +93,22 @@
     "DirectoryFailure": {
       "fields": "code:DirectoryCode,retry_after_ms:Option<u64>",
       "limit": 1024
+    },
+    "ExpectedHead": {
+      "fields": "lsn:u64,digest:String",
+      "limit": 128
+    },
+    "DeletePreemptingPending": {
+      "fields": "tx_id:String,operation:UsernameOperation,expected_head:ExpectedHead,requested_time:u64",
+      "limit": 2048
+    },
+    "BatchResult": {
+      "fields": "abort_digest:String,delete_digest:String,clock_floor:u64",
+      "limit": 2048
+    },
+    "BatchRow": {
+      "fields": "batch_id:String,root:String,request_hash:String,abort_tx_id:String,lsn_n1:u64,lsn_n2:u64,retain_until:u64,result:BatchResult",
+      "limit": 2048
     }
   },
   "enums": {
