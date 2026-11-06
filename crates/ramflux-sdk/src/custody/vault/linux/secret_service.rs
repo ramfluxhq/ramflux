@@ -97,13 +97,13 @@ fn local_collection<'a>(
 /// Caller owns the permanent installation lock across missing/set/readback, durable realm
 /// progress and descriptor publication. All calls run inside its bounded blocking worker.
 /// `create` is false once the realm is known complete: a missing item is then `Corrupt`.
-pub(super) fn ensure(
+pub(super) fn obtain(
     id: &Identity<'_>,
     create: bool,
     cancel: &watch::Receiver<bool>,
     deadline: Instant,
     cut: &impl Fn(&str),
-) -> Result<(), Error> {
+) -> Result<Secret<32>, Error> {
     let deadline = deadline.min(Instant::now() + std::time::Duration::from_secs(30));
     check(cancel, deadline)?;
     if id.realm >= 3 {
@@ -141,7 +141,7 @@ pub(super) fn ensure(
     if !matches.locked.is_empty() {
         return Err(Error::Provider);
     }
-    if let Some(item) = matches.unlocked.first() {
+    let key = if let Some(item) = matches.unlocked.first() {
         // Refuse same attributes planted in another collection.
         if !collection
             .search_items(attributes)
@@ -151,8 +151,9 @@ pub(super) fn ensure(
         {
             return Err(Error::Corrupt);
         }
-        let _key = read(item)?;
+        let key = read(item)?;
         cut("ss-existing-readback");
+        key
     } else {
         if !create {
             return Err(Error::Corrupt);
@@ -186,9 +187,21 @@ pub(super) fn ensure(
             return Err(Error::Corrupt);
         }
         cut("ss-readback");
-    }
-    check(cancel, deadline)
+        key
+    };
+    check(cancel, deadline)?;
+    Ok(key)
 }
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn ensure(
+    id: &Identity<'_>,
+    create: bool,
+    cancel: &watch::Receiver<bool>,
+    deadline: Instant,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
+    obtain(id, create, cancel, deadline, cut).map(drop)
+}
