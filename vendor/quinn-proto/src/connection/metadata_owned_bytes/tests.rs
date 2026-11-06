@@ -4,7 +4,7 @@ use super::*;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
-    sync::{atomic::{AtomicBool, AtomicUsize, Ordering::*}, Condvar, Mutex, Once},
+    sync::{atomic::{AtomicBool, AtomicUsize, Ordering::*}, Condvar, Mutex},
 };
 thread_local! { static CAPTURE: Cell<usize> = const { Cell::new(0) }; }
 static PAYLOAD: AtomicUsize = AtomicUsize::new(0);
@@ -15,15 +15,8 @@ static REQUEST: AtomicUsize = AtomicUsize::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
-static INIT: Once = Once::new();
-static mut GATE: *const (Mutex<(bool, bool)>, Condvar) = std::ptr::null();
-fn gate() -> &'static (Mutex<(bool, bool)>, Condvar) {
-    INIT.call_once(|| unsafe {
-        GATE = Box::into_raw(Box::new((Mutex::new((false, false)), Condvar::new())));
-    });
-    // The fixed test synchronization fixture is published by Once and never freed.
-    unsafe { &*GATE }
-}
+static GATE: (Mutex<(bool, bool)>, Condvar) = (Mutex::new((false, false)), Condvar::new());
+fn gate() -> &'static (Mutex<(bool, bool)>, Condvar) { &GATE }
 struct Counting;
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -77,7 +70,7 @@ unsafe impl GlobalAlloc for Counting {
 #[test]
 #[cfg(any(target_os="linux",target_os="macos"))]
 fn production_owner_credit_outlives_actual_wrapper_free() {
-    let _=gate();
+    drop(gate().0.lock().unwrap()); // Warm the platform mutex outside allocation tracking.
     let layout=owner_layout();
     let owner_charge=((layout.size()+63)&!63)+64;
     let credit=MetadataCredit::new(128+owner_charge);
