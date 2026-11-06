@@ -2550,6 +2550,9 @@ mod resilience_tests;
 #[cfg(all(test, feature = "itest-local-mint"))]
 #[path = "submit_ack_tests.rs"]
 pub(crate) mod submit_ack_tests;
+#[cfg(test)]
+#[path = "submit_fixtures.rs"]
+pub(crate) mod submit_fixtures;
 
 #[cfg(all(test, feature = "itest-local-mint"))]
 #[path = "publication_tests.rs"]

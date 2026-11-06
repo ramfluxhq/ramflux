@@ -33,7 +33,8 @@ fn deadline_error() -> TransportError {
 }
 
 /// Return the original mesh response frame, without decoding its JSON body.
-/// Cancellation drops the actual request future, including cached-connection retries.
+/// The request is written to the wire at most once: no cached-connection re-send.
+/// Cancellation drops the actual request future.
 /// Admission stays with that work even if this caller is aborted. A timed-out caller
 /// waits for transport termination before returning.
 /// # Errors
@@ -91,7 +92,7 @@ pub(super) async fn run(
     pool_size: usize,
 ) {
     let result = {
-        let work = mesh_quic_cached_request(pools, breakers, request, pool_size);
+        let work = mesh_quic_cached_request(pools, breakers, request, pool_size, false);
         tokio::pin!(work);
         tokio::select! {
             biased;
