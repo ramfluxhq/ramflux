@@ -409,3 +409,6 @@ fn probe_r5_self_backup_mismatch_refuses() -> TestResult {
     }
     Ok(())
 }
+
+#[path = "history_owner_fence_tests.rs"]
+mod owner_fence_tests;
