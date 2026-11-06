@@ -35,7 +35,55 @@ impl MeshHttpTimeouts {
 }
 
 /// Hostname resolution hook. Production uses the system resolver; tests inject a stalled one.
-type MeshResolver = Arc<dyn Fn(&str) -> std::io::Result<Vec<SocketAddr>> + Send + Sync>;
+/// The second argument is the request's absolute deadline, when it has one.
+type MeshResolver =
+    Arc<dyn Fn(&str, Option<Instant>) -> std::io::Result<Vec<SocketAddr>> + Send + Sync>;
+
+/// Default cap on resolver threads alive at once, across all clients in the process.
+const DEFAULT_RESOLVER_CAPACITY: u64 = 16;
+
+/// Fixed-capacity pool of resolver workers. There is no queue: a lookup either takes a free
+/// slot and gets its own worker thread, or is refused at once with
+/// [`TransportError::BackpressureRejected`]. A slot is owned by the worker thread and returns to
+/// the pool only when that thread's resolver call has actually returned, so a stalled,
+/// non-cancellable OS resolver keeps holding its slot after the request has timed out.
+struct ResolverPool {
+    capacity: u64,
+    in_flight: std::sync::atomic::AtomicU64,
+}
+
+/// Capacity owned by one resolver worker; dropped when the worker exits.
+struct ResolverSlot(Arc<ResolverPool>);
+
+impl ResolverPool {
+    fn new(capacity: u64) -> Arc<Self> {
+        Arc::new(Self { capacity, in_flight: std::sync::atomic::AtomicU64::new(0) })
+    }
+
+    fn shared() -> &'static Arc<Self> {
+        static SHARED: std::sync::OnceLock<Arc<ResolverPool>> = std::sync::OnceLock::new();
+        SHARED.get_or_init(|| Self::new(DEFAULT_RESOLVER_CAPACITY))
+    }
+
+    fn acquire(self: &Arc<Self>) -> Result<ResolverSlot, TransportError> {
+        use std::sync::atomic::Ordering;
+        self.in_flight
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held < self.capacity).then_some(held + 1)
+            })
+            .map(|_| ResolverSlot(Arc::clone(self)))
+            .map_err(|held| TransportError::BackpressureRejected {
+                capacity: self.capacity,
+                in_flight: held,
+            })
+    }
+}
+
+impl Drop for ResolverSlot {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
 
 fn system_resolve(endpoint: &str) -> std::io::Result<Vec<SocketAddr>> {
     endpoint.to_socket_addrs().map(Iterator::collect)
@@ -49,27 +97,32 @@ fn resolve_mesh_endpoint(
     endpoint: &str,
     timeouts: MeshHttpTimeouts,
     resolver: Option<&MeshResolver>,
+    pool: Option<&Arc<ResolverPool>>,
 ) -> Result<Vec<SocketAddr>, TransportError> {
     let bad =
         |source: std::io::Error| TransportError::Http(format!("bad endpoint {endpoint}: {source}"));
     if timeouts.deadline.is_none() {
         return match resolver {
-            Some(resolver) => resolver(endpoint),
+            Some(resolver) => resolver(endpoint, None),
             None => system_resolve(endpoint),
         }
         .map_err(bad);
     }
     let remaining = bounded_io_timeout(timeouts, Duration::MAX)?;
+    // Taken before the spawn and moved into the worker, so it is released by the worker's exit.
+    let slot = pool.unwrap_or_else(|| ResolverPool::shared()).acquire()?;
+    let deadline = timeouts.deadline;
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let owned = endpoint.to_owned();
     let resolver = resolver.cloned();
     std::thread::Builder::new().name("mesh-http-dns".into()).spawn(move || {
         let addrs = match &resolver {
-            Some(resolver) => resolver(&owned),
+            Some(resolver) => resolver(&owned, deadline),
             None => system_resolve(&owned),
         };
         // The caller may have timed out and dropped the receiver; that is not an error.
         let _ignored = done_tx.send(addrs);
+        drop(slot);
     })?;
     match done_rx.recv_timeout(remaining) {
         Ok(addrs) => addrs.map_err(bad),
@@ -199,6 +252,7 @@ struct MeshHttpClientRequest<'a> {
     body: Option<&'a [u8]>,
     timeouts: MeshHttpTimeouts,
     resolver: Option<&'a MeshResolver>,
+    resolver_pool: Option<&'a Arc<ResolverPool>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -220,6 +274,7 @@ pub struct MeshHttpClient {
     max_idle_per_peer: usize,
     max_lifetime: Duration,
     resolver: Option<MeshResolver>,
+    resolver_pool: Option<Arc<ResolverPool>>,
 }
 
 const DEFAULT_MAX_IDLE_PER_PEER: usize = 128;
@@ -232,6 +287,7 @@ impl Default for MeshHttpClient {
             max_idle_per_peer: configured_max_idle_per_peer(),
             max_lifetime: DEFAULT_MAX_LIFETIME,
             resolver: None,
+            resolver_pool: None,
         }
     }
 }
@@ -244,8 +300,9 @@ impl MeshHttpClient {
 
     /// Test constructor: replaces the system resolver so a test can stall or count lookups.
     #[cfg(test)]
-    fn with_resolver(mut self, resolver: MeshResolver) -> Self {
+    fn with_resolver(mut self, resolver: MeshResolver, pool: Arc<ResolverPool>) -> Self {
         self.resolver = Some(resolver);
+        self.resolver_pool = Some(pool);
         self
     }
 
@@ -275,6 +332,7 @@ impl MeshHttpClient {
             body: Some(&body),
             timeouts: MeshHttpTimeouts::DEFAULT,
             resolver: None,
+            resolver_pool: None,
         })?;
         Ok(serde_json::from_slice(&response)?)
     }
@@ -301,6 +359,7 @@ impl MeshHttpClient {
             body: None,
             timeouts: MeshHttpTimeouts::DEFAULT,
             resolver: None,
+            resolver_pool: None,
         })?;
         Ok(serde_json::from_slice(&response)?)
     }
@@ -333,6 +392,7 @@ impl MeshHttpClient {
             body: Some(&body),
             timeouts: MeshHttpTimeouts::DEFAULT,
             resolver: None,
+            resolver_pool: None,
         })?;
         Ok(serde_json::from_slice(&response)?)
     }
@@ -368,12 +428,17 @@ impl MeshHttpClient {
             body: Some(&body),
             timeouts: MeshHttpTimeouts::DEFAULT.with_deadline(deadline),
             resolver: None,
+            resolver_pool: None,
         })?;
         Ok(serde_json::from_slice(&response)?)
     }
 
     fn json_request(&self, request: MeshHttpClientRequest<'_>) -> Result<Vec<u8>, TransportError> {
-        let request = MeshHttpClientRequest { resolver: self.resolver.as_ref(), ..request };
+        let request = MeshHttpClientRequest {
+            resolver: self.resolver.as_ref(),
+            resolver_pool: self.resolver_pool.as_ref(),
+            ..request
+        };
         let endpoint = normalized_endpoint(request.endpoint);
         record_mesh_client_request();
         let key =
@@ -488,6 +553,7 @@ fn mesh_http_json_request(
         body,
         timeouts: MeshHttpTimeouts::DEFAULT,
         resolver: None,
+        resolver_pool: None,
     })
 }
 
@@ -509,7 +575,8 @@ fn new_mesh_http_connection(
     request: &MeshHttpClientRequest<'_>,
 ) -> Result<MeshHttpPooledConnection, TransportError> {
     let connect_started = Instant::now();
-    let tcp = connect_mesh_tcp(endpoint, request.timeouts, request.resolver)?;
+    let tcp =
+        connect_mesh_tcp(endpoint, request.timeouts, request.resolver, request.resolver_pool)?;
     record_mesh_client_connect(connect_started.elapsed());
     let tls_server_name = rustls::pki_types::ServerName::try_from(request.server_name.to_owned())
         .map_err(|error| TransportError::InvalidDnsName(error.to_string()))?;
@@ -632,6 +699,7 @@ where
         body: Some(&body),
         timeouts: MeshHttpTimeouts::DEFAULT,
         resolver: None,
+        resolver_pool: None,
     })?;
     Ok(serde_json::from_slice(&response)?)
 }
@@ -660,9 +728,10 @@ fn connect_mesh_tcp(
     endpoint: &str,
     timeouts: MeshHttpTimeouts,
     resolver: Option<&MeshResolver>,
+    pool: Option<&Arc<ResolverPool>>,
 ) -> Result<TcpStream, TransportError> {
     let mut last_error = None;
-    for addr in resolve_mesh_endpoint(endpoint, timeouts, resolver)? {
+    for addr in resolve_mesh_endpoint(endpoint, timeouts, resolver, pool)? {
         let connect_timeout = bounded_io_timeout(timeouts, timeouts.connect)?;
         match TcpStream::connect_timeout(&addr, connect_timeout) {
             Ok(stream) => {
@@ -845,10 +914,11 @@ mod tests {
     use crate::{MeshTlsConfig, MeshTlsServer, MeshTlsServerStream};
 
     use super::{
-        MeshHttpClient, MeshHttpClientRequest, MeshHttpTimeouts, MeshResolver, connect_mesh_tcp,
-        mesh_http_get_json, mesh_http_json_request_with_timeouts, mesh_http_pool_key,
-        mesh_http_post_json_with_peer_ca_pems, mesh_http_request_bytes, read_mesh_http_request,
-        read_mesh_http_response_from_reader, system_resolve, write_mesh_json_response,
+        MeshHttpClient, MeshHttpClientRequest, MeshHttpTimeouts, MeshResolver, ResolverPool,
+        connect_mesh_tcp, mesh_http_get_json, mesh_http_json_request_with_timeouts,
+        mesh_http_pool_key, mesh_http_post_json_with_peer_ca_pems, mesh_http_request_bytes,
+        read_mesh_http_request, read_mesh_http_response_from_reader, system_resolve,
+        write_mesh_json_response,
     };
 
     #[test]
@@ -882,7 +952,7 @@ mod tests {
         let server = thread::spawn(move || {
             let _accepted = listener.accept();
         });
-        let stream = connect_mesh_tcp(&endpoint, MeshHttpTimeouts::DEFAULT, None)?;
+        let stream = connect_mesh_tcp(&endpoint, MeshHttpTimeouts::DEFAULT, None, None)?;
         assert!(stream.nodelay()?);
         drop(stream);
         server.join().map_err(|_| "server thread panicked")?;
@@ -1291,12 +1361,16 @@ mod tests {
             Ok(request.path)
         });
         let tls = test_mesh_tls_config("gateway")?;
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let recorder = stalling_resolver(usize::MAX);
+        let (resolver, seen) = (recorder.resolver, recorder.deadlines);
         let result =
             within_hang_guard("response read after a complete TLS handshake", move || {
-                post_probe(&MeshHttpClient::new(), &endpoint, &tls, deadline)
+                let client = MeshHttpClient::new().with_resolver(resolver, ResolverPool::new(4));
+                post_probe(&client, &endpoint, &tls, deadline)
             })?;
         expect_deadline_timeout("response read", result)?;
+        assert_eq!(seen_deadlines(&seen)?, vec![Some(deadline)]);
         let path = router.join().map_err(|_| "router panicked")??;
         assert_eq!(path, "/mvp1/identity/register", "router never saw the request");
         Ok(())
@@ -1326,16 +1400,21 @@ mod tests {
             Ok(())
         });
         let tls = test_mesh_tls_config("gateway")?;
+        let first_deadline = Instant::now() + Duration::from_secs(30);
+        let second_deadline = Instant::now() + Duration::from_secs(1);
+        let recorder = stalling_resolver(usize::MAX);
+        let (resolver, seen) = (recorder.resolver, recorder.deadlines);
         let result = within_hang_guard("stale-connection retry", move || {
-            let client = MeshHttpClient::new();
-            let first =
-                post_probe(&client, &endpoint, &tls, Instant::now() + Duration::from_secs(30));
-            let second =
-                post_probe(&client, &endpoint, &tls, Instant::now() + Duration::from_secs(3));
+            let client = MeshHttpClient::new().with_resolver(resolver, ResolverPool::new(4));
+            let first = post_probe(&client, &endpoint, &tls, first_deadline);
+            let second = post_probe(&client, &endpoint, &tls, second_deadline);
             (first, second)
         })?;
         assert_eq!(result.0?["first"], true);
         expect_deadline_timeout("retry", result.1)?;
+        // The first request dials once; the second reuses the pooled socket, so its only lookup is
+        // the stale-connection retry's dial, which must carry that request's original deadline.
+        assert_eq!(seen_deadlines(&seen)?, vec![Some(first_deadline), Some(second_deadline)]);
         router.join().map_err(|_| "router panicked")??;
         Ok(())
     }
@@ -1373,17 +1452,28 @@ mod tests {
         Ok(())
     }
 
+    /// What a test resolver saw: the absolute deadline handed to every lookup, in call order.
+    type SeenDeadlines = Arc<Mutex<Vec<Option<Instant>>>>;
+
+    struct StallingResolver {
+        resolver: MeshResolver,
+        entered: std::sync::mpsc::Receiver<()>,
+        gate: std::sync::mpsc::Sender<()>,
+        deadlines: SeenDeadlines,
+    }
+
     /// Resolver that delegates to the system until `stall_from` calls have happened, then blocks
     /// on a gate. `entered` receives a message for every stalled call.
-    fn stalling_resolver(
-        stall_from: usize,
-    ) -> (MeshResolver, std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    fn stalling_resolver(stall_from: usize) -> StallingResolver {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (gate, gate_rx) = std::sync::mpsc::channel::<()>();
         let entered_tx = Mutex::new(entered_tx);
         let gate_rx = Mutex::new(gate_rx);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let resolver: MeshResolver = Arc::new(move |endpoint: &str| {
+        let deadlines = SeenDeadlines::default();
+        let seen = Arc::clone(&deadlines);
+        let resolver: MeshResolver = Arc::new(move |endpoint: &str, deadline| {
+            let _ignored = seen.lock().map(|mut seen| seen.push(deadline));
             if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < stall_from {
                 return system_resolve(endpoint);
             }
@@ -1392,25 +1482,28 @@ mod tests {
             let _ignored = gate_rx.lock().map(|gate| gate.recv());
             system_resolve(endpoint)
         });
-        (resolver, entered_rx, gate_tx)
+        StallingResolver { resolver, entered, gate, deadlines }
+    }
+
+    fn seen_deadlines(seen: &SeenDeadlines) -> Result<Vec<Option<Instant>>, String> {
+        seen.lock().map(|seen| seen.clone()).map_err(|error| error.to_string())
     }
 
     #[test]
     fn deadline_bounds_a_stalled_dns_resolver() -> Result<(), Box<dyn std::error::Error>> {
-        let (resolver, entered, gate) = stalling_resolver(0);
+        let stall = stalling_resolver(0);
         let tls = test_mesh_tls_config("gateway")?;
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let (resolver, pool) = (stall.resolver, ResolverPool::new(4));
         let result = within_hang_guard("stalled DNS resolution", move || {
-            let client = MeshHttpClient::new().with_resolver(resolver);
-            post_probe(
-                &client,
-                "router.invalid:7443",
-                &tls,
-                Instant::now() + Duration::from_secs(1),
-            )
+            let client = MeshHttpClient::new().with_resolver(resolver, pool);
+            post_probe(&client, "router.invalid:7443", &tls, deadline)
         })?;
-        entered.try_recv().map_err(|_| "the resolver was never consulted")?;
+        stall.entered.try_recv().map_err(|_| "the resolver was never consulted")?;
         expect_deadline_timeout("DNS", result)?;
-        drop(gate);
+        // Causal: the resolver was handed the caller's original absolute deadline.
+        assert_eq!(seen_deadlines(&stall.deadlines)?, vec![Some(deadline)]);
+        drop(stall.gate);
         Ok(())
     }
 
@@ -1428,21 +1521,84 @@ mod tests {
             crate::close_mesh_server_stream(&mut first).map_err(|error| error.to_string())
         });
         // The first dial resolves normally; the retry's resolution stalls.
-        let (resolver, entered, gate) = stalling_resolver(1);
+        let stall = stalling_resolver(1);
         let tls = test_mesh_tls_config("gateway")?;
+        let first_deadline = Instant::now() + Duration::from_secs(30);
+        let second_deadline = Instant::now() + Duration::from_millis(750);
+        let (resolver, pool) = (stall.resolver, ResolverPool::new(4));
         let result = within_hang_guard("DNS during the stale-connection retry", move || {
-            let client = MeshHttpClient::new().with_resolver(resolver);
-            let first =
-                post_probe(&client, &endpoint, &tls, Instant::now() + Duration::from_secs(30));
-            let second =
-                post_probe(&client, &endpoint, &tls, Instant::now() + Duration::from_secs(2));
+            let client = MeshHttpClient::new().with_resolver(resolver, pool);
+            let first = post_probe(&client, &endpoint, &tls, first_deadline);
+            let second = post_probe(&client, &endpoint, &tls, second_deadline);
             (first, second)
         })?;
         assert_eq!(result.0?["first"], true);
-        entered.try_recv().map_err(|_| "the retry never consulted the resolver")?;
+        stall.entered.try_recv().map_err(|_| "the retry never consulted the resolver")?;
         expect_deadline_timeout("retry DNS", result.1)?;
-        drop(gate);
+        // The retry dial got the second request's original deadline, not a fresh one.
+        assert_eq!(
+            seen_deadlines(&stall.deadlines)?,
+            vec![Some(first_deadline), Some(second_deadline)]
+        );
+        drop(stall.gate);
         router.join().map_err(|_| "router panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn resolver_pool_refuses_when_stalled_lookups_fill_capacity_and_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let stall = stalling_resolver(0);
+        let pool = ResolverPool::new(2);
+        let probe_pool = Arc::clone(&pool);
+        let tls = test_mesh_tls_config("gateway")?;
+        let outcomes = within_hang_guard("resolver pool exhaustion", move || {
+            let client = MeshHttpClient::new().with_resolver(stall.resolver, probe_pool);
+            let mut outcomes = Vec::new();
+            for _ in 0..3 {
+                let deadline = Instant::now() + Duration::from_millis(100);
+                outcomes.push(post_probe(&client, "router.invalid:7443", &tls, deadline));
+            }
+            (outcomes, client, stall.entered, stall.gate)
+        })?;
+        let (mut outcomes, client, entered, gate) = outcomes;
+        let refused = outcomes.pop().ok_or("missing third outcome")?;
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            expect_deadline_timeout(&format!("stalled lookup {index}"), outcome)?;
+        }
+        // Two timed-out lookups still own their slots, so the third is refused with the exact
+        // typed error, and its resolver was never consulted.
+        assert!(
+            matches!(
+                refused,
+                Err(crate::TransportError::BackpressureRejected { capacity: 2, in_flight: 2 })
+            ),
+            "expected BackpressureRejected {{ capacity: 2, in_flight: 2 }}, got {refused:?}"
+        );
+        entered.try_recv()?;
+        entered.try_recv()?;
+        assert!(entered.try_recv().is_err(), "the refused lookup must not reach the resolver");
+        assert_eq!(pool.in_flight.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // Releasing the stalled resolvers lets the workers exit and return their capacity.
+        drop(gate);
+        let guard = Instant::now() + Duration::from_secs(10);
+        while pool.in_flight.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            if Instant::now() > guard {
+                return Err("hang guard: resolver capacity never returned".into());
+            }
+            thread::yield_now();
+        }
+        let tls = test_mesh_tls_config("gateway")?;
+        let recovered = post_probe(
+            &client,
+            "router.invalid:7443",
+            &tls,
+            Instant::now() + Duration::from_secs(30),
+        );
+        assert!(
+            matches!(&recovered, Err(crate::TransportError::Http(message)) if message.contains("bad endpoint")),
+            "expected a resolver error after recovery, got {recovered:?}"
+        );
         Ok(())
     }
 
@@ -1472,6 +1628,7 @@ mod tests {
                 deadline: None,
             },
             resolver: None,
+            resolver_pool: None,
         });
         assert!(rejected.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
