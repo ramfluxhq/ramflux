@@ -104,6 +104,7 @@ fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
     drop(registry);
     drop(store);
     std::fs::remove_file(path).unwrap();
+    assert_replay_budgets_and_indexed_gc_keep_unrelated_principals_live();
 }
 #[test]
 fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
@@ -246,8 +247,7 @@ fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
     drop(f);
     std::fs::remove_file(path).unwrap();
 }
-#[test]
-fn replay_budgets_and_indexed_gc_keep_unrelated_principals_live() {
+fn assert_replay_budgets_and_indexed_gc_keep_unrelated_principals_live() {
     let path = path("capacity");
     let f = RetirementFixture::new(&path);
     let now = f.now;
