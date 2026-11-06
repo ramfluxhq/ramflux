@@ -60,7 +60,7 @@ pub fn build_publication_snapshot(value: &p::PrekeyPublicationSnapshot) -> Resul
 /// # Errors
 /// Rejects noncanonical values or bounds.
 pub fn build_lease_intent(value: &p::PrekeyLeaseIntent) -> Result<(Vec<u8>, [u8; 32])> {
-    if value.expires_at.checked_sub(value.issued_at).is_none_or(|ttl| ttl > 300) {
+    if value.expires_at.checked_sub(value.issued_at).is_none_or(|ttl| ttl > 600) {
         return Err(p::DecodeError::Value.into());
     }
     Ok((value.to_bytes()?, c::lease_operation_id(value)?))

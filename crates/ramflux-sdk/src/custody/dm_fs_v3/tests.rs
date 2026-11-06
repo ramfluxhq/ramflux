@@ -303,19 +303,24 @@ fn public_view_contract() -> Result {
         verify_public_view(&changed.to_bytes()?, &view.authority, view.home_generation),
         Err(binding)
     );
-    let mut changed = view.clone();
-    changed.authority.principal_id.push('x');
-    assert_eq!(
-        verify_public_view(&changed.to_bytes()?, &view.authority, view.home_generation),
-        Err(binding)
-    );
-    let mut changed = view.clone();
-    changed.base.branch.principal_id.push('x');
-    changed.base = build_base(changed.base, &signer("SignedNativePrekeyBase")?)?;
-    assert_eq!(
-        verify_public_view(&changed.to_bytes()?, &view.authority, view.home_generation),
-        Err(binding)
-    );
+    for field in 0..8 {
+        let mut changed = view.clone();
+        mutate_branch(&mut changed.authority, field);
+        assert_eq!(
+            verify_public_view(&changed.to_bytes()?, &view.authority, view.home_generation),
+            Err(binding),
+            "authority branch field {field}"
+        );
+
+        let mut changed = view.clone();
+        mutate_branch(&mut changed.base.branch, field);
+        changed.base = sign_changed_branch_base(changed.base)?;
+        assert_eq!(
+            verify_public_view(&changed.to_bytes()?, &view.authority, view.home_generation),
+            Err(binding),
+            "base branch field {field}"
+        );
+    }
     let mut changed = view.clone();
     changed.base.signature[0] ^= 1;
     assert_eq!(
@@ -334,16 +339,27 @@ fn verifier_contract() -> Result {
     let intent = p::PrekeyLeaseIntent::from_bytes(&raw("PrekeyLeaseIntent")?)?;
     for mode in ["opk", "spk_only"] {
         let lease = p::PrekeyLeaseResult::from_bytes(&raw(&format!("lease_{mode}"))?)?;
-        let mut changed = lease.clone();
-        changed.requester.principal_id.push('x');
-        let changed = c::sign_lease_result(changed, &node)?;
-        assert_eq!(verify_lease_result(&changed.to_bytes()?, &intent, &key), Err(binding));
-        let mut other_intent = intent.clone();
-        other_intent.target.principal_id.push('x');
-        let mut changed = lease.clone();
-        changed.operation_id = c::lease_operation_id(&other_intent)?;
-        let changed = c::sign_lease_result(changed, &node)?;
-        assert_eq!(verify_lease_result(&changed.to_bytes()?, &other_intent, &key), Err(binding));
+        for field in 0..8 {
+            let mut changed = lease.clone();
+            mutate_branch(&mut changed.requester, field);
+            let changed = c::sign_lease_result(changed, &node)?;
+            assert_eq!(
+                verify_lease_result(&changed.to_bytes()?, &intent, &key),
+                Err(binding),
+                "requester branch field {field} ({mode})"
+            );
+
+            let mut other_intent = intent.clone();
+            mutate_branch(&mut other_intent.target, field);
+            let mut changed = lease.clone();
+            changed.operation_id = c::lease_operation_id(&other_intent)?;
+            let changed = c::sign_lease_result(changed, &node)?;
+            assert_eq!(
+                verify_lease_result(&changed.to_bytes()?, &other_intent, &key),
+                Err(binding),
+                "target branch field {field} ({mode})"
+            );
+        }
         let mut changed = lease.clone();
         changed.operation_id[0] ^= 1;
         let changed = c::sign_lease_result(changed, &node)?;
@@ -358,13 +374,16 @@ fn verifier_contract() -> Result {
     let status = p::OwnerPrekeyStatus::from_bytes(&raw("OwnerPrekeyStatus")?)?;
     let query = status_query(&status);
     assert_eq!(verify_owner_status(&status.to_bytes()?, &query, &status.base_hash, &key)?, status);
-    let mut changed = status.clone();
-    changed.owner.principal_id.push('x');
-    let changed = c::sign_owner_status(changed, &node)?;
-    assert_eq!(
-        verify_owner_status(&changed.to_bytes()?, &query, &status.base_hash, &key),
-        Err(binding)
-    );
+    for field in 0..8 {
+        let mut changed = status.clone();
+        mutate_branch(&mut changed.owner, field);
+        let changed = c::sign_owner_status(changed, &node)?;
+        assert_eq!(
+            verify_owner_status(&changed.to_bytes()?, &query, &status.base_hash, &key),
+            Err(binding),
+            "owner branch field {field}"
+        );
+    }
     let mut changed = status.clone();
     changed.base_hash[0] ^= 1;
     let changed = c::sign_owner_status(changed, &node)?;
@@ -390,6 +409,35 @@ fn verifier_contract() -> Result {
         Err(signature)
     );
     received_bytes_contract()
+}
+
+fn mutate_branch(branch: &mut p::QualifiedBranch, field: usize) {
+    match field {
+        0 => branch.account_anchor[0] ^= 1,
+        1 => branch.principal_id.push('x'),
+        2 => branch.device_id.push('x'),
+        3 => branch.device_epoch += 1,
+        4 => branch.certificate_hash[0] ^= 1,
+        5 => branch.record_hash[0] ^= 1,
+        6 => {
+            branch.signing_key = SigningKey::from_bytes(&[0xa5; 32]).verifying_key().to_bytes();
+        }
+        7 => branch.agreement_key[0] ^= 1,
+        _ => unreachable!("qualified branch field index"),
+    }
+}
+
+fn sign_changed_branch_base(
+    mut base: p::SignedNativePrekeyBase,
+) -> Result<p::SignedNativePrekeyBase> {
+    let owner = signer("SignedNativePrekeyBase")?;
+    let signer = if base.branch.signing_key == c::NativePrekeySigner::public_key(&owner) {
+        owner
+    } else {
+        FixtureSigner(SigningKey::from_bytes(&[0xa5; 32]))
+    };
+    base.signature = [0; 64];
+    Ok(build_base(base, &signer)?)
 }
 
 fn received_bytes_contract() -> Result {
@@ -508,14 +556,14 @@ fn builder_bounds() -> Result {
     max_snapshot.retirement_digest = c::retirement_digest(&max_snapshot.pending_retirements)?;
     build_publication_snapshot(&max_snapshot)?;
     let mut intent = p::PrekeyLeaseIntent::from_bytes(&raw("PrekeyLeaseIntent")?)?;
-    for lifetime in [0, 300] {
+    for lifetime in [0, 300, 301, 600] {
         intent.expires_at = intent.issued_at + lifetime;
         build_lease_intent(&intent)?;
     }
-    for expires_at in [intent.issued_at - 1, intent.issued_at + 301] {
-        intent.expires_at = expires_at;
-        assert_eq!(build_lease_intent(&intent), Err(p::DecodeError::Value.into()));
-    }
+    intent.expires_at = intent.issued_at + 601;
+    assert_eq!(build_lease_intent(&intent), Err(p::DecodeError::Value.into()));
+    intent.expires_at = intent.issued_at - 1;
+    assert_eq!(build_lease_intent(&intent), Err(p::DecodeError::Value.into()));
     Ok(())
 }
 
