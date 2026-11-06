@@ -229,3 +229,37 @@ fn publication_target_lifecycle() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn page_snapshot_copies_bounded_atomic_cursor_and_abort_view() -> Result {
+    let root = fixture("bounded-page-snapshot");
+    let store = test_store(&root, 0, 1024 * 1024)?;
+    let id = store.initialize_inbox("target")?;
+    let core = store.publication_core()?;
+    {
+        let mut registry = lock(&core.shared);
+        let inbox = registry
+            .inboxes
+            .get_mut(&Key { target: "target".into(), incarnation: id.clone() })
+            .expect("registered inbox");
+        inbox.published = 1500;
+        inbox.committed_settled = 3;
+        inbox.aborted.insert(2, 5);
+        inbox.aborted.extend((3..=602).map(|n| (2 * n, 2 * n)));
+    }
+    let snapshot = core.page_view("target", &id, 0);
+    assert_eq!((snapshot.0, snapshot.1), (1500, 3));
+    assert_eq!(snapshot.2.len(), 512);
+    assert_eq!(snapshot.2.first(), Some(&(2, 5)));
+    assert_eq!(snapshot.2.last(), Some(&(1026, 1026)));
+    assert!(core.page_registry_unlocked());
+    core.commit_settled("target", &id, 1100);
+    assert_eq!((snapshot.0, snapshot.1, snapshot.2[0]), (1500, 3, (2, 5)));
+    let later = core.page_view("target", &id, 0);
+    assert_eq!(later.1, 1100);
+    assert!(later.2.iter().all(|(lo, _)| *lo > 1100));
+    drop(core);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

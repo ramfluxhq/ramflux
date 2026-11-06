@@ -58,10 +58,12 @@ fn seek_budget() {
     // an exclusive lower-bound seek plus unbounded upper end uses <=11*height.
     // Both pending/dead-letter seeks are counted by SequenceKey::Ord, not labels.
     for n in [64_u64, 4096, 65536] {
-        let inbox = inbox(1..=n, i64::MAX);
-        for after in [n - 1, n, n + 1] {
+        let inbox = inbox((1..=n).map(|seq| seq * 2), i64::MAX);
+        for after in [2 * n - 1, 2 * n, n + 1] {
             COMPARISONS.with(|c| c.set(0));
-            let _ = inbox.resume_page("target", after, 1, 0);
+            let page = inbox.resume_page("target", after, 1, 0).expect("valid seek");
+            check(&page);
+            assert!(COMPARISONS.with(std::cell::Cell::get) > 0);
             let mut height = 1;
             let mut capacity = n;
             while capacity >= 6 {
@@ -133,7 +135,11 @@ fn page_sparse_coverage_and_caps() -> Result {
     let sparse = inbox([1, huge, huge + 2], i64::MAX);
     assert_eq!(sparse.resume_page("target", 0, 0, 0).err(), Some(PageError::InvalidLimit));
     assert_eq!(sparse.resume_page("target", huge + 3, 1, 0).err(), Some(PageError::CursorAhead));
+    COMPARISONS.with(|c| c.set(0));
+    VISITS.with(|c| c.set(0));
     let page = sparse.resume_page("target", 1, 10000, 0)?;
+    assert_eq!(VISITS.with(std::cell::Cell::get), 2);
+    assert!((1..=11).contains(&COMPARISONS.with(std::cell::Cell::get)));
     check(&page);
     assert_eq!(page.entries.len(), 2);
     assert_eq!(page.covered_through_seq, huge + 2);
@@ -178,6 +184,10 @@ fn actual_worst_size(page: &ResumePage) -> usize {
         "oversize_next",
     ] {
         value[field] = serde_json::json!(u64::MAX);
+    }
+    for loss in value["known_losses"].as_array_mut().expect("loss array") {
+        loss["from_seq"] = serde_json::json!(u64::MAX);
+        loss["to_seq"] = serde_json::json!(u64::MAX);
     }
     value["more"] = serde_json::json!(false);
     serde_json::to_vec(&value).expect("wire bytes").len()
@@ -306,11 +316,16 @@ fn inbox_incarnation_reset() -> Result {
         let page = router.resume_page("target", 0, 256, 0)?;
         check(&page);
         assert_eq!(page.settled_through_seq, 30);
+        assert_eq!(page.issued_inbox_seq, 50);
+        assert!(page.known_losses.is_empty());
         assert_eq!(page.entries.len(), 20);
         assert_ne!(page.incarnation_id, Some(old));
-        let expired = router.resume_page("target", 30, 256, i64::MAX)?;
+        let expired = router.resume_page("target", 20, 256, i64::MAX)?;
         check(&expired);
         assert_eq!(expired.incarnation_id, page.incarnation_id);
+        assert!(expired.after_inbox_seq < expired.settled_through_seq);
+        assert_eq!(expired.issued_inbox_seq, 50);
+        assert!(expired.known_losses.iter().all(|loss| loss.from_seq > 30));
         assert_eq!(expired.known_losses.len(), 1);
         assert_eq!((expired.known_losses[0].from_seq, expired.known_losses[0].to_seq), (31, 50));
         drop(store);
@@ -364,5 +379,52 @@ fn out_of_order_process_crash() -> Result {
         drop(store);
         std::fs::remove_dir_all(root)?;
     }
+    Ok(())
+}
+
+#[test]
+fn page_walk_releases_publication_lock_and_clones_each_entry_once() -> Result {
+    let root = fixture("page-unlocked-walk");
+    let store = test_store(&root, 0, 1024 * 1024)?;
+    let id = store.initialize_inbox("target")?;
+    let core = store.publication_core()?;
+    core.register("target", &id, 245)?;
+    let mut source = inbox(1..=245, i64::MAX);
+    source.restore_incarnation("target", id.clone());
+    source.publication = Some(core.clone());
+    for row in source.pending.get_mut("target").expect("rows").values_mut() {
+        row.envelope.encrypted_payload = "x".repeat(3500);
+    }
+    let observed = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = observed.clone();
+    let view = core.clone();
+    WALK_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            assert!(view.page_registry_unlocked(), "walk holds the publication registry");
+            assert_eq!(view.settled_view("target", &id), (245, 0));
+            seen.set(seen.get() + 1);
+        }));
+    });
+    crate::inbox::CLONED_ENTRIES.with(|counts| counts.borrow_mut().clear());
+    MEASUREMENTS.with(|count| count.set(0));
+    let result = source.resume_page("target", 0, 256, 0);
+    assert_eq!(
+        MEASUREMENTS.with(std::cell::Cell::get),
+        246,
+        "one header plus one measurement per record"
+    );
+    WALK_HOOK.with(|hook| *hook.borrow_mut() = None);
+    let page = result?;
+    check(&page);
+    assert_eq!(page.entries.len(), 245);
+    assert!(observed.get() >= 245);
+    assert_eq!(
+        crate::inbox::CLONED_ENTRIES.with(|counts| counts.borrow().values().sum::<usize>()),
+        245
+    );
+    drop(source);
+    drop(core);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

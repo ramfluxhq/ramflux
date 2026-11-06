@@ -412,21 +412,39 @@ impl PublicationCore {
             .map_or((0, 0), |inbox| (inbox.published, inbox.committed_settled.min(inbox.published)))
     }
 
-    /// Borrow published cursor and sparse abort boundaries under one lock.
-    pub(crate) fn with_page_view<T>(
+    /// Copy a bounded page view atomically; callers walk after releasing the registry.
+    pub(crate) fn page_view(
         &self,
         target: &str,
         incarnation: &str,
-        f: impl FnOnce(u64, u64, &BTreeMap<u64, u64>) -> T,
-    ) -> T {
+        after: u64,
+    ) -> (u64, u64, Vec<(u64, u64)>) {
         let registry = lock(&self.shared);
-        if let Some(inbox) =
+        let Some(inbox) =
             registry.inboxes.get(&Key { target: target.into(), incarnation: incarnation.into() })
-        {
-            f(inbox.published, inbox.committed_settled.min(inbox.published), &inbox.aborted)
-        } else {
-            f(0, 0, &BTreeMap::new())
-        }
+        else {
+            return (0, 0, Vec::new());
+        };
+        let settled = inbox.committed_settled.min(inbox.published);
+        let start = after.max(settled);
+        let lower = inbox
+            .aborted
+            .range(..=start)
+            .next_back()
+            .filter(|(_, end)| **end > start)
+            .map_or(std::ops::Bound::Excluded(start), |(&lo, _)| std::ops::Bound::Included(lo));
+        let ranges = inbox
+            .aborted
+            .range((lower, std::ops::Bound::Unbounded))
+            .take(crate::inbox_page::VISIT_CAP)
+            .map(|(&lo, &hi)| (lo, hi))
+            .collect();
+        (inbox.published, settled, ranges)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_registry_unlocked(&self) -> bool {
+        self.shared.registry.try_lock().is_ok()
     }
 
     /// Earliest unresolved assignment, under the same lock as allocation/publication.

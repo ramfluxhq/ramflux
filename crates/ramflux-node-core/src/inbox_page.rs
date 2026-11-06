@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{borrow::Borrow, cmp::Ordering, io, ops::Bound};
 
 pub const PAGE_BYTE_CAP: usize = 1_048_576 - 65_536;
-const VISIT_CAP: usize = 512;
+pub(crate) const VISIT_CAP: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SequenceKey(pub u64);
@@ -83,7 +83,10 @@ pub enum PageError {
 struct Counter(usize);
 impl io::Write for Counter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 += bytes.len();
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("page size overflow"))?;
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -91,13 +94,65 @@ impl io::Write for Counter {
     }
 }
 fn measured<T: Serialize>(value: &T) -> Result<usize, PageError> {
+    #[cfg(test)]
+    MEASUREMENTS.with(|count| count.set(count.get() + 1));
     let mut count = Counter(0);
     serde_json::to_writer(&mut count, value).map_err(|_| PageError::Serialization)?;
     Ok(count.0)
 }
+#[derive(Serialize)]
+struct BorrowedRecord<'a> {
+    entry: &'a InboxEntry,
+    retain_until: i64,
+}
 impl ResumePage {
-    fn worst_size(&self) -> Result<usize, PageError> {
-        // Borrow the same schema: only mutable header fields change width.
+    fn push_loss(
+        &mut self,
+        from: u64,
+        to: u64,
+        reason: PageReason,
+        size: &mut usize,
+    ) -> Result<bool, PageError> {
+        let merges = self
+            .known_losses
+            .last()
+            .is_some_and(|last| last.to_seq.checked_add(1) == Some(from) && last.reason == reason);
+        if !merges {
+            if self.known_losses.len() == 64 {
+                return Ok(false);
+            }
+            let added = measured(&KnownLoss { from_seq: u64::MAX, to_seq: u64::MAX, reason })?
+                + usize::from(!self.known_losses.is_empty());
+            if *size + added > PAGE_BYTE_CAP {
+                return Ok(false);
+            }
+            *size += added;
+        }
+        add_loss(self, from, to, reason);
+        Ok(true)
+    }
+    fn push_entry(
+        &mut self,
+        entry: &InboxEntry,
+        deadline: i64,
+        header: usize,
+        size: &mut usize,
+    ) -> Result<bool, PageError> {
+        let record_size = measured(&BorrowedRecord { entry, retain_until: deadline })?;
+        if header + record_size > PAGE_BYTE_CAP {
+            self.oversize_next = Some(entry.inbox_seq);
+            return Ok(false);
+        }
+        let added = record_size + usize::from(!self.entries.is_empty());
+        if *size + added > PAGE_BYTE_CAP {
+            return Ok(false);
+        }
+        *size += added;
+        self.entries.push(PageEntryRecord { entry: entry.clone(), retain_until: deadline });
+        Ok(true)
+    }
+    fn worst_header_size(&self) -> Result<usize, PageError> {
+        // Called once while both arrays are empty; reserve all mutable header widths.
         let mut header = self.clone();
         header.after_inbox_seq = u64::MAX;
         header.covered_through_seq = u64::MAX;
@@ -116,12 +171,8 @@ struct PageRequest<'a> {
     now: i64,
 }
 impl ResumePage {
-    fn empty(
-        request: PageRequest<'_>,
-        id: Option<&str>,
-        (issued, settled): (u64, u64),
-    ) -> Result<Self, PageError> {
-        let page = Self {
+    fn empty(request: PageRequest<'_>, id: Option<&str>, (issued, settled): (u64, u64)) -> Self {
+        Self {
             frame_type: "resume_page".into(),
             target_delivery_id: request.target.into(),
             incarnation_id: id.map(str::to_owned),
@@ -133,11 +184,7 @@ impl ResumePage {
             known_losses: Vec::new(),
             oversize_next: None,
             more: false,
-        };
-        if page.worst_size()? > 16 * 1024 {
-            return Err(PageError::HeaderTooLarge);
         }
-        Ok(page)
     }
 }
 impl RouterCore {
@@ -170,19 +217,12 @@ impl OpaqueDeviceInbox {
         }
         let id = self.incarnation_id(target);
         if let (Some(core), Some(id)) = (&self.publication, id) {
-            return core.with_page_view(target, id, |issued, settled, ranges| {
-                let start = after.max(settled);
-                let lower = ranges
-                    .range(..=start)
-                    .next_back()
-                    .filter(|(_, end)| **end > start)
-                    .map_or(Bound::Excluded(start), |(&lo, _)| Bound::Included(lo));
-                self.build_page(
-                    PageRequest { target, after, limit, now },
-                    (issued, settled),
-                    ranges.range((lower, Bound::Unbounded)).map(|(&lo, &hi)| (lo, hi)),
-                )
-            });
+            let (issued, settled, ranges) = core.page_view(target, id, after);
+            return self.build_page(
+                PageRequest { target, after, limit, now },
+                (issued, settled),
+                ranges.into_iter(),
+            );
         }
         let issued = self.issued_sequence(target);
         let settled = self.cursor_state(target).map_or(0, |c| c.settled_inbox_seq.min(issued));
@@ -205,21 +245,34 @@ impl OpaqueDeviceInbox {
         if after > issued {
             return Err(PageError::CursorAhead);
         }
-        let mut page = ResumePage::empty(request, self.incarnation_id(target), (issued, settled))?;
+        let mut page = ResumePage::empty(request, self.incarnation_id(target), (issued, settled));
+        let header_size = page.worst_header_size()?;
+        if header_size > 16 * 1024 {
+            return Err(PageError::HeaderTooLarge);
+        }
+        let mut size = header_size;
         let start = page.covered_through_seq;
         let mut pending = seek_rows(self.pending.get(target), start);
         let mut dead = seek_rows(self.dead_letter_index.get(target), start);
-        // Every fetched boundary, including lookahead, consumes one visit.
         let mut visits = 0;
         let mut p = next_counted(&mut pending, &mut visits);
         let mut d = next_counted(&mut dead, &mut visits);
         let mut aborted = aborted.by_ref().inspect(|_| observe_visit());
         let mut a = next_counted(&mut aborted, &mut visits);
         loop {
+            #[cfg(test)]
+            WALK_HOOK.with(|hook| {
+                if let Some(hook) = hook.borrow().as_ref() {
+                    hook();
+                }
+            });
+            if p.budget_spent() || d.budget_spent() || a.budget_spent() {
+                break;
+            }
             let next = [
-                p.map(|(k, _)| k.0),
-                d.map(|(k, _)| k.0),
-                a.map(|(lo, _)| lo.max(start.saturating_add(1))),
+                p.item().map(|(k, _)| k.0),
+                d.item().map(|(k, _)| k.0),
+                a.item().map(|(lo, _)| lo.max(start.saturating_add(1))),
             ]
             .into_iter()
             .flatten()
@@ -229,68 +282,44 @@ impl OpaqueDeviceInbox {
                 break;
             };
             page.covered_through_seq = page.covered_through_seq.max(seq - 1);
-            let mut candidate = page.clone();
             let mut end = seq;
-            if p.is_some_and(|(k, _)| k.0 == seq) {
-                let (_, entry) = p.ok_or(PageError::Serialization)?;
+            let mut loss = None;
+            if let Some((_, entry)) = p.item().filter(|(k, _)| k.0 == seq) {
                 let deadline = self.retain_until(entry);
                 if deadline > now {
-                    if candidate.entries.len() == limit.min(256) {
+                    if page.entries.len() == limit.min(256) {
                         break;
                     }
-                    let record = PageEntryRecord { entry: entry.clone(), retain_until: deadline };
-                    let mut alone = page.clone();
-                    alone.entries = vec![record.clone()];
-                    alone.known_losses.clear();
-                    if alone.worst_size()? > PAGE_BYTE_CAP {
-                        page.oversize_next = Some(seq);
+                    if !page.push_entry(entry, deadline, header_size, &mut size)? {
                         break;
                     }
-                    candidate.entries.push(record);
                 } else {
-                    add_loss(&mut candidate, seq, seq, PageReason::Expired);
+                    loss = Some(PageReason::Expired);
                 }
-            } else if d.is_some_and(|(k, _)| k.0 == seq) {
-                let (_, row) = d.ok_or(PageError::Serialization)?;
+            } else if let Some((_, row)) = d.item().filter(|(k, _)| k.0 == seq) {
                 if row.retain_until > now {
-                    add_loss(
-                        &mut candidate,
-                        seq,
-                        seq,
-                        match row.reason {
-                            DeadLetterReason::AckWindowOverflow => PageReason::AckWindowOverflow,
-                            DeadLetterReason::Nacked(_) => PageReason::Nacked,
-                        },
-                    );
+                    loss = Some(match row.reason {
+                        DeadLetterReason::AckWindowOverflow => PageReason::AckWindowOverflow,
+                        DeadLetterReason::Nacked(_) => PageReason::Nacked,
+                    });
                 }
-            } else if let Some((_, hi)) = a {
+            } else if let Some((_, hi)) = a.item() {
                 end = hi.min(issued);
-                add_loss(&mut candidate, seq, end, PageReason::Aborted);
+                loss = Some(PageReason::Aborted);
             }
-            candidate.covered_through_seq = end;
-            if candidate.known_losses.len() > 64 || candidate.worst_size()? > PAGE_BYTE_CAP {
-                break;
-            }
-            page = candidate;
-            // Stop before loading another key if the shared visit budget is spent.
-            let advance_pending = p.is_some_and(|(k, _)| k.0 <= end);
-            let advance_dead = d.is_some_and(|(k, _)| k.0 <= end);
-            let advance_abort = a.is_some_and(|(_, hi)| hi <= end);
-            if visits
-                + usize::from(advance_pending)
-                + usize::from(advance_dead)
-                + usize::from(advance_abort)
-                > VISIT_CAP
+            if let Some(reason) = loss
+                && !page.push_loss(seq, end, reason, &mut size)?
             {
                 break;
             }
-            if p.is_some_and(|(k, _)| k.0 <= end) {
+            page.covered_through_seq = end;
+            if p.item().is_some_and(|(k, _)| k.0 <= end) {
                 p = next_counted(&mut pending, &mut visits);
             }
-            if d.is_some_and(|(k, _)| k.0 <= end) {
+            if d.item().is_some_and(|(k, _)| k.0 <= end) {
                 d = next_counted(&mut dead, &mut visits);
             }
-            if a.is_some_and(|(_, hi)| hi <= end) {
+            if a.item().is_some_and(|(_, hi)| hi <= end) {
                 a = next_counted(&mut aborted, &mut visits);
             }
         }
@@ -314,16 +343,36 @@ fn observe_visit() {
     #[cfg(test)]
     VISITS.with(|count| count.set(count.get() + 1));
 }
-fn next_counted<I: Iterator>(iter: &mut I, visits: &mut usize) -> Option<I::Item> {
-    if *visits == VISIT_CAP {
-        return None;
-    }
-    let item = iter.next();
-    if item.is_some() {
-        *visits += 1;
-    }
-    item
+enum Counted<T> {
+    Item(T),
+    Exhausted,
+    BudgetSpent,
 }
+impl<T: Copy> Counted<T> {
+    fn item(&self) -> Option<T> {
+        match self {
+            Self::Item(item) => Some(*item),
+            _ => None,
+        }
+    }
+    fn budget_spent(&self) -> bool {
+        matches!(self, Self::BudgetSpent)
+    }
+}
+fn next_counted<I: Iterator>(iter: &mut I, visits: &mut usize) -> Counted<I::Item> {
+    if *visits >= VISIT_CAP {
+        return Counted::BudgetSpent;
+    }
+    match iter.next() {
+        Some(item) => {
+            *visits += 1;
+            Counted::Item(item)
+        }
+        None => Counted::Exhausted,
+    }
+}
+#[cfg(test)]
+thread_local! { static MEASUREMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; static WALK_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) }; }
 fn add_loss(page: &mut ResumePage, from_seq: u64, to_seq: u64, reason: PageReason) {
     if let Some(last) = page
         .known_losses
