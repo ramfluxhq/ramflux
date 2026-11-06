@@ -90,12 +90,6 @@ fn sdk_renewal_uses_current_account_branch_and_pinned_home() -> Result {
     let signed = sign_home_renewal(&account, &vault, &input)?;
     signed.proof.verify(&q.signing_public_key, &signed.signature)?;
     assert_eq!(signed, sign_home_renewal(&account, &vault, &input)?);
-    let bad = RenewalTrust { home: "other", ..trust };
-    let changed = RenewalSigningRequest { trust: &bad, ..input };
-    assert_eq!(
-        sign_with_branch(&credentials.signing.signing_key, &q, &changed),
-        Err(FormatError("renewal home"))
-    );
     let mut changed_w = w.clone();
     changed_w.requester.device_epoch += 1;
     let changed = RenewalSigningRequest { attestation: &changed_w, ..input };
@@ -106,13 +100,6 @@ fn sdk_renewal_uses_current_account_branch_and_pinned_home() -> Result {
         }
         result => return Err(format!("unexpected epoch refusal: {result:?}").into()),
     }
-    let mut bad_signature = sig;
-    bad_signature[0] ^= 1;
-    let changed = RenewalSigningRequest { home_signature: &bad_signature, ..input };
-    assert_eq!(
-        sign_with_branch(&credentials.signing.signing_key, &q, &changed),
-        Err(FormatError("grant signature"))
-    );
     assert_signing_bindings(&credentials.signing.signing_key, &q, &input)?;
     Ok(())
 }
@@ -122,6 +109,13 @@ fn assert_signing_bindings(
     q: &QualifiedOwner,
     input: &RenewalSigningRequest<'_>,
 ) -> Result {
+    let trust = RenewalTrust { home: "other", ..*input.trust };
+    let changed = RenewalSigningRequest { trust: &trust, ..*input };
+    assert_eq!(sign_with_branch(key, q, &changed), Err(FormatError("renewal home")));
+    let mut bad_signature = *input.home_signature;
+    bad_signature[0] ^= 1;
+    let changed = RenewalSigningRequest { home_signature: &bad_signature, ..*input };
+    assert_eq!(sign_with_branch(key, q, &changed), Err(FormatError("grant signature")));
     let trust = RenewalTrust { authority_generation: 2, ..*input.trust };
     let changed = RenewalSigningRequest { trust: &trust, ..*input };
     assert_eq!(sign_with_branch(key, q, &changed), Err(FormatError("renewal source generation")));
