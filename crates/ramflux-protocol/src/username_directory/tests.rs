@@ -36,6 +36,10 @@ fn corpus() -> Result<Corpus, serde_json::Error> {
 }
 fn roundtrip(kind: &str, bytes: &[u8]) -> Result<Vec<u8>, CodecError> {
     match kind {
+        "ExpectedHead" => encode(&decode::<ExpectedHead>(bytes)?),
+        "DeletePreemptingPending" => encode(&decode::<DeletePreemptingPending>(bytes)?),
+        "BatchResult" => encode(&decode::<BatchResult>(bytes)?),
+        "BatchRow" => encode(&decode::<BatchRow>(bytes)?),
         "UsernameBindingBody" => encode(&decode::<UsernameBindingBody>(bytes)?),
         "ProfileRef" => encode(&decode::<ProfileRef>(bytes)?),
         "AvatarRef" => encode(&decode::<AvatarRef>(bytes)?),
@@ -420,12 +424,13 @@ fn username_canonical_domains_and_maxima() -> Result<(), Box<dyn std::error::Err
         Some(60000)
     );
     assert_eq!(DirectoryCode::AuthenticationRequired.http_status(), 401);
-    for case in vectors.valid {
+    for case in &vectors.valid {
         let bytes = roundtrip(&case.kind, case.wire.as_bytes())
             .map_err(|e| std::io::Error::other(format!("{}: {e}", case.name)))?;
         assert_eq!(bytes, case.wire.as_bytes(), "{} identity", case.name);
         assert_eq!(bytes.len(), case.bytes, "{} maximum", case.name);
     }
+    batch_closed_grammar(&vectors.valid)?;
     assert_negative_cases(&vectors.invalid);
     let sources: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../scripts/reference/username_directory/oracle_sources.json"
@@ -482,5 +487,132 @@ fn username_v1_native_profile_unchanged() -> Result<(), Box<dyn std::error::Erro
     let invalid =
         v2.wire.replace(crate::domain::IDENTITY_PROFILE_V2, "ramflux.identity.profile.v9");
     assert!(crate::identity_profile_v2::decode_profile_document(invalid.as_bytes()).is_err());
+    Ok(())
+}
+
+// New records are checked on received canonical bytes, including every required field.
+fn batch_closed_grammar(cases: &[Case]) -> Result<(), Box<dyn std::error::Error>> {
+    for kind in ["ExpectedHead", "DeletePreemptingPending", "BatchResult", "BatchRow"] {
+        let case = cases
+            .iter()
+            .find(|c| c.name == format!("batch_{kind}"))
+            .ok_or_else(|| std::io::Error::other("missing batch fixture"))?;
+        let value: serde_json::Value = serde_json::from_str(&case.wire)?;
+        let fields = value.as_object().ok_or_else(|| std::io::Error::other("not an object"))?;
+        for key in fields.keys() {
+            let mut changed = value.clone();
+            changed
+                .as_object_mut()
+                .ok_or_else(|| std::io::Error::other("not an object"))?
+                .remove(key);
+            match roundtrip(kind, &crate::canonical_json_bytes(&changed)?) {
+                Err(CodecError::Json(error)) => {
+                    assert_eq!(error.to_string(), format!("missing field `{key}`"));
+                }
+                other => {
+                    return Err(std::io::Error::other(format!("{kind}.{key}: {other:?}")).into());
+                }
+            }
+        }
+        for (key, original) in fields {
+            let mut changed = value.clone();
+            changed[key] = serde_json::Value::Null;
+            let expected_type = batch_null_type(key, original)?;
+            match roundtrip(kind, &crate::canonical_json_bytes(&changed)?) {
+                Err(CodecError::Json(error)) => {
+                    assert_eq!(
+                        error.to_string(),
+                        format!("invalid type: null, expected {expected_type}")
+                    );
+                }
+                other => {
+                    return Err(
+                        std::io::Error::other(format!("{kind}.{key} null: {other:?}")).into()
+                    );
+                }
+            }
+        }
+        for key in fields.keys() {
+            let duplicate = format!("{{\"{key}\":null,\"{key}\":null}}");
+            match roundtrip(kind, duplicate.as_bytes()) {
+                Err(CodecError::Protocol(crate::ProtocolError::IJson(error))) => {
+                    assert_eq!(
+                        error.to_string(),
+                        format!("duplicate I-JSON member at line 1 column {}", 11 + 2 * key.len())
+                    );
+                }
+                other => {
+                    return Err(std::io::Error::other(format!(
+                        "{kind}.{key} duplicate: {other:?}"
+                    ))
+                    .into());
+                }
+            }
+        }
+        let mut noncanonical = case.wire.as_bytes().to_vec();
+        noncanonical.push(b' ');
+        assert!(
+            matches!(roundtrip(kind, &noncanonical), Err(CodecError::Noncanonical)),
+            "{kind} byte identity"
+        );
+        let limit = if kind == "ExpectedHead" { 128 } else { 2048 };
+        assert!(
+            matches!(roundtrip(kind, &vec![b' '; limit + 1]), Err(CodecError::Field("frame_size"))),
+            "{kind} frame bound"
+        );
+        batch_unknown_field(kind, &value)?;
+    }
+    Ok(())
+}
+
+fn batch_null_type(key: &str, value: &serde_json::Value) -> Result<&'static str, std::io::Error> {
+    Ok(match value {
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Number(_) => "u64",
+        _ => match key {
+            "operation" => "struct Signed",
+            "expected_head" => "struct ExpectedHead",
+            "result" => "struct BatchResult",
+            _ => return Err(std::io::Error::other("unexpected field type")),
+        },
+    })
+}
+
+fn batch_unknown_field(
+    kind: &str,
+    value: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Every extra field (including caller-supplied members) has an exact serde error.
+    let allowed = match kind {
+        "ExpectedHead" => vec!["lsn", "digest"],
+        "DeletePreemptingPending" => {
+            vec!["tx_id", "operation", "expected_head", "requested_time"]
+        }
+        "BatchResult" => vec!["abort_digest", "delete_digest", "clock_floor"],
+        _ => vec![
+            "batch_id",
+            "root",
+            "request_hash",
+            "abort_tx_id",
+            "lsn_n1",
+            "lsn_n2",
+            "retain_until",
+            "result",
+        ],
+    };
+    let mut changed = value.clone();
+    changed["unknown"] = serde_json::Value::Null;
+    let expected = if allowed.len() == 2 {
+        "unknown field `unknown`, expected `lsn` or `digest`".to_owned()
+    } else {
+        format!(
+            "unknown field `unknown`, expected one of {}",
+            allowed.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
+        )
+    };
+    match roundtrip(kind, &crate::canonical_json_bytes(&changed)?) {
+        Err(CodecError::Json(error)) => assert_eq!(error.to_string(), expected),
+        other => return Err(std::io::Error::other(format!("{kind} extra: {other:?}")).into()),
+    }
     Ok(())
 }

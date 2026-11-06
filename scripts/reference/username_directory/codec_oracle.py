@@ -245,6 +245,46 @@ def fixtures():
     bad.append(dict(name='overfull_delta',type='CheckpointDelta',wire=encode(gc(33)),field='frame_size'))
     for label,wire in [('whitespace',' '+encode(binding())),('trailing',encode(binding())+'x'),('duplicate',encode(binding()).replace('"signature":','"signature":"'+S+'","signature":',1)),('nonminimal_escape',encode(binding()).replace(NAME,'\\u006d'+NAME[1:],1))]:
         bad.append(dict(name=label,type='UsernameBinding',wire=wire,field=''))
+    # r4f: independent byte-identity and exact-field vectors for the narrow codec delta.
+    delete=operation();delete['body'].update(action='delete',binding=None,discoverable=False,profile=ref(M-2))
+    request=dict(tx_id=H,operation=delete,expected_head=dict(lsn=M,digest=H),requested_time=M)
+    result=dict(abort_digest=H,delete_digest=I,clock_floor=M-86400)
+    batch=dict(batch_id=H,root=H,request_hash=H,abort_tx_id=I,lsn_n1=M-1,lsn_n2=M,retain_until=M,result=result)
+    new_values=dict(ExpectedHead=request['expected_head'],DeletePreemptingPending=request,BatchResult=result,BatchRow=batch)
+    for kind,value in new_values.items():
+        add('batch_'+kind,kind,value)
+        for field,v in value.items():
+            if isinstance(v,str):
+                changed=copy.deepcopy(value);changed[field]='invalid!';reject('batch_'+kind+'_'+field,kind,changed,field)
+            elif type(v) is int:
+                changed=copy.deepcopy(value);changed[field]=M+1;reject('batch_'+kind+'_'+field+'_unsafe',kind,changed,'!i_json')
+    def negative(label,kind,value,field):reject('batch_'+label,kind,value,field)
+    for field in ('lsn_n1','lsn_n2'):
+        v=copy.deepcopy(batch);v[field]=0;negative(field+'_zero','BatchRow',v,field)
+    v=copy.deepcopy(batch);v['abort_tx_id']=H;negative('same_ids','BatchRow',v,'abort_tx_id')
+    v=copy.deepcopy(batch);v['lsn_n2']=M-1;negative('nonconsecutive','BatchRow',v,'lsn_n2')
+    v=copy.deepcopy(batch);v['lsn_n1']=M;negative('lsn_exhaustion','BatchRow',v,'lsn_n2')
+    v=copy.deepcopy(batch);v['retain_until']=M-1;negative('short_retention','BatchRow',v,'retain_until')
+    v=copy.deepcopy(batch);v['result']['clock_floor']=M;negative('retention_exhaustion','BatchRow',v,'retain_until')
+    v=copy.deepcopy(request);v['operation']=operation();negative('other_action','DeletePreemptingPending',v,'action')
+    replacement=dict(table='batch',key=H,old=None,new=batch)
+    add('batch_replacement','Replacement',replacement)
+    v=copy.deepcopy(replacement);v['key']=I;negative('key_mismatch','Replacement',v,'batch_id')
+    v=copy.deepcopy(replacement);v.update(key=I,old=batch,new=None);negative('old_key_mismatch','Replacement',v,'batch_id')
+    add('batch_removal','Replacement',dict(table='batch',key=H,old=batch,new=None))
+    for clock in (0,M):
+        v=copy.deepcopy(result);v['clock_floor']=clock;add('batch_result_clock_'+str(clock),'BatchResult',v)
+    v=copy.deepcopy(replacement);v['key']='invalid!';negative('key_grammar','Replacement',v,'batch_id')
+    v=copy.deepcopy(replacement);v['old']=batch;negative('same_images','Replacement',v,'images')
+    v=copy.deepcopy(replacement);v['new']=None;negative('empty_images','Replacement',v,'images')
+    v=gc(1);v['rows']=[replacement];negative('caller_batch','CheckpointDelta',v,'batch')
+    for lsn,clock in ((0,0),(M,M)):
+        v=copy.deepcopy(request);v['expected_head']['lsn']=lsn;v['requested_time']=clock
+        add('batch_request_boundary_'+str(lsn),'DeletePreemptingPending',v)
+    v=copy.deepcopy(batch);v.update(lsn_n1=1,lsn_n2=2,retain_until=86400);v['result']['clock_floor']=0
+    add('batch_row_min','BatchRow',v)
+    v=copy.deepcopy(batch);v['result']['clock_floor']=0
+    add('batch_retention_above_min','BatchRow',v)
     review_cases, review_controls = review_vectors(values, valid)
     bad.extend(review_cases)
     valid.extend(review_controls)
