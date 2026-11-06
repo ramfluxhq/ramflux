@@ -344,6 +344,10 @@ fn large_scoped_grants_bind_reference_owner_and_grantee() {
             .ensure_generic_attachment_format(&shadow.object_id, Some(&shadow.manifest_hash))
             .is_err()
     );
+    assert!(store.ensure_generic_attachment_format(&shadow.object_id, Some("not-a-hash")).is_err());
+    assert!(
+        store.ensure_generic_attachment_format(&shadow.object_id, Some(&hex(&[0; 32]))).is_err()
+    );
     store.ensure_generic_attachment_format("generic-control", Some("generic-manifest")).unwrap();
     let ledger = store.attachment_ledger(super::super::AttachmentPolicy::default()).unwrap();
     let registry = ledger.scoped_grants(config.clone()).unwrap();
@@ -375,3 +379,5 @@ fn large_scoped_grants_bind_reference_owner_and_grantee() {
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
+
+mod admission_tests;
