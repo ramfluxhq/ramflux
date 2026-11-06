@@ -295,7 +295,7 @@ impl PairingWire for RoleContext {
         if self.role == "initiator"
             && let Some(v) = &self.common.destination_ref
         {
-            require(v != &self.device_ref, "destination_is_primary")?;
+            require(v.device_id != self.device_ref.device_id, "destination_is_primary")?;
         }
         budget(self, Self::LIMIT)
     }
@@ -323,7 +323,10 @@ impl PairingWire for Transcript {
             "role_slots",
         )?;
         require(self.initiator.common == self.responder.common, "common_binding")?;
-        require(self.initiator.device_ref != self.responder.device_ref, "distinct_devices")?;
+        require(
+            self.initiator.device_ref.device_id != self.responder.device_ref.device_id,
+            "distinct_devices",
+        )?;
         budget(self, Self::LIMIT)
     }
 }

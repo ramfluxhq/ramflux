@@ -34,6 +34,8 @@ def run(args, data):
 
 def generate():
     manifest = json.loads((FIX / 'manifest.json').read_text())
+    assert hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == manifest['oracle_sha256']
+    assert hashlib.sha256((REF/'hash.c').read_bytes()).hexdigest() == manifest['adapter_sha256']
     for name, digest in manifest['blake3_c']['files_sha256'].items():
         assert hashlib.sha256((REF / name).read_bytes()).hexdigest() == digest, name
     common = dict(schema='ramflux.pairing.Common.v2', version=2,
