@@ -24,11 +24,14 @@ pub(super) const META: TableDefinition<&str, u64> =
 // about 11% margin over the worst measured row.
 pub(super) const ROW_CHARGE: u64 = 672;
 pub(super) const ROOT_CHARGE: u64 = 16 * 1024;
-pub(super) const CAP_BYTES: u64 = 8 * 1024 * 1024;
-// Largest entry count whose worst-case charge still fits CAP_BYTES. At this count
-// the byte cap and the entry cap refuse together; 16384 rows cannot fit at the
-// measured worst case within 8 MiB.
-pub(super) const DEFAULT_ENTRIES: u64 = (CAP_BYTES - ROOT_CHARGE) / ROW_CHARGE;
+pub(super) const DEFAULT_ENTRIES: u64 = 16_384;
+// Live-page budget covers the root charge too: 16 KiB root + 16384 x 672 B
+// = 11026432 B. Both caps are reachable at the measured worst case, so the entry
+// cap and the byte cap refuse together at 16384 rows. The redb file can reach
+// about 2x live pages through copy-on-write slack; that slack is not admission-
+// controlled, and compaction or a free-page policy is a pre-activation follow-up.
+pub(super) const CAP_BYTES: u64 = ROOT_CHARGE + DEFAULT_ENTRIES * ROW_CHARGE;
+const _: () = assert!(CAP_BYTES == 11_026_432);
 #[derive(Clone, Copy)]
 pub(super) struct Limits {
     pub entries: u64,

@@ -8,66 +8,80 @@ use crate::relay::attachment::grants::test_support::{auth, fixtures, signed};
 use crate::relay::attachment::{
     AttachmentLedger, AttachmentOwner, AttachmentPolicy, AttachmentReservationRequest,
 };
+use ramflux_protocol::large_attachment::QualifiedOwner;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::Arc;
 
-/// Fills the default entry and byte caps with the worst-case principal distribution
-/// (one nonce per distinct qualified principal, so every row also owns a principal
-/// counter). Filling uses the storage admission with per-batch commits on a
-/// file-backed redb, because one owner can register at most 1024 grants and the
-/// public path cannot reach 10k distinct principals from one owner. The on-disk
-/// size and the next public admission are then checked against the real caps.
-pub(super) fn assert_default_capacity_worst_case_principals_on_disk() {
-    let path = super::tests::path("worst-capacity");
+/// Live-page budget: 16 KiB root plus 16384 rows at 672 B, independent of the constants.
+const LIVE_BUDGET: u64 = 11_026_432;
+/// Distinct principals available to each fill. Both modes stop at their refusal first.
+const FILL_PRINCIPALS: usize = 24_576;
+const NOW: u64 = 1_700_000_001;
+const UPLOAD: [u8; 32] = [21; 32];
+
+/// Creates a file-backed ledger with one committed attachment that grants can bind to.
+fn open_committed_ledger(name: &str) -> (std::path::PathBuf, AttachmentLedger) {
+    let path = super::tests::path(name);
     let db = redb::Database::create(&path).unwrap();
     let tx = db.begin_write().unwrap();
-    crate::relay::attachment::install(&tx, 1_700_000_001).unwrap();
+    crate::relay::attachment::install(&tx, NOW).unwrap();
     tx.commit().unwrap();
     let ledger = AttachmentLedger::new(Arc::new(db), AttachmentPolicy::default()).unwrap();
-    let (native, grant) = fixtures();
-    let now = 1_700_000_001;
+    let (native, _grant) = fixtures();
     let owner =
         AttachmentOwner::from_authenticated_session(&native.manifest().owner.account_anchor)
             .unwrap();
-    let upload = [21; 32];
     ledger
         .reserve(
             &owner,
             AttachmentReservationRequest {
-                upload_id: upload,
+                upload_id: UPLOAD,
                 object_id: native.manifest().object_id,
                 layout: native.manifest().layout,
             },
-            now - 1,
+            NOW - 1,
         )
         .unwrap();
-    ledger.bind(&owner, &upload, &native, now - 1).unwrap();
-    ledger.commit(&owner, &upload, now - 1).unwrap();
-    let registry = ledger.scoped_grants(authority()).unwrap();
-    let entries = Limits::default().entries;
-    let requester = grant.grant().grantee.clone();
-    // Worst layout: principals arrive in digest (key) order, so every table appends
-    // sequentially and leaves the densest-fragmenting B-tree pages behind.
-    let mut principals: Vec<(String, [u8; 64])> = (0..entries)
+    ledger.bind(&owner, &UPLOAD, &native, NOW - 1).unwrap();
+    ledger.commit(&owner, &UPLOAD, NOW - 1).unwrap();
+    (path, ledger)
+}
+
+/// Admits distinct principals in digest (key) order, the worst B-tree layout, one
+/// committed transaction per admission, until the first refusal. Returns the number
+/// admitted and the refusal, if any.
+fn fill_worst_case(
+    ledger: &AttachmentLedger,
+    requester: &QualifiedOwner,
+    limits: Limits,
+) -> (u64, Option<AttachmentReplayError>) {
+    let mut others: Vec<(String, [u8; 64])> = (0..FILL_PRINCIPALS)
         .map(|n| {
             let mut other = requester.clone();
             other.account_anchor = format!("principal-{n}");
             (other.account_anchor.clone(), principal("node-a", &other))
         })
         .collect();
-    principals.sort_by_key(|(_, digest)| *digest);
-    // One committed transaction per admission, as the production path does.
-    for (anchor, _) in principals {
-        let tx = ledger.db.begin_write().unwrap();
+    others.sort_by_key(|(_, digest)| *digest);
+    let mut admitted = 0_u64;
+    for (anchor, _) in others {
         let mut other = requester.clone();
         other.account_anchor = anchor;
-        consume(&tx, "node-a", &other, &proof(now, 0), now, Limits::default()).unwrap();
-        tx.commit().unwrap();
+        let tx = ledger.db.begin_write().unwrap();
+        match consume(&tx, "node-a", &other, &proof(NOW, 0), NOW, limits) {
+            Ok(()) => {
+                tx.commit().unwrap();
+                admitted += 1;
+            }
+            Err(error) => return (admitted, Some(error)),
+        }
     }
+    (admitted, None)
+}
+
+/// Sums live redb pages across the replay tables, the quantity the annex budget covers.
+fn live_bytes(ledger: &AttachmentLedger) -> u64 {
     let tx = ledger.db.begin_read().unwrap();
-    assert_eq!(tx.open_table(NONCES).unwrap().len().unwrap(), entries);
-    assert_eq!(tx.open_table(PRINCIPALS).unwrap().len().unwrap(), entries);
-    let charged = tx.open_table(META).unwrap().get("bytes").unwrap().unwrap().value();
     let mut live = 0_u64;
     for stats in [
         tx.open_table(NONCES).unwrap().stats().unwrap(),
@@ -77,15 +91,35 @@ pub(super) fn assert_default_capacity_worst_case_principals_on_disk() {
     ] {
         live += stats.stored_bytes() + stats.metadata_bytes() + stats.fragmented_bytes();
     }
-    drop(tx);
-    // The cap is ledger storage (live redb pages, annex section 9). File length is
-    // reported only: copy-on-write slack in the file is not bounded by the charge.
+    live
+}
+
+fn charged_bytes(ledger: &AttachmentLedger) -> u64 {
+    let tx = ledger.db.begin_read().unwrap();
+    tx.open_table(META).unwrap().get("bytes").unwrap().unwrap().value()
+}
+
+/// Default caps: exactly 16384 worst-case rows fit, and the next public admission is refused.
+pub(super) fn assert_default_capacity_worst_case_principals_on_disk() {
+    assert_eq!(CAP_BYTES, LIVE_BUDGET);
+    assert_eq!(DEFAULT_ENTRIES, 16_384);
+    let (path, ledger) = open_committed_ledger("worst-capacity");
+    let (native, grant) = fixtures();
+    let registry = ledger.scoped_grants(authority()).unwrap();
+    let requester = grant.grant().grantee.clone();
+    let (admitted, refusal) = fill_worst_case(&ledger, &requester, Limits::default());
+    assert_eq!(admitted, DEFAULT_ENTRIES);
+    assert!(matches!(refusal, Some(AttachmentReplayError::ReplayProtectionCapacity)));
+    let live = live_bytes(&ledger);
+    let charged = charged_bytes(&ledger);
     let on_disk = std::fs::metadata(&path).unwrap().len();
     println!(
-        "replay capacity worst case: rows={entries} live={live} on_disk={on_disk} charged={charged} cap={CAP_BYTES}"
+        "replay default worst case: rows={admitted} live={live} on_disk={on_disk} charged={charged} budget={LIVE_BUDGET}"
     );
-    assert!(charged <= CAP_BYTES, "charged={charged}");
-    assert!(live <= CAP_BYTES, "live={live}");
+    // The budget is ledger storage (live redb pages, annex section 9). File length is
+    // reported only: copy-on-write slack is not bounded by the charge.
+    assert!(charged <= LIVE_BUDGET, "charged={charged}");
+    assert!(live <= LIVE_BUDGET, "live={live}");
     // Public admission of a fresh principal is refused with the exact capacity error.
     let signer = ed25519_dalek::SigningKey::from_bytes(&[77; 32]);
     let mut probe = grant.grant().clone();
@@ -93,13 +127,39 @@ pub(super) fn assert_default_capacity_worst_case_principals_on_disk() {
     probe.grantee.account_anchor = "public-probe".into();
     let probe = signed(&probe);
     registry
-        .register(&upload, &native, &probe, &auth(&native, &probe, now).context(), &signer)
+        .register(&UPLOAD, &native, &probe, &auth(&native, &probe, NOW).context(), &signer)
         .unwrap();
     assert!(matches!(
-        registry.admit_operation_after_authentication(&probe, 1, &proof(now, 255), now),
+        registry.admit_operation_after_authentication(&probe, 1, &proof(NOW, 255), NOW),
         Err(AttachmentReplayError::ReplayProtectionCapacity)
     ));
     drop(registry);
+    drop(ledger);
+    std::fs::remove_file(path).unwrap();
+}
+
+/// Byte-cap-binding mode: the entry cap is set above any reachable count, so only the
+/// live-page byte check can refuse. Fills until refusal and asserts the live pages stay
+/// within the budget. Lowering `charge` below the measured row cost admits more rows and
+/// must fail the live-page assertion (`BtF`).
+pub(super) fn assert_byte_cap_binding_worst_case_principals_on_disk() {
+    let (path, ledger) = open_committed_ledger("worst-byte-cap");
+    let (_native, grant) = fixtures();
+    let requester = grant.grant().grantee.clone();
+    let limits =
+        Limits { entries: u64::MAX, bytes: LIVE_BUDGET, principal: 1024, charge: ROW_CHARGE };
+    let (admitted, refusal) = fill_worst_case(&ledger, &requester, limits);
+    assert!(matches!(refusal, Some(AttachmentReplayError::ReplayProtectionCapacity)));
+    let live = live_bytes(&ledger);
+    let charged = charged_bytes(&ledger);
+    println!(
+        "replay byte-cap worst case: rows={admitted} live={live} charged={charged} budget={LIVE_BUDGET}"
+    );
+    assert!(live <= LIVE_BUDGET, "live={live} admitted={admitted}");
+    assert!(charged <= LIVE_BUDGET, "charged={charged}");
+    // The refusal came from the byte check: the next charge would exceed the budget.
+    assert_eq!(admitted, DEFAULT_ENTRIES);
+    assert!(charged + ROW_CHARGE > LIVE_BUDGET);
     drop(ledger);
     std::fs::remove_file(path).unwrap();
 }
