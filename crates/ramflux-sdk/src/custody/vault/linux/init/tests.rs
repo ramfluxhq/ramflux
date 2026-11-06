@@ -120,7 +120,7 @@ fn manifest_bounds_and_cross_fields() -> TestResult {
     let mut trailing = bytes;
     trailing.push(b' ');
     assert_eq!(parse(&trailing, root, mode), Err(Error::Corrupt));
-    assert_eq!(mode_name(LinuxVaultMode::DesktopSecretService), Err(Error::Mode));
+    assert_eq!(mode_name(LinuxVaultMode::DesktopSecretService), "desktop-secret-service");
     let dir = tempfile::tempdir()?;
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
     let fd = root_fd(dir.path())?;
