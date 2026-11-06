@@ -87,6 +87,12 @@ impl From<RenewalRefusal> for IssueError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Issued,
+    Refused(RenewalRefusal),
+}
+
 /// Named, test-hookable points. Production passes [`IssueHooks::none`].
 pub struct IssueHooks<'a> {
     /// After validation, before the admission transaction.
@@ -149,20 +155,31 @@ impl SourceIssuer {
         self.registry.mint_renewal_challenge(&self.policy, request, now)
     }
 
-    /// Wire adapter: maps every outcome to the typed response, never to local minting.
+    /// Wire adapter. The JSON response frame is built and written through the same
+    /// lease-holding writer as the raw token: the lease is held until the transport
+    /// write completes or is cancelled, never across a buffered return.
+    /// # Errors
+    /// `Cancelled`/`Interrupted`/`Write` as for [`Self::renew`]; typed refusals are
+    /// written as `Refused` frames and reported as [`Outcome::Refused`].
     pub fn respond(
         &self,
         request: &RenewAdmitRequest,
         clock: &dyn Fn() -> u64,
-    ) -> RenewAdmitResponse {
-        let mut sink = VecSink::default();
-        match self.renew(request, clock, &mut sink, &IssueHooks::none()) {
-            Ok(()) => RenewAdmitResponse::Issued { token: sink.bytes },
-            Err(IssueError::Refused(code)) => RenewAdmitResponse::Refused { code },
-            Err(IssueError::Cancelled) => {
-                RenewAdmitResponse::Refused { code: RenewalRefusal::GrantNotActive }
+        sink: &mut dyn TokenSink,
+        hooks: &IssueHooks<'_>,
+    ) -> Result<Outcome, IssueError> {
+        match self.issue(request, clock, sink, hooks, true) {
+            Ok(()) => Ok(Outcome::Issued),
+            Err(IssueError::Refused(code)) => {
+                let frame = serde_json::to_vec(&RenewAdmitResponse::Refused { code })
+                    .map_err(|_| IssueError::Write(io::ErrorKind::InvalidData))?;
+                sink.write_token(&frame, TOKEN_WRITE_DEADLINE).map_err(|e| {
+                    sink.reset();
+                    IssueError::Write(e.kind())
+                })?;
+                Ok(Outcome::Refused(code))
             }
-            Err(_) => RenewAdmitResponse::Refused { code: RenewalRefusal::Busy },
+            Err(other) => Err(other),
         }
     }
 
@@ -176,6 +193,17 @@ impl SourceIssuer {
         clock: &dyn Fn() -> u64,
         sink: &mut dyn TokenSink,
         hooks: &IssueHooks<'_>,
+    ) -> Result<(), IssueError> {
+        self.issue(request, clock, sink, hooks, false)
+    }
+
+    fn issue(
+        &self,
+        request: &RenewAdmitRequest,
+        clock: &dyn Fn() -> u64,
+        sink: &mut dyn TokenSink,
+        hooks: &IssueHooks<'_>,
+        json: bool,
     ) -> Result<(), IssueError> {
         let now = clock();
         let v = self.validate(request, now)?;
@@ -197,10 +225,12 @@ impl SourceIssuer {
                 home_epoch: v.home_epoch,
                 payload_generation: v.target.payload_generation,
                 authority_generation: authority.generation,
+                w_issued_at: v.attestation.issued_at,
                 w_expires_at: v.attestation.expires_at,
+                verdict_checked_at: request.home_verdict.checked_at,
                 proof: &proof,
             },
-            now,
+            clock,
         )?;
         if (hooks.after_commit)() {
             return Err(IssueError::Interrupted);
@@ -210,8 +240,10 @@ impl SourceIssuer {
             sink.reset();
             return Err(IssueError::Cancelled);
         }
+        // Issue time is re-read after admission, never reused from validation.
+        let issued_at = clock();
         let expires_at =
-            now.saturating_add(TOKEN_LIFETIME).min(g.expires_at).min(v.receipt_expires_at);
+            issued_at.saturating_add(TOKEN_LIFETIME).min(g.expires_at).min(v.receipt_expires_at);
         let token = AttachmentToken {
             target_hash: v.target.hash().map_err(|_| RenewalRefusal::Invalid)?,
             grant_hash: v.attestation.grant_hash,
@@ -221,7 +253,7 @@ impl SourceIssuer {
             requester_digest: requester_digest(&g.grantee).map_err(|_| RenewalRefusal::Invalid)?,
             rights: 1 << (v.target.op - 1),
             token_issuer: self.policy.token_issuer.clone(),
-            issued_at: now,
+            issued_at,
             expires_at,
         };
         let signature = self
@@ -231,7 +263,13 @@ impl SourceIssuer {
         let bytes = token
             .signed_bytes(&self.signer.verifying_key().to_bytes(), &signature)
             .map_err(|_| RenewalRefusal::Expired)?;
-        write_through_lease(&lease, sink, &bytes, clock, hooks)
+        let frame = if json {
+            serde_json::to_vec(&RenewAdmitResponse::Issued { token: bytes })
+                .map_err(|_| IssueError::Write(io::ErrorKind::InvalidData))?
+        } else {
+            bytes
+        };
+        write_through_lease(&lease, sink, &frame, clock, hooks)
     }
 
     fn validate(&self, req: &RenewAdmitRequest, now: u64) -> Result<Validated, RenewalRefusal> {

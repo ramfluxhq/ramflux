@@ -13,6 +13,7 @@ use redb::ReadableTable as _;
 use std::sync::{Arc, Barrier};
 
 mod mint_tests;
+mod predicate_tests;
 
 pub(super) const RELAY: &str = "https://relay.example";
 pub(super) const ISSUER: &str = "https://gateway.owner.example";
@@ -116,7 +117,9 @@ impl Env {
             home_epoch: 1,
             payload_generation: op.payload_generation,
             authority_generation: 4,
+            w_issued_at: self.now,
             w_expires_at,
+            verdict_checked_at: self.now,
             proof,
         }
     }
@@ -134,7 +137,7 @@ impl Env {
         };
         self.f.registry.admit_renewal_after_authentication(
             &self.admission(challenge, op, &proof, self.now + 30),
-            at,
+            &|| at,
         )
     }
 }
@@ -205,11 +208,13 @@ fn large_renewal_challenge_single_use_and_atomic_with_nonce() {
                 home_epoch: 1,
                 payload_generation: 1,
                 authority_generation: 4,
+                w_issued_at: now,
                 w_expires_at: now + 30,
+                verdict_checked_at: now,
                 proof: &proof,
             };
             barrier.wait();
-            registry.admit_renewal_after_authentication(&adm, now).map(drop)
+            registry.admit_renewal_after_authentication(&adm, &|| now).map(drop)
         }));
     }
     barrier.wait();
@@ -249,10 +254,12 @@ fn renewal_challenge_state_survives_restart() {
                     home_epoch: 1,
                     payload_generation: 1,
                     authority_generation: 4,
+                    w_issued_at: now,
                     w_expires_at: now + 30,
+                    verdict_checked_at: now,
                     proof: &proof,
                 },
-                at,
+                &|| at,
             )
             .map(drop)
     };
@@ -274,7 +281,7 @@ fn renewal_challenge_delayed_positive_expiry_and_substitutions() {
     let proof = AttachmentReplayProof { nonce: [5; 32], issued_at: now, expires_at: now + 30 };
     let long = e.admission(5, &t, &proof, now + 31);
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&long, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&long, &|| now + 1)),
         RenewalRefusal::ChallengeMismatch
     );
     // Substitutions: each refused, the challenge stays unconsumed.
@@ -287,44 +294,44 @@ fn renewal_challenge_delayed_positive_expiry_and_substitutions() {
     let mut adm = e.admission(5, &t, &proof, now + 30);
     adm.requester = &stranger;
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&adm, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&adm, &|| now + 1)),
         RenewalRefusal::ChallengeMismatch
     );
     let mut adm = e.admission(5, &t, &proof, now + 30);
     adm.home_node = "node-c";
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&adm, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&adm, &|| now + 1)),
         RenewalRefusal::ChallengeMismatch
     );
     let mut adm = e.admission(5, &t, &proof, now + 30);
     adm.home_epoch = 0;
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&adm, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&adm, &|| now + 1)),
         RenewalRefusal::ChallengeMismatch
     );
     let second = e.f.register_edited(|g| g.grant_id = [0x77; 32]);
     let mut adm = e.admission(5, &t, &proof, now + 30);
     adm.grant = &second;
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&adm, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&adm, &|| now + 1)),
         RenewalRefusal::ChallengeMismatch
     );
     let mut adm = e.admission(5, &t, &proof, now + 30);
     adm.authority_generation = 5;
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&adm, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&adm, &|| now + 1)),
         RenewalRefusal::AuthorityGenerationMismatch
     );
     let mut adm = e.admission(5, &t, &proof, now + 30);
     adm.payload_generation = 2;
     assert_eq!(
-        refusal(e.f.registry.admit_renewal_after_authentication(&adm, now + 1)),
+        refusal(e.f.registry.admit_renewal_after_authentication(&adm, &|| now + 1)),
         RenewalRefusal::PayloadGenerationMismatch
     );
     // Challenge 5 admits once its substitutions are all refused (they consumed nothing).
     drop(
         e.f.registry
-            .admit_renewal_after_authentication(&e.admission(5, &t, &proof, now + 30), now + 1)
+            .admit_renewal_after_authentication(&e.admission(5, &t, &proof, now + 30), &|| now + 1)
             .unwrap(),
     );
     assert_eq!(refusal(e.admit(5, &t, 6, now + 1)), RenewalRefusal::ChallengeConsumed);
