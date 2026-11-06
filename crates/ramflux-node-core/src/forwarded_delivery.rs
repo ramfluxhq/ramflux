@@ -25,6 +25,12 @@ pub struct ForwardedEnvelopeRequest {
     pub envelope: ramflux_protocol::Envelope,
     pub migration_evidence: Option<ForwardedMigrationEvidence>,
 }
+/// Metadata captured by forwarded acceptance, never reconstructed by authenticating a reply.
+pub struct ForwardedSubmission {
+    pub outcome: RouterSubmitOutcome,
+    pub incarnation_id: Option<String>,
+    pub retain_until: Option<i64>,
+}
 // Serialize pin eviction with inbox acceptance so a newly verified pin cannot be
 // evicted between its authority transaction and its durable inbox receipt.
 pub(crate) static FOREIGN_PIN_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -98,6 +104,25 @@ impl RouterCore {
     > {
         crate::router_store::publication::capture(|| {
             self.submit_forwarded_envelope_inner(store, node, request, now)
+                .map(|result| result.outcome)
+        })
+    }
+
+    /// Prepare a forwarded result with its original acceptance metadata.
+    /// # Errors
+    /// Refuses nested preparation and propagates the existing storage/admission errors.
+    pub fn prepare_forwarded_envelope_with_metadata(
+        &self,
+        store: &RouterRedbStore,
+        node: Option<&MigrationNode>,
+        request: ForwardedEnvelopeRequest,
+        now: u64,
+    ) -> Result<
+        crate::publication::PublishedOperation<Result<ForwardedSubmission, NodeCoreError>>,
+        NodeCoreError,
+    > {
+        crate::router_store::publication::capture(|| {
+            self.submit_forwarded_envelope_inner(store, node, request, now)
         })
     }
 
@@ -143,7 +168,7 @@ impl RouterCore {
         node: Option<&MigrationNode>,
         request: ForwardedEnvelopeRequest,
         now: u64,
-    ) -> Result<RouterSubmitOutcome, NodeCoreError> {
+    ) -> Result<ForwardedSubmission, NodeCoreError> {
         let pin_admission =
             FOREIGN_PIN_ADMISSION.lock().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let ForwardedEnvelopeRequest { envelope, migration_evidence, peer_node_id } = request;
@@ -197,7 +222,11 @@ impl RouterCore {
                 };
                 let assignment =
                     crate::publication::await_sender_retry(&store.publication_core()?, assignment)?;
-                return Ok(crate::sender_retry::accepted_outcome(&assignment, envelope));
+                return Ok(ForwardedSubmission {
+                    outcome: crate::sender_retry::accepted_outcome(&assignment, envelope),
+                    incarnation_id: Some(assignment.inbox_incarnation_id),
+                    retain_until: Some(assignment.retain_until),
+                });
             }
         };
         retry_owner.bind(&envelope.target_delivery_id)?;
@@ -207,24 +236,22 @@ impl RouterCore {
             &envelope.target_delivery_id,
             now,
         )? {
-            return Ok(RouterSubmitOutcome::DuplicateFederatedForward {
-                target_delivery_id: envelope.target_delivery_id,
+            return Ok(ForwardedSubmission {
+                outcome: RouterSubmitOutcome::DuplicateFederatedForward {
+                    target_delivery_id: envelope.target_delivery_id,
+                },
+                incarnation_id: None,
+                retain_until: None,
             });
         }
         self.prepare_publication_target(store, &envelope.target_delivery_id)?;
         let replay = crate::envelope_replay_tuple_key(&source, &envelope);
         let outcome = self.submit_envelope_at(&source, envelope, now);
-        let entry = match &outcome {
-            RouterSubmitOutcome::Online(d) => Some(InboxEntry {
-                inbox_seq: d.inbox_seq,
-                target_delivery_id: d.target_delivery_id.clone(),
-                envelope: d.envelope.clone(),
-            }),
-            RouterSubmitOutcome::OfflineQueued(d) => Some(d.entry.clone()),
-            _ => None,
-        };
+        let entry = accepted_entry(&outcome);
+        let mut metadata = (None, None);
         if let Some(entry) = entry {
             self.constrain_forwarded_retention(&entry, deadline);
+            metadata = self.session_delivery_metadata(&entry.target_delivery_id, entry.inbox_seq);
             if let Err(error) = store.record_forwarded_submission(
                 &replay,
                 &entry,
@@ -240,6 +267,18 @@ impl RouterCore {
             }
             retry_owner.accepted_entry(store, source.root_commitment(), &entry, now);
         }
-        Ok(outcome)
+        Ok(ForwardedSubmission { outcome, incarnation_id: metadata.0, retain_until: metadata.1 })
+    }
+}
+
+fn accepted_entry(outcome: &RouterSubmitOutcome) -> Option<InboxEntry> {
+    match outcome {
+        RouterSubmitOutcome::Online(d) => Some(InboxEntry {
+            inbox_seq: d.inbox_seq,
+            target_delivery_id: d.target_delivery_id.clone(),
+            envelope: d.envelope.clone(),
+        }),
+        RouterSubmitOutcome::OfflineQueued(d) => Some(d.entry.clone()),
+        _ => None,
     }
 }

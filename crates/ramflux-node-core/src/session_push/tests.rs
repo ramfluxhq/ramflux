@@ -50,6 +50,11 @@ fn incarnation_bound_batch_all_store_modes() -> Result {
             SessionPushReason::IncarnationMismatch
         ));
         assert_eq!(router.resume("target", 0, 100).len(), 65);
+        let future = SessionAckBatchRequest { inbox_seqs: vec![66], ..bad.clone() };
+        assert!(matches!(
+            router.session_ack_batch(&store, &future).expect_err("E before future seq").reason,
+            SessionPushReason::IncarnationMismatch
+        ));
         let oversized = SessionAckBatchRequest {
             target_delivery_id: "target".into(),
             incarnation_id: id.clone(),

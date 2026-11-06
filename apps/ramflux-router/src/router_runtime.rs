@@ -126,6 +126,7 @@ impl RouterHandle {
         }
     }
 
+    #[cfg(any(test, feature = "itest-http"))]
     pub(crate) fn submit_envelope_from(
         &self,
         envelope: ramflux_protocol::Envelope,
@@ -148,6 +149,7 @@ impl RouterHandle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_envelope_async_from(
         &self,
         envelope: ramflux_protocol::Envelope,
@@ -157,6 +159,53 @@ impl RouterHandle {
         match self {
             Self::Tokio(runtime) => {
                 crate::router_engine::submit_envelope_async(
+                    &runtime.state,
+                    &runtime.store,
+                    crate::router_engine::AsyncForwardContext {
+                        client: runtime.home_node_forward.as_ref(),
+                        semaphore: &runtime.forward_semaphore,
+                        timeout: runtime.forward_timeout,
+                    },
+                    envelope,
+                    total_started,
+                    origin,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(crate) fn submit_envelope_mesh_from(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
+    ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        match self {
+            Self::Tokio(runtime) => crate::router_engine::submit_envelope_mesh(
+                runtime.state.as_ref(),
+                runtime.store.as_ref(),
+                crate::router_engine::AsyncForwardContext {
+                    client: runtime.home_node_forward.as_ref(),
+                    semaphore: &runtime.forward_semaphore,
+                    timeout: runtime.forward_timeout,
+                },
+                envelope,
+                total_started,
+                origin,
+            ),
+        }
+    }
+
+    pub(crate) async fn submit_envelope_mesh_async_from(
+        &self,
+        envelope: ramflux_protocol::Envelope,
+        total_started: Instant,
+        origin: ramflux_node_core::RouterEnvelopeOrigin,
+    ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        match self {
+            Self::Tokio(runtime) => {
+                crate::router_engine::submit_envelope_mesh_async(
                     &runtime.state,
                     &runtime.store,
                     crate::router_engine::AsyncForwardContext {
@@ -225,6 +274,7 @@ impl RouterHandle {
         }
     }
 
+    #[cfg(any(test, feature = "itest-http"))]
     pub(crate) fn own_device_fanout(
         &self,
         request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
@@ -424,7 +474,7 @@ impl RouterHandle {
         let operation = tokio::task::spawn_blocking(move || {
             let Self::Tokio(runtime) = &router;
             let node = runtime.custody.get().and_then(|service| service.migration_node());
-            router.state().prepare_forwarded_envelope(
+            router.state().prepare_forwarded_envelope_with_metadata(
                 router.store(),
                 node,
                 request,
@@ -441,23 +491,33 @@ impl RouterHandle {
     ) -> anyhow::Result<serde_json::Value> {
         let Self::Tokio(runtime) = self;
         let node = runtime.custody.get().and_then(|s| s.migration_node());
-        self.forwarded_reply(self.state().submit_forwarded_envelope(
-            self.store(),
-            node,
-            request,
-            ramflux_node_core::now_unix_seconds(),
-        ))
+        self.forwarded_reply(
+            self.state()
+                .prepare_forwarded_envelope_with_metadata(
+                    self.store(),
+                    node,
+                    request,
+                    ramflux_node_core::now_unix_seconds(),
+                )?
+                .published_blocking()?,
+        )
     }
 
     fn forwarded_reply(
         &self,
-        outcome: Result<ramflux_node_core::RouterSubmitOutcome, ramflux_node_core::NodeCoreError>,
+        outcome: Result<ramflux_node_core::ForwardedSubmission, ramflux_node_core::NodeCoreError>,
     ) -> anyhow::Result<serde_json::Value> {
         match outcome {
             Ok(outcome) => {
-                let delivery =
-                    crate::router_engine::submit_response_from_outcome(self.state(), outcome);
-                Ok(forwarded_delivery_reply(&delivery))
+                let delivery = crate::router_engine::submit_response_from_outcome(
+                    self.state(),
+                    outcome.outcome,
+                );
+                Ok(forwarded_mesh_delivery_reply(&ramflux_node_core::SessionPushSubmitResponse {
+                    delivery,
+                    incarnation_id: outcome.incarnation_id,
+                    retain_until: outcome.retain_until,
+                }))
             }
             Err(error) => forwarded_error_reply(error),
         }
@@ -494,6 +554,17 @@ fn forwarded_error_reply(
     }
 }
 
+fn forwarded_mesh_delivery_reply(
+    response: &ramflux_node_core::SessionPushSubmitResponse,
+) -> serde_json::Value {
+    let delivery = &response.delivery;
+    let accepted = matches!(
+        delivery.outcome.as_str(),
+        "online" | "offline_queued" | "duplicate_federated_forward"
+    );
+    serde_json::json!({"accepted":accepted,"retryable":!accepted && !delivery.outcome.starts_with("rejected_") && delivery.outcome!="payload_too_large","delivery":response})
+}
+#[cfg(test)]
 fn forwarded_delivery_reply(
     delivery: &ramflux_node_core::EnvelopeSubmitResponse,
 ) -> serde_json::Value {

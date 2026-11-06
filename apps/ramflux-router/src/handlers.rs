@@ -385,11 +385,7 @@ pub(crate) fn handle_mesh_request_value(
     {
         return Ok(response);
     }
-    let path = request.path.clone();
-    let body = request.body.clone();
-    let mut response = handle_mesh_request_inner(request, router, peer_service_id)?;
-    session_push::decorate(&path, &body, router, &mut response, peer_service_id)?;
-    Ok(response)
+    handle_mesh_request_inner(request, router, peer_service_id)
 }
 fn handle_mesh_request_inner(
     request: ramflux_transport::MeshHttpRequest,
@@ -397,6 +393,13 @@ fn handle_mesh_request_inner(
     peer_service_id: &str,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if method == "POST"
+        && path == "/mvp10/own-devices/fanout"
+        && peer_service_id != "ramflux-gateway"
+    {
+        return Ok(MeshResponse::text("403 Forbidden", "own-device fanout requires gateway peer"));
+    }
+
     if method == "POST" && path == ramflux_node_core::MIGRATION_PEER_PATH {
         if peer_service_id != "ramflux-federation" {
             return Ok(MeshResponse::text(
@@ -462,11 +465,9 @@ pub(crate) async fn handle_mesh_quic_request_value(
             envelope_origin_for_peer(peer_service_id)?,
         )
         .await?;
-        let mut wire = MeshResponse::json("200 OK", serde_json::to_vec(&response)?);
-        session_push::decorate(&request.path, &body, router, &mut wire, peer_service_id)?;
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: serde_json::from_slice(&wire.body)?,
+            body: serde_json::to_value(response)?,
         });
     }
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp0/envelope/forwarded") {
@@ -478,18 +479,19 @@ pub(crate) async fn handle_mesh_quic_request_value(
         }
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: {
-                let value = router.submit_forwarded_async(serde_json::from_slice(&body)?).await?;
-                let mut wire = MeshResponse::json("200 OK", serde_json::to_vec(&value)?);
-                session_push::decorate(&request.path, &body, router, &mut wire, peer_service_id)?;
-                serde_json::from_slice(&wire.body)?
-            },
+            body: router.submit_forwarded_async(serde_json::from_slice(&body)?).await?,
         });
     }
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp10/own-devices/fanout") {
+        if peer_service_id != "ramflux-gateway" {
+            return Ok(ramflux_transport::GatewayQuicResponse {
+                status: 403,
+                body: serde_json::json!({"reason":"gateway peer required"}),
+            });
+        }
+
         let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
             serde_json::from_slice(&body)?;
-        let metadata_router = router.clone();
         let router = router.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             ramflux_node_core::publication::capture(|| {
@@ -501,20 +503,11 @@ pub(crate) async fn handle_mesh_quic_request_value(
             })
         })
         .await??;
-        let mut wire = MeshResponse::json(
-            "200 OK",
-            serde_json::to_vec(&prepared.published().await?.resolved().await?)?,
-        );
-        session_push::decorate(
-            "/mvp10/own-devices/fanout",
-            &body,
-            &metadata_router,
-            &mut wire,
-            peer_service_id,
-        )?;
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: serde_json::from_slice(&wire.body)?,
+            body: serde_json::to_value(
+                prepared.published().await?.resolved_with_metadata().await?,
+            )?,
         });
     }
     let mesh_request = ramflux_transport::MeshHttpRequest {
@@ -617,15 +610,15 @@ fn handle_mesh_fast_path_value(
         )
         .into()),
         ("POST", "/mvp0/envelope") => {
-            let response = handle_mvp0_envelope_from(
+            let response = handle_mvp0_envelope_mesh_from(
                 body,
                 router,
                 envelope_origin_for_peer(peer_service_id)?,
             )?;
             tracing::info!(
-                target_delivery_id = %response.target_delivery_id,
-                outcome = %response.outcome,
-                inbox_seq = ?response.inbox_seq,
+                target_delivery_id = %response.delivery.target_delivery_id,
+                outcome = %response.delivery.outcome,
+                inbox_seq = ?response.delivery.inbox_seq,
                 "router mesh mvp0 envelope returned"
             );
             Ok(Some(MeshResponse::json("200 OK", serde_json::to_vec(&response)?)))
@@ -731,10 +724,7 @@ fn handle_mesh_general_value(
             let response = handle_mvp6_friend_request(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
         }
-        ("POST", "/mvp10/own-devices/fanout") => {
-            let response = handle_mvp10_own_devices_fanout(body, router)?;
-            Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
-        }
+        ("POST", "/mvp10/own-devices/fanout") => mesh_fanout_response(body, router),
         ("POST", "/mvp7/lifecycle/event") => {
             let response = handle_mvp7_lifecycle_event(body, router.state(), router.store())?;
             Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
@@ -833,6 +823,16 @@ pub(crate) fn envelope_origin_for_peer(
         _ => anyhow::bail!("mesh peer cannot submit envelopes"),
     }
 }
+fn handle_mvp0_envelope_mesh_from(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    let started = Instant::now();
+    let envelope = serde_json::from_slice(body)?;
+    router.submit_envelope_mesh_from(envelope, started, origin)
+}
+#[cfg(feature = "itest-http")]
 fn handle_mvp0_envelope_from(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
@@ -849,12 +849,12 @@ pub(crate) async fn handle_mvp0_envelope_async_from(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     let total_started = Instant::now();
     let decode_started = Instant::now();
     let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
     ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
-    router.submit_envelope_async_from(envelope, total_started, origin).await
+    router.submit_envelope_mesh_async_from(envelope, total_started, origin).await
 }
 
 fn mesh_response_status_code(status: &str) -> u16 {
@@ -1133,6 +1133,7 @@ fn handle_mvp6_friend_request(
     Ok(response)
 }
 
+#[cfg(feature = "itest-http")]
 fn handle_mvp10_own_devices_fanout(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
@@ -1331,6 +1332,22 @@ fn refresh_forward_authority(
     )?;
     router.state().refresh_registered_envelope_authority(&mut envelope)?;
     Ok(envelope)
+}
+
+fn mesh_fanout_response(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<MeshResponse> {
+    let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
+        serde_json::from_slice(body)?;
+    let response = ramflux_node_core::publication::capture(|| {
+        crate::router_engine::own_device_fanout_inner(router.state(), router.store(), &request)
+    })?
+    .published_blocking()??;
+    let response = tokio::runtime::Builder::new_current_thread()
+        .build()?
+        .block_on(response.resolved_with_metadata())?;
+    Ok(MeshResponse::json("200 OK", serde_json::to_vec(&response)?))
 }
 
 #[cfg(test)]
@@ -1680,6 +1697,13 @@ mod tests {
             "ramflux-gateway",
         ))?;
         assert_eq!(accepted.status, 200);
+        let point = serde_json::to_value(handle.state().fetch_entry(
+            "target_router_async_ingress",
+            1,
+            0,
+        )?)?;
+        assert_eq!(accepted.body["incarnation_id"], point["incarnation_id"]);
+        assert_eq!(accepted.body["retain_until"], point["record"]["retain_until"]);
         let accepted: ramflux_node_core::EnvelopeSubmitResponse =
             serde_json::from_value(accepted.body)?;
         assert_eq!(accepted.outcome, "offline_queued");

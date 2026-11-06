@@ -71,7 +71,11 @@ fn invalid_seq_terminal() -> anyhow::Result<()> {
                 "/mvp0/ack-bound-batch",
                 json!({"target_delivery_id":target,"incarnation_id":id,"inbox_seqs":[seq]}),
             )?;
-            assert_eq!(batch["reason"], "invalid_seq");
+            // E mismatch now precedes the published-range check (controller P13 r2 L1).
+            assert_eq!(
+                batch["reason"],
+                if target == "unknown" && seq > 0 { "incarnation_mismatch" } else { "invalid_seq" }
+            );
             let entry =
                 call(&router, "GET", &format!("/mvp1/inbox-entry/{target}/{seq}"), Value::Null)?;
             assert_eq!(entry["reason"], "invalid_seq");
@@ -283,6 +287,12 @@ fn capable_establishment_initializes_empty_inbox() -> anyhow::Result<()> {
 }
 #[test]
 fn fanout_mesh_retains_acceptance_metadata() -> anyhow::Result<()> {
+    for quic in [false, true] {
+        fanout_metadata_case(quic)?;
+    }
+    Ok(())
+}
+fn fanout_metadata_case(quic: bool) -> anyhow::Result<()> {
     let (state, store, path) = crate::router_runtime::tests::test_router("fanout-metadata")?;
     crate::router_runtime::tests::register_test_device_at(
         &state,
@@ -296,12 +306,24 @@ fn fanout_mesh_retains_acceptance_metadata() -> anyhow::Result<()> {
     let router = RouterHandle::tokio(state, store, None);
     let envelope =
         crate::router_runtime::tests::current_envelope("fanout-metadata", "target_alice")?;
-    let response = call(
-        &router,
-        "POST",
-        "/mvp10/own-devices/fanout",
-        json!({"principal_id":"alice","source_device_id":"alice_phone","envelope":envelope}),
-    )?;
+    let body = json!({"principal_id":"alice","source_device_id":"alice_phone","envelope":envelope});
+    let response = if quic {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(super::super::handle_mesh_quic_request_value(
+                &ramflux_transport::GatewayQuicRequest {
+                    method: "POST".into(),
+                    path: "/mvp10/own-devices/fanout".into(),
+                    body,
+                },
+                &router,
+                "ramflux-gateway",
+            ))?
+            .body
+    } else {
+        call(&router, "POST", "/mvp10/own-devices/fanout", body)?
+    };
     let rows = response["delivered"].as_array().ok_or_else(|| anyhow::anyhow!("rows"))?;
     assert_ne!(rows.len(), 0);
     for row in rows {
@@ -315,3 +337,5 @@ fn fanout_mesh_retains_acceptance_metadata() -> anyhow::Result<()> {
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+mod revocation_tests;

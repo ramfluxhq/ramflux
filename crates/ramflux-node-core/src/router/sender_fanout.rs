@@ -15,7 +15,7 @@ struct Candidate {
     admission: RetryAdmission,
 }
 enum Child {
-    Complete(ItestMvp10OwnDeviceFanoutDelivery),
+    Complete(crate::SessionPushFanoutDelivery),
     Waiting { device: String, target: String, waiter: RetryWaiter },
 }
 /// Stored fanout response, with original-child retry waiters still outside all locks.
@@ -30,6 +30,19 @@ impl PreparedFanout {
     /// # Errors
     /// Returns a store/runtime error; typed child refusals remain delivery outcomes.
     pub async fn resolved(self) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError> {
+        let response = self.resolved_with_metadata().await?;
+        Ok(ItestMvp10OwnDeviceFanoutResponse {
+            principal_id: response.principal_id,
+            source_device_id: response.source_device_id,
+            delivered: response.delivered.into_iter().map(|child| child.delivery).collect(),
+        })
+    }
+    /// Resolve children with the original metadata captured before commit.
+    /// # Errors
+    /// Returns the same retry/publication errors as `resolved`.
+    pub async fn resolved_with_metadata(
+        self,
+    ) -> Result<crate::SessionPushFanoutResponse, NodeCoreError> {
         let mut delivered = Vec::with_capacity(self.children.len());
         for child in self.children {
             delivered.push(match child {
@@ -37,13 +50,21 @@ impl PreparedFanout {
                 Child::Waiting { device, target, waiter } => match waiter.resolved().await {
                     Ok(assignment) => {
                         self.core.wait_sender_assignment(&assignment).await;
-                        delivery(device, target, "offline_queued", Some(assignment.inbox_seq))
+                        complete(
+                            delivery(device, target, "offline_queued", Some(assignment.inbox_seq)),
+                            (
+                                Some(assignment.inbox_incarnation_id.clone()),
+                                Some(assignment.retain_until),
+                            ),
+                        )
                     }
-                    Err(error) => delivery(device, target, &error.to_string(), None),
+                    Err(error) => {
+                        complete(delivery(device, target, &error.to_string(), None), (None, None))
+                    }
                 },
             });
         }
-        Ok(ItestMvp10OwnDeviceFanoutResponse {
+        Ok(crate::SessionPushFanoutResponse {
             principal_id: self.principal_id,
             source_device_id: self.source_device_id,
             delivered,
@@ -59,6 +80,13 @@ impl PreparedFanout {
             .block_on(self.resolved())
     }
 }
+fn complete(
+    delivery: ItestMvp10OwnDeviceFanoutDelivery,
+    (incarnation_id, retain_until): (Option<String>, Option<i64>),
+) -> crate::SessionPushFanoutDelivery {
+    crate::SessionPushFanoutDelivery { delivery, incarnation_id, retain_until }
+}
+
 fn delivery(
     device_id: String,
     target_delivery_id: String,
@@ -108,7 +136,10 @@ impl RouterCore {
                         .mvp10_own_device_targets(request)?
                         .into_iter()
                         .map(|(device, target)| {
-                            Child::Complete(delivery(device, target, &outcome, None))
+                            Child::Complete(complete(
+                                delivery(device, target, &outcome, None),
+                                (None, None),
+                            ))
                         })
                         .collect(),
                     core: store.publication_core()?,
@@ -250,11 +281,17 @@ impl RouterCore {
                         &store.publication_core()?,
                         assignment,
                     )?;
-                    children.push(Child::Complete(delivery(
-                        child.device,
-                        target,
-                        "offline_queued",
-                        Some(assignment.inbox_seq),
+                    children.push(Child::Complete(complete(
+                        delivery(
+                            child.device,
+                            target,
+                            "offline_queued",
+                            Some(assignment.inbox_seq),
+                        ),
+                        (
+                            Some(assignment.inbox_incarnation_id.clone()),
+                            Some(assignment.retain_until),
+                        ),
                     )));
                 }
                 RetryAdmission::Waiting(waiter) => {
@@ -273,7 +310,10 @@ impl RouterCore {
                         owners.push((owner, entry.clone()));
                         entries.push(entry);
                     }
-                    children.push(Child::Complete(result));
+                    let metadata = result.inbox_seq.map_or((None, None), |seq| {
+                        self.session_delivery_metadata(&result.target_delivery_id, seq)
+                    });
+                    children.push(Child::Complete(complete(result, metadata)));
                 }
             }
         }

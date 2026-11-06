@@ -30,6 +30,7 @@ pub(crate) struct AsyncForwardContext<'a> {
     pub(crate) timeout: std::time::Duration,
 }
 
+#[cfg(any(test, feature = "itest-http"))]
 pub(crate) fn submit_envelope(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -38,20 +39,31 @@ pub(crate) fn submit_envelope(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    ramflux_node_core::publication::capture(|| {
-        submit_envelope_inner(state, store, forward, envelope, total_started, origin)
-    })?
-    .published_blocking()?
+    submit_envelope_mesh(state, store, forward, envelope, total_started, origin)
+        .map(|response| response.delivery)
 }
-
-pub(crate) fn submit_envelope_inner(
+pub(crate) fn submit_envelope_mesh(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
     forward: AsyncForwardContext<'_>,
     envelope: ramflux_protocol::Envelope,
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
-) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    ramflux_node_core::publication::capture(|| {
+        submit_envelope_mesh_inner(state, store, forward, envelope, total_started, origin)
+    })?
+    .published_blocking()?
+}
+
+pub(crate) fn submit_envelope_mesh_inner(
+    state: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     let target = envelope.target_delivery_id.clone();
     let result =
         (|| match prepare_submission(state, store, forward, envelope, total_started, origin)? {
@@ -63,18 +75,53 @@ pub(crate) fn submit_envelope_inner(
                     &store.publication_core()?,
                     assignment,
                 )?;
-                Ok(sender_retry_response(&assignment))
+                Ok(sender_retry_mesh_response(&assignment))
             }
         })();
-    typed_sender_result(result, &target)
+    typed_sender_mesh_result(result, &target)
 }
 
 fn complete_response(response: ramflux_node_core::EnvelopeSubmitResponse) -> PreparedSubmit {
-    PreparedSubmit::Complete(Box::new(response))
+    complete_mesh_response(response, (None, None))
+}
+
+fn complete_mesh_response(
+    delivery: ramflux_node_core::EnvelopeSubmitResponse,
+    (incarnation_id, retain_until): (Option<String>, Option<i64>),
+) -> PreparedSubmit {
+    PreparedSubmit::Complete(Box::new(ramflux_node_core::SessionPushSubmitResponse {
+        delivery,
+        incarnation_id,
+        retain_until,
+    }))
+}
+fn sender_retry_mesh_response(
+    assignment: &ramflux_node_core::sender_retry::SenderAssignment,
+) -> ramflux_node_core::SessionPushSubmitResponse {
+    ramflux_node_core::SessionPushSubmitResponse {
+        delivery: sender_retry_response(assignment),
+        incarnation_id: Some(assignment.inbox_incarnation_id.clone()),
+        retain_until: Some(assignment.retain_until),
+    }
+}
+fn typed_sender_mesh_result(
+    result: anyhow::Result<ramflux_node_core::SessionPushSubmitResponse>,
+    target: &str,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => typed_sender_result(Err(error), target).map(|delivery| {
+            ramflux_node_core::SessionPushSubmitResponse {
+                delivery,
+                incarnation_id: None,
+                retain_until: None,
+            }
+        }),
+    }
 }
 
 enum PreparedSubmit {
-    Complete(Box<ramflux_node_core::EnvelopeSubmitResponse>),
+    Complete(Box<ramflux_node_core::SessionPushSubmitResponse>),
     Waiting(ramflux_node_core::sender_retry::RetryWaiter),
 }
 
@@ -156,6 +203,9 @@ fn prepare_submission(
     ramflux_node_core::record_router_submit_dispatch_us(elapsed_us(dispatch_started));
     let save_started = Instant::now();
     let persistent_entry = persistent_entry_from_outcome(&outcome);
+    let metadata = persistent_entry.as_ref().map_or((None, None), |entry| {
+        state.session_delivery_metadata(&entry.target_delivery_id, entry.inbox_seq)
+    });
     persist_submission_outcome(
         store,
         &replay_key,
@@ -174,17 +224,8 @@ fn prepare_submission(
     );
     ramflux_node_core::record_router_submit_completed();
     ramflux_node_core::record_router_submit_save_us(elapsed_us(save_started));
-    let response_started = Instant::now();
-    let response = submit_response_from_outcome(state, outcome);
-    tracing::info!(
-        target_delivery_id = %response.target_delivery_id,
-        outcome = %response.outcome,
-        inbox_seq = ?response.inbox_seq,
-        "router mvp0 envelope outcome"
-    );
-    ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
-    ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
-    Ok(complete_response(response))
+    let response = submission_response(state, outcome, total_started);
+    Ok(complete_mesh_response(response, metadata))
 }
 
 enum SourceAdmission {
@@ -283,6 +324,7 @@ fn complete_sync_forward(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn submit_envelope_async(
     state: &std::sync::Arc<ramflux_node_core::RouterCore>,
     store: &std::sync::Arc<ramflux_node_core::RouterRedbStore>,
@@ -291,6 +333,18 @@ pub(crate) async fn submit_envelope_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    submit_envelope_mesh_async(state, store, forward, envelope, total_started, origin)
+        .await
+        .map(|response| response.delivery)
+}
+pub(crate) async fn submit_envelope_mesh_async(
+    state: &std::sync::Arc<ramflux_node_core::RouterCore>,
+    store: &std::sync::Arc<ramflux_node_core::RouterRedbStore>,
+    forward: AsyncForwardContext<'_>,
+    envelope: ramflux_protocol::Envelope,
+    total_started: Instant,
+    origin: ramflux_node_core::RouterEnvelopeOrigin,
+) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     let target = envelope.target_delivery_id.clone();
     let publication = store.publication_core()?;
     let state = std::sync::Arc::clone(state);
@@ -321,12 +375,12 @@ pub(crate) async fn submit_envelope_async(
             PreparedSubmit::Waiting(waiter) => {
                 let assignment = waiter.resolved().await?;
                 publication.wait_sender_assignment(&assignment).await;
-                Ok(sender_retry_response(&assignment))
+                Ok(sender_retry_mesh_response(&assignment))
             }
         }
     }
     .await;
-    typed_sender_result(result, &target)
+    typed_sender_mesh_result(result, &target)
 }
 
 fn record_decoded(envelope: &ramflux_protocol::Envelope) {
@@ -495,6 +549,7 @@ pub(crate) fn apply_bound_nack(
     Ok(ramflux_node_core::InboxCursorResponse::from(&cursor))
 }
 
+#[cfg(any(test, feature = "itest-http"))]
 pub(crate) fn own_device_fanout(
     state: &ramflux_node_core::RouterCore,
     store: &ramflux_node_core::RouterRedbStore,
@@ -890,7 +945,9 @@ fn prepare_sender_retry(
                     &store.publication_core()?,
                     assignment,
                 )?;
-                RetryPreparation::Return(complete_response(sender_retry_response(&assignment)))
+                RetryPreparation::Return(PreparedSubmit::Complete(Box::new(
+                    sender_retry_mesh_response(&assignment),
+                )))
             }
         },
     )
@@ -946,4 +1003,22 @@ fn finish_retry_owner(
     ) {
         owner.forwarded();
     }
+}
+
+fn submission_response(
+    state: &ramflux_node_core::RouterCore,
+    outcome: ramflux_node_core::RouterSubmitOutcome,
+    total_started: Instant,
+) -> ramflux_node_core::EnvelopeSubmitResponse {
+    let response_started = Instant::now();
+    let response = submit_response_from_outcome(state, outcome);
+    tracing::info!(
+        target_delivery_id = %response.target_delivery_id,
+        outcome = %response.outcome,
+        inbox_seq = ?response.inbox_seq,
+        "router mvp0 envelope outcome"
+    );
+    ramflux_node_core::record_router_submit_response_us(elapsed_us(response_started));
+    ramflux_node_core::record_router_submit_total_us(elapsed_us(total_started));
+    response
 }

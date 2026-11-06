@@ -204,11 +204,12 @@ impl RouterCore {
         self.bind_publication(store).map_err(|_| failure(SessionPushReason::InternalError))?;
         let lease =
             store.acquire_acknowledgement(target).map_err(|_| failure(SessionPushReason::Busy))?;
+        self.check_inbox_incarnation(target, &request.incarnation_id)?;
         let issued = self.session_push_status(target).inbox_seq;
         if request.inbox_seqs.iter().any(|s| *s > issued) {
             return Err(failure(SessionPushReason::InvalidSeq));
         }
-        self.check_inbox_incarnation(target, &request.incarnation_id)?;
+
         let acks = self.session_ack_members(target, &request.inbox_seqs);
         let settled = self.cursor_state(target).map_or(0, |c| c.settled_inbox_seq);
         let applied = self

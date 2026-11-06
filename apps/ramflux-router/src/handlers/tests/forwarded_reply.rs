@@ -90,6 +90,10 @@ async fn forwarded_wire_reply_refuses_dormant_and_acks_durable_duplicate_after_r
         assert_eq!(accepted["retryable"], false);
         assert_eq!(accepted["delivery"]["outcome"], "offline_queued");
         assert_eq!(accepted["delivery"]["inbox_seq"], 1);
+        let point = serde_json::to_value(handle.state().fetch_entry("active-target", 1, 0)?)?;
+        assert_eq!(accepted["delivery"]["incarnation_id"], point["incarnation_id"]);
+        assert_eq!(accepted["delivery"]["retain_until"], point["record"]["retain_until"]);
+
         let original = handle.state().resume("active-target", 0, 10);
         assert_eq!(original.len(), 1);
         drop(handle);
