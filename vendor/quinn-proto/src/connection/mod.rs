@@ -53,7 +53,7 @@ pub use datagrams::{Datagrams, SendDatagramError};
 mod mtud;
 mod pacing;
 #[allow(dead_code)] // Dormant until complete packet publication is available.
-pub(crate) mod metadata_staging { pub(crate) mod tls_contract; }
+pub(crate) mod metadata_staging;
 mod packet_builder;
 use packet_builder::PacketBuilder;
 
