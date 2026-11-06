@@ -1376,6 +1376,51 @@ negative!(
     },
     StageError::InvalidLedger(Domain::RawBase)
 );
+// Prepare-only: each retained debit is otherwise valid but exceeds its used ledger.
+// Used stays within limit, so only the retained `debit <= used` rule fails.
+negative!(
+    inventory_e1_prepare_metadata_debit_exceeds_used,
+    |f: &mut Fixture| {
+        f.prepare();
+        f.ledgers.metadata_used = 127;
+    },
+    StageError::InvalidLedger(Domain::Metadata)
+);
+negative!(
+    inventory_e1_prepare_slice_debit_exceeds_used,
+    |f: &mut Fixture| {
+        f.prepare();
+        f.ledgers.slice_used = 127;
+    },
+    StageError::InvalidLedger(Domain::Slice)
+);
+// Raw needs its matching retained grant (64) in the context, so it is asserted directly.
+#[test]
+fn inventory_e1_prepare_raw_debit_exceeds_used() {
+    let mut f = Fixture::valid();
+    f.prepare();
+    f.raw();
+    f.ledgers.raw_used = 63;
+    let mut context = f.context();
+    context.reservation = Some((ReservationId(40), 0, 64));
+    assert_eq!(f.violations(), vec![StageError::InvalidLedger(Domain::RawBase)]);
+    assert_eq!(
+        validate_e1(&f.request(), &context),
+        Err(StageError::InvalidLedger(Domain::RawBase))
+    );
+}
+negative!(
+    inventory_e1_prepare_owner_allocation_mismatch,
+    |f: &mut Fixture| {
+        f.prepare();
+        // Registered and lease-matched elsewhere, so only the expected-owner binding fails.
+        let mut elsewhere = f.owners[0];
+        elsewhere.allocation = AllocationId(99);
+        f.registry.push(elsewhere);
+        f.owners[0].allocation = AllocationId(99);
+    },
+    StageError::OwnerAllocationMismatch(0)
+);
 negative!(
     inventory_e1_empty_owner_owner,
     |f: &mut Fixture| {
@@ -1896,4 +1941,22 @@ fn owner_completeness_requires_every_expected_allocation() {
     f.expected.push(another);
     assert_eq!(validate_e1(&f.request(), &f.context()),
         Err(StageError::OwnerMissing(OwnerId(20))));
+}
+
+#[test]
+fn prepare_retained_debit_at_exact_used_accepts() {
+    let mut f = Fixture::valid();
+    f.prepare();
+    f.ledgers.metadata_used = 128;
+    f.ledgers.slice_used = 128;
+    let ok = Ok(ValidatedE1 { metadata: 128, raw: 0, next: ReservationState::Allocated });
+    assert_eq!(validate_e1(&f.request(), &f.context()), ok);
+    f.raw();
+    f.ledgers.raw_used = 64;
+    let mut context = f.context();
+    context.reservation = Some((ReservationId(40), 0, 64));
+    assert_eq!(
+        validate_e1(&f.request(), &context),
+        Ok(ValidatedE1 { metadata: 0, raw: 64, next: ReservationState::Allocated })
+    );
 }
