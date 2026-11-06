@@ -1,0 +1,11 @@
+{
+  "coverage": "seed only; later consumers remain unproven",
+  "introduced_in": "P02",
+  "consumer": "custody::vault::linux::codec",
+  "test_target": "ramflux-sdk lib",
+  "test": "linux_vault_owned_buffers_clear_on_all_exits",
+  "observer": "drop observer snapshots actual full owned allocation before deallocation; assertions after consumer exit",
+  "cases": ["success", "failed decrypt", "partial RNG failure", "format rejection", "cancelled owner"],
+  "later_owners": ["P04 credential pipes", "P05 Secret Service", "P06 seed adapters", "P07 runtime and export", "P08 CLI", "P09 host import", "P10 reconnect", "P11 unit injection"],
+  "residuals": ["chacha20 0.9.1 xchacha new local subkey", "hchacha local state and return copies", "CPU registers", "caller-owned borrowed input", "OS and dependency internal copies"]
+}
