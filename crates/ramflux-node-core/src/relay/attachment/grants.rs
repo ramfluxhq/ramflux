@@ -4,7 +4,9 @@
 mod admission;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
+mod replay;
 mod retirement;
+pub use replay::{AttachmentReplayError, AttachmentReplayProof};
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
 use super::{
@@ -72,6 +74,7 @@ pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), AttachmentLedge
     let _ = tx.open_table(REFERENCES).map_err(store)?;
     admission::install(tx)?;
     retirement::install(tx)?;
+    replay::install(tx)?;
     Ok(())
 }
 fn invalid(_: impl std::fmt::Display) -> AttachmentLedgerError {

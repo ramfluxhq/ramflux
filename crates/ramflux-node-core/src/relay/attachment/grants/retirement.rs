@@ -105,7 +105,7 @@ impl GrantPublicationLease {
     }
 }
 impl ScopedGrantRegistry {
-    fn stored_grant(
+    pub(super) fn stored_grant(
         &self,
         row: &RegisteredAttachmentGrant,
     ) -> Result<VerifiedScopedGrant, AttachmentLedgerError> {
@@ -120,7 +120,7 @@ impl ScopedGrantRegistry {
         .map(|v| v.0)
         .map_err(invalid)
     }
-    fn current(
+    pub(super) fn current(
         &self,
         grant: &VerifiedScopedGrant,
         now: u64,
@@ -163,8 +163,17 @@ impl ScopedGrantRegistry {
         right: u32,
         now: u64,
     ) -> Result<GrantPublicationLease, AttachmentLedgerError> {
+        self.lease_with_admission(grant, right, now, |_| Ok(now))
+    }
+    pub(super) fn lease_with_admission<E: From<AttachmentLedgerError>>(
+        &self,
+        grant: &VerifiedScopedGrant,
+        right: u32,
+        now: u64,
+        admit: impl FnOnce(&redb::WriteTransaction) -> Result<u64, E>,
+    ) -> Result<GrantPublicationLease, E> {
         if !matches!(right, 1 | 2 | 4 | 8 | 16) || grant.grant().rights & right == 0 {
-            return Err(AttachmentLedgerError::Conflict);
+            return Err(AttachmentLedgerError::Conflict.into());
         }
         let mut leases = self.leases.lock()?;
         leases.retain(|_, v| {
@@ -172,16 +181,22 @@ impl ScopedGrantRegistry {
             !v.is_empty()
         });
         if leases.values().map(Vec::len).sum::<usize>() >= 32 {
-            return Err(AttachmentLedgerError::Capacity);
+            return Err(AttachmentLedgerError::Capacity.into());
         }
         self.current(grant, now)?;
         // Fence clock rollback durably, sharing the registration clock owner.
         let tx = self.ledger.db.begin_write().map_err(store)?;
-        clock(&tx, now)?;
+        let admitted_now = admit(&tx)?;
+        clock(&tx, admitted_now)?;
         tx.commit().map_err(store)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         leases.entry(grant.grant().grant_id).or_default().push(Arc::downgrade(&cancelled));
-        Ok(GrantPublicationLease { registry: self.clone(), grant: grant.clone(), cancelled, now })
+        Ok(GrantPublicationLease {
+            registry: self.clone(),
+            grant: grant.clone(),
+            cancelled,
+            now: admitted_now,
+        })
     }
     /// Authenticates the original current owner and durably fences one grant.
     /// The caller's native operation admission must also consume the operation `PoP`
