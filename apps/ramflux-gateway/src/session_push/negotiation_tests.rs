@@ -171,3 +171,45 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn open_clamps_runtime_push_limit() -> anyhow::Result<()> {
+    for (requested, expected) in [(4, 16), (1000, 256)] {
+        let mut fixture = Fixture::new(&format!("open-limit-{requested}"))?;
+        fixture.context.hub.readiness.started.store(true, Ordering::Release);
+        let context = fixture.context.clone();
+        let auth = auth(false)?;
+        let source = runtime()?.source_identity;
+        let open: ramflux_node_core::GatewayOpenFrame = serde_json::from_value(
+            json!({"protocol_version":ramflux_node_core::GATEWAY_SESSION_PROTOCOL_VERSION,"transport_kind":"quic_quinn","client_instance_id":"client","device_id":"device","target_delivery_id":"target","stream_nonce":"nonce","previous_session_id":null,"resume_token_hash":null,"last_seen_inbox_seq":null,"max_inflight_downstream":requested,"max_inflight_upstream":4,"pre_auth_cookie":null,"pre_auth_now":null,"source_ip_hash":null}),
+        )?;
+        let key = ramflux_node_core::DeviceAuthKeyResponse {
+            custody_authority: None,
+            root_public_key: None,
+            signed_device_set: None,
+            principal_id: "principal".into(),
+            device_id: "device".into(),
+            device_epoch: 1,
+            branch_public_key: "branch".into(),
+            target_delivery_id: "target".into(),
+            revoked: false,
+        };
+        let task = tokio::spawn(async move {
+            let mut send = support::Sink(Arc::new(std::sync::Mutex::new(Vec::new())));
+            crate::session::establish_gateway_session(
+                &mut send, &context, &open, &auth, key, source,
+            )
+            .await
+        });
+        let req = fixture.next().await?;
+        assert_eq!(req.path, "/s1/session/upsert");
+        let reply = req.body.clone();
+        req.respond.send((200, reply)).map_err(|_| Retired)?;
+        let cursor = fixture.next().await?;
+        assert_eq!(cursor.path, "/mvp0/cursor/target");
+        cursor.respond.send((200, Value::Null)).map_err(|_| Retired)?;
+        let runtime = tokio::time::timeout(Duration::from_secs(5), task).await???;
+        assert_eq!(runtime.push_limit, expected);
+    }
+    Ok(())
+}

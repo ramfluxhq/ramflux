@@ -14,7 +14,7 @@ use std::{
     },
     time::Duration,
 };
-const BYTE_CAP: usize = 4 * 1024 * 1024;
+pub(crate) const BYTE_CAP: usize = 4 * 1024 * 1024;
 const EMPTY: u64 = u64::MAX;
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
 // Sink admission is queue waiting, with its own bound; only the I/O consumes 15s.
@@ -120,8 +120,9 @@ impl PushQueue {
         if self.is_closed() {
             return Admission::Closed;
         }
-        let Ok(mut state) = self.inner.state.try_lock() else {
-            return self.overflow(seq);
+        let Ok(mut state) = self.inner.state.lock() else {
+            self.retire();
+            return Admission::Closed;
         };
         if self.is_closed() {
             return Admission::Closed;
