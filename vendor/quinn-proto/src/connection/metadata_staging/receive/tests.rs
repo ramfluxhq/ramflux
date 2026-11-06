@@ -24,7 +24,7 @@ macro_rules! negative {
             let mut f = Fixture::valid();
             f.prepare();
             ($setup)(&mut f);
-            assert_eq!(f.violations(), vec![$error], "one independent shared-rule failure");
+            assert_eq!(f.violations_with_debit(true), vec![$error], "one independent shared-rule failure");
             let before = format!("{:?}{:?}", f.owners, f.ledgers);
             let session = tls_contract::tests::CountingSession::default();
             let result = validate_e2(
@@ -800,7 +800,7 @@ impl ReceiveFixture {
     // children are evaluated only when the corresponding parent arithmetic exists.
     fn violations(&self) -> Vec<StageError> {
         use StageError::*;
-        let mut errors = self.shared.violations();
+        let mut errors = self.shared.violations_with_debit(true);
         if !errors.is_empty() {
             return errors;
         }

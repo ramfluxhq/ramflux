@@ -212,6 +212,11 @@ impl Fixture {
     // and full-rule collection within each structurally applicable validation level.
     // It does not call any production validator, q(), or role decoder.
     pub(super) fn violations(&self) -> Vec<StageError> {
+        self.violations_with_debit(self.action != Action::Prepare as u8)
+    }
+    // Receive contracts validate a fresh batch and owners together, rather than
+    // consuming an already-retained E1 Prepare grant.
+    pub(super) fn violations_with_debit(&self, fresh_debit: bool) -> Vec<StageError> {
         use StageError::*;
         let mut errors = Vec::new();
         if self.terminal {
@@ -485,11 +490,11 @@ impl Fixture {
                     errors.push(InvalidLedger(domain));
                     continue;
                 }
-                if self.action == 1 && amount > u128::from(used) {
+                if !fresh_debit && amount > u128::from(used) {
                     errors.push(InvalidLedger(domain));
                     continue;
                 }
-                let total = u128::from(used) + if self.action == 1 { 0 } else { amount };
+                let total = u128::from(used) + if fresh_debit { amount } else { 0 };
                 if total > u128::from(u64::MAX) {
                     errors.push(ArithmeticOverflow(op));
                     continue;

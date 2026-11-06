@@ -633,21 +633,21 @@
       },
       "src/connection/metadata_staging.rs": {
         "patched_sha256": "49dafe9d7beded10cb64ed779e43e62edf0a04148ae9c751b09ede1eff00e8b6",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
       },
       "src/connection/metadata_staging/tests.rs": {
-        "patched_sha256": "af463ab7e4ff26ab7b93e6bf291444b0b67c398b237010aa40530a658072fbc3",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
+        "patched_sha256": "7a7dc9d4202e60b2b83834ccdcd56ebcd8dbda740a52820d45509ca9c89de4ae",
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
       },
       "src/connection/metadata_staging/receive.rs": {
         "upstream_sha256": null,
         "patched_sha256": "237d2a7d383686bb4b610dbc8ef6d145dea869189cfbdda5387e628d9e1b380a",
-        "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests"
+        "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
       },
       "src/connection/metadata_staging/receive/tests.rs": {
         "upstream_sha256": null,
-        "patched_sha256": "11943ca2cbfb5475923ce875fdf80aa220f81883a227c82a37280d48657ec1e2",
-        "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests"
+        "patched_sha256": "859f60dbb0560965e063d74c084241ebaa9b2806ae98be8a8edbc2ffe427768a",
+        "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
       }
     },
     "formatting": {
