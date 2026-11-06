@@ -409,3 +409,15 @@ those leases until destruction, but allocation-count/capacity tests alone do not
 certify that temporal boundary. Production allocator certificates remain unissued
 until independent real-deallocator/concurrent-refund oracles and their bypass
 mutations pass alongside the complete runtime identity evidence.
+
+Bounded receipt-range insertion and replacement seek their first relevant range
+with `partition_point`. Insertions include an adjacent predecessor; replacement
+intersections exclude it. Ascending gapped frames no longer scan the full prefix
+on every frame. Middle insertions still shift contiguous storage, and overlapping
+merges still compact it. The supported-envelope CPU proof must include reverse
+and random gapped insertion and merge-heavy traffic at the full frozen window;
+binary search alone does not certify those remaining costs.
+
+Receive-history driver guards are at least ten seconds, including readiness,
+injection, chunk reads, and final credit drain. Causal events and independent
+assertions remain the completion oracle; these guards only bound hangs.
