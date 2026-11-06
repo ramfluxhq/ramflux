@@ -10,6 +10,7 @@ mod ingress;
 mod itest_http;
 mod object_issue;
 mod principal_directory;
+mod push_queue;
 mod push_registration;
 mod quic_dispatch;
 mod registration;

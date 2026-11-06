@@ -50,6 +50,7 @@ async fn durable_view_publication() -> Result<(), Box<dyn std::error::Error>> {
         let (send, sender_frames) = super::submit_ack_tests::sink();
         let (recipient, received) = super::submit_ack_tests::sink();
         context.hub.register("alice-target".into(), "recipient".into(), recipient).await?;
+        let delivered_context = context.clone();
         let delivery = tokio::spawn(async move {
             let entry = prepared.published().await?;
             let response = ramflux_node_core::EnvelopeSubmitResponse {
@@ -69,6 +70,7 @@ async fn durable_view_publication() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(sender_frames.lock().map_err(|_| anyhow::anyhow!("sender frames"))?.len(), 0);
         drop(held);
         tokio::time::timeout(std::time::Duration::from_secs(30), delivery).await???;
+        delivered_context.hub.flushed("alice-target").await?;
         let frames = received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?;
         assert_eq!(frames.len(), 1);
         assert!(

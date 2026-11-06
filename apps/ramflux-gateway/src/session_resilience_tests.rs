@@ -38,6 +38,7 @@ impl GatewaySessionFrameSink for Sink {
 fn runtime() -> anyhow::Result<GatewaySessionRuntime> {
     Ok(GatewaySessionRuntime {
         session_push: None,
+        push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &ramflux_crypto::create_identity_root("alice", [1; 32]),
             &ramflux_crypto::create_device_branch("alice", "device", 1, [2; 32]),
@@ -261,6 +262,7 @@ async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reco
     };
     super::reply_and_deliver_submitted(&send, &context, &runtime()?, &response, &frame, None)
         .await?;
+    context.hub.flushed("peer").await?;
     assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert!(!context.hub.send_to("peer", &frame).await);
     assert_eq!(writes.load(Ordering::SeqCst), 1, "dead peer was removed, not retried");
@@ -284,6 +286,7 @@ async fn broken_recipient_is_unregistered_without_an_extra_sender_reply_and_reco
     // This is delivery work, not another request or reply on A's stream.
     super::deliver_submitted_to_peer(&context, &runtime()?, &response, &frame, &envelope, None)
         .await?;
+    context.hub.flushed("peer").await?;
     let received = received.lock().map_err(|_| anyhow::anyhow!("received"))?;
     assert_eq!(received.len(), 1);
     assert_eq!(
@@ -327,15 +330,19 @@ async fn a_failed_old_sink_cannot_unregister_the_replacement_session() -> anyhow
     let received = Arc::new(Mutex::new(Vec::new()));
     let replacement: GatewaySendHandle =
         Arc::new(AsyncMutex::new(Box::new(Sink(received.clone()))));
-    hub.register(
-        "peer".into(),
-        "same-session".into(),
-        Arc::new(AsyncMutex::new(Box::new(ReplacedSink { hub: hub.clone(), replacement }))),
-    )
-    .await?;
+    let mut old = hub
+        .register(
+            "peer".into(),
+            "same-session".into(),
+            Arc::new(AsyncMutex::new(Box::new(ReplacedSink { hub: hub.clone(), replacement }))),
+        )
+        .await?;
     let frame = ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 };
-    assert!(!hub.send_to("peer", &frame).await);
     assert!(hub.send_to("peer", &frame).await);
+    tokio::time::timeout(std::time::Duration::from_secs(5), old.closed.changed()).await??;
+    assert!(hub.send_to("peer", &frame).await);
+    hub.flushed("peer").await?;
+    hub.flushed("peer").await?;
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
     Ok(())
 }
@@ -378,10 +385,35 @@ async fn resuming_the_same_session_id_survives_the_old_loops_cleanup() -> anyhow
             .send_to("peer", &ramflux_node_core::GatewayServerFrame::Heartbeat { now: 7 })
             .await
     );
+    context.hub.flushed("peer").await?;
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
     Ok(())
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_stalled_peer_write_closes_only_that_registration_within_the_deadline()
+-> anyhow::Result<()> {
+    let hub = Arc::new(GatewaySessionHub::default());
+    let finished = Arc::new(AtomicUsize::new(0));
+    let mut registration = hub
+        .register(
+            "peer".into(),
+            "session".into(),
+            Arc::new(AsyncMutex::new(Box::new(StalledSink(finished.clone())))),
+        )
+        .await?;
+    let frame = ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 };
+    assert!(hub.send_to("peer", &frame).await);
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(14)).await;
+    assert!(!*registration.closed.borrow());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), registration.closed.changed())
+        .await??;
+    assert_eq!(finished.load(Ordering::SeqCst), 1);
+    assert!(!hub.send_to("peer", &frame).await);
+    Ok(())
+}
 struct StalledSink(Arc<AtomicUsize>);
 impl GatewaySessionFrameSink for StalledSink {
     fn finish(&mut self) -> Result<(), TransportError> {
@@ -391,26 +423,4 @@ impl GatewaySessionFrameSink for StalledSink {
     fn send_frame<'a>(&'a mut self, _: &'a [u8]) -> Future<'a, ()> {
         Box::pin(std::future::pending())
     }
-}
-#[tokio::test]
-async fn a_stalled_peer_write_closes_only_that_registration_within_the_deadline()
--> anyhow::Result<()> {
-    let hub = GatewaySessionHub::default();
-    let finished = Arc::new(AtomicUsize::new(0));
-    let registration = hub
-        .register(
-            "peer".into(),
-            "session".into(),
-            Arc::new(AsyncMutex::new(Box::new(StalledSink(finished.clone())))),
-        )
-        .await?;
-    let frame = ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 };
-    assert!(
-        !tokio::time::timeout(std::time::Duration::from_secs(3), hub.send_to("peer", &frame))
-            .await?
-    );
-    assert_eq!(finished.load(Ordering::SeqCst), 1);
-    assert!(*registration.closed.borrow());
-    assert!(!hub.send_to("peer", &frame).await);
-    Ok(())
 }

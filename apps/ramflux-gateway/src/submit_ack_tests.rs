@@ -108,6 +108,7 @@ async fn submit_after_recipient_ack(
     let _ = finished.send(());
     serving.await??;
     result?;
+    context.hub.flushed("alice-target").await?;
     let frames = frames.lock().map_err(|_| anyhow::anyhow!("sender mutex"))?;
     if ["aborted_retry_safe", "capacity_retry_after", "idempotency_conflict", "payload_too_large"]
         .contains(&outcome)
@@ -179,6 +180,7 @@ async fn submit_while_replacing(
     released.notify_one();
     tokio::time::timeout(std::time::Duration::from_secs(10), task).await???;
     assert!(context.hub.send_to("agent-target", &GatewayServerFrame::Heartbeat { now: 7 }).await);
+    context.hub.flushed("agent-target").await?;
     assert_eq!(
         replacement_frames.lock().map_err(|_| anyhow::anyhow!("replacement frames"))?.len(),
         1
@@ -341,6 +343,7 @@ pub(crate) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
     Ok(crate::GatewaySessionRuntime {
         session_push: None,
+        push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?,
         session_id: "agent-session".into(),
         resume_token: "resume".into(),
@@ -392,6 +395,7 @@ async fn fanout_confirmation_survives_recipient_ack_with_an_empty_or_later_inbox
             super::deliver_own_device_fanout_entry(&context, &runtime, &delivery, &submitted, None),
         )
         .await??;
+        context.hub.flushed("alice-target").await?;
         assert_eq!(
             *received.lock().map_err(|_| anyhow::anyhow!("frames"))?,
             vec![GatewayServerFrame::Deliver { entry }]

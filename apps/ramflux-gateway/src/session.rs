@@ -410,11 +410,12 @@ async fn run_registered_gateway_session(
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
     let registration = context
         .hub
-        .register_session(
+        .register_with_limit(
             target_delivery_id.clone(),
             session_id,
             Arc::clone(&send),
             runtime.session_push.clone(),
+            runtime.push_limit,
         )
         .await?;
     let result = run_gateway_session_loop_until_closed(
@@ -637,6 +638,7 @@ pub(crate) async fn establish_gateway_session(
     crate::session_push::established(send, established, session_push.as_deref()).await?;
     Ok(GatewaySessionRuntime {
         session_push,
+        push_limit: usize::try_from(open.max_inflight_downstream).unwrap_or(256).clamp(16, 256),
         source_identity,
         session_id,
         resume_token,
@@ -1875,8 +1877,20 @@ pub(crate) async fn write_gateway_handle(
     send: &GatewaySendHandle,
     frame: &ramflux_node_core::GatewayServerFrame,
 ) -> anyhow::Result<()> {
-    let mut send = send.lock().await;
-    write_gateway_frame(&mut **send, frame).await
+    let bytes = serde_json::to_vec(frame)?;
+    tokio::time::timeout(crate::push_queue::WRITE_DEADLINE, async {
+        #[cfg(feature = "itest-http")]
+        delay_itest_gateway_frame().await;
+        let mut sink = send.lock().await;
+        sink.send_frame(&bytes).await.map_err(super::session_response::ClientWriteFailure)
+    })
+    .await
+    .map_err(|_| {
+        super::session_response::ClientWriteFailure(ramflux_transport::TransportError::Quic(
+            "gateway frame write deadline".into(),
+        ))
+    })??;
+    Ok(())
 }
 
 pub(crate) async fn write_gateway_frame(
@@ -2058,6 +2072,7 @@ pub(crate) mod tests {
     fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
             session_push: None,
+            push_limit: 256,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root("principal_a", [1; 32]),
                 &ramflux_crypto::create_device_branch("principal_a", "device_a", 1, [2; 32]),
@@ -2347,6 +2362,7 @@ pub(crate) mod tests {
     ) -> anyhow::Result<crate::GatewaySessionRuntime> {
         Ok(crate::GatewaySessionRuntime {
             session_push: None,
+            push_limit: 256,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root(&branch.principal_id, [0x91; 32]),
                 branch,

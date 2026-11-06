@@ -8,7 +8,7 @@ mod negotiation;
 #[path = "submit_tests.rs"]
 mod submit;
 #[path = "test_support.rs"]
-mod support;
+pub(crate) mod support;
 use super::*;
 use support::{Fixture, ID, cursor, runtime, sink};
 
@@ -112,6 +112,7 @@ async fn heartbeat(context: &GatewayQuicContext) -> anyhow::Result<()> {
         )
         .await?
     );
+    context.hub.flushed("heartbeat").await?;
     assert_eq!(frames.lock().map_err(|_| Retired)?[0], json!({"frame_type":"heartbeat","now":7}));
     Ok(())
 }

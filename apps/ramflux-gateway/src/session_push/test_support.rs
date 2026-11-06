@@ -7,8 +7,8 @@ use ramflux_transport::{
     GatewaySessionFrameSink, MeshQuicAcceptedWireRequest as Wire, MeshQuicServer, TransportError,
 };
 use std::sync::{Arc, Mutex};
-pub(super) const ID: &str = "0123456789abcdef0123456789abcdef";
-pub(super) struct Sink(pub Arc<Mutex<Vec<Value>>>);
+pub(crate) const ID: &str = "0123456789abcdef0123456789abcdef";
+pub(crate) struct Sink(pub Arc<Mutex<Vec<Value>>>);
 impl GatewaySessionFrameSink for Sink {
     fn finish(&mut self) -> Result<(), TransportError> {
         Ok(())
@@ -27,13 +27,14 @@ impl GatewaySessionFrameSink for Sink {
         })
     }
 }
-pub(super) fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<Value>>>) {
+pub(crate) fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<Value>>>) {
     let rows = Arc::new(Mutex::new(Vec::new()));
     (Arc::new(tokio::sync::Mutex::new(Box::new(Sink(rows.clone())))), rows)
 }
-pub(super) fn runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
+pub(crate) fn runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     Ok(crate::GatewaySessionRuntime {
         session_push: Some(ID.into()),
+        push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &ramflux_crypto::create_identity_root("agent", [3; 32]),
             &ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]),
@@ -48,12 +49,12 @@ pub(super) fn runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
         supports_forward_ack: false,
     })
 }
-pub(super) struct Request {
+pub(crate) struct Request {
     pub path: String,
     pub body: Value,
     pub respond: tokio::sync::oneshot::Sender<(u16, Value)>,
 }
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     pub context: crate::GatewayQuicContext,
     pub requests: tokio::sync::mpsc::Receiver<Request>,
     task: tokio::task::JoinHandle<()>,
@@ -130,17 +131,17 @@ async fn serve(
         }
     }
 }
-pub(super) fn cursor() -> Value {
+pub(crate) fn cursor() -> Value {
     json!({"target_delivery_id":"target","inbox_seq":0,"last_envelope_id":null,"acked_envelope_ids":[],"nacked_envelope_ids":{}})
 }
-pub(super) fn ack(seq: u64) -> Value {
+pub(crate) fn ack(seq: u64) -> Value {
     json!({"schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1","signing_key_id":"device","signature_alg":"ed25519","signature":"fixture","ack_id":"ack","envelope_id":"envelope","receiver_device_id":"agent-device","received_at":1,"ext":{"inbox_seq":seq}})
 }
-pub(super) fn nack(seq: u64) -> Value {
+pub(crate) fn nack(seq: u64) -> Value {
     json!({"schema":"ramflux.nack.v1","version":1,"domain":"ramflux.nack.v1","signing_key_id":"device","signature_alg":"ed25519","signature":"fixture","nack_id":"nack","envelope_id":"envelope","receiver_device_id":"agent-device","reason":"invalid_signature","received_at":1,"ext":{"inbox_seq":seq}})
 }
 
-pub(super) struct Source(pub std::collections::VecDeque<Vec<u8>>);
+pub(crate) struct Source(pub std::collections::VecDeque<Vec<u8>>);
 impl ramflux_transport::GatewaySessionFrameSource for Source {
     fn recv_frame(
         &mut self,
