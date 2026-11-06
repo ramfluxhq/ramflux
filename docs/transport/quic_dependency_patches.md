@@ -239,7 +239,6 @@ actual retained owners and completed prefix bytes/records independently of credi
 counters. The earlier loss/retransmit module relocations are cohesive responsibility
 extractions; their upstream source/deltas remain explicitly recorded.
 
-
 ### Partial receive payload backing (PR1B-2a)
 
 Dormant metadata mode admits an exact-capacity copy of decrypted packet payload
@@ -267,3 +266,11 @@ Its zero-budget case independently checks no STREAM effect before allocation
 refusal. Allocation-site units exercise exact-full/refused capacity, split/cloned
 payloads in both diagnostic families, and a real CRYPTO handshake through the
 same copy path. Owner-envelope, assembler and atomicity proofs remain unissued.
+
+
+The receive backing oracle now holds views across explicit STOP_SENDING and a
+received RESET_STREAM before Drained and final handle release. Its exact-capacity assertion compares the actual
+copy capacity with the decrypted packet payload length observed in admission before
+reservation/allocation, rather than deriving both values inside the copy helper.
+A refused input records its payload length but reaches no copy allocation or STREAM
+effect. This observation adds no production activation or owner-envelope proof.
