@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod attachment_renewal;
 mod clients;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
