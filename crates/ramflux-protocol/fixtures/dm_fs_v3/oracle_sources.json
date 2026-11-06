@@ -78,7 +78,7 @@
       "oracle": "PyCA cryptography / OpenSSL X25519"
     },
     "hkdf_sha256": {
-      "product": "RustCrypto sha2/hmac/hkdf",
+      "product": "Native dm_fs_v3 uses an owned scalar SHA-256/HMAC/HKDF backend with observable RAII erasure; existing shared kdf.rs callers retain RustCrypto sha2/hmac/hkdf unchanged.",
       "oracle": "PyCA cryptography / OpenSSL HMAC/SHA256, manual extract/expand checked against OpenSSL-backed HKDF"
     },
     "rfs1": {
