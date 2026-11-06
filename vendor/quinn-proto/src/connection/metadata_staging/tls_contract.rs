@@ -247,13 +247,13 @@ pub(crate) fn validate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::crypto::{self, Session};
     use crate::transport_parameters::TransportParameters;
     use crate::{ConnectionId, Side, TransportError};
-    use std::{any::Any, cell::Cell};
     use TlsContractError::*;
+    use std::{any::Any, cell::Cell};
     const PERMITTED: &[(TlsSpace, TlsSequence)] = &[
         (TlsSpace::Initial, TlsSequence::ReadThenWrite),
         (TlsSpace::Initial, TlsSequence::WriteOnly),
@@ -495,8 +495,8 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct CountingSession {
-        calls: std::sync::atomic::AtomicUsize,
+    pub(crate) struct CountingSession {
+        pub(crate) calls: std::sync::atomic::AtomicUsize,
     }
     impl CountingSession {
         fn called(&self) {
@@ -557,6 +557,29 @@ mod tests {
             self.called();
             Ok(())
         }
+    }
+    #[test]
+    fn all_caps_at_exact_equality_reaches_session_once() {
+        let mut f = Fixture::valid();
+        let e = f.envelope.as_mut().unwrap();
+        let retained = e.retained_input_max.unwrap();
+        let output = e.output_peak_max.unwrap();
+        let sum = retained + e.internal_peak_max.unwrap() + output + e.key_peak_max.unwrap();
+        e.total_peak_max = Some(sum);
+        f.context.base_allowance = sum;
+        f.context.output_capacity = output;
+        f.context.key_slots = f.context.key_slots_required;
+        f.context.read_len = retained - f.context.retained_input_now;
+        assert!(f.violations().is_empty());
+        let mut session = CountingSession::default();
+        let result = crypto::with_validated_tls_envelope(
+            f.envelope.as_ref(),
+            &f.context,
+            &mut session,
+            |s, _| s.is_handshaking(),
+        );
+        assert_eq!(result, Ok(true));
+        assert_eq!(session.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     #[test]
     fn valid_envelope_reaches_session_once() {

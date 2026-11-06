@@ -421,3 +421,18 @@ binary search alone does not certify those remaining costs.
 Receive-history driver guards are at least ten seconds, including readiness,
 injection, chunk reads, and final credit drain. Causal events and independent
 assertions remain the completion oracle; these guards only bound hangs.
+
+
+Dormant packet-private stage core validates exact connection/credit/configuration/
+layout, packet-space/number/generation/phase, allocation and owner identities,
+physical layouts, charged-byte equations and reservation lifecycle transitions.
+Metadata and slice admission are atomic across the entire inline batch; key
+suballocations consume only the existing fixed base grant. The move-only batch
+lease survives every prepared backing and transfers without refund/recharge.
+Allocator refusal discards the packet-private allocations before returning credit.
+No packet processing or ordinary constructor selects this core. Its ledger and
+inline plan require existing precharged storage; this patch issues no finite
+allocator/TLS evidence and does not resolve the later publication/activation gates.
+The E1 oracle uses independent wide arithmetic and causal deallocation gates;
+the E0 positive boundary case reaches exactly one Session call with every cap
+at equality.

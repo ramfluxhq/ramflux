@@ -87,6 +87,21 @@ impl MetadataCredit {
         let bytes=bytes.unwrap();s.used+=bytes;s.peak=s.peak.max(s.used);
         Ok(AllocationCharge { credit:self.clone(), bytes })
     }
+    // Staging holds its slice lock before this lock. Validate and debit as one operation.
+    pub(crate) fn reserve_stage_batch<T>(&self, check: impl FnOnce(usize, usize, bool) -> Result<(usize, T), super::metadata_staging::StageError>) -> Result<T, super::metadata_staging::StageError> {
+        let mut state=self.state.lock().unwrap();
+        match check(state.used,state.limit,state.exhausted) {
+            Ok((bytes,value)) => {state.used+=bytes;state.peak=state.peak.max(state.used);Ok(value)}
+            Err(error) => {
+                if let super::metadata_staging::StageError::Resource(resource)=error {
+                    if !state.exhausted {state.failed_class=Some(resource.class);}
+                    state.exhausted=true;state.refusals=state.refusals.saturating_add(1);
+                }
+                Err(error)
+            }
+        }
+    }
+    pub(crate) fn release_stage_batch(&self, bytes: usize) {self.state.lock().unwrap().used-=bytes;}
     pub(crate) fn observe_receive_payload_len(&self, length:usize){self.state.lock().unwrap().receive_payload_len=length;}
     pub(crate) fn receive_backing_capacity(&self, capacity:usize){self.state.lock().unwrap().receive_backing_capacity=capacity;}
     pub(crate) fn receive_owner_layout(&self, size: usize) { self.state.lock().unwrap().receive_owner_layout=size; }
