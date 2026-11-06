@@ -150,6 +150,7 @@ impl ScopedGrantRegistry {
         {
             return Err(AttachmentLedgerError::Expired);
         }
+        payload.require_bound_generation()?;
         Ok(row)
     }
     /// Adds the live-state gate to an ALREADY authenticated operation. This does

@@ -87,6 +87,29 @@ impl RetirementFixture {
             issued_at: self.now,
         }
     }
+    /// Rewrites the committed payload row into (or out of) the pre-generation legacy
+    /// shape: pending generation 0 and no committed generation.
+    /// # Panics
+    /// Panics on storage failure or a missing payload row.
+    pub fn set_legacy_zero(&self, legacy: bool) {
+        let owner = AttachmentOwner::from_authenticated_session(
+            &self.native.manifest().owner.account_anchor,
+        )
+        .unwrap();
+        let tx = self.registry.ledger.db.begin_write().unwrap();
+        {
+            let mut rows = tx.open_table(super::RECORDS).unwrap();
+            let k = super::key(&owner, &[21; 32]);
+            let mut row: serde_json::Value = {
+                let value = super::ReadableTable::get(&rows, k.as_slice()).unwrap().unwrap();
+                serde_json::from_slice(value.value()).unwrap()
+            };
+            row["pending_generation"] = u64::from(!legacy).into();
+            row["committed_generation"] = if legacy { serde_json::Value::Null } else { 1.into() };
+            rows.insert(k.as_slice(), serde_json::to_vec(&row).unwrap().as_slice()).unwrap();
+        }
+        tx.commit().unwrap();
+    }
     /// # Panics
     /// Panics if fixed owner material is malformed.
     #[must_use]

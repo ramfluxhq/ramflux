@@ -350,3 +350,81 @@ fn corrupted_terminal_counter_or_sum_fails_closed_with_real_backend() {
         ));
     }
 }
+
+#[test]
+fn reopen_with_caps_below_real_usage_keeps_existing_payloads_cleanable() {
+    let dir = unique();
+    fs::create_dir_all(&dir).unwrap();
+    let cases = [case(0), case(1), case(6)];
+    let mut specs = Vec::new();
+    {
+        let rig = open(&dir, AttachmentPolicy::default()).unwrap();
+        bystander(&rig, 1);
+        for (n, c) in cases.iter().enumerate() {
+            specs.push(stage(&rig, c, u8::try_from(n + 1).unwrap(), 100));
+        }
+        // Real usage: the payload owner holds 3 slots, 2 owners, 4 slots globally.
+        assert_eq!(rig.ledger.usage(&owner()).unwrap().terminal_slots, 3);
+        assert_eq!(shape(&rig).5, 4);
+    }
+    // Per-owner cap 2 < usage 3, owner cap 1 < 2 owners, global cap 3 < 4.
+    let lowered = AttachmentPolicy {
+        max_terminal_owners: 1,
+        max_terminal_objects_per_owner: 2,
+        max_terminal_objects_global: 3,
+        ..Default::default()
+    };
+    let rig = open(&dir, lowered).unwrap(); // recount ignores the lowered settings
+    let before = shape(&rig);
+    assert_eq!((before.2, before.4, before.5), (2, 2, 4));
+    // New objects are refused for the over-cap owner and globally; new owners likewise.
+    let mut fresh = request(&case(6), 9);
+    fresh.object_id = [0x5A; 32];
+    assert!(matches!(
+        rig.ledger.reserve(&owner(), fresh, 150),
+        Err(AttachmentLedgerError::TerminalEvidenceCapacity)
+    ));
+    assert!(matches!(
+        rig.ledger.reserve(
+            &other(1),
+            AttachmentReservationRequest { upload_id: [8; 32], object_id: [8; 32], ..fresh },
+            150
+        ),
+        Err(AttachmentLedgerError::TerminalEvidenceCapacity)
+    ));
+    assert!(matches!(
+        rig.ledger.reserve(
+            &other(2),
+            AttachmentReservationRequest { upload_id: [7; 32], object_id: [7; 32], ..fresh },
+            150
+        ),
+        Err(AttachmentLedgerError::TerminalOwnerCapacity)
+    ));
+    assert_eq!(shape(&rig), before);
+    // Existing committed payloads still read, retire, clean up and prune with the real backend.
+    for (n, spec) in specs.iter().enumerate() {
+        let mut out = Vec::new();
+        rig.backend.read_range(spec, 0, spec.length(), &mut out).unwrap();
+        assert_eq!(out, cases[n].ciphertext);
+    }
+    // All three payloads expire together: one GC turn, then a reclaim per payload.
+    assert_eq!(rig.ledger.gc_due(100 + 604_800, 64).unwrap().len(), 4);
+    for (n, spec) in specs.iter().enumerate() {
+        let upload = u8::try_from(n + 1).unwrap();
+        rig.ledger
+            .reclaim(&owner(), &[upload; 32], |_| {
+                rig.backend
+                    .delete_with(spec, |_| Ok(()))
+                    .map_err(|e| AttachmentLedgerError::Store(e.to_string()))
+            })
+            .unwrap();
+    }
+    prune_everything(&rig);
+    assert_eq!(rig.ledger.usage(&owner()).unwrap().terminal_slots, 3);
+    assert_eq!(shape(&rig).3, 3);
+    for (n, spec) in specs.iter().enumerate() {
+        assert_refused_everywhere(&rig, &cases[n], spec);
+    }
+    drop(rig);
+    drop(open(&dir, lowered).unwrap());
+}
