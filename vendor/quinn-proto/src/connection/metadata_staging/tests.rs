@@ -503,7 +503,33 @@ impl Fixture {
                     errors.push(if domain == Domain::RawBase {
                         BaseEnvelopeExceeded
                     } else {
-                        Resource(ResourceExhausted { class: MetadataClass::StreamAssemblers })
+                        let mut running = u128::from(used);
+                        let row = self
+                            .rows
+                            .iter()
+                            .find(|r| {
+                                if r.domain_tag != 0 {
+                                    return false;
+                                }
+                                running += u128::from(r.charge);
+                                running > u128::from(limit)
+                            })
+                            .expect("computable metadata excess has a first row");
+                        const CLASSES: [MetadataClass; 12] = [
+                            MetadataClass::SentRecords,
+                            MetadataClass::SentFrameMetadata,
+                            MetadataClass::RetransmitOwners,
+                            MetadataClass::SendSegments,
+                            MetadataClass::SendRanges,
+                            MetadataClass::StreamAssemblers,
+                            MetadataClass::CryptoAssemblers,
+                            MetadataClass::UnorderedHistory,
+                            MetadataClass::PendingRetransmits,
+                            MetadataClass::PendingAcks,
+                            MetadataClass::AckScratch,
+                            MetadataClass::LossScratch,
+                        ];
+                        Resource(ResourceExhausted { class: CLASSES[row.class_tag as usize] })
                     });
                 }
             }
@@ -1823,7 +1849,11 @@ fn observe_accepting_cell(action: Action, state: ReservationState) {
     assert_eq!(c.snapshot(), initial);
 }
 
-pub(super) fn completed_free(allocation: AllocationId, lease: LeaseId, consumed: bool) -> FreeWitness {
+pub(super) fn completed_free(
+    allocation: AllocationId,
+    lease: LeaseId,
+    consumed: bool,
+) -> FreeWitness {
     // The borrowed validation seam observes genuine allocator completion. These
     // test-only registry keys never issue a production lease or byte allowance.
     let physical = StageAllocation::allocate(8, 8).unwrap();

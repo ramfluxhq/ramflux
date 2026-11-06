@@ -3,10 +3,11 @@
 //! Trusted observations must originate in physical storage, never packet claims.
 use super::metadata_credit::{MetadataClass, MetadataCredit, ResourceExhausted};
 use std::sync::{Arc, Mutex};
+pub(crate) mod history;
+pub(crate) mod receive;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tls_contract;
-pub(crate) mod receive;
 
 // IDs are nominal, opaque registry keys. Zero encodes an absent/uninitialized key
 // only at the borrowed validation seam; no key is interpreted as a byte allowance.
@@ -57,6 +58,12 @@ pub(crate) enum Field {
     PreparedSlots,
     StreamId,
     Offset,
+    RangeCount,
+    ReplacementSlots,
+    CopyLength,
+    CopyCapacity,
+    CryptoLength,
+    CryptoPreparedSlots,
     ExpectedCharge,
     ReservedCharge,
 }
@@ -71,12 +78,14 @@ pub(crate) enum Count {
     Rows,
     Owners,
     ReceiveFrames,
+    HistoryRanges,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arithmetic {
     AllocationProduct(usize),
     AllocationCharge(usize),
     StreamEnd(usize),
+    CryptoReceiveEnd(usize),
     MetadataSum,
     RawSum,
     MetadataOverlap,
@@ -232,6 +241,22 @@ impl Role {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StageError {
+    HistoryRangeOrder(usize),
+    HistoryEndpointOutOfRange(usize),
+    HistoryNotNormalized(usize),
+    HistoryContentsMismatch,
+    HistoryCapacityInsufficient,
+    HistoryCapacityObservationMismatch,
+    CompactionLengthMismatch,
+    CompactionCapacityInsufficient,
+    CompactionContentsMismatch,
+    OldHistoryNotRetained,
+    InvalidCryptoSpace(u8),
+    CryptoSpaceMissing(crate::packet::SpaceId),
+    CryptoSpaceDuplicate(crate::packet::SpaceId),
+    CryptoReceiveEndOutOfRange(usize),
+    CryptoReceiveMismatch(crate::packet::SpaceId, history::CryptoReceiveField),
+    CryptoReceiveCapacityInsufficient(crate::packet::SpaceId),
     StreamIdOutOfRange,
     FrameMismatch(Field, usize),
     StreamEndOutOfRange(usize),
@@ -456,9 +481,6 @@ fn binding(r: &Request<'_>, c: &Context<'_>) -> Result<Binding, StageError> {
         return Err(InvalidPhase(b.phase_tag));
     }
     Ok(b)
-}
-fn validate_batch(batch: Option<Batch<'_>>, c: &Context<'_>, retained: Option<(u64,u64)>) -> Result<(u64, u64), StageError> {
-    validate_batch_for(batch, c, Role::e1, retained)
 }
 fn validate_batch_for(
     batch: Option<Batch<'_>>,
@@ -690,6 +712,13 @@ fn validate_owners(r: &Request<'_>, c: &Context<'_>) -> Result<(), StageError> {
 }
 /// Validate a borrowed packet-private contract without allocation, publication or TLS.
 pub(crate) fn validate_e1(r: &Request<'_>, c: &Context<'_>) -> Result<ValidatedE1, StageError> {
+    validate_e1_for(r, c, Role::e1)
+}
+fn validate_e1_for(
+    r: &Request<'_>,
+    c: &Context<'_>,
+    roles: fn(Role) -> bool,
+) -> Result<ValidatedE1, StageError> {
     use StageError::*;
     let b = binding(r, c)?;
     let action = match r.action_tag {
@@ -742,7 +771,7 @@ pub(crate) fn validate_e1(r: &Request<'_>, c: &Context<'_>) -> Result<ValidatedE
             let (_, metadata, raw) = c.reservation.ok_or(MissingReservation)?;
             Some((metadata, raw))
         } else { None };
-        validate_batch(r.batch, c, retained)?
+        validate_batch_for(r.batch, c, roles, retained)?
     } else {
         let (_, metadata, raw) = c.reservation.ok_or(MissingReservation)?;
         (metadata, raw)
@@ -785,7 +814,7 @@ impl StageCredit {
         Arc::new(Self { metadata, state: Mutex::new(ledgers) })
     }
     pub(crate) fn snapshot(&self) -> Ledgers {
-        let state=self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
         let mut s = *state;
         let metadata_used = self.metadata.stats().used as u64;
         s.slice_used = s
@@ -803,6 +832,14 @@ impl StageCredit {
         request: &Request<'_>,
         context: &Context<'_>,
     ) -> Result<StageLease<N>, StageError> {
+        self.reserve_for(request, context, Role::e1)
+    }
+    fn reserve_for<const N: usize>(
+        self: &Arc<Self>,
+        request: &Request<'_>,
+        context: &Context<'_>,
+        roles: fn(Role) -> bool,
+    ) -> Result<StageLease<N>, StageError> {
         let mut state = self.state.lock().unwrap();
         self.metadata.reserve_stage_batch(|used, limit, exhausted| {
             let mut c = *context;
@@ -815,7 +852,7 @@ impl StageCredit {
                 .ok_or(StageError::ArithmeticOverflow(Arithmetic::SliceOverlap))?;
             c.ledgers.metadata_used = used as u64;
             c.ledgers.metadata_limit = limit as u64;
-            let validated = validate_e1(request, &c)?;
+            let validated = validate_e1_for(request, &c, roles)?;
             // Only the Reserve entrypoint creates a fresh lease; all later transitions
             // consume the move-only lease rather than re-debiting validated records.
             assert_eq!(
