@@ -219,6 +219,7 @@ fn dm_fs_v3_size_limits_exact_and_plus_one() -> Result {
     let opk = opk(&vector(&fixtures, "SignedNativeOpk")?["input"])?;
     base.branch.principal_id = "p".repeat(256);
     base.branch.device_id = "é".repeat(128);
+    base.capabilities = "c".repeat(64);
     let canonical = base.to_bytes()?;
     assert!(canonical.len() <= 2_048);
     assert_eq!(SignedNativePrekeyBase::from_bytes(&canonical)?, base);
@@ -243,11 +244,12 @@ fn dm_fs_v3_size_limits_exact_and_plus_one() -> Result {
         assert_eq!(invalid.to_bytes(), Err(DecodeError::Value));
     }
     let mut update = update(&vector(&fixtures, "OwnerPrekeyUpdate")?["input"])?;
+    update.base = base.clone();
     update.additive_opks = vec![opk.clone(); 64];
     let retirement = update.retirements.first().ok_or("retirement")?.clone();
     update.retirements = vec![retirement.clone(); 400];
     let bytes = update.to_bytes()?;
-    assert!(bytes.len() <= 65_536);
+    assert_eq!(bytes.len(), 48_798);
     assert_eq!(OwnerPrekeyUpdate::from_bytes(&bytes)?, update);
     update.additive_opks.push(opk);
     assert_eq!(
@@ -275,10 +277,15 @@ fn dm_fs_v3_size_limits_exact_and_plus_one() -> Result {
         bytes.push(0);
         assert_eq!(scan(kind, &bytes).err(), Some(DecodeError::TypeCeiling));
     }
-    // A snapshot combines two individually legal lists; its aggregate cap remains binding.
+    // Decision r7 permits every collection and inherited ID at maximum simultaneously.
     update.retirements.pop();
     snapshot.pending_retirements.pop();
     snapshot.update = update;
-    assert_eq!(snapshot.to_bytes(), Err(DecodeError::TypeCeiling));
+    let maximal = snapshot.to_bytes()?;
+    assert_eq!(maximal.len(), 80_132);
+    assert_eq!(PrekeyPublicationSnapshot::from_bytes(&maximal)?, snapshot);
+    let mut oversized = maximal;
+    oversized.resize(WireType::PrekeyPublicationSnapshot.ceiling() + 1, 0);
+    assert_eq!(PrekeyPublicationSnapshot::from_bytes(&oversized), Err(DecodeError::TypeCeiling));
     Ok(())
 }
