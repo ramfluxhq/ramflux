@@ -878,3 +878,6 @@ async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), S
 
 #[path = "native_group_conversation_tests.rs"]
 mod native_group_conversation;
+
+#[path = "selector_reopen.rs"]
+pub(super) mod selector_reopen;
