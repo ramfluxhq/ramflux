@@ -512,8 +512,8 @@ pub(crate) async fn negotiate(
         match capable_registration(context, descriptor).await {
             Ok(id) => return Ok(Some(id)),
             Err(error) => {
+                // post() clears readiness only when the capable route is gone.
                 tracing::debug!(%error,"capable registration unavailable; selecting compatibility");
-                context.hub.readiness.ready.store(false, Ordering::Release);
             }
         }
     }

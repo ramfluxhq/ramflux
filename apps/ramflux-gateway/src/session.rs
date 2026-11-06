@@ -9,7 +9,7 @@ use crate::{
     GatewayForwardDeliverRequest, GatewayForwardDeliverResponse, GatewayPeerDirectory,
     GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, dispatch_quic_json_request,
     gateway_state, notify_offline_wake, router_cursor_async, router_get_json_async,
-    router_inbox_async, router_post_json, router_post_json_async, router_session_async,
+    router_inbox_async, router_post_json_async, router_session_async,
     serve::GatewayListenerContext,
 };
 
@@ -848,17 +848,18 @@ async fn run_gateway_session_loop_until_closed(
                     handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout).await?;
                 }
                 ramflux_node_core::GatewayClientFrame::IdentityRegister { request } => {
-                    let response = crate::registration::forward(
+                    let response = crate::registration::forward_async(
                         &context.router,
                         serde_json::json!(request),
                         context.remote_addr.ip(),
-                    );
+                    )
+                    .await;
                     write_gateway_handle(&send, &crate::registration::session_response(response))
                         .await?;
                 }
                 ramflux_node_core::GatewayClientFrame::PrekeyPublish { request } => {
                     let response: ramflux_node_core::PrekeyResponse =
-                        router_post_json(&context.router, "/mvp1/prekey/publish", &request)?;
+                        crate::registration::publish_prekey(&context.router, &request).await?;
                     write_gateway_handle(
                         &send,
                         &ramflux_node_core::GatewayServerFrame::PrekeyPublished { response },

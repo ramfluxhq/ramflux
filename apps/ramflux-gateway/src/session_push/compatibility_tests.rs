@@ -59,7 +59,7 @@ async fn establishment_write_errors_keep_client_mapping() -> anyhow::Result<()> 
     Ok(())
 }
 #[tokio::test]
-async fn failed_capable_registration_falls_back_without_echo() -> anyhow::Result<()> {
+async fn initial_registration_readiness_scope() -> anyhow::Result<()> {
     for (label, status, response) in [
         ("refused", 400, json!({"reason":"busy","incarnation_id":ID})),
         (
@@ -78,7 +78,10 @@ async fn failed_capable_registration_falls_back_without_echo() -> anyhow::Result
             json!({"incarnation_id":ID,"target_delivery_id":"target","session_id":"other"}),
         ),
         ("removed", 404, json!({})),
+        ("method-removed", 405, json!({})),
+        ("gone", 410, json!({})),
         ("transient", 500, json!({})),
+        ("timeout", 0, json!({})),
     ] {
         let mut fixture = Fixture::new(&format!("capable-fallback-{label}"))?;
         fixture.context.hub.readiness.started.store(true, Ordering::Release);
@@ -89,10 +92,16 @@ async fn failed_capable_registration_falls_back_without_echo() -> anyhow::Result
         let task = tokio::spawn(async move { negotiate(&context, &auth, &descriptor).await });
         let capable = fixture.next().await?;
         assert_eq!(capable.path, "/s1/session");
-        capable.respond.send((status, response)).map_err(|_| Retired)?;
+        if status == 0 {
+            tokio::time::pause();
+            tokio::time::advance(REQUEST_TIMEOUT).await;
+            tokio::time::resume();
+        } else {
+            capable.respond.send((status, response)).map_err(|_| Retired)?;
+        }
         let legacy = fixture.next().await?;
         assert_eq!(legacy.path, "/s1/session/upsert");
-        assert!(!fixture.context.hub.readiness.supports());
+        assert_eq!(fixture.context.hub.readiness.supports(), !matches!(status, 404 | 405 | 410));
         legacy
             .respond
             .send((200, serde_json::to_value(super::negotiation::descriptor())?))

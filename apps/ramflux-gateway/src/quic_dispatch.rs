@@ -38,13 +38,13 @@ pub(crate) async fn dispatch_quic_json_request(
             serde_json::to_value(response)?
         }
         ("POST", "/mvp1/identity/register") => {
-            return Ok(crate::registration::forward(router, request.body, source));
+            return Ok(crate::registration::forward_async(router, request.body, source).await);
         }
         ("POST", "/mvp1/prekey/publish") => {
             let prekey: ramflux_node_core::PrekeyPublishRequest =
                 serde_json::from_value(request.body)?;
             let response: ramflux_node_core::PrekeyResponse =
-                router_post_json(router, "/mvp1/prekey/publish", &prekey)?;
+                crate::registration::publish_prekey(router, &prekey).await?;
             serde_json::to_value(response)?
         }
         ("POST", "/mvp1/device/revoke") => {

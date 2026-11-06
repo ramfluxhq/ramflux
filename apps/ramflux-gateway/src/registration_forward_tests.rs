@@ -10,7 +10,9 @@ use ramflux_protocol::{DeviceSetStatus, PrincipalKind, SignedDeviceSetEntry, enc
 use std::sync::Arc;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-fn registration(now: i64) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
+pub(crate) fn registration(
+    now: i64,
+) -> Result<IdentityRegisterRequest, Box<dyn std::error::Error>> {
     let root = ramflux_crypto::create_identity_root("peer", [31; 32]);
     let branch = ramflux_crypto::create_device_branch("peer", "device", 1, [32; 32]);
     let agreement = X25519KeyPair::from_seed([33; 32]);

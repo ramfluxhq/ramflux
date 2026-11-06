@@ -14,19 +14,17 @@ pub(crate) fn rejected(reason_code: IdentityDirectoryReason) -> GatewayQuicRespo
         }),
     }
 }
+/// Blocking adapter for the synchronous test HTTP listener.
+#[cfg(any(feature = "itest-http", test))]
 pub(crate) fn forward(
     router: &crate::RouterMeshClient,
     body: serde_json::Value,
     source: std::net::IpAddr,
 ) -> GatewayQuicResponse {
-    let mut request: ramflux_node_core::IdentityRegisterRequest = match serde_json::from_value(body)
-    {
+    let request = match prepare(body, source) {
         Ok(request) => request,
-        Err(_) => return rejected(IdentityDirectoryReason::InvalidRegistration),
+        Err(response) => return response,
     };
-    if crate::principal_directory::registration_context(&mut request, source).is_err() {
-        return rejected(IdentityDirectoryReason::RegistrationUnavailable);
-    }
     let response: serde_json::Value =
         match crate::router_post_json(router, "/mvp1/identity/register", &request) {
             Ok(response) => response,
@@ -34,6 +32,59 @@ pub(crate) fn forward(
                 return crate::principal_directory::registration_forwarding_failure(&error);
             }
         };
+    registration_result(response)
+}
+
+const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn prepare(
+    body: serde_json::Value,
+    source: std::net::IpAddr,
+) -> Result<ramflux_node_core::IdentityRegisterRequest, GatewayQuicResponse> {
+    let mut request: ramflux_node_core::IdentityRegisterRequest = match serde_json::from_value(body)
+    {
+        Ok(request) => request,
+        Err(_) => return Err(rejected(IdentityDirectoryReason::InvalidRegistration)),
+    };
+    if crate::principal_directory::registration_context(&mut request, source).is_err() {
+        return Err(rejected(IdentityDirectoryReason::RegistrationUnavailable));
+    }
+    Ok(request)
+}
+
+pub(crate) async fn forward_async(
+    router: &crate::RouterMeshClient,
+    body: serde_json::Value,
+    source: std::net::IpAddr,
+) -> GatewayQuicResponse {
+    let request = match prepare(body, source) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    match tokio::time::timeout(
+        REGISTRATION_TIMEOUT,
+        crate::router_post_json_async(router, "/mvp1/identity/register", &request),
+    )
+    .await
+    {
+        Ok(Ok(response)) => registration_result(response),
+        Ok(Err(error)) => crate::principal_directory::registration_forwarding_failure(&error),
+        Err(error) => crate::principal_directory::registration_forwarding_failure(&error),
+    }
+}
+
+pub(crate) async fn publish_prekey(
+    router: &crate::RouterMeshClient,
+    request: &ramflux_node_core::PrekeyPublishRequest,
+) -> anyhow::Result<ramflux_node_core::PrekeyResponse> {
+    Ok(tokio::time::timeout(
+        REGISTRATION_TIMEOUT,
+        crate::router_post_json_async(router, "/mvp1/prekey/publish", request),
+    )
+    .await??)
+}
+
+fn registration_result(response: serde_json::Value) -> GatewayQuicResponse {
     if serde_json::from_value::<IdentityRegistrationFailure>(response.clone()).is_ok() {
         return GatewayQuicResponse { status: 409, body: response };
     }
@@ -102,3 +153,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "registration_async_tests.rs"]
+mod async_tests;
