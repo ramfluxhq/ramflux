@@ -244,6 +244,20 @@ fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
         f.registry.ledger.db.begin_read().unwrap().open_table(NONCES).unwrap().len().unwrap(),
         1
     );
+    let expires = f.grant.grant().expires_at;
+    f.registry.gc_consumed_proofs(expires, 64).unwrap();
+    assert!(
+        matches!(
+            f.registry.admit_operation_after_authentication(
+                &rotated,
+                1,
+                &proof(expires - 1, 3),
+                expires - 1
+            ),
+            Err(AttachmentReplayError::Ledger(AttachmentLedgerError::Expired))
+        ),
+        "within-skew rollback must not reopen an expired grant"
+    );
     drop(f);
     std::fs::remove_file(path).unwrap();
 }
