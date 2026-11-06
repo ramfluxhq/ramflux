@@ -26,7 +26,7 @@ pub(crate) fn test_db(test_name: &str) -> Result<(PathBuf, AccountDb), StorageEr
     Ok((root, db))
 }
 
-fn signed_test_db(
+pub(crate) fn signed_test_db(
     test_name: &str,
 ) -> Result<(PathBuf, AccountDb, ramflux_crypto::DeviceBranch), StorageError> {
     let root = temp_root(test_name);

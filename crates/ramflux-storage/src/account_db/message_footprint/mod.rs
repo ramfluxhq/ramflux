@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Write-time ownership of per-message copies; deletion visits indexed locators only.
+#[cfg(test)]
+mod audit;
 mod erasure;
 mod replay_reference;
 mod schema;
