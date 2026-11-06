@@ -23,6 +23,9 @@ pub(crate) fn unregistered_envelope_copies(
     limit: usize,
 ) -> rusqlite::Result<Vec<String>> {
     let mut found = Vec::new();
+    if limit == 0 {
+        return Ok(found);
+    }
     for (table, locator, kind, column) in STORES {
         if !super::schema::exists(db, table)? {
             continue;

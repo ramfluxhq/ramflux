@@ -695,3 +695,122 @@ fn envelope_history_import_leaves_no_unregistered_copy() -> Result<(), StorageEr
     std::fs::remove_dir_all(source_root)?;
     Ok(())
 }
+
+#[test]
+fn envelope_audit_honours_its_limit() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-envelope-audit-limit")?;
+    let found = |db: &AccountDb, limit: usize| -> Result<Vec<String>, StorageError> {
+        Ok(db.connection.call(move |raw| audit::unregistered_envelope_copies(raw, limit))?)
+    };
+    assert_eq!(found(&db, 1)?, Vec::<String>::new());
+    for name in ["a", "b", "c"] {
+        db.connection.execute(
+            "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2)",
+            params![format!("zz-new/{name}"), serde_json::to_vec(&envelope_value("message"))?],
+        )?;
+    }
+    assert_eq!(found(&db, 0)?, Vec::<String>::new());
+    assert_eq!(found(&db, 1)?.len(), 1);
+    assert_eq!(found(&db, 2)?.len(), 2);
+    assert_eq!(found(&db, 16)?.len(), 3);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn archive_filter(table: &str) -> &'static str {
+    if table == "backup_archived_actor_state" {
+        "state_kind='zz-new/archived'"
+    } else {
+        "event_id='event-archived'"
+    }
+}
+
+#[test]
+fn envelope_merge_relocates_incoming_archive_rows_and_erases_them() -> Result<(), StorageError> {
+    let root = crate::tests::temp_root("footprint-envelope-archive-merge");
+    let mut dbs = Vec::new();
+    for name in ["origin", "middle", "final"] {
+        let index = AccountIndex::open(root.join(name))?;
+        index.create_account("account", "root")?;
+        dbs.push(AccountDb::open(&index, "account", &AccountDbKey::generate()?)?);
+    }
+    let [origin, middle, last] = &dbs[..] else { unreachable!() };
+    for db in [origin, middle, last] {
+        db.send_direct_message("thread", "message", "peer", b"secret")?;
+    }
+    // The committed receipt binds payload -> M, so the event copy is owned by M directly.
+    origin.persist_actor_state("routed/committed/bound", &envelope_value("message"))?;
+    origin.persist_actor_state("zz-new/archived", &envelope_value("message"))?;
+    origin.append_event("event-archived", "text", &serde_json::to_vec(&full_envelope())?)?;
+    // Stage 1 puts the origin rows into the middle generation's archive tables.
+    let first = root.join("origin.db");
+    let origin_snapshot = origin.write_backup_snapshot(&first)?;
+    let middle_path = root.join("middle.db");
+    let middle_snapshot = middle.write_backup_snapshot(&middle_path)?;
+    let mut generation = crate::BackupDatabase::open(&middle_path, &middle_snapshot.key)?;
+    generation.merge_backup(&first, &origin_snapshot.key, || Ok(()))?;
+    // Keep only the archived copies so the next merge relocates archive-to-archive rows.
+    generation.db.execute_batch(
+        "DELETE FROM runtime_actor_state WHERE state_kind='zz-new/archived';
+         DELETE FROM local_event_log WHERE event_id='event-archived';",
+    )?;
+    let archived = |db: &rusqlite::Connection, table: &str| -> rusqlite::Result<i64> {
+        db.query_row(
+            &format!("SELECT count(*) FROM {table} WHERE {}", archive_filter(table)),
+            [],
+            |row| row.get(0),
+        )
+    };
+    assert_eq!(archived(&generation.db, "backup_archived_actor_state")?, 1);
+    assert_eq!(archived(&generation.db, "backup_archived_local_event")?, 1);
+    drop(generation);
+    // Stage 2: the final account imports a snapshot whose archive tables hold footprinted rows.
+    let final_path = root.join("final.db");
+    let final_snapshot = last.write_backup_snapshot(&final_path)?;
+    let mut merged = crate::BackupDatabase::open(&final_path, &final_snapshot.key)?;
+    merged.merge_backup(&middle_path, &middle_snapshot.key, || Ok(()))?;
+    let owners = |db: &rusqlite::Connection,
+                  kind: &str,
+                  table: &str,
+                  owner: &str|
+     -> rusqlite::Result<i64> {
+        db.query_row(
+            &format!(
+                "SELECT count(*) FROM {table} a JOIN message_footprint f \
+                 ON f.kind=?1 AND f.locator=CAST(a.rowid AS TEXT) AND f.message_id=?2 \
+                 WHERE a.source LIKE '%/%' AND {} AND CAST(a.{} AS TEXT) LIKE '%private%'",
+                archive_filter(table)
+                    .replace("state_kind", "a.state_kind")
+                    .replace("event_id", "a.event_id"),
+                if kind == "archived_actor" { "state_json" } else { "event_body" }
+            ),
+            params![kind, owner],
+            |row| row.get(0),
+        )
+    };
+    let check_present = |db: &rusqlite::Connection| -> rusqlite::Result<()> {
+        assert_eq!(archived(db, "backup_archived_actor_state")?, 1);
+        assert_eq!(archived(db, "backup_archived_local_event")?, 1);
+        assert_eq!(owners(db, "archived_actor", "backup_archived_actor_state", "message")?, 1);
+        assert_eq!(owners(db, "archived_event", "backup_archived_local_event", "message")?, 1);
+        Ok(())
+    };
+    check_present(&merged.db)?;
+    assert_eq!(audit::unregistered_envelope_copies(&merged.db, 16)?, Vec::<String>::new());
+    merged
+        .db
+        .execute("UPDATE direct_message_projection SET deleted=1 WHERE message_id='message'", [])?;
+    for table in ["backup_archived_actor_state", "backup_archived_local_event"] {
+        assert_eq!(archived(&merged.db, table)?, 0, "{table} survived deletion");
+    }
+    drop(merged);
+    let reopened = crate::BackupDatabase::open(&final_path, &final_snapshot.key)?;
+    for table in ["backup_archived_actor_state", "backup_archived_local_event"] {
+        assert_eq!(archived(&reopened.db, table)?, 0, "{table} returned after reopen");
+    }
+    drop(reopened);
+    drop(dbs);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
