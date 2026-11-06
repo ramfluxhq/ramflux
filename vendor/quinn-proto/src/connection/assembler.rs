@@ -276,9 +276,9 @@ impl Chunk {
 }
 
 #[derive(Clone, Debug, Eq)]
-struct Buffer {
+pub(super) struct Buffer {
     offset: u64,
-    bytes: Bytes,
+    pub(super) bytes: Bytes,
     /// Size of the allocation behind `bytes`, if `defragmented == false`.
     /// Otherwise this will be set to `bytes.len()` by `try_mark_defragment`.
     /// Will never be less than `bytes.len()`.
@@ -288,7 +288,7 @@ struct Buffer {
 
 impl Buffer {
     /// Constructs a new fragmented Buffer
-    fn new(offset: u64, bytes: Bytes, allocation_size: usize) -> Self {
+    pub(super) fn new(offset: u64, bytes: Bytes, allocation_size: usize) -> Self {
         Self {
             offset,
             bytes,

@@ -441,3 +441,12 @@ matches both retained metadata and raw grants, validating current usage without
 a second debit. Test free hooks run at the actual allocator deallocation boundary,
 including partial Prepare rollback; causal gates release on panic and every
 completion wait is bounded by a panicking guard of at least ten seconds.
+
+Dormant STREAM receive preparation reuses the stage core's binding, allocation
+and owner validation. A packet-private aggregate holds actual descriptor heaps,
+distinct inline stream owners, one copied payload and its separately accounted
+Bytes wrapper until all storage is freed. Shared views do not acquire new credit;
+retained datagrams keep their original base ownership. Repeated STREAM IDs share
+one assembler heap, and an empty semantic scan allocates nothing. Refusal frees
+only packet-private storage and preserves live receive queues. No packet-entry,
+publication, ordinary constructor or provider certificate is enabled here.
