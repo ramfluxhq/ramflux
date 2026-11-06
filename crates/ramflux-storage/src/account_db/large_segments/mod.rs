@@ -13,6 +13,8 @@ pub use orphan::SegmentOrphanSweep;
 #[cfg(test)]
 mod retirement_tests;
 #[cfg(test)]
+mod review_tests;
+#[cfg(test)]
 mod tests;
 use super::AccountDb;
 use crate::StorageError;
@@ -72,8 +74,15 @@ impl AccountDb {
             #[cfg(test)]
             during_write: None,
         };
-        if self.segment_reconciled.get().is_none() {
+        if self.segment_reconciled.get().is_none()
+            || self
+                .object_retirement
+                .segment_cleanup_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             store.cleanup_retired(32)?;
+        }
+        if self.segment_reconciled.get().is_none() {
             store.recover_startup()?;
             let _ = self.segment_reconciled.set(());
         }

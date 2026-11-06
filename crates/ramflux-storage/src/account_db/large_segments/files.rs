@@ -7,6 +7,17 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[cfg(test)]
+thread_local! { static FILESYSTEM_OPERATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(super) fn note_filesystem_operation() {
+    FILESYSTEM_OPERATIONS.with(|count| count.set(count.get() + 1));
+}
+#[cfg(test)]
+pub(super) fn filesystem_operations() -> u64 {
+    FILESYSTEM_OPERATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CrashPoint {
     Written,
@@ -16,6 +27,8 @@ pub(super) enum CrashPoint {
 }
 
 pub(super) fn private_dir(path: &Path) -> Result<(), StorageError> {
+    #[cfg(test)]
+    note_filesystem_operation();
     match fs::create_dir(path) {
         Ok(()) => {
             #[cfg(unix)]
@@ -35,6 +48,8 @@ pub(super) fn private_dir(path: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 pub(super) fn sync_dir(path: &Path) -> Result<(), StorageError> {
+    #[cfg(test)]
+    note_filesystem_operation();
     File::open(path)?.sync_all()?;
     Ok(())
 }

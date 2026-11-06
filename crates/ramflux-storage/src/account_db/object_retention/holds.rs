@@ -7,7 +7,7 @@ use super::*;
 /// Owns a bounded, provisional retention claim until send success converts it to message edges.
 pub struct PreSendObjectHold {
     connection: crate::database::Connection,
-    segment_root: std::path::PathBuf,
+    segment_cleanup_pending: Arc<std::sync::atomic::AtomicBool>,
     commitment: String,
     observer: Option<ObjectRetirementObserver>,
     armed: bool,
@@ -27,6 +27,11 @@ impl PreSendObjectHold {
                 == object_erasure_commitment(&db.principal_commitment, wire, manifest)
     }
 
+    #[cfg(test)]
+    pub(in crate::account_db) fn disarm_for_test(&mut self) {
+        self.armed = false;
+    }
+
     /// # Errors
     /// Returns transactional cleanup errors; the durable expiry remains available for recovery.
     pub fn release(mut self) -> Result<(), StorageError> {
@@ -42,6 +47,7 @@ impl PreSendObjectHold {
         let sql = self.connection.call(|db| schema::payload_erasure_body(db))?;
         self.connection.execute_batch(&sql)?;
         transaction.commit()?;
+        self.segment_cleanup_pending.store(true, std::sync::atomic::Ordering::Release);
         if changed > 0 {
             let current = self.connection.query_row(
                 "SELECT generation FROM account_erasure_generation WHERE singleton=1",
@@ -54,11 +60,7 @@ impl PreSendObjectHold {
             }
             resources::retire(&self.resources, Some(std::slice::from_ref(&self.commitment)))?;
         }
-        super::super::large_segments::retirement::drain_connection(
-            &self.connection,
-            &self.segment_root,
-            32,
-        )?;
+
         Ok(())
     }
 }
@@ -89,7 +91,7 @@ impl AccountDb {
         )?;
         Ok(PreSendObjectHold {
             connection: self.connection.clone(),
-            segment_root: self.path.with_extension("segments"),
+            segment_cleanup_pending: Arc::clone(&self.object_retirement.segment_cleanup_pending),
             commitment: object_erasure_commitment(&self.principal_commitment, wire, manifest),
             observer: self.object_retirement.callback.borrow().clone(),
             armed: true,

@@ -121,7 +121,7 @@ fn assert_hot_query_plans(db: &AccountDb) -> Result {
     Ok(())
 }
 
-fn signed_requests(
+pub(super) fn signed_requests(
     grants: &[NativeGrantAssociation],
     signer: &SigningKey,
 ) -> Result<Vec<VerifiedAttachmentRetirement>> {

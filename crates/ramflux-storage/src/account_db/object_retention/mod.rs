@@ -59,6 +59,7 @@ pub(super) struct RetirementObserver {
     pub cursor: Cell<i64>,
     pub resources: resources::Resources,
     pub generations: generation::Resources,
+    pub segment_cleanup_pending: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AccountDb {
@@ -93,6 +94,9 @@ impl AccountDb {
         if !self.connection.is_autocommit()? {
             return Ok(());
         }
+        self.object_retirement
+            .segment_cleanup_pending
+            .store(true, std::sync::atomic::Ordering::Release);
         let callback = self.object_retirement.callback.borrow().clone();
         let result = (|| -> Result<(), StorageError> {
             generation::retire(
@@ -118,7 +122,7 @@ impl AccountDb {
                 )?;
                 self.object_retirement.cursor.set(*last);
             }
-            super::large_segments::retirement::drain_account(self, 32)?;
+
             Ok(())
         })();
         if result.is_err()

@@ -298,3 +298,6 @@ fn backfill_expiry(db: &rusqlite::Connection) -> Result<(), StorageError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod veto_tests;

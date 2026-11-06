@@ -9,7 +9,7 @@ use crate::{BackupDatabase, ObjectReferenceAdmission, ObjectReferenceOwner, Obje
 use ed25519_dalek::{Signer, SigningKey};
 use rusqlite::params;
 use std::fs;
-fn bind(db: &AccountDb, m: &VerifiedContentManifest, message: &str, reference: &str) {
+pub(super) fn bind(db: &AccountDb, m: &VerifiedContentManifest, message: &str, reference: &str) {
     let wire = ramflux_protocol::encode_base64url(m.manifest().object_id);
     let hash = ramflux_protocol::encode_base64url(m.manifest().hash().unwrap());
     db.upsert_object(&ObjectWrite {
@@ -71,14 +71,18 @@ fn large_restore_and_late_worker_cannot_resurrect_revoked_segments() {
         db.delete_direct_message("thread", "first", "local", "delete").unwrap();
         assert!(db.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_segment_resource WHERE transfer_id='first' AND retired=1)",[],|r|r.get::<_,bool>(0)).unwrap());
     }));
-    assert!(store.checkpoint("first", 1, 0, 0, &cipher[0]).is_err());
+    assert!(matches!(
+        store.checkpoint("first", 1, 0, 0, &cipher[0]),
+        Err(StorageError::ObjectErased)
+    ));
     store.during_write = None;
     assert!(!store.location("first", 1).try_exists().unwrap());
     assert_eq!(fs::read(&retained).unwrap(), cipher[0]);
     assert_eq!(store.read_chunk("second", 2, 0, 0).unwrap(), cipher[0]);
-    assert!(
-        store.admit_reference("first", 1, SegmentDirection::Download, &native, &first).is_err()
-    );
+    assert!(matches!(
+        store.admit_reference("first", 1, SegmentDirection::Download, &native, &first),
+        Err(StorageError::ObjectErased)
+    ));
     // Advancing a live generation durably reclaims the previous generation's files.
     store.admit_reference("second", 3, SegmentDirection::Download, &native, &second).unwrap();
     assert!(!retained.try_exists().unwrap());
@@ -91,15 +95,21 @@ fn large_restore_and_late_worker_cannot_resurrect_revoked_segments() {
         Ok::<_, StorageError>(())
     })
     .unwrap();
+    store.cleanup_retired(32).unwrap();
     assert!(!live.try_exists().unwrap());
-    assert!(
-        store.admit_reference("second", 3, SegmentDirection::Download, &native, &second).is_err()
-    );
+    assert!(matches!(
+        store.admit_reference("second", 3, SegmentDirection::Download, &native, &second),
+        Err(StorageError::ObjectErased)
+    ));
     store.admit_reference("second", 4, SegmentDirection::Download, &native, &second).unwrap();
     store.checkpoint("second", 4, 0, 0, &cipher[0]).unwrap();
     db.delete_direct_message("thread", "second", "local", "delete").unwrap();
+    store.cleanup_retired(32).unwrap();
     assert!(!store.location("second", 4).try_exists().unwrap());
-    assert!(store.read_chunk("second", 4, 0, 0).is_err());
+    assert!(matches!(
+        store.read_chunk("second", 4, 0, 0),
+        Err(StorageError::ObjectIdentityConflict)
+    ));
     // Genuine pre-registration orphan discovery is bounded and creates debt before deletion.
     let orphan = store.root.join(ramflux_protocol::encode_base64url([89; 32])).join("4");
     fs::create_dir_all(&orphan).unwrap();
@@ -177,21 +187,28 @@ fn large_restore_and_late_worker_cannot_resurrect_revoked_segments() {
         drop(second_gen);
         let restored = AccountDb::open(&index, "acct", &restored_key).unwrap();
         assert_eq!(restored.segment_store().unwrap().resource_count().unwrap(), 0);
-        assert!(
-            restored
-                .segment_store()
-                .unwrap()
-                .admit_reference("first", 1, SegmentDirection::Download, &native, &first)
-                .is_err()
-        );
+        assert!(matches!(
+            restored.segment_store().unwrap().admit_reference(
+                "first",
+                1,
+                SegmentDirection::Download,
+                &native,
+                &first
+            ),
+            Err(StorageError::ObjectErased)
+        ));
     }
     let db = reopen(&root);
-    assert!(
-        db.segment_store()
-            .unwrap()
-            .admit_reference("second", 4, SegmentDirection::Download, &native, &second)
-            .is_err()
-    );
+    assert!(matches!(
+        db.segment_store().unwrap().admit_reference(
+            "second",
+            4,
+            SegmentDirection::Download,
+            &native,
+            &second
+        ),
+        Err(StorageError::ObjectErased)
+    ));
     cleanup_query_plan(&db);
     drop(db);
     fs::remove_dir_all(root).unwrap();
@@ -239,6 +256,24 @@ fn cleanup_query_plan(db: &AccountDb) {
     assert_eq!(db.segment_store().unwrap().resource_count().unwrap(), 4096);
     assert!(matches!(
         super::retirement::check_capacity(&db.connection),
+        Err(StorageError::SegmentResourceCapacity { limit: 4096 })
+    ));
+    let (native, _) = fixture(1);
+    bind(db, &native, "capacity-live", "capacity-reference");
+    let wire = ramflux_protocol::encode_base64url(native.manifest().object_id);
+    let reference = SegmentReference {
+        selector: &wire,
+        reference_hash: "capacity-reference",
+        message_id: "capacity-live",
+    };
+    assert!(matches!(
+        db.segment_store().unwrap().admit_reference(
+            "over-capacity",
+            1,
+            SegmentDirection::Download,
+            &native,
+            &reference
+        ),
         Err(StorageError::SegmentResourceCapacity { limit: 4096 })
     ));
     let mut q=db.connection.prepare("EXPLAIN QUERY PLAN SELECT directory,generation FROM object_segment_resource WHERE retired=1 AND directory>=?1 ORDER BY directory,generation LIMIT 32").unwrap();
@@ -302,10 +337,11 @@ fn provisional_segments_follow_hold_release_and_expiry() {
     store.checkpoint("upload", 1, 0, 0, &cipher[0]).unwrap();
     let path = store.location("upload", 1);
     hold.release().unwrap();
+    store.cleanup_retired(32).unwrap();
     assert!(!path.try_exists().unwrap());
     assert!(matches!(
         store.read_chunk("upload", 1, 0, 0),
-        Err(StorageError::ObjectErased | StorageError::ObjectIdentityConflict)
+        Err(StorageError::ObjectIdentityConflict)
     ));
     let mut other = m.clone();
     other.object_id = [99; 32];
@@ -318,6 +354,8 @@ fn provisional_segments_follow_hold_release_and_expiry() {
     let hash2 = ramflux_protocol::encode_base64url(other.manifest().hash().unwrap());
     let hold2 = db.pre_send_object_hold(&wire2, &hash2).unwrap();
     store.admit_pre_send("expired", 1, &other, &hold2).unwrap();
+    store.checkpoint("expired", 1, 0, 0, &cipher[0]).unwrap();
+    assert!(store.location("expired", 1).join("0.segment").is_file());
     db.write_transaction(|| {
         db.connection.execute(
             "UPDATE object_retention_payload SET hold_expires_at=?1 WHERE wire_id=?2",
@@ -330,6 +368,8 @@ fn provisional_segments_follow_hold_release_and_expiry() {
         store.checkpoint("expired", 1, 0, 0, &cipher[0]),
         Err(StorageError::ObjectErased)
     ));
+    db.maintain_expired_object_holds().unwrap();
+    store.cleanup_retired(32).unwrap();
     assert!(!store.location("expired", 1).try_exists().unwrap());
     drop(hold2);
     let mut converted = m.clone();
@@ -348,6 +388,7 @@ fn provisional_segments_follow_hold_release_and_expiry() {
     hold3.release().unwrap();
     assert_eq!(store.read_chunk("converted", 1, 0, 0).unwrap(), cipher[0]);
     db.delete_direct_message("thread", "converted-message", "local", "delete").unwrap();
+    store.cleanup_retired(32).unwrap();
     assert!(!store.location("converted", 1).try_exists().unwrap());
     drop(store);
     drop(db);
