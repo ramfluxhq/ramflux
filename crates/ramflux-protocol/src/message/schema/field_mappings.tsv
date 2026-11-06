@@ -1,0 +1,514 @@
+# Approved message_schema_v1 section 3.1: message, field, tag, native source, type
+CallEndpoint	principal_id	1	CallEndpoint.principal_id	string
+CallEndpoint	root_public_key	2	CallEndpoint.root_public_key	string
+CallEndpoint	device_id	3	CallEndpoint.device_id	string
+CallAction	invite	1	CallAction::Invite{ base_key: String }	CallActionInvite (string base_key = 1;)
+CallAction	ringing	2	CallAction::Ringing	CallActionRinging (empty)
+CallAction	answer	3	CallAction::Answer{ base_key: String }	CallActionAnswer (string base_key = 1;)
+CallAction	ack	4	CallAction::Ack{ allocation: Box<VoicePeerAllocation> }	CallActionAck (VoicePeerAllocation allocation = 1;)
+CallAction	ready	5	CallAction::Ready{ consent: Box<VoiceLeaseConsent> }	CallActionReady (VoiceLeaseConsent consent = 1;)
+CallAction	reject	6	CallAction::Reject	CallActionReject (empty)
+CallAction	busy	7	CallAction::Busy	CallActionBusy (empty)
+CallAction	hangup	8	CallAction::Hangup	CallActionHangup (empty)
+CallAction	timeout	9	CallAction::Timeout	CallActionTimeout (empty)
+CallAction	failed	10	CallAction::Failed	CallActionFailed (empty)
+CallAction	answered_elsewhere	11	CallAction::AnsweredElsewhere	CallActionAnsweredElsewhere (empty)
+CallAction	rekey	12	CallAction::Rekey{ generation: u64, base_key: String }	CallActionRekey (uint64 generation = 1;; string base_key = 2;)
+CallAction	rekey_ack	13	CallAction::RekeyAck{ generation: u64, base_key: String }	CallActionRekeyAck (uint64 generation = 1;; string base_key = 2;)
+CallControl	schema	1	CallControl.schema	string
+CallControl	call_id	2	CallControl.call_id	string
+CallControl	conversation_id	3	CallControl.conversation_id	string
+CallControl	caller	4	CallControl.caller	CallEndpoint
+CallControl	callee	5	CallControl.callee	CallEndpoint
+CallControl	sender	6	CallControl.sender	CallEndpoint
+CallControl	seq	7	CallControl.seq	uint64
+CallControl	created_at	8	CallControl.created_at	int64
+CallControl	body	9	CallControl.body	CallAction
+CallControl	signature	10	CallControl.signature	string
+VoiceAllocationRequest	call_id	1	VoiceAllocationRequest.call_id	string
+VoiceAllocationRequest	caller	2	VoiceAllocationRequest.caller	CallEndpoint
+VoiceAllocationRequest	callee	3	VoiceAllocationRequest.callee	CallEndpoint
+VoicePeerAllocation	lease_id	1	VoicePeerAllocation.lease_id	string
+VoicePeerAllocation	endpoint	2	VoicePeerAllocation.endpoint	string
+VoicePeerAllocation	expires_at	3	VoicePeerAllocation.expires_at	uint64
+VoicePeerAllocation	hard_expires_at	4	VoicePeerAllocation.hard_expires_at	uint64
+VoiceLeaseConsent	scope	1	VoiceLeaseConsent.scope	VoiceAllocationRequest
+VoiceLeaseConsent	lease_id	2	VoiceLeaseConsent.lease_id	string
+VoiceLeaseConsent	expires_at	3	VoiceLeaseConsent.expires_at	uint64
+VoiceLeaseConsent	signature	4	VoiceLeaseConsent.signature	string
+SurfaceEvent	schema	1	EventFields.schema	string
+SurfaceEvent	conversation_id	2	EventFields.conversation_id	string
+SurfaceEvent	version	3	EventFields.version	uint64
+SurfaceEvent	command	4	EventFields.command	SurfaceCommand
+SurfaceAction	schema	1	ActionFields.schema	string
+SurfaceAction	conversation_id	2	ActionFields.conversation_id	string
+SurfaceAction	surface_id	3	ActionFields.surface_id	string
+SurfaceAction	version	4	ActionFields.version	uint64
+SurfaceAction	surface_hash	5	ActionFields.surface_hash	string
+SurfaceAction	action_id	6	ActionFields.action_id	string
+SurfaceAction	values	7	ActionFields.values	JsonValue
+SurfaceAction	args_hash	8	ActionFields.args_hash	string
+SurfaceAction	task_binding	9	ActionFields.task_binding	optional SurfaceTaskBinding
+SurfaceTaskBinding	task_id	1	SurfaceTaskBinding.task_id	string
+SurfaceTaskBinding	step_id	2	SurfaceTaskBinding.step_id	string
+SurfaceCommand	create_surface	1	A2uiConversationCommand::CreateSurface(CreateSurfaceCommand)	SurfaceCommandCreateSurface (CreateSurfaceCommand value = 1;)
+SurfaceCommand	update_components	2	A2uiConversationCommand::UpdateComponents(UpdateComponentsCommand)	SurfaceCommandUpdateComponents (UpdateComponentsCommand value = 1;)
+SurfaceCommand	update_data_model	3	A2uiConversationCommand::UpdateDataModel(UpdateDataModelCommand)	SurfaceCommandUpdateDataModel (UpdateDataModelCommand value = 1;)
+SurfaceCommand	delete_surface	4	A2uiConversationCommand::DeleteSurface(DeleteSurfaceCommand)	SurfaceCommandDeleteSurface (DeleteSurfaceCommand value = 1;)
+SurfaceCommand	patch_surface	5	A2uiConversationCommand::PatchSurface(PatchSurfaceCommand)	SurfaceCommandPatchSurface (PatchSurfaceCommand value = 1;)
+SurfaceCommand	stream_append	6	A2uiConversationCommand::StreamAppend(StreamAppendCommand)	SurfaceCommandStreamAppend (StreamAppendCommand value = 1;)
+PatchSurfaceCommand	surface_id	1	PatchSurfaceCommand.surface_id	string
+PatchSurfaceCommand	base_surface_hash	2	PatchSurfaceCommand.base_surface_hash	string
+PatchSurfaceCommand	ops	3	PatchSurfaceCommand.ops	repeated SurfacePatchOp
+PatchSurfaceCommand	new_surface_hash	4	PatchSurfaceCommand.new_surface_hash	string
+SurfacePatchOp	replace_block	1	SurfacePatchOp::ReplaceBlock{ component: Value }	SurfacePatchOpReplaceBlock (JsonValue component = 1;)
+SurfacePatchOp	insert_block	2	SurfacePatchOp::InsertBlock{ index: usize, component: Value }	SurfacePatchOpInsertBlock (uint64 index = 1;; JsonValue component = 2;)
+SurfacePatchOp	remove_block	3	SurfacePatchOp::RemoveBlock{ component_id: String }	SurfacePatchOpRemoveBlock (string component_id = 1;)
+SurfacePatchOp	set_actions	4	SurfacePatchOp::SetActions{ actions: Vec<Value> }	SurfacePatchOpSetActions (repeated JsonValue actions = 1;)
+SurfacePatchOp	set_fallback_text	5	SurfacePatchOp::SetFallbackText{ fallback_text: String }	SurfacePatchOpSetFallbackText (string fallback_text = 1;)
+StreamAppendCommand	surface_id	1	StreamAppendCommand.surface_id	string
+StreamAppendCommand	component_id	2	StreamAppendCommand.component_id	string
+StreamAppendCommand	text_delta	3	StreamAppendCommand.text_delta	string
+StreamAppendCommand	final_	4	StreamAppendCommand.final_	bool
+CreateSurfaceCommand	surface_id	1	CreateSurfaceCommand.surface_id	string
+CreateSurfaceCommand	surface_type	2	CreateSurfaceCommand.surface_type	SurfaceType
+CreateSurfaceCommand	catalog	3	CreateSurfaceCommand.catalog	string
+CreateSurfaceCommand	catalog_version	4	CreateSurfaceCommand.catalog_version	string
+CreateSurfaceCommand	fallback_text	5	CreateSurfaceCommand.fallback_text	string
+CreateSurfaceCommand	fallback_markdown	6	CreateSurfaceCommand.fallback_markdown	optional string
+CreateSurfaceCommand	components	7	CreateSurfaceCommand.components	repeated JsonValue
+CreateSurfaceCommand	data_model	8	CreateSurfaceCommand.data_model	JsonObject
+CreateSurfaceCommand	allowed_actions	9	CreateSurfaceCommand.allowed_actions	repeated JsonValue
+UpdateComponentsCommand	surface_id	1	UpdateComponentsCommand.surface_id	string
+UpdateComponentsCommand	base_surface_hash	2	UpdateComponentsCommand.base_surface_hash	string
+UpdateComponentsCommand	components	3	UpdateComponentsCommand.components	repeated JsonValue
+UpdateComponentsCommand	remove_component_ids	4	UpdateComponentsCommand.remove_component_ids	repeated string
+UpdateComponentsCommand	new_surface_hash	5	UpdateComponentsCommand.new_surface_hash	string
+UpdateDataModelCommand	surface_id	1	UpdateDataModelCommand.surface_id	string
+UpdateDataModelCommand	base_surface_hash	2	UpdateDataModelCommand.base_surface_hash	string
+UpdateDataModelCommand	data_patch	3	UpdateDataModelCommand.data_patch	JsonObject
+UpdateDataModelCommand	new_surface_hash	4	UpdateDataModelCommand.new_surface_hash	string
+DeleteSurfaceCommand	surface_id	1	DeleteSurfaceCommand.surface_id	string
+DeleteSurfaceCommand	reason	2	DeleteSurfaceCommand.reason	optional DeleteSurfaceReason
+SurfaceType	message_card	1	SurfaceType::MessageCard	SurfaceTypeMessageCard (empty)
+SurfaceType	approval_card	2	SurfaceType::ApprovalCard	SurfaceTypeApprovalCard (empty)
+SurfaceType	form_card	3	SurfaceType::FormCard	SurfaceTypeFormCard (empty)
+SurfaceType	status_panel	4	SurfaceType::StatusPanel	SurfaceTypeStatusPanel (empty)
+SurfaceType	task_card	5	SurfaceType::TaskCard	SurfaceTypeTaskCard (empty)
+SurfaceType	file_preview	6	SurfaceType::FilePreview	SurfaceTypeFilePreview (empty)
+SurfaceType	call_card	7	SurfaceType::CallCard	SurfaceTypeCallCard (empty)
+SurfaceType	agent_result	8	SurfaceType::AgentResult	SurfaceTypeAgentResult (empty)
+SurfaceType	notification_card	9	SurfaceType::NotificationCard	SurfaceTypeNotificationCard (empty)
+DeleteSurfaceReason	completed	1	DeleteSurfaceReason::Completed	DeleteSurfaceReasonCompleted (empty)
+DeleteSurfaceReason	cancelled	2	DeleteSurfaceReason::Cancelled	DeleteSurfaceReasonCancelled (empty)
+DeleteSurfaceReason	replaced	3	DeleteSurfaceReason::Replaced	DeleteSurfaceReasonReplaced (empty)
+DeleteSurfaceReason	expired	4	DeleteSurfaceReason::Expired	DeleteSurfaceReasonExpired (empty)
+DeleteSurfaceReason	error	5	DeleteSurfaceReason::Error	DeleteSurfaceReasonError (empty)
+A2iControlEvent	schema	1	A2iControlEvent.schema	string
+A2iControlEvent	version	2	A2iControlEvent.version	uint32
+A2iControlEvent	domain	3	A2iControlEvent.domain	string
+A2iControlEvent	ext	4	A2iControlEvent.ext	Ext
+A2iControlEvent	signed	5	A2iControlEvent.signed	SignedFields
+A2iControlEvent	event_type	6	A2iControlEvent.event_type	A2iControlEventType
+A2iControlEvent	control_domain	7	A2iControlEvent.control_domain	ControlDomain
+A2iControlEvent	action	8	A2iControlEvent.action	string
+A2iControlEvent	subject	9	A2iControlEvent.subject	JsonValue
+A2iControlEvent	correlation_id	10	A2iControlEvent.correlation_id	string
+A2iControlEvent	source_device_id	11	A2iControlEvent.source_device_id	string
+A2iControlEvent	target_device_id	12	A2iControlEvent.target_device_id	string
+A2iControlEvent	grant_id	13	A2iControlEvent.grant_id	optional string
+A2iControlEvent	expires_at	14	A2iControlEvent.expires_at	optional int64
+ControlDomain	message	1	ControlDomain::Message	ControlDomainMessage (empty)
+ControlDomain	conversation	2	ControlDomain::Conversation	ControlDomainConversation (empty)
+ControlDomain	a2ui	3	ControlDomain::A2ui	ControlDomainA2ui (empty)
+ControlDomain	mcp_tool	4	ControlDomain::McpTool	ControlDomainMcpTool (empty)
+A2iControlEventType	control	1	A2iControlEventType::Control	A2iControlEventTypeControl (empty)
+TaskStatus	proposed	1	TaskStatus::Proposed	TaskStatusProposed (empty)
+TaskStatus	running	2	TaskStatus::Running	TaskStatusRunning (empty)
+TaskStatus	needs_me	3	TaskStatus::NeedsMe	TaskStatusNeedsMe (empty)
+TaskStatus	done	4	TaskStatus::Done	TaskStatusDone (empty)
+TaskStatus	failed	5	TaskStatus::Failed	TaskStatusFailed (empty)
+TaskStatus	cancelled	6	TaskStatus::Cancelled	TaskStatusCancelled (empty)
+NeedsMe	approval	1	NeedsMe::Approval{ grant_id: String }	NeedsMeApproval (string grant_id = 1;)
+NeedsMe	choice	2	NeedsMe::Choice{ surface_id: String }	NeedsMeChoice (string surface_id = 1;)
+NeedsMe	input	3	NeedsMe::Input{ surface_id: String }	NeedsMeInput (string surface_id = 1;)
+TaskStep	id	1	TaskStep.id	string
+TaskStep	title	2	TaskStep.title	string
+TaskStep	state	3	TaskStep.state	TaskStatus
+TaskStep	needs_me	4	TaskStep.needs_me	optional NeedsMe
+TaskStart	task_id	1	TaskStart.task_id	string
+TaskStart	conversation_id	2	TaskStart.conversation_id	string
+TaskStart	requester	3	TaskStart.requester	string
+TaskStart	assignee	4	TaskStart.assignee	string
+TaskStart	text	5	TaskStart.text	string
+TaskStart	constraints	6	TaskStart.constraints	optional string
+TaskProposal	task_id	1	TaskProposal.task_id	string
+TaskProposal	conversation_id	2	TaskProposal.conversation_id	string
+TaskProposal	proposer	3	TaskProposal.proposer	string
+TaskProposal	assignee	4	TaskProposal.assignee	string
+TaskProposal	title	5	TaskProposal.title	string
+TaskProposal	steps	6	TaskProposal.steps	repeated TaskStep
+TaskAccept	task_id	1	TaskAccept.task_id	string
+TaskAccept	version	2	TaskAccept.version	uint64
+TaskDecline	task_id	1	TaskDecline.task_id	string
+TaskDecline	version	2	TaskDecline.version	uint64
+TaskUpdate	task_id	1	TaskUpdate.task_id	string
+TaskUpdate	version	2	TaskUpdate.version	uint64
+TaskUpdate	state	3	TaskUpdate.state	TaskStatus
+TaskUpdate	steps	4	TaskUpdate.steps	repeated TaskStep
+TaskUpdate	result_ref	5	TaskUpdate.result_ref	optional string
+TaskUpdate	result_summary	6	TaskUpdate.result_summary	optional string
+TaskCancel	task_id	1	TaskCancel.task_id	string
+TaskCancel	base_revision	2	TaskCancel.base_revision	uint64
+TaskDecision	resume	1	TaskDecision::Resume	TaskDecisionResume (empty)
+TaskDecision	deny	2	TaskDecision::Deny	TaskDecisionDeny (empty)
+TaskResolve	task_id	1	TaskResolve.task_id	string
+TaskResolve	base_revision	2	TaskResolve.base_revision	uint64
+TaskResolve	step_id	3	TaskResolve.step_id	string
+TaskResolve	target	4	TaskResolve.target	NeedsMe
+TaskResolve	decision_id	5	TaskResolve.decision_id	string
+TaskResolve	decision	6	TaskResolve.decision	TaskDecision
+TaskEventBody	start	1	TaskEventBody::Start(TaskStart)	TaskEventBodyStart (TaskStart value = 1;)
+TaskEventBody	proposal	2	TaskEventBody::Proposal(TaskProposal)	TaskEventBodyProposal (TaskProposal value = 1;)
+TaskEventBody	accept	3	TaskEventBody::Accept(TaskAccept)	TaskEventBodyAccept (TaskAccept value = 1;)
+TaskEventBody	decline	4	TaskEventBody::Decline(TaskDecline)	TaskEventBodyDecline (TaskDecline value = 1;)
+TaskEventBody	update	5	TaskEventBody::Update(TaskUpdate)	TaskEventBodyUpdate (TaskUpdate value = 1;)
+TaskEventBody	cancel	6	TaskEventBody::Cancel(TaskCancel)	TaskEventBodyCancel (TaskCancel value = 1;)
+TaskEventBody	resolve	7	TaskEventBody::Resolve(TaskResolve)	TaskEventBodyResolve (TaskResolve value = 1;)
+TaskEvent	schema	1	EventFields.schema	string
+TaskEvent	version	2	EventFields.version	uint32
+TaskEvent	domain	3	EventFields.domain	string
+TaskEvent	ext	4	EventFields.ext	Ext
+TaskEvent	signed	5	EventFields.signed	SignedFields
+TaskEvent	conversation_id	6	EventFields.conversation_id	string
+TaskEvent	event	7	EventFields.event	TaskEventBody
+SignedFields	signing_key_id	1	SignedFields.signing_key_id	string
+SignedFields	signature_alg	2	SignedFields.signature_alg	SignatureAlg
+SignedFields	signature	3	SignedFields.signature	string
+Ext	ext	1	Ext.ext	JsonObject
+SurfaceCarrier	schema	1	Carrier.schema	string
+SurfaceCarrier	content_type	2	Carrier.content_type	string
+SurfaceCarrier	posted_at	3	Carrier.posted_at	optional int64
+SurfaceCarrier	updated_at	4	Carrier.updated_at	optional int64
+SurfaceCarrier	conversation_id	5	Carrier.conversation_id	string
+SurfaceCarrier	surface_id	6	Carrier.surface_id	string
+SurfaceCarrier	message_id	7	Carrier.message_id	string
+SurfaceCarrier	sender_principal_id	8	Carrier.sender_principal_id	string
+SurfaceCarrier	sender_device_id	9	Carrier.sender_device_id	string
+SurfaceCarrier	author_principal_id	10	Carrier.author_principal_id	string
+SurfaceCarrier	signature	11	Carrier.signature	string
+SurfaceCarrier	snapshot	12	Carrier.snapshot	optional SurfaceSnapshotProof
+SurfaceCarrier	event	16	PayloadKind::Event / wire_base64	SurfaceEvent
+SurfaceCarrier	action	17	PayloadKind::Action / wire_base64	SurfaceAction
+SurfaceCarrier	action_receipt	18	PayloadKind::ActionReceipt / wire_base64	SurfaceCarrier
+SurfaceSnapshotProof	event	1	SnapshotProof.wire_base64	SurfaceEvent
+SurfaceSnapshotProof	checkpoint	2	SnapshotProof.checkpoint_base64	SurfaceCheckpoint
+SurfaceSnapshotProof	surface_hash	3	SnapshotProof.surface_hash	optional string
+SurfaceSnapshotProof	metadata	4	SnapshotProof.metadata	SurfaceResyncMetadata
+SurfaceSnapshotProof	author_device_id	5	SnapshotProof.author_device_id	string
+SurfaceDelivery	kind	1	SurfaceControl.kind	SurfaceControlKind
+SurfaceDelivery	carrier	2	SurfaceControl.carrier_base64	SurfaceCarrier
+SurfaceDelivery	group_epoch	3	SurfaceControl.group_epoch	optional uint64
+SurfaceDelivery	context	4	SurfaceControl.context	optional OwnContext
+SurfaceDelivery	manifests	5	SurfaceControl.manifests	repeated NativeDeviceManifest
+SurfaceControlKind	peer	1	ControlKind::Peer	SurfaceControlKindPeer (empty)
+SurfaceControlKind	own	2	ControlKind::Own	SurfaceControlKindOwn (empty)
+OwnContext	conversation_id	1	OwnContext.conversation_id	string
+OwnContext	participants	2	OwnContext.participants	repeated string
+OwnContext	group	3	OwnContext.group	optional SdkOwnDeviceGroupSnapshot
+OwnContext	friend	4	OwnContext.friend	optional FriendLinkRecord
+TaskCarrier	content_type	1	Carrier.content_type	string
+TaskCarrier	conversation_id	2	Carrier.conversation_id	string
+TaskCarrier	message_id	3	Carrier.message_id	string
+TaskCarrier	principal_id	4	Carrier.principal_id	string
+TaskCarrier	device_id	5	Carrier.device_id	string
+TaskCarrier	event	6	Carrier.wire_base64	TaskEvent
+TaskCarrier	signature	7	Carrier.signature	string
+TaskCarrier	decision_proof	8	Carrier.decision_proof_base64	TaskCertificate
+TaskApprovalRequest	binding	1	Request.binding	TaskApprovalBinding
+TaskApprovalRequest	approval	2	Request.approval	LocalMcpApprovalRecord
+TaskApprovalRequest	grant_body	3	Request.grant_body	LocalMcpGrantSigningBody
+TaskApprovalPayload	request	1	Payload::Request{ request: Box<Request> }	TaskApprovalPayloadRequest (TaskApprovalRequest request = 1;)
+TaskApprovalPayload	decision	2	Payload::Decision{ request: Box<Request>, approved: bool, grant_signature: Option<String> }	TaskApprovalPayloadDecision (TaskApprovalRequest request = 1;; bool approved = 2;; optional string grant_signature = 3;)
+TaskApprovalPacket	payload	1	Packet.payload	TaskApprovalPayload
+TaskApprovalPacket	principal	2	Packet.principal	string
+TaskApprovalPacket	device	3	Packet.device	string
+TaskApprovalPacket	signature	4	Packet.signature	string
+TaskAck	carrier	1	Ack.carrier_base64	TaskCarrier
+TaskAck	certificate	2	Ack.certificate	TaskCertificate
+TaskAck	manifests	3	Ack.manifests	repeated NativeDeviceManifest
+TaskAck	signer_principal	4	Ack.signer_principal	string
+TaskAck	signer_device	5	Ack.signer_device	string
+TaskAck	signature	6	Ack.signature	string
+TaskControl	intent	1	Control::Intent{ carrier_base64: String }	TaskControlIntent (TaskCarrier carrier = 1;)
+TaskControl	ack	2	Control::Ack(Box<Ack>)	TaskControlAck (TaskAck value = 1;)
+TaskCertificate	conversation_id	1	Certificate.conversation_id	string
+TaskCertificate	resolution	2	Certificate.resolution	TaskResolve
+TaskCertificate	assignee	3	Certificate.assignee	string
+TaskCertificate	issuer_device	4	Certificate.issuer_device	string
+TaskCertificate	issued_at	5	Certificate.issued_at	int64
+TaskCertificate	phase	6	Certificate.phase	TaskCertificatePhase
+TaskCertificate	committed_version	7	Certificate.committed_version	optional uint64
+TaskCertificate	carrier_hash	8	Certificate.carrier_hash	optional string
+TaskCertificate	decision_key	9	Certificate.decision_key	string
+TaskCertificate	evidence_hash	10	Certificate.evidence_hash	string
+TaskCertificate	signature	11	Certificate.signature	string
+TaskCertificatePhase	reserved	1	Phase::Reserved	TaskCertificatePhaseReserved (empty)
+TaskCertificatePhase	committed	2	Phase::Committed	TaskCertificatePhaseCommitted (empty)
+TaskAcceptedEvent	carrier	1	AcceptedEvent.carrier	TaskCarrier
+TaskAcceptedEvent	public_key	2	AcceptedEvent.public_key	string
+TaskAcceptedEvent	actor_kind_verified	3	AcceptedEvent.actor_kind_verified	bool
+TaskAcceptedEvent	received_at	4	AcceptedEvent.received_at	int64
+TaskAcceptedEvent	decision_certificate	5	AcceptedEvent.decision_certificate	optional TaskCertificate
+TaskAcceptedEvent	membership	6	AcceptedEvent.membership	optional TaskMembership
+TaskHistory	events	1	TaskHistory.events	repeated TaskAcceptedEvent
+TaskHistory	created_at	2	TaskHistory.created_at	int64
+TaskHistory	updated_at	3	TaskHistory.updated_at	int64
+TaskMembership	conversation	1	Membership.conversation	string
+TaskMembership	group	2	Membership.group	optional string
+TaskMembership	epoch	3	Membership.epoch	optional uint64
+TaskMembership	at	4	Membership.at	int64
+TaskMembership	members	5	Membership.members	repeated string
+TaskOwnPacket	context	1	TaskOwnPacket.context	OwnContext
+TaskOwnPacket	history	2	TaskOwnPacket.history	TaskHistory
+TaskOwnPacket	manifests	3	TaskOwnPacket.manifests	repeated NativeDeviceManifest
+TaskOwnPacket	pins	4	TaskOwnPacket.pins	repeated SdkOwnDeviceGroupMemberPin
+TaskOwnPacket	base	5	TaskOwnPacket.base	uint64
+TaskOwnPacket	prefix_hash	6	TaskOwnPacket.prefix_hash	string
+TaskApprovalBinding	conversation_id	1	TaskApprovalBinding.conversation_id	string
+TaskApprovalBinding	task_id	2	TaskApprovalBinding.task_id	string
+TaskApprovalBinding	step_id	3	TaskApprovalBinding.step_id	string
+TaskApprovalBinding	opening_revision	4	TaskApprovalBinding.opening_revision	uint64
+TaskApprovalBinding	requester	5	TaskApprovalBinding.requester	string
+TaskApprovalBinding	assignee	6	TaskApprovalBinding.assignee	string
+TaskApprovalBinding	executor_device_id	7	TaskApprovalBinding.executor_device_id	string
+LocalMcpGrantSigningBody	task_binding	1	LocalMcpGrantSigningBody.task_binding	optional TaskApprovalBinding
+LocalMcpGrantSigningBody	approval_id	2	LocalMcpGrantSigningBody.approval_id	string
+LocalMcpGrantSigningBody	grant_id	3	LocalMcpGrantSigningBody.grant_id	string
+LocalMcpGrantSigningBody	server_id	4	LocalMcpGrantSigningBody.server_id	string
+LocalMcpGrantSigningBody	tool_name	5	LocalMcpGrantSigningBody.tool_name	string
+LocalMcpGrantSigningBody	tool_scope	6	LocalMcpGrantSigningBody.tool_scope	optional string
+LocalMcpGrantSigningBody	capability	7	LocalMcpGrantSigningBody.capability	McpCapability
+LocalMcpGrantSigningBody	registry_hash	8	LocalMcpGrantSigningBody.registry_hash	string
+LocalMcpGrantSigningBody	tool_manifest_set_hash	9	LocalMcpGrantSigningBody.tool_manifest_set_hash	string
+LocalMcpGrantSigningBody	full_delegation	10	LocalMcpGrantSigningBody.full_delegation	bool
+LocalMcpGrantSigningBody	single_use	11	LocalMcpGrantSigningBody.single_use	bool
+LocalMcpGrantSigningBody	arguments_hash	12	LocalMcpGrantSigningBody.arguments_hash	optional string
+LocalMcpGrantSigningBody	expires_at	13	LocalMcpGrantSigningBody.expires_at	int64
+LocalBusFederationRoute	federation_url	1	LocalBusFederationRoute.federation_url	string
+LocalBusFederationRoute	source_node_id	2	LocalBusFederationRoute.source_node_id	string
+LocalBusFederationRoute	target_node_id	3	LocalBusFederationRoute.target_node_id	string
+LocalBusFederationRoute	required_capability	4	LocalBusFederationRoute.required_capability	string
+LocalBusFederationRoute	admin_token	5	LocalBusFederationRoute.admin_token	optional string
+LocalBusFederationRoute	recipient_prekey_url	6	LocalBusFederationRoute.recipient_prekey_url	optional string
+LocalMcpApprovalRecord	approval_id	1	LocalMcpApprovalRecord.approval_id	string
+LocalMcpApprovalRecord	server_id	2	LocalMcpApprovalRecord.server_id	string
+LocalMcpApprovalRecord	tool_name	3	LocalMcpApprovalRecord.tool_name	string
+LocalMcpApprovalRecord	capability	4	LocalMcpApprovalRecord.capability	McpCapability
+LocalMcpApprovalRecord	risk_level	5	LocalMcpApprovalRecord.risk_level	RiskLevel
+LocalMcpApprovalRecord	tool_scope	6	LocalMcpApprovalRecord.tool_scope	optional string
+LocalMcpApprovalRecord	confirmation_mode	7	LocalMcpApprovalRecord.confirmation_mode	string
+LocalMcpApprovalRecord	expires_at	8	LocalMcpApprovalRecord.expires_at	int64
+LocalMcpApprovalRecord	status	9	LocalMcpApprovalRecord.status	string
+LocalMcpApprovalRecord	details	10	LocalMcpApprovalRecord.details	JsonValue
+GroupStateControl	schema	1	GroupControlPacket.schema	string
+GroupStateControl	body	2	GroupControlPacket.body	GroupControlBody
+GroupControlBody	request	1	GroupControlBody::Request{ request: GroupChangeRequest, federation: Option<LocalBusFederationRoute> }	GroupControlBodyRequest (NativeGroupChangeRequest request = 1;; optional LocalBusFederationRoute federation = 2;)
+GroupControlBody	result	2	GroupControlBody::Result{ result: GroupChangeResult }	GroupControlBodyResult (NativeGroupChangeResult result = 1;)
+GroupControlBody	device_set	3	GroupControlBody::DeviceSet{ group_id: String, actor: GroupStateActor, device_set_epoch: u64 }	GroupControlBodyDeviceSet (string group_id = 1;; NativeGroupActor actor = 2;; uint64 device_set_epoch = 3;)
+GroupControlBody	transfer	4	GroupControlBody::Transfer{ control: Box<super::TransferControl> }	GroupControlBodyTransfer (TransferControl control = 1;)
+TransferDevice	root	1	TransferDevice.root	string
+TransferDevice	device	2	TransferDevice.device	string
+TransferProbe	id	1	TransferProbe.id	string
+TransferProbe	actor	2	TransferProbe.actor	NativeGroupActor
+TransferProbe	creator	3	TransferProbe.creator	NativeGroupActor
+TransferProbe	base	4	TransferProbe.base	NativeGroupSnapshot
+TransferProbe	required	5	TransferProbe.required	repeated TransferDevice
+TransferProbe	issued_at	6	TransferProbe.issued_at	int64
+TransferProbe	expires_at	7	TransferProbe.expires_at	int64
+TransferHead	proposal	1	TransferHead.proposal	string
+TransferHead	actor	2	TransferHead.actor	NativeGroupActor
+TransferHead	requested_hash	3	TransferHead.requested_hash	string
+TransferHead	head	4	TransferHead.head	NativeGroupSnapshot
+TransferHead	acceptance	5	TransferHead.acceptance	optional NativeGroupTransferAcceptance
+TransferHead	requires_sync	6	TransferHead.requires_sync	bool
+TransferHead	target	7	TransferHead.target	TransferDevice
+TransferHead	additional_targets	8	TransferHead.additional_targets	repeated TransferDevice
+TransferHead	cancelled	9	TransferHead.cancelled	bool
+TransferHead	cancel_ack	10	TransferHead.cancel_ack	bool
+TransferHead	issued_at	11	TransferHead.issued_at	int64
+TransferHead	expires_at	12	TransferHead.expires_at	int64
+TransferBody	probe	1	TransferBody::Probe{ probe: Box<TransferProbe> }	TransferBodyProbe (TransferProbe probe = 1;)
+TransferBody	head	2	TransferBody::Head{ reply: Box<TransferHead> }	TransferBodyHead (TransferHead reply = 1;)
+TransferControl	body	1	TransferControl.body	TransferBody
+TransferControl	signature	2	TransferControl.signature	string
+OwnContactSync	manifest	1	Contact.manifest	NativeDeviceManifest
+OwnContactSync	link	2	Contact.link	FriendLinkRecord
+OwnContactTombstone	link	1	Tombstone.link	FriendLinkRecord
+OwnContactTombstone	decided_at	2	Tombstone.decided_at	optional int64
+OwnGroupConsent	schema	1	Consent.schema	string
+OwnGroupConsent	actor	2	Consent.actor	NativeGroupActor
+OwnGroupConsent	snapshot	3	Consent.snapshot	NativeGroupSnapshot
+OwnGroupConsent	accepted	4	Consent.accepted	bool
+OwnGroupConsent	issued_at	5	Consent.issued_at	int64
+OwnGroupConsent	expires_at	6	Consent.expires_at	int64
+OwnGroupConsent	signature	7	Consent.signature	string
+SurfaceCheckpoint	schema	1	Checkpoint.schema	string
+SurfaceCheckpoint	content	2	Checkpoint.content	optional CreateSurfaceCommand
+SurfaceCheckpoint	conversation_id	3	Checkpoint.conversation_id	optional string
+SurfaceCheckpoint	version	4	Checkpoint.version	uint64
+SurfaceCheckpoint	closed	5	Checkpoint.closed	bool
+SurfaceCheckpoint	final_text	6	Checkpoint.final_text	repeated SurfaceFinalEntry
+SurfaceFinalEntry	id	1	FinalEntry.id	string
+SurfaceFinalEntry	nested	2	FinalEntry.nested	bool
+SurfaceFinalEntry	text_hash	3	FinalEntry.text_hash	string
+SurfaceResyncMetadata	schema	1	ResyncMetadata.schema	string
+SurfaceResyncMetadata	conversation_id	2	ResyncMetadata.conversation_id	string
+SurfaceResyncMetadata	version	3	ResyncMetadata.version	uint64
+SurfaceResyncMetadata	closed	4	ResyncMetadata.closed	bool
+SurfaceResyncMetadata	finality_base64	5	ResyncMetadata.finality_base64	string
+SurfaceResyncRequest	kind	1	ResyncRequest.kind	string
+SurfaceResyncRequest	conversation_id	2	ResyncRequest.conversation_id	string
+SurfaceResyncRequest	surface_ref	3	ResyncRequest.surface_ref	string
+SurfaceResyncRequest	author	4	ResyncRequest.author	string
+SurfaceResyncRequest	surface_id	5	ResyncRequest.surface_id	string
+SurfaceResyncRequest	group	6	ResyncRequest.group	optional string
+SurfaceResyncRequest	epoch	7	ResyncRequest.epoch	optional uint64
+GuardianRecoveryShare	share_id	1	SdkGuardianRecoveryShare.share_id	uint32
+GuardianRecoveryShare	threshold	2	SdkGuardianRecoveryShare.threshold	uint32
+GuardianRecoveryShare	total	3	SdkGuardianRecoveryShare.total	uint32
+GuardianRecoveryShare	member_kind	4	SdkGuardianRecoveryShare.member_kind	RecoveryQuorumMemberKind
+GuardianRecoveryShare	value_base64	5	SdkGuardianRecoveryShare.value_base64	string
+GuardianInvite	schema	1	SdkGuardianInviteMessage.schema	string
+GuardianInvite	version	2	SdkGuardianInviteMessage.version	uint32
+GuardianInvite	invite_id	3	SdkGuardianInviteMessage.invite_id	string
+GuardianInvite	inviter_principal_id	4	SdkGuardianInviteMessage.inviter_principal_id	string
+GuardianInvite	inviter_device_id	5	SdkGuardianInviteMessage.inviter_device_id	string
+GuardianInvite	inviter_device_epoch	6	SdkGuardianInviteMessage.inviter_device_epoch	uint64
+GuardianInvite	inviter_device_public_key_base64url	7	SdkGuardianInviteMessage.inviter_device_public_key_base64url	string
+GuardianInvite	guardian_principal_id	8	SdkGuardianInviteMessage.guardian_principal_id	string
+GuardianInvite	recovery_quorum_id	9	SdkGuardianInviteMessage.recovery_quorum_id	string
+GuardianInvite	share	10	SdkGuardianInviteMessage.share	GuardianRecoveryShare
+GuardianInvite	issued_at	11	SdkGuardianInviteMessage.issued_at	int64
+GuardianInvite	expires_at	12	SdkGuardianInviteMessage.expires_at	int64
+GuardianInvite	signed	13	SdkGuardianInviteMessage.signed	SignedFields
+GuardianAccept	schema	1	SdkGuardianAcceptMessage.schema	string
+GuardianAccept	version	2	SdkGuardianAcceptMessage.version	uint32
+GuardianAccept	accept_id	3	SdkGuardianAcceptMessage.accept_id	string
+GuardianAccept	invite_id	4	SdkGuardianAcceptMessage.invite_id	string
+GuardianAccept	owner_principal_id	5	SdkGuardianAcceptMessage.owner_principal_id	string
+GuardianAccept	guardian_principal_id	6	SdkGuardianAcceptMessage.guardian_principal_id	string
+GuardianAccept	guardian_device_id	7	SdkGuardianAcceptMessage.guardian_device_id	string
+GuardianAccept	guardian_device_epoch	8	SdkGuardianAcceptMessage.guardian_device_epoch	uint64
+GuardianAccept	guardian_device_public_key_base64url	9	SdkGuardianAcceptMessage.guardian_device_public_key_base64url	string
+GuardianAccept	recovery_quorum_id	10	SdkGuardianAcceptMessage.recovery_quorum_id	string
+GuardianAccept	accepted_at	11	SdkGuardianAcceptMessage.accepted_at	int64
+GuardianAccept	signed	12	SdkGuardianAcceptMessage.signed	SignedFields
+SdkOwnDeviceGroupSnapshot	shared_state	1	SdkOwnDeviceGroupSnapshot.shared_state	optional NativeGroupSnapshot
+SdkOwnDeviceGroupSnapshot	group_id	2	SdkOwnDeviceGroupSnapshot.group_id	string
+SdkOwnDeviceGroupSnapshot	group_epoch	3	SdkOwnDeviceGroupSnapshot.group_epoch	uint64
+SdkOwnDeviceGroupSnapshot	max_members	4	SdkOwnDeviceGroupSnapshot.max_members	uint32
+SdkOwnDeviceGroupSnapshot	new_member_history	5	SdkOwnDeviceGroupSnapshot.new_member_history	string
+SdkOwnDeviceGroupSnapshot	local_role	6	SdkOwnDeviceGroupSnapshot.local_role	string
+SdkOwnDeviceGroupSnapshot	local_joined_epoch	7	SdkOwnDeviceGroupSnapshot.local_joined_epoch	uint64
+SdkOwnDeviceGroupSnapshot	members	8	SdkOwnDeviceGroupSnapshot.members	repeated SdkOwnDeviceGroupMemberSnapshot
+SdkOwnDeviceGroupSnapshot	routes	9	SdkOwnDeviceGroupSnapshot.routes	repeated LocalBusGroupMemberRoute
+SdkOwnDeviceGroupMemberPin	group_id	1	SdkOwnDeviceGroupMemberPin.group_id	string
+SdkOwnDeviceGroupMemberPin	device_id	2	SdkOwnDeviceGroupMemberPin.device_id	string
+SdkOwnDeviceGroupMemberPin	signing_public_key	3	SdkOwnDeviceGroupMemberPin.signing_public_key	string
+SdkOwnDeviceGroupMemberPin	principal_id	4	SdkOwnDeviceGroupMemberPin.principal_id	optional string
+SdkOwnDeviceGroupMemberPin	principal_commitment	5	SdkOwnDeviceGroupMemberPin.principal_commitment	optional string
+SdkOwnDeviceGroupMemberSnapshot	member_id	1	SdkOwnDeviceGroupMemberSnapshot.member_id	string
+SdkOwnDeviceGroupMemberSnapshot	role	2	SdkOwnDeviceGroupMemberSnapshot.role	string
+SdkOwnDeviceGroupMemberSnapshot	joined_epoch	3	SdkOwnDeviceGroupMemberSnapshot.joined_epoch	uint64
+LocalBusGroupMemberRoute	member_id	1	LocalBusGroupMemberRoute.member_id	string
+LocalBusGroupMemberRoute	member_principal_commitment	2	LocalBusGroupMemberRoute.member_principal_commitment	optional string
+LocalBusGroupMemberRoute	device_signing_public_key	3	LocalBusGroupMemberRoute.device_signing_public_key	optional string
+LocalBusGroupMemberRoute	target_delivery_id	4	LocalBusGroupMemberRoute.target_delivery_id	optional string
+LocalBusGroupMemberRoute	federation	5	LocalBusGroupMemberRoute.federation	optional LocalBusFederationRoute
+GroupKeyDistribution	schema	1	SdkGroupSenderKeyDistribution.schema	string
+GroupKeyDistribution	version	2	SdkGroupSenderKeyDistribution.version	uint32
+GroupKeyDistribution	group_id	3	SdkGroupSenderKeyDistribution.group_id	string
+GroupKeyDistribution	sender_id	4	SdkGroupSenderKeyDistribution.sender_id	string
+GroupKeyDistribution	group_key_epoch	5	SdkGroupSenderKeyDistribution.group_key_epoch	uint64
+GroupKeyDistribution	group_state_hash	6	SdkGroupSenderKeyDistribution.group_state_hash	optional string
+GroupKeyDistribution	sender_key_seed	7	SdkGroupSenderKeyDistribution.sender_key_seed	bytes
+GroupKeyDistribution	sender_key_signature	8	SdkGroupSenderKeyDistribution.sender_key_signature	optional string
+GroupKeyDistribution	sender_device_signing_public_key	9	SdkGroupSenderKeyDistribution.sender_device_signing_public_key	optional string
+GroupKeyControl	schema	1	SdkGroupSenderKeyDistributionEnvelope.schema	string
+GroupKeyControl	version	2	SdkGroupSenderKeyDistributionEnvelope.version	uint32
+GroupKeyControl	membership_event	3	SdkGroupSenderKeyDistributionEnvelope.membership_event_base64	NativeGroupEvent
+GroupKeyControl	actor_manifest_url	4	SdkGroupSenderKeyDistributionEnvelope.actor_manifest_url	optional string
+GroupKeyControl	distribution	5	SdkGroupSenderKeyDistributionEnvelope.distribution_base64	GroupKeyDistribution
+SurfaceExportMetadata	truncated	1	SurfaceExportMetadata.truncated	bool
+SurfaceExportMetadata	next_before	2	SurfaceExportMetadata.next_before	optional int64
+SurfaceExportMetadata	skipped	3	SurfaceExportMetadata.skipped	map<string, uint32>
+SurfaceHistoryExport	controls	1	SurfaceHistoryExport.controls	repeated SurfaceDelivery
+SurfaceHistoryExport	checkpoints	2	SurfaceHistoryExport.checkpoints	repeated OwnedSurfaceCheckpoint
+SurfaceHistoryExport	metadata	3	SurfaceHistoryExport.metadata	SurfaceExportMetadata
+OwnedSurfaceCheckpoint	record	1	OwnedSurfaceCheckpoint.record	StoredSurface
+OwnedSurfaceCheckpoint	snapshot_event	2	OwnedSurfaceCheckpoint.snapshot_wire_base64	SurfaceEvent
+OwnedSurfaceCheckpoint	version	3	OwnedSurfaceCheckpoint.version	uint64
+OwnedSurfaceCheckpoint	surface_hash	4	OwnedSurfaceCheckpoint.surface_hash	string
+OwnedSurfaceCheckpoint	conversation	5	OwnedSurfaceCheckpoint.conversation	JsonValue
+OwnedSurfaceCheckpoint	group_epoch	6	OwnedSurfaceCheckpoint.group_epoch	optional uint64
+StoredSurface	surface_id	1	StoredSurface.surface_id	string
+StoredSurface	conversation_id	2	StoredSurface.conversation_id	string
+StoredSurface	author_principal_id	3	StoredSurface.author_principal_id	string
+StoredSurface	author_device_id	4	StoredSurface.author_device_id	string
+StoredSurface	checkpoint	5	StoredSurface.checkpoint_base64	SurfaceCheckpoint
+StoredSurface	created_at	6	StoredSurface.created_at	optional int64
+StoredSurface	updated_at	7	StoredSurface.updated_at	optional int64
+TaskExportMetadata	truncated	1	TaskExportMetadata.truncated	bool
+TaskExportMetadata	skipped_items	2	TaskExportMetadata.skipped_items	uint32
+TaskExportMetadata	next_cursor	3	TaskExportMetadata.next_cursor	optional string
+NativeDeviceManifest	custody	1	SdkDeviceManifestResponse.custody	optional NativeCustodyManifest
+NativeDeviceManifest	signed_device_set	2	SdkDeviceManifestResponse.signed_device_set	optional NativeSignedDeviceSet
+NativeDeviceManifest	principal_id	3	SdkDeviceManifestResponse.principal_id	string
+NativeDeviceManifest	principal_commitment	4	SdkDeviceManifestResponse.principal_commitment	string
+NativeDeviceManifest	root_public_key	5	SdkDeviceManifestResponse.root_public_key	string
+NativeDeviceManifest	devices	6	SdkDeviceManifestResponse.devices	repeated ManifestDevice
+ManifestDevice	principal_id	1	SdkDeviceManifestEntry.principal_id	string
+ManifestDevice	principal_commitment	2	SdkDeviceManifestEntry.principal_commitment	string
+ManifestDevice	device_id	3	SdkDeviceManifestEntry.device_id	string
+ManifestDevice	device_epoch	4	SdkDeviceManifestEntry.device_epoch	uint64
+ManifestDevice	branch_public_key	5	SdkDeviceManifestEntry.branch_public_key	string
+ManifestDevice	target_delivery_id	6	SdkDeviceManifestEntry.target_delivery_id	string
+ManifestDevice	branch_proof	7	SdkDeviceManifestEntry.branch_proof	optional NativeBranchProof
+ManifestDevice	prekey_bundle	8	SdkDeviceManifestEntry.prekey_bundle	NativePrekeyBundle
+ManifestDevice	branch_authorized_event_id	9	SdkDeviceManifestEntry.branch_authorized_event_id	string
+SignatureAlg	ed25519	1	SignatureAlg::Ed25519	SignatureAlgEd25519 (empty)
+FriendLinkRecord	link_id	1	FriendLinkRecord.link_id	string
+FriendLinkRecord	requester_id	2	FriendLinkRecord.requester_id	string
+FriendLinkRecord	target_id	3	FriendLinkRecord.target_id	string
+FriendLinkRecord	state	4	FriendLinkRecord.state	string
+FriendLinkRecord	remove_scope	5	FriendLinkRecord.remove_scope	optional string
+FriendLinkRecord	blocked	6	FriendLinkRecord.blocked	bool
+FriendLinkRecord	capability_revoked_at	7	FriendLinkRecord.capability_revoked_at	optional int64
+McpCapability	read_conversation	1	McpCapability::ReadConversation	McpCapabilityReadConversation (empty)
+McpCapability	draft_message	2	McpCapability::DraftMessage	McpCapabilityDraftMessage (empty)
+McpCapability	send_message	3	McpCapability::SendMessage	McpCapabilitySendMessage (empty)
+McpCapability	read_local_files	4	McpCapability::ReadLocalFiles	McpCapabilityReadLocalFiles (empty)
+McpCapability	write_local_files	5	McpCapability::WriteLocalFiles	McpCapabilityWriteLocalFiles (empty)
+McpCapability	run_shell	6	McpCapability::RunShell	McpCapabilityRunShell (empty)
+McpCapability	manage_contacts	7	McpCapability::ManageContacts	McpCapabilityManageContacts (empty)
+McpCapability	manage_group	8	McpCapability::ManageGroup	McpCapabilityManageGroup (empty)
+McpCapability	manage_media	9	McpCapability::ManageMedia	McpCapabilityManageMedia (empty)
+McpCapability	manage_node	10	McpCapability::ManageNode	McpCapabilityManageNode (empty)
+McpCapability	external_tool_invoke	11	McpCapability::ExternalToolInvoke	McpCapabilityExternalToolInvoke (empty)
+RiskLevel	low	1	RiskLevel::Low	RiskLevelLow (empty)
+RiskLevel	medium	2	RiskLevel::Medium	RiskLevelMedium (empty)
+RiskLevel	high	3	RiskLevel::High	RiskLevelHigh (empty)
+RiskLevel	critical	4	RiskLevel::Critical	RiskLevelCritical (empty)
+RecoveryQuorumMemberKind	root_share	1	RecoveryQuorumMemberKind::RootShare	RecoveryQuorumMemberKindRootShare (empty)
+RecoveryQuorumMemberKind	device_share	2	RecoveryQuorumMemberKind::DeviceShare	RecoveryQuorumMemberKindDeviceShare (empty)
+RecoveryQuorumMemberKind	guardian_share	3	RecoveryQuorumMemberKind::GuardianShare	RecoveryQuorumMemberKindGuardianShare (empty)
+RecoveryQuorumMemberKind	hardware_token_share	4	RecoveryQuorumMemberKind::HardwareTokenShare	RecoveryQuorumMemberKindHardwareTokenShare (empty)
+OwnSentMessage	envelope_id	1	SentMessage.envelope_id	string
+OwnSentMessage	message_id	2	SentMessage.message_id	string
+OwnSentMessage	sender_id	3	SentMessage.sender_id	string
+OwnSentMessage	original_recipients	4	SentMessage.original_recipients	repeated string
+OwnSentMessage	ciphertext_digest	5	SentMessage.ciphertext_hash	optional bytes
+OwnSentMessage	context	6	SentMessage.context	OwnContext
+OwnSentMessage	authored_at	7	SentMessage.authored_at	optional int64
+OwnSentMessage	exact_inner	8	SentMessage.body_base64	bytes

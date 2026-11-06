@@ -8,6 +8,8 @@ repository = "https://github.com/ramflux/ramflux-protocol"
 
 [dependencies]
 prost.workspace = true
+prost-reflect = "=0.16.5"
+unicode-segmentation = "=1.13.3"
 pbjson = "=0.9.0"
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-core = { workspace = true }
