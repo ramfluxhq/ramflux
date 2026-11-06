@@ -208,6 +208,9 @@ fn validate_string(schema: &FieldDescriptor, bytes: &[u8]) -> Result<(), Validat
         if !value.is_number() {
             return Err(ValidationError::Content);
         }
+        if value.to_string().as_bytes() != bytes {
+            return Err(ValidationError::NonCanonical);
+        }
         super::super::validate_i_json_value(&value).map_err(|_| ValidationError::Content)?;
     }
     Ok(())

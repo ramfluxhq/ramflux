@@ -370,3 +370,22 @@ fn scanner_preserves_unknown_and_rejects_noncanonical_bounds() -> TestResult {
     assert_eq!(scan_message("Message", &text.encode_to_vec(), 2), Err(ValidationError::Limit));
     Ok(())
 }
+
+#[test]
+fn json_number_tokens_require_canonical_byte_identity() -> TestResult {
+    for token in ["9007199254740991", "-42", "1.5"] {
+        let value = JsonValue { value: Some(json_value::Value::Number(token.into())) };
+        let bytes = value.encode_to_vec();
+        assert_eq!(scan_message("JsonValue", &bytes, 2), Ok(ScanOutcome::Supported));
+        assert_eq!(JsonValue::decode(bytes.as_slice())?.encode_to_vec(), bytes);
+    }
+    for token in [" 9007199254740991", "9007199254740991 ", "9.007199254740991e15", "1E+0", "1.00"]
+    {
+        let value = JsonValue { value: Some(json_value::Value::Number(token.into())) };
+        assert_eq!(
+            scan_message("JsonValue", &value.encode_to_vec(), 2),
+            Err(ValidationError::NonCanonical)
+        );
+    }
+    Ok(())
+}
