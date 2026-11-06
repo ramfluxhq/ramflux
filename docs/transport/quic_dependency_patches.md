@@ -450,3 +450,11 @@ retained datagrams keep their original base ownership. Repeated STREAM IDs share
 one assembler heap, and an empty semantic scan allocates nothing. Refusal frees
 only packet-private storage and preserves live receive queues. No packet-entry,
 publication, ordinary constructor or provider certificate is enabled here.
+
+The dormant history stage prepares replacement range storage, compaction copies,
+three-space CRYPTO descriptor heaps, shared CRYPTO payload/wrapper storage and
+optional history plans under one atomic metadata reservation. Borrowed old owners
+remain alive through replacement destruction; refusal preserves their exact
+bytes, ranges and charges. Exact validation inventories include field-specific
+CRYPTO comparisons and metadata-only base-debit controls. No packet entrypoint
+or ordinary constructor activates this preparation.

@@ -632,11 +632,11 @@
         "delta": "Dormant closed TLS identity, finite-byte and operation contract; independently checked exact-error fixtures and counted Session methods; Remove duplicate hardcoded space/sequence check from validator and oracle; reviewed registry alone defines permitted pairs; Reuse counted Session mock for E1; accept all E0 caps at exact equality with one Session call"
       },
       "src/connection/metadata_staging.rs": {
-        "patched_sha256": "49dafe9d7beded10cb64ed779e43e62edf0a04148ae9c751b09ede1eff00e8b6",
+        "patched_sha256": "f47906796d2fcedd6e6ac57bcaedad134eae653f8d968fa0c3c58d7966fd436d",
         "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
       },
       "src/connection/metadata_staging/tests.rs": {
-        "patched_sha256": "7a7dc9d4202e60b2b83834ccdcd56ebcd8dbda740a52820d45509ca9c89de4ae",
+        "patched_sha256": "497dbadbc684e3d3eae4592c96726321ef25c681c2a4fa7ea4f45a4b2fcb4f8c",
         "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
       },
       "src/connection/metadata_staging/receive.rs": {
@@ -648,6 +648,16 @@
         "upstream_sha256": null,
         "patched_sha256": "859f60dbb0560965e063d74c084241ebaa9b2806ae98be8a8edbc2ffe427768a",
         "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests; E1 r2 restack: retain grant-aware batch validation and distinguish fresh receive debit in the independent oracle"
+      },
+      "src/connection/metadata_staging/history.rs": {
+        "upstream_sha256": null,
+        "patched_sha256": "09c2099f6008261a6075b3d4ac23b07c7228032fdf5928b900c6e20778d45a94",
+        "delta": "; Dormant history/compaction and three-space CRYPTO preparation with exact contract and physical owner tests"
+      },
+      "src/connection/metadata_staging/history/tests.rs": {
+        "upstream_sha256": null,
+        "patched_sha256": "030899e094c768eaf68525818ef5697367cca47c851f167bdf05d54508b866dd",
+        "delta": "; Dormant history/compaction and three-space CRYPTO preparation with exact contract and physical owner tests"
       }
     },
     "formatting": {
