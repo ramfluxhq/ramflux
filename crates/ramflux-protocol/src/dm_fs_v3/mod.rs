@@ -9,3 +9,13 @@ pub use codec::{DecodeError, Field, Fields, Scanned, WireType, scan};
 
 #[cfg(test)]
 mod codec_tests;
+
+mod publication;
+pub use publication::{
+    MAX_ADDITIVE_OPKS, MAX_RETIREMENT_REFS, NATIVE_PREKEY_PROFILE, OwnerPrekeyUpdate,
+    PrekeyPublicationSnapshot, QualifiedBranch, RetirementRef, SignedNativeOpk,
+    SignedNativePrekeyBase,
+};
+
+#[cfg(test)]
+mod publication_tests;
