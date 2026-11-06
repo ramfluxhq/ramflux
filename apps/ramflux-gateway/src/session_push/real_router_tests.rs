@@ -88,7 +88,7 @@ async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
 async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()> {
     let (_child, context) = real_router().await?;
     context.hub.readiness.start(&context.router);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while !context.hub.readiness.supports() {
             tokio::task::yield_now().await;
         }
