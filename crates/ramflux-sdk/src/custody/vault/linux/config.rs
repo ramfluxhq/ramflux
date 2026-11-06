@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use super::LinuxVaultConfigError;
 
@@ -75,7 +75,7 @@ impl LinuxVaultConfig {
     /// Desktop mode obtains its scoped KEKs from Secret Service, with no file fallback.
     /// # Errors
     /// Rejects unsupported modes, primary material in a service, incorrect realm sets
-    /// and relative credential paths. Provider availability is checked by later parts.
+    /// and relative, duplicate, traversing or overlong credential paths. Provider availability is checked by later parts.
     pub fn new(
         mode: &str,
         role: LinuxVaultRole,
@@ -102,12 +102,23 @@ impl LinuxVaultConfig {
         if present != expected {
             return Err(LinuxVaultConfigError::CredentialSet);
         }
-        if [&credentials.primary, &credentials.device, &credentials.data]
+        let paths: Vec<_> = [&credentials.primary, &credentials.device, &credentials.data]
             .into_iter()
             .flatten()
-            .any(|path| !path.is_absolute())
-        {
-            return Err(LinuxVaultConfigError::CredentialPath);
+            .collect();
+        for (index, path) in paths.iter().enumerate() {
+            if !path.is_absolute() {
+                return Err(LinuxVaultConfigError::CredentialPath);
+            }
+            if path.as_os_str().as_encoded_bytes().len() > 4095 {
+                return Err(LinuxVaultConfigError::CredentialPathLength);
+            }
+            if path.components().any(|part| part == Component::ParentDir) {
+                return Err(LinuxVaultConfigError::CredentialPathTraversal);
+            }
+            if paths[..index].contains(path) {
+                return Err(LinuxVaultConfigError::CredentialPathDuplicate);
+            }
         }
         Ok(Self { mode, role, credentials })
     }
@@ -139,6 +150,64 @@ mod tests {
             device: device.then(|| "/credentials/rf-device-kek".into()),
             data: data.then(|| "/credentials/rf-data-kek".into()),
         }
+    }
+
+    #[test]
+    fn linux_vault_credentials_reject_duplicate_paths() {
+        for pair in [(0, 1), (0, 2), (1, 2)] {
+            let mut values = ["/primary".to_owned(), "/device".to_owned(), "/data".to_owned()];
+            values[pair.1] = values[pair.0].clone();
+            let supplied = LinuxCredentialPaths {
+                primary: Some(values[0].clone().into()),
+                device: Some(values[1].clone().into()),
+                data: Some(values[2].clone().into()),
+            };
+            assert_eq!(
+                LinuxVaultConfig::new("systemd-host", LinuxVaultRole::AttendedPrimary, supplied),
+                Err(LinuxVaultConfigError::CredentialPathDuplicate)
+            );
+        }
+    }
+    #[test]
+    fn linux_vault_credentials_reject_parent_components() {
+        for field in 0..3 {
+            let mut supplied = paths(true, true, true);
+            let slot = match field {
+                0 => &mut supplied.primary,
+                1 => &mut supplied.device,
+                _ => &mut supplied.data,
+            };
+            *slot = Some("/credentials/../rf-kek".into());
+            assert_eq!(
+                LinuxVaultConfig::new("systemd-host", LinuxVaultRole::AttendedPrimary, supplied),
+                Err(LinuxVaultConfigError::CredentialPathTraversal)
+            );
+        }
+    }
+    #[test]
+    fn linux_vault_credentials_reject_overlong_paths() -> Result<(), LinuxVaultConfigError> {
+        for field in 0..3 {
+            for length in [4095, 4096] {
+                let mut supplied = paths(true, true, true);
+                let slot = match field {
+                    0 => &mut supplied.primary,
+                    1 => &mut supplied.device,
+                    _ => &mut supplied.data,
+                };
+                *slot = Some(format!("/{}", "x".repeat(length - 1)).into());
+                let result = LinuxVaultConfig::new(
+                    "systemd-host",
+                    LinuxVaultRole::AttendedPrimary,
+                    supplied,
+                );
+                if length == 4095 {
+                    result?;
+                } else {
+                    assert_eq!(result, Err(LinuxVaultConfigError::CredentialPathLength));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

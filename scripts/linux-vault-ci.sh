@@ -30,8 +30,9 @@ cleanup() {
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
   if [ "$created_user" -eq 1 ]; then
     pkill -u "$fixture_user" >/dev/null 2>&1 || true
-    userdel "$fixture_user" >/dev/null 2>&1 || true
   fi
+  if [ -s "$fixture/ancestor-acls" ]; then setfacl --restore="$fixture/ancestor-acls"; fi
+  if [ "$created_user" -eq 1 ]; then userdel "$fixture_user" >/dev/null 2>&1 || true; fi
   rm -rf -- "$fixture"
   if [ -n "$created_target_alias" ]; then rm -f -- "$created_target_alias"; fi
   if [ -n "$created_workspace" ]; then rm -rf -- "$created_workspace"; fi
@@ -70,6 +71,8 @@ if [ -n "$test_binary" ]; then
   fixture_env=("RF_LINUX_VAULT_FIXTURE_RF=$fixture/rf")
   test_command=("$fixture/platform-test" --ignored --exact linux_vault_platform_fixture_is_private)
 else
+  command -v getfacl >/dev/null
+  command -v setfacl >/dev/null
   # Nextest remaps metadata but cannot rewrite env!(CARGO_BIN_EXE_rf).
   # Recreate the compile-time workspace on the disposable hosted CI runner.
   workspace="$(tar --zstd -xOf "$archive" target/nextest/cargo-metadata.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["workspace_root"])')"
@@ -110,6 +113,18 @@ PY
     ln -s "$workspace/target" "$original_target"
     created_target_alias="$original_target"
   fi
+  # nextest canonicalizes the compile-time workspace as the fixture user.
+  # Hosted runners may have private ancestors (notably /home/runner). Grant
+  # only traversal where needed and restore the exact ACLs before user removal.
+  ancestor="$(dirname "$workspace")"
+  while :; do
+    if ! runuser -u "$fixture_user" -- test -x "$ancestor"; then
+      getfacl -p "$ancestor" >> "$fixture/ancestor-acls"
+      setfacl -m "u:$fixture_user:x" "$ancestor"
+    fi
+    [ "$ancestor" != / ] || break
+    ancestor="$(dirname "$ancestor")"
+  done
   # Only disposable archive output is transferred, never a shared build target.
   chown -R "$fixture_user:$fixture_group" "$workspace/target"
   test_command=("$nextest" nextest run --archive-file "$archive" --workspace-remap .
@@ -120,7 +135,7 @@ cat > "$fixture/bus.conf" <<BUS
   <type>session</type>
   <listen>unix:path=$fixture/runtime/bus</listen>
   <auth>EXTERNAL</auth>
-  <policy context="default"><allow send_destination="*"/><allow eavesdrop="true"/><allow own="*"/></policy>
+  <policy context="default"><allow send_destination="*"/><allow own="*"/></policy>
 </busconfig>
 BUS
 chmod 0644 "$fixture/bus.conf"

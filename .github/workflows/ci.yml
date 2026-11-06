@@ -326,7 +326,7 @@ jobs:
       - name: Install platform fixture tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y systemd dbus dbus-x11 gnome-keyring libsecret-tools libsecret-1-dev zstd
+          sudo apt-get install -y systemd dbus dbus-x11 gnome-keyring libsecret-tools libsecret-1-dev zstd acl
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:

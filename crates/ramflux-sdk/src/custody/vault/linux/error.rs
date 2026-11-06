@@ -16,4 +16,13 @@ pub enum LinuxVaultConfigError {
     /// Credential arguments must be absolute paths, never inline key material.
     #[error("credential path must be absolute")]
     CredentialPath,
+    /// Credential paths cannot contain parent-directory traversal.
+    #[error("credential path contains a parent component")]
+    CredentialPathTraversal,
+    /// Credential paths are limited to 4095 encoded bytes, excluding the terminator.
+    #[error("credential path exceeds 4095 bytes")]
+    CredentialPathLength,
+    /// Independent realms cannot use the same credential path.
+    #[error("credential paths must be distinct")]
+    CredentialPathDuplicate,
 }
