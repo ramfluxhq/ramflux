@@ -31,7 +31,7 @@ pub(super) fn validated_hash(content: &CreateSurfaceCommand) -> Result<String, S
         return Err(limits::exceeded(SurfaceLimit::Actions));
     }
     limits::identifier(&content.surface_id)?;
-    if content.fallback_text.trim().is_empty() {
+    if content.catalog != super::web_catalog::CATALOG && content.fallback_text.trim().is_empty() {
         return Err(SurfaceReject::MissingFallback);
     }
     if !crate::text_safety::free_text_is_safe(&content.fallback_text) {
@@ -49,6 +49,7 @@ pub(super) fn validated_hash(content: &CreateSurfaceCommand) -> Result<String, S
             return Err(SurfaceReject::DuplicateAction);
         }
     }
+    super::web_catalog::validate(content)?;
     // Exactly the typed hash input, including actions, fallback strings and JSON syntax.
     // One bounded traversal and one canonical encoding after the complete atomic update.
     let value = serde_json::to_value(content).map_err(|_| SurfaceReject::Encoding)?;

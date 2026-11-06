@@ -10,6 +10,7 @@ mod limits;
 mod snapshot;
 mod state;
 mod types;
+pub mod web_catalog;
 pub use limits::{
     MAX_SURFACE_ACTIONS, MAX_SURFACE_BLOCKS, MAX_SURFACE_DATA_BYTES, MAX_SURFACE_DATA_DEPTH,
     MAX_SURFACE_FINALIZED_BLOCKS, MAX_SURFACE_PATCH_OPS, MAX_SURFACE_TEXT_CHARS,
