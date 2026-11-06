@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub(crate) mod attachment_retirement;
 pub mod backup;
 mod backup_consent_merge;
 mod backup_contact_merge;
@@ -49,6 +50,7 @@ mod group_retention;
 mod group_snapshot;
 pub mod groups;
 pub mod history;
+pub use attachment_retirement::{NativeGrantAssociation, PendingAttachmentRetirement};
 pub(crate) mod home_migration;
 pub mod identity_verification;
 pub mod journal;
