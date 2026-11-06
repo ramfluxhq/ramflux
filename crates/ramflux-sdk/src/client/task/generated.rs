@@ -289,9 +289,13 @@ fn value_json(value: &g::JsonValue) -> Result<Value, SdkError> {
 mod approval;
 mod carrier;
 mod certificate;
+mod control;
+mod manifest;
 
 #[cfg(test)]
 mod certificate_tests;
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 mod tests;
 

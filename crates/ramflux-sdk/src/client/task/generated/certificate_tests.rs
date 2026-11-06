@@ -4,7 +4,7 @@
 use super::super::certificate::{Certificate, Phase};
 use super::{certificate::native_certificate, tests::TestResult, *};
 
-fn fixture(
+pub(super) fn fixture(
     client: &RamfluxClient,
     committed: bool,
 ) -> Result<(Certificate, g::TaskCertificate), Box<dyn std::error::Error>> {
