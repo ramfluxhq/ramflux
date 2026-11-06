@@ -69,7 +69,7 @@ signing bytes. All new labels below are now reserved in
 alone enables no custody decoder, signing path or verifier. Uniqueness, absence
 of NUL and prefix-freeness are tested across the entire registry. All new labels
 use `ramflux.identity.`. The transcript schema and hash label deliberately share
-one constant and spelling: `ramflux.identity.pairing_transcript.v1`.
+the retained v1 control and the separate v2 full-context transcript domain.
 
 | Constant | Exact label | Purpose |
 | --- | --- | --- |
@@ -90,6 +90,8 @@ one constant and spelling: `ramflux.identity.pairing_transcript.v1`.
 | `CUSTODY_OBJECT_HASH` | `ramflux.identity.custody.object_hash.v1` | BLAKE3: signed-object hash |
 | `CUSTODY_SECTION_HASH` | `ramflux.identity.custody.section_hash.v1` | BLAKE3: record-section hash |
 | `CUSTODY_SAFETY_NUMBER` | `ramflux.identity.safety_number.v2` | BLAKE3: anchor safety fingerprint |
+| `CUSTODY_PAIRING_TRANSCRIPT_V2` | `ramflux.identity.pairing_transcript.v2` | SHA-256: full-context transcript |
+| `CUSTODY_PAIRING_CONTEXT_COMMITMENT_V2` | `ramflux.identity.pairing.context_commitment.v2` | SHA-256: complete role context |
 | `CUSTODY_PAIRING_TRANSCRIPT` | `ramflux.identity.pairing_transcript.v1` | schema and SHA-256: pairing transcript; one shared spelling |
 | `CUSTODY_PAIRING_COMMITMENT` | `ramflux.identity.pairing.commitment.v1` | SHA-256: SAS key commitment |
 | `CUSTODY_PAIRING_SAS` | `ramflux.identity.pairing.sas.v1` | HKDF info: SAS bytes |
@@ -801,37 +803,70 @@ falling back to root access or auto-creating an identity.
 
 ## SAS labels and primary handover
 
-Invitation transport uses the existing device-pair session/routed path with a
-restricted pre-enrollment bootstrap. QR/typed invitation ids only rendezvous;
+Invitation transport uses dedicated bounded root-free relay routes and authenticated
+primary issuance; ordinary device-pair/session authorization is unchanged. QR/typed invitation ids only rendezvous;
 no enrollment request is accepted before mutual SAS confirmation. Use seven
 [Matrix emoji indices/names](https://spec.matrix.org/v1.16/client-server-api/#sas-method-emoji)
 (42 bits); TUI displays their standard names, no decimal format. User mismatch
 immediately consumes/cancels the invitation. Three transport/protocol failures
 also consume it; maximum three live invitations and ten creations per hour.
 
-The invitation has a five-minute lifetime. The primary's confirmed invitation
-stores the expected anchor/head/purpose; changed authority invalidates the run
-and requires a fresh invitation. The transcript is JCS of exactly `schema: "ramflux.identity.pairing_transcript.v1"`,
-`version: 1`, `invitation_id: B32`, `account_anchor: B32`,
-`master_public_key: Key`, `record_hash: Hash`, `device_set_epoch: U53`,
-`principal_kind: Kind`, `purpose: "enroll"|"primary_transfer"`,
-`requested_role: "secondary"|"primary"`, `capabilities: string[]` (branch vocabulary,
-sorted), `initiator_sas_key: Key`, `responder_sas_key: Key` (X25519),
-`initiator_branch_key: Key`, `responder_branch_key: Key` (Ed25519),
-`responder_agreement_key: Key` (X25519), `sender_hpke_key: Key|null`,
-`recipient_hpke_key: Key|null` (X25519, non-null only on primary transfer),
-`sas_suite: "ramflux.identity.pairing.sas_emoji.v1"` and
-`hpke_suite: "ramflux.identity.transfer.hpke_suite.v1"|null`.
-Initiator is the old primary. `transcript_hash` is
-`SHA-256(frame("ramflux.identity.pairing_transcript.v1", transcript))`.
+The dormant `device_pairing_v2` profile uses closed canonical JSON objects.
+Every type T has required `schema: "ramflux.pairing.T.v2"` and `version: 2`.
+All unknown, duplicate and missing fields (including nullable fields) are rejected.
+Decoders reject noncanonical bytes and ordered arrays; only encoders sort arrays.
+U/Time are integers 0…9007199254740991. B32/Key/Hash are canonical unpadded
+base64url of exactly 32 bytes. Id is nonempty control-free UTF-8 ≤128 bytes;
+Name is safe free text UTF-8 ≤128 bytes (LF allowed; other controls and bidi controls refused). Ref is the existing closed DeviceRef,
+with positive device_epoch. Caps is a nonempty sorted unique subset of exactly
+call/group/message/register/sync. No new signature or object-hash grammar is used.
 
-Before public-key reveal each party commits to
-`SHA-256(frame("ramflux.identity.pairing.commitment.v1", role_byte ||
-random_32_byte_salt || own_raw_sas_key || invitation_id_raw))`;
-role byte is 0 for initiator, 1 for responder. Exchange both commitments before
-either reveal; salts and keys are fixed once, and mismatch cancels. These exact
-commitment/transcript bindings need provider adaptation review and vectors: a
-historical library audit is not an audit of this new flow.
+Common has exactly invitation_id:B32, issuer_seq:U (≥1), account_anchor:B32,
+master_public_key:Key, record_hash:Hash, device_set_epoch:U,
+principal_kind:"human", sas_suite:"ramflux.identity.pairing.sas_emoji.v1",
+hpke_suite:"ramflux.identity.transfer.hpke_suite.v1"|null,
+purpose:"enroll"|"primary_transfer", requested_role:"secondary"|"primary",
+recipient_mode:"new"|"existing", destination_ref:Ref|null, capabilities:Caps,
+lease_not_before:Time, lease_expires_at:Time, expires_at:Time,
+transfer_id:B32|null, data_selection:[{key_id:Id,purpose:"history"|"attachment"}].
+Selection is sorted unique by (key_id,purpose), ≤32 entries, each complete encoded
+entry ≤384 bytes. Common is ≤15872 bytes including schema/version. Lease expiry
+is strictly after start, within 2592000 seconds and within verified authority.
+Invitation expiry is within 300 seconds of creation. Enroll requires secondary,
+new, null transfer_id/hpke_suite and empty selection. Transfer requires primary,
+nonnull transfer_id and the fixed HPKE suite. destination_ref is nonnull exactly
+for existing mode; all refs share the anchor.
+
+RoleContext has exactly role:"initiator"|"responder", common:Common,
+device_ref:Ref, branch_key:Key, agreement_key:Key, sas_key:Key,
+hpke_key:Key|null, display_name:Name, plus schema/version. HPKE keys are nonnull
+exactly for transfer; they are independent X25519 keys, never Ed25519 conversions.
+RoleContext is ≤20480 complete bytes. An existing destination is a different
+active current device; responder ref, keys, capabilities and leases must match
+its retained certificate. Initiator ref/branch/agreement keys must match verified
+current primary. Callers must verify signed invitation projection, current head,
+certificate and creation-time bounds; a valid codec grants no authority.
+
+ContextOffer has only common plus schema/version (≤16384 bytes). Commit has
+invitation_id, role, commitment:Hash plus schema/version (≤512 bytes). Reveal
+has invitation_id, role, salt:B32, context:RoleContext plus schema/version
+(≤20992 bytes); outer role/id must match context. Transcript has exactly
+initiator:RoleContext and responder:RoleContext plus schema/version
+(≤41472 bytes). Fixed slots have the named role, distinct device refs and
+byte-identical Common objects. Reveals use bounded application chunking.
+
+Both roles freeze all context fields and fresh random 32-byte salts before
+commitment. Exchange/store both commitments before either reveal; early reveal
+or any changed context cancels. No provider or human-confirm callback runs on
+invalid context. Identical transport retry is allowed; conflicting duplicate
+commitment cancels. Full-context commitment is SHA256 of
+`frame("ramflux.identity.pairing.context_commitment.v2", role_byte || salt32 || JCS(RoleContext))`,
+where initiator=0 and responder=1. TH is SHA256 of
+`frame("ramflux.identity.pairing_transcript.v2", JCS(Transcript))`.
+V1 key-only commitments/transcripts remain control vectors and cannot negotiate
+into v2. Independent synthetic fixtures and source pins live in
+`crates/ramflux-protocol/fixtures/pairing_v2/`; `scripts/pairing_oracle.py --check`
+uses OpenSSL SHA-256 and the official portable BLAKE3 C implementation.
 
 HKDF-SHA256 uses the X25519 shared secret as IKM, transcript hash as salt and
 `"ramflux.identity.pairing.sas.v1"` as info, producing six bytes. Take the first
@@ -914,7 +949,9 @@ ids are permanently consumed; a crash cannot restart their signing effect.
 The destination separately derives the master from the user-entered phrase,
 creates a fresh self-signing key/certificate at a higher range and publishes its
 record. Handover receipt alone never promotes it. Require exact durable record
-ACK before activation; old device demotion/erasure remains observable cleanup.
+ACK before activation; old primary becomes active secondary. Preserve every existing branch and its
+keys/rights, including an already-linked destination. Only old management-key
+cleanup remains pending; no branch erasure or revocation is part of transfer.
 Destroy transfer/SAS keys on completion, expiry and cancellation. Lost-primary
 recovery needs no HPKE sender and follows the same higher-range publication rules.
 

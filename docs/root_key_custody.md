@@ -427,10 +427,9 @@ Do not invent a PAKE or adopt an unaudited SPAKE2 implementation.
 
 1. The user starts pairing on the primary. Create a one-use five-minute invitation
    with a fresh random identifier. Deliver the invitation by QR or typed rendezvous
-   identifier over the existing device-pair session path
-   (`client/routed/session.rs` and `client/routed/pair_lifecycle.rs`), with a
-   restricted pre-enrollment bootstrap for SAS frames only; this is planned integration, not an existing
-   root-free enrollment endpoint. Relay transport is untrusted until SAS finishes.
+   identifier over dedicated bounded root-free relay routes. Authenticated
+   primary Issue/Create is separate; existing session authorization is unchanged.
+   This remains dormant planned integration. Relay transport is untrusted until SAS finishes.
    Public handshake input is size/rate bounded;
    it cannot create an enrollment request or an unsolicited approval prompt.
 2. The secondary generates branch keys locally. Bind the committed handshake to
@@ -446,10 +445,11 @@ Do not invent a PAKE or adopt an unaudited SPAKE2 implementation.
 4. Require both local human confirmations and independent MAC key confirmations.
    Only then send the signed enrollment proposal inside the confirmed channel.
    Display the exact new device, root, kind, capabilities and expiry using safe
-   text rendering. A changed proposal or authority head requires revalidation.
+   text rendering. A changed proposal, selection or authority head requires a fresh invitation and SAS.
 5. The primary explicitly approves those keys and publishes the v3 set. Release
    usable branch authority/start sync only after its exact durable ACK. Retries
-   reuse the proposal id; no duplicate enrollment or seed-copy fallback.
+   reuse the exact candidate; preserve every existing device, key, lease, status,
+   primary holder and receive/erase floor. No duplicate enrollment or seed-copy fallback.
 6. The secondary verifies the account fingerprint, certificate, exact key/set
    inclusion and transcript. Erase invitation/ephemeral secrets on every exit.
 
@@ -463,8 +463,8 @@ A matching short code is a human authentication check, not an AEAD password.
 
 ## Replacement and recovery
 
-For planned primary transfer, generate the new self-signing key and fresh branch
-on the destination, and enter the phrase only in its user-started promotion flow.
+For planned primary transfer, generate the new self-signing key locally on the destination; generate a fresh
+branch only for a new destination, retaining an already-linked destination branch, and enter the phrase only in its user-started promotion flow.
 Authenticate both devices and the recipient's ephemeral HPKE key through SAS.
 Use [RFC 9180 HPKE](https://www.rfc-editor.org/rfc/rfc9180.html) mode Auth
 (`0x02`): DHKEM(X25519, HKDF-SHA256) (`0x0020`), HKDF-SHA256 (`0x0001`),
@@ -483,7 +483,10 @@ secret or vault unlock credential travels. The destination creates its certifica
 locally. HPKE does not itself approve enrollment or prevent replay.
 
 Publish the master-certified replacement and exact v3 record before activation.
-Then erase/demote or revoke the old primary; expose incomplete cooperative cleanup.
+Retain and re-certify every existing branch with unchanged keys and rights. Demote
+the old primary to active secondary; only its old management authority is fenced.
+Never revoke or delete a device for pairing, transfer, cancellation or uncertain ACK.
+Expose incomplete old-management cleanup.
 The new certificate's range fences the old signer even if it retained a copy.
 Use a crash journal and reconcile uncertain ACKs; never revive the old authority
 from a stale file. Reset outbound sessions/sender chains as needed without
