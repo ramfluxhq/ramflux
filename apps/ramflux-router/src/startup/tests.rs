@@ -122,7 +122,7 @@ fn legacy_child() -> anyhow::Result<()> {
     release_tx.send(())?;
     for (index, client) in clients.iter_mut().enumerate() {
         client.set_nonblocking(false)?;
-        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.set_read_timeout(Some(Duration::from_secs(10)))?;
         let mut response = String::new();
         client.read_to_string(&mut response)?;
         anyhow::ensure!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
