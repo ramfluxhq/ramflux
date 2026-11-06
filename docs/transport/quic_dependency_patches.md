@@ -2,7 +2,7 @@
 
 The product resolves exactly one local Quinn 0.11.11 and quinn-proto 0.11.18
 through its root crates.io patch table. compio-quic uses the same proto patch.
-Both vendor packages are excluded from product workspace membership with
+The Quinn vendor packages are excluded from product workspace membership with
 `exclude = ["vendor/*"]`. They therefore retain the product's dependency
 `opt-level = 3`; workspace clippy, doctests and nextest archives do not select
 their own libraries/examples/dev dependencies. The mutants diff excludes
@@ -44,7 +44,7 @@ Product formatting command: `cargo +1.99.0 fmt --all`, with pinned toolchain
 1.99.0 and `rustfmt 1.10.0-stable (b940084d7e 2026-09-28)`. Excluded vendor
 sources are not bulk formatted. To reproduce r2 vendor source, extract the
 verified upstream archive, prepend `// SPDX-License-Identifier: MIT OR Apache-2.0`
-to Rust sources, then apply each declared delta. Scoped later formatting commands and upstream
+to Quinn Rust sources (MIT alone for Bytes), then apply each declared delta. Scoped later formatting commands and upstream
 import/whitespace restoration are recorded in the provenance file. The provenance record also retains r1's exact
 `cargo fmt --all` (pinned toolchain 1.99.0) command/config history, superseded by this restoration.
 Do not run rustfmt on vendor sources. `vendor/rustfmt.toml` was removed because
@@ -269,3 +269,38 @@ Allocation-site units exercise exact-full/refused capacity, split/cloned payload
 in both diagnostic families, and a real CRYPTO handshake through the same copy path.
 Owner-envelope, assembler and atomicity proofs remain unissued; the independent
 input-length observation adds no activation or owner-envelope proof.
+
+
+### Pinned Bytes after-free prerequisite
+
+The product graph uses patched Bytes 1.12.0; the isolated Quinn library-test graphs
+retain patched Bytes 1.11.1. Their registry archive and per-file original/patched
+hashes use the same `vendor/quic-provenance.json` format as Quinn. The existing
+provenance script verifies both identities and keeps diagnostic packet features
+out of the ordinary product graph. Original MIT license files remain unchanged.
+
+`Bytes::try_from_owner_with_guard` asks the caller to reserve the compiler's actual
+wrapper Layout before its fallible allocation. Refusal preserves the input owner;
+allocation failure releases the unused reservation. The unique guard lives outside
+the Box during final destruction: payload owner destruction and actual wrapper
+free complete before the guard returns credit, including constructor and owner
+Drop unwinding. Existing `Bytes::from_owner` and its default behavior are unchanged.
+Clones and slices share this allocation; `try_into_mut` preserves Err(self).
+Forced Vec/BytesMut conversions copy before releasing the owner. Managed receive
+paths must exclude them unless their copy overlap has separate admission.
+
+The test-only counting allocator queries actual usable allocation sizes on Mac
+System malloc and Linux System malloc, then pauses immediately before actual free.
+A competing credit attempt must fail while that physical allocation is live. The
+oracle also checks refusal, failed allocation, final clone/slice, constructor and
+owner Drop panics, and conversions. Returning the guard before free fails it.
+Those observations cover these test identities; they do not certify every allocator
+or the eventual production owner layout. This prerequisite is not integrated into
+receive backing and issues no receive/envelope certificate or activation.
+
+A certified non-spendable per-connection allowance D must include any remaining
+allocator excess. Checked profile arithmetic must rederive
+`N = (b - E) / (2 * Unit_base + M_conn + D)`, require N >= 2, and independently check
+`E + N * (2 * Unit_base + M_conn + D) <= b` plus aggregate slices within B. The hook
+removes early-refund retirement overlap; this does not establish zero allocator
+excess. Unknown source/layout/runtime/target/allocator identities refuse certificates.

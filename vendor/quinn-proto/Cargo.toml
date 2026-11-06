@@ -200,3 +200,6 @@ check-cfg = ["cfg(fuzzing)"]
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[patch.crates-io]
+bytes = { path = "../bytes-1.11.1" }

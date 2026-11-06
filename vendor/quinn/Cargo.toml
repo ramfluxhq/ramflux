@@ -269,6 +269,7 @@ version = ">=0.5, <0.7"
 [workspace]
 
 [patch.crates-io]
+bytes = { path = "../bytes-1.11.1" }
 quinn-proto = { path = "../quinn-proto" }
 
 [profile.dev.package."*"]

@@ -14,7 +14,16 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD = ROOT / "vendor/quic-provenance.json"
-PINS = {"quinn": "0.11.11", "quinn-proto": "0.11.18"}
+PINS = {
+    "quinn": "0.11.11",
+    "quinn-proto": "0.11.18",
+    "bytes-1.12.0": "1.12.0",
+    "bytes-1.11.1": "1.11.1",
+}
+
+
+def package_name(name):
+    return "bytes" if name.startswith("bytes-") else name
 
 
 def digest(path):
@@ -36,7 +45,7 @@ def check_sources(records):
         assert record["version"] == version, f"{name}: pin changed"
         assert len(record["archive_sha256"]) == 64, "missing archive identity"
         assert record["source"] == (
-            f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
+            f"https://static.crates.io/crates/{package_name(name)}/{package_name(name)}-{version}.crate"
         ), "unexpected source archive"
         base = ROOT / "vendor" / name
         actual = inventory(base)
@@ -47,11 +56,12 @@ def check_sources(records):
             changed = expected.get("upstream_sha256") != expected["patched_sha256"]
             assert bool(expected.get("delta")) == changed, f"{name}/{rel}: undeclared delta"
             if path.suffix == ".rs":
-                assert "SPDX-License-Identifier: MIT OR Apache-2.0" in (
+                license_id = "MIT" if package_name(name) == "bytes" else "MIT OR Apache-2.0"
+                assert f"SPDX-License-Identifier: {license_id}" in (
                     "\n".join(path.read_text().splitlines()[:5])
                 ), f"{name}/{rel}: upstream license missing"
                 assert len(path.read_text().splitlines()) <= 5000, f"{rel}: file too long"
-        for license_file in ("LICENSE-MIT", "LICENSE-APACHE"):
+        for license_file in (("LICENSE",) if package_name(name) == "bytes" else ("LICENSE-MIT", "LICENSE-APACHE")):
             expected = record["files"][license_file]
             assert digest(base / license_file) == expected["upstream_sha256"], (
                 f"{name}: upstream license changed"
@@ -65,14 +75,14 @@ def check_resolution():
     )
     metadata = json.loads(result.stdout)
     assert not any(
-        p["id"] in metadata["workspace_members"] and p["name"] in PINS
+        p["id"] in metadata["workspace_members"] and p["name"] in {"bytes", "quinn", "quinn-proto"}
         for p in metadata["packages"]
     ), "vendored dependencies must not be workspace members"
     assert not any(p["name"] == "async-std" for p in metadata["packages"]), (
         "vendor-only dev dependencies leaked into product resolution"
     )
     ids = {}
-    for name, version in PINS.items():
+    for name, version in (("quinn", PINS["quinn"]), ("quinn-proto", PINS["quinn-proto"]), ("bytes", "1.12.0")):
         packages = [p for p in metadata["packages"] if p["name"] == name]
         assert len(packages) == 1, f"{name}: duplicate or absent package"
         package = packages[0]
@@ -80,9 +90,18 @@ def check_resolution():
             f"{name}: unpatched source/version"
         )
         assert Path(package["manifest_path"]).resolve() == (
-            ROOT / "vendor" / name / "Cargo.toml"
+            ROOT / "vendor" / ("bytes-1.12.0" if name == "bytes" else name) / "Cargo.toml"
         ).resolve(), f"{name}: wrong path"
         ids[name] = package["id"]
+    for vendor in ("quinn", "quinn-proto"):
+        graph = json.loads(subprocess.run(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--manifest-path",
+             str(ROOT / "vendor" / vendor / "Cargo.toml")],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout)
+        packages = [p for p in graph["packages"] if p["name"] == "bytes"]
+        assert len(packages) == 1 and packages[0]["version"] == "1.11.1", "vendor bytes pin drift"
+        assert Path(packages[0]["manifest_path"]).resolve() == (ROOT / "vendor/bytes-1.11.1/Cargo.toml").resolve(), "vendor bytes patch bypassed"
     nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
     assert "__control-test" not in nodes[ids["quinn-proto"]]["features"], (
         "dependency-test packet hooks leaked into product resolution"
@@ -101,7 +120,7 @@ def verify_upstream(records, archive_dir=None):
     cache = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))) / "registry/cache"
     for name, version in PINS.items():
         record = records[name]
-        filename = f"{name}-{version}.crate"
+        filename = f"{package_name(name)}-{version}.crate"
         if archive_dir is not None:
             archive = (archive_dir / filename).read_bytes()
         else:
@@ -123,7 +142,7 @@ def verify_upstream(records, archive_dir=None):
                     if member.isdir():
                         continue
                     assert member.isfile(), f"{name}: non-regular archive member"
-                    rel = Path(member.name).relative_to(f"{name}-{version}")
+                    rel = Path(member.name).relative_to(f"{package_name(name)}-{version}")
                     assert not rel.is_absolute() and ".." not in rel.parts, "unsafe archive path"
                     assert str(rel) not in seen, "duplicate archive file"
                     seen.add(str(rel))
