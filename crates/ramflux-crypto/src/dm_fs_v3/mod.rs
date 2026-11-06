@@ -36,3 +36,8 @@ pub enum NativePrekeyError {
 }
 #[cfg(test)]
 mod signature_tests;
+
+mod hkdf;
+pub use hkdf::{NativeHkdfError, NativeHkdfOutput, native_hkdf};
+#[cfg(test)]
+mod hkdf_tests;
