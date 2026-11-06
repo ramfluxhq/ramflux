@@ -159,10 +159,13 @@ pub(crate) fn cell(row: &wire::Replacement) -> Result<ImageCell> {
         key.extend_from_slice(&at.to_be_bytes());
     }
     key.extend(encoded);
+    // `batch` rows are witness-built only (P03A1b); a caller row can never reach the image.
     macro_rules! arms {($($variant:ident),*)=>{match row {$(wire::Replacement::$variant {key,old,new}=>{
         let pack=|value|canonical(&wire::Replacement::$variant {key:key.clone(),old:None,new:Some(value)});
         (old.clone().map(pack).transpose()?,new.clone().map(pack).transpose()?)
-    }),*}};}
+    }),*
+        wire::Replacement::Batch { .. } => return Err(CheckpointError::Refused("batch")),
+    }};}
     let (old, new) = arms!(Root, Name, Skeleton, Hold, Operation, OpOwner, Due, Counter);
     Ok((key, old, new))
 }
