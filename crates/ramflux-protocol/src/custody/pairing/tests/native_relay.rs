@@ -791,15 +791,43 @@ fn transfer_binding_sweep(create: &Value, created: &Value) -> TestResult {
         decode_value::<Created>(&mode)?.validate_create(&saved),
         Err(WireError::Field("created_binding"))
     );
-    let mut purpose = out.clone();
+    // Purpose binding: the saved Create is a valid primary_transfer/new/empty-selection
+    // exchange. The reply differs only in purpose; enroll forces transfer_id to null,
+    // which is the purpose-coupled field the reply cannot keep.
+    let mut transfer = create.clone();
+    transfer["spec"]["purpose"] = json!("primary_transfer");
+    transfer["ticket"]["body"]["spec_hash"] =
+        json!(decode_value::<CreateSpec>(&transfer["spec"])?.spec_hash()?);
+    let transfer_saved = decode_value::<Create>(&transfer)?;
+    let mut transfer_reply = created.clone();
+    transfer_reply["invitation"]["body"] = invitation_fixture(&transfer["spec"]);
+    transfer_reply["invitation"]["body"]["transfer_id"] = json!(id());
+    decode_value::<Created>(&transfer_reply)?.validate_create(&transfer_saved)?;
+    let mut purpose = transfer_reply.clone();
     purpose["invitation"]["body"]["purpose"] = json!("enroll");
-    purpose["invitation"]["body"]["recipient_mode"] = json!("new");
-    purpose["invitation"]["body"]["destination_ref"] = Value::Null;
     purpose["invitation"]["body"]["transfer_id"] = Value::Null;
-    purpose["invitation"]["body"]["data_selection"] = json!([]);
     assert_eq!(
-        decode_value::<Created>(&purpose)?.validate_create(&saved),
+        decode_value::<Created>(&purpose)?.validate_create(&transfer_saved),
         Err(WireError::Field("created_binding"))
+    );
+    // Coupled pairs cannot be split: a single-field change fails validation first.
+    let mut mode_only = out.clone();
+    mode_only["invitation"]["body"]["recipient_mode"] = json!("new");
+    assert_eq!(
+        decode_value::<Created>(&mode_only).and_then(|c| c.validate_create(&saved)),
+        Err(WireError::Field("destination_ref"))
+    );
+    let mut clock_only = out.clone();
+    clock_only["invitation"]["body"]["created_at"] = json!(101);
+    assert_eq!(
+        decode_value::<Created>(&clock_only).and_then(|c| c.validate_create(&saved)),
+        Err(WireError::Field("invitation_lifetime"))
+    );
+    let mut account_only = out.clone();
+    account_only["invitation"]["body"]["account_anchor"] = json!(id());
+    assert_eq!(
+        decode_value::<Created>(&account_only).and_then(|c| c.validate_create(&saved)),
+        Err(WireError::Field("destination_anchor"))
     );
     // Admission conjunctions must be independently falsified.
     saved.validate_admission(&saved.ticket.body.boot_id, CreateSlot::Issued, 100, true)?;
