@@ -140,6 +140,8 @@ impl CheckpointWitness {
         let next = CheckpointHead { lsn, digest, clock_floor: time.wall, ..self.head.clone() };
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        // The appending root's own expired results go first, so its quota cannot be starved by others.
+        prune_root_results(&tx, root_id, time.wall)?;
         prune_results(&tx, time.wall)?;
         let redo = tx.open_table(REDO).map_err(storage)?;
         require(redo.len().map_err(storage)? < if control { 16384 } else { 16368 }, "redo_global")?;
@@ -168,6 +170,9 @@ impl CheckpointWitness {
             table.insert(index.as_str(), canonical(&(count + 1))?.as_slice()).map_err(storage)?;
             table
                 .insert(format!("redo_owner:{lsn}").as_str(), canonical(&root_id)?.as_slice())
+                .map_err(storage)?;
+            table
+                .insert(owner_index(root_id, lsn).as_str(), canonical(&true)?.as_slice())
                 .map_err(storage)?;
         }
 
@@ -227,6 +232,8 @@ impl CheckpointWitness {
         self.last_monotonic = time.monotonic;
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        // Expired results are pruned even when this pass has nothing to compact.
+        prune_results(&tx, time.wall)?;
         let mut redo = tx.open_table(REDO).map_err(storage)?;
         let mut entries = Vec::new();
         for row in redo.range(..=through).map_err(storage)?.take(128) {
@@ -261,6 +268,41 @@ impl CheckpointWitness {
         self.safe_wall = time.wall;
         Ok(entries.len())
     }
+}
+
+// Per-root index key; lsn is zero-padded so one root's entries are a contiguous, oldest-first range.
+fn owner_index(root: &str, lsn: u64) -> String {
+    format!("retained_owner:{root}:{lsn:020}")
+}
+
+// Prunes at most 128 expired results owned by `root`, in the caller's transaction.
+fn prune_root_results(tx: &redb::WriteTransaction, root: &str, now: u64) -> Result<()> {
+    let prefix = format!("retained_owner:{root}:");
+    let mut expired = Vec::new();
+    {
+        let meta = tx.open_table(META).map_err(storage)?;
+        let compacted = tx.open_table(COMPACTED).map_err(storage)?;
+        for entry in meta.range(prefix.as_str()..).map_err(storage)?.take(128) {
+            let (key, _) = entry.map_err(storage)?;
+            let Some(suffix) = key.value().strip_prefix(prefix.as_str()) else { break };
+            let lsn: u64 = suffix.parse().map_err(|_| CheckpointError::Refused("redo_owner"))?;
+            // Owned redo that is not yet compacted is newer than every retained result.
+            let Some(frame) = compacted.get(lsn).map_err(storage)? else { break };
+            let checkpoint: wire::Checkpoint = wire::decode(frame.value())?;
+            if now.saturating_sub(checkpoint.delta.clock_floor) < 86400 {
+                break;
+            }
+            expired.push((lsn, checkpoint.delta.tx_id));
+        }
+    }
+    let mut compacted = tx.open_table(COMPACTED).map_err(storage)?;
+    let mut ids = tx.open_table(TX_IDS).map_err(storage)?;
+    for (lsn, id) in expired {
+        compacted.remove(lsn).map_err(storage)?;
+        ids.remove(id.as_str()).map_err(storage)?;
+        release_result_owner(tx, lsn)?;
+    }
+    Ok(())
 }
 
 // lsn and witness time are monotonic, so oldest retained results form an indexed prefix.
@@ -307,6 +349,7 @@ fn release_result_owner(tx: &redb::WriteTransaction, lsn: u64) -> Result<()> {
     } else {
         meta.insert(count_key.as_str(), canonical(&(count - 1))?.as_slice()).map_err(storage)?;
     }
+    meta.remove(owner_index(&owner, lsn).as_str()).map_err(storage)?;
     meta.remove(owner_key.as_str()).map_err(storage)?;
     Ok(())
 }

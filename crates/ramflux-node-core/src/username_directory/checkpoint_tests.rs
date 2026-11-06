@@ -642,6 +642,90 @@ fn username_checkpoint_retained_root_cap() -> TestResult {
     assert_eq!(witness.head(), head);
     Ok(())
 }
+// Root 1 and 2 fill the first 128 expired slots; root 3 must still prune its own expired results.
+fn expired_quota_progress(reopen_first: bool) -> TestResult {
+    use redb::{ReadableDatabase, ReadableTableMetadata};
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    for n in 0..192 {
+        let head = witness.head();
+        witness.append(&head, clock_delta(n, WALL), &id(u8::try_from(n / 64 + 1)?), false)?;
+    }
+    assert_eq!(witness.compact(192)?, 128);
+    assert_eq!(witness.compact(192)?, 64);
+    let owner = id(3);
+    let head = witness.head();
+    assert!(matches!(
+        witness.append(&head, clock_delta(192, WALL), &owner, false),
+        Err(CheckpointError::Refused("redo_root"))
+    ));
+    assert_eq!(witness.head(), head);
+    fixture.clock.wall.store(WALL + 86_400, Ordering::SeqCst);
+    let mut witness = if reopen_first {
+        drop(witness);
+        fixture.reopen()?
+    } else {
+        witness
+    };
+    if reopen_first {
+        // A compaction pass with nothing to compact still prunes expired results, bounded to 128.
+        assert_eq!(witness.compact(192)?, 0);
+        let tables = witness.db.begin_read().map_err(storage)?;
+        assert_eq!(tables.open_table(COMPACTED).map_err(storage)?.len().map_err(storage)?, 64);
+    }
+    let head = witness.head();
+    witness.append(&head, clock_delta(192, WALL + 86_400), &owner, false)?;
+    assert_eq!(witness.head().lsn, 193);
+    assert!(witness.transaction(&clock_delta(0, WALL).tx_id)?.is_none());
+    let tables = witness.db.begin_read().map_err(storage)?;
+    assert_eq!(tables.open_table(REDO).map_err(storage)?.len().map_err(storage)?, 1);
+    assert_eq!(tables.open_table(COMPACTED).map_err(storage)?.len().map_err(storage)?, 0);
+    drop(tables);
+    drop(witness);
+    let witness = fixture.reopen()?;
+    assert_eq!(witness.head().lsn, 193);
+    Ok(())
+}
+
+#[test]
+fn username_checkpoint_expired_quota_progress() -> TestResult {
+    expired_quota_progress(false)?;
+    expired_quota_progress(true)
+}
+
+#[test]
+fn username_checkpoint_caller_batch_rejected() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    let head = witness.head();
+    let mut delta = clock_delta(1, WALL);
+    delta.rows = vec![wire::Replacement::Batch {
+        key: id(9),
+        old: None,
+        new: Some(wire::BatchRow {
+            batch_id: id(9),
+            root: id(3),
+            request_hash: id(4),
+            abort_tx_id: id(5),
+            lsn_n1: 1,
+            lsn_n2: 2,
+            retain_until: WALL + 86_400,
+            result: wire::BatchResult {
+                abort_digest: id(6),
+                delete_digest: id(7),
+                clock_floor: WALL,
+            },
+        }),
+    }];
+    assert!(matches!(
+        witness.append(&head, delta.clone(), &id(3), false),
+        Err(CheckpointError::Codec(wire::CodecError::Field("batch")))
+    ));
+    assert!(matches!(cell(&delta.rows[0]), Err(CheckpointError::Refused("batch"))));
+    assert_eq!(witness.head(), head);
+    Ok(())
+}
+
 #[test]
 fn username_checkpoint_expiry_clock_floor_durable() -> TestResult {
     let fixture = Fixture::new()?;
