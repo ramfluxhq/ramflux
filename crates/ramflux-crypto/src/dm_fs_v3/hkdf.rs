@@ -25,12 +25,6 @@ type Result<T> = std::result::Result<T, NativeHkdfError>;
 pub struct NativeHkdfOutput<const N: usize> {
     bytes: [u8; N],
 }
-impl<const N: usize> std::ops::Deref for NativeHkdfOutput<N> {
-    type Target = [u8; N];
-    fn deref(&self) -> &Self::Target {
-        &self.bytes
-    }
-}
 impl<const N: usize> AsRef<[u8]> for NativeHkdfOutput<N> {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
@@ -433,4 +427,11 @@ pub(super) fn test_intermediates<const N: usize>(
     }
     matches &= block == blocks.len() && session.output.as_ref() == expected;
     Ok(matches)
+}
+
+#[cfg(test)]
+pub(super) fn test_hmac(key: &[u8], parts: &[&[u8]]) -> Result<NativeHkdfOutput<32>> {
+    let mut output = NativeHkdfOutput { bytes: [0; 32] };
+    hmac(key, parts, &mut output.bytes)?;
+    Ok(output)
 }
