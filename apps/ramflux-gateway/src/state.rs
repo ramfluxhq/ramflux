@@ -94,11 +94,28 @@ pub(crate) struct GatewayForwardDeliverRequest {
     pub(crate) source_gateway_id: String,
     pub(crate) target_delivery_id: String,
     pub(crate) forwarded: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_forward_field"
+    )]
     pub(crate) incarnation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null_forward_field"
+    )]
     pub(crate) retain_until: Option<i64>,
     pub(crate) frame: ramflux_node_core::GatewayServerFrame,
+}
+
+fn non_null_forward_field<'de, D, T>(decoder: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let value = <Option<T> as serde::Deserialize>::deserialize(decoder)?;
+    value.map(Some).ok_or_else(|| serde::de::Error::custom("forward field must not be null"))
 }
 
 pub(crate) type GatewayForwardDeliverResponse = ramflux_node_core::SessionPushForwardResponse;

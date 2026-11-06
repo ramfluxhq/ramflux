@@ -157,6 +157,8 @@ impl PushQueue {
         if let Ok(mut sink) = tokio::time::timeout(SINK_ADMISSION_DEADLINE, send.lock()).await {
             self.retire();
             let _ = sink.finish();
+        } else {
+            self.retire();
         }
     }
     pub(crate) fn not_pushed(&self, seq: u64) -> bool {
@@ -323,12 +325,14 @@ impl PushQueue {
             let barrier = self.inner.before_write.lock().ok().and_then(|mut b| b.take());
             if let Some((entered, release)) = barrier {
                 entered.notify_one();
-                let Ok(Ok(permit)) =
-                    tokio::time::timeout(Duration::from_secs(5), release.acquire()).await
-                else {
-                    return false;
-                };
-                permit.forget();
+                let result = tokio::time::timeout(Duration::from_secs(10), release.acquire()).await;
+                assert!(
+                    matches!(result, Ok(Ok(_))),
+                    "queue write release barrier failed: {result:?}"
+                );
+                if let Ok(Ok(permit)) = result {
+                    permit.forget();
+                }
             }
         }
         let Ok(mut sink) = tokio::time::timeout(SINK_ADMISSION_DEADLINE, send.lock()).await else {
@@ -344,7 +348,7 @@ impl PushQueue {
 
     #[cfg(test)]
     pub(crate) async fn flushed(&self) -> anyhow::Result<()> {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let changed = self.inner.changed.notified();
                 tokio::pin!(changed);

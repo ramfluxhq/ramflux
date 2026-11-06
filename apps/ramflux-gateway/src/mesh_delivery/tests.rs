@@ -29,28 +29,53 @@ fn request() -> crate::GatewayForwardDeliverRequest {
 fn forwarding_fields_and_cross_field_rules() -> anyhow::Result<()> {
     let valid = serde_json::to_value(request())?;
     assert!(validate(&request()).is_ok());
-    for (path, value) in [
-        ("/source_gateway_id", json!("")),
-        ("/source_gateway_id", json!("x".repeat(257))),
-        ("/target_delivery_id", json!("")),
-        ("/target_delivery_id", json!("other")),
-        ("/target_delivery_id", json!("x".repeat(257))),
-        ("/forwarded", json!(false)),
-        ("/incarnation_id", json!("BAD")),
-        ("/incarnation_id", json!("A".repeat(32))),
-        ("/incarnation_id", json!(null)),
-        ("/retain_until", json!(null)),
-        ("/retain_until", json!(0)),
-        ("/retain_until", json!(-1)),
-        ("/frame/entry/target_delivery_id", json!("other")),
-        ("/frame/entry/envelope/target_delivery_id", json!("other")),
-        ("/frame/entry/inbox_seq", json!(0)),
-        ("/frame", json!({"frame_type":"heartbeat","now":1})),
+    for (path, value, expected) in [
+        ("/source_gateway_id", json!(""), "invalid forwarding identity"),
+        (
+            "/source_gateway_id",
+            json!(format!("{}x", "é".repeat(128))),
+            "invalid forwarding identity",
+        ),
+        ("/source_gateway_id", json!("x".repeat(257)), "invalid forwarding identity"),
+        ("/target_delivery_id", json!(""), "invalid forwarding identity"),
+        (
+            "/target_delivery_id",
+            json!(format!("{}x", "é".repeat(128))),
+            "invalid forwarding identity",
+        ),
+        ("/target_delivery_id", json!("other"), "forward target/sequence mismatch"),
+        ("/target_delivery_id", json!("x".repeat(257)), "invalid forwarding identity"),
+        ("/forwarded", json!(false), "forward marker required"),
+        ("/incarnation_id", json!("BAD"), "invalid forward incarnation/deadline pair"),
+        ("/incarnation_id", json!("A".repeat(32)), "invalid forward incarnation/deadline pair"),
+        ("/retain_until", json!(0), "invalid forward incarnation/deadline pair"),
+        ("/retain_until", json!(-1), "invalid forward incarnation/deadline pair"),
+        ("/frame/entry/target_delivery_id", json!("other"), "forward target/sequence mismatch"),
+        (
+            "/frame/entry/envelope/target_delivery_id",
+            json!("other"),
+            "forward target/sequence mismatch",
+        ),
+        ("/frame/entry/inbox_seq", json!(0), "forward target/sequence mismatch"),
+        ("/frame", json!({"frame_type":"heartbeat","now":1}), "durable Deliver required"),
     ] {
         let mut bad = valid.clone();
         *bad.pointer_mut(path).ok_or_else(|| anyhow::anyhow!("missing test path {path}"))? = value;
         let parsed: crate::GatewayForwardDeliverRequest = serde_json::from_value(bad)?;
-        assert!(validate(&parsed).is_err(), "accepted {path}");
+        assert_eq!(
+            validate(&parsed).err().map(|e| e.to_string()).as_deref(),
+            Some(expected),
+            "{path}"
+        );
+    }
+    for missing in ["incarnation_id", "retain_until"] {
+        let mut bad = valid.clone();
+        bad.as_object_mut().ok_or_else(|| anyhow::anyhow!("fixture object"))?.remove(missing);
+        let parsed = serde_json::from_value(bad)?;
+        assert_eq!(
+            validate(&parsed).err().map(|e| e.to_string()).as_deref(),
+            Some("invalid forward incarnation/deadline pair")
+        );
     }
     Ok(())
 }
@@ -68,20 +93,37 @@ fn mesh_compat_overflow() -> anyhow::Result<()> {
         let wire = serde_json::to_value(&reply)?;
         let old = wire["delivered"].as_bool().ok_or_else(|| anyhow::anyhow!("missing bool"))?;
         assert_eq!(old, matches!(outcome, Outcome::Queued | Outcome::Overflowed));
-        assert_eq!(
-            handled(&reply).is_ok(),
-            matches!(outcome, Outcome::Queued | Outcome::Overflowed | Outcome::NoSession)
-        );
+        match outcome {
+            Outcome::Queued | Outcome::Overflowed => assert!(handled(&reply)?),
+            Outcome::NoSession => assert!(!handled(&reply)?),
+            _ => assert_eq!(
+                handled(&reply).err().map(|e| e.to_string()).as_deref(),
+                Some("invalid durable mesh result")
+            ),
+        }
         let mut bad = wire;
         bad["delivered"] = json!(!old);
-        assert!(serde_json::from_value::<Response>(bad).is_err());
+        assert_eq!(
+            serde_json::from_value::<Response>(bad).err().map(|e| e.to_string()).as_deref(),
+            Some("forward delivered/outcome mismatch")
+        );
     }
     for delivered in [false, true] {
         let old: Response = serde_json::from_value(json!({"delivered":delivered}))?;
         assert_eq!(handled(&old)?, delivered);
     }
-    for bad in [json!({}), json!({"delivered":1}), json!({"delivered":true,"outcome":"mystery"})] {
-        assert!(serde_json::from_value::<Response>(bad).is_err());
+    for (bad, expected) in [
+        (json!({}), "missing field `delivered`"),
+        (json!({"delivered":1}), "invalid type: integer `1`, expected a boolean"),
+        (
+            json!({"delivered":true,"outcome":"mystery"}),
+            "unknown variant `mystery`, expected one of `queued`, `overflowed`, `no_session`, `full`, `unsupported`, `expired`",
+        ),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<Response>(bad).err().map(|e| e.to_string()).as_deref(),
+            Some(expected)
+        );
     }
     Ok(())
 }
@@ -143,5 +185,51 @@ async fn actual_mesh_overflow_is_handled_by_old_and_new_decoders() -> anyhow::Re
     assert!(old.delivered);
     assert!(handled(&new)?);
     drop(guard);
+    Ok(())
+}
+
+#[test]
+fn forwarding_inclusive_identity_and_deadline_bounds() -> anyhow::Result<()> {
+    for target in ["x".repeat(256), "é".repeat(128)] {
+        let mut req = request();
+        req.source_gateway_id = target.clone();
+        req.target_delivery_id = target.clone();
+        let ramflux_node_core::GatewayServerFrame::Deliver { entry } = &mut req.frame else {
+            anyhow::bail!("fixture Deliver");
+        };
+        entry.target_delivery_id = target.clone();
+        entry.envelope.target_delivery_id = target;
+        req.retain_until = Some(1);
+        assert_eq!(req.source_gateway_id.len(), 256);
+        validate(&req)?;
+    }
+    Ok(())
+}
+#[test]
+fn forwarding_wire_roundtrip_and_null_refusal() -> anyhow::Result<()> {
+    let frame = serde_json::to_string(&request().frame)?;
+    for metadata in [String::new(), format!("\"incarnation_id\":\"{ID}\",\"retain_until\":1,")] {
+        let bytes = format!("{{\"source_gateway_id\":\"source\",\"target_delivery_id\":\"target\",\"forwarded\":true,{metadata}\"frame\":{frame}}}").into_bytes();
+        let decoded: crate::GatewayForwardDeliverRequest = serde_json::from_slice(&bytes)?;
+        validate(&decoded)?;
+        assert_eq!(serde_json::to_vec(&decoded)?, bytes);
+    }
+    for fields in [
+        json!({"incarnation_id":null}),
+        json!({"retain_until":null}),
+        json!({"incarnation_id":null,"retain_until":null}),
+    ] {
+        let mut bad = serde_json::to_value(request())?;
+        for (key, value) in fields.as_object().ok_or_else(|| anyhow::anyhow!("null fixture"))? {
+            bad[key] = value.clone();
+        }
+        assert_eq!(
+            serde_json::from_value::<crate::GatewayForwardDeliverRequest>(bad)
+                .err()
+                .map(|e| e.to_string())
+                .as_deref(),
+            Some("forward field must not be null")
+        );
+    }
     Ok(())
 }
