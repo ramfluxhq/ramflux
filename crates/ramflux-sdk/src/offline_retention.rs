@@ -16,7 +16,7 @@ pub(crate) const DIRECT_RECEIPT_TTL_SECS: u32 = 300;
 // Pair resets authenticate a short-lived handshake, never retained chat content.
 pub(crate) const RESET_TTL_SECS: u32 = 300;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountConfig {
     #[serde(default = "default_retention", deserialize_with = "decode_retention")]
