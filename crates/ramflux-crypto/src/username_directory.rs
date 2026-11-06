@@ -662,6 +662,10 @@ mod tests {
             "DueKey" => encode(&decode::<DueKey>(bytes)?),
             "CounterKey" => encode(&decode::<CounterKey>(bytes)?),
             "ServeCandidate" => encode(&decode::<ServeCandidate>(bytes)?),
+            "ExpectedHead" => encode(&decode::<ExpectedHead>(bytes)?),
+            "DeletePreemptingPending" => encode(&decode::<DeletePreemptingPending>(bytes)?),
+            "BatchResult" => encode(&decode::<BatchResult>(bytes)?),
+            "BatchRow" => encode(&decode::<BatchRow>(bytes)?),
             _ => Err(wire::CodecError::Field("unknown test type")),
         }
     }
@@ -672,7 +676,7 @@ mod tests {
             "../../../scripts/reference/username_directory/wire_vectors.json"
         ))?;
         let cases = corpus["invalid"].as_array().ok_or("missing schema negatives")?;
-        assert_eq!(cases.len(), 563);
+        assert_eq!(cases.len(), 591);
         let mut fields = 0;
         for case in cases {
             let error = roundtrip(string(case, "type"), string(case, "wire").as_bytes());
@@ -693,7 +697,7 @@ mod tests {
                 fields += 1;
             }
         }
-        assert!(fields >= 277);
+        assert_eq!(fields, 399);
         Ok(())
     }
 }
