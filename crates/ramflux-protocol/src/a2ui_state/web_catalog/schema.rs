@@ -28,45 +28,50 @@ fn pointer(path: &str, key: &str) -> String {
     format!("{path}/{}", safe.replace('~', "~0").replace('/', "~1"))
 }
 fn schema_keywords(schema: &Value, path: &str) -> Result<()> {
-    let fields = schema.as_object().ok_or(SurfaceReject::Encoding)?;
+    let fields = schema.as_object().ok_or_else(|| reject(path, "invalidSchemaKeywordValue"))?;
     for (key, value) in fields {
-        match key.as_str() {
+        let next = pointer(path, key);
+        let valid = match key.as_str() {
             "$defs" | "properties" => {
-                for (name, child) in value.as_object().ok_or(SurfaceReject::Encoding)? {
-                    schema_keywords(child, &pointer(&pointer(path, key), name))?;
+                let children =
+                    value.as_object().ok_or_else(|| reject(&next, "invalidSchemaKeywordValue"))?;
+                for (name, child) in children {
+                    schema_keywords(child, &pointer(&next, name))?;
                 }
+                true
             }
-            "items" => schema_keywords(value, &pointer(path, key))?,
+            "items" => {
+                schema_keywords(value, &next)?;
+                true
+            }
             "anyOf" => {
-                for (n, child) in
-                    value.as_array().ok_or(SurfaceReject::Encoding)?.iter().enumerate()
-                {
-                    schema_keywords(child, &format!("{path}/anyOf/{n}"))?;
+                let children =
+                    value.as_array().ok_or_else(|| reject(&next, "invalidSchemaKeywordValue"))?;
+                for (n, child) in children.iter().enumerate() {
+                    schema_keywords(child, &format!("{next}/{n}"))?;
                 }
+                !children.is_empty()
             }
-            "$schema"
-            | "$id"
-            | "title"
-            | "description"
-            | "type"
-            | "required"
-            | "additionalProperties"
-            | "$ref"
-            | "const"
-            | "enum"
-            | "minimum"
-            | "maximum"
-            | "minItems"
-            | "maxItems"
-            | "minLength"
-            | "maxLength"
-            | "x-utf8Bytes"
-            | "x-encodedBytes" => (),
+            "$schema" | "$id" | "title" | "description" | "$ref" => value.is_string(),
+            "type" => matches!(
+                value.as_str(),
+                Some("object" | "array" | "string" | "boolean" | "integer" | "null")
+            ),
+            "required" => value.as_array().is_some_and(|keys| keys.iter().all(Value::is_string)),
+            "additionalProperties" => value == &Value::Bool(false),
+            "const" => true,
+            "enum" => value.as_array().is_some_and(|choices| !choices.is_empty()),
+            "minimum" | "maximum" => value.as_i64().is_some(),
+            "minItems" | "maxItems" | "minLength" | "maxLength" | "x-utf8Bytes"
+            | "x-encodedBytes" => value.as_u64().is_some(),
             "x-format"
                 if matches!(
                     value.as_str(),
                     Some("identifier" | "safeText" | "objectId" | "digest32")
-                ) => {}
+                ) =>
+            {
+                true
+            }
             "x-crossFields"
                 if matches!(
                     value.as_str(),
@@ -87,8 +92,14 @@ fn schema_keywords(schema: &Value, path: &str) -> Result<()> {
                             | "progress"
                             | "status"
                     )
-                ) => {}
-            _ => return Err(reject(&pointer(path, key), "unsupportedSchemaKeyword")),
+                ) =>
+            {
+                true
+            }
+            _ => return Err(reject(&next, "unsupportedSchemaKeyword")),
+        };
+        if !valid {
+            return Err(reject(&next, "invalidSchemaKeywordValue"));
         }
     }
     Ok(())
@@ -740,7 +751,49 @@ mod tests {
     fn size(n: u64) -> usize {
         usize::try_from(n).unwrap_or_else(|e| unreachable!("schema bound: {e}"))
     }
+    fn inclusive_bounds(schema: &Value, root: &Value, path: &str) {
+        for key in ["minimum", "maximum"] {
+            if let Some(bound) = schema.get(key) {
+                assert_eq!(
+                    check(bound, schema, root, path),
+                    Ok(()),
+                    "{path}/{key} inclusive boundary"
+                );
+            }
+        }
+        // Isolate each primitive constraint so nested item/format requirements cannot
+        // mask a tightened comparison. Every declared bound is visited by bounds().
+        for key in ["minItems", "maxItems"] {
+            if let Some(bound) = schema.get(key).and_then(Value::as_u64) {
+                let only = json!({"type":"array",key:bound});
+                assert_eq!(
+                    check(&json!(vec![Value::Null; size(bound)]), &only, root, path),
+                    Ok(()),
+                    "{path}/{key}"
+                );
+            }
+        }
+        for key in ["minLength", "maxLength"] {
+            if let Some(bound) = schema.get(key).and_then(Value::as_u64) {
+                let only = json!({"type":"string",key:bound});
+                assert_eq!(
+                    check(&json!("a".repeat(size(bound))), &only, root, path),
+                    Ok(()),
+                    "{path}/{key}"
+                );
+            }
+        }
+        if let Some(bound) = schema.get("x-utf8Bytes").and_then(Value::as_u64) {
+            let text = "é".repeat(size(bound / 2)) + &"a".repeat(size(bound % 2));
+            assert_eq!(text.len(), size(bound));
+            assert_eq!(
+                check(&json!(text), &json!({"type":"string","x-utf8Bytes":bound}), root, path),
+                Ok(())
+            );
+        }
+    }
     fn bounds(schema: &Value, root: &Value, path: &str) {
+        inclusive_bounds(schema, root, path);
         if let Some(kind) = schema.get("type").and_then(Value::as_str) {
             let wrong = if kind == "null" { json!(0) } else { Value::Null };
             assert_eq!(check(&wrong, schema, root, path), Err(reject(path, "type")));
@@ -911,6 +964,67 @@ mod tests {
         assert_eq!(
             load_schema(&serde_json::to_string(&schema)?),
             Err(reject("/$defs/Id/pattern", "unsupportedSchemaKeyword"))
+        );
+        Ok(())
+    }
+    #[test]
+    fn webui_inclusive_semantic_bounds_are_closed() {
+        let root = bundled().unwrap_or_else(|e| unreachable!("{e}"));
+        assert_eq!(check(&json!("a".repeat(24)), &root["$defs"]["Id"], root, "/id"), Ok(()));
+        for value in ["9007199254740991", "-9007199254740991"] {
+            let mut input = samples().remove(7);
+            input["data"]["value"] = json!(value);
+            assert_eq!(super::super::validate(&content(input)), Ok(()));
+        }
+        let mut progress = samples().remove(13);
+        progress["data"]["value"] = json!(0);
+        progress["data"]["total"] = json!(1);
+        assert_eq!(super::super::validate(&content(progress)), Ok(()));
+    }
+    #[test]
+    fn webui_schema_keyword_values_fail_closed()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for (key, bad) in [
+            ("$schema", json!(false)),
+            ("$id", json!(1)),
+            ("title", Value::Null),
+            ("description", json!([])),
+            ("$ref", json!({})),
+            ("type", json!(false)),
+            ("type", json!("number")),
+            ("type", json!(["string"])),
+            ("required", json!("field")),
+            ("required", json!([1])),
+            ("additionalProperties", json!(true)),
+            ("additionalProperties", json!({})),
+            ("enum", json!("choice")),
+            ("enum", json!([])),
+            ("minimum", json!("0")),
+            ("minimum", json!(1.5)),
+            ("maximum", json!(false)),
+            ("minItems", json!(-1)),
+            ("maxItems", json!("1")),
+            ("minLength", json!(0.5)),
+            ("maxLength", Value::Null),
+            ("x-utf8Bytes", json!(true)),
+            ("x-encodedBytes", json!(-1)),
+            ("properties", json!([])),
+            ("$defs", json!(false)),
+            ("items", json!("string")),
+            ("anyOf", json!({})),
+            ("anyOf", json!([])),
+        ] {
+            assert_eq!(
+                load_schema(&serde_json::to_string(&json!({key:bad}))?),
+                Err(reject(&format!("/{key}"), "invalidSchemaKeywordValue")),
+                "{key}"
+            );
+        }
+        let mut schema = load_schema(super::super::SCHEMA)?;
+        schema["$defs"]["Integer"]["minimum"] = json!("zero");
+        assert_eq!(
+            load_schema(&serde_json::to_string(&schema)?),
+            Err(reject("/$defs/Integer/minimum", "invalidSchemaKeywordValue"))
         );
         Ok(())
     }
