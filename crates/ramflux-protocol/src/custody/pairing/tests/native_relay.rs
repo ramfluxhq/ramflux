@@ -139,6 +139,8 @@ fn pairing_native_relay_schemas_are_closed() -> TestResult {
     }
     native_cases(&spec, &ticket, &create, &invitation, &created, &invite)?;
     native_controls(&issue, &create, &ticket, &invitation, &created)?;
+    binding_sweep(&create, &created)?;
+    action_goldens(&independent)?;
     relay_cases()?;
     failure_cases()?;
     Ok(())
@@ -189,6 +191,13 @@ fn native_cases(
     for sig in ["", &"A".repeat(85), &"A".repeat(87)] {
         field::<Create>(create, "/ticket/signature", json!(sig), "signature")?;
     }
+    for (path, error) in [("/issued_at", "created_at"), ("/expires_at", "expires_at")] {
+        integer_case::<CreateTicket>(ticket, path, error)?;
+    }
+    field::<Invitation>(invitation, "/issuer_seq", json!(0), "issuer_seq")?;
+    integer_case::<Invitation>(invitation, "/issuer_seq", "issuer_seq")?;
+    integer_case::<Invitation>(invitation, "/created_at", "created_at")?;
+    integer_case::<Invitation>(invitation, "/expires_at", "expires_at")?;
     descriptor_cases(invitation, created, invite)?;
     native_max_cases(spec, ticket, create, invitation, created)?;
     Ok(())
@@ -218,6 +227,23 @@ fn descriptor_cases(invitation: &Value, created: &Value, invite: &Value) -> Test
         "https://[bad]",
     ] {
         field::<Invitation>(invitation, "/public_origin", json!(bad), "public_origin")?;
+    }
+    for origin in ["https://a:0", "https://a:65535", "https://[::1]", "https://[::1]:443"] {
+        let mut valid = invitation.clone();
+        valid["public_origin"] = json!(origin);
+        decode_value::<Invitation>(&valid)?;
+    }
+    for origin in [
+        "https://a:",
+        "https://a..b",
+        "https://-a",
+        "https://a-",
+        "https://[::1",
+        "https://[::1]tail",
+        "https://[::1]:",
+        "https://a/#fragment",
+    ] {
+        field::<Invitation>(invitation, "/public_origin", json!(origin), "public_origin")?;
     }
     let mut longest = invitation.clone();
     longest["public_origin"] = json!(format!("https://{}", "a".repeat(248)));
@@ -469,6 +495,7 @@ fn relay_cases() -> TestResult {
         b32_cases::<Send>(&v, "/frame/mac", "mac")?;
         b32_cases::<Send>(&v, "/frame/transcript_hash", "transcript_hash")?;
     }
+    relay_request_boundaries([&claim, &claimed, &send, &receipt, &poll, &polled, &close, &closed])?;
     frame_cases(&send, &polled)?;
     token_cases(&send, &poll, &close, &claim)?;
     Ok(())
@@ -520,6 +547,20 @@ fn frame_cases(send: &Value, polled: &Value) -> TestResult {
     three["frames"].as_array_mut().ok_or("frames")?.push(json!({"seq":2,"frame":min["frame"]}));
     assert_eq!(decode_value::<Polled>(&three).err(), Some(WireError::Field("frames")));
     field::<Polled>(&two, "/frames/1/seq", json!(2), "frame_sequence")?;
+    field::<Polled>(&two, "/frames/1/seq", json!(0), "frame_sequence")?;
+    let mut largest = two.clone();
+    largest["frames"][0]["seq"] = json!(MAX_SAFE_JSON_INTEGER - 1);
+    largest["frames"][1]["seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    round::<Polled>(&largest)?;
+    for index in [0, 1] {
+        invalid::<Polled>(
+            &two,
+            &format!("/frames/{index}/seq"),
+            json!(MAX_SAFE_JSON_INTEGER + 1),
+            WireError::Json,
+        )?;
+    }
+
     let mut too_large = two.clone();
     too_large["frames"][0]["frame"] = channel["frame"].clone();
     too_large["frames"][1]["frame"] = channel["frame"].clone();
@@ -553,6 +594,53 @@ fn token_cases(send: &Value, poll: &Value, close: &Value, claim: &Value) -> Test
         decode_value::<Claim>(claim)?.validate_token(&binding, 100),
         Err(WireError::Field("token_role"))
     );
+    let poll = decode_value::<Poll>(poll)?;
+    let close = decode_value::<Close>(close)?;
+    let claim = decode_value::<Claim>(claim)?;
+    let foreign = encode_base64url([9; 32]);
+    for (changed, error) in [
+        (TokenBinding { invitation_id: &foreign, ..binding }, "token_context"),
+        (TokenBinding { issuer_seq: 2, ..binding }, "token_context"),
+        (TokenBinding { token: &foreign, ..binding }, "token"),
+        (TokenBinding { role: "responder", ..binding }, "token_role"),
+    ] {
+        assert_eq!(
+            send.validate_token(&changed, 100),
+            Err(WireError::Field(error)),
+            "send/{error}"
+        );
+        assert_eq!(
+            poll.validate_token(&changed, 100),
+            Err(WireError::Field(error)),
+            "poll/{error}"
+        );
+        assert_eq!(
+            close.validate_token(&changed, 100),
+            Err(WireError::Field(error)),
+            "close/{error}"
+        );
+        let recipient = TokenBinding {
+            role: if error == "token_role" { "initiator" } else { "responder" },
+            ..changed
+        };
+        assert_eq!(
+            claim.validate_token(&recipient, 100),
+            Err(WireError::Field(error)),
+            "claim/{error}"
+        );
+    }
+    received_token_cases(&send, &poll, &close, &claim, &binding, &wrong_role)?;
+    for now in [0, 399] {
+        send.validate_token(&binding, now)?;
+        poll.validate_token(&binding, now)?;
+        close.validate_token(&binding, now)?;
+        claim.validate_token(&wrong_role, now)?;
+    }
+    for now in [400, 401] {
+        assert_eq!(poll.validate_token(&binding, now), Err(WireError::Field("expired")));
+        assert_eq!(close.validate_token(&binding, now), Err(WireError::Field("expired")));
+        assert_eq!(claim.validate_token(&wrong_role, now), Err(WireError::Field("expired")));
+    }
     Ok(())
 }
 fn failure_cases() -> TestResult {
@@ -589,6 +677,302 @@ fn failure_cases() -> TestResult {
         } else {
             field::<Failure>(&f, "/retry_after_ms", json!(1000), "retry_after_ms")?;
         }
+    }
+    Ok(())
+}
+
+fn action_goldens(independent: &Value) -> TestResult {
+    for name in ["issue", "create", "old_open_session"] {
+        let golden = &independent["actions"][name];
+        let action: CustodyProofAction = serde_json::from_value(golden["value"].clone())?;
+        assert_eq!(hex(&bytes(&action)?), golden["canonical_hex"], "{name} canonical");
+        let mut preimage = b"ramflux.identity.custody_action.v1\0".to_vec();
+        preimage.extend(bytes(&action)?);
+        assert_eq!(hex(&preimage), golden["preimage_hex"], "{name} preimage");
+        assert_eq!(crate::custody::custody_action_hash(&action)?, golden["hash"], "{name} hash");
+    }
+    Ok(())
+}
+// Each case starts from received bytes that pass all inner codecs. Correlated
+// fields change only where needed to preserve an unrelated inner invariant.
+fn binding_sweep(create: &Value, created: &Value) -> TestResult {
+    let saved = decode_value::<Create>(create)?;
+    for (path, value) in [
+        ("/invitation/body/issuer_seq", json!(2)),
+        ("/invitation/body/node_key", json!(id())),
+        ("/invitation/body/base_record_hash", json!(id())),
+        ("/invitation/body/base_epoch", json!(1)),
+        ("/invitation/body/capabilities", json!(["message"])),
+        ("/invitation/body/lease_not_before", json!(1_700_000_001)),
+        ("/invitation/body/lease_expires_at", json!(1_702_591_999)),
+        ("/invitation/body/primary_ref/device_id", json!("other")),
+        ("/invitation/body/primary_ref/device_epoch", json!(2)),
+    ] {
+        let mut changed = created.clone();
+        *changed.pointer_mut(path).ok_or("binding path")? = value;
+        let received = decode_value::<Created>(&changed)?;
+        assert_eq!(
+            received.validate_create(&saved),
+            Err(WireError::Field("created_binding")),
+            "{path}"
+        );
+    }
+    let mut request = created.clone();
+    request["request_id"] = json!(id());
+    request["invitation"]["body"]["request_id"] = json!(id());
+    assert_eq!(
+        decode_value::<Created>(&request)?.validate_create(&saved),
+        Err(WireError::Field("created_binding"))
+    );
+    // Shift both times to keep the exact 300-second invitation lifetime.
+    let mut clock = created.clone();
+    clock["invitation"]["body"]["created_at"] = json!(101);
+    clock["invitation"]["body"]["expires_at"] = json!(401);
+    assert_eq!(
+        decode_value::<Created>(&clock)?.validate_create(&saved),
+        Err(WireError::Field("created_binding"))
+    );
+    let mut account = created.clone();
+    account["invitation"]["body"]["account_anchor"] = json!(id());
+    account["invitation"]["body"]["primary_ref"]["account_anchor"] = json!(id());
+    assert_eq!(
+        decode_value::<Created>(&account)?.validate_create(&saved),
+        Err(WireError::Field("created_binding"))
+    );
+    // Both ticket-context equality arms, with ticket primary-anchor validation intact.
+    let mut ticket_account = create.clone();
+    ticket_account["ticket"]["body"]["account_anchor"] = json!(id());
+    ticket_account["ticket"]["body"]["primary_ref"]["account_anchor"] = json!(id());
+    assert_eq!(
+        decode_value::<Create>(&ticket_account).err(),
+        Some(WireError::Field("ticket_context"))
+    );
+    let ticket = &create["ticket"]["body"];
+    field::<CreateTicket>(ticket, "/primary_ref/account_anchor", json!(id()), "primary_anchor")?;
+    transfer_binding_sweep(create, created)
+}
+fn transfer_binding_sweep(create: &Value, created: &Value) -> TestResult {
+    // All projected transfer-only spec fields remain independently distinguishable.
+    let mut full = create.clone();
+    full["spec"]["purpose"] = json!("primary_transfer");
+    full["spec"]["recipient_mode"] = json!("existing");
+    full["spec"]["destination_ref"] = full["spec"]["primary_ref"].clone();
+    full["spec"]["destination_ref"]["device_id"] = json!("destination");
+    full["spec"]["data_selection"] = json!([{"key_id":"key","purpose":"history"}]);
+    full["ticket"]["body"]["spec_hash"] =
+        json!(decode_value::<CreateSpec>(&full["spec"])?.spec_hash()?);
+    profile_field_vectors::<CreateSpec>(&full["spec"])?;
+    let mut descriptor = invitation_fixture(&full["spec"]);
+    descriptor["transfer_id"] = json!(id());
+    profile_field_vectors::<Invitation>(&descriptor)?;
+    let saved = decode_value::<Create>(&full)?;
+    let mut out = created.clone();
+    out["invitation"]["body"] = invitation_fixture(&full["spec"]);
+    out["invitation"]["body"]["transfer_id"] = json!(id());
+    decode_value::<Created>(&out)?.validate_create(&saved)?;
+    for (path, value) in [
+        ("/invitation/body/destination_ref/device_id", json!("another")),
+        ("/invitation/body/destination_ref/device_epoch", json!(2)),
+        ("/invitation/body/data_selection/0/key_id", json!("other")),
+        ("/invitation/body/data_selection/0/purpose", json!("attachment")),
+    ] {
+        let mut wrong = out.clone();
+        *wrong.pointer_mut(path).ok_or("transfer binding path")? = value;
+        assert_eq!(
+            decode_value::<Created>(&wrong)?.validate_create(&saved),
+            Err(WireError::Field("created_binding")),
+            "{path}"
+        );
+    }
+    let mut mode = out.clone();
+    mode["invitation"]["body"]["recipient_mode"] = json!("new");
+    mode["invitation"]["body"]["destination_ref"] = Value::Null;
+    assert_eq!(
+        decode_value::<Created>(&mode)?.validate_create(&saved),
+        Err(WireError::Field("created_binding"))
+    );
+    let mut purpose = out.clone();
+    purpose["invitation"]["body"]["purpose"] = json!("enroll");
+    purpose["invitation"]["body"]["recipient_mode"] = json!("new");
+    purpose["invitation"]["body"]["destination_ref"] = Value::Null;
+    purpose["invitation"]["body"]["transfer_id"] = Value::Null;
+    purpose["invitation"]["body"]["data_selection"] = json!([]);
+    assert_eq!(
+        decode_value::<Created>(&purpose)?.validate_create(&saved),
+        Err(WireError::Field("created_binding"))
+    );
+    // Admission conjunctions must be independently falsified.
+    saved.validate_admission(&saved.ticket.body.boot_id, CreateSlot::Issued, 100, true)?;
+    assert_eq!(
+        saved.validate_admission(&saved.ticket.body.boot_id, CreateSlot::Issued, 100, false),
+        Err(WireError::Field("expired"))
+    );
+    Ok(())
+}
+
+fn profile_field_vectors<T: PairingWire>(full: &Value) -> TestResult {
+    for (path, error) in [
+        ("/primary_ref/account_anchor", "ref.account_anchor"),
+        ("/destination_ref/account_anchor", "ref.account_anchor"),
+        ("/base_record_hash", "record_hash"),
+    ] {
+        b32_cases::<T>(full, path, error)?;
+    }
+    for prefix in ["primary_ref", "destination_ref"] {
+        for value in [json!(""), json!("x".repeat(129)), json!("\n")] {
+            field::<T>(full, &format!("/{prefix}/device_id"), value, "ref.device_id")?;
+        }
+        field::<T>(full, &format!("/{prefix}/device_epoch"), json!(0), "ref.device_epoch")?;
+        integer_case::<T>(full, &format!("/{prefix}/device_epoch"), "ref.device_epoch")?;
+        let mut endpoint = full.clone();
+        endpoint[prefix]["device_id"] = json!("é".repeat(64));
+        endpoint[prefix]["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+        decode_value::<T>(&endpoint)?;
+    }
+    for caps in [
+        json!([]),
+        json!(["call", "call"]),
+        json!(["sync", "call"]),
+        json!(["other"]),
+        json!(["call", "group", "message", "register", "sync", "sync"]),
+    ] {
+        field::<T>(full, "/capabilities", caps, "capabilities")?;
+    }
+    for (path, value, error) in [
+        ("/destination_ref/account_anchor", json!(id()), "destination_anchor"),
+        ("/primary_ref/account_anchor", json!(id()), "primary_anchor"),
+        ("/data_selection/0/key_id", json!(""), "selection.key_id"),
+        ("/data_selection/0/key_id", json!("x".repeat(129)), "selection.key_id"),
+        ("/data_selection/0/key_id", json!("\n"), "selection.key_id"),
+        ("/data_selection/0/purpose", json!("other"), "selection.purpose"),
+        ("/lease_expires_at", full["lease_not_before"].clone(), "lease"),
+        ("/lease_expires_at", json!(0), "lease"),
+    ] {
+        field::<T>(full, path, value, error)?;
+    }
+    let mut endpoint = full.clone();
+    endpoint["data_selection"] = json!(
+        (0..32)
+            .map(|i| json!({"key_id":format!("{i:02}{}","x".repeat(126)),"purpose":"attachment"}))
+            .collect::<Vec<_>>()
+    );
+    endpoint["base_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+    endpoint["lease_not_before"] = json!(MAX_SAFE_JSON_INTEGER - MAX_BRANCH_LEASE_SECONDS);
+    endpoint["lease_expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
+    decode_value::<T>(&endpoint)?;
+    field::<T>(
+        &endpoint,
+        "/lease_not_before",
+        json!(MAX_SAFE_JSON_INTEGER - MAX_BRANCH_LEASE_SECONDS - 1),
+        "lease",
+    )?;
+    let mut wrong = endpoint["data_selection"].as_array().ok_or("selection")?.clone();
+    wrong.swap(0, 1);
+    field::<T>(&endpoint, "/data_selection", json!(wrong), "data_selection")?;
+    let mut wrong = endpoint["data_selection"].as_array().ok_or("selection")?.clone();
+    wrong[1] = wrong[0].clone();
+    field::<T>(&endpoint, "/data_selection", json!(wrong), "data_selection")?;
+    let mut wrong = endpoint["data_selection"].as_array().ok_or("selection")?.clone();
+    wrong.push(json!({"key_id":"zz","purpose":"history"}));
+    field::<T>(&endpoint, "/data_selection", json!(wrong), "data_selection")?;
+    for (path, error) in [
+        ("/base_epoch", "device_set_epoch"),
+        ("/lease_not_before", "lease_not_before"),
+        ("/lease_expires_at", "lease_expires_at"),
+    ] {
+        integer_case::<T>(full, path, error)?;
+    }
+    Ok(())
+}
+
+fn relay_request_boundaries(values: [&Value; 8]) -> TestResult {
+    let [claim, claimed, send, receipt, poll, polled, close, closed] = values;
+    macro_rules! issuer_bounds {
+        ($ty:ty,$value:expr) => {{
+            field::<$ty>($value, "/issuer_seq", json!(0), "issuer_seq")?;
+            integer_case::<$ty>($value, "/issuer_seq", "issuer_seq")?;
+            let mut maximum = $value.clone();
+            maximum["issuer_seq"] = json!(MAX_SAFE_JSON_INTEGER);
+            decode_value::<$ty>(&maximum)?;
+        }};
+    }
+    issuer_bounds!(Claim, claim);
+    issuer_bounds!(Claimed, claimed);
+    issuer_bounds!(Send, send);
+    issuer_bounds!(Poll, poll);
+    issuer_bounds!(Close, close);
+    let mut maximum = send.clone();
+    maximum["seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    decode_value::<Send>(&maximum)?;
+    let mut maximum = receipt.clone();
+    maximum["seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    decode_value::<Sent>(&maximum)?;
+    macro_rules! relay_fields {
+        ($ty:ty,$v:expr,[$($field:literal),*]) => {$(b32_cases::<$ty>($v,concat!("/",$field),$field)?;)*};
+    }
+    relay_fields!(Claim, claim, ["invitation_id"]);
+    relay_fields!(Claimed, claimed, ["invitation_id", "claim_nonce"]);
+    relay_fields!(Send, send, ["invitation_id"]);
+    relay_fields!(Sent, receipt, ["invitation_id"]);
+    relay_fields!(Poll, poll, ["invitation_id", "token"]);
+    relay_fields!(Polled, polled, ["invitation_id"]);
+    relay_fields!(Close, close, ["invitation_id", "token"]);
+    relay_fields!(Closed, closed, ["invitation_id"]);
+    field::<Sent>(receipt, "/role", json!("other"), "role")?;
+    field::<Poll>(poll, "/role", json!("other"), "role")?;
+    field::<Close>(close, "/role", json!("other"), "role")?;
+    let mut role = send.clone();
+    role["frame"] = json!({"kind":"confirm","role":"responder","transcript_hash":id(),"mac":id()});
+    assert_eq!(decode_value::<Send>(&role).err(), Some(WireError::Field("frame_role")));
+    role["frame"]["role"] = json!("other");
+    assert_eq!(decode_value::<Send>(&role).err(), Some(WireError::Field("role")));
+    Ok(())
+}
+
+fn received_token_cases(
+    send: &Send,
+    poll: &Poll,
+    close: &Close,
+    claim: &Claim,
+    binding: &TokenBinding<'_>,
+    wrong_role: &TokenBinding<'_>,
+) -> TestResult {
+    let foreign = encode_base64url([9; 32]);
+    // Mutate the actual canonical HTTP request as well as saved evidence.
+    // A channel frame has no inner invitation/role, so outer token checks are
+    // reached without a commit's independent frame binding masking the error.
+    let mut input = serde_json::to_value(send)?;
+    input["frame"] = json!({"kind":"channel","counter":0,"ciphertext":encode_base64url([0;16])});
+    macro_rules! request_binding {
+        ($ty:ty,$value:expr,$binding:expr,$token:literal) => {{
+            let base = serde_json::to_value($value)?;
+            for (key, value, error) in [
+                ("invitation_id", json!(foreign), "token_context"),
+                ("issuer_seq", json!(2), "token_context"),
+                ($token, json!(foreign), "token"),
+            ] {
+                let mut wrong = base.clone();
+                wrong[key] = value;
+                assert_eq!(
+                    decode_value::<$ty>(&wrong)?.validate_token($binding, 100),
+                    Err(WireError::Field(error)),
+                    "{key}"
+                );
+            }
+        }};
+    }
+    request_binding!(Send, &input, binding, "token");
+    request_binding!(Poll, poll, binding, "token");
+    request_binding!(Close, close, binding, "token");
+    request_binding!(Claim, claim, wrong_role, "recipient_token");
+    for mut wrong in [input, serde_json::to_value(poll)?, serde_json::to_value(close)?] {
+        wrong["role"] = json!("responder");
+        let result = match wrong["schema"].as_str().ok_or("request schema")? {
+            "ramflux.pairing.Send.v2" => decode_value::<Send>(&wrong)?.validate_token(binding, 100),
+            "ramflux.pairing.Poll.v2" => decode_value::<Poll>(&wrong)?.validate_token(binding, 100),
+            _ => decode_value::<Close>(&wrong)?.validate_token(binding, 100),
+        };
+        assert_eq!(result, Err(WireError::Field("token_role")));
     }
     Ok(())
 }

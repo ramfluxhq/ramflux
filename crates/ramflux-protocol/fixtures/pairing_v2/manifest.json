@@ -22,7 +22,7 @@
   "oracle": "scripts/check-pairing-oracle.py",
   "secrets": "synthetic only",
   "custody_control_sha256": "400efa43d0ba3b9262ff3ccc141fc60eec777cb9c0ac7015b3f9422ae233da87",
-  "oracle_sha256": "7e560a850c5a31a14b5c5273bb330a7e1c07eec6d426c2e8dff7bdc9d771673e",
+  "oracle_sha256": "86282e76cf701a7ace62f35e69c67b86700978fbc7c483dbecd3b8229bb3392b",
   "adapter_sha256": "4b09b62aa67bd582363e9eb3a36184eabf2970cc50798357f84ffbae8d6ae7b8",
   "openssl": {
     "version": "3.6.2",
