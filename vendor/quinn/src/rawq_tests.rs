@@ -822,9 +822,20 @@ async fn receive_backing_credit_follows_last_bytes_owner(){
     assert_eq!(data,[b"first".to_vec(),b"second".to_vec()]);
     assert_eq!(connection.stats().frame_rx.stream,2);
     let capacity=probe.stats().receive_backing_capacity;
-    assert!(capacity>=first.len()+second.len());
+    let admitted_payload_len=probe.stats().receive_payload_len;
+    assert!(admitted_payload_len>first.len()+second.len(),"packet payload includes STREAM framing");
+    assert_eq!(capacity,admitted_payload_len,"physical copy capacity matches independently observed decrypted packet length");
     let payload_charge=((capacity+63)&!63)+64;
     let view=first.slice(1..);let held=view.clone();drop((first,view));
+    let held_data=held.to_vec();let second_data=second.to_vec();
+    recv1.stop(0u32.into()).unwrap();recv2.stop(0u32.into()).unwrap();
+    let resets=connection.stats().frame_rx.reset_stream;
+    send2.reset(0u32.into()).unwrap();
+    until(||connection.stats().frame_rx.reset_stream>resets).await;
+    assert_eq!(&held[..],&held_data[..],"held view survives STOP_SENDING and RESET_STREAM");
+    assert_eq!(&second[..],&second_data[..]);
+    assert!(raw.snapshot().0.items>=1,"stop does not destroy the retained packet owner");
+    assert!(probe.stats().used>=payload_charge);
     connection.close(0u32.into(),b"done");
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((recv1,recv2,send1,send2,connection,peer,endpoint,peer_endpoint));
@@ -835,8 +846,6 @@ async fn receive_backing_credit_follows_last_bytes_owner(){
     assert_eq!(probe.stats().used,payload_charge,"one remaining slice/clone retains the full allocation");
     assert_eq!(raw.snapshot().0.items,1);
     drop(held);until(||probe.stats().used==0&&raw.snapshot().0.items==0).await;
-
-
 }
 
 async fn receive_backing_copy_refuses_before_stream(){
@@ -851,6 +860,7 @@ async fn receive_backing_copy_refuses_before_stream(){
     assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
     assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::StreamAssemblers));
+    assert!(probe.stats().receive_payload_len>0,"the refused input length is observed before allocation");
     assert_eq!(probe.stats().receive_backing_capacity,0);assert_eq!(probe.stats().allocations,0);
     assert_eq!(connection.stats().frame_rx.stream,before,"refused payload does not produce STREAM effects");
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();

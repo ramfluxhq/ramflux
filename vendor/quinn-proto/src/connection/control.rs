@@ -214,14 +214,25 @@ impl Connection {
             && pending.packet.header.has_frames()
             && pending.packet.plaintext.is_none()
         {
+            let payload_len = pending.packet.payload_len();
             let bytes = mem::take(&mut pending.packet.payload).freeze();
-            let copied=if let Some((credit,class))=self.metadata.as_ref().and_then(|credit|metadata_backing::payload_class(&bytes).map(|class|(credit,class))){
-                match metadata_backing::copy_payload(&bytes,self.raw_owner.clone(),credit,class){
-                    Ok(copy)=>Some(copy),
-                    Err(_)=>{self.resource_exhausted(pending.now);return None;}
+            let copied = if let Some((credit, class)) = self.metadata.as_ref().and_then(|credit| {
+                metadata_backing::payload_class(&bytes).map(|class| (credit, class))
+            }) {
+                credit.observe_receive_payload_len(payload_len);
+                match metadata_backing::copy_payload(&bytes, self.raw_owner.clone(), credit, class) {
+                    Ok(copy) => Some(copy),
+                    Err(_) => {
+                        self.resource_exhausted(pending.now);
+                        return None;
+                    }
                 }
-            }else{None};
-            pending.packet.plaintext = Some(if let Some(copy)=copied {copy} else if let Some(owner) = self.raw_owner.clone() {
+            } else {
+                None
+            };
+            pending.packet.plaintext = Some(if let Some(copy) = copied {
+                copy
+            } else if let Some(owner) = self.raw_owner.clone() {
                 Bytes::from_owner(RawBacking {
                     bytes,
                     _owner: owner,

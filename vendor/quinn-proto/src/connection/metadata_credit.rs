@@ -41,6 +41,8 @@ impl ResourceExhausted {
 /// Credit observation; capacity is charged once, with no second factor-two multiplier.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MetadataStats {
+    /// Decrypted packet payload length observed at admission, before copy reservation/allocation.
+    pub receive_payload_len: usize,
     /// Actual capacity of the most recent admitted receive payload copy.
     /// Owner/refcount-envelope allocation is not included or certified by this component.
     pub receive_backing_capacity: usize,
@@ -81,6 +83,7 @@ impl MetadataCredit {
         let bytes=bytes.unwrap();s.used+=bytes;s.peak=s.peak.max(s.used);
         Ok(AllocationCharge { credit:self.clone(), bytes })
     }
+    pub(crate) fn observe_receive_payload_len(&self, length:usize){self.state.lock().unwrap().receive_payload_len=length;}
     pub(crate) fn receive_backing_capacity(&self, capacity:usize){self.state.lock().unwrap().receive_backing_capacity=capacity;}
     pub(crate) fn allocated(&self) { let mut s=self.state.lock().unwrap();s.allocations=s.allocations.saturating_add(1); }
 }
