@@ -654,7 +654,7 @@ async fn dispatch_group_control_delivery(
             target_delivery_id: delivery.target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 3_600,
+            ttl: account.client.content_ttl()?,
         };
         if let Some(federation) = delivery.route.federation.as_ref() {
             let response = account
@@ -989,7 +989,7 @@ pub(crate) async fn dispatch_group_send_request(
                 target_delivery_id,
                 encrypted_body: Vec::new(),
                 created_at,
-                ttl: body.ttl.unwrap_or(3_600),
+                ttl: account.client.content_ttl()?,
             };
             if let Some(federation) = body.federation.as_ref() {
                 let engine = account.session_client().await?;
@@ -1080,7 +1080,7 @@ pub(crate) async fn dispatch_group_send_request(
                     target_delivery_id,
                     encrypted_body: encrypted_body.clone(),
                     created_at,
-                    ttl: body.ttl.unwrap_or(3_600),
+                    ttl: account.client.content_ttl()?,
                 };
                 if let Some(federation) = route.federation.as_ref() {
                     let engine = account.session_client().await?;
@@ -1262,7 +1262,7 @@ pub(crate) async fn dispatch_group_sender_key_distribution(
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 3_600,
+            ttl: account.client.content_ttl()?,
         };
         let payload_bytes = group_distribution_payload(
             &account.client, engine.config(), group_id, &payload)?;

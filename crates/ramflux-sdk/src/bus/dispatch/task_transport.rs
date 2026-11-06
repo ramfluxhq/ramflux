@@ -336,7 +336,7 @@ pub(in crate::bus) async fn seal(
         target_delivery_id: target.delivery.clone(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: 3600,
+        ttl: account.client.content_ttl()?,
     };
     let sealed = if let Some(federation) = &target.federation {
         account.client.seal_routed_federated_as(

@@ -124,6 +124,7 @@ pub(super) async fn submit_message(
     {
         crate::client::surface::check_delivery_size(plaintext.len())?;
     }
+    body.ttl = account.client.content_ttl()?;
     normalize_message_recipient(&account.client, &mut body)?;
     let entry = if let Some(plaintext) = body.plaintext_body()? {
         if !body.attachments.is_empty() {
@@ -630,7 +631,7 @@ fn receipt_gateway_message(
         target_delivery_id: target_delivery_id.to_owned(),
         encrypted_body: Vec::new(),
         created_at,
-        ttl: 300,
+        ttl: crate::offline_retention::DIRECT_RECEIPT_TTL_SECS,
     })
 }
 

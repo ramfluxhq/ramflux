@@ -251,8 +251,10 @@ impl RamfluxClient {
                         routing_set_id: None,
                         delivery_class: ramflux_protocol::DeliveryClass::SelfDeviceControl,
                         priority: ramflux_protocol::Priority::Normal,
-                        ttl: 600,
-                        created_at: envelope.expires_at.saturating_sub(600),
+                        ttl: self.content_ttl()?,
+                        created_at: envelope
+                            .expires_at
+                            .saturating_sub(i64::from(self.content_ttl()?)),
                         encrypted_payload: String::new(),
                         payload_hash: String::new(),
                     },

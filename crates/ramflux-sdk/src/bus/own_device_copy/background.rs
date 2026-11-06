@@ -225,7 +225,8 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let now = now_unix_timestamp();
     for (key, mut work) in pending_ordered(&account.client, now)? {
         if (!work.local_manifest && message_owner(&work).is_some())
-            || work.intent.created_at.saturating_add(600) <= now
+            || work.intent.created_at.saturating_add(i64::from(account.client.content_ttl()?))
+                <= now
             || (work.packet.is_none() && work.attempts >= 10)
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
@@ -420,7 +421,7 @@ fn envelope(
         target_delivery_id: plan.config.target_delivery_id.clone(),
         encrypted_body: packet.bytes()?,
         created_at: now_unix_timestamp(),
-        ttl: 600,
+        ttl: account.client.content_ttl()?,
     };
     let mut envelope = gateway_direct_message_envelope(&plan.config, &message, None)?;
     envelope.delivery_class = ramflux_protocol::DeliveryClass::SelfDeviceControl;

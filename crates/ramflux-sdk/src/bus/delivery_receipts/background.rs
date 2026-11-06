@@ -365,7 +365,7 @@ mod tests {
             target_delivery_id: account.gateway_config.target_delivery_id.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 600,
+            ttl: crate::offline_retention::RECEIPT_TTL_SECS,
         };
         let packet = gateway_direct_message_envelope(&account.gateway_config, &message, None)?;
         let work = Work {
@@ -463,7 +463,7 @@ pub(crate) async fn test_fetch_material(
         target_delivery_id: String::new(),
         encrypted_body: Vec::new(),
         created_at: 0,
-        ttl: 600,
+        ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
     let mut plan = Plan {
         key: String::new(),

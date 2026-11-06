@@ -83,7 +83,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
         target_delivery_id: reply.destination.target.clone(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: 600,
+        ttl: client.content_ttl()?,
     };
     let request = client.routed_send_material_request(&config, &message)?;
     Ok(Some(Plan { key, fingerprint, reply, config, message, body, request }))

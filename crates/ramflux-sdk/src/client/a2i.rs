@@ -57,7 +57,7 @@ impl RamfluxClient {
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: event.created_at,
-            ttl: 3_600,
+            ttl: self.content_ttl()?,
         };
         self.send_plaintext_direct_message_without_franking(
             engine,

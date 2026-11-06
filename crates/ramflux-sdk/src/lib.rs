@@ -37,6 +37,10 @@ pub mod custody;
 mod surface;
 pub use surface::{SurfaceSendRequest, new_surface_message_id};
 mod constants;
+mod offline_retention;
+pub use offline_retention::{
+    AccountConfig, DEFAULT_OFFLINE_RETENTION_SECS, MIN_OFFLINE_RETENTION_SECS,
+};
 mod contact_card;
 mod contact_card_native;
 mod contact_identity;

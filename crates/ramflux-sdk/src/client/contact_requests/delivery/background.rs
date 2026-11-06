@@ -441,10 +441,12 @@ fn recipient(
         target_delivery_id: device.target_delivery_id,
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: u32::try_from(
-            plan.intent.expires_at.saturating_sub(now_unix_timestamp()).clamp(1, TTL),
-        )
-        .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
+        ttl: account.client.content_ttl()?.min(
+            u32::try_from(
+                plan.intent.expires_at.saturating_sub(now_unix_timestamp()).clamp(1, TTL),
+            )
+            .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
+        ),
     };
     let request = account.client.routed_send_material_request(&plan.config, &message)?;
     Ok(Some((RecipientPlan { plan, message, body, material_hash: material }, request)))

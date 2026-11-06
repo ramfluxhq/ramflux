@@ -237,7 +237,7 @@ fn receipt_message(
         target_delivery_id: target.into(),
         encrypted_body: Vec::new(),
         created_at: work.at,
-        ttl: u32::try_from(LIFETIME).unwrap_or(600),
+        ttl: crate::offline_retention::RECEIPT_TTL_SECS,
     };
     Ok((message, serde_json::to_vec(&event)?))
 }

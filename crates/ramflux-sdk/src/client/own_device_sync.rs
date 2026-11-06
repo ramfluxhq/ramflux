@@ -141,7 +141,7 @@ impl RamfluxClient {
             target_delivery_id: target_device.target_delivery_id.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 3_600,
+            ttl: self.content_ttl()?,
         };
         let (mut session, x3dh) =
             self.load_or_create_send_dm_session(engine, &slot_message).await?;
@@ -168,7 +168,7 @@ impl RamfluxClient {
             snapshot_id: snapshot_id.clone(),
             snapshot_kind: "history_bundle".to_owned(),
             created_at: now_unix_timestamp(),
-            expires_at: now_unix_timestamp().saturating_add(3_600),
+            expires_at: now_unix_timestamp().saturating_add(i64::from(self.content_ttl()?)),
             nonce: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
             history_ref: own_device_history_ref(
                 &object,

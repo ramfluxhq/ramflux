@@ -133,7 +133,7 @@ impl RamfluxClient {
             target_delivery_id: self.pair_delivery_id(remote)?,
             encrypted_body: Vec::new(),
             created_at: super::now_unix_timestamp(),
-            ttl: 300,
+            ttl: crate::offline_retention::RESET_TTL_SECS,
         };
         let body = serde_json::to_vec(&serde_json::json!({
             "type":kind.wire(), "rejected_bootstrap_floor": if kind == PairControlKind::Reset {

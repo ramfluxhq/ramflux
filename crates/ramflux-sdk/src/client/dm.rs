@@ -51,8 +51,9 @@ impl RamfluxClient {
     pub async fn send_direct_message_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
-        message: GatewayDirectMessage,
+        mut message: GatewayDirectMessage,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        message.ttl = self.content_ttl()?;
         self.send_direct_message(
             &message.conversation_id,
             &message.message_id,
@@ -68,8 +69,9 @@ impl RamfluxClient {
     pub async fn submit_direct_message_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
-        message: GatewayDirectMessage,
+        mut message: GatewayDirectMessage,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        message.ttl = self.content_ttl()?;
         let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
         engine.submit_envelope(envelope).await
     }
@@ -80,9 +82,10 @@ impl RamfluxClient {
     pub async fn send_plaintext_direct_message_via_gateway(
         &self,
         engine: &mut impl GatewaySessionAccess,
-        message: GatewayDirectMessage,
+        mut message: GatewayDirectMessage,
         plaintext: &[u8],
     ) -> Result<GatewayInboxEntry, SdkError> {
+        message.ttl = self.content_ttl()?;
         self.send_plaintext_direct_message_via_gateway_inner(
             engine,
             message,
@@ -177,10 +180,11 @@ impl RamfluxClient {
         &mut self,
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
-        message: GatewayDirectMessage,
+        mut message: GatewayDirectMessage,
         plaintext: &[u8],
         attachments: &[LocalBusMessageAttachmentInput],
     ) -> Result<GatewayInboxEntry, SdkError> {
+        message.ttl = self.content_ttl()?;
         self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
             engine,
             pool,

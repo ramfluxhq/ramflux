@@ -135,7 +135,7 @@ impl RamfluxClient {
             target_delivery_id,
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 3_600,
+            ttl: self.content_ttl()?,
         };
         self.resolve_message_recipient(engine.config(), &mut message).await?;
         let key_slot = self

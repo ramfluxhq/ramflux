@@ -277,12 +277,7 @@ fn prepare_target(
         target_delivery_id: device.target_delivery_id,
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: if selected.view().effective_role(root, &device.device_id).is_some() {
-            3600
-        } else {
-            u32::try_from(BOUNDARY_SECONDS)
-                .map_err(|_| SdkError::LocalBus("removal boundary TTL overflow".into()))?
-        },
+        ttl: account.client.content_ttl()?,
     };
     let route = client.shared_group_federation_route(&state.group_id, root)?;
     let request = client.routed_send_material_request(&plan.config, &message)?;
