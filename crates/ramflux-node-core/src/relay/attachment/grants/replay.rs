@@ -122,6 +122,21 @@ impl ScopedGrantRegistry {
     }
 }
 
+impl ScopedGrantRegistry {
+    /// Read-only replay pre-check for the authenticated requester's nonce.
+    pub(super) fn nonce_consumed_read(
+        &self,
+        requester: &ramflux_protocol::large_attachment::QualifiedOwner,
+        nonce: &[u8; 32],
+    ) -> Result<bool, AttachmentReplayError> {
+        use redb::ReadableTable;
+        let mut key = storage::principal(&self.authority.source, requester).to_vec();
+        key.extend(nonce);
+        let tx = super::ReadableDatabase::begin_read(&*self.ledger.db).map_err(store)?;
+        let rows = tx.open_table(storage::NONCES).map_err(store)?;
+        Ok(rows.get(key.as_slice()).map_err(store)?.is_some())
+    }
+}
 /// Shared with the renewal admission transaction: the same nonce ledger, fence and charge.
 pub(super) fn nonce_consumed(
     tx: &redb::WriteTransaction,

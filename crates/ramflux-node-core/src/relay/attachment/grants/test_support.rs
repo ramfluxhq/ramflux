@@ -23,12 +23,16 @@ fn bytes(s: &str) -> Vec<u8> {
         .map(|v| u8::from_str_radix(std::str::from_utf8(v).unwrap(), 16).unwrap())
         .collect()
 }
+#[cfg(test)]
 pub(super) fn fixtures() -> (VerifiedContentManifest, VerifiedScopedGrant) {
+    fixtures_case(0)
+}
+pub(super) fn fixtures_case(case: usize) -> (VerifiedContentManifest, VerifiedScopedGrant) {
     let j: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../../ramflux-protocol/tests/fixtures/large_attachment_v1.json"
     ))
     .unwrap();
-    let c = &j["cases"][0];
+    let c = &j["cases"][case];
     let mc = bytes(c["content_manifest_unsigned_hex"].as_str().unwrap());
     let mut signed = u32::try_from(mc.len()).unwrap().to_be_bytes().to_vec();
     signed.extend(mc);
@@ -54,6 +58,7 @@ pub(super) struct Auth {
     pop: RequesterProofOfPossession,
     pub(super) cache: RelayTrustSnapshotCache,
     body: String,
+    audience: String,
 }
 impl Auth {
     pub(super) fn context(&self) -> ScopedRegistrationAuth<'_> {
@@ -64,7 +69,7 @@ impl Auth {
                 grant: None,
                 owner_proof: Some(&self.proof),
                 pop: &self.pop,
-                expected_audience_node_id: V3_AUDIENCE_NODE,
+                expected_audience_node_id: &self.audience,
                 expected_body_hash: &self.body,
                 capability: self.proof.capability,
                 now: self.token.issued_at,
@@ -106,6 +111,7 @@ pub(super) fn authority_token(
         .unwrap();
     (token, cache)
 }
+#[cfg(test)]
 pub(super) fn auth(
     native: &VerifiedContentManifest,
     grant: &VerifiedScopedGrant,
@@ -113,6 +119,7 @@ pub(super) fn auth(
 ) -> Auth {
     auth_for(native, now, ObjectRelayCapability::Put, hex(&grant.grant().hash().unwrap()))
 }
+#[cfg(test)]
 pub(super) fn auth_for(
     native: &VerifiedContentManifest,
     now: u64,
@@ -121,6 +128,7 @@ pub(super) fn auth_for(
 ) -> Auth {
     auth_for_device(native, now, cap, body, &native.manifest().owner, owner_seed())
 }
+#[cfg(test)]
 pub(super) fn auth_for_device(
     native: &VerifiedContentManifest,
     now: u64,
@@ -128,6 +136,19 @@ pub(super) fn auth_for_device(
     body: String,
     owner: &QualifiedOwner,
     seed: [u8; 32],
+) -> Auth {
+    auth_for_device_at(native, now, cap, body, owner, seed, V3_AUDIENCE_NODE)
+}
+/// Same as [`auth_for_device`] for a source authority named `audience`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn auth_for_device_at(
+    native: &VerifiedContentManifest,
+    now: u64,
+    cap: ObjectRelayCapability,
+    body: String,
+    owner: &QualifiedOwner,
+    seed: [u8; 32],
+    audience: &str,
 ) -> Auth {
     let mut proof = v3_signed_owner_proof(now, cap).unwrap();
     proof.object_id = hex(&native.manifest().object_id);
@@ -154,11 +175,12 @@ pub(super) fn auth_for_device(
         "ramflux.object_relay.recipient_device.v1",
         owner.device_id.as_bytes(),
     );
+    audience.clone_into(&mut token.audience_node_id);
     v3_resign_token(&mut token).unwrap();
     let mut pop = v3_signed_pop(&token, cap, seed, now).unwrap();
     pop.body_hash.clone_from(&body);
     pop.signature = v3_sign(&requester_pop_signing_bytes(&pop).unwrap(), seed);
-    Auth { token, proof, pop, cache, body }
+    Auth { token, proof, pop, cache, body, audience: audience.to_owned() }
 }
 pub(super) fn signed(g: &ScopedAttachmentGrant) -> VerifiedScopedGrant {
     let signature =

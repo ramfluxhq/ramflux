@@ -73,6 +73,122 @@ pub enum RenewalRefusal {
     Storage,
 }
 
+impl RenewalRefusal {
+    /// Number of variants; `ordinal` is an exhaustive match so a new variant fails to compile
+    /// until it is given an ordinal, a wire code, an HTTP status and a retry class.
+    pub const COUNT: usize = 21;
+    /// Every variant, in `ordinal` order.
+    pub const ALL: [Self; Self::COUNT] = [
+        Self::Replay,
+        Self::Expired,
+        Self::ChallengeUnknown,
+        Self::ChallengeConsumed,
+        Self::ChallengeMismatch,
+        Self::ChallengeExpired,
+        Self::GrantNotActive,
+        Self::PayloadGenerationMismatch,
+        Self::AuthorityGenerationMismatch,
+        Self::TargetInvalid,
+        Self::RightsInsufficient,
+        Self::HomeMismatch,
+        Self::HomeTrustUnavailable,
+        Self::CapabilityUnavailable,
+        Self::CapabilityInvalid,
+        Self::SourceUnknown,
+        Self::ReplayProtectionCapacity,
+        Self::ClockUncertain,
+        Self::Busy,
+        Self::Invalid,
+        Self::Storage,
+    ];
+    #[must_use]
+    pub const fn ordinal(self) -> usize {
+        match self {
+            Self::Replay => 0,
+            Self::Expired => 1,
+            Self::ChallengeUnknown => 2,
+            Self::ChallengeConsumed => 3,
+            Self::ChallengeMismatch => 4,
+            Self::ChallengeExpired => 5,
+            Self::GrantNotActive => 6,
+            Self::PayloadGenerationMismatch => 7,
+            Self::AuthorityGenerationMismatch => 8,
+            Self::TargetInvalid => 9,
+            Self::RightsInsufficient => 10,
+            Self::HomeMismatch => 11,
+            Self::HomeTrustUnavailable => 12,
+            Self::CapabilityUnavailable => 13,
+            Self::CapabilityInvalid => 14,
+            Self::SourceUnknown => 15,
+            Self::ReplayProtectionCapacity => 16,
+            Self::ClockUncertain => 17,
+            Self::Busy => 18,
+            Self::Invalid => 19,
+            Self::Storage => 20,
+        }
+    }
+    /// Stable code every hop (relay, source router, federation, gateway) carries unchanged.
+    #[must_use]
+    pub const fn wire_code(self) -> &'static str {
+        match self {
+            Self::Replay => "replay",
+            Self::Expired => "expired",
+            Self::ChallengeUnknown => "challenge_unknown",
+            Self::ChallengeConsumed => "challenge_consumed",
+            Self::ChallengeMismatch => "challenge_mismatch",
+            Self::ChallengeExpired => "challenge_expired",
+            Self::GrantNotActive => "grant_not_active",
+            Self::PayloadGenerationMismatch => "payload_generation_mismatch",
+            Self::AuthorityGenerationMismatch => "authority_generation_mismatch",
+            Self::TargetInvalid => "target_invalid",
+            Self::RightsInsufficient => "rights_insufficient",
+            Self::HomeMismatch => "home_mismatch",
+            Self::HomeTrustUnavailable => "home_trust_unavailable",
+            Self::CapabilityUnavailable => "capability_unavailable",
+            Self::CapabilityInvalid => "capability_invalid",
+            Self::SourceUnknown => "source_unknown",
+            Self::ReplayProtectionCapacity => "replay_protection_capacity",
+            Self::ClockUncertain => "clock_uncertain",
+            Self::Busy => "busy",
+            Self::Invalid => "invalid",
+            Self::Storage => "storage",
+        }
+    }
+    /// HTTP status each internal hop returns for this refusal.
+    #[must_use]
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::Replay
+            | Self::ChallengeConsumed
+            | Self::PayloadGenerationMismatch
+            | Self::AuthorityGenerationMismatch => 409,
+            Self::Expired | Self::ChallengeExpired => 410,
+            Self::ChallengeUnknown | Self::SourceUnknown => 404,
+            Self::ChallengeMismatch => 422,
+            Self::GrantNotActive | Self::RightsInsufficient | Self::HomeMismatch => 403,
+            Self::TargetInvalid | Self::CapabilityInvalid | Self::Invalid => 400,
+            Self::ReplayProtectionCapacity => 429,
+            Self::HomeTrustUnavailable
+            | Self::CapabilityUnavailable
+            | Self::ClockUncertain
+            | Self::Busy => 503,
+            Self::Storage => 500,
+        }
+    }
+    /// Whether the caller may retry the same request later. `Storage` is fail-closed.
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::HomeTrustUnavailable
+                | Self::CapabilityUnavailable
+                | Self::ReplayProtectionCapacity
+                | Self::ClockUncertain
+                | Self::Busy
+        )
+    }
+}
+
 impl From<AttachmentLedgerError> for RenewalRefusal {
     fn from(error: AttachmentLedgerError) -> Self {
         match error {
@@ -153,7 +269,10 @@ pub struct RenewalAdmission<'a> {
     pub home_epoch: u64,
     pub payload_generation: u64,
     pub authority_generation: u64,
+    pub w_issued_at: u64,
     pub w_expires_at: u64,
+    /// `checked_at` of the verdict the caller used; revalidated at admission time.
+    pub verdict_checked_at: u64,
     pub proof: &'a AttachmentReplayProof,
 }
 
@@ -245,6 +364,20 @@ impl ScopedGrantRegistry {
         now: u64,
     ) -> Result<RenewalChallenge, RenewalRefusal> {
         let challenge = ramflux_crypto::random_32().map_err(|_| RenewalRefusal::Storage)?;
+        self.mint_with(policy, request, challenge, now, Caps::default())
+    }
+
+    /// Test-support mint with a caller-chosen challenge value.
+    /// # Errors
+    /// As [`Self::mint_renewal_challenge`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mint_renewal_challenge_with(
+        &self,
+        policy: &RenewalPolicy,
+        request: &ChallengeMint<'_>,
+        challenge: [u8; 32],
+        now: u64,
+    ) -> Result<RenewalChallenge, RenewalRefusal> {
         self.mint_with(policy, request, challenge, now, Caps::default())
     }
 
@@ -394,13 +527,18 @@ impl ScopedGrantRegistry {
     pub fn admit_renewal_after_authentication(
         &self,
         admission: &RenewalAdmission<'_>,
-        now: u64,
+        clock: &dyn Fn() -> u64,
     ) -> Result<GrantPublicationLease, RenewalRefusal> {
         let g = admission.grant.grant();
+        // Replay precedence: an already consumed authenticated request is Replay before any
+        // lease-capacity or current-state refusal. The in-transaction check stays atomic.
+        if self.nonce_consumed_read(admission.requester, &admission.proof.nonce)? {
+            return Err(RenewalRefusal::Replay);
+        }
         if admission.requester != &g.grantee {
             return Err(RenewalRefusal::ChallengeMismatch);
         }
-        self.lease_with_admission(admission.grant, RENEW_RIGHT, now, lease_error, |tx| {
+        self.lease_with_admission(admission.grant, RENEW_RIGHT, clock(), lease_error, |tx| {
             if replay::nonce_consumed(
                 tx,
                 &self.authority.source,
@@ -409,7 +547,9 @@ impl ScopedGrantRegistry {
             )? {
                 return Err(RenewalRefusal::Replay);
             }
-            let effective = replay::fence_clock(tx, now)?;
+            // The clock is re-read inside the transaction: nothing validated earlier is
+            // trusted past this instant.
+            let effective = replay::fence_clock(tx, clock())?;
             let row: RegisteredAttachmentGrant = {
                 let table = tx.open_table(GRANTS).map_err(store)?;
                 let value = table
@@ -486,6 +626,19 @@ impl ScopedGrantRegistry {
         }
         if effective >= row.expires_at {
             return Err(RenewalRefusal::ChallengeExpired);
+        }
+        // W, Prenew and the verdict are revalidated against the admission-time clock.
+        if effective >= admission.w_expires_at
+            || admission.w_issued_at > effective.saturating_add(5)
+            || effective >= admission.proof.expires_at
+            || admission.proof.issued_at > effective.saturating_add(5)
+        {
+            return Err(RenewalRefusal::Expired);
+        }
+        if effective.saturating_sub(admission.verdict_checked_at) > VERDICT_MAX_AGE
+            || admission.verdict_checked_at > effective.saturating_add(5)
+        {
+            return Err(RenewalRefusal::HomeTrustUnavailable);
         }
         row.consumed = true;
         table.insert(admission.challenge.as_slice(), encode(&row)?.as_slice()).map_err(store)?;

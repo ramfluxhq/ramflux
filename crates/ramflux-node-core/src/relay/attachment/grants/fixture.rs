@@ -5,7 +5,7 @@
 use super::{
     AttachmentAuthority, AttachmentLedgerError, AttachmentOwner, RetirementOutcome,
     ScopedGrantRegistry, hex,
-    test_support::{auth, auth_for_device, fixtures, owner_seed, signed},
+    test_support::{auth_for_device_at, fixtures_case, owner_seed, signed},
 };
 use crate::{ObjectRelayCapability, RelayRedbStore};
 use ed25519_dalek::{Signer, SigningKey};
@@ -19,7 +19,22 @@ pub struct RetirementFixture {
     pub native: VerifiedContentManifest,
     pub grant: VerifiedScopedGrant,
     pub now: u64,
+    pub source: String,
+    pub generation: u64,
     signer: SigningKey,
+}
+/// Which frozen case and source authority a fixture registers under.
+#[derive(Debug, Clone)]
+pub struct FixtureSpec {
+    pub case: usize,
+    pub source: String,
+    pub generation: u64,
+    pub signer_seed: [u8; 32],
+}
+impl Default for FixtureSpec {
+    fn default() -> Self {
+        Self { case: 0, source: "node-a".into(), generation: 4, signer_seed: [77; 32] }
+    }
 }
 impl RetirementFixture {
     /// # Panics
@@ -32,7 +47,13 @@ impl RetirementFixture {
     /// Panics on invalid fixture setup. The supplied clock keeps replay startup deterministic.
     #[must_use]
     pub fn new_at(path: &std::path::Path, now: u64) -> Self {
-        let (native, mut grant) = fixtures();
+        Self::new_with(path, now, &FixtureSpec::default())
+    }
+    /// # Panics
+    /// Panics on invalid fixture setup.
+    #[must_use]
+    pub fn new_with(path: &std::path::Path, now: u64, spec: &FixtureSpec) -> Self {
+        let (native, mut grant) = fixtures_case(spec.case);
         if now != 1_700_000_001 {
             let mut current = grant.grant().clone();
             current.issued_at = now - 1;
@@ -58,18 +79,33 @@ impl RetirementFixture {
             .unwrap();
         ledger.bind(&owner, &upload, &native, now - 1).unwrap();
         ledger.commit(&owner, &upload, 1, now - 1).unwrap();
-        let signer = SigningKey::from_bytes(&[77; 32]);
+        let signer = SigningKey::from_bytes(&spec.signer_seed);
         let registry = ledger
             .scoped_grants(AttachmentAuthority {
-                source: "node-a".into(),
-                generation: 4,
+                source: spec.source.clone(),
+                generation: spec.generation,
                 signing_public_key: signer.verifying_key().to_bytes(),
             })
             .unwrap();
         registry
-            .register(&upload, &native, &grant, &auth(&native, &grant, now).context(), &signer)
+            .register(
+                &upload,
+                &native,
+                &grant,
+                &aud(&native, &grant, now, &spec.source).context(),
+                &signer,
+            )
             .unwrap();
-        Self { store, registry, native, grant, now, signer }
+        Self {
+            store,
+            registry,
+            native,
+            grant,
+            now,
+            source: spec.source.clone(),
+            generation: spec.generation,
+            signer,
+        }
     }
     /// # Panics
     /// Panics if valid fixture signing fails.
@@ -81,8 +117,8 @@ impl RetirementFixture {
             grant_id: g.grant_id,
             grant_hash: g.hash().unwrap(),
             grant_epoch: g.epoch,
-            source_authority: "node-a".into(),
-            authority_generation: 4,
+            source_authority: self.source.clone(),
+            authority_generation: self.generation,
             operation_id: [99; 32],
             issued_at: self.now,
         }
@@ -149,13 +185,14 @@ impl RetirementFixture {
             &key.verifying_key().to_bytes(),
         )
         .unwrap();
-        let proof = auth_for_device(
+        let proof = auth_for_device_at(
             &self.native,
             self.now,
             ObjectRelayCapability::Tombstone,
             hex(blake3::hash(&r.signing_bytes().unwrap()).as_bytes()),
             owner,
             seed,
+            &self.source,
         );
         self.registry.retire(&signed, &proof.context())
     }
@@ -171,7 +208,7 @@ impl RetirementFixture {
                 &[21; 32],
                 &self.native,
                 &g,
-                &auth(&self.native, &g, self.now).context(),
+                &aud(&self.native, &g, self.now, &self.source).context(),
                 &self.signer,
             )
             .unwrap();
@@ -193,7 +230,7 @@ impl RetirementFixture {
                 &[21; 32],
                 &self.native,
                 &g,
-                &auth(&self.native, &g, self.now).context(),
+                &aud(&self.native, &g, self.now, &self.source).context(),
                 &self.signer,
             )
             .unwrap();
@@ -204,4 +241,21 @@ impl RetirementFixture {
     pub fn source_signer(&self) -> SigningKey {
         self.signer.clone()
     }
+}
+
+fn aud(
+    native: &VerifiedContentManifest,
+    grant: &VerifiedScopedGrant,
+    now: u64,
+    source: &str,
+) -> super::test_support::Auth {
+    auth_for_device_at(
+        native,
+        now,
+        ObjectRelayCapability::Put,
+        hex(&grant.grant().hash().unwrap()),
+        &native.manifest().owner,
+        owner_seed(),
+        source,
+    )
 }
