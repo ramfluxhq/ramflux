@@ -3,6 +3,9 @@
 
 //! Dormant receive-ledger schema and transaction authority; activation is a separate step.
 pub(crate) mod schema;
+pub(crate) mod stage;
+#[cfg(test)]
+mod stage_tests;
 #[cfg(test)]
 mod tests;
 
@@ -21,6 +24,8 @@ pub struct ReceiveExpectation<'a> {
 /// Unforgeable authority scoped to an account's immediate writer transaction.
 pub struct ReceiveTransaction<'a> {
     db: &'a AccountDb,
+    target: &'a str,
+    incarnation: &'a str,
 }
 
 impl ReceiveTransaction<'_> {
@@ -66,7 +71,11 @@ impl AccountDb {
             if incarnation != expected.incarnation || cursor != expected.cursor {
                 return Err(StorageError::AuthorizationRejected);
             }
-            let authority = ReceiveTransaction { db: self };
+            let authority = ReceiveTransaction {
+                db: self,
+                target: expected.target,
+                incarnation: expected.incarnation,
+            };
             let value = write(&authority)?;
             authority.require_writer()?;
             if self.privacy_erasure_generation()? != expected.erasure_generation {

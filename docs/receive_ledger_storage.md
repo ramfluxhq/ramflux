@@ -46,3 +46,44 @@ Dependency gate: S6a P1 `194259e3`, P2 `a400593f`, P3 `84d9ccfd`, P13
 `7838348a` are ancestors of the base. P14's final patch `9616732f` is identical
 by stable patch-id to merged `1567b84a`; the preceding gateway adapters and
 compatibility fixes are also in the base. P16 is not required by this step.
+
+## Dormant W0 admission
+
+`ReceiveTransaction::stage` accepts caller-authenticated normalized entry bytes,
+checks the entry's outer sequence/target and envelope target against the transaction
+identity, and preserves the supplied bytes exactly. The entry cap is 1 MiB; router
+P12 independently enforces complete downstream frame sizing. The opaque admission
+key is required. The actor must commit W0 before invoking any W1 processing.
+No runtime path invokes this API yet.
+
+Each receipt reserves one potential terminal intent. Quota admission counts the
+union of receipt/intent keys across every incarnation for the target (1,024),
+plus staged work count (1,024) and serialized bytes (64 MiB). Duplicate work uses
+no second slot and preserves the first bytes, key, deadline and first-seen time.
+Capacity refusal writes nothing and grants no new processing authority; existing
+local recovery work remains available. Sequence keys are point operations, including
+u64::MAX; range reconciliation and actor scheduling belong to later steps.
+
+A mismatch preserves original work and returns Conflict, never permission to process
+the replacement or retire the connection. Metadata-only checkpoint keys under
+`gateway_receive_conflict:<quoted-target>:` suppress repeated diagnostics for the
+64 most recent conflicting keys. They contain only target/incarnation/sequence and
+a fixed enum, never content, message identity or hashes. Callers emit diagnostics
+only when diagnostic_created is true. Ordinary entry normalization remains the
+caller's authenticated protocol boundary; storage does not reserialize input.
+
+Erased receipts refuse restaging. P01's transaction checks private-erasure generation
+before admission and again before commit. P03 owns wire/logical footprint registration,
+replay aliases, erasure transitions and backup/import sanitization, including clearing
+receive diagnostic checkpoints. Until those owners and the remaining ledger stages
+land, the schema and admission remain dormant. S6a P2 a400593f and P12 a353d30d
+are ancestors of the fetched main c7bc48bd; P02 is stacked on P01 f21690fe.
+
+Admission uses a nested savepoint under its scoped outer writer. A failed work
+insert rolls back the receipt reservation even when the caller handles the error;
+only the outer receive transaction commits W0 durably. Exact-error tests exercise
+that SQLite failure and pre-/post-write private-erasure generation refusal.
+
+The runtime installer excludes all five ledger tables from generic rowid-based
+outbox triggers and removes any earlier installations on reopen. Their composite
+keys and transition-specific publication remain owned by the ledger W paths.
