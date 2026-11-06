@@ -92,6 +92,23 @@ impl Drop for Scope {
         });
     }
 }
+fn assert_wipes(expected: &[&'static str], run: impl FnOnce() -> Result) -> Result {
+    OBS.with(|obs| {
+        assert!(obs.borrow().is_none());
+        obs.replace(Some(Observation {
+            expected: Vec::new(),
+            seen: BTreeSet::new(),
+            wipes: BTreeMap::new(),
+        }));
+    });
+    let scope = Scope;
+    run()?;
+    let state = OBS.with(RefCell::take).ok_or("wipe observations")?;
+    assert!(state.seen.is_empty(), "failed bootstrap reached successful DH handoff");
+    assert_eq!(state.wipes, expected.iter().map(|slot| (*slot, 1)).collect());
+    drop(scope);
+    Ok(())
+}
 fn parts(
     vector: &Value,
 ) -> Result<(p::PrekeyLeaseResult, p::BootstrapTranscript, Zeroizing<[u8; 32]>)> {
@@ -318,10 +335,13 @@ fn dm_fs_v3_initiator_failure_and_limits() -> Result {
     }
     let mut rng = FixtureRng::new(v)?;
     rng.seeds[1] = rng.seeds[0];
-    assert!(matches!(
-        native_initiator(input(&lease, &t, &key, &dh1), &mut rng),
-        Err(NativeBootstrapError::RepeatedKey)
-    ));
+    assert_wipes(&["e_seed", "r0_seed"], || {
+        assert!(matches!(
+            native_initiator(input(&lease, &t, &key, &dh1), &mut rng),
+            Err(NativeBootstrapError::RepeatedKey)
+        ));
+        Ok(())
+    })?;
     let mut bad = t.clone();
     bad.header.routed_ad = vec![0; 4097];
     let mut rng = FixtureRng::new(v)?;
@@ -384,13 +404,23 @@ fn signed_noncontributory_peer(vector: &Value, peer: [u8; 32], which: &str) -> R
     transcript.header.opk_key = lease.opk.as_ref().map(|opk| opk.opk_key);
     let key = node.public_key();
     let mut rng = FixtureRng::new(vector)?;
-    assert!(
-        matches!(
-            native_initiator(input(&lease, &transcript, &key, &dh1), &mut rng),
-            Err(NativeBootstrapError::NonContributory)
-        ),
-        "signed non-contributory {which}"
-    );
+    let mut expected = vec!["e_seed", "r0_seed", "dh2"];
+    if which != "agreement" {
+        expected.push("dh3");
+    }
+    if which == "opk" {
+        expected.push("dh4");
+    }
+    assert_wipes(&expected, || {
+        assert!(
+            matches!(
+                native_initiator(input(&lease, &transcript, &key, &dh1), &mut rng),
+                Err(NativeBootstrapError::NonContributory)
+            ),
+            "signed non-contributory {which}"
+        );
+        Ok(())
+    })?;
     Ok(())
 }
 #[test]
@@ -402,6 +432,210 @@ fn dm_fs_v3_initiator_signed_zero_peers_rejected() -> Result {
                 signed_noncontributory_peer(vector, fixed(&fixture["peer_public"])?, which)?;
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn dm_fs_v3_initiator_transcript_failure_erases_seeds() -> Result {
+    let c = crypto()?;
+    for v in c["bootstrap"].as_array().ok_or("bootstrap")? {
+        let (lease, mut t, dh1) = parts(v)?;
+        t.header.operation_id[0] ^= 1;
+        let key = node_key();
+        let mut rng = FixtureRng::new(v)?;
+        assert_wipes(&["e_seed", "r0_seed"], || {
+            assert!(matches!(
+                native_initiator(input(&lease, &t, &key, &dh1), &mut rng),
+                Err(NativeBootstrapError::Proof(NativePrekeyError::Binding))
+            ));
+            Ok(())
+        })?;
+        assert_eq!(rng.cursor, 2);
+    }
+    Ok(())
+}
+#[derive(Clone, Copy)]
+enum DeadlineBound {
+    IssuedAt,
+    LeasedAt,
+    SpkExpiry,
+    EnvelopeTime,
+    EnvelopeTtl,
+    TtlPolicy,
+    FutureLease,
+    SpkValidity,
+}
+fn reseal_deadline(lease: &mut p::PrekeyLeaseResult, t: &mut p::BootstrapTranscript) -> Result {
+    let branch = crate::DeviceBranch {
+        principal_id: "fixture-target".into(),
+        device_id: "fixture-device".into(),
+        device_epoch: 1,
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&[14; 32]),
+    };
+    let node = crate::DeviceBranch {
+        principal_id: "fixture-node".into(),
+        device_id: "fixture-device".into(),
+        device_epoch: 1,
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&[60; 32]),
+    };
+    lease.base = sign_base(lease.base.clone(), &branch)?;
+    *lease = sign_lease_result(lease.clone(), &node)?;
+    t.header.base = lease.base.clone();
+    t.header.base_hash = base_hash(&lease.base)?;
+    t.header.bundle_hash = bundle_hash(lease)?;
+    t.header.issued_at = lease.issued_at;
+    t.header.leased_at = lease.leased_at;
+    t.header.deadline = lease.deadline;
+    Ok(())
+}
+// Each baseline passes with every competing bound slack; change one independent
+// input, then update only its dependent signed/header/hash representations.
+fn deadline_negative(mode: &str, bound: DeadlineBound, error: p::DeadlineError) -> Result {
+    let c = crypto()?;
+    let v = c["bootstrap"]
+        .as_array()
+        .ok_or("bootstrap")?
+        .iter()
+        .find(|v| v["mode"] == mode)
+        .ok_or("mode")?;
+    let (mut lease, mut t, dh1) = parts(v)?;
+    let horizon = u64::try_from(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS)?;
+    let start = 2_000_000;
+    lease.base.issued_at = start;
+    lease.base.expires_at = start + 2 * horizon;
+    lease.issued_at = start + 10;
+    lease.leased_at = start + 10;
+    lease.deadline = start + horizon + 1;
+    t.envelope_created_at = start + 11;
+    t.envelope_ttl = horizon;
+    let now = match bound {
+        DeadlineBound::IssuedAt => {
+            lease.issued_at = start + 2;
+            start + 10
+        }
+        DeadlineBound::LeasedAt => {
+            lease.leased_at = start + 2;
+            start + 10
+        }
+        DeadlineBound::SpkExpiry => {
+            lease.base.expires_at = start + horizon + 2;
+            lease.issued_at = start + horizon + 10;
+            lease.leased_at = lease.issued_at;
+            lease.deadline = start + 2 * horizon + 1;
+            t.envelope_created_at = lease.issued_at + 10;
+            lease.issued_at
+        }
+        DeadlineBound::EnvelopeTime => {
+            lease.deadline = start + horizon / 2 + 1;
+            t.envelope_ttl = horizon / 2;
+            start + 10
+        }
+        DeadlineBound::EnvelopeTtl => {
+            lease.deadline = start + horizon / 2 + 1;
+            t.envelope_created_at = start;
+            t.envelope_ttl = horizon / 2 + 10;
+            start + 10
+        }
+        DeadlineBound::TtlPolicy | DeadlineBound::FutureLease | DeadlineBound::SpkValidity => {
+            start + 10
+        }
+    };
+    reseal_deadline(&mut lease, &mut t)?;
+    let key = node_key();
+    let mut baseline = input(&lease, &t, &key, &dh1);
+    baseline.now = now;
+    assert!(
+        native_initiator(baseline, &mut FixtureRng::new(v)?).is_ok(),
+        "deadline baseline must pass"
+    );
+    match bound {
+        DeadlineBound::IssuedAt => lease.issued_at = start,
+        DeadlineBound::LeasedAt => lease.leased_at = start,
+        DeadlineBound::SpkExpiry => lease.base.expires_at = start + horizon,
+        DeadlineBound::EnvelopeTime => t.envelope_created_at = start,
+        DeadlineBound::EnvelopeTtl => t.envelope_ttl = horizon / 2,
+        DeadlineBound::TtlPolicy => t.envelope_ttl = horizon + 1,
+        DeadlineBound::FutureLease => {
+            lease.leased_at = now + ramflux_protocol::custody::CLOCK_SKEW_SECONDS + 1;
+        }
+        DeadlineBound::SpkValidity => lease.base.issued_at = start - 1,
+    }
+    reseal_deadline(&mut lease, &mut t)?;
+    let mut negative = input(&lease, &t, &key, &dh1);
+    negative.now = now;
+    let mut rng = FixtureRng::new(v)?;
+    let result = native_initiator(negative, &mut rng);
+    assert!(result.is_err(), "deadline bound must reject");
+    if let Err(actual) = result {
+        assert_eq!(actual, NativeBootstrapError::Deadline(error));
+    }
+    assert_eq!(rng.cursor, 0, "deadline rejects before entropy");
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_spk_only_start() -> Result {
+    deadline_negative("spk_only", DeadlineBound::IssuedAt, p::DeadlineError::ExceedsBound)
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_opk_start() -> Result {
+    deadline_negative("opk", DeadlineBound::LeasedAt, p::DeadlineError::ExceedsBound)
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_spk_expiry() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::SpkExpiry, p::DeadlineError::ExceedsBound)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_envelope_time() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::EnvelopeTime, p::DeadlineError::ExceedsBound)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_envelope_ttl() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::EnvelopeTtl, p::DeadlineError::ExceedsBound)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_ttl_policy() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::TtlPolicy, p::DeadlineError::Policy)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_future_lease() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::FutureLease, p::DeadlineError::FutureLease)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_spk_validity() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::SpkValidity, p::DeadlineError::Policy)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_deadline_accepts_d_minus_one() -> Result {
+    let c = crypto()?;
+    for v in c["bootstrap"].as_array().ok_or("bootstrap")? {
+        let (lease, t, dh1) = parts(v)?;
+        let key = node_key();
+        let mut accepted = input(&lease, &t, &key, &dh1);
+        accepted.now = t.header.deadline - 1;
+        let output = native_initiator(accepted, &mut FixtureRng::new(v)?)?;
+        assert!(
+            output.initial_sk.as_ref() == fixed::<32>(&v["kdf"]["output"])?,
+            "D-1 golden mismatch"
+        );
     }
     Ok(())
 }
