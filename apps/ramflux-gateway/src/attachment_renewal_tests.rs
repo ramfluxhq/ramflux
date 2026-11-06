@@ -8,7 +8,9 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn bytes(v: &serde_json::Value) -> Result<Vec<u8>> {
     let s = v.as_str().ok_or("hex string")?;
     s.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| Ok(u8::from_str_radix(std::str::from_utf8(p)?, 16)?))
         .collect()
 }
@@ -83,8 +85,8 @@ async fn large_home_forwarding_preserves_authenticated_foreign_requester() -> Re
     assert_eq!(forwarded.attestation, w.attestation.canonical_bytes()?);
     assert_eq!(forwarded.proof, pop.canonical_bytes()?);
     assert_eq!(forward_bytes(&q, &config, &attempt, &w, &pop, &signature)?, forwarded);
-    assert_forwarding_refusals(&q,&config,&attempt,&w,&pop,&signature,r)?;
-    mesh_round_trip(&forwarded,&bytes(&r["token"]["bytes_hex"])?).await?;
+    assert_forwarding_refusals(&q, &config, &attempt, &w, (&pop, &signature), r)?;
+    mesh_round_trip(&forwarded, &bytes(&r["token"]["bytes_hex"])?).await?;
     Ok(())
 }
 #[test]
@@ -155,9 +157,9 @@ fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_reques
                 stale.source_identity =
                     ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
                         &root, "other",
-                    )?
+                    )?;
             }
-        };
+        }
         assert_eq!(check_current(&stale, &key, 100), Err(FormatError("session authority")));
     }
     let mut revoked = key.clone();
@@ -183,79 +185,107 @@ fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_reques
     Ok(())
 }
 
-async fn mesh_round_trip(forwarded:&ForwardedRenewal,token:&[u8])->Result {
-    use crate::clients::tests::{temp_cert_root,issue_test_ca_and_service_cert};
-    let root=temp_cert_root("attachment-renewal")?;
-    let home=issue_test_ca_and_service_cert(&root,"mesh","ramflux-gateway")?;
-    let source=issue_test_ca_and_service_cert(&root,"mesh","ramflux-source")?;
-    let client_tls=home.tls.clone();let trusted_source=source.ca_pem.clone();
-    let roots=std::sync::Arc::new(move ||Ok(vec![home.ca_pem.clone()]));
-    let server=ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider("127.0.0.1:0",&source.tls,roots)?;
-    let endpoint=server.local_addr()?.to_string();
-    let expected=forwarded.clone();let response=token.to_vec();
-    let task=tokio::spawn(async move {
-        let connection=server.accept_connection().await?;
-        let accepted=ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(&connection).await?;
-        let ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted)=accepted else {return Err(anyhow::anyhow!("native renewal transport framing"));};
-        anyhow::ensure!(accepted.request.method=="POST" && accepted.request.path=="/s9/attachments/renew","renewal path");
-        let actual:ForwardedRenewal=serde_json::from_value(accepted.request.body.clone())?;
-        anyhow::ensure!(actual==expected,"forwarded native bytes changed");
-        accepted.write_json_response(200,&response).await?;
+async fn mesh_round_trip(forwarded: &ForwardedRenewal, token: &[u8]) -> Result {
+    use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
+    let root = temp_cert_root("attachment-renewal")?;
+    let home = issue_test_ca_and_service_cert(&root, "mesh", "ramflux-gateway")?;
+    let source = issue_test_ca_and_service_cert(&root, "mesh", "ramflux-source")?;
+    let client_tls = home.tls.clone();
+    let trusted_source = source.ca_pem.clone();
+    let roots = std::sync::Arc::new(move || Ok(vec![home.ca_pem.clone()]));
+    let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+        "127.0.0.1:0",
+        &source.tls,
+        roots,
+    )?;
+    let endpoint = server.local_addr()?.to_string();
+    let expected = forwarded.clone();
+    let response = token.to_vec();
+    let task = tokio::spawn(async move {
+        let connection = server.accept_connection().await?;
+        let accepted =
+            ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(
+                &connection,
+            )
+            .await?;
+        let ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) = accepted else {
+            return Err(anyhow::anyhow!("native renewal transport framing"));
+        };
+        anyhow::ensure!(
+            accepted.request.method == "POST" && accepted.request.path == "/s9/attachments/renew",
+            "renewal path"
+        );
+        let actual: ForwardedRenewal = serde_json::from_value(accepted.request.body.clone())?;
+        anyhow::ensure!(actual == expected, "forwarded native bytes changed");
+        accepted.write_json_response(200, &response).await?;
         // Keep the authenticated connection owner alive until the client has read.
-        Ok::<_,anyhow::Error>((server,connection))
+        Ok::<_, anyhow::Error>((server, connection))
     });
-    let received=post_forwarded(&endpoint,&client_tls,"ramflux-source",&[trusted_source],forwarded).await?;
-    assert_eq!(received,token);
-    let owners=task.await??;drop(owners);std::fs::remove_dir_all(root)?;Ok(())
+    let received =
+        post_forwarded(&endpoint, &client_tls, "ramflux-source", &[trusted_source], forwarded)
+            .await?;
+    assert_eq!(received, token);
+    let owners = task.await??;
+    drop(owners);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
-fn assert_forwarding_refusals(q:&QualifiedOwner,config:&HomeRenewalConfig,attempt:&HomeRenewalAttempt<'_>,w:&SignedHomeForward,pop:&RequesterPop,signature:&[u8;64],r:&serde_json::Value)->Result {
-    let (renew,target)=attempt.request.target()?;
-    let forwarded=forward_bytes(q,config,attempt,w,pop,signature)?;
-    for rejected in r["rejected_target_operations_hex"].as_array().ok_or("targets")? {
-        let t = AttachmentOperation::decode(&bytes(rejected)?)?;
-        let changed = RenewalRequest::new(&t, &renew.audience, renew.operation_id)?;
-        let a = HomeRenewalAttempt { request: &changed, ..*attempt };
-        let expected = if t.audience == target.audience {
+fn assert_forwarding_refusals(
+    requester: &QualifiedOwner,
+    config: &HomeRenewalConfig,
+    attempt: &HomeRenewalAttempt<'_>,
+    forward: &SignedHomeForward,
+    signed_proof: (&RequesterPop, &[u8; 64]),
+    vectors: &serde_json::Value,
+) -> Result {
+    let (pop, signature) = signed_proof;
+    let (renew, target) = attempt.request.target()?;
+    let forwarded = forward_bytes(requester, config, attempt, forward, pop, signature)?;
+    for rejected in vectors["rejected_target_operations_hex"].as_array().ok_or("targets")? {
+        let target_operation = AttachmentOperation::decode(&bytes(rejected)?)?;
+        let changed = RenewalRequest::new(&target_operation, &renew.audience, renew.operation_id)?;
+        let changed_attempt = HomeRenewalAttempt { request: &changed, ..*attempt };
+        let expected = if target_operation.audience == target.audience {
             "forward request binding"
         } else {
             "renewal audience"
         };
         assert_eq!(
-            forward_bytes(&q, &config, &a, &w, &pop, &signature),
+            forward_bytes(requester, config, &changed_attempt, forward, pop, signature),
             Err(FormatError(expected))
         );
     }
     for field in 0..5 {
-        let mut other = (*q).clone();
+        let mut other = (*requester).clone();
         match field {
             0 => other.account_anchor.push('x'),
             1 => other.device_id.push('x'),
             2 => other.device_epoch += 1,
             3 => other.signing_public_key[0] ^= 1,
             _ => other.home_node_id.push('x'),
-        };
+        }
         assert_eq!(
-            forward_bytes(&other, &config, &attempt, &w, &pop, &signature),
+            forward_bytes(&other, config, attempt, forward, pop, signature),
             Err(FormatError("renewal requester"))
         );
     }
-    let mut bad = (*w).clone();
+    let mut bad = (*forward).clone();
     bad.attestation.home_issuer.push('x');
     assert_eq!(
-        forward_bytes(&q, &config, &attempt, &bad, &pop, &signature),
+        forward_bytes(requester, config, attempt, &bad, pop, signature),
         Err(FormatError("forward home binding"))
     );
     let mut bad_pop = (*pop).clone();
     bad_pop.operation_hash = target.hash()?;
     assert_eq!(
-        forward_bytes(&q, &config, &attempt, &w, &bad_pop, &signature),
+        forward_bytes(requester, config, attempt, forward, &bad_pop, signature),
         Err(FormatError("pop binding"))
     );
     let mut bad_signature = *signature;
     bad_signature[0] ^= 1;
     assert_eq!(
-        forward_bytes(&q, &config, &attempt, &w, &pop, &bad_signature),
+        forward_bytes(requester, config, attempt, forward, pop, &bad_signature),
         Err(FormatError("grant signature"))
     );
     // Real unrelated signed grants cannot replace the exact request-bound grant.
@@ -267,12 +297,12 @@ fn assert_forwarding_refusals(q:&QualifiedOwner,config:&HomeRenewalConfig,attemp
         let encoded =
             unrelated.signed_bytes(&owner.sign(&unrelated.signing_bytes()?).to_bytes())?;
         let unrelated = ScopedAttachmentGrant::decode_signed(&encoded)?;
-        let a = HomeRenewalAttempt { grant: &unrelated, ..*attempt };
+        let changed_attempt = HomeRenewalAttempt { grant: &unrelated, ..*attempt };
         assert_eq!(
-            forward_bytes(&q, &config, &a, &w, &pop, &signature),
+            forward_bytes(requester, config, &changed_attempt, forward, pop, signature),
             Err(FormatError("renewal grant binding"))
         );
     }
-    assert_eq!(forward_bytes(&q, &config, &attempt, &w, &pop, &signature)?, forwarded);
+    assert_eq!(forward_bytes(requester, config, attempt, forward, pop, signature)?, forwarded);
     Ok(())
 }

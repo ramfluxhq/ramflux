@@ -78,7 +78,9 @@ fn sign_with_branch(
         now,
     } = input;
     request.validate(grant, requester, trust.source, trust.relay, *now)?;
-    if request.target()?.0.authority_generation != trust.authority_generation { return Err(FormatError("renewal source generation")); }
+    if request.target()?.0.authority_generation != trust.authority_generation {
+        return Err(FormatError("renewal source generation"));
+    }
     w.validate(request, grant, requester, challenge, *now)?;
     if w.home_issuer != trust.home {
         return Err(FormatError("renewal home"));

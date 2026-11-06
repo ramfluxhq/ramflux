@@ -171,6 +171,10 @@ fn forward_bytes(
         grant: attempt.grant.signed_bytes()?,
     })
 }
+pub(crate) struct SignedRequesterProof<'a> {
+    pub(crate) proof: &'a RequesterPop,
+    pub(crate) signature: &'a [u8; 64],
+}
 /// Explicit source POST over authenticated mesh QUIC. Replies are opaque signed
 /// token bytes; source validation/issuance is P25. No redirect or local mint fallback.
 #[allow(dead_code)] // P24 prepares the complete dormant egress; P25 owns ingress.
@@ -180,8 +184,7 @@ pub(crate) async fn forward_current_session(
     config: &HomeRenewalConfig,
     attempt: &HomeRenewalAttempt<'_>,
     w: &SignedHomeForward,
-    pop: &RequesterPop,
-    signature: &[u8; 64],
+    proof: SignedRequesterProof<'_>,
 ) -> anyhow::Result<Vec<u8>> {
     let key: Option<ramflux_node_core::DeviceAuthKeyResponse> = crate::router_get_json_async(
         &context.router,
@@ -194,15 +197,36 @@ pub(crate) async fn forward_current_session(
         attempt.now,
     )?;
     let requester = session_requester(runtime, &context.node_id)?;
-    let bytes = forward_bytes(&requester, config, attempt, w, pop, signature)?;
+    let bytes = forward_bytes(&requester, config, attempt, w, proof.proof, proof.signature)?;
     let peer = context
         .peers
         .peer(&config.source_peer)
         .ok_or_else(|| anyhow::anyhow!("renewal source peer unavailable"))?;
-    post_forwarded(&peer.endpoint, context.peers.tls(), &peer.server_name, context.peers.peer_ca_pems(), &bytes).await
+    post_forwarded(
+        &peer.endpoint,
+        context.peers.tls(),
+        &peer.server_name,
+        context.peers.peer_ca_pems(),
+        &bytes,
+    )
+    .await
 }
-async fn post_forwarded(endpoint:&str,tls:&ramflux_transport::MeshTlsConfig,server_name:&str,roots:&[String],bytes:&ForwardedRenewal)->anyhow::Result<Vec<u8>> {
-    Ok(ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(endpoint,"/s9/attachments/renew",tls,server_name,roots,bytes).await?)
+async fn post_forwarded(
+    endpoint: &str,
+    tls: &ramflux_transport::MeshTlsConfig,
+    server_name: &str,
+    roots: &[String],
+    bytes: &ForwardedRenewal,
+) -> anyhow::Result<Vec<u8>> {
+    Ok(ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(
+        endpoint,
+        "/s9/attachments/renew",
+        tls,
+        server_name,
+        roots,
+        bytes,
+    )
+    .await?)
 }
 
 #[cfg(test)]
