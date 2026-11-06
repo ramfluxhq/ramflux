@@ -124,7 +124,7 @@ fn run(
 }
 fn refused(frame: CustodyServerFrame, expected: CustodyRefusal) {
     assert!(
-        matches!(frame,CustodyServerFrame::Refused{code,capacity:None,retry:None} if code==expected),
+        matches!(&frame,CustodyServerFrame::Refused{code,capacity:None,retry:None} if code==&expected),
         "wrong dormant admission result: {frame:?}"
     );
 }
