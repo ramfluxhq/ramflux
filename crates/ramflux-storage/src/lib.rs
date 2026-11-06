@@ -74,3 +74,5 @@ mod contact_request_tests;
 mod tests;
 
 mod schema_shared_group;
+
+pub use account_db::{NativeGrantAssociation, PendingAttachmentRetirement};

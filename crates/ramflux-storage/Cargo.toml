@@ -53,4 +53,5 @@ todo = "deny"
 dbg_macro = "deny"
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 rusqlite = { version = "0.37", default-features = false, features = ["trace", "hooks"] }
