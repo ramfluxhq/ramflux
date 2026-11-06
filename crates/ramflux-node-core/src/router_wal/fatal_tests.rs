@@ -224,46 +224,65 @@ fn uncertain_write_fail_stop() -> TestResult {
         let _ = store.record_submission_increment("fault", i64::MAX, Some(&entry(2)));
         park();
     }
-    for mode in [1, 2] {
-        for case in [
-            "wal_convert",
-            "wal_serialize",
-            "wal_frame_len",
-            "wal_panic",
-            "writer_channel_loss",
-            "index_lock",
-            "fsync_channel_loss",
-            "record_length",
-            "record_crc",
-            "record_payload",
-            "sync_all",
-            "roll_open",
-            "header_write",
-            "head_commit",
-            "directory_sync",
-            "index_update",
-            "writer_reply",
-            "fsync_enqueue",
-        ] {
-            if matches!(case, "fsync_enqueue" | "fsync_channel_loss") && mode == 1 {
-                continue;
-            }
-            let root = root(&format!("{mode}-{case}"));
-            wait_abort(command("uncertain_write_fail_stop", &root, case, mode).spawn()?)?;
-            let store = crate::router_store::incarnation::test_store(&root, mode, u64::MAX)?;
-            store.load_router()?;
-            assert!(
-                store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 1),
-                "pre-fence success lost: {case}"
-            );
-            let core = store.publication_core()?;
-            let id = store.inbox_status("fatal-target")?.0.expect("incarnation");
-            assert!(core.view("fatal-target", &id).1.is_empty(), "uncertain bytes were tombstoned");
-            drop(core);
-            drop(store);
-            fs::remove_dir_all(root)?;
+    // Each durability mode gets its own nextest deadline. Combining all 43
+    // child abort/reopen cycles can exhaust it on a contended filesystem even
+    // when every individual child finishes well within its watchdog.
+    wal_fail_stop_cases(1)
+}
+
+#[test]
+fn uncertain_write_fail_stop_async() -> TestResult {
+    wal_fail_stop_cases(2)
+}
+
+#[test]
+fn uncertain_write_fail_stop_redb() -> TestResult {
+    redb_fail_stop_cases()
+}
+
+fn wal_fail_stop_cases(mode: u8) -> TestResult {
+    for case in [
+        "wal_convert",
+        "wal_serialize",
+        "wal_frame_len",
+        "wal_panic",
+        "writer_channel_loss",
+        "index_lock",
+        "fsync_channel_loss",
+        "record_length",
+        "record_crc",
+        "record_payload",
+        "sync_all",
+        "roll_open",
+        "header_write",
+        "head_commit",
+        "directory_sync",
+        "index_update",
+        "writer_reply",
+        "fsync_enqueue",
+    ] {
+        if matches!(case, "fsync_enqueue" | "fsync_channel_loss") && mode == 1 {
+            continue;
         }
+        let root = root(&format!("{mode}-{case}"));
+        wait_abort(command("uncertain_write_fail_stop", &root, case, mode).spawn()?)?;
+        let store = crate::router_store::incarnation::test_store(&root, mode, u64::MAX)?;
+        store.load_router()?;
+        assert!(
+            store.load_delivery_state(0)?.0.pending_entries().any(|row| row.inbox_seq == 1),
+            "pre-fence success lost: {case}"
+        );
+        let core = store.publication_core()?;
+        let id = store.inbox_status("fatal-target")?.0.expect("incarnation");
+        assert!(core.view("fatal-target", &id).1.is_empty(), "uncertain bytes were tombstoned");
+        drop(core);
+        drop(store);
+        fs::remove_dir_all(root)?;
     }
+    Ok(())
+}
+
+fn redb_fail_stop_cases() -> TestResult {
     for case in [
         "redb_begin",
         "redb_apply",
