@@ -42,6 +42,8 @@ fn compact(
         .map_err(store)?
         .insert(deadline(expiry, key_bytes).as_slice(), ())
         .map_err(store)?;
+    // Permanent: written into the slot charged at admission, never pruned or refunded.
+    super::terminal::record(tx, &record.owner, &record.object_id, crate::now_unix_seconds())?;
     tx.open_table(RECORDS).map_err(store)?.remove(key_bytes).map_err(store)?;
     tx.open_table(OBJECTS).map_err(store)?.remove(object_key.as_slice()).map_err(store)?;
     tx.open_table(DEBTS).map_err(store)?.remove(key_bytes).map_err(store)?;
@@ -172,6 +174,7 @@ pub(super) fn prune(
     now: u64,
     limit: usize,
 ) -> Result<usize, AttachmentLedgerError> {
+    let before = super::terminal::snapshot(tx)?;
     let mut expiry = tx.open_table(EXPIRY).map_err(store)?;
     let mut upper = now.to_be_bytes().to_vec();
     upper.extend_from_slice(&[255; 512]);
@@ -222,6 +225,8 @@ pub(super) fn prune(
         total.fences = total.fences.checked_sub(1).ok_or(AttachmentLedgerError::State)?;
         totals.insert(owner.0.as_str(), encode(&total)?.as_slice()).map_err(store)?;
     }
+    drop((fences, objects, totals, expiry));
+    super::terminal::verify_after_prune(tx, before)?;
     Ok(keys.len())
 }
 

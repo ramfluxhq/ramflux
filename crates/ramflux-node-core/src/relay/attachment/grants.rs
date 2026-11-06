@@ -30,7 +30,8 @@ const GRANTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("native_attachment_scoped_grants_v1");
 const EXPIRY: TableDefinition<&[u8], ()> =
     TableDefinition::new("native_attachment_scoped_expiry_v1");
-const CONFIG: TableDefinition<&str, &[u8]> = TableDefinition::new("native_attachment_authority_v1");
+pub(super) const CONFIG: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("native_attachment_authority_v1");
 const REFERENCES: TableDefinition<&[u8], ()> =
     TableDefinition::new("native_attachment_scoped_references_v1");
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

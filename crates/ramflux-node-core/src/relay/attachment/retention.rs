@@ -14,6 +14,10 @@ pub struct AttachmentPolicy {
     pub pending_max_seconds: u64,
     pub max_records_per_owner: u64,
     pub max_identity_fences_per_owner: u64,
+    /// Admission budgets for permanent terminal evidence; lowering never evicts.
+    pub max_terminal_objects_per_owner: u64,
+    pub max_terminal_objects_global: u64,
+    pub max_terminal_owners: u64,
 }
 impl Default for AttachmentPolicy {
     fn default() -> Self {
@@ -25,6 +29,9 @@ impl Default for AttachmentPolicy {
             pending_max_seconds: 86_400,
             max_records_per_owner: 16384,
             max_identity_fences_per_owner: 65_536,
+            max_terminal_objects_per_owner: 1 << 18,
+            max_terminal_objects_global: 1 << 24,
+            max_terminal_owners: 65_536,
         }
     }
 }
@@ -35,6 +42,10 @@ impl AttachmentPolicy {
             || self.pending_max_seconds < self.pending_lease_seconds
             || self.max_records_per_owner == 0
             || self.max_identity_fences_per_owner == 0
+            || !(1..=super::terminal::HARD_SLOTS_PER_OWNER)
+                .contains(&self.max_terminal_objects_per_owner)
+            || !(1..=super::terminal::HARD_SLOTS_GLOBAL).contains(&self.max_terminal_objects_global)
+            || !(1..=super::terminal::HARD_OWNERS).contains(&self.max_terminal_owners)
         {
             return Err(AttachmentLedgerError::Invalid);
         }
@@ -230,6 +241,12 @@ impl AttachmentLedger {
             return Err(AttachmentLedgerError::Expired);
         }
         if record.state != AttachmentReservationState::Committed {
+            return Err(AttachmentLedgerError::State);
+        }
+        // Legacy-zero refusal: a payload without an authoritative generation is never served.
+        if record.pending_generation == 0
+            || record.committed_generation != Some(record.pending_generation)
+        {
             return Err(AttachmentLedgerError::State);
         }
         Ok(record)

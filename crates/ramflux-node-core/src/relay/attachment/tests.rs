@@ -2,18 +2,19 @@
 // Copyright (c) 2026 Span Brain
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 use super::*;
+
 use crate::RelayRedbStore;
 use ramflux_protocol::large_attachment::ContentManifest;
 use redb::ReadableTableMetadata;
 use std::{fs, path::PathBuf};
-fn root() -> PathBuf {
+pub(super) fn root() -> PathBuf {
     std::env::temp_dir().join(format!(
         "rf-native-ledger-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ))
 }
-fn fixture() -> ramflux_protocol::large_attachment::VerifiedContentManifest {
+pub(super) fn fixture() -> ramflux_protocol::large_attachment::VerifiedContentManifest {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../ramflux-protocol/tests/fixtures/large_attachment_v1.json"
     ))
@@ -97,8 +98,8 @@ fn large_account_quota_includes_concurrent_reservations() {
     );
     assert_eq!(occupied(&ledger, "owner-anchor"), 48);
     ledger.bind(&owner, &first.upload_id, &native, 100).unwrap();
-    ledger.commit(&owner, &first.upload_id, 101).unwrap();
-    ledger.commit(&owner, &first.upload_id, 102).unwrap();
+    ledger.commit(&owner, &first.upload_id, 1, 101).unwrap();
+    ledger.commit(&owner, &first.upload_id, 1, 102).unwrap();
     ledger.bind(&owner, &first.upload_id, &native, 103).unwrap();
     assert_eq!(
         (ledger.usage(&owner).unwrap().used, ledger.usage(&owner).unwrap().reserved),
@@ -142,7 +143,7 @@ fn large_account_quota_includes_concurrent_reservations() {
     let ledger = store.attachment_ledger(policy).unwrap();
     assert_eq!(occupied(&ledger, "owner-anchor"), 32);
     assert_eq!(ledger.usage(&owner).unwrap().used, 16);
-    assert!(ledger.commit(&owner, &[successful; 32], 105).is_err());
+    assert!(ledger.commit(&owner, &[successful; 32], 1, 105).is_err());
     drop(ledger);
     drop(store);
     fs::remove_dir_all(root).unwrap();
@@ -164,7 +165,10 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
     req.object_id = native.manifest().object_id;
     ledger.reserve(&owner, req, 100).unwrap();
     ledger.bind(&owner, &req.upload_id, &native, 100).unwrap();
-    assert_eq!(ledger.commit(&owner, &req.upload_id, 200).unwrap().expires_at, Some(200 + 604_800));
+    assert_eq!(
+        ledger.commit(&owner, &req.upload_id, 1, 200).unwrap().expires_at,
+        Some(200 + 604_800)
+    );
     assert_eq!(
         ledger.committed(&owner, &req.upload_id, 400).unwrap().expires_at,
         Some(200 + 604_800)
@@ -224,7 +228,7 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
     ledger.reserve(&owner, req, 100).unwrap();
     ledger.bind(&owner, &req.upload_id, &native, 100).unwrap();
     assert_eq!(
-        ledger.commit(&owner, &req.upload_id, 200).unwrap().expires_at,
+        ledger.commit(&owner, &req.upload_id, 1, 200).unwrap().expires_at,
         Some(200 + 14 * 86_400)
     );
     drop(ledger);
@@ -258,7 +262,7 @@ fn large_retention_defaults_and_operator_override_survive_restart() {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn memory_ledger(policy: AttachmentPolicy) -> AttachmentLedger {
+pub(super) fn memory_ledger(policy: AttachmentPolicy) -> AttachmentLedger {
     let db = redb::Database::builder()
         .create_with_backend(redb::backends::InMemoryBackend::new())
         .unwrap();
@@ -311,7 +315,8 @@ fn released_records_free_live_capacity_and_compact_expiring_identity_fences() {
     while ledger.usage(&owner).unwrap().fences != 0 {
         ledger.gc_due(until, 64).unwrap();
     }
-    ledger.reserve(&owner, first, until).unwrap();
+    // The identity fence is gone, but the terminal object id is never reusable.
+    assert!(matches!(ledger.reserve(&owner, first, until), Err(AttachmentLedgerError::State)));
     assert!(ledger.gc_due(until, 65).is_err());
     assert!(ledger.cleanup_page(&owner, None, 65).is_err());
 }
@@ -391,6 +396,10 @@ fn historical_released_records_compact_on_normal_schema_install() {
         let schema: TableDefinition<&str, u64> =
             TableDefinition::new("native_attachment_ledger_schema");
         tx.open_table(schema).unwrap().remove("compact_releases_v1").unwrap();
+        // A ledger that predates the terminal counters: install seeds them from the rows.
+        let mut config = tx.open_table(super::grants::CONFIG).unwrap();
+        config.remove("terminal_owners").unwrap();
+        config.remove("terminal_slots_global").unwrap();
     }
     tx.commit().unwrap();
     let tx = ledger.db.begin_write().unwrap();
@@ -440,7 +449,7 @@ fn distinct_identity_fences_and_cleanup_after_lowered_cap_do_not_hide_due_jobs()
     ));
     assert!(matches!(
         ledger.reserve(&owner, AttachmentReservationRequest { upload_id: [4; 32], ..first }, 101),
-        Err(AttachmentLedgerError::Conflict)
+        Err(AttachmentLedgerError::State)
     ));
     let debt = AttachmentReservationRequest { upload_id: [5; 32], object_id: [6; 32], ..first };
     ledger.reserve(&owner, debt, 406).unwrap();

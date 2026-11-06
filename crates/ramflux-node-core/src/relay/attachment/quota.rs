@@ -29,22 +29,10 @@ impl AttachmentLedger {
         let mut records = tx.open_table(RECORDS).map_err(store)?;
         if let Some(found) = records.get(record_key.as_slice()).map_err(store)? {
             let record: AttachmentReservation = decode(found.value())?;
-            if record.object_id != request.object_id
-                || record.plaintext_length != request.layout.plaintext_length
-                || record.network_chunk_bytes != request.layout.network_chunk_bytes
-            {
-                return Err(AttachmentLedgerError::Conflict);
-            }
-            match record.state {
-                AttachmentReservationState::Pending => pending(&record, now)?,
-                AttachmentReservationState::Committed
-                    if record.expires_at.is_some_and(|time| time > now) => {}
-                AttachmentReservationState::Committed => {
-                    return Err(AttachmentLedgerError::Expired);
-                }
-                _ => return Err(AttachmentLedgerError::State),
-            }
-            return Ok(record);
+            return replayed(record, &request, now);
+        }
+        if super::terminal::is_terminal(&tx, &request.object_id)? {
+            return Err(AttachmentLedgerError::State);
         }
         let mut objects = tx.open_table(OBJECTS).map_err(store)?;
         let object_key = key(owner, &request.object_id);
@@ -59,10 +47,10 @@ impl AttachmentLedger {
             return Err(AttachmentLedgerError::Conflict);
         }
         let mut totals = tx.open_table(TOTALS).map_err(store)?;
-        let mut total: AttachmentQuota = totals
-            .get(owner.0.as_str())
-            .map_err(store)?
-            .map_or(Ok(AttachmentQuota::default()), |v| decode(v.value()))?;
+        let existing = totals.get(owner.0.as_str()).map_err(store)?;
+        let new_owner = existing.is_none();
+        let mut total: AttachmentQuota =
+            existing.map_or(Ok(AttachmentQuota::default()), |v| decode(v.value()))?;
         if total.records >= self.policy.max_records_per_owner
             || total
                 .fences
@@ -101,7 +89,10 @@ impl AttachmentLedger {
             lease_step: self.policy.pending_lease_seconds,
             retention_seconds: self.policy.retention_seconds,
             expires_at: None,
+            pending_generation: 1,
+            committed_generation: None,
         };
+        super::terminal::admit(&tx, &self.policy, new_owner, &mut total)?;
         total.reserved += size;
         total.records += 1;
         totals.insert(owner.0.as_str(), encode(&total)?.as_slice()).map_err(store)?;
@@ -153,16 +144,26 @@ impl AttachmentLedger {
         })
     }
     /// Atomic reserved-to-used settlement after the trusted backend has durably
-    /// verified/committed the bound payload. This method does not validate backend data.
+    /// verified/committed the bound payload. The generation the backend reports must
+    /// equal the ledger's `pending_generation`; it is bound once and never taken from a request.
+    /// This method does not validate backend data.
     /// # Errors
     /// Refuses expired, unbound or terminal work and storage/length overflow.
     pub fn commit(
         &self,
         owner: &AttachmentOwner,
         id: &[u8; 32],
+        backend_generation: u64,
         now: u64,
     ) -> Result<AttachmentReservation, AttachmentLedgerError> {
         self.change(owner, id, |record, total| {
+            // Legacy-zero rows have no authoritative generation and are refused.
+            if record.pending_generation == 0 {
+                return Err(AttachmentLedgerError::State);
+            }
+            if backend_generation != record.pending_generation {
+                return Err(AttachmentLedgerError::Conflict);
+            }
             if record.state == AttachmentReservationState::Committed {
                 if record.expires_at.is_none_or(|expiry| now >= expiry) {
                     return Err(AttachmentLedgerError::Expired);
@@ -179,6 +180,7 @@ impl AttachmentLedger {
                 total.reserved.checked_sub(record.size).ok_or(AttachmentLedgerError::State)?;
             total.used =
                 total.used.checked_add(record.size).ok_or(AttachmentLedgerError::Invalid)?;
+            record.committed_generation = Some(record.pending_generation);
             record.state = AttachmentReservationState::Committed;
             Ok(())
         })
@@ -236,6 +238,26 @@ impl AttachmentLedger {
         tx.commit().map_err(store)?;
         Ok(record)
     }
+}
+fn replayed(
+    record: AttachmentReservation,
+    request: &AttachmentReservationRequest,
+    now: u64,
+) -> Result<AttachmentReservation, AttachmentLedgerError> {
+    if record.object_id != request.object_id
+        || record.plaintext_length != request.layout.plaintext_length
+        || record.network_chunk_bytes != request.layout.network_chunk_bytes
+    {
+        return Err(AttachmentLedgerError::Conflict);
+    }
+    match record.state {
+        AttachmentReservationState::Pending => pending(&record, now)?,
+        AttachmentReservationState::Committed
+            if record.expires_at.is_some_and(|time| time > now) => {}
+        AttachmentReservationState::Committed => return Err(AttachmentLedgerError::Expired),
+        _ => return Err(AttachmentLedgerError::State),
+    }
+    Ok(record)
 }
 pub(super) fn pending(
     record: &AttachmentReservation,

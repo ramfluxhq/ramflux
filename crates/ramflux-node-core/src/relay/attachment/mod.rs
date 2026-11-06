@@ -11,7 +11,10 @@ mod identity;
 pub use grants::*;
 mod quota;
 mod retention;
+mod terminal;
 pub use retention::{AttachmentDebtPage, AttachmentPolicy};
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 mod tests;
 use ramflux_protocol::large_attachment::SegmentLayout;
@@ -42,6 +45,10 @@ pub enum AttachmentLedgerError {
     State,
     #[error("attachment metadata capacity exceeded")]
     Capacity,
+    #[error("terminal evidence capacity exceeded")]
+    TerminalEvidenceCapacity,
+    #[error("terminal owner capacity exceeded")]
+    TerminalOwnerCapacity,
     #[error("attachment ledger storage: {0}")]
     Store(String),
     #[error(transparent)]
@@ -93,6 +100,12 @@ pub struct AttachmentReservation {
     pub lease_step: u64,
     pub retention_seconds: u64,
     pub expires_at: Option<u64>,
+    /// Authoritative payload generation, allocated once at reserve. Legacy rows read as 0.
+    #[serde(default)]
+    pub pending_generation: u64,
+    /// Set exactly once at commit, equal to `pending_generation`.
+    #[serde(default)]
+    pub committed_generation: Option<u64>,
 }
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct AttachmentQuota {
@@ -101,6 +114,8 @@ pub struct AttachmentQuota {
     pub records: u64,
     #[serde(default)]
     pub fences: u64,
+    #[serde(default)]
+    pub terminal_slots: u64,
 }
 #[derive(Clone)]
 pub struct AttachmentLedger {
@@ -120,6 +135,7 @@ pub(super) fn install(
     let _ = tx.open_table(DEADLINES).map_err(map)?;
     let _ = tx.open_table(DEBTS).map_err(map)?;
     identity::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
+    terminal::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     format::install(tx).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     grants::install(tx, replay_now).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     Ok(())
@@ -130,6 +146,7 @@ impl AttachmentLedger {
         policy: AttachmentPolicy,
     ) -> Result<Self, AttachmentLedgerError> {
         policy.validate()?;
+        terminal::recount(&db)?;
         Ok(Self { db, policy })
     }
     /// # Errors
