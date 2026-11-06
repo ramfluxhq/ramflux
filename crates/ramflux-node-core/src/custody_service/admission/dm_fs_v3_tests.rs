@@ -122,9 +122,9 @@ fn run(
     let challenge = driver.challenge(service, router, store, action.clone())?;
     attempt(driver, service, router, store, action, driver.proof(&challenge)?)
 }
-fn refused(frame: CustodyServerFrame, expected: CustodyRefusal) {
+fn refused(frame: &CustodyServerFrame, expected: &CustodyRefusal) {
     assert!(
-        matches!(&frame,CustodyServerFrame::Refused{code,capacity:None,retry:None} if code==&expected),
+        matches!(frame,CustodyServerFrame::Refused{code,capacity:None,retry:None} if code==expected),
         "wrong dormant admission result: {frame:?}"
     );
 }
@@ -184,7 +184,7 @@ fn dm_fs_v3_custody_actions_refused_without_write() -> Result {
         let challenge = driver.challenge(&service, &router, &store, action.clone())?;
         let proof = driver.proof(&challenge)?;
         refused(
-            attempt(
+            &attempt(
                 &driver,
                 &service,
                 &router,
@@ -192,24 +192,24 @@ fn dm_fs_v3_custody_actions_refused_without_write() -> Result {
                 CustodyProofAction::OpenSession,
                 proof.clone(),
             )?,
-            CustodyRefusal::BindingRefused,
+            &CustodyRefusal::BindingRefused,
         );
         let other: CustodyProofAction = serde_json::from_value(
             rows[if row["action"]["operation"] == "prekey_status" { 2 } else { 1 }]["action"]
                 .clone(),
         )?;
         refused(
-            attempt(&driver, &service, &router, &store, other, proof.clone())?,
-            CustodyRefusal::BindingRefused,
+            &attempt(&driver, &service, &router, &store, other, proof.clone())?,
+            &CustodyRefusal::BindingRefused,
         );
         proof_negatives(&driver, &service, &router, &store, &action, &proof)?;
         refused(
-            attempt(&driver, &service, &router, &store, action.clone(), proof.clone())?,
-            CustodyRefusal::Unsupported,
+            &attempt(&driver, &service, &router, &store, action.clone(), proof.clone())?,
+            &CustodyRefusal::Unsupported,
         );
         refused(
-            attempt(&driver, &service, &router, &store, action, proof)?,
-            CustodyRefusal::Replay,
+            &attempt(&driver, &service, &router, &store, action, proof)?,
+            &CustodyRefusal::Replay,
         );
         assert_eq!(snapshot(&store)?, before);
         assert_eq!(store.custody_publication_write_count(), writes);
@@ -251,10 +251,12 @@ fn proof_negatives(
                 .to_bytes(),
         );
         let bad = Envelope { body, signature };
-        refused(
-            attempt(driver, service, router, store, action.clone(), bad)?,
-            CustodyRefusal::BindingRefused,
-        );
+        let expected = if field == "challenge_nonce" {
+            CustodyRefusal::ChallengeUnknown
+        } else {
+            CustodyRefusal::BindingRefused
+        };
+        refused(&attempt(driver, service, router, store, action.clone(), bad)?, &expected);
     }
     for field in ["account_anchor", "device_id", "device_epoch"] {
         let mut body = serde_json::to_value(&proof.body)?;
@@ -271,15 +273,15 @@ fn proof_negatives(
                 .to_bytes(),
         );
         refused(
-            attempt(driver, service, router, store, action.clone(), bad)?,
-            CustodyRefusal::BindingRefused,
+            &attempt(driver, service, router, store, action.clone(), bad)?,
+            &CustodyRefusal::BindingRefused,
         );
     }
     let mut bad = proof.clone();
     bad.signature = encode_base64url([0; 64]);
     refused(
-        attempt(driver, service, router, store, action.clone(), bad)?,
-        CustodyRefusal::BindingRefused,
+        &attempt(driver, service, router, store, action.clone(), bad)?,
+        &CustodyRefusal::BindingRefused,
     );
     Ok(())
 }
