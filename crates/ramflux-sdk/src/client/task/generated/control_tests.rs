@@ -55,7 +55,8 @@ fn decode(client: &RamfluxClient, value: &g::TaskControl) -> Result<g::TaskContr
 }
 
 #[test]
-fn generated_intent_and_ack_round_trip_all_fields_and_bind_typed_signatures() -> TestResult {
+pub(super) fn generated_intent_and_ack_round_trip_all_fields_and_bind_typed_signatures()
+-> TestResult {
     let client = client();
     let carrier = resolution_carrier(&client)?;
     let intent = g::TaskControl {
@@ -312,7 +313,8 @@ fn generated_carrier_identifier_bounds_and_certificate_bindings_have_exact_error
 }
 
 #[test]
-fn generated_ack_native_manifest_fields_and_documents_preserve_verified_authority() -> TestResult {
+pub(super) fn generated_ack_native_manifest_fields_and_documents_preserve_verified_authority()
+-> TestResult {
     let directory = tempfile::tempdir()?;
     let mut client = client();
     client.open_account_index(directory.path())?;
@@ -322,6 +324,11 @@ fn generated_ack_native_manifest_fields_and_documents_preserve_verified_authorit
     let bytes = client.encode_generated_task_manifest(&native)?;
     assert_eq!(client.decode_generated_task_manifest(&bytes, "human")?, native);
     let generated = g::NativeDeviceManifest::decode(bytes.as_slice())?;
+    let mut history = super::history_tests::fixture(&client)?;
+    history.packets[0].manifests = vec![generated.clone()];
+    assert_eq!(client.decode_generated_task_history_export(
+        &client.encode_generated_task_history_export(&history)?
+    )?, history);
     let mut original = ack(&client)?;
     original.manifests = vec![generated.clone()];
     let bytes = client.encode_generated_task_control(control(original))?;
@@ -369,7 +376,7 @@ fn generated_ack_native_manifest_fields_and_documents_preserve_verified_authorit
 }
 
 #[test]
-fn generated_approval_round_trip_requires_the_native_grant_signature() -> TestResult {
+pub(super) fn generated_approval_round_trip_requires_the_native_grant_signature() -> TestResult {
     let client = client();
     let (packet, native) = super::tests::approval_packet()?;
     let bytes = client.encode_generated_task_approval(packet.clone())?;
