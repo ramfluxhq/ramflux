@@ -887,3 +887,6 @@ pub(super) mod legacy_selector;
 
 #[path = "pending_selector_tests.rs"]
 pub(super) mod pending_selector;
+
+#[path = "post_send_tests.rs"]
+pub(super) mod post_send;
