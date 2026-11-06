@@ -176,7 +176,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 140] = [
+pub const ALL: [&str; 150] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -317,6 +317,16 @@ pub const ALL: [&str; 140] = [
     DM_FS_V3_FRAME_RESULT,
     DM_FS_V3_RETIREMENT_LIST,
     DM_FS_V3_REQUEST_HASH,
+    USERNAME_BINDING,
+    IDENTITY_PROFILE_V2,
+    USERNAME_OPERATION,
+    USERNAME_OPERATION_HASH,
+    USERNAME_CHECKPOINT,
+    USERNAME_PROFILE_HASH,
+    USERNAME_BINDING_HASH,
+    USERNAME_RECEIPT,
+    USERNAME_RESOLVE,
+    AVATAR_CONTENT,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
@@ -355,9 +365,13 @@ mod tests {
                 label.starts_with("ramflux.identity.") || *label == super::CUSTODY_BRANCH_EXPORTER
             );
         }
-        assert_eq!(super::ALL[117..].len(), 23);
-        for label in &super::ALL[117..] {
+        assert_eq!(super::ALL[117..140].len(), 23);
+        for label in &super::ALL[117..140] {
             assert!(label.starts_with("ramflux.dm_bootstrap_fs."));
+        }
+        assert_eq!(super::ALL[140..].len(), 10);
+        for label in &super::ALL[140..] {
+            assert!(label.starts_with("ramflux.identity."));
         }
         assert_eq!(
             super::CUSTODY_BRANCH_EXPORTER,

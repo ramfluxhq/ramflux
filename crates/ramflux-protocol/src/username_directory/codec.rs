@@ -773,6 +773,15 @@ impl Wire for CheckpointDelta {
         if self.kind == DeltaKind::Clock {
             need(self.rows.is_empty(), "rows")?;
         }
+        if let Some(operation) = &self.operation {
+            for replacement in &self.rows {
+                if let Replacement::Operation { old, new, .. } = replacement {
+                    for row in [old, new].into_iter().flatten() {
+                        need(&row.operation == operation, "operation")?;
+                    }
+                }
+            }
+        }
         let mut previous: Option<(String, Vec<u8>)> = None;
         for row in &self.rows {
             let key = row.order_key()?;
@@ -1063,6 +1072,14 @@ fn home_result(row: &HomeRevalidateResult) -> Result<(), CodecError> {
             p.body.principal_commitment == row.root && p.body.state == ReceiptState::Reserved,
             "pending_receipt",
         )?;
+        let expected_epoch = row
+            .current_receipt
+            .as_ref()
+            .map_or(Some(1), |current| current.body.epoch.checked_add(1));
+        need(expected_epoch == Some(p.body.epoch), "pending_epoch")?;
+        if let Some(current) = &row.current_receipt {
+            need(current.body.center_id == p.body.center_id, "center_id")?;
+        }
     }
     if row.lookup_allowed {
         need(
@@ -1140,6 +1157,11 @@ impl Wire for Replacement {
             Self::Root { key, old, new } => {
                 fixed(key, 32, "root")?;
                 images(old.as_ref(), new.as_ref())?;
+                let next = new.as_ref().ok_or(CodecError::Field("root"))?;
+                if let Some(previous) = old {
+                    need(!previous.deleted || next.deleted, "deleted")?;
+                    need(next.epoch >= previous.epoch, "epoch")?;
+                }
                 for row in [old, new].into_iter().flatten() {
                     if let Some(b) = &row.current_binding {
                         need(b.body.principal_commitment == *key, "current_binding")?;
