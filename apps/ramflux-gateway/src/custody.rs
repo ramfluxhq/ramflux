@@ -26,6 +26,10 @@ pub(crate) struct GatewayGrant {
     deadline: std::time::Instant,
 }
 impl GatewayGrant {
+    #[cfg(test)]
+    pub(crate) fn from_test_session(session: CustodySession) -> Self {
+        Self { session, deadline: std::time::Instant::now() + Duration::from_secs(60) }
+    }
     pub(crate) fn deadline(&self) -> std::time::Instant {
         self.deadline
     }

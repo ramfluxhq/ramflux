@@ -396,3 +396,35 @@ fn capable_nack_is_incarnation_fenced_and_durable() -> anyhow::Result<()> {
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn legacy_nack_keeps_cursor_shape() -> anyhow::Result<()> {
+    let (router, path, accepted) = seed("legacy-nack-cursor")?;
+    let row = router
+        .state()
+        .resume("target", 0, 1)
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("entry"))?;
+    let nack = json!({"schema":"ramflux.nack.v1","version":1,"domain":"ramflux.nack.v1","signing_key_id":"test","signature_alg":"ed25519","signature":"fixture","nack_id":"legacy","envelope_id":row.envelope.envelope_id,"receiver_device_id":"device","reason":"invalid_signature","received_at":1,"ext":{"inbox_seq":1}});
+    let legacy = call(
+        &router,
+        "POST",
+        "/mvp0/nack-bound",
+        json!({"target_delivery_id":"target","nack":nack}),
+    )?;
+    assert!(legacy.get("incarnation_id").is_none());
+    let cursor: ramflux_node_core::InboxCursorResponse = serde_json::from_value(legacy)?;
+    assert_eq!(cursor.target_delivery_id, "target");
+    let modern = call(
+        &router,
+        "POST",
+        "/mvp0/nack-bound",
+        json!({"target_delivery_id":"target","incarnation_id":accepted["incarnation_id"],"nack":nack}),
+    )?;
+    assert_eq!(modern["incarnation_id"], accepted["incarnation_id"]);
+    assert_eq!(modern["cursor"]["target_delivery_id"], "target");
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}

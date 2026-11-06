@@ -1881,7 +1881,7 @@ pub(crate) async fn write_gateway_handle(
 
 pub(crate) async fn write_gateway_frame(
     send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
-    frame: &ramflux_node_core::GatewayServerFrame,
+    frame: &impl serde::Serialize,
 ) -> anyhow::Result<()> {
     #[cfg(feature = "itest-http")]
     delay_itest_gateway_frame().await;

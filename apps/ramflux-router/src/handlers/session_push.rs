@@ -22,6 +22,9 @@ pub(super) fn route(
     router: &crate::router_runtime::RouterHandle,
     peer: &str,
 ) -> anyhow::Result<Option<MeshResponse>> {
+    if (method, path) == ("POST", "/mvp0/nack-bound") {
+        return bound_nack(serde_json::from_slice(body)?, router, peer).map(Some);
+    }
     let capable_page = path.starts_with("/mvp1/inbox/")
         && path.split('?').nth(1).is_some_and(|q| q.split('&').any(|p| p == "session_push=1"));
     let entry = path.starts_with("/mvp1/inbox-entry/");
@@ -34,10 +37,7 @@ pub(super) fn route(
         || path == "/mvp1/session-push-capabilities"
         || capable_page
         || entry
-        || path == "/mvp0/ack-bound"
-        || (path == "/mvp0/nack-bound"
-            && serde_json::from_slice::<serde_json::Value>(body)
-                .is_ok_and(|v| v.get("incarnation_id").is_some()));
+        || path == "/mvp0/ack-bound";
     if !handled {
         return Ok(None);
     }
@@ -73,18 +73,6 @@ pub(super) fn route(
             }
         }
         ("POST", "/mvp0/ack-bound") => bound_ack(body, router),
-        ("POST", "/mvp0/nack-bound") => {
-            let value: serde_json::Value = serde_json::from_slice(body)?;
-            let request: ramflux_node_core::TargetNackRequest =
-                serde_json::from_value(value.clone())?;
-            let id = value["incarnation_id"].as_str().unwrap_or("");
-            match router.state().session_nack(router.store(), &request, id) {
-                Ok(cursor) => reply(&serde_json::json!({"incarnation_id":id,"cursor":cursor})),
-                Err(error) => {
-                    Ok(MeshResponse::json("400 Bad Request", serde_json::to_vec(&error)?))
-                }
-            }
-        }
         ("POST", "/mvp0/issued-seqs") => issued(body, router),
         ("GET", _) if capable_page => page(path, router),
         ("GET", _) if entry => point(path, router),
@@ -92,6 +80,29 @@ pub(super) fn route(
     }?;
     Ok(Some(result))
 }
+fn bound_nack(
+    mut value: serde_json::Value,
+    router: &crate::router_runtime::RouterHandle,
+    peer: &str,
+) -> anyhow::Result<MeshResponse> {
+    let incarnation = value.as_object_mut().and_then(|body| body.remove("incarnation_id"));
+    if incarnation.is_some() && peer != "ramflux-gateway" {
+        return Ok(MeshResponse::text(
+            "403 Forbidden",
+            "session push requires authenticated gateway",
+        ));
+    }
+    let request: ramflux_node_core::TargetNackRequest = serde_json::from_value(value)?;
+    let Some(id) = incarnation else {
+        return reply(&router.apply_bound_nack(&request)?);
+    };
+    let id = id.as_str().unwrap_or("");
+    match router.state().session_nack(router.store(), &request, id) {
+        Ok(cursor) => reply(&serde_json::json!({"incarnation_id":id,"cursor":cursor})),
+        Err(error) => Ok(MeshResponse::json("400 Bad Request", serde_json::to_vec(&error)?)),
+    }
+}
+
 fn issued(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
