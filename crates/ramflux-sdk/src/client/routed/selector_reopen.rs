@@ -44,13 +44,13 @@ pub(in crate::client::routed) fn import_entry(
     }
     Ok(())
 }
-struct Case {
-    a: Fixture,
-    b: Fixture,
-    refs: Vec<SdkDmAttachmentRef>,
+pub(super) struct Case {
+    pub(super) a: Fixture,
+    pub(super) b: Fixture,
+    pub(super) refs: Vec<SdkDmAttachmentRef>,
 }
 impl Case {
-    fn new() -> Result<Self, SdkError> {
+    pub(super) fn new() -> Result<Self, SdkError> {
         OBSERVED.with_borrow_mut(|o| *o = Observation::default());
         let a = Fixture::new("alice", 21)?;
         let mut b = Fixture::new("bob", 31)?;
@@ -160,7 +160,7 @@ impl Case {
         )?;
         Ok(())
     }
-    fn fence(&self) -> Result<(), SdkError> {
+    pub(super) fn fence(&self) -> Result<(), SdkError> {
         self.b.client.account_db()?.retain_object(
             &self.refs[1].object_id,
             &self.refs[1].manifest_hash,
@@ -365,7 +365,7 @@ async fn e16_fresh_m3_reopens_closed_alias_via_routed_receive() -> TestResult {
     Ok(())
 }
 
-fn connection(c: &Case) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
+pub(super) fn connection(c: &Case) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
     use ramflux_storage::{FileVaultSecretSource, VaultSecretSource};
     use std::fmt::Write;
     let vault = FileVaultSecretSource::new(&c.b.root).vault_secret("bob")?;

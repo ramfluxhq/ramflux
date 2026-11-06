@@ -350,3 +350,6 @@ fn invalid(message: &str) -> SdkError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::client) use tests::legacy_selector::import_entry as observe_legacy_import;
