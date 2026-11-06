@@ -4,7 +4,7 @@
 use crate::{CustodyService, RouterCore, RouterRedbStore, tests::custody_sessions::Driver};
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_crypto::custody::{branch_exporter_hash, sign_branch_proof_v3};
-use ramflux_protocol::{canonical_json_bytes, custody::*, domain, encode_base64url};
+use ramflux_protocol::{custody::*, domain, encode_base64url};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -74,15 +74,31 @@ fn attempt(
 ) -> Result<CustodyServerFrame> {
     // Build a correctly signed receipt even for deliberately malformed proofs,
     // so node-side negatives cannot be satisfied by the proxy signer's precheck.
-    let descriptor=driver.node.envelope().body.proxy_keys.first().ok_or("proxy")?;
-    let body=RelayAcceptance {
-        schema:domain::CUSTODY_RELAY_ACCEPTANCE.into(),version:1,issuer_kind:AcceptanceIssuer::NodeProxy,
-        relay_id:descriptor.proxy_id.clone(),relay_key_id:descriptor.key_id.clone(),
-        node_identity_record_hash:driver.node.hash().into(),client_exporter_hash:Some(branch_exporter_hash(&[5;32])),
-        receipt_id:encode_base64url(ramflux_crypto::random_32()?),message_hash:object_hash(&proof)?,purpose:AcceptancePurpose::BranchProof,
-        audience:proof.body.audience.clone(),source_device_ref:Some(proof.body.device_ref.clone()),branch_certificate_hash:Some(proof.body.certificate_hash.clone()),target_anchor:None,challenge_nonce:Some(proof.body.challenge_nonce.clone()),accepted_at:NOW,
+    let descriptor = driver.node.envelope().body.proxy_keys.first().ok_or("proxy")?;
+    let body = RelayAcceptance {
+        schema: domain::CUSTODY_RELAY_ACCEPTANCE.into(),
+        version: 1,
+        issuer_kind: AcceptanceIssuer::NodeProxy,
+        relay_id: descriptor.proxy_id.clone(),
+        relay_key_id: descriptor.key_id.clone(),
+        node_identity_record_hash: driver.node.hash().into(),
+        client_exporter_hash: Some(branch_exporter_hash(&[5; 32])),
+        receipt_id: encode_base64url(ramflux_crypto::random_32()?),
+        message_hash: object_hash(&proof)?,
+        purpose: AcceptancePurpose::BranchProof,
+        audience: proof.body.audience.clone(),
+        source_device_ref: Some(proof.body.device_ref.clone()),
+        branch_certificate_hash: Some(proof.body.certificate_hash.clone()),
+        target_anchor: None,
+        challenge_nonce: Some(proof.body.challenge_nonce.clone()),
+        accepted_at: NOW,
     };
-    let receipt=Envelope {signature:encode_base64url(driver.proxy.sign(&signing_bytes(domain::CUSTODY_RELAY_ACCEPTANCE,&body)?).to_bytes()),body};
+    let receipt = Envelope {
+        signature: encode_base64url(
+            driver.proxy.sign(&signing_bytes(domain::CUSTODY_RELAY_ACCEPTANCE, &body)?).to_bytes(),
+        ),
+        body,
+    };
     Ok(service.mesh(
         router,
         store,
@@ -138,7 +154,8 @@ fn snapshot(store: &RouterRedbStore) -> Result<BTreeMap<String, Option<Rows>>> {
 }
 #[test]
 fn dm_fs_v3_custody_actions_refused_without_write() -> Result {
-    let path = std::env::temp_dir().join(format!("ramflux-dm-fs-v3-{}.redb",encode_base64url(ramflux_crypto::random_32()?)));
+    let path = std::env::temp_dir()
+        .join(format!("ramflux-dm-fs-v3-{}.redb", encode_base64url(ramflux_crypto::random_32()?)));
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;

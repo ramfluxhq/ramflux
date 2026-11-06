@@ -54,9 +54,10 @@ fn hex_bytes(v: &Value) -> Result<Vec<u8>> {
     (0..text.len()).step_by(2).map(|i| Ok(u8::from_str_radix(&text[i..i + 2], 16)?)).collect()
 }
 fn rejects(value: &Value) -> Result {
-    assert!(
-        matches!(decode::<CustodyProofAction>(&serde_json::to_vec(value)?, MAX_CUSTODY_FRAME_BYTES), Err(crate::ProtocolError::Canonical(_)))
-    );
+    assert!(matches!(
+        decode::<CustodyProofAction>(&serde_json::to_vec(value)?, MAX_CUSTODY_FRAME_BYTES),
+        Err(crate::ProtocolError::Canonical(_))
+    ));
     Ok(())
 }
 #[test]
@@ -84,6 +85,9 @@ fn dm_fs_v3_custody_carriers_reject_each_field_and_cross_field() -> Result {
         rejects(&v)?;
         let mut v = action.clone();
         v[other] = json!("unexpected");
+        rejects(&v)?;
+        let mut v = action.clone();
+        v.as_object_mut().ok_or("action")?.remove("operation");
         rejects(&v)?;
         let mut v = action.clone();
         v["operation"] = json!("unknown");
@@ -175,5 +179,45 @@ fn dm_fs_v3_custody_carrier_collection_limits() -> Result {
         action[name] = json!(encode_base64url(bytes));
         rejects(&action)?;
     }
+    Ok(())
+}
+
+#[test]
+fn dm_fs_v3_custody_carriers_accept_maximal_collections() -> Result {
+    let wire: Value =
+        serde_json::from_str(include_str!("../../fixtures/dm_fs_v3/wire_vectors.json"))?;
+    let query = wire["positive"]
+        .as_array()
+        .ok_or("positive")?
+        .iter()
+        .find(|v| v["name"] == "owner_status_query_maximum_ids")
+        .ok_or("max query")?;
+    let action: CustodyProofAction = decode(
+        &serde_json::to_vec(&json!({"operation":"prekey_status","query":query["base64url"]}))?,
+        MAX_CUSTODY_FRAME_BYTES,
+    )?;
+    assert_eq!(action.capability(), "register");
+    let rows = vectors()?;
+    let mut update = OwnerPrekeyUpdate::from_bytes(&decode_base64url(
+        rows[2]["action"]["update"].as_str().ok_or("update")?,
+    )?)?;
+    update.base.branch.principal_id = "p".repeat(256);
+    update.base.branch.device_id = "d".repeat(256);
+    update.base.capabilities = "a".repeat(64);
+    let opk = update.additive_opks.first().ok_or("opk")?.clone();
+    update.additive_opks = (0..64)
+        .map(|i| {
+            let mut v = opk.clone();
+            v.opk_id[0] = i;
+            v
+        })
+        .collect();
+    update.retirements =
+        (0..400).map(|i| RetirementRef { generation: 1, serial: i, key_id: [2; 32] }).collect();
+    let bytes = update.to_bytes()?;
+    assert!(bytes.len() <= 65_536);
+    let value = json!({"operation":"register_update","update":encode_base64url(&bytes)});
+    let action: CustodyProofAction = decode(&serde_json::to_vec(&value)?, MAX_CUSTODY_FRAME_BYTES)?;
+    assert_eq!(serde_json::to_value(&action)?, value);
     Ok(())
 }
