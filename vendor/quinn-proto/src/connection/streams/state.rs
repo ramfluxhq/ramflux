@@ -1404,6 +1404,21 @@ mod tests {
     }
 
     #[test]
+    fn illegal_ordered_read_restores_owner_only_in_metadata_mode() {
+        for bounded in [false,true] {
+            let mut client=make(Side::Client);
+            if bounded { client.metadata=Some(crate::connection::metadata_credit::MetadataCredit::new(1<<20)); }
+            let id=StreamId::new(Side::Server,Dir::Uni,0);
+            client.received(frame::Stream {id,offset:0,fin:false,data:Bytes::from_static(b"x")},1).unwrap();
+            let mut pending=Retransmits::default();let mut recv=RecvStream {id,state:&mut client,pending:&mut pending};
+            { let mut chunks=recv.read(false).unwrap();assert_eq!(&chunks.next(16).unwrap().unwrap().bytes[..],b"x");let _=chunks.finalize(); }
+            assert_eq!(recv.read(true).err(),Some(ReadableError::IllegalOrderedRead));
+            if bounded { assert!(recv.read(false).is_ok(),"metadata-mode failure lost the receive owner"); }
+            else { assert_eq!(recv.read(false).err(),Some(ReadableError::ClosedStream),"default mode changed upstream behavior"); }
+        }
+    }
+
+    #[test]
     fn recv_stopped() {
         let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);

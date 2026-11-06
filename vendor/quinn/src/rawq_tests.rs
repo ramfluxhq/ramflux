@@ -14,6 +14,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use tokio::time::timeout;
+mod allocator;
 
 #[derive(Debug, Default)]
 struct Wire {
@@ -938,15 +939,25 @@ async fn receive_assemblers_charge_compaction_peaks() {
         let replacement_charge=((replacement_bytes+63)&!63)+64;
         let before=probe.stats();
         if case<2 { probe.freeze_with_additional_bytes(if case==0 {0}else{replacement_charge}); }
-        let result=recv.read_chunk(64,false).await;
+        // Box before observation; poll once while the connection driver is gated.
+        // Only the actual replacement heap has this layout in this operation.
+        let mut read=Box::pin(recv.read_chunk(64,false));
+        let(result,heap_allocations)=allocator::heap_allocations(replacement_bytes,|| {
+            match read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                Poll::Ready(result)=>result,
+                Poll::Pending=>panic!("buffered compaction read did not complete synchronously"),
+            }
+        });
+        drop(read);
         if case<2 {
             assert!(matches!(result,Err(ReadError::ConnectionLost(ConnectionError::LocallyClosed))));
             assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()),storage,"read refusal restores the removed receive owner and its old heap");
             assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::StreamAssemblers));
-            assert_eq!(probe.stats().allocations,before.allocations+u64::from(case==1),"only an admitted replacement heap may allocate");
+            assert_eq!(heap_allocations,usize::from(case==1),"allocator observed an unadmitted replacement heap");
             gate.open();
             assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
         } else {
+            assert_eq!(heap_allocations,1,"allocator must observe the admitted replacement heap");
             let bytes=result.unwrap().unwrap().bytes;
             assert_eq!(&bytes[..],b"abcdef");
             assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()),(replacement_bytes,0));

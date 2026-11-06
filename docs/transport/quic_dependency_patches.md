@@ -389,3 +389,23 @@ iterator destruction, clear/reinit and fresh fragments between consumed ranges.
 This completes the unordered-history hook component, not whole-packet transaction
 or exhaustive cross-class/waiter proof. Those remain separate parts, as do runtime
 profile enforcement, allocator certificates and activation/security gates.
+
+
+The compaction driver oracle observes successful System allocator calls matching
+the replacement heap's actual layout, outside metadata accounting. Its buffered
+read is polled synchronously while the driver is gated, so unrelated tasks cannot
+contribute observations. It checks zero actual replacement allocations on heap
+refusal and one on copy refusal/success; the metadata allocation counter is not
+its heap oracle. Actual descriptor capacity and returned bytes remain separate
+observations. This test allocator is confined to the Quinn unit-test target.
+
+Default-mode IllegalOrderedRead retains upstream behavior: the removed receive
+owner is restored only when metadata admission is configured. A mode-paired unit
+checks default closure and bounded-owner preservation independently.
+
+Descriptor free-before-refund barrier tests for the old sorted compaction Vec and
+old heap growth backing remain mandatory finite-evidence work. The source retains
+those leases until destruction, but allocation-count/capacity tests alone do not
+certify that temporal boundary. Production allocator certificates remain unissued
+until independent real-deallocator/concurrent-refund oracles and their bypass
+mutations pass alongside the complete runtime identity evidence.

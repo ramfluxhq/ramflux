@@ -275,7 +275,9 @@ impl<'a> Chunks<'a> {
         if recv.assembler.bind(streams.metadata.clone(),super::super::metadata_credit::MetadataClass::StreamAssemblers).is_err()
             || recv.assembler.ensure_ordering(ordered).is_err()
         {
-            streams.recv.insert(id,Some(StreamRecv::Open(recv)));
+            // Preserve the upstream default-mode IllegalOrderedRead behavior.
+            // Bounded admission failures must retain the removed receive owner.
+            if streams.metadata.is_some() { streams.recv.insert(id,Some(StreamRecv::Open(recv))); }
             return Err(ReadableError::IllegalOrderedRead);
         }
         Ok(Self {
