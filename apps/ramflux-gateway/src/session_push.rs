@@ -12,6 +12,7 @@ use std::sync::{
 };
 use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Default)]
 pub(crate) struct Readiness {
     started: AtomicBool,
@@ -19,13 +20,16 @@ pub(crate) struct Readiness {
 }
 impl Readiness {
     pub(crate) fn start(self: &Arc<Self>, router: &RouterMeshClient) {
+        self.start_with_interval(router, DISCOVERY_INTERVAL);
+    }
+    fn start_with_interval(self: &Arc<Self>, router: &RouterMeshClient, period: Duration) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
         }
         let weak = Arc::downgrade(self);
         let router = router.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
