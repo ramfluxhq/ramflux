@@ -46,6 +46,7 @@ itest-restore-state = []
 object-ipc-crash-seam = []
 
 [dependencies]
+ed25519-dalek.workspace = true
 prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist
 ramflux-protocol = { workspace = true }
@@ -87,7 +88,6 @@ poly1305 = { version = "=0.8.0", features = ["zeroize"] }
 
 [dev-dependencies]
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
-ed25519-dalek.workspace = true
 rusqlite = { workspace = true }
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }

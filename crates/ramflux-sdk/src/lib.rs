@@ -32,6 +32,7 @@ pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,
 };
+pub mod attachment_renewal;
 pub mod attachment_retirement;
 pub mod custody;
 mod surface;

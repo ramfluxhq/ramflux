@@ -3,6 +3,11 @@
 
 //! Dormant large-attachment wire formats. These codecs confer no authority.
 mod grant;
+mod renewal;
+pub use renewal::{
+    AttachmentOperation, ForwardAttestation, RenewalRequest, RequesterPop, body_digest,
+    requester_digest,
+};
 mod receipt;
 mod retirement;
 pub use grant::{ScopedAttachmentGrant, VerifiedScopedGrant};
