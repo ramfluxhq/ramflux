@@ -5,7 +5,7 @@
 use crate::{RamfluxClient, SdkError};
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_OFFLINE_RETENTION_SECS: u32 = 604_800;
+pub const DEFAULT_OFFLINE_RETENTION_SECS: u32 = ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS_U32;
 pub const MIN_OFFLINE_RETENTION_SECS: u32 = 3_600;
 // Call state is useful only while the live call can still be negotiated.
 pub(crate) const CALL_SIGNAL_TTL_SECS: u32 = 3_600;
@@ -19,7 +19,7 @@ pub(crate) const RESET_TTL_SECS: u32 = 300;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountConfig {
-    #[serde(default = "default_retention", deserialize_with = "decode_retention")]
+    #[serde(deserialize_with = "decode_retention")]
     pub offline_retention_secs: u32,
 }
 const fn default_retention() -> u32 {
@@ -32,7 +32,7 @@ impl Default for AccountConfig {
 }
 fn validate(value: u32) -> Result<(), SdkError> {
     if !(MIN_OFFLINE_RETENTION_SECS..=DEFAULT_OFFLINE_RETENTION_SECS).contains(&value) {
-        return Err(SdkError::InvalidOfflineRetention(value));
+        return Err(SdkError::InvalidOfflineRetention(u64::from(value)));
     }
     Ok(())
 }
@@ -45,10 +45,10 @@ pub(crate) const fn content_ttl(config: &AccountConfig) -> u32 {
     config.offline_retention_secs
 }
 pub(crate) fn decode_config(value: serde_json::Value) -> Result<AccountConfig, SdkError> {
-    if let Some(value) = value["offline_retention_secs"].as_u64()
-        && let Ok(value) = u32::try_from(value)
-    {
-        validate(value)?;
+    if let Some(retention) = value["offline_retention_secs"].as_u64() {
+        let retention =
+            u32::try_from(retention).map_err(|_| SdkError::InvalidOfflineRetention(retention))?;
+        validate(retention)?;
     }
     Ok(serde_json::from_value(value)?)
 }

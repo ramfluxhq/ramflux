@@ -43,7 +43,7 @@ impl GroupOperation {
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
     #[error("offline retention {0} is outside 3600..=604800 seconds")]
-    InvalidOfflineRetention(u32),
+    InvalidOfflineRetention(u64),
     #[error(transparent)]
     LifecycleShared(std::sync::Arc<SdkError>),
     #[error("operation requires reconciliation: {0}")]
