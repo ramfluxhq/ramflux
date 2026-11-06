@@ -92,6 +92,8 @@ pub const CUSTODY_MASTER_SEED: &str = "ramflux.identity.master.v1";
 pub const CUSTODY_OBJECT_HASH: &str = "ramflux.identity.custody.object_hash.v1";
 pub const CUSTODY_SECTION_HASH: &str = "ramflux.identity.custody.section_hash.v1";
 pub const CUSTODY_SAFETY_NUMBER: &str = "ramflux.identity.safety_number.v2";
+pub const CUSTODY_PAIRING_INVITATION_V2: &str = "ramflux.identity.pairing.invitation.v2";
+pub const CUSTODY_PAIRING_CREATE_TICKET_V2: &str = "ramflux.identity.pairing.create_ticket.v2";
 pub const CUSTODY_PAIRING_TRANSCRIPT_V2: &str = "ramflux.identity.pairing_transcript.v2";
 pub const CUSTODY_PAIRING_CONTEXT_COMMITMENT_V2: &str =
     "ramflux.identity.pairing.context_commitment.v2";
@@ -179,7 +181,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 152] = [
+pub const ALL: [&str; 154] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -331,6 +333,8 @@ pub const ALL: [&str; 152] = [
     USERNAME_RESOLVE,
     AVATAR_CONTENT,
     CUSTODY_PAIRING_TRANSCRIPT_V2,
+    CUSTODY_PAIRING_INVITATION_V2,
+    CUSTODY_PAIRING_CREATE_TICKET_V2,
     CUSTODY_PAIRING_CONTEXT_COMMITMENT_V2,
 ];
 
@@ -379,7 +383,7 @@ mod tests {
         for label in &super::ALL[117..140] {
             assert!(label.starts_with("ramflux.dm_bootstrap_fs."));
         }
-        assert_eq!(super::ALL[140..].len(), 12);
+        assert_eq!(super::ALL[140..].len(), 14);
         for label in &super::ALL[140..] {
             assert!(label.starts_with("ramflux.identity."));
         }

@@ -554,6 +554,8 @@ fn proof_action_name(action: &CustodyProofAction) -> &'static str {
         CustodyProofAction::Publish { .. } => "publish",
         CustodyProofAction::Register { .. } => "register",
         CustodyProofAction::OpenSession => "open_session",
+        CustodyProofAction::PairingIssue { .. } => "pairing_issue",
+        CustodyProofAction::PairingCreate { .. } => "pairing_create",
         CustodyProofAction::HomeMigration { .. } => "home_migration",
         CustodyProofAction::PrekeyStatus { .. } => "prekey_status",
         CustodyProofAction::RegisterUpdate { .. } => "register_update",

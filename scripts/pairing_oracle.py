@@ -72,6 +72,32 @@ def generate():
     with tempfile.TemporaryDirectory(prefix='pairing-oracle-') as tmp:
         exe=str(Path(tmp)/'blake3-ref')
         subprocess.run(['cc','-O2','-DBLAKE3_NO_SSE2','-DBLAKE3_NO_SSE41','-DBLAKE3_NO_AVX2','-DBLAKE3_NO_AVX512','-DBLAKE3_USE_NEON=0','-I',str(REF),str(REF/'hash.c'),*[str(REF/n) for n in ['blake3.c','blake3_dispatch.c','blake3_portable.c']],'-o',exe],check=True)
+        spec=dict(schema='ramflux.pairing.CreateSpec.v2',version=2,
+                  account_anchor=common['account_anchor'],primary_ref=initiator['device_ref'],
+                  base_record_hash=common['record_hash'],base_epoch=common['device_set_epoch'],
+                  purpose='enroll',recipient_mode='new',destination_ref=None,
+                  capabilities=common['capabilities'],lease_not_before=common['lease_not_before'],
+                  lease_expires_at=common['lease_expires_at'],data_selection=[],ttl_seconds=300)
+        spec_hash=b64(run([exe],frame('ramflux.identity.custody.object_hash.v1',jcs(spec))))
+        ticket=dict(schema='ramflux.pairing.CreateTicket.v2',version=2,node_key=b64(bytes([3])*32),
+                    boot_id=b64(bytes([5])*32),create_id=b64(bytes([2])*32),issuer_seq=1,
+                    account_anchor=spec['account_anchor'],primary_ref=spec['primary_ref'],
+                    spec_hash=spec_hash,issued_at=100,expires_at=400)
+        invitation={k:v for k,v in spec.items() if k!='ttl_seconds'}
+        invitation.update(schema='ramflux.pairing.Invitation.v2',invitation_id=b64(bytes([1])*32),
+                          issuer_seq=1,request_id=b64(bytes([2])*32),node_key=b64(bytes([3])*32),
+                          public_origin='https://relay.example:443',transfer_id=None,created_at=100,expires_at=400)
+        commit=dict(schema='ramflux.pairing.Commit.v2',version=2,invitation_id=b64(bytes([1])*32),role='initiator',commitment=b64(bytes([1])*32))
+        send=dict(schema='ramflux.pairing.Send.v2',version=2,invitation_id=b64(bytes([1])*32),issuer_seq=1,role='initiator',token=b64(bytes([4])*32),seq=0,frame=dict(kind='commit',value=commit))
+        native_preimages={
+            'ticket':jcs(dict(domain='ramflux.identity.pairing.create_ticket.v2',body=ticket)),
+            'invitation':jcs(dict(domain='ramflux.identity.pairing.invitation.v2',body=invitation)),
+            'old_ticket':jcs(dict(domain='ramflux.identity.pairing.create_ticket.v1',body=ticket)),
+            'old_invitation':jcs(dict(domain='ramflux.identity.pairing.invitation.v1',body=invitation))}
+        output['native_relay']=dict(spec=spec,spec_hash=spec_hash,ticket=ticket,invitation=invitation,send=send,
+                                   send_digest=b64(run([exe],frame('ramflux.identity.custody.object_hash.v1',jcs(send)))),
+                                   preimages_hex={k:v.hex() for k,v in native_preimages.items()},
+                                   sha256={k:run(['openssl','dgst','-sha256','-binary'],v).hex() for k,v in native_preimages.items()})
         controls={}
         envelope={'body':{'schema':'control.v1','version':1,'nullable':None,'nested':{'body':{'n':1},'signature':b64(bytes([13])*64)}},'signature':b64(bytes([12])*64)}
         for name, domain, value in [('object','ramflux.identity.custody.object_hash.v1',envelope),('section','ramflux.identity.custody.section_hash.v1',{'section':'profile','value':{'kind':'human'}}),('list','ramflux.identity.revoked_devices.list.v1',[])]:

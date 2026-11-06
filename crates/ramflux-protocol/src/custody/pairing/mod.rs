@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub const MAX_COMMON_BYTES: usize = 15_872;
 pub const MAX_ROLE_BYTES: usize = 20_480;
 pub const MAX_TRANSCRIPT_BYTES: usize = 2 * MAX_ROLE_BYTES + 512;
+pub mod native;
+pub mod relay;
+
 pub const PROFILE: &str = "device_pairing_v2";
 
 /// Stable codec errors; field names never contain peer-provided diagnostics.
@@ -404,7 +407,7 @@ pub struct Reveal {
     pub context: RoleContext,
 }
 impl PairingWire for Reveal {
-    const LIMIT: usize = MAX_ROLE_BYTES + 512;
+    const LIMIT: usize = 24_576;
     fn normalize(&mut self) {
         self.context.normalize();
     }

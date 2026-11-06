@@ -460,3 +460,5 @@ fn maximal_objects(original: &Value) -> TestResult {
     typed.validate_bounds(MAX_SAFE_JSON_INTEGER - 300, 0, MAX_SAFE_JSON_INTEGER)?;
     Ok(())
 }
+
+mod native_relay;
