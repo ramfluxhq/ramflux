@@ -58,6 +58,7 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         source: &RetirementSource<'_>,
         now: u64,
     ) -> Result<(), SdkError> {
+        self.db.gc_attachment_retirements(now, 64)?;
         let (grant, receipt) = AttachmentRegistrationReceipt::decode_capability(
             capability,
             source.authority,
@@ -91,6 +92,7 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         vault: &dyn PrimaryVault,
         now: u64,
     ) -> Result<(), SdkError> {
+        self.db.gc_attachment_retirements(now, 64)?;
         if self.db.native_reference_retirement_started(reference)? {
             return Ok(());
         }
@@ -98,12 +100,10 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         let mut requests = Vec::with_capacity(grants.len());
         for association in grants {
             let g = association.grant.grant();
-            let (actor, credentials) = self.account.credentials(vault, &g.owner.device_id, now)?;
+            let (actor, credentials) =
+                self.account.credentials(vault, self.account.local_device_id()?, now)?;
             let key = &credentials.signing.signing_key;
-            if actor.account_anchor != g.owner.account_anchor
-                || actor.device_epoch != g.owner.device_epoch
-                || key.verifying_key().to_bytes() != g.owner.signing_public_key
-            {
+            if actor.account_anchor != g.owner.account_anchor {
                 return Err(refused("owner key"));
             }
             let request = AttachmentRetirement {
@@ -129,7 +129,7 @@ impl<'a> AttachmentRetirementOutbox<'a> {
                 AttachmentRetirement::verify(
                     &request.canonical_bytes().map_err(refused)?,
                     &signature,
-                    &g.owner.signing_public_key,
+                    &key.verifying_key().to_bytes(),
                 )
                 .map_err(refused)?,
             );
@@ -143,8 +143,36 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         &self,
         after: Option<&[u8; 32]>,
         limit: usize,
+        vault: &dyn PrimaryVault,
+        now: u64,
     ) -> Result<Vec<PendingAttachmentRetirement>, SdkError> {
-        Ok(self.db.pending_attachment_retirements(after, limit)?)
+        self.db.gc_attachment_retirements(now, 64)?;
+        let mut rows = self.db.pending_attachment_retirements(after, limit)?;
+        if rows.is_empty() {
+            return Ok(rows);
+        }
+        let (_, credentials) =
+            self.account.credentials(vault, self.account.local_device_id()?, now)?;
+        for row in &mut rows {
+            let request = row.signed.request();
+            let signature: [u8; 64] = ramflux_protocol::decode_base64url(
+                &ramflux_crypto::sign_canonical_bytes_with_device_branch(
+                    &request.signing_bytes().map_err(refused)?,
+                    &credentials.signing,
+                ),
+            )
+            .map_err(refused)?
+            .try_into()
+            .map_err(refused)?;
+            row.signed = AttachmentRetirement::verify(
+                &request.canonical_bytes().map_err(refused)?,
+                &signature,
+                &credentials.signing.signing_key.verifying_key().to_bytes(),
+            )
+            .map_err(refused)?;
+            self.db.refresh_attachment_retirement_signature(&row.signed)?;
+        }
+        Ok(rows)
     }
     /// Apply only a request-bound response from the authenticated source, after transport verification.
     /// # Errors
@@ -162,6 +190,7 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         }
         if status == RetirementDeliveryStatus::Retired {
             self.db.acknowledge_attachment_retirement(request)?;
+            self.db.gc_attachment_retirements(0, 64)?;
         }
         Ok(())
     }

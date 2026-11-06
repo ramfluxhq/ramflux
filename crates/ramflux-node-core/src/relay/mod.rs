@@ -42,5 +42,7 @@ pub use store::*;
 mod operations;
 pub use operations::*;
 
+#[cfg(any(test, feature = "test-support"))]
+mod native_fixture_crypto;
 #[cfg(test)]
 mod test_support;

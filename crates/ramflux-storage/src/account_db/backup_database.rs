@@ -177,6 +177,7 @@ impl BackupDatabase {
         if mode == BackupOpenMode::Normalized && original_input.unowned_legacy_actor_count > 0 {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }
+        super::attachment_retirement::recount_archive(&db)?;
         let opened = Self { db, original_input };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;

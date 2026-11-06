@@ -2,7 +2,11 @@
 // Copyright (c) 2026 Span Brain
 //! Durable scoped registration; operation admission and retirement are separate owners.
 mod admission;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 mod retirement;
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
 use super::{
     AttachmentLedger, AttachmentLedgerError, AttachmentOwner, AttachmentReservation,
     AttachmentReservationState, RECORDS, ReadableDatabase, ReadableTable, deadline, decode, encode,
@@ -141,10 +145,14 @@ impl ScopedGrantRegistry {
             || t.issuer_node_id != owner.home_node_id
             || t.owner_principal_id != owner.account_anchor
             || t.owner_home_node_id != owner.home_node_id
-            || t.owner_signing_key_id != owner.device_id
-            || t.owner_device_epoch != owner.device_epoch
-            || t.requester_device_epoch != owner.device_epoch
-            || t.owner_public_key != ramflux_protocol::encode_base64url(owner.signing_public_key)
+            || (capability == ObjectRelayCapability::Put
+                && (t.owner_signing_key_id != owner.device_id
+                    || t.owner_device_epoch != owner.device_epoch
+                    || t.owner_public_key
+                        != ramflux_protocol::encode_base64url(owner.signing_public_key)))
+            || t.requester_device_id != t.owner_signing_key_id
+            || t.requester_device_epoch != t.owner_device_epoch
+            || t.requester_public_key != t.owner_public_key
             || t.object_id != hex(&grant.object_id)
             || t.manifest_hash != hex(&grant.manifest_hash)
         {

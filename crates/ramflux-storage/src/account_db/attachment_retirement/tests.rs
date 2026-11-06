@@ -87,6 +87,12 @@ fn retirement_outbox_seals_complete_fanout_and_reopens_with_indexed_pages() -> R
     let db = AccountDb::open(&index, "human", &key)?;
     assert!(db.native_reference_retirement_started(&[3; 32])?);
     assert_eq!(db.pending_attachment_retirements(None, 64)?.len(), 1);
+    assert_reclamation(&db)?;
+    g.reference_id = [77; 32];
+    g.grant_id = [78; 32];
+    g.issued_at = 10_001;
+    g.expires_at = 20_000;
+    db.bind_native_grant("message", "ref", &association(&g)?)?;
     drop(db);
     drop(index);
     std::fs::remove_dir_all(root)?;
@@ -140,4 +146,143 @@ fn signed_requests(
         )?);
     }
     Ok(requests)
+}
+
+#[test]
+fn restore_keeps_target_attachment_authority_and_recounts_its_budgets() -> Result {
+    use crate::BackupDatabase;
+    let root = std::env::temp_dir().join(format!(
+        "rf-retirement-restore-{}",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let index = AccountIndex::open(&root)?;
+    index.create_account("account", "owner")?;
+    let key = AccountDbKey::generate()?;
+    let db = AccountDb::open(&index, "account", &key)?;
+    // Deliberately no actor/object/reference provenance. Runtime state is not imported authority.
+    db.write_transaction(|| {
+        db.connection.execute(
+            "INSERT INTO runtime_attachment_reference VALUES(?1,'target','target',0,0)",
+            params![[1_u8; 32].as_slice()],
+        )?;
+        db.connection.execute(
+            "INSERT INTO runtime_attachment_grant VALUES(?1,?2,?3,'target-source',1)",
+            params![[2_u8; 32].as_slice(), [1_u8; 32].as_slice(), restore_grant(2, 1)?],
+        )?;
+        db.connection.execute("UPDATE runtime_attachment_budget SET grants=9", [])?;
+        Ok::<_, StorageError>(())
+    })?;
+    let target_path = root.join("target.db");
+    let target = db.write_backup_snapshot(&target_path)?;
+    db.write_transaction(|| {
+        db.connection.execute(
+            "INSERT INTO runtime_attachment_reference VALUES(?1,'incoming','incoming',1,0)",
+            params![[3_u8; 32].as_slice()],
+        )?;
+        db.connection.execute(
+            "INSERT INTO runtime_attachment_grant VALUES(?1,?2,?3,'untrusted-source',2)",
+            params![[4_u8; 32].as_slice(), [3_u8; 32].as_slice(), restore_grant(4, 3)?],
+        )?;
+        Ok::<_, StorageError>(())
+    })?;
+    let incoming_path = root.join("incoming.db");
+    let incoming = db.write_backup_snapshot(&incoming_path)?;
+    let mut candidate = BackupDatabase::open(&target_path, &target.key)?;
+    candidate.merge_backup(&incoming_path, &incoming.key, || Ok(()))?;
+    assert_eq!(
+        candidate.db.query_row("SELECT count(*) FROM runtime_attachment_grant", [], |r| r
+            .get::<_, u64>(0))?,
+        1
+    );
+    assert_eq!(
+        candidate.db.query_row("SELECT grants FROM runtime_attachment_budget", [], |r| r
+            .get::<_, u64>(0))?,
+        1
+    );
+    assert_eq!(
+        candidate.db.query_row("SELECT grants FROM runtime_attachment_reference", [], |r| r
+            .get::<_, u64>(0))?,
+        1
+    );
+    assert!(!candidate.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_attachment_reference WHERE message_id='incoming')",
+        [],
+        |r| r.get::<_, bool>(0)
+    )?);
+    drop(candidate);
+    drop(db);
+    drop(index);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn assert_reclamation(db: &AccountDb) -> Result {
+    for (sql, index) in [
+        (
+            "SELECT grant_id FROM runtime_attachment_retirement WHERE pending=0 ORDER BY operation LIMIT 64",
+            "runtime_attachment_retirement_pending",
+        ),
+        (
+            "SELECT grant_id FROM runtime_attachment_expiry WHERE expires<=10001 ORDER BY expires,grant_id LIMIT 64",
+            "runtime_attachment_expiry_due",
+        ),
+    ] {
+        let mut q = db.connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let plan = q
+            .query_map([], |r| r.get::<_, String>(3))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert!(plan.iter().any(|s| s.contains(index)), "{plan:?}");
+        assert!(!plan.iter().any(|s| s.contains("SCAN") || s.contains("TEMP B-TREE")), "{plan:?}");
+    }
+    let before: u64 =
+        db.connection
+            .query_row("SELECT grants FROM runtime_attachment_budget", [], |r| r.get(0))?;
+    assert_eq!(db.gc_attachment_retirements(101, 64)?, 64);
+    assert_eq!(
+        db.connection.query_row("SELECT grants FROM runtime_attachment_budget", [], |r| r
+            .get::<_, u64>(0))?,
+        before - 64
+    );
+    // Expired pending work is settled without any relay row/ACK, in bounded pages.
+    while db.gc_attachment_retirements(10_001, 64)? > 0 {}
+    assert!(db.pending_attachment_retirements(None, 64)?.is_empty());
+    assert_eq!(
+        db.connection.query_row("SELECT grants FROM runtime_attachment_budget", [], |r| r
+            .get::<_, u64>(0))?,
+        0
+    );
+    assert_eq!(
+        db.connection.query_row(
+            "SELECT sum(grants) FROM runtime_attachment_reference",
+            [],
+            |r| r.get::<_, u64>(0)
+        )?,
+        0
+    );
+    Ok(())
+}
+
+fn restore_grant(id: u8, reference: u8) -> std::result::Result<Vec<u8>, StorageError> {
+    let key = SigningKey::from_bytes(&[11; 32]);
+    let owner = QualifiedOwner {
+        account_anchor: "owner".into(),
+        device_id: "device".into(),
+        device_epoch: 1,
+        signing_public_key: key.verifying_key().to_bytes(),
+        home_node_id: "home".into(),
+    };
+    let grant = ScopedAttachmentGrant {
+        grant_id: [id; 32],
+        reference_id: [reference; 32],
+        object_id: [8; 32],
+        manifest_hash: [7; 32],
+        owner: owner.clone(),
+        grantee: owner,
+        epoch: 1,
+        rights: 31,
+        issued_at: 100,
+        expires_at: 10000,
+    };
+    let signature = key.sign(&grant.signing_bytes().map_err(invalid)?).to_bytes();
+    grant.signed_bytes(&signature).map_err(invalid)
 }

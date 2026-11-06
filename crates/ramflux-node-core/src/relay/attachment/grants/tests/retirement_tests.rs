@@ -155,3 +155,60 @@ fn large_retired_grant_blocks_old_token_renewal_and_late_publish() {
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn retirement_accepts_current_owner_devices_and_scopes_operation_ids() {
+    use super::super::fixture::RetirementFixture;
+    let root = std::env::temp_dir().join(format!("rf-current-owner-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let fixture = RetirementFixture::new(&root.join("db"));
+    let r = fixture.request();
+    // Each single-field mutation is freshly signed; every binding has an exact refusal.
+    for field in 0..7 {
+        let mut bad = r.clone();
+        match field {
+            0 => bad.reference_id[0] ^= 1,
+            1 => bad.grant_hash[0] ^= 1,
+            2 => bad.grant_epoch += 1,
+            3 => bad.source_authority = "other".into(),
+            4 => bad.authority_generation += 1,
+            5 => bad.issued_at += 6,
+            _ => bad.grant_id = [17; 32],
+        }
+        let result = fixture.retire(&bad);
+        if field == 6 {
+            assert!(matches!(result, Err(AttachmentLedgerError::State)));
+        } else {
+            assert!(matches!(result, Err(AttachmentLedgerError::Conflict)));
+        }
+    }
+    let foreign = SigningKey::from_bytes(&[88; 32]);
+    let sig = foreign.sign(&r.signing_bytes().unwrap()).to_bytes();
+    let signed = AttachmentRetirement::verify(
+        &r.canonical_bytes().unwrap(),
+        &sig,
+        &foreign.verifying_key().to_bytes(),
+    )
+    .unwrap();
+    let body = hex(blake3::hash(&r.signing_bytes().unwrap()).as_bytes());
+    let proof = auth_for(&fixture.native, fixture.now, ObjectRelayCapability::Tombstone, body);
+    assert!(matches!(
+        fixture.registry.retire(&signed, &proof.context()),
+        Err(AttachmentLedgerError::Conflict)
+    ));
+    let mut rotated = fixture.owner();
+    rotated.device_epoch += 1;
+    rotated.signing_public_key = SigningKey::from_bytes(&[65; 32]).verifying_key().to_bytes();
+    assert_eq!(fixture.retire_as(&r, &rotated, [65; 32]).unwrap(), RetirementOutcome::Retired);
+    let other = fixture.independent(23);
+    let mut r2 = r;
+    r2.grant_id = other.grant().grant_id;
+    r2.grant_hash = other.grant().hash().unwrap();
+    let key = SigningKey::from_bytes(&[66; 32]);
+    rotated.device_id = "second-current-device".into();
+    rotated.signing_public_key = key.verifying_key().to_bytes();
+    assert_eq!(fixture.retire_as(&r2, &rotated, [66; 32]).unwrap(), RetirementOutcome::Retired);
+    drop(fixture);
+    fs::remove_dir_all(root).unwrap();
+}

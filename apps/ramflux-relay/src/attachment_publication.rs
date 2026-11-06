@@ -3,7 +3,7 @@
 //! Dormant publication guard shared by local and S3 data paths after operation admission.
 //! Native token/PoP verification and nonce consumption must precede this helper.
 use ramflux_node_core::attachment::{
-    GrantPublicationLease, ScopedGrantRegistry,
+    AttachmentLedgerError, GrantPublicationLease, ScopedGrantRegistry,
     backend::{AttachmentBackend, BackendError, BackendSegment},
 };
 use ramflux_protocol::large_attachment::{VerifiedContentManifest, VerifiedScopedGrant};
@@ -67,9 +67,12 @@ pub fn read_after_operation_admission(
     {
         return Err(BackendError::Bounds);
     }
-    let lease = registry
-        .lease_after_operation_admission(request.grant, 1, clock())
-        .map_err(|_| BackendError::Retired)?;
+    let lease = registry.lease_after_operation_admission(request.grant, 1, clock()).map_err(
+        |e| match e {
+            AttachmentLedgerError::Capacity => BackendError::Busy,
+            _ => BackendError::Retired,
+        },
+    )?;
     let mut writer = PublicationWriter { output, lease: &lease, clock, remaining: request.length };
     backend.read_range(&spec, request.offset, request.length, &mut writer)?;
     if writer.remaining != 0 {
@@ -78,3 +81,6 @@ pub fn read_after_operation_admission(
     writer.flush()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

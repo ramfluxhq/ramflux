@@ -31,7 +31,9 @@ struct RowSelection<'a> {
     filter: &'a str,
 }
 fn skip_merge_table(table: &str) -> bool {
-    if super::backup_selector_admission::is_scratch(table) {
+    if table.starts_with("runtime_attachment_")
+        || super::backup_selector_admission::is_scratch(table)
+    {
         return true;
     }
     matches!(
