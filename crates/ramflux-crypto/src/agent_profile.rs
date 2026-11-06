@@ -489,9 +489,10 @@ mod tests {
         Ok(())
     }
 
-    // Independent oracle: CPython sorted compact UTF-8 JSON, cryptography 50.0.2 Ed25519,
-    // blake3 1.0.11. Native genesis uses custody_v3_reference.py with entropy10,
-    // primary12/branch13/agreement14 and the unchanged entropy0 human custodian.
+    // Independent oracle: scripts/reference/agent_profile/oracle.py (CPython 3.14, run with -I).
+    // BLAKE3 is the pure-Python primitive pinned at commit 3fde72e (no FFI, not the Rust crate);
+    // Ed25519 is PyCA cryptography 46.0.3. The native record and sidecar envelope are built and
+    // serialized in Python. Lineage is recorded in scripts/reference/agent_profile/manifest.json.
     // No production serializer/signature/hash helper generates these expected values.
     fn oracle(signed: &AgentProfileEnvelope, record: &Envelope<DeviceSet>) -> Result {
         assert_eq!(object_hash(record)?, "WS9hoFDbwEmVP2IXEfYQm3KzyPq6-KXSR1iLSiNZvJo");

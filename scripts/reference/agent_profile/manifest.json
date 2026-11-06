@@ -1,0 +1,23 @@
+{
+  "schema": "ramflux.agent.profile.oracle-manifest.v1",
+  "oracle": "scripts/reference/agent_profile/oracle.py",
+  "consumers": ["crates/ramflux-crypto/src/agent_profile.rs (oracle test)"],
+  "hash_primitive": {
+    "implementation": "pure-Python BLAKE3, no FFI",
+    "source": "scripts/reference/username_directory/pure_blake3.py",
+    "upstream": "https://github.com/oconnor663/pure_python_blake3",
+    "commit": "3fde72eabfc6aa4ea7fa727bdfb852f396f90a17",
+    "sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
+    "license": "scripts/reference/username_directory/pure_blake3.LICENSE (CC0 1.0)",
+    "license_sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+  },
+  "ed25519_provider": "PyCA cryptography 46.0.3 (hash-pinned in scripts/reference/username_directory/requirements.txt)",
+  "python": "CPython 3.14, run with -I",
+  "product_helpers_used": false,
+  "goldens": {
+    "native_head": "WS9hoFDbwEmVP2IXEfYQm3KzyPq6-KXSR1iLSiNZvJo",
+    "signature": "oQtBtYep0hY2BRjGzrXj4DhG_6ZeIjHOnEjpCTdGrR-NzTadps8E3UNhkYUeE1T8olJm6sm-KboL9PTl26-MBQ",
+    "sidecar_digest": "W3juonkTVGcnBDxemcO8yCohbpW35OPOHZ5PVj27U5g"
+  },
+  "note": "Values were first pinned from the python blake3 1.0.11 wrapper (a Rust-library wrapper, not independent). Regenerated with the pure-Python primitive; all three values are unchanged, which confirms the earlier goldens."
+}
