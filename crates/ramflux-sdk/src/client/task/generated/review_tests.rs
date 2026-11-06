@@ -44,7 +44,7 @@ fn generated_number_tokens_preserve_byte_identity_and_refuse_other_spellings() -
 }
 
 #[test]
-fn generated_carrier_refuses_even_resigned_unverified_decision_proof() -> TestResult {
+fn generated_carrier_refuses_resigned_junk_decision_proof_at_verification() -> TestResult {
     let mut client = RamfluxClient::new();
     client.create_device_branch("human", "device", 1, [23; 32]);
     let bytes = client
@@ -73,9 +73,10 @@ fn generated_carrier_refuses_even_resigned_unverified_decision_proof() -> TestRe
         &device(),
     );
     let bytes = g::Task { payload: Some(g::task::Payload::Carrier(carrier)) }.encode_to_vec();
-    exact_invalid(
-        client.decode_generated_task_carrier(&bytes),
-        "generated task decision proof verification unavailable",
+    let result = client.decode_generated_task_carrier(&bytes);
+    assert!(
+        matches!(result, Err(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed))),
+        "expected certificate VerifyFailed, got {result:?}"
     );
     Ok(())
 }
