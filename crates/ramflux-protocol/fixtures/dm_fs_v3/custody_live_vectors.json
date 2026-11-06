@@ -1,0 +1,332 @@
+{
+  "authority": {
+    "certificate": {
+      "body": {
+        "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+        "agreement_identity_public_key": "WFV4TLPIx5bYSsk-j0pT2rC7MegJYAQs-ofwOkKTswg",
+        "branch_signing_public_key": "kaKKC3Q4FZOk2UaVeSCJJq_IrYLIg5t2RDWbnrqaSzo",
+        "capabilities": [
+          "call",
+          "group",
+          "message",
+          "register",
+          "sync"
+        ],
+        "cert_id": "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA",
+        "device_epoch": 1,
+        "device_id": "primary",
+        "expires_at": 1762592000,
+        "master_certificate_hash": "Bh7HDn48G5iKloAt7PzT74Z7x783lGWvw1vCqdl2kLc",
+        "not_before": 1760000000,
+        "principal_kind": "human",
+        "schema": "ramflux.identity.branch_certificate.v1",
+        "version": 1
+      },
+      "signature": "OkbYPZ7S0jm_F3jOTjaLHuTFss9Ye4mYoAP_pONrFC5Py0_khTO0vI2u8pwVZPQmpMjo1p1opClYUGvbCwp3BQ"
+    },
+    "record": {
+      "body": {
+        "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+        "custody_mode": "v3",
+        "delegations": [],
+        "device_set_epoch": 4294967297,
+        "devices": [
+          {
+            "agreement_key_commitment": "PHdsr-F4y_JXd4mao75LINypm8kBcY3QmYmPEFKAU5U",
+            "branch_certificate": {
+              "body": {
+                "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+                "agreement_identity_public_key": "WFV4TLPIx5bYSsk-j0pT2rC7MegJYAQs-ofwOkKTswg",
+                "branch_signing_public_key": "kaKKC3Q4FZOk2UaVeSCJJq_IrYLIg5t2RDWbnrqaSzo",
+                "capabilities": [
+                  "call",
+                  "group",
+                  "message",
+                  "register",
+                  "sync"
+                ],
+                "cert_id": "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBA",
+                "device_epoch": 1,
+                "device_id": "primary",
+                "expires_at": 1762592000,
+                "master_certificate_hash": "Bh7HDn48G5iKloAt7PzT74Z7x783lGWvw1vCqdl2kLc",
+                "not_before": 1760000000,
+                "principal_kind": "human",
+                "schema": "ramflux.identity.branch_certificate.v1",
+                "version": 1
+              },
+              "signature": "OkbYPZ7S0jm_F3jOTjaLHuTFss9Ye4mYoAP_pONrFC5Py0_khTO0vI2u8pwVZPQmpMjo1p1opClYUGvbCwp3BQ"
+            },
+            "device_epoch": 1,
+            "device_id": "primary",
+            "migration_state": "native",
+            "revoked_at": null,
+            "signing_key_commitment": "MYULoOnoZXk0Mw8CTFXKiOqNFMRqcVwcNXHHY3R4acY",
+            "status": "active"
+          }
+        ],
+        "issued_at": 1760000000,
+        "legacy_binding": null,
+        "master_certificate": {
+          "body": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "cert_id": "Dw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8",
+            "custody_kind": "local_human",
+            "issued_at": 1760000000,
+            "legacy_binding_hash": null,
+            "master_public_key": "91gMDpaiATaUYHJSik3XlJDsE9zgPAuUSFl65-vJlZI",
+            "previous_certificate_hash": null,
+            "primary_device_ref": {
+              "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+              "device_epoch": 1,
+              "device_id": "primary"
+            },
+            "principal_id": "dm-fs-live",
+            "principal_kind": "human",
+            "range_index": 1,
+            "schema": "ramflux.identity.master_certificate.v1",
+            "scopes": [
+              "branch_certify",
+              "contact_consent",
+              "delegate",
+              "device_set",
+              "profile"
+            ],
+            "self_signing_public_key": "C1E62bSSQBXKCQLtB5BE06xdvsIwbwaUjBDajrbjny0",
+            "version": 1
+          },
+          "signature": "6YeCRUXzm8qIM5FE8lUmruOk0MviDffNeQASrUw9DZmS-187UTj-Kw5YfJOU2484q6mqpVIrtUw0zxXGQv-jBQ"
+        },
+        "migration": null,
+        "origin": "new",
+        "previous_record_hash": null,
+        "principal_id": "dm-fs-live",
+        "principal_kind": "human",
+        "profile": {
+          "custodian": null,
+          "display_name": "Human",
+          "kind": "human"
+        },
+        "revoked_delegation_ids": [],
+        "revoked_device_checkpoint": null,
+        "schema": "ramflux.identity.signed_device_set.v3",
+        "section_hashes": {
+          "delegations": "u2vjvaKeUTCA8Z_WqY5vv_9W38HfsDvQ0zS0-Jvf9HQ",
+          "devices": "3vMBah0supeG5mb1UY-zcz-nXrP0ER9P1tkZfsi43Fc",
+          "migration": "PuZvvT45m-DToF2lJO4xh2soc6EgMYJjqNW7fudQkoc",
+          "profile": "iZIsq5E_QMjb0JFDj7xJeyG6TbnH7A55S2MZq6uOOcc",
+          "revoked_delegation_ids": "4XeIV73t7KnC-EfggK9imLwWHQvXic1x10d5D10Z57A",
+          "revoked_device_checkpoint": "2w04tcJKbxewLsd4S1mNc4vVm7tHI96cikB7yxH6vv8"
+        },
+        "version": 3
+      },
+      "signature": "d-g1Ro6DvJ3aa5PpUI25wJyRETbDUHD8XDlfhBPKacxm2MOr--IUB-m5Ps-lg5jxgljqfqwHUdb107c_420bCg"
+    }
+  },
+  "branch_seed": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+  "exporter": "0505050505050505050505050505050505050505050505050505050505050505",
+  "principal": "dm-fs-live",
+  "proxy_seed": "0909090909090909090909090909090909090909090909090909090909090909",
+  "rows": [
+    {
+      "action": {
+        "operation": "register",
+        "prekey_bundle": {
+          "fixture": "unchanged-register-control",
+          "profile": "old-native",
+          "version": 1
+        }
+      },
+      "action_hash": "F7yMUyuRY1YL0wGTJebpSHGxIcZAgXlyvkIxZEBGRuQ",
+      "branch_public": "91a28a0b74381593a4d9469579208926afc8ad82c8839b7644359b9eba9a4b3a",
+      "challenge": {
+        "action_hash": "F7yMUyuRY1YL0wGTJebpSHGxIcZAgXlyvkIxZEBGRuQ",
+        "audience": "node",
+        "binding_mode": "home_relay_receipt",
+        "challenge_nonce": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+        "expires_at": 1760000300,
+        "issued_at": 1760000000
+      },
+      "operation": "register",
+      "proof_envelope": {
+        "body": {
+          "action_hash": "F7yMUyuRY1YL0wGTJebpSHGxIcZAgXlyvkIxZEBGRuQ",
+          "audience": "node",
+          "binding_mode": "home_relay_receipt",
+          "certificate_hash": "j60OIwqCkk71OPPaZVGPK8cV5IfwZ2hWoo8CeA8LfPk",
+          "challenge_nonce": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+          "device_ref": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "device_epoch": 1,
+            "device_id": "primary"
+          },
+          "expires_at": 1760000300,
+          "issued_at": 1760000000,
+          "proof_id": "cHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHA",
+          "record_hash": "x7RABC-DWpwkMvmkBt15oD2YYEGMAvtuT3oRyUkKJYE",
+          "schema": "ramflux.identity.branch_proof.v3",
+          "transport_binding": "-EnWcyX6zwQXe8ZjstxUQFGDHFie9YHUEvLrpEg053w",
+          "version": 3
+        },
+        "signature": "8myEthZex2jSwcaE9YjaOmr3ZHrbf8lUnioTke47Dy2fi2ngUYabuIYQMmxhZBMguj2hc-TrTBGoYJzGA3OkBw"
+      },
+      "proof_transcript": "7b22626f6479223a7b22616374696f6e5f68617368223a224637794d557975525931594c307747544a6562705348477849635a4167586c79766b49785a454247527551222c2261756469656e6365223a226e6f6465222c2262696e64696e675f6d6f6465223a22686f6d655f72656c61795f72656365697074222c2263657274696669636174655f68617368223a226a36304f497771436b6b37314f5050615a5647504b386356354966775a3268576f6f38436541384c66506b222c226368616c6c656e67655f6e6f6e6365223a22576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c7061576c6f222c226465766963655f726566223a7b226163636f756e745f616e63686f72223a22327977334a5735305f72734a71644a524e38634b5a4d4633787a5738555f6d3558506833334a34545f4449222c226465766963655f65706f6368223a312c226465766963655f6964223a227072696d617279227d2c22657870697265735f6174223a313736303030303330302c226973737565645f6174223a313736303030303030302c2270726f6f665f6964223a2263484277634842776348427763484277634842776348427763484277634842776348427763484277634841222c227265636f72645f68617368223a227837524142432d445770776b4d766d6b427431356f4432595945474d4176747554336f5279556b4b4a5945222c22736368656d61223a2272616d666c75782e6964656e746974792e6272616e63685f70726f6f662e7633222c227472616e73706f72745f62696e64696e67223a222d456e57637958367a77515865385a6a7374785551464744484669653959485545764c7270456730353377222c2276657273696f6e223a337d2c22646f6d61696e223a2272616d666c75782e6964656e746974792e6272616e63685f70726f6f662e7633227d",
+      "receipt": {
+        "body": {
+          "accepted_at": 1760000000,
+          "audience": "node",
+          "branch_certificate_hash": "j60OIwqCkk71OPPaZVGPK8cV5IfwZ2hWoo8CeA8LfPk",
+          "challenge_nonce": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo",
+          "client_exporter_hash": "-EnWcyX6zwQXe8ZjstxUQFGDHFie9YHUEvLrpEg053w",
+          "issuer_kind": "node_proxy",
+          "message_hash": "xm0D8j7NqSssXXwDENfFXRNs3cSqlmy_ykCt56Xe12w",
+          "node_identity_record_hash": "fN37OaaiZj7yB3aPfYY5-09H127G3COY7YwxsKM3Pzg",
+          "purpose": "branch_proof",
+          "receipt_id": "a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s",
+          "relay_id": "gateway",
+          "relay_key_id": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
+          "schema": "ramflux.identity.relay_acceptance.v1",
+          "source_device_ref": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "device_epoch": 1,
+            "device_id": "primary"
+          },
+          "target_anchor": null,
+          "version": 1
+        },
+        "signature": "sKy3KPITnAJcb1Y2rcK5Ya1rOm0IQVp88rCMrp50ibJDvgvj6Hu7HQEjFhQbMXc-KGieT9VvbxZNeMRLg85RCA"
+      }
+    },
+    {
+      "action": {
+        "operation": "prekey_status",
+        "query": "UkZTMQoBAAMAAQAAABpyYW1mbHV4LmRtLmJvb3RzdHJhcC5mcy52MQACAAAA9VJGUzEBAQAIAAEAAAAgCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsAAgAAAAxwcmluY2lwYWwtMTEAAwAAAAlkZXZpY2UtMTEABAAAAAgAAAABAAAAAQAFAAAAIAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMAAYAAAAgDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0ABwAAACAL7vWp5nnmo-E0_ieDe_8yx8tfXUTqCbyw5UK61qTAzAAIAAAAIH6B6Rbjr82zHvdNjbkj8roVuCoapllOoijc3yfXtU9sAAMAAABQAAEAAABKUkZTMQQBAAMAAQAAAAgAAAAAAAAAAQACAAAACAAAAAAAAAACAAMAAAAgIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI"
+      },
+      "action_hash": "mAhaUDmJN3akSDRkHtq4V8bJO660AVV30ba6zmb7QW0",
+      "branch_public": "91a28a0b74381593a4d9469579208926afc8ad82c8839b7644359b9eba9a4b3a",
+      "challenge": {
+        "action_hash": "mAhaUDmJN3akSDRkHtq4V8bJO660AVV30ba6zmb7QW0",
+        "audience": "node",
+        "binding_mode": "home_relay_receipt",
+        "challenge_nonce": "W1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1s",
+        "expires_at": 1760000300,
+        "issued_at": 1760000000
+      },
+      "operation": "prekey_status",
+      "proof_envelope": {
+        "body": {
+          "action_hash": "mAhaUDmJN3akSDRkHtq4V8bJO660AVV30ba6zmb7QW0",
+          "audience": "node",
+          "binding_mode": "home_relay_receipt",
+          "certificate_hash": "j60OIwqCkk71OPPaZVGPK8cV5IfwZ2hWoo8CeA8LfPk",
+          "challenge_nonce": "W1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1s",
+          "device_ref": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "device_epoch": 1,
+            "device_id": "primary"
+          },
+          "expires_at": 1760000300,
+          "issued_at": 1760000000,
+          "proof_id": "cXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXE",
+          "record_hash": "x7RABC-DWpwkMvmkBt15oD2YYEGMAvtuT3oRyUkKJYE",
+          "schema": "ramflux.identity.branch_proof.v3",
+          "transport_binding": "-EnWcyX6zwQXe8ZjstxUQFGDHFie9YHUEvLrpEg053w",
+          "version": 3
+        },
+        "signature": "gfC7XjTlSTaLnDDl0-wgYA13CItOjn797faAjDAsyWbXBNCCvTTFzCjB0lkWNEbLKba52MwQPe1bm2QyHhhrDA"
+      },
+      "proof_transcript": "7b22626f6479223a7b22616374696f6e5f68617368223a226d41686155446d4a4e33616b5344526b487471345638624a4f36363041565633306261367a6d6237515730222c2261756469656e6365223a226e6f6465222c2262696e64696e675f6d6f6465223a22686f6d655f72656c61795f72656365697074222c2263657274696669636174655f68617368223a226a36304f497771436b6b37314f5050615a5647504b386356354966775a3268576f6f38436541384c66506b222c226368616c6c656e67655f6e6f6e6365223a2257317462573174625731746257317462573174625731746257317462573174625731746257317462573173222c226465766963655f726566223a7b226163636f756e745f616e63686f72223a22327977334a5735305f72734a71644a524e38634b5a4d4633787a5738555f6d3558506833334a34545f4449222c226465766963655f65706f6368223a312c226465766963655f6964223a227072696d617279227d2c22657870697265735f6174223a313736303030303330302c226973737565645f6174223a313736303030303030302c2270726f6f665f6964223a2263584678635846786358467863584678635846786358467863584678635846786358467863584678635845222c227265636f72645f68617368223a227837524142432d445770776b4d766d6b427431356f4432595945474d4176747554336f5279556b4b4a5945222c22736368656d61223a2272616d666c75782e6964656e746974792e6272616e63685f70726f6f662e7633222c227472616e73706f72745f62696e64696e67223a222d456e57637958367a77515865385a6a7374785551464744484669653959485545764c7270456730353377222c2276657273696f6e223a337d2c22646f6d61696e223a2272616d666c75782e6964656e746974792e6272616e63685f70726f6f662e7633227d",
+      "receipt": {
+        "body": {
+          "accepted_at": 1760000000,
+          "audience": "node",
+          "branch_certificate_hash": "j60OIwqCkk71OPPaZVGPK8cV5IfwZ2hWoo8CeA8LfPk",
+          "challenge_nonce": "W1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1s",
+          "client_exporter_hash": "-EnWcyX6zwQXe8ZjstxUQFGDHFie9YHUEvLrpEg053w",
+          "issuer_kind": "node_proxy",
+          "message_hash": "Z3piwrSIfhXAO5Asd0vCfsOTXus4udgVhUOB9midLOc",
+          "node_identity_record_hash": "fN37OaaiZj7yB3aPfYY5-09H127G3COY7YwxsKM3Pzg",
+          "purpose": "branch_proof",
+          "receipt_id": "bGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGw",
+          "relay_id": "gateway",
+          "relay_key_id": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
+          "schema": "ramflux.identity.relay_acceptance.v1",
+          "source_device_ref": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "device_epoch": 1,
+            "device_id": "primary"
+          },
+          "target_anchor": null,
+          "version": 1
+        },
+        "signature": "kkdhMp-RxeBgwTJJNDGwDGOAnSAI8FpKCyMDqkQGVWan4Esc2heo9EPN6rIHKujfJv4zr9jepGy43K6shH49Dw"
+      }
+    },
+    {
+      "action": {
+        "operation": "register_update",
+        "update": "UkZTMQUBAAYAAQAAABpyYW1mbHV4LmRtLmJvb3RzdHJhcC5mcy52MQACAAACEVJGUzECAQALAAEAAAAacmFtZmx1eC5kbS5ib290c3RyYXAuZnMudjEAAgAAAPVSRlMxAQEACAABAAAAIAsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLAAIAAAAMcHJpbmNpcGFsLTExAAMAAAAJZGV2aWNlLTExAAQAAAAIAAAAAQAAAAEABQAAACAMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAAGAAAAIA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NAAcAAAAgC-71qeZ55qPhNP4ng3v_MsfLX11E6gm8sOVCutakwMwACAAAACB-gekW46_Nsx73TY25I_K6FbgqGqZZTqIo3N8n17VPbAADAAAACAAAAAAAAAABAAQAAAAgHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4ABQAAAAgAAAAAAAAAAQAGAAAAICvTlQRhIC4kLyuug8B3EZ1bpK4wBYPX67eSOyJthTNDAAcAAAAIAAAAAAAPQkAACAAAAAgAAAAAACG3QAAJAAAACAAAAAAAAAABAAoAAAAQcmVnaXN0ZXIsbWVzc2FnZQALAAAAQBpARg0_Owzv9fCIGkNopdTFH1eGmmVNk3J5Nbn_iT2Ugtbz_ReuiR-_hW_49i_RdvBGCqtNoSFuqbcJlJU3qgsAAwAAAAgAAAAAAAAAAQAEAAABAgABAAAA_FJGUzEDAQAHAAEAAAAacmFtZmx1eC5kbS5ib290c3RyYXAuZnMudjEAAgAAACDS1RQhplU7mJVBtEXijj5Ig3A-J-oNNX2qCPD7xVNA_gADAAAACAAAAAAAAAABAAQAAAAIAAAAAAAAAAEABQAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAAGAAAAIH00pIFfprmCU15grzvZtJVWgWCA8WQf-B0rfIroJopEAAcAAABAiCJknAP6gkDi0Di3OfAsTwBXTLh4V_BKtCxNMJmhWcaTKP3Adq-SkGufpZLBxIqdxPI9ls8BYfsyHHDUQw3ABgAFAAAAUAABAAAASlJGUzEEAQADAAEAAAAIAAAAAAAAAAEAAgAAAAgAAAAAAAAAAgADAAAAICIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiAAYAAABAAPdDz6Gt5en3Am1e6Kz4paGP_IWIyhmyBLtKurhLyR3qB87N9VPSNXGqn8oGOVA3-KAzSMH2r5IRzpuUV7CgDQ"
+      },
+      "action_hash": "ainoc8ck6GyVF90eYga7c7bD51_uxlKJFl7QDdmHnWU",
+      "branch_public": "91a28a0b74381593a4d9469579208926afc8ad82c8839b7644359b9eba9a4b3a",
+      "challenge": {
+        "action_hash": "ainoc8ck6GyVF90eYga7c7bD51_uxlKJFl7QDdmHnWU",
+        "audience": "node",
+        "binding_mode": "home_relay_receipt",
+        "challenge_nonce": "XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw",
+        "expires_at": 1760000300,
+        "issued_at": 1760000000
+      },
+      "operation": "register_update",
+      "proof_envelope": {
+        "body": {
+          "action_hash": "ainoc8ck6GyVF90eYga7c7bD51_uxlKJFl7QDdmHnWU",
+          "audience": "node",
+          "binding_mode": "home_relay_receipt",
+          "certificate_hash": "j60OIwqCkk71OPPaZVGPK8cV5IfwZ2hWoo8CeA8LfPk",
+          "challenge_nonce": "XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw",
+          "device_ref": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "device_epoch": 1,
+            "device_id": "primary"
+          },
+          "expires_at": 1760000300,
+          "issued_at": 1760000000,
+          "proof_id": "cnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnI",
+          "record_hash": "x7RABC-DWpwkMvmkBt15oD2YYEGMAvtuT3oRyUkKJYE",
+          "schema": "ramflux.identity.branch_proof.v3",
+          "transport_binding": "-EnWcyX6zwQXe8ZjstxUQFGDHFie9YHUEvLrpEg053w",
+          "version": 3
+        },
+        "signature": "YgKOoNEhZoTeCQeiE3mR8FA5iAxnaeYXiH3f53T-yZPZ10qweFrdy1wE5s3c_JhdIijRUc3lsJBoHb3y19urAg"
+      },
+      "proof_transcript": "7b22626f6479223a7b22616374696f6e5f68617368223a2261696e6f6338636b3647795646393065596761376337624435315f75786c4b4a466c375144646d486e5755222c2261756469656e6365223a226e6f6465222c2262696e64696e675f6d6f6465223a22686f6d655f72656c61795f72656365697074222c2263657274696669636174655f68617368223a226a36304f497771436b6b37314f5050615a5647504b386356354966775a3268576f6f38436541384c66506b222c226368616c6c656e67655f6e6f6e6365223a2258467863584678635846786358467863584678635846786358467863584678635846786358467863584677222c226465766963655f726566223a7b226163636f756e745f616e63686f72223a22327977334a5735305f72734a71644a524e38634b5a4d4633787a5738555f6d3558506833334a34545f4449222c226465766963655f65706f6368223a312c226465766963655f6964223a227072696d617279227d2c22657870697265735f6174223a313736303030303330302c226973737565645f6174223a313736303030303030302c2270726f6f665f6964223a22636e4a79636e4a79636e4a79636e4a79636e4a79636e4a79636e4a79636e4a79636e4a79636e4a79636e49222c227265636f72645f68617368223a227837524142432d445770776b4d766d6b427431356f4432595945474d4176747554336f5279556b4b4a5945222c22736368656d61223a2272616d666c75782e6964656e746974792e6272616e63685f70726f6f662e7633222c227472616e73706f72745f62696e64696e67223a222d456e57637958367a77515865385a6a7374785551464744484669653959485545764c7270456730353377222c2276657273696f6e223a337d2c22646f6d61696e223a2272616d666c75782e6964656e746974792e6272616e63685f70726f6f662e7633227d",
+      "receipt": {
+        "body": {
+          "accepted_at": 1760000000,
+          "audience": "node",
+          "branch_certificate_hash": "j60OIwqCkk71OPPaZVGPK8cV5IfwZ2hWoo8CeA8LfPk",
+          "challenge_nonce": "XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw",
+          "client_exporter_hash": "-EnWcyX6zwQXe8ZjstxUQFGDHFie9YHUEvLrpEg053w",
+          "issuer_kind": "node_proxy",
+          "message_hash": "yGeOKEL58L8I7KoQnyiakU2E1xjlaCjCEBHv5R1XSig",
+          "node_identity_record_hash": "fN37OaaiZj7yB3aPfYY5-09H127G3COY7YwxsKM3Pzg",
+          "purpose": "branch_proof",
+          "receipt_id": "bW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW0",
+          "relay_id": "gateway",
+          "relay_key_id": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
+          "schema": "ramflux.identity.relay_acceptance.v1",
+          "source_device_ref": {
+            "account_anchor": "2yw3JW50_rsJqdJRN8cKZMF3xzW8U_m5XPh33J4T_DI",
+            "device_epoch": 1,
+            "device_id": "primary"
+          },
+          "target_anchor": null,
+          "version": 1
+        },
+        "signature": "bbtuT00bsvhAOHaDjvY2fxoN2veq1WnSDgLTZdXxnGXUw_11easzOBRHcqX3qu4IhWaFJmQe2Nm47hE4goDhBw"
+      }
+    }
+  ],
+  "test_vectors_only": "public fixture seeds; generated by dm_fs_v3_write_live_vectors"
+}

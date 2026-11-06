@@ -144,6 +144,7 @@
     "wire_vectors.json": "c4e40872046cd30b8f4e087b909c9e67838ea8c57734eb85c8d881c2cba1384a",
     "crypto_vectors.json": "9b6b769441dd4f9e0b28c4049309cec7339fe745cfec9b97076004e44020406a",
     "custody_vectors.json": "04cd0212ec5227bf6fc858f64f5c9dd4e7a5cc0ea0c2bfcebe05fd7604fd59bf",
+    "custody_live_vectors.json": "ad86a1d26b412963044527e3266e0aedd09d2ffe44d7de2ecb766141fd981b99",
     "oracle_requirements.txt": "c09fe6a6062d35797729ef474ffce91a70eb0e25f6fafffd64064fc31cbd29a0"
   },
   "coverage": {
@@ -161,7 +162,7 @@
     ],
     "filled_maximum_cases": 19
   },
-  "oracle_source_sha256": "151956b64aeab3d3edcc6f19730bf8b4b0357d55c6e81f44f81a1745cd00a7c8",
+  "oracle_source_sha256": "ed907684722450158e13e42b49609c0d13f8840a5a807f44741eb11904395797",
   "design_copy": {
     "approved_source_sha256": "558d57c4513e5f2902f6604b9a15744fa1ea6ab028d7cc630f14d7a79a854012",
     "sha256": "aa5e72d17262e53e6a15c06863474d8c8ad456129906253901dca91cdc771503",
