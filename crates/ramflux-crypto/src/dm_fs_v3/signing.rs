@@ -90,7 +90,7 @@ pub fn sign_base(
     Ok(value)
 }
 /// Verify strict signature validity and embedded public bindings only.
-/// Node keys must come from the caller's authenticated node context.
+/// The caller must establish current branch authority independently.
 /// # Errors
 /// Rejects malformed canonical data, bad signatures and inconsistent bindings.
 pub fn verify_base(value: &SignedNativePrekeyBase) -> Result {
@@ -118,7 +118,7 @@ pub fn sign_opk(
     Ok(value)
 }
 /// Verify strict signature validity and embedded public bindings only.
-/// Node keys must come from the caller's authenticated node context.
+/// The caller must establish current branch authority independently.
 /// # Errors
 /// Rejects malformed canonical data, bad signatures and inconsistent bindings.
 pub fn verify_opk(value: &SignedNativeOpk, branch: &QualifiedBranch) -> Result {
@@ -145,10 +145,11 @@ pub fn sign_owner_update(
     Ok(value)
 }
 /// Verify strict signature validity and embedded public bindings only.
-/// Node keys must come from the caller's authenticated node context.
+/// The caller must establish current branch authority independently.
 /// # Errors
 /// Rejects malformed canonical data, bad signatures and inconsistent bindings.
 pub fn verify_owner_update(value: &OwnerPrekeyUpdate) -> Result {
+    let body = value.signing_body_bytes()?;
     verify_base(&value.base)?;
     for opk in &value.additive_opks {
         verify_opk(opk, &value.base.branch)?;
@@ -158,7 +159,7 @@ pub fn verify_owner_update(value: &OwnerPrekeyUpdate) -> Result {
     }
     verify(
         NativeSignatureDomain::OwnerUpdate,
-        &value.signing_body_bytes()?,
+        &body,
         &value.signature,
         &value.base.branch.signing_key,
     )
@@ -176,7 +177,7 @@ pub fn sign_request(
     Ok(value)
 }
 /// Verify strict signature validity and embedded public bindings only.
-/// Node keys must come from the caller's authenticated node context.
+/// The caller must establish current branch authority independently.
 /// # Errors
 /// Rejects malformed canonical data, bad signatures and inconsistent bindings.
 pub fn verify_request(value: &NativePrekeyRequest) -> Result {
