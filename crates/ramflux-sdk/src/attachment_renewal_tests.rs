@@ -91,6 +91,12 @@ fn sdk_renewal_uses_current_account_branch_and_pinned_home() -> Result {
     let signed = sign_home_renewal(&account, &vault, &input)?;
     signed.proof.verify(&q.signing_public_key, &signed.signature)?;
     assert_eq!(signed, sign_home_renewal(&account, &vault, &input)?);
+    assert_skew_boundaries(
+        &account,
+        &vault,
+        &input,
+        &SkewContext { home: &home, requester: &q, now },
+    )?;
     let mut changed_w = w.clone();
     changed_w.requester.device_epoch += 1;
     let changed = RenewalSigningRequest { attestation: &changed_w, ..input };
@@ -102,6 +108,52 @@ fn sdk_renewal_uses_current_account_branch_and_pinned_home() -> Result {
         result => return Err(format!("unexpected epoch refusal: {result:?}").into()),
     }
     assert_signing_bindings(&credentials.signing.signing_key, &q, &input)?;
+    Ok(())
+}
+
+struct SkewContext<'a> {
+    home: &'a ed25519_dalek::SigningKey,
+    requester: &'a QualifiedOwner,
+    now: u64,
+}
+
+fn assert_skew_boundaries(
+    account: &BornAccount,
+    vault: &dyn PrimaryVault,
+    input: &RenewalSigningRequest<'_>,
+    context: &SkewContext<'_>,
+) -> Result {
+    let w = input.attestation;
+    let now = context.now;
+    for (issued_at, expires_at, expected_issued_at, expected_expires_at) in
+        [(now - 5, now + 25, now, now + 25), (now + 5, now + 35, now + 5, now + 30)]
+    {
+        let attestation = ForwardAttestation { issued_at, expires_at, ..w.clone() };
+        let home_signature = context.home.sign(&attestation.signing_bytes()?).to_bytes();
+        let skewed = RenewalSigningRequest {
+            attestation: &attestation,
+            home_signature: &home_signature,
+            ..*input
+        };
+        let signed = sign_home_renewal(account, vault, &skewed)?;
+        assert_eq!(signed.proof.issued_at, expected_issued_at);
+        assert_eq!(signed.proof.expires_at, expected_expires_at);
+        assert!(signed.proof.expires_at - signed.proof.issued_at <= 30);
+        signed.proof.verify(&context.requester.signing_public_key, &signed.signature)?;
+    }
+    let outside_skew = ForwardAttestation { issued_at: now + 6, expires_at: now + 36, ..w.clone() };
+    let home_signature = context.home.sign(&outside_skew.signing_bytes()?).to_bytes();
+    let outside_skew = RenewalSigningRequest {
+        attestation: &outside_skew,
+        home_signature: &home_signature,
+        ..*input
+    };
+    match sign_home_renewal(account, vault, &outside_skew) {
+        Err(SdkError::LocalBusRefused { body, .. }) => {
+            assert_eq!(body["reason"], "forward time");
+        }
+        result => return Err(format!("unexpected out-of-skew result: {result:?}").into()),
+    }
     Ok(())
 }
 

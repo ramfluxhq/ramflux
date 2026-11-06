@@ -86,12 +86,13 @@ fn sign_with_branch(
         return Err(FormatError("renewal home"));
     }
     w.verify(trust.home_key, signature)?;
+    let issued_at = (*now).max(w.issued_at);
     let proof = RequesterPop {
         operation_hash: w.operation_hash,
         requester_digest: requester_digest(requester)?,
         nonce: *nonce,
-        issued_at: *now,
-        expires_at: w.expires_at,
+        issued_at,
+        expires_at: w.expires_at.min(now.saturating_add(30)).min(issued_at.saturating_add(30)),
         forward_digest: w.hash()?,
     };
     proof.validate(w, *now)?;

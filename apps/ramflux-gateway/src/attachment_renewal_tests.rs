@@ -118,6 +118,7 @@ fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_reques
     let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
     let runtime = GatewaySessionRuntime {
         session_push: None,
+        push_limit: 256,
         source_identity: source.clone(),
         session_id: "s".into(),
         resume_token: "r".into(),
@@ -201,7 +202,7 @@ async fn mesh_round_trip(forwarded: &ForwardedRenewal, token: &[u8]) -> Result {
     let endpoint = server.local_addr()?.to_string();
     let expected = forwarded.clone();
     let response = token.to_vec();
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         let connection = server.accept_connection().await?;
         let accepted =
             ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(
@@ -221,12 +222,31 @@ async fn mesh_round_trip(forwarded: &ForwardedRenewal, token: &[u8]) -> Result {
         // Keep the authenticated connection owner alive until the client has read.
         Ok::<_, anyhow::Error>((server, connection))
     });
-    let received =
-        post_forwarded(&endpoint, &client_tls, "ramflux-source", &[trusted_source], forwarded)
-            .await?;
-    assert_eq!(received, token);
-    let owners = task.await??;
-    drop(owners);
+    let round_trip = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let received =
+            post_forwarded(&endpoint, &client_tls, "ramflux-source", &[trusted_source], forwarded)
+                .await?;
+        anyhow::ensure!(received == token, "renewal token response changed");
+        let owners = (&mut task).await??;
+        drop(owners);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    match round_trip {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            task.abort();
+            let _ = task.await;
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(error.into());
+        }
+        Err(elapsed) => {
+            task.abort();
+            let _ = task.await;
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(anyhow::anyhow!("renewal mesh round trip exceeded 15s: {elapsed}").into());
+        }
+    }
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
