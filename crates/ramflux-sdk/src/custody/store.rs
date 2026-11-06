@@ -77,6 +77,46 @@ impl std::fmt::Debug for AgentProvisioningBundle {
 impl Drop for AgentProvisioningBundle {
     fn drop(&mut self) {
         self.data_passphrase.zeroize();
+        #[cfg(test)]
+        export_observer::inspect("p07-export-passphrase", self.data_passphrase.as_bytes());
+    }
+}
+/// Owned copy of the provisioning secret used for UTF-8 validation. It is cleared on every exit,
+/// including the invalid-UTF-8 error: validation borrows from this guard (`str::from_utf8`), so no
+/// unguarded `Vec`/`FromUtf8Error` buffer exists on any path.
+struct ExportSource(Vec<u8>);
+impl ExportSource {
+    fn copy(secret: &[u8]) -> Self {
+        Self(secret.to_vec())
+    }
+}
+impl Drop for ExportSource {
+    fn drop(&mut self) {
+        self.0.zeroize();
+        #[cfg(test)]
+        export_observer::inspect("p07-export-utf8", &self.0);
+    }
+}
+/// Test-only observer of the export conversion buffers after cleanup (see D6, P07).
+#[cfg(test)]
+pub(crate) mod export_observer {
+    use std::cell::RefCell;
+    pub(crate) type Seen = Vec<(&'static str, Vec<u8>)>;
+    thread_local! {
+        static SEEN: RefCell<Option<Seen>> = const { RefCell::new(None) };
+    }
+    pub(crate) fn begin() {
+        SEEN.with(|seen| *seen.borrow_mut() = Some(Vec::new()));
+    }
+    pub(super) fn inspect(label: &'static str, bytes: &[u8]) {
+        SEEN.with(|seen| {
+            if let Some(seen) = seen.borrow_mut().as_mut() {
+                seen.push((label, bytes.to_vec()));
+            }
+        });
+    }
+    pub(crate) fn take() -> Seen {
+        SEEN.with(|seen| seen.borrow_mut().take().unwrap_or_default())
     }
 }
 /// An authenticated local account, with no legacy root signer or active session.
@@ -600,7 +640,10 @@ pub(crate) fn export_agent_credentials(
     }
     let reference = agent.stored.agent_provisioning_vault_ref.as_deref().ok_or_else(invalid)?;
     let secret = vault.load_provisioning_secret(reference)?;
-    let passphrase = String::from_utf8(secret.to_vec()).map_err(|_| invalid())?;
+    let passphrase = {
+        let source = ExportSource::copy(&secret);
+        std::str::from_utf8(&source.0).map_err(|_| invalid())?.to_owned()
+    };
     let bundle =
         AgentProvisioningBundle { account_id: account_id.to_owned(), data_passphrase: passphrase };
     let bytes = Zeroizing::new(ramflux_protocol::canonical_json_bytes(&bundle)?);
