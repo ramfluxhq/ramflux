@@ -2,15 +2,17 @@
 // Copyright (c) 2026 Span Brain
 
 //! Whole-population issued observations, bounded to four 1,024-target requests.
+mod request;
 use crate::{GatewaySessionHub, RouterMeshClient};
-#[derive(Debug, serde::Deserialize)]
+pub(crate) use request::Requests;
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct IssuedSeq {
     pub(crate) target_delivery_id: String,
     pub(crate) incarnation_id: Option<String>,
     pub(crate) inbox_seq: u64,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct IssuedSeqsResponse {
     issued: Vec<IssuedSeq>,
@@ -62,18 +64,10 @@ pub(crate) async fn round(hub: &Arc<GatewaySessionHub>, router: &RouterMeshClien
         let router = router.clone();
         tasks.spawn(async move {
             let targets: Vec<_> = page.iter().map(|(target, _)| target.clone()).collect();
-            let result = tokio::time::timeout(Duration::from_millis(1500), async {
-                let response: IssuedSeqsResponse = crate::router_post_json_async(
-                    &router,
-                    "/mvp0/issued-seqs",
-                    &ramflux_node_core::IssuedSeqsRequest { targets: targets.clone() },
-                )
-                .await?;
-                validate(&targets, response).map_err(anyhow::Error::from)
-            })
-            .await
-            .ok()
-            .and_then(Result::ok);
+            let result = request::post(&router, targets.clone(), &hub.probe_requests)
+                .await
+                .and_then(|reply| decode(&targets, &reply.bytes, reply.mesh_frame))
+                .ok();
             for (target, entry) in page {
                 hub.probe_observation(
                     &target,
@@ -146,6 +140,32 @@ fn validate(
         }
     }
     Ok(result)
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct IssuedWireResponse {
+    status: u16,
+    body: IssuedSeqsResponse,
+}
+fn decode(
+    targets: &[String],
+    bytes: &[u8],
+    mesh_frame: bool,
+) -> anyhow::Result<BTreeMap<String, IssuedSeq>> {
+    // Validate original bytes with the shared I-JSON policy before constructing typed rows.
+    let response = if mesh_frame {
+        let wire: IssuedWireResponse = ramflux_protocol::parse_i_json(bytes)?;
+        anyhow::ensure!(
+            (200..300).contains(&wire.status),
+            "issued probe HTTP status {}",
+            wire.status
+        );
+        wire.body
+    } else {
+        ramflux_protocol::parse_i_json(bytes)?
+    };
+    Ok(validate(targets, response)?)
 }
 
 /// Offered ranges are hints only. They never acknowledge or settle a client inbox.

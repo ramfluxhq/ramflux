@@ -28,6 +28,7 @@ pub(crate) struct GatewaySessionHub {
     senders_by_target: AsyncMutex<Arc<Index<GatewayHubEntry>>>,
     next_registration: std::sync::atomic::AtomicU64,
     pub(crate) probe_started: std::sync::atomic::AtomicBool,
+    pub(crate) probe_requests: crate::issued_probe::Requests,
     pub(crate) readiness: Arc<crate::session_push::Readiness>,
 }
 
