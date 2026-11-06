@@ -21,7 +21,7 @@ struct Intent {
     group: Option<String>,
     body: String,
     created_at: i64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<i64>,
     owner_record: Option<(String, String)>,
 }
@@ -283,3 +283,21 @@ pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_b
 
 #[cfg(test)]
 pub(crate) use background::drive_once;
+
+#[cfg(test)]
+mod retention_compatibility_tests {
+    use super::*;
+    #[test]
+    fn legacy_own_copy_intent_keeps_expiry_and_fingerprint() -> Result<(), SdkError> {
+        let old = json!({"copy_id":"copy","sequence":1,"id":"message","conversation":"thread",
+            "group":null,"body":"","created_at":100,"owner_record":null});
+        let intent: Intent = serde_json::from_value(old.clone())?;
+        assert_eq!(intent.expiry(), 700);
+        assert_eq!(
+            serde_json::to_value(intent)?,
+            old,
+            "adding a null changes the in-flight CAS fingerprint"
+        );
+        Ok(())
+    }
+}
