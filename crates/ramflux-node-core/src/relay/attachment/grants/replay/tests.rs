@@ -105,8 +105,43 @@ fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
     drop(store);
     std::fs::remove_file(path).unwrap();
     assert_replay_budgets_and_indexed_gc_keep_unrelated_principals_live();
-    super::capacity_tests::assert_default_capacity_through_public_admission();
+    super::capacity_tests::assert_default_capacity_worst_case_principals_on_disk();
 }
+#[test]
+fn inclusive_skew_fence_and_expiry_boundaries_admit_fresh_nonces() {
+    let path = path("inclusive-bounds");
+    let f = RetirementFixture::new_at(&path, crate::now_unix_seconds());
+    let now = f.now;
+    let admit = |nonce: u8, issued_at: u64, expires_at: u64, at: u64| {
+        f.registry
+            .admit_operation_after_authentication(
+                &f.grant,
+                1,
+                &AttachmentReplayProof { nonce: [nonce; 32], issued_at, expires_at },
+                at,
+            )
+            .map(drop)
+    };
+    // Issue time exactly at the skew limit (now+5) is admitted.
+    admit(1, now + 5, now + 35, now).unwrap();
+    // Move the durable clock fence to now+10, then admit exactly 5 s behind it.
+    admit(2, now + 10, now + 40, now + 10).unwrap();
+    admit(3, now + 5, now + 35, now + 5).unwrap();
+    // Exactly at expires+4 is still live; exactly 6 s behind the fence is refused.
+    admit(4, now, now + 30, now + 34).unwrap();
+    assert!(matches!(
+        admit(5, now + 28, now + 58, now + 28),
+        Err(AttachmentReplayError::ClockUncertain)
+    ));
+    // Exact consumption-row GC boundary: a row is collectable at expires+5.
+    assert_eq!(f.registry.gc_consumed_proofs(now + 34, 64).unwrap(), 0);
+    assert_eq!(f.registry.gc_consumed_proofs(now + 35, 64).unwrap(), 1);
+    assert_eq!(f.registry.gc_consumed_proofs(now + 39, 64).unwrap(), 0);
+    assert_eq!(f.registry.gc_consumed_proofs(now + 40, 64).unwrap(), 2);
+    drop(f);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[test]
 fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
     let path = path("fields");
