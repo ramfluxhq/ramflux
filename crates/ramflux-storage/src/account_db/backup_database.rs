@@ -172,6 +172,7 @@ impl BackupDatabase {
                 super::mac_subkeys::initialize(&mut db, key, false)?;
             }
         }
+        db.execute_batch(crate::schema_large_segments::RETIREMENT_SCHEMA)?;
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
         if mode == BackupOpenMode::Normalized && original_input.unowned_legacy_actor_count > 0 {

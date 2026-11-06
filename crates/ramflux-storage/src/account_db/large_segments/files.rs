@@ -34,7 +34,7 @@ pub(super) fn private_dir(path: &Path) -> Result<(), StorageError> {
     }
     Ok(())
 }
-fn sync_dir(path: &Path) -> Result<(), StorageError> {
+pub(super) fn sync_dir(path: &Path) -> Result<(), StorageError> {
     File::open(path)?.sync_all()?;
     Ok(())
 }
@@ -151,6 +151,7 @@ impl SegmentStore<'_> {
         if hashes.get(start..start + 32) != Some(blake3::hash(&bytes).as_bytes().as_slice()) {
             return Err(StorageError::Integrity("segment chunk hash"));
         }
+        self.current(id, generation)?;
         Ok(bytes)
     }
 

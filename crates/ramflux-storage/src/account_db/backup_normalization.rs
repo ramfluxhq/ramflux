@@ -30,6 +30,7 @@ impl BackupDatabase {
             self.db.execute_batch("INSERT INTO incoming.runtime_account_identity SELECT * FROM main.runtime_account_identity; INSERT INTO incoming.schema_migration SELECT * FROM main.schema_migration; INSERT INTO incoming.account_mac_bundle SELECT * FROM main.account_mac_bundle;")?;
             self.begin_merge_inputs(true, |_| Ok(()))?;
             capture_input_deletions(&self.db)?;
+            crate::account_db::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(&mut || Ok(()))?;
             self.merge_contact_fences()?;
             self.prepare_conversation_counts()?;
