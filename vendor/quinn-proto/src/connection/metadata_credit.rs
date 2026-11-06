@@ -44,8 +44,12 @@ pub struct MetadataStats {
     /// Decrypted packet payload length observed at admission, before copy reservation/allocation.
     pub receive_payload_len: usize,
     /// Actual capacity of the most recent admitted receive payload copy.
-    /// Owner/refcount-envelope allocation is not included or certified by this component.
+    /// The owner/refcount envelope is a distinct, separately charged allocation.
     pub receive_backing_capacity: usize,
+    /// Wrapper layout observed from the actual Bytes constructor before reservation.
+    pub receive_owner_layout: usize,
+    /// Successfully allocated receive owner envelopes, shared by all their views.
+    pub receive_owner_allocations: u64,
     /// Frozen byte ceiling.
     pub limit: usize,
     /// Live allocation charges.
@@ -85,6 +89,8 @@ impl MetadataCredit {
     }
     pub(crate) fn observe_receive_payload_len(&self, length:usize){self.state.lock().unwrap().receive_payload_len=length;}
     pub(crate) fn receive_backing_capacity(&self, capacity:usize){self.state.lock().unwrap().receive_backing_capacity=capacity;}
+    pub(crate) fn receive_owner_layout(&self, size: usize) { self.state.lock().unwrap().receive_owner_layout=size; }
+    pub(crate) fn receive_owner_allocated(&self) { let mut s=self.state.lock().unwrap();s.receive_owner_allocations=s.receive_owner_allocations.saturating_add(1); }
     pub(crate) fn allocated(&self) { let mut s=self.state.lock().unwrap();s.allocations=s.allocations.saturating_add(1); }
 }
 impl Drop for AllocationCharge {
@@ -121,6 +127,9 @@ impl super::Connection {
         self.metadata=Some(credit.clone());
         MetadataProbe(credit)
     }
+    /// Production receive owner's compiler layout, queried without allocation.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_receive_owner_layout(&self) -> usize { super::metadata_owned_bytes::owner_layout().size() }
     /// Actual pending descriptor backing across packet spaces, independent of the ledger.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_pending_storage(&self)->usize{self.spaces.iter().map(|s|s.pending.capacity_bytes()).sum()}

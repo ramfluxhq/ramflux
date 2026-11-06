@@ -47,6 +47,11 @@ impl Connection {
     /// Construct an encrypted wire packet using the actual peer's negotiated keys.
     #[doc(hidden)]
     pub fn control_test_packet(&self, number: u64, handshake: bool, frames: &[u8]) -> Vec<u8> {
+        self.control_test_packet_with_payload_len(number, handshake, frames).0
+    }
+    /// Encrypted test packet plus independently observed pre-encryption payload length.
+    #[doc(hidden)]
+    pub fn control_test_packet_with_payload_len(&self, number: u64, handshake: bool, frames: &[u8]) -> (Vec<u8>, usize) {
         let space = if handshake {
             SpaceId::Handshake
         } else {
@@ -74,12 +79,13 @@ impl Connection {
         let partial = header.encode(&mut bytes);
         bytes.extend_from_slice(frames);
         bytes.resize(bytes.len().max(64) + keys.packet.local.tag_len(), 0);
+        let payload_len = bytes.len() - partial.header_len - keys.packet.local.tag_len();
         partial.finish(
             &mut bytes,
             &*keys.header.local,
             Some((number, &*keys.packet.local)),
         );
-        bytes
+        (bytes, payload_len)
     }
     /// Arm the normal CID timer; the real Tokio driver must execute it.
     #[doc(hidden)]

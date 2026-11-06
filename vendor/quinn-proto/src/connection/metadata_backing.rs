@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Dormant receive payload copies whose credit follows the final Bytes view.
 //!
-//! This hook covers the exact payload allocation only. The Bytes owner/refcount
-//! envelope is a distinct allocation and remains uncertified until its actual
-//! final-deallocation boundary is instrumented. No receive-class certificate yet.
-use super::metadata_credit::{AllocationCharge, MetadataClass, MetadataCredit, ResourceExhausted};
+//! Payload storage and the Bytes wrapper have separate reservations; both follow
+//! their actual free boundaries. Other receive allocations remain uncertified.
+use super::{
+    metadata_credit::{MetadataClass, MetadataCredit, ResourceExhausted},
+    metadata_owned_bytes::{self, PayloadBacking},
+};
 use bytes::Bytes;
 use std::sync::Arc;
 
@@ -31,17 +33,7 @@ pub(super) fn copy_payload(
     credit.allocated();
     credit.receive_backing_capacity(bytes.capacity());
     bytes.extend_from_slice(source);
-    Ok(Bytes::from_owner(PayloadBacking { bytes, _raw_owner: raw_owner, _charge: charge }))
-}
-
-struct PayloadBacking {
-    // Field order: destroy the actual payload allocation before returning its credit.
-    bytes: Vec<u8>,
-    _raw_owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
-    _charge: Option<AllocationCharge>,
-}
-impl AsRef<[u8]> for PayloadBacking {
-    fn as_ref(&self) -> &[u8] { &self.bytes }
+    metadata_owned_bytes::into_bytes(PayloadBacking::new(bytes, raw_owner, charge), credit, class)
 }
 
 #[cfg(test)]
@@ -50,15 +42,16 @@ mod tests {
     #[test]
     fn exact_payload_capacity_is_shared_through_slices_and_last_clone() {
         for class in [MetadataClass::StreamAssemblers, MetadataClass::CryptoAssemblers] {
-            let credit = MetadataCredit::new(192);
+            let owner_charge = ((metadata_owned_bytes::owner_layout().size()+63)&!63)+64;
+            let credit = MetadataCredit::new(192+owner_charge);
             let mut bytes = copy_payload(&[0x5a; 65], None, &credit, class).unwrap();
             assert_eq!(credit.stats().receive_backing_capacity, 65);
             let tail = bytes.split_off(32);
             let held = tail.slice(1..).clone();
             drop((bytes, tail));
             assert_eq!(&held[..], &[0x5a;32]);
-            assert_eq!(credit.stats().used, 192);
-            assert_eq!(credit.stats().allocations, 1);
+            assert_eq!(credit.stats().used, 192+owner_charge);
+            assert_eq!(credit.stats().allocations, 2);
             drop(held);assert_eq!(credit.stats().used, 0);
         }
     }

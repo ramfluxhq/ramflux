@@ -805,6 +805,16 @@ async fn metadata_receiver_drop_propagates_pending_refusal(){
 #[tokio::test]
 async fn receive_backing_credit_follows_last_bytes_owner(){
     receive_backing_copy_refuses_before_stream().await;
+    receive_backing_shared_payload_and_owner().await;
+}
+
+#[tokio::test]
+async fn receive_owner_metadata_survives_final_payload_drop(){
+    receive_owner_refuses_before_stream().await;
+    receive_backing_shared_payload_and_owner().await;
+}
+
+async fn receive_backing_shared_payload_and_owner(){
     let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
     gate.closed.store(true,Ordering::SeqCst);
     let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
@@ -826,6 +836,9 @@ async fn receive_backing_credit_follows_last_bytes_owner(){
     assert!(admitted_payload_len>first.len()+second.len(),"packet payload includes STREAM framing");
     assert_eq!(capacity,admitted_payload_len,"physical copy capacity matches independently observed decrypted packet length");
     let payload_charge=((capacity+63)&!63)+64;
+    let owner_charge=((probe.stats().receive_owner_layout+63)&!63)+64;
+    let backing_charge=payload_charge+owner_charge;
+    assert_eq!(probe.stats().receive_owner_allocations,1,"two STREAM frames share one wrapper");
     let view=first.slice(1..);let held=view.clone();drop((first,view));
     let held_data=held.to_vec();let second_data=second.to_vec();
     recv1.stop(0u32.into()).unwrap();recv2.stop(0u32.into()).unwrap();
@@ -835,15 +848,15 @@ async fn receive_backing_credit_follows_last_bytes_owner(){
     assert_eq!(&held[..],&held_data[..],"held view survives STOP_SENDING and RESET_STREAM");
     assert_eq!(&second[..],&second_data[..]);
     assert!(raw.snapshot().0.items>=1,"stop does not destroy the retained packet owner");
-    assert!(probe.stats().used>=payload_charge);
+    assert!(probe.stats().used>=backing_charge);
     connection.close(0u32.into(),b"done");
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((recv1,recv2,send1,send2,connection,peer,endpoint,peer_endpoint));
-    until(||probe.stats().used==payload_charge).await;
+    until(||probe.stats().used==backing_charge).await;
     assert_eq!(raw.snapshot().0.items,1,"two STREAM views retain one shared packet owner");
     assert!(!held.is_empty());assert!(!second.is_empty());
     drop(second);
-    assert_eq!(probe.stats().used,payload_charge,"one remaining slice/clone retains the full allocation");
+    assert_eq!(probe.stats().used,backing_charge,"one remaining slice/clone retains the full allocation");
     assert_eq!(raw.snapshot().0.items,1);
     drop(held);until(||probe.stats().used==0&&raw.snapshot().0.items==0).await;
 }
@@ -865,4 +878,38 @@ async fn receive_backing_copy_refuses_before_stream(){
     assert_eq!(connection.stats().frame_rx.stream,before,"refused payload does not produce STREAM effects");
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+}
+
+async fn receive_owner_refuses_before_stream() {
+    let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);
+    wire.held.store(true,Ordering::SeqCst);
+    wire.suppress_send.store(true,Ordering::SeqCst);
+    let number=connection.control_test(|p|p.metadata_test_next_received());
+    // STREAM with explicit length, server-initiated unidirectional stream 3, one byte.
+    let(packet,payload_len)=peer.control_test(|p|p.control_test_packet_with_payload_len(number,false,&[0x0a,3,1,0x5a]));
+    let owner_layout=connection.control_test(|p|p.metadata_test_receive_owner_layout());
+    let payload_charge=((payload_len+63)&!63)+64;
+    let owner_charge=((owner_layout+63)&!63)+64;
+    let probe=connection.control_test(|p|p.metadata_test_limit(payload_charge+owner_charge-1));
+    let before=connection.stats().frame_rx.stream;
+    wire.packets.lock().unwrap().clear();
+    wire.packets.lock().unwrap().push_back(packet);
+    wire.held.store(false,Ordering::SeqCst);
+    if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
+    gate.open();
+    until(||connection.close_reason().is_some()||connection.stats().frame_rx.stream>before).await;
+    assert_eq!(connection.stats().frame_rx.stream,before,"unadmitted owner wrapper produced a STREAM effect");
+    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    let stats=probe.stats();
+    assert_eq!(stats.receive_payload_len,payload_len,"wire builder observation precedes receive admission");
+    assert_eq!(stats.receive_backing_capacity,payload_len,"payload was allocated before the separate wrapper refusal");
+    assert_eq!(stats.receive_owner_layout,owner_layout);
+    assert_eq!(stats.receive_owner_allocations,0,"refused wrapper never reaches allocation");
+    assert_eq!(stats.allocations,1,"only the admitted payload copy allocated");
+    assert_eq!(stats.failed_class,Some(proto::MetadataClass::StreamAssemblers));
+    assert!(stats.peak<=stats.limit);
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    drop((connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }
