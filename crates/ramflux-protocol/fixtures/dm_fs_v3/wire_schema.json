@@ -186,7 +186,7 @@
     "SignedNativeOpk": {
       "code": 3,
       "version": 1,
-      "ceiling": 512,
+      "ceiling": 1024,
       "domain": "opk",
       "fields": [
         {
@@ -243,7 +243,7 @@
     "RetirementRef": {
       "code": 4,
       "version": 1,
-      "ceiling": 128,
+      "ceiling": 1024,
       "domain": null,
       "fields": [
         {
@@ -272,7 +272,7 @@
     "OwnerPrekeyUpdate": {
       "code": 5,
       "version": 1,
-      "ceiling": 65536,
+      "ceiling": 50176,
       "domain": "owner_update",
       "fields": [
         {
@@ -301,14 +301,14 @@
           "name": "additive_opks",
           "kind": "list64@SignedNativeOpk",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 16386
         },
         {
           "id": 5,
           "name": "retirements",
           "kind": "list400@RetirementRef",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 31202
         },
         {
           "id": 6,
@@ -322,7 +322,7 @@
     "PrekeyPublicationSnapshot": {
       "code": 6,
       "version": 1,
-      "ceiling": 65536,
+      "ceiling": 81920,
       "domain": "publication_snapshot",
       "fields": [
         {
@@ -337,7 +337,7 @@
           "name": "update",
           "kind": "@OwnerPrekeyUpdate",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 50176
         },
         {
           "id": 3,
@@ -365,7 +365,7 @@
           "name": "pending_retirements",
           "kind": "list400@RetirementRef",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 31202
         },
         {
           "id": 7,
@@ -379,7 +379,7 @@
     "PublicPrekeyView": {
       "code": 7,
       "version": 1,
-      "ceiling": 4096,
+      "ceiling": 2048,
       "domain": "public_view",
       "fields": [
         {
@@ -415,7 +415,7 @@
     "PrekeyLeaseIntent": {
       "code": 8,
       "version": 1,
-      "ceiling": 4096,
+      "ceiling": 2048,
       "domain": "lease_intent",
       "fields": [
         {
@@ -479,7 +479,7 @@
     "PrekeyLeaseResult": {
       "code": 9,
       "version": 1,
-      "ceiling": 8192,
+      "ceiling": 4096,
       "domain": "lease_result",
       "fields": [
         {
@@ -501,7 +501,7 @@
           "name": "opk",
           "kind": "opt@SignedNativeOpk",
           "required": true,
-          "max_bytes": 513
+          "max_bytes": 1025
         },
         {
           "id": 4,
@@ -564,7 +564,7 @@
     "OwnerStatusQuery": {
       "code": 10,
       "version": 1,
-      "ceiling": 16384,
+      "ceiling": 17408,
       "domain": null,
       "fields": [
         {
@@ -586,14 +586,14 @@
           "name": "requested_ids",
           "kind": "list200@RetirementRef",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 15602
         }
       ]
     },
     "OwnerStatusEntry": {
       "code": 11,
       "version": 1,
-      "ceiling": 256,
+      "ceiling": 1024,
       "domain": null,
       "fields": [
         {
@@ -643,7 +643,7 @@
     "OwnerPrekeyStatus": {
       "code": 12,
       "version": 1,
-      "ceiling": 65536,
+      "ceiling": 37888,
       "domain": "owner_status",
       "fields": [
         {
@@ -707,7 +707,7 @@
           "name": "entries",
           "kind": "list200@OwnerStatusEntry",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 35202
         },
         {
           "id": 10,
@@ -721,7 +721,7 @@
     "NativePrekeyRequest": {
       "code": 13,
       "version": 1,
-      "ceiling": 8192,
+      "ceiling": 3072,
       "domain": "request",
       "fields": [
         {
@@ -827,7 +827,7 @@
     "NativePrekeyLease": {
       "code": 14,
       "version": 1,
-      "ceiling": 16384,
+      "ceiling": 5120,
       "domain": "frame_lease",
       "fields": [
         {
@@ -842,21 +842,21 @@
           "name": "request",
           "kind": "@NativePrekeyRequest",
           "required": true,
-          "max_bytes": 8192
+          "max_bytes": 3072
         },
         {
           "id": 3,
           "name": "intent",
           "kind": "@PrekeyLeaseIntent",
           "required": true,
-          "max_bytes": 4096
+          "max_bytes": 2048
         }
       ]
     },
     "NativePrekeyPublish": {
       "code": 15,
       "version": 1,
-      "ceiling": 131072,
+      "ceiling": 53248,
       "domain": "frame_publish",
       "fields": [
         {
@@ -871,21 +871,21 @@
           "name": "request",
           "kind": "@NativePrekeyRequest",
           "required": true,
-          "max_bytes": 8192
+          "max_bytes": 3072
         },
         {
           "id": 3,
           "name": "update",
           "kind": "@OwnerPrekeyUpdate",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 50176
         }
       ]
     },
     "NativePrekeyStatus": {
       "code": 16,
       "version": 1,
-      "ceiling": 32768,
+      "ceiling": 19456,
       "domain": "frame_status",
       "fields": [
         {
@@ -900,21 +900,21 @@
           "name": "request",
           "kind": "@NativePrekeyRequest",
           "required": true,
-          "max_bytes": 8192
+          "max_bytes": 3072
         },
         {
           "id": 3,
           "name": "query",
           "kind": "@OwnerStatusQuery",
           "required": true,
-          "max_bytes": 16384
+          "max_bytes": 17408
         }
       ]
     },
     "NativePrekeyResult": {
       "code": 17,
       "version": 1,
-      "ceiling": 131072,
+      "ceiling": 40960,
       "domain": "frame_result",
       "fields": [
         {
@@ -943,14 +943,14 @@
           "name": "lease",
           "kind": "opt@PrekeyLeaseResult",
           "required": true,
-          "max_bytes": 8193
+          "max_bytes": 4097
         },
         {
           "id": 5,
           "name": "status",
           "kind": "opt@OwnerPrekeyStatus",
           "required": true,
-          "max_bytes": 65537
+          "max_bytes": 37889
         },
         {
           "id": 6,
@@ -992,7 +992,7 @@
     "BootstrapHeader": {
       "code": 18,
       "version": 1,
-      "ceiling": 16384,
+      "ceiling": 8192,
       "domain": "header",
       "fields": [
         {
@@ -1147,14 +1147,14 @@
           "name": "routed_ad",
           "kind": "bytes",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 4096
         }
       ]
     },
     "BootstrapTranscript": {
       "code": 19,
       "version": 1,
-      "ceiling": 32768,
+      "ceiling": 12288,
       "domain": "transcript",
       "fields": [
         {
@@ -1169,7 +1169,7 @@
           "name": "header",
           "kind": "@BootstrapHeader",
           "required": true,
-          "max_bytes": 16384
+          "max_bytes": 8192
         },
         {
           "id": 3,
@@ -1190,7 +1190,7 @@
           "name": "routed_ad",
           "kind": "bytes",
           "required": true,
-          "max_bytes": 65536
+          "max_bytes": 4096
         }
       ]
     }
@@ -1423,5 +1423,90 @@
     }
   },
   "test_vectors_only": "public fixture seeds",
-  "code_fields": "Control-free UTF-8; P03-P05 typed decoders own value sets, empty values and combination semantics."
+  "code_fields": "Control-free UTF-8; P03-P05 typed decoders own value sets, empty values and combination semantics.",
+  "size_policy": {
+    "decision": "r7",
+    "minimum_headroom_percent": 2,
+    "rounding_bytes": 1024,
+    "routed_ad_max_bytes": 4096,
+    "construction": "Every inherited ID is 256 UTF-8 bytes, every Code has max_bytes, every optional is present, every collection is filled simultaneously with maximal canonical children. Profile is its fixed accepted literal, scalar widths are exact. Nested type padding is not canonical and does not count as an element.",
+    "table": {
+      "QualifiedBranch": {
+        "worst_case_bytes": 736,
+        "ceiling": 1024
+      },
+      "SignedNativePrekeyBase": {
+        "worst_case_bytes": 1068,
+        "ceiling": 2048
+      },
+      "SignedNativeOpk": {
+        "worst_case_bytes": 252,
+        "ceiling": 1024
+      },
+      "RetirementRef": {
+        "worst_case_bytes": 74,
+        "ceiling": 1024
+      },
+      "OwnerPrekeyUpdate": {
+        "worst_case_bytes": 48798,
+        "ceiling": 50176
+      },
+      "PrekeyPublicationSnapshot": {
+        "worst_case_bytes": 80132,
+        "ceiling": 81920
+      },
+      "PublicPrekeyView": {
+        "worst_case_bytes": 1870,
+        "ceiling": 2048
+      },
+      "PrekeyLeaseIntent": {
+        "worst_case_bytes": 1642,
+        "ceiling": 2048
+      },
+      "PrekeyLeaseResult": {
+        "worst_case_bytes": 3077,
+        "ceiling": 4096
+      },
+      "OwnerStatusQuery": {
+        "worst_case_bytes": 16390,
+        "ceiling": 17408
+      },
+      "OwnerStatusEntry": {
+        "worst_case_bytes": 172,
+        "ceiling": 1024
+      },
+      "OwnerPrekeyStatus": {
+        "worst_case_bytes": 36192,
+        "ceiling": 37888
+      },
+      "NativePrekeyRequest": {
+        "worst_case_bytes": 2606,
+        "ceiling": 3072
+      },
+      "NativePrekeyLease": {
+        "worst_case_bytes": 4306,
+        "ceiling": 5120
+      },
+      "NativePrekeyPublish": {
+        "worst_case_bytes": 51462,
+        "ceiling": 53248
+      },
+      "NativePrekeyStatus": {
+        "worst_case_bytes": 19054,
+        "ceiling": 19456
+      },
+      "NativePrekeyResult": {
+        "worst_case_bytes": 40111,
+        "ceiling": 40960
+      },
+      "BootstrapHeader": {
+        "worst_case_bytes": 7404,
+        "ceiling": 8192
+      },
+      "BootstrapTranscript": {
+        "worst_case_bytes": 11580,
+        "ceiling": 12288
+      }
+    }
+  }
 }
