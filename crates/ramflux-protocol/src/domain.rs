@@ -344,6 +344,10 @@ mod tests {
                 label.starts_with("ramflux.identity.") || *label == super::CUSTODY_BRANCH_EXPORTER
             );
         }
+        assert_eq!(super::ALL[117..].len(), 23);
+        for label in &super::ALL[117..] {
+            assert!(label.starts_with("ramflux.dm_bootstrap_fs."));
+        }
         assert_eq!(
             super::CUSTODY_BRANCH_EXPORTER,
             "EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3"

@@ -97,7 +97,16 @@ fn dm_fs_v3_frames_vector() -> Result {
         }
     }
     assert_eq!(count, 7);
-    assert!(NativePrekeyFrame::from_json(br#"{"frame_type":"native_prekey_status","frame_type":"native_prekey_lease","payload":""}"#).is_err());
+    let valid = NativePrekeyFrame::Lease(Box::new(NativePrekeyLease::from_bytes(&raw(
+        "NativePrekeyLease",
+    )?)?))
+    .to_json()?;
+    let carrier: Value = serde_json::from_slice(&valid)?;
+    let payload = carrier["payload"].as_str().ok_or("payload")?;
+    let duplicate = format!(
+        r#"{{"frame_type":"native_prekey_lease","frame_type":"native_prekey_lease","payload":"{payload}"}}"#
+    );
+    assert!(NativePrekeyFrame::from_json(&duplicate.into_bytes()).is_err());
     let bytes = raw("NativePrekeyLease")?;
     let request = field(&bytes, WireType::NativePrekeyLease, 2)?;
     let bad = replace(&bytes, 2, &replace(&request, 2, b"status")?)?;
@@ -205,7 +214,22 @@ fn dm_fs_v3_retry_hint_is_shared_clamped_and_bound() -> Result {
     for (n, expected) in
         [(0, 1000), (999, 1000), (1000, 1000), (3_600_000, 3_600_000), (u32::MAX, 3_600_000)]
     {
-        let r = NativePrekeyResult::from_bytes(&replace(&b, 8, &n.to_be_bytes())?)?;
+        let bytes = replace(&b, 8, &n.to_be_bytes())?;
+        if (1000..=3_600_000).contains(&n) {
+            let decoded = NativePrekeyResult::from_bytes(&bytes)?;
+            assert_eq!(decoded.to_bytes()?, bytes);
+        } else {
+            assert_eq!(NativePrekeyResult::from_bytes(&bytes), Err(DecodeError::Value));
+        }
+        // Only the encoder clamps caller-owned hints; canonical decoding never normalizes.
+        let mut r = NativePrekeyResult::from_bytes(&b)?;
+        r.retry = Some(RetryHint { scope: RetryScope::NodeCapacity, retry_after_ms: n });
+        if !(1000..=3_600_000).contains(&n) {
+            assert!(r.validate_for(&r.correlation_id, &r.request_hash, &request).is_err());
+        }
+        let encoded = r.to_bytes()?;
+        let r = NativePrekeyResult::from_bytes(&encoded)?;
+        assert_eq!(r.to_bytes()?, encoded);
         assert_eq!(
             r.validate_for(&r.correlation_id, &r.request_hash, &request)?,
             Some(RetryHint::new(RetryScope::NodeCapacity, expected))
@@ -459,5 +483,22 @@ fn dm_fs_v3_unleased_state_requires_zero_times() -> Result {
         let status = replace(&raw("OwnerPrekeyStatus")?, 9, &list(1, &bad)?)?;
         assert_eq!(OwnerPrekeyStatus::from_bytes(&status), Err(DecodeError::Value));
     }
+    Ok(())
+}
+
+#[test]
+fn dm_fs_v3_result_vectors_round_trip_exact_bytes() -> Result {
+    let w = vectors()?;
+    let mut count = 0;
+    for group in ["positive", "filled_maximum", "service_maximum"] {
+        for vector in w[group].as_array().ok_or("vectors")? {
+            if vector["type"] == "NativePrekeyResult" {
+                let bytes = hex(vector["bytes"].as_str().ok_or("bytes")?)?;
+                assert_eq!(NativePrekeyResult::from_bytes(&bytes)?.to_bytes()?, bytes);
+                count += 1;
+            }
+        }
+    }
+    assert_eq!(count, 6);
     Ok(())
 }

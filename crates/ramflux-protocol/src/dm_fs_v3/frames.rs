@@ -257,7 +257,10 @@ fn decode_retry(scope: &[u8], after: &[u8]) -> Result<Option<RetryHint>, DecodeE
         b"node_capacity" => RetryScope::NodeCapacity,
         _ => return Err(DecodeError::Value),
     };
-    Ok(Some(RetryHint::new(scope, after)))
+    if !(RetryHint::MIN_RETRY_AFTER_MS..=RetryHint::MAX_RETRY_AFTER_MS).contains(&after) {
+        return Err(DecodeError::Value);
+    }
+    Ok(Some(RetryHint { scope, retry_after_ms: after }))
 }
 fn validate_result(value: &NativePrekeyResult) -> Result<(), DecodeError> {
     let valid = match value.result_kind {
@@ -306,7 +309,13 @@ impl NativePrekeyResult {
         {
             return Err(DecodeError::Value);
         }
-        Ok(self.retry.map(RetryHint::clamped))
+        if self.retry.is_some_and(|hint| {
+            !(RetryHint::MIN_RETRY_AFTER_MS..=RetryHint::MAX_RETRY_AFTER_MS)
+                .contains(&hint.retry_after_ms)
+        }) {
+            return Err(DecodeError::Value);
+        }
+        Ok(self.retry)
     }
 }
 
