@@ -4,8 +4,12 @@
 mod admission;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
+mod renewal;
 mod replay;
 mod retirement;
+pub use renewal::{
+    ChallengeMint, HomeVerdict, RenewalAdmission, RenewalChallenge, RenewalPolicy, RenewalRefusal,
+};
 pub use replay::{AttachmentReplayError, AttachmentReplayProof};
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
@@ -79,6 +83,7 @@ pub(super) fn install(
     admission::install(tx)?;
     retirement::install(tx)?;
     replay::install(tx, replay_now)?;
+    renewal::install(tx)?;
     Ok(())
 }
 fn invalid(_: impl std::fmt::Display) -> AttachmentLedgerError {
@@ -122,6 +127,11 @@ impl AttachmentLedger {
     }
 }
 impl ScopedGrantRegistry {
+    /// The pinned source authority this registry issues and verifies under.
+    #[must_use]
+    pub fn authority(&self) -> &AttachmentAuthority {
+        &self.authority
+    }
     fn authenticate(
         &self,
         grant: &VerifiedScopedGrant,

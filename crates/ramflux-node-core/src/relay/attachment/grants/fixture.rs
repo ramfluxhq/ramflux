@@ -10,8 +10,8 @@ use super::{
 use crate::{ObjectRelayCapability, RelayRedbStore};
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_protocol::large_attachment::{
-    AttachmentRetirement, QualifiedOwner, VerifiedAttachmentRetirement, VerifiedContentManifest,
-    VerifiedScopedGrant,
+    AttachmentRetirement, QualifiedOwner, ScopedAttachmentGrant, VerifiedAttachmentRetirement,
+    VerifiedContentManifest, VerifiedScopedGrant,
 };
 pub struct RetirementFixture {
     pub store: RelayRedbStore,
@@ -176,5 +176,32 @@ impl RetirementFixture {
             )
             .unwrap();
         g
+    }
+    /// Registers a variant of the fixture grant (for example fewer rights).
+    /// # Panics
+    /// Panics if registering the edited fixture grant fails.
+    #[must_use]
+    pub fn register_edited(
+        &self,
+        edit: impl FnOnce(&mut ScopedAttachmentGrant),
+    ) -> VerifiedScopedGrant {
+        let mut g = self.grant.grant().clone();
+        edit(&mut g);
+        let g = signed(&g);
+        self.registry
+            .register(
+                &[21; 32],
+                &self.native,
+                &g,
+                &auth(&self.native, &g, self.now).context(),
+                &self.signer,
+            )
+            .unwrap();
+        g
+    }
+    /// The source authority signing key the fixture registered under.
+    #[must_use]
+    pub fn source_signer(&self) -> SigningKey {
+        self.signer.clone()
     }
 }

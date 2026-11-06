@@ -187,7 +187,7 @@ fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
         0
     );
     let aborted: Result<super::super::GrantPublicationLease, AttachmentReplayError> =
-        f.registry.lease_with_admission(&f.grant, 1, now, |tx| {
+        f.registry.lease_with_admission(&f.grant, 1, now, Into::into, |tx| {
             consume(tx, "node-a", &f.grant.grant().grantee, &good, now, Limits::default())?;
             Err(AttachmentReplayError::Invalid)
         });
