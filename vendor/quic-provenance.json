@@ -636,8 +636,8 @@
         "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary"
       },
       "src/connection/metadata_staging/tests.rs": {
-        "patched_sha256": "401a3e18f27b3a16ee9b2d18c8f5307daf7f2b46ef46ecae59e5d237602b010a",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality"
+        "patched_sha256": "31900d126969d16cee8e993ddaad3f3019beb8e68bfe33e0c0e420a8646767e8",
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality; E1 r3: per-domain Prepare retained debit > used negatives with exact InvalidLedger, owner-allocation mismatch negative, exact-used equality acceptance"
       }
     },
     "formatting": {
