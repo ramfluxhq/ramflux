@@ -234,7 +234,7 @@ fn actor_registration(key: &str, value: &Value) -> ActorRegistration {
     {
         registration.bindings.insert((format!("object:{object}"), message.to_owned()));
     }
-    if key.starts_with("routed/committed/")
+    if (key.starts_with("routed/committed/") || key.starts_with("legacy/replay/committed/"))
         && let Some(message) = value.pointer("/routing/message_id").and_then(Value::as_str)
     {
         if let Some(payload) = value.pointer("/entry/envelope/payload_hash").and_then(Value::as_str)
@@ -351,6 +351,7 @@ pub(super) fn actor_state_may_reference_message(key: &str) -> bool {
             "own-device/",
             "inbox/",
             "backup/staging/",
+            "legacy/replay/",
         ]
         .iter()
         .any(|prefix| key.starts_with(prefix))
