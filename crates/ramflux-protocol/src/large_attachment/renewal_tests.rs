@@ -365,25 +365,148 @@ fn renewal_attestation_and_pop_refuse_each_signed_binding() -> Result {
     Ok(())
 }
 
-type Case = (String, Vec<u8>, &'static str);
+/// Predicate inventory (id, location and predicate). Generated from the renewal.rs source.
+const INVENTORY: &[(&str, &str)] = &[
+    ("A01", "renewal.rs:38 grant_epoch == 0"),
+    ("A02", "renewal.rs:38 authority_generation == 0"),
+    ("A03", "renewal.rs:38 payload_generation == 0"),
+    ("A04", "renewal.rs:48 match op: `_` arm (operation kind)"),
+    ("A05", "renewal.rs:50 method != expected method"),
+    ("A06", "renewal.rs:50 path != expected path"),
+    ("A07", "renewal.rs:53 matches!(op, 2 | 8)"),
+    ("A08", "renewal.rs:54 segment_index != 0"),
+    ("A09", "renewal.rs:54 offset != 0"),
+    ("A10", "renewal.rs:54 length != 0"),
+    ("A11", "renewal.rs:58 op == 1"),
+    ("A12", "renewal.rs:59 length == 0"),
+    ("A13", "renewal.rs:60 length > 1_048_576"),
+    ("A14", "renewal.rs:63 offset.checked_add(length) is None"),
+    ("A15", "renewal.rs:64 checked end > SEGMENT_BYTES"),
+    ("A16", "renewal.rs:68 op == 3"),
+    ("A17", "renewal.rs:69 segment_index != 0 (page)"),
+    ("A18", "renewal.rs:70 length == 0 (page)"),
+    ("A19", "renewal.rs:71 length > 256 (page)"),
+    ("A20", "renewal.rs:72 offset.checked_add(length) is None (page)"),
+    ("A21", "renewal.rs:76 matches!(op, 1 | 2)"),
+    ("A22", "renewal.rs:76 body_digest != body_digest(&[])"),
+    ("B01", "renewal.rs:100 bytes.len() > 4096"),
+    ("B02", "renewal.rs:104 take(4) != b\"RFO1\""),
+    ("B03", "renewal.rs:104 u32() != 1 (operation version)"),
+    ("B04", "renewal.rs:124 !c.0.is_empty() (trailing bytes)"),
+    ("B05", "native.rs:173 Cursor::take None arm (O entry, truncation)"),
+    ("C01", "native.rs:189 O method: n == 0"),
+    ("C02", "native.rs:189 O method: n > 256"),
+    ("C03", "native.rs:191 O method: from_utf8 Err"),
+    ("C04", "native.rs:189 O path: n == 0"),
+    ("C05", "native.rs:189 O path: n > 256"),
+    ("C06", "native.rs:191 O path: from_utf8 Err"),
+    ("C07", "native.rs:189 O audience: n == 0"),
+    ("C08", "native.rs:189 O audience: n > 256"),
+    ("C09", "native.rs:191 O audience: from_utf8 Err"),
+    ("C10", "native.rs:189 W anchor: n == 0"),
+    ("C11", "native.rs:189 W anchor: n > 256"),
+    ("C12", "native.rs:191 W anchor: from_utf8 Err"),
+    ("C13", "native.rs:189 W device id: n == 0"),
+    ("C14", "native.rs:189 W device id: n > 256"),
+    ("C15", "native.rs:191 W device id: from_utf8 Err"),
+    ("C16", "native.rs:189 W home node: n == 0"),
+    ("C17", "native.rs:189 W home node: n > 256"),
+    ("C18", "native.rs:191 W home node: from_utf8 Err"),
+    ("C19", "native.rs:189 W source issuer: n == 0"),
+    ("C20", "native.rs:189 W source issuer: n > 256"),
+    ("C21", "native.rs:191 W source issuer: from_utf8 Err"),
+    ("C22", "native.rs:189 W home issuer: n == 0"),
+    ("C23", "native.rs:189 W home issuer: n > 256"),
+    ("C24", "native.rs:191 W home issuer: from_utf8 Err"),
+    ("D01", "renewal.rs:174 body.len() > 8192"),
+    ("D02", "renewal.rs:179 take(4) != b\"RFRQ\""),
+    ("D03", "renewal.rs:179 u32() != 1 (body version)"),
+    ("D04", "native.rs:173 Cursor::take None arm (body entry)"),
+    ("D05", "renewal.rs:184 !c.0.is_empty() (body trailing)"),
+    ("D06", "renewal.rs:187 renew.op != 8 (outer kind)"),
+    ("D07", "renewal.rs:187 !matches!(target.op, 1..=3)"),
+    ("D08", "renewal.rs:190 renew.body_digest != body_digest(body)"),
+    ("D09", "renewal.rs:193 renew.object_id != target.object_id"),
+    ("D10", "renewal.rs:194 renew.manifest_hash != target.manifest_hash"),
+    ("D11", "renewal.rs:195 renew.grant_id != target.grant_id"),
+    ("D12", "renewal.rs:196 renew.grant_epoch != target.grant_epoch"),
+    ("D13", "renewal.rs:197 renew.authority_generation != target.authority_generation"),
+    ("D14", "renewal.rs:198 renew.payload_generation != target.payload_generation"),
+    ("D15", "renewal.rs:199 renew.operation_id == target.operation_id"),
+    ("E01", "renewal.rs:341 grantee.account_anchor != requester.account_anchor (derived eq leg)"),
+    ("E02", "renewal.rs:341 grantee.device_id != requester.device_id (derived eq leg)"),
+    ("E03", "renewal.rs:341 grantee.device_epoch != requester.device_epoch (derived eq leg)"),
+    (
+        "E04",
+        "renewal.rs:341 grantee.signing_public_key != requester.signing_public_key (derived eq leg)",
+    ),
+    ("E05", "renewal.rs:341 grantee.home_node_id != requester.home_node_id (derived eq leg)"),
+    ("E06", "renewal.rs:344 renew.audience != source"),
+    ("E07", "renewal.rs:344 target.audience != relay"),
+    ("E08", "renewal.rs:347 target.object_id != g.object_id"),
+    ("E09", "renewal.rs:348 target.manifest_hash != g.manifest_hash"),
+    ("E10", "renewal.rs:349 target.grant_id != g.grant_id"),
+    ("E11", "renewal.rs:350 target.grant_epoch != g.epoch"),
+    ("E12", "renewal.rs:355 g.rights & (8|right) != (8|right)"),
+    ("E13", "renewal.rs:358 now < g.issued_at"),
+    ("E14", "renewal.rs:358 now >= g.expires_at"),
+    ("F01", "renewal.rs:423 bytes.len() > 2048"),
+    ("F02", "renewal.rs:427 take(4) != b\"RFW1\""),
+    ("F03", "renewal.rs:427 u32() != 1 (forward version)"),
+    ("F04", "renewal.rs:449 !c.0.is_empty() (forward trailing bytes)"),
+    ("F05", "native.rs:173 Cursor::take None arm (W entry, truncation)"),
+    ("F06", "renewal.rs:247 lifetime: issued >= expires (W)"),
+    ("F07", "renewal.rs:247 lifetime: expires - issued > 30 (W)"),
+    ("F08", "renewal.rs:257 grant_epoch == 0 (W)"),
+    ("F09", "renewal.rs:257 requester.home_node_id != home_issuer (W)"),
+    ("F10", "renewal.rs:149 qualified: device_epoch == 0 (W requester)"),
+    ("G01", "renewal.rs:375 requester.account_anchor != expected (derived eq leg)"),
+    ("G02", "renewal.rs:375 requester.device_id != expected (derived eq leg)"),
+    ("G03", "renewal.rs:375 requester.device_epoch != expected (derived eq leg)"),
+    ("G04", "renewal.rs:375 requester.signing_public_key != expected (derived eq leg)"),
+    ("G05", "renewal.rs:375 requester.home_node_id != expected (derived eq leg)"),
+    ("G06", "renewal.rs:376 challenge != expected"),
+    ("G07", "renewal.rs:377 grant_hash != grant hash"),
+    ("G08", "renewal.rs:378 grant_id != grant.grant_id"),
+    ("G09", "renewal.rs:379 grant_epoch != grant.epoch"),
+    ("G10", "renewal.rs:380 source_issuer != request audience"),
+    ("G11", "renewal.rs:381 operation_hash != request operation hash"),
+    ("G12", "renewal.rs:386 issued_at > now + 5"),
+    ("G13", "renewal.rs:387 expires_at <= now"),
+    ("G14", "renewal.rs:388 expires_at > grant.expires_at"),
+    ("H01", "renewal.rs:459 bytes.len() != 152 (pop length)"),
+    ("H02", "renewal.rs:463 take(4) != b\"RFP1\""),
+    ("H03", "renewal.rs:463 u32() != 1 (pop version)"),
+    ("H04", "renewal.rs:247 lifetime: issued >= expires (P)"),
+    ("H05", "renewal.rs:247 lifetime: expires - issued > 30 (P)"),
+    ("I01", "renewal.rs:400 operation_hash != w.operation_hash"),
+    ("I02", "renewal.rs:401 requester_digest != requester_digest(w.requester)"),
+    ("I03", "renewal.rs:402 forward_digest != w.hash()"),
+    ("I04", "renewal.rs:406 issued_at < w.issued_at"),
+    ("I05", "renewal.rs:407 expires_at > w.expires_at"),
+    ("I06", "renewal.rs:408 issued_at > now + 5"),
+    ("I07", "renewal.rs:409 expires_at <= now"),
+    ("J01", "grant.rs:150 W verify_strict Err (grant signature)"),
+    ("J02", "grant.rs:150 P verify_strict Err (grant signature)"),
+];
+
 type Fe = std::result::Result<(), FormatError>;
 
+/// One row per predicate instance. `hits` records ids; `failures` collects mismatches so a
+/// per-predicate break-the-fix shows exactly which rows fail.
 #[derive(Default)]
-struct Counts {
-    errors: usize,
-    positives: usize,
+struct Rows {
+    hits: Vec<&'static str>,
+    failures: Vec<String>,
 }
 
-struct Vectors {
-    request: RenewalRequest,
-    renew: AttachmentOperation,
-    target: AttachmentOperation,
-    ro: Vec<u8>,
-    w: Vec<u8>,
-    p: Vec<u8>,
-    w_orig: ForwardAttestation,
-    p_orig: RequesterPop,
-    grant: VerifiedScopedGrant,
+/// `want` is the exact refusal, or `None` when the row must be accepted.
+fn row(r: &mut Rows, id: &'static str, label: &str, got: Fe, want: Option<&'static str>) {
+    r.hits.push(id);
+    let expect = want.map_or(Ok(()), |e| Err(FormatError(e)));
+    if got != expect {
+        r.failures.push(format!("{id} {label}: got {got:?}, want {expect:?}"));
+    }
 }
 
 fn fixture_json() -> Result<serde_json::Value> {
@@ -392,26 +515,6 @@ fn fixture_json() -> Result<serde_json::Value> {
 
 fn read_hex(v: &serde_json::Value) -> Result<Vec<u8>> {
     bytes(v.as_str().ok_or("hex")?)
-}
-
-fn vectors() -> Result<Vectors> {
-    let j = fixture_json()?;
-    let r = &j["renewal"];
-    let request = fixture()?;
-    let (renew, target) = request.target()?;
-    let w = read_hex(&r["home"]["bytes_hex"])?;
-    let p = read_hex(&r["renewal_pop"]["bytes_hex"])?;
-    Ok(Vectors {
-        ro: request.operation.clone(),
-        w_orig: ForwardAttestation::decode(&w)?,
-        p_orig: RequesterPop::decode(&p)?,
-        grant: load_grant(&j)?,
-        request,
-        renew,
-        target,
-        w,
-        p,
-    })
 }
 
 fn load_grant(j: &serde_json::Value) -> Result<VerifiedScopedGrant> {
@@ -445,26 +548,6 @@ fn mutated(base: &[u8], mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
     b
 }
 
-fn case(
-    cases: &mut Vec<Case>,
-    label: &str,
-    base: &[u8],
-    mutate: impl FnOnce(&mut Vec<u8>),
-    error: &'static str,
-) {
-    cases.push((label.to_owned(), mutated(base, mutate), error));
-}
-
-fn refuse(c: &mut Counts, label: &str, got: Fe, want: &'static str) {
-    c.errors += 1;
-    assert_eq!(got, Err(FormatError(want)), "{label}");
-}
-
-fn accept(c: &mut Counts, label: &str, got: Fe) {
-    c.positives += 1;
-    assert_eq!(got, Ok(()), "{label}");
-}
-
 fn dec_o(b: &[u8]) -> Fe {
     AttachmentOperation::decode(b).map(|_| ())
 }
@@ -475,12 +558,6 @@ fn dec_w(b: &[u8]) -> Fe {
 
 fn dec_p(b: &[u8]) -> Fe {
     RequesterPop::decode(b).map(|_| ())
-}
-
-fn run_decode(c: &mut Counts, cases: Vec<Case>, dec: fn(&[u8]) -> Fe) {
-    for (label, b, want) in cases {
-        refuse(c, &label, dec(&b), want);
-    }
 }
 
 /// Byte offset just past the identity whose u32 length prefix starts at `at`.
@@ -539,674 +616,952 @@ fn w_pos(w: &[u8]) -> Result<WPos> {
     })
 }
 
-fn operation_header_rows(v: &Vectors, c: &mut Counts) -> Result {
-    let ro = &v.ro;
-    let path_at = ident_end(ro, 12)?;
-    let path_last = ident_end(ro, path_at)? - 1;
-    let mut cases: Vec<Case> = Vec::new();
-    cases.push(("O over 4096 bytes".into(), vec![0; 4097], "operation cap"));
-    case(&mut cases, "O version", ro, |b| b[7] = 2, "operation version");
-    case(&mut cases, "O trailing byte", ro, |b| b.push(0), "operation framing");
-    case(
-        &mut cases,
-        "O op kind 4",
-        ro,
-        |b| b[8..12].copy_from_slice(&4_u32.to_be_bytes()),
-        "operation kind",
-    );
-    case(&mut cases, "O method byte", ro, |b| b[16] ^= 1, "operation endpoint");
-    case(&mut cases, "O path last byte", ro, |b| b[path_last] ^= 1, "operation endpoint");
-    case(
-        &mut cases,
-        "O grant epoch zero",
-        ro,
-        |b| put_from_end(b, 112, &[0; 8]),
-        "operation generation",
-    );
-    case(
-        &mut cases,
-        "O authority generation zero",
-        ro,
-        |b| put_from_end(b, 104, &[0; 8]),
-        "operation generation",
-    );
-    case(
-        &mut cases,
-        "O payload generation zero",
-        ro,
-        |b| put_from_end(b, 64, &[0; 8]),
-        "operation generation",
-    );
-    case(&mut cases, "O method byte non-UTF-8", ro, |b| b[16] = 0xff, "native UTF8");
-    case(
-        &mut cases,
-        "O truncated by one byte",
-        ro,
-        |b| {
-            b.pop();
-        },
-        "truncated native",
-    );
-    run_decode(c, cases, dec_o);
-    Ok(())
+struct Vectors {
+    request: RenewalRequest,
+    renew: AttachmentOperation,
+    target: AttachmentOperation,
+    ro: Vec<u8>,
+    w: Vec<u8>,
+    p: Vec<u8>,
+    w_orig: ForwardAttestation,
+    p_orig: RequesterPop,
+    grant: VerifiedScopedGrant,
 }
 
-fn operation_unused_range_rows(v: &Vectors, c: &mut Counts) {
-    let ro = &v.ro;
-    let mut cases: Vec<Case> = Vec::new();
-    case(
-        &mut cases,
-        "renewal O segment index",
-        ro,
-        |b| put_from_end(b, 56, &1_u64.to_be_bytes()),
-        "operation unused range",
-    );
-    case(
-        &mut cases,
-        "renewal O offset",
-        ro,
-        |b| put_from_end(b, 48, &1_u64.to_be_bytes()),
-        "operation unused range",
-    );
-    case(
-        &mut cases,
-        "renewal O length",
-        ro,
-        |b| put_from_end(b, 40, &1_u64.to_be_bytes()),
-        "operation unused range",
-    );
-    run_decode(c, cases, dec_o);
-}
-
-fn operation_range_rows(v: &Vectors, c: &mut Counts) -> Result {
-    operation_unused_range_rows(v, c);
-    let mut page = v.target.clone();
-    page.op = 3;
-    page.method = "POST".into();
-    page.path =
-        format!("/attachments/{}/{}/missing", hex(&page.object_id), hex(&page.manifest_hash));
-    page.length = 1;
-    page.offset = 0;
-    let page = page.canonical_bytes()?;
-    let mut read = v.target.clone();
-    read.op = 1;
-    read.method = "GET".into();
-    read.path =
-        format!("/attachments/{}/{}/segments/0", hex(&read.object_id), hex(&read.manifest_hash));
-    read.length = 1;
-    read.offset = 0;
-    read.body_digest = body_digest(&[]);
-    let read = read.canonical_bytes()?;
-    let seg = u64::from(super::super::SEGMENT_BYTES);
-    let mut cases: Vec<Case> = Vec::new();
-    case(
-        &mut cases,
-        "page segment index",
-        &page,
-        |b| put_from_end(b, 56, &1_u64.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut cases,
-        "page length zero",
-        &page,
-        |b| put_from_end(b, 40, &0_u64.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut cases,
-        "page length 257",
-        &page,
-        |b| put_from_end(b, 40, &257_u64.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut cases,
-        "page offset u64::MAX",
-        &page,
-        |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut cases,
-        "read length zero",
-        &read,
-        |b| put_from_end(b, 40, &0_u64.to_be_bytes()),
-        "operation range",
-    );
-    case(
-        &mut cases,
-        "read length 1 MiB + 1 at offset 0",
-        &read,
-        |b| put_from_end(b, 40, &1_048_577_u64.to_be_bytes()),
-        "operation range",
-    );
-    case(
-        &mut cases,
-        "read offset u64::MAX length 1 (overflow)",
-        &read,
-        |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()),
-        "operation range",
-    );
-    case(
-        &mut cases,
-        "read range past segment end",
-        &read,
-        |b| put_from_end(b, 48, &seg.to_be_bytes()),
-        "operation range",
-    );
-    run_decode(c, cases, dec_o);
-    let read_body = mutated(&read, |b| flip_from_end(b, 32));
-    refuse(c, "read body digest", dec_o(&read_body), "read body");
-    operation_range_positives(v, c)?;
-
-    Ok(())
-}
-
-fn operation_range_positives(v: &Vectors, c: &mut Counts) -> Result {
-    let seg = u64::from(super::super::SEGMENT_BYTES);
-    // Inclusive positives: length cap, segment edge, page range edge.
-    let mut max_read = v.target.clone();
-    max_read.op = 1;
-    max_read.method = "GET".into();
-    max_read.path = read_path(&max_read);
-    max_read.length = 1_048_576;
-    max_read.offset = 0;
-    max_read.body_digest = body_digest(&[]);
-    accept(c, "read length exactly 1 MiB", dec_o(&max_read.canonical_bytes()?));
-    let mut edge_read = max_read.clone();
-    edge_read.length = 1;
-    edge_read.offset = seg - 1;
-    accept(c, "read last byte of segment", dec_o(&edge_read.canonical_bytes()?));
-    let mut max_page = v.target.clone();
-    max_page.op = 3;
-    max_page.method = "POST".into();
-    max_page.path = format!(
-        "/attachments/{}/{}/missing",
-        hex(&max_page.object_id),
-        hex(&max_page.manifest_hash)
-    );
-    max_page.length = 256;
-    max_page.offset = 0;
-    accept(c, "page length exactly 256", dec_o(&max_page.canonical_bytes()?));
-    max_page.offset = u64::MAX - 256;
-    accept(c, "page offset+length == u64::MAX", dec_o(&max_page.canonical_bytes()?));
-    Ok(())
+fn vectors() -> Result<Vectors> {
+    let j = fixture_json()?;
+    let r = &j["renewal"];
+    let request = fixture()?;
+    let (renew, target) = request.target()?;
+    let w = read_hex(&r["home"]["bytes_hex"])?;
+    let p = read_hex(&r["renewal_pop"]["bytes_hex"])?;
+    Ok(Vectors {
+        ro: request.operation.clone(),
+        w_orig: ForwardAttestation::decode(&w)?,
+        p_orig: RequesterPop::decode(&p)?,
+        grant: load_grant(&j)?,
+        request,
+        renew,
+        target,
+        w,
+        p,
+    })
 }
 
 fn read_path(op: &AttachmentOperation) -> String {
-    format!("/attachments/{}/{}/segments/0", hex(&op.object_id), hex(&op.manifest_hash))
+    format!(
+        "/attachments/{}/{}/segments/{}",
+        hex(&op.object_id),
+        hex(&op.manifest_hash),
+        op.segment_index
+    )
 }
 
-fn identity_rows(v: &Vectors, c: &mut Counts) -> Result {
+/// Valid read (op 1) at segment 0, offset 0, length 1, empty body digest.
+fn read_base(v: &Vectors) -> AttachmentOperation {
+    let mut op = v.target.clone();
+    op.op = 1;
+    op.method = "GET".into();
+    op.segment_index = 0;
+    op.path = read_path(&op);
+    op.offset = 0;
+    op.length = 1;
+    op.body_digest = body_digest(&[]);
+    op
+}
+
+/// Valid missing page (op 3) at segment 0, length 1, offset 0.
+fn page_base(v: &Vectors) -> AttachmentOperation {
+    let mut op = v.target.clone();
+    op.op = 3;
+    op.method = "POST".into();
+    op.segment_index = 0;
+    op.path = format!("/attachments/{}/{}/missing", hex(&op.object_id), hex(&op.manifest_hash));
+    op.offset = 0;
+    op.length = 1;
+    op
+}
+
+fn rows_operation_canonical(v: &Vectors, r: &mut Rows) -> Result {
+    let ro = &v.ro;
+    let path_at = ident_end(ro, 12)?;
+    let path_last = ident_end(ro, path_at)? - 1;
+    let generation = Some("operation generation");
+    row(
+        r,
+        "A01",
+        "renewal O grant epoch zero",
+        dec_o(&mutated(ro, |b| put_from_end(b, 112, &[0; 8]))),
+        generation,
+    );
+    row(
+        r,
+        "A02",
+        "renewal O authority generation zero",
+        dec_o(&mutated(ro, |b| put_from_end(b, 104, &[0; 8]))),
+        generation,
+    );
+    row(
+        r,
+        "A03",
+        "renewal O payload generation zero",
+        dec_o(&mutated(ro, |b| put_from_end(b, 64, &[0; 8]))),
+        generation,
+    );
+    row(
+        r,
+        "A04",
+        "renewal O op kind 4",
+        dec_o(&mutated(ro, |b| b[8..12].copy_from_slice(&4_u32.to_be_bytes()))),
+        Some("operation kind"),
+    );
+    row(
+        r,
+        "A05",
+        "renewal O method byte",
+        dec_o(&mutated(ro, |b| b[16] ^= 1)),
+        Some("operation endpoint"),
+    );
+    row(
+        r,
+        "A06",
+        "renewal O path last byte",
+        dec_o(&mutated(ro, |b| b[path_last] ^= 1)),
+        Some("operation endpoint"),
+    );
+    rows_operation_page(v, r)?;
+    rows_operation_range(v, r)
+}
+
+fn rows_operation_page(v: &Vectors, r: &mut Rows) -> Result {
+    let page = page_base(v).canonical_bytes()?;
+    let page_err = Some("operation page");
+    row(
+        r,
+        "A17",
+        "page O segment index 1",
+        dec_o(&mutated(&page, |b| put_from_end(b, 56, &1_u64.to_be_bytes()))),
+        page_err,
+    );
+    row(
+        r,
+        "A18",
+        "page O length zero",
+        dec_o(&mutated(&page, |b| put_from_end(b, 40, &0_u64.to_be_bytes()))),
+        page_err,
+    );
+    row(
+        r,
+        "A19",
+        "page O length 257",
+        dec_o(&mutated(&page, |b| put_from_end(b, 40, &257_u64.to_be_bytes()))),
+        page_err,
+    );
+    row(
+        r,
+        "A20",
+        "page O offset u64::MAX length 1",
+        dec_o(&mutated(&page, |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()))),
+        page_err,
+    );
+    Ok(())
+}
+
+fn rows_operation_range(v: &Vectors, r: &mut Rows) -> Result {
+    let ro = &v.ro;
+    let read = read_base(v).canonical_bytes()?;
+    let seg = u64::from(super::super::SEGMENT_BYTES);
+    let mut seg1 = read_base(v);
+    seg1.segment_index = 1;
+    seg1.path = read_path(&seg1);
+    row(
+        r,
+        "A07",
+        "read O at segment 1 is not an unused range",
+        dec_o(&seg1.canonical_bytes()?),
+        None,
+    );
+    let unused = Some("operation unused range");
+    row(
+        r,
+        "A08",
+        "renewal O segment index 1",
+        dec_o(&mutated(ro, |b| put_from_end(b, 56, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    row(
+        r,
+        "A09",
+        "renewal O offset 1",
+        dec_o(&mutated(ro, |b| put_from_end(b, 48, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    row(
+        r,
+        "A10",
+        "renewal O length 1",
+        dec_o(&mutated(ro, |b| put_from_end(b, 40, &1_u64.to_be_bytes()))),
+        unused,
+    );
+    let mut past = page_base(v);
+    past.offset = seg + 5;
+    row(
+        r,
+        "A11",
+        "page O offset past segment is not a read range",
+        dec_o(&past.canonical_bytes()?),
+        None,
+    );
+    let range = Some("operation range");
+    row(
+        r,
+        "A12",
+        "read O length zero",
+        dec_o(&mutated(&read, |b| put_from_end(b, 40, &0_u64.to_be_bytes()))),
+        range,
+    );
+    row(
+        r,
+        "A13",
+        "read O length 1 MiB + 1",
+        dec_o(&mutated(&read, |b| put_from_end(b, 40, &1_048_577_u64.to_be_bytes()))),
+        range,
+    );
+    row(
+        r,
+        "A14",
+        "read O offset u64::MAX length 1 (overflow)",
+        dec_o(&mutated(&read, |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()))),
+        range,
+    );
+    row(
+        r,
+        "A15",
+        "read O range past segment end",
+        dec_o(&mutated(&read, |b| put_from_end(b, 48, &seg.to_be_bytes()))),
+        range,
+    );
+    let mut long = read_base(v);
+    long.length = 257;
+    row(r, "A16", "read O length 257 is not a page", dec_o(&long.canonical_bytes()?), None);
+    row(r, "A21", "renewal O (op 8) is not read-digest checked", dec_o(ro), None);
+    row(
+        r,
+        "A22",
+        "read O body digest",
+        dec_o(&mutated(&read, |b| flip_from_end(b, 32))),
+        Some("read body"),
+    );
+    Ok(())
+}
+
+fn rows_operation_decode(v: &Vectors, r: &mut Rows) {
+    let ro = &v.ro;
+    row(r, "B01", "O over 4096 bytes", dec_o(&vec![0; 4097]), Some("operation cap"));
+    row(r, "B02", "O magic", dec_o(&mutated(ro, |b| b[0] ^= 1)), Some("operation version"));
+    row(r, "B03", "O version 2", dec_o(&mutated(ro, |b| b[7] = 2)), Some("operation version"));
+    row(r, "B04", "O trailing byte", dec_o(&mutated(ro, |b| b.push(0))), Some("operation framing"));
+    row(
+        r,
+        "B05",
+        "O truncated by one byte",
+        dec_o(&mutated(ro, |b| {
+            b.pop();
+        })),
+        Some("truncated native"),
+    );
+}
+
+const C_IDS: [&str; 24] = [
+    "C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10", "C11", "C12", "C13",
+    "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22", "C23", "C24",
+];
+
+fn rows_identity(v: &Vectors, r: &mut Rows) -> Result {
     let ro = &v.ro;
     let w = &v.w;
     let path_at = ident_end(ro, 12)?;
     let aud_at = ident_end(ro, path_at)?;
     let wp = w_pos(w)?;
-    let mut ocases: Vec<Case> = Vec::new();
-    for (name, at) in [("method", 12), ("path", path_at), ("audience", aud_at)] {
-        case(
-            &mut ocases,
-            &format!("O {name} length zero"),
-            ro,
-            |b| b[at..at + 4].copy_from_slice(&0_u32.to_be_bytes()),
-            "native identity length",
+    let o_fields = [("O method", 12_usize), ("O path", path_at), ("O audience", aud_at)];
+    let w_fields = [
+        ("W anchor", wp.anchor),
+        ("W device id", wp.device),
+        ("W home node", wp.home),
+        ("W source issuer", wp.source),
+        ("W home issuer", wp.home_issuer),
+    ];
+    let mut k = 0;
+    for (_, at) in o_fields {
+        row(
+            r,
+            C_IDS[k],
+            "O identity zero length",
+            dec_o(&mutated(ro, |b| b[at..at + 4].copy_from_slice(&0_u32.to_be_bytes()))),
+            Some("native identity length"),
         );
-        case(
-            &mut ocases,
-            &format!("O {name} length 257"),
-            ro,
-            |b| b[at..at + 4].copy_from_slice(&257_u32.to_be_bytes()),
-            "native identity length",
+        row(
+            r,
+            C_IDS[k + 1],
+            "O identity length 257",
+            dec_o(&mutated(ro, |b| b[at..at + 4].copy_from_slice(&257_u32.to_be_bytes()))),
+            Some("native identity length"),
         );
+        row(
+            r,
+            C_IDS[k + 2],
+            "O identity non-UTF-8",
+            dec_o(&mutated(ro, |b| b[at + 4] = 0xff)),
+            Some("native UTF8"),
+        );
+        k += 3;
     }
-    let mut wcases: Vec<Case> = Vec::new();
-    for (name, at) in [
-        ("account anchor", wp.anchor),
-        ("device id", wp.device),
-        ("home node", wp.home),
-        ("source issuer", wp.source),
-        ("home issuer", wp.home_issuer),
-    ] {
-        case(
-            &mut wcases,
-            &format!("W {name} length zero"),
-            w,
-            |b| b[at..at + 4].copy_from_slice(&0_u32.to_be_bytes()),
-            "native identity length",
+    for (_, at) in w_fields {
+        row(
+            r,
+            C_IDS[k],
+            "W identity zero length",
+            dec_w(&mutated(w, |b| b[at..at + 4].copy_from_slice(&0_u32.to_be_bytes()))),
+            Some("native identity length"),
         );
-        case(
-            &mut wcases,
-            &format!("W {name} length 257"),
-            w,
-            |b| b[at..at + 4].copy_from_slice(&257_u32.to_be_bytes()),
-            "native identity length",
+        row(
+            r,
+            C_IDS[k + 1],
+            "W identity length 257",
+            dec_w(&mutated(w, |b| b[at..at + 4].copy_from_slice(&257_u32.to_be_bytes()))),
+            Some("native identity length"),
         );
+        row(
+            r,
+            C_IDS[k + 2],
+            "W identity non-UTF-8",
+            dec_w(&mutated(w, |b| b[at + 4] = 0xff)),
+            Some("native UTF8"),
+        );
+        k += 3;
     }
-    run_decode(c, ocases, dec_o);
-    run_decode(c, wcases, dec_w);
-
-    // Inclusive maxima (256 bytes). Method and path cannot be valid at 256 bytes, so they
-    // prove the length check passed by reaching the endpoint refusal.
-    let max = vec![b'a'; 256];
-    let mut method = b"POST".to_vec();
-    method.resize(256, b'x');
-    let mut path = b"/s9/attachments/renew".to_vec();
-    path.resize(256, b'x');
-    for (label, bytes) in [
-        ("O method at max", splice_ident(ro, 12, &method)?),
-        ("O path at max", splice_ident(ro, path_at, &path)?),
-    ] {
-        c.positives += 1;
-        assert_eq!(dec_o(&bytes), Err(FormatError("operation endpoint")), "{label}");
-    }
-    accept(c, "O audience at max", dec_o(&splice_ident(ro, aud_at, &max)?));
-    accept(c, "W account anchor at max", dec_w(&splice_ident(w, wp.anchor, &max)?));
-    accept(c, "W device id at max", dec_w(&splice_ident(w, wp.device, &max)?));
-    accept(c, "W source issuer at max", dec_w(&splice_ident(w, wp.source, &max)?));
-    let pair = splice_ident(&splice_ident(w, wp.home_issuer, &max)?, wp.home, &max)?;
-    accept(c, "W home node and home issuer at max", dec_w(&pair));
     Ok(())
 }
 
-fn forward_decode_rows(v: &Vectors, c: &mut Counts) -> Result {
+fn rows_renewal_body(v: &Vectors, r: &mut Rows) -> Result {
+    let body = &v.request.body;
+    let ro = &v.ro;
+    let req =
+        |op: Vec<u8>, body: Vec<u8>| RenewalRequest { operation: op, body }.target().map(|_| ());
+    let kind = Some("renewal target kind");
+    row(
+        r,
+        "D01",
+        "renewal body over 8192 bytes",
+        req(ro.clone(), vec![0; 8193]),
+        Some("renewal body cap"),
+    );
+    row(
+        r,
+        "D02",
+        "renewal body magic",
+        req(ro.clone(), mutated(body, |b| b[0] ^= 1)),
+        Some("renewal body version"),
+    );
+    row(
+        r,
+        "D03",
+        "renewal body version 2",
+        req(ro.clone(), mutated(body, |b| b[7] = 2)),
+        Some("renewal body version"),
+    );
+    row(
+        r,
+        "D04",
+        "renewal body target length beyond body",
+        req(ro.clone(), mutated(body, |b| b[8..12].copy_from_slice(&u32::MAX.to_be_bytes()))),
+        Some("truncated native"),
+    );
+    row(
+        r,
+        "D05",
+        "renewal body trailing byte",
+        req(ro.clone(), mutated(body, |b| b.push(0))),
+        Some("renewal body framing"),
+    );
+    let mut outer = page_base(v);
+    outer.audience = v.renew.audience.clone();
+    outer.operation_id = v.renew.operation_id;
+    outer.body_digest = body_digest(body);
+    row(
+        r,
+        "D06",
+        "outer operation is Missing (valid), not renewal",
+        req(outer.canonical_bytes()?, body.clone()),
+        kind,
+    );
+    let t8 = {
+        let mut t = v.target.clone();
+        t.op = 8;
+        t.method = "POST".into();
+        t.path = "/s9/attachments/renew".into();
+        t.segment_index = 0;
+        t.offset = 0;
+        t.length = 0;
+        t
+    };
+    let mut frame = b"RFRQ".to_vec();
+    frame.extend(1_u32.to_be_bytes());
+    lp(&mut frame, &t8.canonical_bytes()?)?;
+    let mut renew8 = v.renew.clone();
+    renew8.body_digest = body_digest(&frame);
+    row(r, "D07", "embedded target is operation 8", req(renew8.canonical_bytes()?, frame), kind);
+    row(
+        r,
+        "D08",
+        "renewal body digest",
+        req(mutated(ro, |b| flip_from_end(b, 32)), body.clone()),
+        Some("renewal body digest"),
+    );
+    rows_renewal_bindings(v, r);
+    Ok(())
+}
+
+fn rows_renewal_bindings(v: &Vectors, r: &mut Rows) {
+    let ro = &v.ro;
+    let body = &v.request.body;
+    let tid = v.target.operation_id;
+    let req =
+        |op: Vec<u8>, body: Vec<u8>| RenewalRequest { operation: op, body }.target().map(|_| ());
+    let binding = Some("renewal target binding");
+    row(
+        r,
+        "D09",
+        "renewal object id",
+        req(mutated(ro, |b| flip_from_end(b, 208)), body.clone()),
+        binding,
+    );
+    row(
+        r,
+        "D10",
+        "renewal manifest hash",
+        req(mutated(ro, |b| flip_from_end(b, 176)), body.clone()),
+        binding,
+    );
+    row(
+        r,
+        "D11",
+        "renewal grant id",
+        req(mutated(ro, |b| flip_from_end(b, 144)), body.clone()),
+        binding,
+    );
+    row(
+        r,
+        "D12",
+        "renewal grant epoch",
+        req(mutated(ro, |b| put_from_end(b, 112, &2_u64.to_be_bytes())), body.clone()),
+        binding,
+    );
+    row(
+        r,
+        "D13",
+        "renewal authority generation",
+        req(mutated(ro, |b| put_from_end(b, 104, &2_u64.to_be_bytes())), body.clone()),
+        binding,
+    );
+    row(
+        r,
+        "D14",
+        "renewal payload generation",
+        req(mutated(ro, |b| put_from_end(b, 64, &2_u64.to_be_bytes())), body.clone()),
+        binding,
+    );
+    row(
+        r,
+        "D15",
+        "renewal operation id equal to target",
+        req(mutated(ro, |b| put_from_end(b, 96, &tid)), body.clone()),
+        binding,
+    );
+}
+
+fn rows_renewal_grant(v: &Vectors, r: &mut Rows) -> Result {
+    let owner = ed25519_dalek::SigningKey::from_bytes(&[81; 32]);
+    let base = signed_grant(v.grant.grant().clone(), &owner)?;
+    let requester = base.grant().grantee.clone();
+    let now = 1_700_000_001;
+    let source = v.renew.audience.clone();
+    let relay = v.target.audience.clone();
+    let ro = &v.ro;
+    let body = &v.request.body;
+    let who = Some("renewal requester");
+    let g = base.grant().clone();
+    let with_grantee = |f: &dyn Fn(&mut crate::large_attachment::ScopedAttachmentGrant)| -> Result<VerifiedScopedGrant> {
+        let mut c = g.clone();
+        f(&mut c);
+        signed_grant(c, &owner)
+    };
+    let check = |c: &VerifiedScopedGrant| {
+        RenewalRequest { operation: ro.clone(), body: body.clone() }
+            .validate(c, &requester, &source, &relay, now)
+    };
+    row(
+        r,
+        "E01",
+        "grantee account anchor",
+        check(&with_grantee(&|c| c.grantee.account_anchor.push('x'))?),
+        who,
+    );
+    row(
+        r,
+        "E02",
+        "grantee device id",
+        check(&with_grantee(&|c| c.grantee.device_id.push('x'))?),
+        who,
+    );
+    row(
+        r,
+        "E03",
+        "grantee device epoch",
+        check(&with_grantee(&|c| c.grantee.device_epoch += 1)?),
+        who,
+    );
+    row(
+        r,
+        "E04",
+        "grantee signing key",
+        check(&with_grantee(&|c| c.grantee.signing_public_key[0] ^= 1)?),
+        who,
+    );
+    row(
+        r,
+        "E05",
+        "grantee home node",
+        check(&with_grantee(&|c| c.grantee.home_node_id.push('x'))?),
+        who,
+    );
+    rows_renewal_audience(v, r)?;
+    let grant_err = Some("renewal grant binding");
+    row(r, "E08", "grant object id", check(&with_grantee(&|c| c.object_id[0] ^= 1)?), grant_err);
+    row(
+        r,
+        "E09",
+        "grant manifest hash",
+        check(&with_grantee(&|c| c.manifest_hash[0] ^= 1)?),
+        grant_err,
+    );
+    row(r, "E10", "grant id", check(&with_grantee(&|c| c.grant_id[0] ^= 1)?), grant_err);
+    row(r, "E11", "grant epoch", check(&with_grantee(&|c| c.epoch += 1)?), grant_err);
+    row(
+        r,
+        "E12",
+        "grant rights without renewal bit",
+        check(&with_grantee(&|c| c.rights = 1)?),
+        Some("renewal rights"),
+    );
+    let early = RenewalRequest { operation: ro.clone(), body: body.clone() };
+    row(
+        r,
+        "E13",
+        "now before grant issue",
+        early.validate(&base, &requester, &source, &relay, g.issued_at - 1),
+        Some("renewal grant time"),
+    );
+    row(
+        r,
+        "E14",
+        "now at grant expiry",
+        early.validate(&base, &requester, &source, &relay, g.expires_at),
+        Some("renewal grant time"),
+    );
+    Ok(())
+}
+
+fn rows_renewal_audience(v: &Vectors, r: &mut Rows) -> Result {
+    let owner = ed25519_dalek::SigningKey::from_bytes(&[81; 32]);
+    let base = signed_grant(v.grant.grant().clone(), &owner)?;
+    let requester = base.grant().grantee.clone();
+    let now = 1_700_000_001;
+    let source = v.renew.audience.clone();
+    let relay = v.target.audience.clone();
+    let ro = &v.ro;
+    let body = &v.request.body;
+    let aud = ident_end(ro, ident_end(ro, 12)?)?;
+    let renew_aud =
+        RenewalRequest { operation: mutated(ro, |b| b[aud + 4] ^= 1), body: body.clone() };
+    row(
+        r,
+        "E06",
+        "renewal audience byte",
+        renew_aud.validate(&base, &requester, &source, &relay, now),
+        Some("renewal audience"),
+    );
+    let tb = v.target.canonical_bytes()?;
+    let t_aud = ident_end(&tb, ident_end(&tb, 12)?)?;
+    let body2 = mutated(body, |b| b[12 + t_aud + 4] ^= 1);
+    let mut renew2 = v.renew.clone();
+    renew2.body_digest = body_digest(&body2);
+    let relay_aud = RenewalRequest { operation: renew2.canonical_bytes()?, body: body2 };
+    row(
+        r,
+        "E07",
+        "target relay audience byte",
+        relay_aud.validate(&base, &requester, &source, &relay, now),
+        Some("renewal audience"),
+    );
+    Ok(())
+}
+
+fn rows_forward_decode(v: &Vectors, r: &mut Rows) -> Result {
     let w = &v.w;
     let wp = w_pos(w)?;
-    let issued: [u8; 8] = w[wp.issued..wp.issued + 8].try_into()?;
-    let iss = u64::from_be_bytes(issued);
-    let mut cases: Vec<Case> = Vec::new();
-    cases.push(("W over 2048 bytes".into(), vec![0; 2049], "forward cap"));
-    case(&mut cases, "W version", w, |b| b[7] = 2, "forward version");
-    case(&mut cases, "W trailing byte", w, |b| b.push(0), "forward framing");
-    case(
-        &mut cases,
+    let iss = u64::from_be_bytes(w[wp.issued..wp.issued + 8].try_into()?);
+    row(r, "F01", "W over 2048 bytes", dec_w(&vec![0; 2049]), Some("forward cap"));
+    row(r, "F02", "W magic", dec_w(&mutated(w, |b| b[0] ^= 1)), Some("forward version"));
+    row(r, "F03", "W version 2", dec_w(&mutated(w, |b| b[7] = 2)), Some("forward version"));
+    row(r, "F04", "W trailing byte", dec_w(&mutated(w, |b| b.push(0))), Some("forward framing"));
+    row(
+        r,
+        "F05",
         "W truncated by one byte",
-        w,
-        |b| {
+        dec_w(&mutated(w, |b| {
             b.pop();
-        },
-        "truncated native",
+        })),
+        Some("truncated native"),
     );
-    case(&mut cases, "W device epoch zero", w, |b| put_at(b, wp.device_epoch, 0), "device epoch");
-    case(
-        &mut cases,
-        "W grant epoch zero",
-        w,
-        |b| put_at(b, wp.grant_epoch, 0),
-        "forward home binding",
+    row(
+        r,
+        "F06",
+        "W expires equal to issued",
+        dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss))),
+        Some("proof lifetime"),
     );
-    case(
-        &mut cases,
-        "W home node differs from home issuer",
-        w,
-        |b| b[wp.home + 4] ^= 1,
-        "forward home binding",
-    );
-    case(
-        &mut cases,
-        "W lifetime zero (expires == issued)",
-        w,
-        |b| put_at(b, wp.issued + 8, iss),
-        "proof lifetime",
-    );
-    case(
-        &mut cases,
+    row(
+        r,
+        "F07",
         "W lifetime 31 seconds",
-        w,
-        |b| put_at(b, wp.issued + 8, iss + 31),
-        "proof lifetime",
+        dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 31))),
+        Some("proof lifetime"),
     );
-    run_decode(c, cases, dec_w);
-    accept(
-        c,
-        "W lifetime exactly 30 seconds",
-        dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 30))),
+    row(
+        r,
+        "F08",
+        "W grant epoch zero",
+        dec_w(&mutated(w, |b| put_at(b, wp.grant_epoch, 0))),
+        Some("forward home binding"),
     );
-    accept(
-        c,
-        "W lifetime exactly 1 second",
-        dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 1))),
+    row(
+        r,
+        "F09",
+        "W home node differs from home issuer",
+        dec_w(&mutated(w, |b| b[wp.home + 4] ^= 1)),
+        Some("forward home binding"),
+    );
+    row(
+        r,
+        "F10",
+        "W requester device epoch zero",
+        dec_w(&mutated(w, |b| put_at(b, wp.device_epoch, 0))),
+        Some("device epoch"),
     );
     Ok(())
 }
 
-fn forward_validate_rows(v: &Vectors, c: &mut Counts) -> Result {
+fn rows_forward_validate(v: &Vectors, r: &mut Rows) -> Result {
     let w0 = &v.w_orig;
     let now = w0.issued_at;
     let gexp = v.grant.grant().expires_at;
     let wb = &v.w;
     let p = w_pos(wb)?;
     let ge = p.grant_epoch;
-    let rows: Vec<(&str, Vec<u8>, &'static str)> = vec![
-        ("W requester key", mutated(wb, |b| b[p.key] ^= 1), "forward request binding"),
-        ("W grant hash", mutated(wb, |b| b[ge - 64] ^= 1), "forward request binding"),
-        ("W grant id", mutated(wb, |b| b[ge - 32] ^= 1), "forward request binding"),
-        ("W grant epoch", mutated(wb, |b| b[ge + 7] = 2), "forward request binding"),
-        ("W source issuer", mutated(wb, |b| b[p.source + 4] ^= 1), "forward request binding"),
-        ("W challenge", mutated(wb, |b| b[p.challenge] ^= 1), "forward request binding"),
-        ("W operation hash", mutated(wb, |b| b[p.op_hash] ^= 1), "forward request binding"),
-        (
-            "W issued more than 5 s ahead",
-            mutated(wb, |b| {
-                put_from_end(b, 16, &(now + 6).to_be_bytes());
-                put_from_end(b, 8, &(now + 7).to_be_bytes());
+    let req = w0.requester.clone();
+    let ch = w0.challenge;
+    let check = |bytes: &[u8], at: u64| {
+        ForwardAttestation::decode(bytes)
+            .and_then(|w| w.validate(&v.request, &v.grant, &req, &ch, at))
+    };
+    let bind = Some("forward request binding");
+    let time = Some("forward time");
+    row(
+        r,
+        "G01",
+        "W requester account anchor",
+        check(&mutated(wb, |b| b[p.anchor + 4] ^= 1), now),
+        bind,
+    );
+    row(
+        r,
+        "G02",
+        "W requester device id",
+        check(&mutated(wb, |b| b[p.device + 4] ^= 1), now),
+        bind,
+    );
+    row(
+        r,
+        "G03",
+        "W requester device epoch 2",
+        check(&mutated(wb, |b| put_at(b, p.device_epoch, 2)), now),
+        bind,
+    );
+    row(r, "G04", "W requester signing key", check(&mutated(wb, |b| b[p.key] ^= 1), now), bind);
+    row(
+        r,
+        "G05",
+        "W requester home (home issuer kept consistent)",
+        check(
+            &mutated(wb, |b| {
+                b[p.home + 4] ^= 1;
+                b[p.home_issuer + 4] ^= 1;
             }),
-            "forward time",
-        ),
-        (
-            "W expired at validation time",
-            mutated(wb, |b| {
-                put_from_end(b, 16, &(now - 1).to_be_bytes());
-                put_from_end(b, 8, &now.to_be_bytes());
-            }),
-            "forward time",
-        ),
-        (
-            "W expiry after grant expiry",
-            mutated(wb, |b| {
-                put_from_end(b, 16, &(gexp - 29).to_be_bytes());
-                put_from_end(b, 8, &(gexp + 1).to_be_bytes());
-            }),
-            "forward time",
-        ),
-    ];
-    for (label, bytes, want) in rows {
-        let got = ForwardAttestation::decode(&bytes)?.validate(
-            &v.request,
-            &v.grant,
-            &w0.requester,
-            &w0.challenge,
-            now,
-        );
-        refuse(c, label, got, want);
-    }
-    let sk = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
-    let pk = sk.verifying_key().to_bytes();
-    let sig = sk.sign(&w0.signing_bytes()?).to_bytes();
-    accept(c, "W signature verifies", w0.verify(&pk, &sig));
-    let mut bad = sig;
-    bad[0] ^= 1;
-    refuse(c, "W signature byte flip", w0.verify(&pk, &bad), "grant signature");
-
-    // Inclusive positives: issued exactly 5 s ahead, expiry exactly at grant expiry.
-    let at_skew = mutated(wb, |b| {
-        put_from_end(b, 16, &(now + 5).to_be_bytes());
-        put_from_end(b, 8, &(now + 6).to_be_bytes());
-    });
-    accept(
-        c,
-        "W issued exactly 5 s ahead",
-        ForwardAttestation::decode(&at_skew)?.validate(
-            &v.request,
-            &v.grant,
-            &w0.requester,
-            &w0.challenge,
             now,
         ),
+        bind,
     );
-    let at_grant = mutated(wb, |b| {
-        put_from_end(b, 16, &(gexp - 30).to_be_bytes());
-        put_from_end(b, 8, &gexp.to_be_bytes());
-    });
-    accept(
-        c,
-        "W expiry exactly at grant expiry",
-        ForwardAttestation::decode(&at_grant)?.validate(
-            &v.request,
-            &v.grant,
-            &w0.requester,
-            &w0.challenge,
-            gexp - 30,
-        ),
+    row(r, "G06", "W challenge", check(&mutated(wb, |b| b[p.challenge] ^= 1), now), bind);
+    row(r, "G07", "W grant hash", check(&mutated(wb, |b| b[ge - 64] ^= 1), now), bind);
+    row(r, "G08", "W grant id", check(&mutated(wb, |b| b[ge - 32] ^= 1), now), bind);
+    row(r, "G09", "W grant epoch 2", check(&mutated(wb, |b| b[ge + 7] = 2), now), bind);
+    row(r, "G10", "W source issuer", check(&mutated(wb, |b| b[p.source + 4] ^= 1), now), bind);
+    row(r, "G11", "W operation hash", check(&mutated(wb, |b| b[p.op_hash] ^= 1), now), bind);
+    let at_times = |issued: u64, expires: u64| {
+        mutated(wb, |b| {
+            put_from_end(b, 16, &issued.to_be_bytes());
+            put_from_end(b, 8, &expires.to_be_bytes());
+        })
+    };
+    row(r, "G12", "W issued more than 5 s ahead", check(&at_times(now + 6, now + 7), now), time);
+    row(
+        r,
+        "G13",
+        "W expired at its own validation time",
+        check(&at_times(now, now + 5), now + 10),
+        time,
     );
-    accept(
-        c,
-        "W unmodified vector validates",
-        w0.validate(&v.request, &v.grant, &w0.requester, &w0.challenge, now),
+    row(
+        r,
+        "G14",
+        "W expiry after grant expiry",
+        check(&at_times(gexp - 29, gexp + 1), gexp - 29),
+        time,
     );
     Ok(())
 }
 
-fn pop_decode_rows(v: &Vectors, c: &mut Counts) -> Result {
+fn rows_pop_decode(v: &Vectors, r: &mut Rows) -> Result {
     let pb = &v.p;
     let iss = u64::from_be_bytes(pb[104..112].try_into()?);
-    let mut cases: Vec<Case> = Vec::new();
-    case(&mut cases, "P version", pb, |b| b[7] = 2, "pop version");
-    case(&mut cases, "P trailing byte", pb, |b| b.push(0), "pop length");
-    case(&mut cases, "P lifetime zero", pb, |b| put_at(b, 112, iss), "proof lifetime");
-    case(&mut cases, "P lifetime 31 seconds", pb, |b| put_at(b, 112, iss + 31), "proof lifetime");
-    run_decode(c, cases, dec_p);
-    accept(c, "P lifetime exactly 30 seconds", dec_p(&mutated(pb, |b| put_at(b, 112, iss + 30))));
-    accept(c, "P lifetime exactly 1 second", dec_p(&mutated(pb, |b| put_at(b, 112, iss + 1))));
+    row(r, "H01", "P length 153", dec_p(&mutated(pb, |b| b.push(0))), Some("pop length"));
+    row(r, "H02", "P magic", dec_p(&mutated(pb, |b| b[0] ^= 1)), Some("pop version"));
+    row(r, "H03", "P version 2", dec_p(&mutated(pb, |b| b[7] = 2)), Some("pop version"));
+    row(
+        r,
+        "H04",
+        "P expires equal to issued",
+        dec_p(&mutated(pb, |b| put_at(b, 112, iss))),
+        Some("proof lifetime"),
+    );
+    row(
+        r,
+        "H05",
+        "P lifetime 31 seconds",
+        dec_p(&mutated(pb, |b| put_at(b, 112, iss + 31))),
+        Some("proof lifetime"),
+    );
     Ok(())
 }
 
-fn pop_validate_rows(v: &Vectors, c: &mut Counts) -> Result {
+fn rows_pop_validate(v: &Vectors, r: &mut Rows) {
     let w0 = &v.w_orig;
     let now = w0.issued_at;
     let pb = &v.p;
-    let iss = u64::from_be_bytes(pb[104..112].try_into()?);
     let times = |issued: u64, expires: u64| {
         mutated(pb, |b| {
             put_at(b, 104, issued);
             put_at(b, 112, expires);
         })
     };
-    let rows: Vec<(&str, Vec<u8>, u64, &'static str)> = vec![
-        ("P operation hash", mutated(pb, |b| b[8] ^= 1), now, "pop binding"),
-        ("P requester digest", mutated(pb, |b| b[40] ^= 1), now, "pop binding"),
-        ("P forward digest", mutated(pb, |b| b[120] ^= 1), now, "pop binding"),
-        ("P issued before W issued", times(iss - 1, iss + 29), now, "pop time"),
-        ("P expiry after W expiry", times(iss + 1, iss + 31), now, "pop time"),
-        ("P issued more than 5 s ahead", times(now + 6, now + 7), now, "pop time"),
-        ("P expired at validation time", times(now + 28, now + 29), now + 40, "pop time"),
-    ];
-    for (label, bytes, at, want) in rows {
-        let got = RequesterPop::decode(&bytes)?.validate(w0, at);
-        refuse(c, label, got, want);
-    }
-    let sk = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let check =
+        |bytes: &[u8], at: u64| RequesterPop::decode(bytes).and_then(|p| p.validate(w0, at));
+    let bind = Some("pop binding");
+    let time = Some("pop time");
+    row(r, "I01", "P operation hash", check(&mutated(pb, |b| b[8] ^= 1), now), bind);
+    row(r, "I02", "P requester digest", check(&mutated(pb, |b| b[40] ^= 1), now), bind);
+    row(r, "I03", "P forward digest", check(&mutated(pb, |b| b[120] ^= 1), now), bind);
+    row(r, "I04", "P issued before W issued", check(&times(now - 1, now + 29), now), time);
+    row(r, "I05", "P expiry after W expiry", check(&times(now + 1, now + 31), now), time);
+    row(r, "I06", "P issued more than 5 s ahead", check(&times(now + 6, now + 7), now), time);
+    row(
+        r,
+        "I07",
+        "P expired at its own validation time",
+        check(&times(now, now + 5), now + 10),
+        time,
+    );
+}
+
+fn rows_signatures(v: &Vectors, r: &mut Rows) -> Result {
+    let w0 = &v.w_orig;
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
     let pk = sk.verifying_key().to_bytes();
-    let p0 = &v.p_orig;
-    let sig = sk.sign(&p0.signing_bytes()?).to_bytes();
-    accept(c, "P signature verifies", p0.verify(&pk, &sig));
+    let sig = sk.sign(&w0.signing_bytes()?).to_bytes();
+    w0.verify(&pk, &sig)?;
     let mut bad = sig;
     bad[0] ^= 1;
-    refuse(c, "P signature byte flip", p0.verify(&pk, &bad), "grant signature");
-    accept(
-        c,
-        "P issued exactly 5 s ahead",
-        RequesterPop::decode(&times(now + 5, now + 6))?.validate(w0, now),
-    );
-    accept(c, "P unmodified vector validates", p0.validate(w0, now));
+    row(r, "J01", "W signature byte flip", w0.verify(&pk, &bad), Some("grant signature"));
+    let p0 = &v.p_orig;
+    let sk2 = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let pk2 = sk2.verifying_key().to_bytes();
+    let sig2 = sk2.sign(&p0.signing_bytes()?).to_bytes();
+    p0.verify(&pk2, &sig2)?;
+    let mut bad2 = sig2;
+    bad2[0] ^= 1;
+    row(r, "J02", "P signature byte flip", p0.verify(&pk2, &bad2), Some("grant signature"));
     Ok(())
 }
 
-fn renewal_body_rows(v: &Vectors, c: &mut Counts) -> Result {
-    let body = &v.request.body;
+/// Inclusive boundary acceptances, counted separately from the predicate inventory.
+fn boundary_positives(v: &Vectors) -> Result {
     let ro = &v.ro;
-    let tid = v.target.operation_id;
-    let req =
-        |op: Vec<u8>, body: Vec<u8>| RenewalRequest { operation: op, body }.target().map(|_| ());
-    refuse(c, "renewal body over 8192 bytes", req(ro.clone(), vec![0; 8193]), "renewal body cap");
-    refuse(
-        c,
-        "renewal body version",
-        req(ro.clone(), mutated(body, |b| b[0] ^= 1)),
-        "renewal body version",
-    );
-    refuse(
-        c,
-        "renewal body trailing byte",
-        req(ro.clone(), mutated(body, |b| b.push(0))),
-        "renewal body framing",
-    );
-    refuse(
-        c,
-        "renewal body target length beyond body",
-        req(ro.clone(), mutated(body, |b| b[8..12].copy_from_slice(&u32::MAX.to_be_bytes()))),
-        "truncated native",
-    );
-    refuse(
-        c,
-        "renewal body digest",
-        req(mutated(ro, |b| flip_from_end(b, 32)), body.clone()),
-        "renewal body digest",
-    );
-    let binding: Vec<(&str, Vec<u8>)> = vec![
-        ("object id", mutated(ro, |b| flip_from_end(b, 208))),
-        ("manifest hash", mutated(ro, |b| flip_from_end(b, 176))),
-        ("grant id", mutated(ro, |b| flip_from_end(b, 144))),
-        ("grant epoch", mutated(ro, |b| put_from_end(b, 112, &2_u64.to_be_bytes()))),
-        ("authority generation", mutated(ro, |b| put_from_end(b, 104, &2_u64.to_be_bytes()))),
-        ("payload generation", mutated(ro, |b| put_from_end(b, 64, &2_u64.to_be_bytes()))),
-        ("operation id equal to target", mutated(ro, |b| put_from_end(b, 96, &tid))),
-    ];
-    for (label, op) in binding {
-        refuse(
-            c,
-            &format!("renewal target binding: {label}"),
-            req(op, body.clone()),
-            "renewal target binding",
-        );
-    }
-
-    // Renewal audience (O) and relay audience (target) are checked against the caller's source and relay.
-    let requester = v.grant.grant().grantee.clone();
-    let now = v.w_orig.issued_at;
-    let source = v.renew.audience.clone();
-    let relay = v.target.audience.clone();
+    let w = &v.w;
     let path_at = ident_end(ro, 12)?;
     let aud_at = ident_end(ro, path_at)?;
-    let renew_aud =
-        RenewalRequest { operation: mutated(ro, |b| b[aud_at + 4] ^= 1), body: body.clone() };
-    refuse(
-        c,
-        "renewal O audience byte",
-        renew_aud.validate(&v.grant, &requester, &source, &relay, now),
-        "renewal audience",
-    );
-    let tb = v.target.canonical_bytes()?;
-    let t_path = ident_end(&tb, 12)?;
-    let t_aud = ident_end(&tb, t_path)?;
-    let body2 = mutated(body, |b| b[12 + t_aud + 4] ^= 1);
-    let mut renew2 = v.renew.clone();
-    renew2.body_digest = body_digest(&body2);
-    let relay_aud = RenewalRequest { operation: renew2.canonical_bytes()?, body: body2 };
-    refuse(
-        c,
-        "renewal target relay audience byte",
-        relay_aud.validate(&v.grant, &requester, &source, &relay, now),
-        "renewal audience",
-    );
-
-    // A well-formed renewal whose target is an operation 8 is refused by kind, not by binding.
-    let mut t8 = v.target.clone();
-    t8.op = 8;
-    t8.method = "POST".into();
-    t8.path = "/s9/attachments/renew".into();
-    t8.segment_index = 0;
-    t8.offset = 0;
-    t8.length = 0;
-    let mut frame = b"RFRQ".to_vec();
-    frame.extend(1_u32.to_be_bytes());
-    lp(&mut frame, &t8.canonical_bytes()?)?;
-    let mut renew8 = v.renew.clone();
-    renew8.body_digest = body_digest(&frame);
-    refuse(
-        c,
-        "renewal target kind 8",
-        req(renew8.canonical_bytes()?, frame),
-        "renewal target kind",
-    );
+    let max = vec![b'a'; 256];
+    let mut method = b"POST".to_vec();
+    method.resize(256, b'x');
+    let mut path = b"/s9/attachments/renew".to_vec();
+    path.resize(256, b'x');
+    assert_eq!(dec_o(&splice_ident(ro, 12, &method)?), Err(FormatError("operation endpoint")));
+    assert_eq!(dec_o(&splice_ident(ro, path_at, &path)?), Err(FormatError("operation endpoint")));
+    dec_o(&splice_ident(ro, aud_at, &max)?)?;
+    let wp = w_pos(w)?;
+    dec_w(&splice_ident(w, wp.anchor, &max)?)?;
+    dec_w(&splice_ident(w, wp.device, &max)?)?;
+    dec_w(&splice_ident(w, wp.source, &max)?)?;
+    dec_w(&splice_ident(&splice_ident(w, wp.home_issuer, &max)?, wp.home, &max)?)?;
+    let seg = u64::from(super::super::SEGMENT_BYTES);
+    let mut read = read_base(v);
+    read.length = 1_048_576;
+    dec_o(&read.canonical_bytes()?)?;
+    read.length = 1;
+    read.offset = seg - 1;
+    dec_o(&read.canonical_bytes()?)?;
+    let mut page = page_base(v);
+    page.length = 256;
+    dec_o(&page.canonical_bytes()?)?;
+    page.offset = u64::MAX - 256;
+    dec_o(&page.canonical_bytes()?)?;
+    let iss = u64::from_be_bytes(w[wp.issued..wp.issued + 8].try_into()?);
+    dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 30)))?;
+    dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 1)))?;
+    let now = v.w_orig.issued_at;
+    let gexp = v.grant.grant().expires_at;
+    let at_skew = mutated(w, |b| {
+        put_from_end(b, 16, &(now + 5).to_be_bytes());
+        put_from_end(b, 8, &(now + 6).to_be_bytes());
+    });
+    ForwardAttestation::decode(&at_skew)?.validate(
+        &v.request,
+        &v.grant,
+        &v.w_orig.requester,
+        &v.w_orig.challenge,
+        now,
+    )?;
+    let at_grant = mutated(w, |b| {
+        put_from_end(b, 16, &(gexp - 30).to_be_bytes());
+        put_from_end(b, 8, &gexp.to_be_bytes());
+    });
+    ForwardAttestation::decode(&at_grant)?.validate(
+        &v.request,
+        &v.grant,
+        &v.w_orig.requester,
+        &v.w_orig.challenge,
+        gexp - 30,
+    )?;
+    v.w_orig.validate(&v.request, &v.grant, &v.w_orig.requester, &v.w_orig.challenge, now)?;
+    let pb = &v.p;
+    let piss = u64::from_be_bytes(pb[104..112].try_into()?);
+    dec_p(&mutated(pb, |b| put_at(b, 112, piss + 30)))?;
+    dec_p(&mutated(pb, |b| put_at(b, 112, piss + 1)))?;
+    let skew_p = mutated(pb, |b| {
+        put_at(b, 104, now + 5);
+        put_at(b, 112, now + 6);
+    });
+    RequesterPop::decode(&skew_p)?.validate(&v.w_orig, now)?;
+    v.p_orig.validate(&v.w_orig, now)?;
     Ok(())
 }
 
-const INVENTORY_OPERATION_HEADER: usize = 11;
-const INVENTORY_OPERATION_RANGE: usize = 12;
-const INVENTORY_IDENTITY: usize = 16;
-const INVENTORY_FORWARD_DECODE: usize = 9;
-const INVENTORY_FORWARD_VALIDATE: usize = 11;
-const INVENTORY_POP_DECODE: usize = 4;
-const INVENTORY_POP_VALIDATE: usize = 8;
-const INVENTORY_RENEWAL_BODY: usize = 15;
-/// Sum of the family counts above; the pre-existing grant-level test adds 11 more refusals.
-const INVENTORY_ERROR_ROWS: usize = 86;
-
-#[test]
-fn renewal_received_bytes_operation_header_matrix() -> Result {
+fn family(f: fn(&Vectors, &mut Rows) -> Result) -> Result {
     let v = vectors()?;
-    let mut c = Counts::default();
-    operation_header_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_OPERATION_HEADER);
+    let mut r = Rows::default();
+    f(&v, &mut r)?;
+    assert!(r.failures.is_empty(), "{:#?}", r.failures);
     Ok(())
 }
 
 #[test]
-fn renewal_received_bytes_operation_range_matrix() -> Result {
+fn renewal_rows_operation_canonical() -> Result {
+    family(rows_operation_canonical)
+}
+
+#[test]
+fn renewal_rows_operation_decode_and_identity() -> Result {
+    family(|v, r| {
+        rows_operation_decode(v, r);
+        rows_identity(v, r)
+    })
+}
+
+#[test]
+fn renewal_rows_renewal_body() -> Result {
+    family(rows_renewal_body)
+}
+
+#[test]
+fn renewal_rows_renewal_grant() -> Result {
+    family(rows_renewal_grant)
+}
+
+#[test]
+fn renewal_rows_forward_decode_and_validate() -> Result {
+    family(|v, r| {
+        rows_forward_decode(v, r)?;
+        rows_forward_validate(v, r)
+    })
+}
+
+#[test]
+fn renewal_rows_pop_and_signatures() -> Result {
+    family(|v, r| {
+        rows_pop_decode(v, r)?;
+        rows_pop_validate(v, r);
+        rows_signatures(v, r)
+    })
+}
+
+#[test]
+fn renewal_boundary_positives_accept() -> Result {
     let v = vectors()?;
-    let mut c = Counts::default();
-    operation_range_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_OPERATION_RANGE);
-    assert_eq!(c.positives, 4);
-    Ok(())
+    boundary_positives(&v)
 }
 
 #[test]
-fn renewal_received_bytes_identity_matrix() -> Result {
+fn renewal_predicate_rows_match_inventory() -> Result {
     let v = vectors()?;
-    let mut c = Counts::default();
-    identity_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_IDENTITY);
-    assert_eq!(c.positives, 7);
+    let mut r = Rows::default();
+    rows_operation_canonical(&v, &mut r)?;
+    rows_operation_decode(&v, &mut r);
+    rows_identity(&v, &mut r)?;
+    rows_renewal_body(&v, &mut r)?;
+    rows_renewal_grant(&v, &mut r)?;
+    rows_forward_decode(&v, &mut r)?;
+    rows_forward_validate(&v, &mut r)?;
+    rows_pop_decode(&v, &mut r)?;
+    rows_pop_validate(&v, &mut r);
+    rows_signatures(&v, &mut r)?;
+    assert!(r.failures.is_empty(), "{:#?}", r.failures);
+    let mut hits = r.hits.clone();
+    hits.sort_unstable();
+    let mut inv: Vec<&str> = INVENTORY.iter().map(|(id, _)| *id).collect();
+    inv.sort_unstable();
+    assert_eq!(hits, inv, "each predicate instance has exactly one row");
+    assert_eq!(INVENTORY.len(), 118);
     Ok(())
-}
-
-#[test]
-fn renewal_received_bytes_forward_matrix() -> Result {
-    let v = vectors()?;
-    let mut c = Counts::default();
-    forward_decode_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_FORWARD_DECODE);
-    let mut c = Counts::default();
-    forward_validate_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_FORWARD_VALIDATE);
-    Ok(())
-}
-
-#[test]
-fn renewal_received_bytes_pop_matrix() -> Result {
-    let v = vectors()?;
-    let mut c = Counts::default();
-    pop_decode_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_POP_DECODE);
-    let mut c = Counts::default();
-    pop_validate_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_POP_VALIDATE);
-    Ok(())
-}
-
-#[test]
-fn renewal_received_bytes_body_matrix() -> Result {
-    let v = vectors()?;
-    let mut c = Counts::default();
-    renewal_body_rows(&v, &mut c)?;
-    assert_eq!(c.errors, INVENTORY_RENEWAL_BODY);
-    Ok(())
-}
-
-#[test]
-fn renewal_inventory_total_matches_test_rows() {
-    let sum = INVENTORY_OPERATION_HEADER
-        + INVENTORY_OPERATION_RANGE
-        + INVENTORY_IDENTITY
-        + INVENTORY_FORWARD_DECODE
-        + INVENTORY_FORWARD_VALIDATE
-        + INVENTORY_POP_DECODE
-        + INVENTORY_POP_VALIDATE
-        + INVENTORY_RENEWAL_BODY;
-    assert_eq!(sum, INVENTORY_ERROR_ROWS);
 }
 
 #[test]
