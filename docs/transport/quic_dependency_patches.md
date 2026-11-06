@@ -250,8 +250,9 @@ Refused admission returns through the existing resource-close path before STREAM
 frame effects. Default mode takes the unchanged raw-backed plaintext path.
 
 This is the payload component only, not complete receive metadata enforcement.
-The separately allocated `Bytes::from_owner` owner/refcount envelope has not yet
-been certified or instrumented through final deallocation; PR1B-2b owns that work.
+The separately allocated Bytes owner/refcount envelope now uses the guarded
+constructor described below; its allocation has separate admission and lifetime.
+The partial receive classes remain uncertified.
 Heap/descriptors, compaction copies, unordered history and whole-packet metadata
 transactions remain subsequent parts. No receipt of data, test counter or payload
 lease is a certificate for those allocations, TLS residuals or a runtime profile.
@@ -304,3 +305,28 @@ allocator excess. Checked profile arithmetic must rederive
 `E + N * (2 * Unit_base + M_conn + D) <= b` plus aggregate slices within B. The hook
 removes early-refund retirement overlap; this does not establish zero allocator
 excess. Unknown source/layout/runtime/target/allocator identities refuse certificates.
+
+
+### Partial receive owner envelope (PR1B-2b)
+
+Dormant payload copies use `Bytes::try_from_owner_with_guard` with a separately
+reserved AllocationCharge for the constructor's actual wrapper Layout. The guard
+is outside the owner allocation during final destruction and returns only after
+payload destruction and wrapper deallocation. Payload storage keeps its own charge;
+raw ownership is additionally held by the after-free guard, so its permit also
+survives wrapper deallocation. Clones, slices and Chunks
+share one wrapper. No fixed wrapper-size estimate enters production admission.
+Reservation/allocation refusal maps to the existing ResourceExhausted/terminal
+adapter before STREAM effects; a refused wrapper destroys the temporary admitted
+payload copy. Whole-packet class preflight remains a subsequent part.
+
+The production-owner allocation-site test measures System allocator usable extents
+for both actual payload and actual wrapper, retains them through completed free,
+and blocks the final wrapper deallocator after payload destruction. Its concurrent
+replacement reservation remains refused while the wrapper's credit is held. The
+real-driver `receive_owner_metadata_survives_final_payload_drop` adds a limit one
+byte short of payload+wrapper admission, independent pre-encryption payload length,
+zero admitted STREAM effects and zero wrapper allocations; its positive case holds
+shared Chunks/slices/clones across STOP_SENDING, RESET_STREAM and Drained. This is
+owner-component evidence, pending dependency audit; it is not a receive-class,
+allocator-profile or envelope certificate, and enables no production capability.

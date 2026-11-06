@@ -81,9 +81,15 @@ fn production_owner_credit_outlives_actual_wrapper_free() {
     let layout=owner_layout();
     let owner_charge=((layout.size()+63)&!63)+64;
     let credit=MetadataCredit::new(128+owner_charge);
+    struct RawOwner(Arc<AtomicBool>);
+    impl Drop for RawOwner {
+        fn drop(&mut self) { self.0.store(true,SeqCst); }
+    }
+    let raw_dropped=Arc::new(AtomicBool::new(false));
+    let raw_owner=Arc::new(RawOwner(raw_dropped.clone()));
     let _=credit.stats(); // Initialize the fixed ledger mutex outside backing-allocation observation.
     CAPTURE.with(|c|c.set(1));
-    let bytes=super::super::metadata_backing::copy_payload(&[0x5a],None,&credit,MetadataClass::StreamAssemblers).unwrap();
+    let bytes=super::super::metadata_backing::copy_payload(&[0x5a],Some(raw_owner),&credit,MetadataClass::StreamAssemblers).unwrap();
     CAPTURE.with(|c|c.set(0));
     assert_eq!(COUNT.load(SeqCst),2,"one payload and one owner allocation");
     assert_eq!(REQUEST.load(SeqCst),layout.size(),"constructor layout matches the allocator request");
@@ -101,10 +107,13 @@ fn production_owner_credit_outlives_actual_wrapper_free() {
     let payload_live=PAYLOAD_LIVE.load(SeqCst);
     let wrapper_live=WRAPPER_LIVE.load(SeqCst);
     let used=credit.stats().used;
+    let raw_retained=!raw_dropped.load(SeqCst);
     let refused=credit.reserve(layout.size(),MetadataClass::StreamAssemblers).is_err();
     state.1=true;gate().1.notify_all();drop(state);worker.join().unwrap();
     assert_eq!(payload_live,0,"payload is physically freed before its refund");
     assert!(wrapper_live>0);
+    assert!(raw_retained,"raw permit returned before actual wrapper free");
+    assert!(raw_dropped.load(SeqCst));
     assert_eq!(used,owner_charge,"wrapper credit returned before actual free");
     assert!(refused,"replacement wrapper reused still-live credit");
     assert_eq!(WRAPPER_LIVE.load(SeqCst),0);assert_eq!(credit.stats().used,0);

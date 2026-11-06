@@ -600,12 +600,12 @@
         "delta": "PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; Keep separate payload admission; construct shared receive backing through guarded owner envelope"
       },
       "src/connection/metadata_owned_bytes.rs": {
-        "patched_sha256": "6bc117fa2dbd6e791255e361a9a611aa0c43a5b0ed8d32534a78eec6c0812605",
-        "delta": "Reserve compiler-reported Bytes owner layout and retain AllocationCharge through actual wrapper free"
+        "patched_sha256": "4f041e4914aaab7325f821f2aaab47ba834bd8df274154abdaec2cfea28392e4",
+        "delta": "Reserve compiler-reported Bytes owner layout and retain AllocationCharge through actual wrapper free; Retain raw owner in the unique after-free guard alongside its actual-layout charge"
       },
       "src/connection/metadata_owned_bytes/tests.rs": {
-        "patched_sha256": "ec24bf58fde978e26b9002842c385d5d18039d0ad337dd653ead1c955e5fdf4b",
-        "delta": "Test-only System allocator observes actual production payload/wrapper extents and final-free barrier"
+        "patched_sha256": "9c4e53736633ca9c76f28e1c03bcaa810d7529b2be78bae4d51cfe39c98f0ca7",
+        "delta": "Test-only System allocator observes actual production payload/wrapper extents and final-free barrier; Observe raw ownership retained at the actual wrapper deallocation barrier"
       }
     },
     "formatting": {
