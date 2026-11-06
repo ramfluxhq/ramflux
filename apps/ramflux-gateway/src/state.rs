@@ -95,10 +95,7 @@ pub(crate) struct GatewayForwardDeliverRequest {
     pub(crate) frame: ramflux_node_core::GatewayServerFrame,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct GatewayForwardDeliverResponse {
-    pub(crate) delivered: bool,
-}
+pub(crate) type GatewayForwardDeliverResponse = ramflux_node_core::SessionPushForwardResponse;
 
 impl GatewayPeerDirectory {
     pub(crate) fn empty(config: &ramflux_node_core::NodeServiceConfig) -> Self {

@@ -2769,6 +2769,7 @@ dependencies = [
  "ramflux-transport",
  "rcgen",
  "redb",
+ "serde",
  "serde_json",
  "socket2",
  "tokio",

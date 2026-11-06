@@ -94,6 +94,7 @@ fn wal_identity_and_restore_rotation() -> Result {
                 acked_inbox_seqs: BTreeSet::from([1]),
                 ..crate::CursorAckState::default()
             };
+            crate::session_push::tests::reject_stale(&store, "restore-target", &old[0])?;
             // The same sequence is still pending under the new E: an old intent cannot ACK it.
             let error = store
                 .record_ack_for_incarnation(&cursor, "restore-row", &old[0])
@@ -209,6 +210,7 @@ pub(super) fn quarantine_matrix() -> Result {
             store.load_router()?;
             let new = store.inbox_status("restore-target")?.0.expect("new E");
             assert_ne!(new, old[0]);
+            crate::session_push::tests::reject_stale(&store, "restore-target", &old[0])?;
             assert_eq!(store.inbox_status("restore-target")?.1, 2);
             // A valid extra segment inside quarantine is never replayed either.
             let ignored = root.join("wal/quarantine");

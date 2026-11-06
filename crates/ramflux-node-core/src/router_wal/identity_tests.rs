@@ -274,6 +274,7 @@ pub(super) fn loss_matrix() -> Result {
             store.load_router()?;
             let new = store.inbox_status("p2-target")?.0.expect("rotated E");
             assert_ne!(new, old, "required recorded segment loss must rotate E");
+            crate::session_push::tests::reject_stale(&store, "p2-target", &old)?;
             drop(store);
             let store = test_store(&root, mode, u64::MAX)?;
             assert_eq!(

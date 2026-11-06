@@ -21,6 +21,16 @@ impl RouterCore {
         }
         self.bind_publication(store)?;
         let lease = store.acquire_acknowledgement(target)?;
+        self.apply_ack_batch_leased(store, target, acks, &lease)
+    }
+
+    pub(crate) fn apply_ack_batch_leased(
+        &self,
+        store: &crate::RouterRedbStore,
+        target: &str,
+        acks: &[ramflux_protocol::Ack],
+        lease: &crate::SubmissionLease,
+    ) -> Result<Vec<Result<CursorAckState, NodeCoreError>>, NodeCoreError> {
         let mut candidate = self.target_shard(target).inbox.clone_ack_target(target);
         let previous_dead_letters = candidate
             .cursor_state(target)
@@ -67,7 +77,7 @@ impl RouterCore {
                 .cloned()
                 .ok_or(NodeCoreError::InvalidAckBatch("candidate lacks cursor"))?;
             cursor.retired_inbox_seqs = retired.iter().copied().collect();
-            store.record_leased_ack_batch(&cursor, &acknowledged, &lease)?;
+            store.record_leased_ack_batch(&cursor, &acknowledged, lease)?;
             let mut shard = self.target_shard(target);
             let boundary = shard.inbox.settlement_boundary(target);
             let _publication = crate::fatal_durability::publication()?;

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod entry_fetch;
+mod session_push;
 
 use crate::identity_authority::handle_signed_device_set;
 use std::io::Write;
@@ -379,6 +380,22 @@ pub(crate) fn handle_mesh_request_value(
     router: &crate::router_runtime::RouterHandle,
     peer_service_id: &str,
 ) -> anyhow::Result<MeshResponse> {
+    if let Some(response) =
+        session_push::route(&request.method, &request.path, &request.body, router, peer_service_id)?
+    {
+        return Ok(response);
+    }
+    let path = request.path.clone();
+    let body = request.body.clone();
+    let mut response = handle_mesh_request_inner(request, router, peer_service_id)?;
+    session_push::decorate(&path, &body, router, &mut response, peer_service_id)?;
+    Ok(response)
+}
+fn handle_mesh_request_inner(
+    request: ramflux_transport::MeshHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
+) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
     if method == "POST" && path == ramflux_node_core::MIGRATION_PEER_PATH {
         if peer_service_id != "ramflux-federation" {
@@ -445,9 +462,11 @@ pub(crate) async fn handle_mesh_quic_request_value(
             envelope_origin_for_peer(peer_service_id)?,
         )
         .await?;
+        let mut wire = MeshResponse::json("200 OK", serde_json::to_vec(&response)?);
+        session_push::decorate(&request.path, &body, router, &mut wire, peer_service_id)?;
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: serde_json::to_value(response)?,
+            body: serde_json::from_slice(&wire.body)?,
         });
     }
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp0/envelope/forwarded") {
@@ -459,12 +478,18 @@ pub(crate) async fn handle_mesh_quic_request_value(
         }
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: router.submit_forwarded_async(serde_json::from_slice(&body)?).await?,
+            body: {
+                let value = router.submit_forwarded_async(serde_json::from_slice(&body)?).await?;
+                let mut wire = MeshResponse::json("200 OK", serde_json::to_vec(&value)?);
+                session_push::decorate(&request.path, &body, router, &mut wire, peer_service_id)?;
+                serde_json::from_slice(&wire.body)?
+            },
         });
     }
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp10/own-devices/fanout") {
         let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
             serde_json::from_slice(&body)?;
+        let metadata_router = router.clone();
         let router = router.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             ramflux_node_core::publication::capture(|| {
@@ -476,9 +501,20 @@ pub(crate) async fn handle_mesh_quic_request_value(
             })
         })
         .await??;
+        let mut wire = MeshResponse::json(
+            "200 OK",
+            serde_json::to_vec(&prepared.published().await?.resolved().await?)?,
+        );
+        session_push::decorate(
+            "/mvp10/own-devices/fanout",
+            &body,
+            &metadata_router,
+            &mut wire,
+            peer_service_id,
+        )?;
         return Ok(ramflux_transport::GatewayQuicResponse {
             status: 200,
-            body: serde_json::to_value(prepared.published().await?.resolved().await?)?,
+            body: serde_json::from_slice(&wire.body)?,
         });
     }
     let mesh_request = ramflux_transport::MeshHttpRequest {
@@ -487,6 +523,9 @@ pub(crate) async fn handle_mesh_quic_request_value(
         body,
     };
     let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
+        || request.path == "/mvp0/ack-bound-batch"
+        || request.path == "/mvp0/ack-bound"
+        || request.path == "/s1/session"
         || request.path == ramflux_node_core::MIGRATION_PEER_PATH
     {
         let router = router.clone();
