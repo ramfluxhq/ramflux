@@ -202,19 +202,36 @@ impl Connection {
 
     pub(crate) fn execute_batch(&self, sql: &str) -> Result<()> {
         let sql = sql.to_owned();
-        self.call(move |db| db.execute_batch(&sql))
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        let path = self.inner.path.clone();
+        self.call(move |db| {
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            crate::durability_test_hooks::notify(&path, &sql, false, db.is_autocommit())?;
+            db.execute_batch(&sql)?;
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            crate::durability_test_hooks::notify(&path, &sql, true, db.is_autocommit())?;
+            Ok(())
+        })
     }
 
     pub(crate) fn execute(&self, sql: &str, params: impl Parameters) -> Result<usize> {
         let sql = sql.to_owned();
         let values = params.values()?;
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        let path = self.inner.path.clone();
         #[cfg(feature = "itest-work-budget")]
         let probe = self.work_probe();
         self.call(move |db| {
             let mut statement = db.prepare_cached(&sql)?;
             #[cfg(feature = "itest-work-budget")]
             let committed = crate::database_work::committed_state_write(&sql, &values);
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            crate::durability_test_hooks::notify(&path, &sql, false, db.is_autocommit())?;
             let result = statement.execute(rusqlite::params_from_iter(values));
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            if result.is_ok() {
+                crate::durability_test_hooks::notify(&path, &sql, true, db.is_autocommit())?;
+            }
             #[cfg(feature = "itest-work-budget")]
             if let Some(probe) = probe {
                 probe.record_write(&statement, committed, result.as_ref().copied().unwrap_or(0));
