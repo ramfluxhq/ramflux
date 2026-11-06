@@ -195,8 +195,8 @@ pub fn profile_hash_v2(value: &wire::SignedIdentityProfileV2) -> Result<String, 
 /// Rejects invalid v1 fields or noncanonical signature encodings.
 pub fn profile_hash_v1(value: &ramflux_protocol::SignedIdentityProfile) -> Result<String, Error> {
     ramflux_protocol::identity_profile_signing_bytes(value).map_err(crate::CryptoError::from)?;
-    let signature =
-        ramflux_protocol::decode_base64url(&value.signature).map_err(crate::CryptoError::from)?;
+    let signature = ramflux_protocol::decode_base64url(&value.signature)
+        .map_err(|_| crate::CryptoError::VerifyFailed)?;
     if signature.len() != 64 || encode_base64url(&signature) != value.signature {
         return Err(crate::CryptoError::VerifyFailed.into());
     }
@@ -625,6 +625,53 @@ mod tests {
             verify_profile(&weak, &wire::decode(string(&cases[0], "wire").as_bytes())?),
             Err(Error::RootCommitment)
         ));
+        Ok(())
+    }
+    #[test]
+    fn username_profile_v1_hash_rejects_invalid_signature_encodings() -> TestResult {
+        let vectors = corpus()?;
+        let original: ramflux_protocol::SignedIdentityProfile =
+            serde_json::from_str(string(&vectors["legacy"], "wire"))?;
+        profile_hash_v1(&original)?;
+        let mut short = original.clone();
+        short.signature = encode_base64url([0_u8; 63]);
+        assert!(
+            matches!(profile_hash_v1(&short), Err(Error::Crypto(crate::CryptoError::VerifyFailed))),
+            "63-byte signatures must not enter a document hash"
+        );
+        let mut noncanonical = original;
+        // 64 zero bytes have 86 canonical 'A's. 'B' changes only unused trailing bits.
+        noncanonical.signature = format!("{}B", "A".repeat(85));
+        assert!(matches!(
+            ramflux_protocol::decode_base64url(&noncanonical.signature),
+            Err(base64::DecodeError::InvalidLastSymbol(85, b'B'))
+        ));
+        assert!(
+            matches!(
+                profile_hash_v1(&noncanonical),
+                Err(Error::Crypto(crate::CryptoError::VerifyFailed))
+            ),
+            "noncanonical base64 must not enter a document hash"
+        );
+        Ok(())
+    }
+    #[test]
+    fn username_center_verifiers_reject_weak_keys() -> TestResult {
+        let vectors = corpus()?;
+        let cases = vectors["signatures"].as_array().ok_or("missing signature fixtures")?;
+        let weak = VerifyingKey::from_bytes(&[0_u8; 32])?;
+        assert!(weak.is_weak());
+        for kind in ["DirectoryReceipt", "DirectoryResolve"] {
+            let case =
+                cases.iter().find(|c| string(c, "type") == kind).ok_or("missing center record")?;
+            let data = string(case, "wire").as_bytes();
+            verify_case(kind, data, &key(case, "key")?, string(&vectors, "center_id"))?;
+            let result = verify_case(kind, data, &weak, string(&vectors, "center_id"));
+            assert!(
+                matches!(result, Err(Error::Crypto(crate::CryptoError::VerifyFailed))),
+                "{kind} must reject weak center keys"
+            );
+        }
         Ok(())
     }
     use wire::*;
