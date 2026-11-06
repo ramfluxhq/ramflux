@@ -161,7 +161,7 @@
     ],
     "filled_maximum_cases": 19
   },
-  "oracle_source_sha256": "8a7631292c01fb09ab41db0dfa9694905ffa238ab196e1cb5ada265bec7bcbac",
+  "oracle_source_sha256": "7a47c539f7408f95f702f61a632fb01afb5e0835454c125b1a1c7da849bdc64e",
   "design_copy": {
     "approved_source_sha256": "558d57c4513e5f2902f6604b9a15744fa1ea6ab028d7cc630f14d7a79a854012",
     "sha256": "aa5e72d17262e53e6a15c06863474d8c8ad456129906253901dca91cdc771503",
@@ -181,5 +181,6 @@
   },
   "test_vectors_only": "public fixture seeds",
   "review_revision": "P01 r2; controller decision r5",
-  "size_revision": "Decision r7: all 19 type ceilings derive from simultaneous canonical maxima with 2% headroom, rounded to KiB; routed AD 4096; no existing crypto/custody output changes."
+  "size_revision": "Decision r7: all 19 type ceilings derive from simultaneous canonical maxima with 2% headroom, rounded to KiB; routed AD 4096; no existing crypto/custody output changes.",
+  "p03_oracle_review_lows": "P01 r2 L1: pin decision-r5 role domains and declaration membership; L2: bind snapshot retirement_digest and status retirement_ack to the complete list hash."
 }

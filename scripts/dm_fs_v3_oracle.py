@@ -386,6 +386,22 @@ def check_bindings(wire, crypto, custody):
     require(set(rules) == {'branch_binding','base_hash','retirement_digest','lease_operation_id',
         'request_argument','request_hash','bundle_hash','transcript_hash',
         'publication_snapshot_hash','frame_result_hash','custody_action_hash','custody_object_hash'}, 'hash-role inventory')
+    # Controller decision r5 pins role meanings, not only pairwise distinctness.
+    native_role_domains = {
+        'branch_binding':'branch_binding', 'base_hash':'base_hash',
+        'retirement_digest':'retirement_list', 'lease_operation_id':'lease_operation_id',
+        'request_argument':'request_argument', 'request_hash':'request_hash',
+        'bundle_hash':'bundle_hash', 'transcript_hash':'transcript',
+        'publication_snapshot_hash':'publication_snapshot', 'frame_result_hash':'frame_result',
+    }
+    for role, item in native_role_domains.items():
+        expected = domain(item).decode()
+        require(rules[role]['domain'] == expected and expected in SCHEMA['domains'], 'decision-r5 role domain: '+role)
+    expected_retirements = slots['retirement_digest']['digest']
+    require(by_name['PrekeyPublicationSnapshot']['input']['retirement_digest'] == expected_retirements,
+            'snapshot retirement digest binding')
+    require(by_name['OwnerPrekeyStatus']['input']['retirement_ack'] == expected_retirements,
+            'status retirement acknowledgement binding')
     require(len({r['domain'] for r in rules.values()}) == len(rules), 'hash role domain reuse')
     signature_domains = {domain(TYPES[v['name']]['domain']).decode() for v in crypto['signatures'] if v['name'] in TYPES}
     require(not signature_domains.intersection(r['domain'] for r in rules.values()), 'hash/signature domain reuse')

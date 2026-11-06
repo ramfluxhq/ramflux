@@ -3,6 +3,7 @@
 
 //! Owned public publication documents and strict RFS1 codecs.
 //! These types contain no secret keys and perform no signing or authority checks.
+use super::codec::Kind;
 use super::{DecodeError, Scanned, WireType, scan, valid_custody_id};
 
 /// The only profile accepted by these dormant components.
@@ -349,6 +350,12 @@ impl Writer {
         }
         if value.len() > spec.max {
             return Err(DecodeError::FieldCeiling);
+        }
+        if spec.kind == Kind::Code {
+            let code = std::str::from_utf8(value).map_err(|_| DecodeError::Value)?;
+            if code.chars().any(char::is_control) {
+                return Err(DecodeError::Value);
+            }
         }
         let size = self
             .bytes

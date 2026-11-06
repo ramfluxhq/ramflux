@@ -223,6 +223,12 @@ fn dm_fs_v3_size_limits_exact_and_plus_one() -> Result {
     assert!(canonical.len() <= 2_048);
     assert_eq!(SignedNativePrekeyBase::from_bytes(&canonical)?, base);
     // OPKs retain only fixed branch_binding, never inherited strings.
+    let mut invalid_code = base.clone();
+    invalid_code.capabilities = "register,\nmessage".into();
+    assert_eq!(invalid_code.to_bytes(), Err(DecodeError::Value));
+    let mut invalid_profile = base.clone();
+    invalid_profile.profile = "unknown".into();
+    assert_eq!(invalid_profile.to_bytes(), Err(DecodeError::Value));
     let opk_bytes = opk.to_bytes()?;
     assert!(opk_bytes.len() <= 512);
     assert_eq!(SignedNativeOpk::from_bytes(&opk_bytes)?, opk);
