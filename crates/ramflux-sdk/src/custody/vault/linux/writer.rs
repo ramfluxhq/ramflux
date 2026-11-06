@@ -44,15 +44,31 @@ pub(super) enum Event {
     DirSync,
 }
 
-/// Runs one durability syscall, then reports it. The event exists only if the syscall succeeded,
-/// so a call site cannot report a step without performing it.
-fn step(
-    observe: &impl Fn(Event) -> Result<(), Error>,
-    event: Event,
-    syscall: impl FnOnce() -> Result<(), Error>,
+/// Durability wrappers. Each one performs the real syscall and reports its event only after that
+/// call succeeded. The event is produced by the wrapper itself, so a call site that skips the
+/// wrapper cannot still report the step, and the oracle sees only syscalls that actually ran.
+type Observer<'a> = &'a dyn Fn(Event) -> Result<(), Error>;
+fn file_sync(file: &File, observe: Observer<'_>) -> Result<(), Error> {
+    file.sync_all().map_err(|_| Error::Io)?;
+    observe(Event::FileSync)
+}
+fn rename_reported(
+    store: &Store,
+    from: &str,
+    to: &str,
+    flags: RenameFlags,
+    observe: Observer<'_>,
 ) -> Result<(), Error> {
-    syscall()?;
-    observe(event)
+    fs::renameat_with(&store.realm_dir, from, &store.realm_dir, to, flags).map_err(Error::from)?;
+    observe(Event::Rename)
+}
+fn unlink_reported(store: &Store, name: &str, observe: Observer<'_>) -> Result<(), Error> {
+    store.unlink(name)?;
+    observe(Event::Unlink)
+}
+fn sync_realm_reported(store: &Store, observe: Observer<'_>) -> Result<(), Error> {
+    fs::fsync(&store.realm_dir).map_err(Error::from)?;
+    observe(Event::DirSync)
 }
 
 pub(super) enum Operation {
@@ -98,9 +114,9 @@ impl Store {
             Operation::Delete { reference, kind, generation } => {
                 self.read(&reference, kind, generation)?;
                 observe(Event::Cut("before_delete"))?;
-                step(&observe, Event::Unlink, || self.unlink(&reference))?;
+                unlink_reported(self, &reference, &observe)?;
                 observe(Event::Cut("after_delete"))?;
-                step(&observe, Event::DirSync, || fs::fsync(&self.realm_dir).map_err(Error::from))?;
+                sync_realm_reported(self, &observe)?;
                 observe(Event::Cut("delete_synced"))?;
                 return Ok(Vec::new());
             }
@@ -148,16 +164,13 @@ impl Store {
             let mut file = File::from(fd);
             file.write_all(&record).map_err(|_| Error::Io)?;
             observe(Event::Cut("written"))?;
-            step(&observe, Event::FileSync, || file.sync_all().map_err(|_| Error::Io))?;
+            file_sync(&file, &observe)?;
             observe(Event::Cut("file_synced"))?;
             let flags = if replace { RenameFlags::empty() } else { RenameFlags::NOREPLACE };
             observe(Event::Cut("before_publish"))?;
-            step(&observe, Event::Rename, || {
-                fs::renameat_with(&self.realm_dir, &temp, &self.realm_dir, &reference, flags)
-                    .map_err(Error::from)
-            })?;
+            rename_reported(self, &temp, &reference, flags, &observe)?;
             observe(Event::Cut("published"))?;
-            step(&observe, Event::DirSync, || fs::fsync(&self.realm_dir).map_err(Error::from))?;
+            sync_realm_reported(self, &observe)?;
             observe(Event::Cut("parent_synced"))?;
             Ok(Vec::new())
         })();
