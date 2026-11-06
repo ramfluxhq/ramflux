@@ -130,6 +130,12 @@ impl AccountDb {
             super::backup_selector_admission::drop_scratch(&target)?;
             super::home_migration::strip_from_backup(&target)?;
             target.execute("DELETE FROM object_segment_resource", [])?;
+            // Historical archives have no native physical progress to clear.
+            let native:bool=target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0))?;
+            if native {
+                target.execute("UPDATE object_segment_file SET received_bitmap=0,chunk_digests=zeroblob(256),cipher_verified=0",[])?;
+                target.execute("UPDATE object_transfer_state SET done_bytes=0,segment_sequence=0 WHERE segment_generation IS NOT NULL",[])?;
+            }
             // Domain history, keys and object payloads were copied by SQLite itself.
             let counts=read_counts(&target)?;
             target.close().map_err(|(_, error)| error)?;

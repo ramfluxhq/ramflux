@@ -7,6 +7,8 @@ use crate::EncryptionMode;
 pub enum StorageError {
     #[error("another process holds the account writer lock: {0}")]
     AccountWriterBusy(String),
+    #[error("segment resource capacity exceeded: {limit}")]
+    SegmentResourceCapacity { limit: usize },
     /// Authentication or integrity verification failed; never used for local I/O.
     #[error("{0}")]
     Integrity(&'static str),

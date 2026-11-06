@@ -7,6 +7,7 @@ use super::*;
 /// Owns a bounded, provisional retention claim until send success converts it to message edges.
 pub struct PreSendObjectHold {
     connection: crate::database::Connection,
+    segment_root: std::path::PathBuf,
     commitment: String,
     observer: Option<ObjectRetirementObserver>,
     armed: bool,
@@ -15,6 +16,17 @@ pub struct PreSendObjectHold {
 }
 
 impl PreSendObjectHold {
+    pub(in crate::account_db) fn admits_segment_payload(
+        &self,
+        db: &AccountDb,
+        wire: &str,
+        manifest: &str,
+    ) -> bool {
+        self.armed
+            && self.commitment
+                == object_erasure_commitment(&db.principal_commitment, wire, manifest)
+    }
+
     /// # Errors
     /// Returns transactional cleanup errors; the durable expiry remains available for recovery.
     pub fn release(mut self) -> Result<(), StorageError> {
@@ -42,6 +54,11 @@ impl PreSendObjectHold {
             }
             resources::retire(&self.resources, Some(std::slice::from_ref(&self.commitment)))?;
         }
+        super::super::large_segments::retirement::drain_connection(
+            &self.connection,
+            &self.segment_root,
+            32,
+        )?;
         Ok(())
     }
 }
@@ -72,6 +89,7 @@ impl AccountDb {
         )?;
         Ok(PreSendObjectHold {
             connection: self.connection.clone(),
+            segment_root: self.path.with_extension("segments"),
             commitment: object_erasure_commitment(&self.principal_commitment, wire, manifest),
             observer: self.object_retirement.callback.borrow().clone(),
             armed: true,

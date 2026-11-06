@@ -8,6 +8,7 @@ use super::{
 use crate::database::Connection;
 use rusqlite::{OptionalExtension, params};
 use std::path::{Path, PathBuf};
+pub(super) const RESOURCE_LIMIT: usize = 4096;
 type ResourceBinding = (String, String, Option<String>, Option<String>, Option<String>, bool);
 type ResourceState = (String, String, Option<String>, Option<String>, Option<String>, bool, bool);
 pub struct SegmentReference<'a> {
@@ -59,6 +60,37 @@ impl SegmentStore<'_> {
     ) -> Result<(), StorageError> {
         self.admit_inner(id, generation, direction, native, Some(reference))
     }
+    /// Admits an owned upload under the account's existing provisional retention token.
+    /// # Errors
+    /// Refuses foreign ownership, expired/released holds, fences and stale generations.
+    pub fn admit_pre_send(
+        &mut self,
+        id: &str,
+        generation: u64,
+        native: &VerifiedContentManifest,
+        hold: &crate::PreSendObjectHold,
+    ) -> Result<(), StorageError> {
+        let m = native.manifest();
+        let wire = ramflux_protocol::encode_base64url(m.object_id);
+        let manifest = ramflux_protocol::encode_base64url(
+            m.hash().map_err(|_| StorageError::Integrity("segment manifest"))?,
+        );
+        if m.owner.account_anchor != self.db.principal_commitment
+            || !hold.admits_segment_payload(self.db, &wire, &manifest)
+        {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.check_provisional(&wire, &manifest)?;
+        self.admit_inner(id, generation, SegmentDirection::Upload, native, None)
+    }
+    pub(super) fn check_provisional(&self, wire: &str, manifest: &str) -> Result<(), StorageError> {
+        let authority = self.db.erasure_authority.as_ref().unwrap_or(&self.db.connection);
+        let live:bool=authority.query_row("SELECT EXISTS(SELECT 1 FROM object_retention_payload WHERE commitment=?1 AND retention_class='pre_send' AND hold_expires_at>?2)",params![ramflux_crypto::object_erasure_commitment(&self.db.principal_commitment,wire,manifest),self.db.now_unix()],|r|r.get(0))?;
+        if !live {
+            return Err(StorageError::ObjectErased);
+        }
+        self.db.check_object_identity(wire, manifest)
+    }
     #[cfg(test)]
     pub(super) fn admit(
         &mut self,
@@ -67,6 +99,14 @@ impl SegmentStore<'_> {
         direction: SegmentDirection,
         native: &VerifiedContentManifest,
     ) -> Result<(), StorageError> {
+        let m = native.manifest();
+        self.db.retain_object(
+            &ramflux_protocol::encode_base64url(m.object_id),
+            &ramflux_protocol::encode_base64url(
+                m.hash().map_err(|_| StorageError::Integrity("segment manifest"))?,
+            ),
+            crate::ObjectRetention::PreSend { expires_at: self.db.now_unix().saturating_add(600) },
+        )?;
         self.admit_inner(id, generation, direction, native, None)
     }
     pub(super) fn check_reference(
@@ -91,7 +131,7 @@ impl SegmentStore<'_> {
         wire: &str,
         manifest: &str,
         reference: Option<&SegmentReference<'_>>,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         let dir = directory(id);
         let floor: Option<i64> = self
             .db
@@ -107,6 +147,10 @@ impl SegmentStore<'_> {
         }
         let binding = reference.map(|r| (r.selector, r.reference_hash, r.message_id));
         let old:Option<ResourceBinding>=self.db.connection.query_row("SELECT wire,manifest,selector,reference_hash,message_id,retired FROM object_segment_resource WHERE directory=?1 AND generation=?2",params![dir,generation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
+        let fresh = old.is_none();
+        if fresh {
+            check_capacity(&self.db.connection)?;
+        }
         if let Some((w, m, s, r, msg, retired)) = old
             && (retired
                 || w != wire
@@ -136,11 +180,12 @@ impl SegmentStore<'_> {
                 binding.map(|b| b.2)
             ],
         )?;
-        Ok(())
+        Ok(fresh)
     }
     pub(super) fn check_resource(&self, id: &str, generation: u64) -> Result<(), StorageError> {
         let dir = directory(id);
-        let row:Option<ResourceState>=self.db.connection.query_row("SELECT wire,manifest,selector,reference_hash,message_id,retired,EXISTS(SELECT 1 FROM object_segment_floor f WHERE f.directory=r.directory AND f.generation>=r.generation) FROM object_segment_resource r WHERE directory=?1 AND generation=?2",params![dir,integer(generation)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
+        let authority = self.db.erasure_authority.as_ref().unwrap_or(&self.db.connection);
+        let row:Option<ResourceState>=authority.query_row("SELECT wire,manifest,selector,reference_hash,message_id,retired,EXISTS(SELECT 1 FROM object_segment_floor f WHERE f.directory=r.directory AND f.generation>=r.generation) FROM object_segment_resource r WHERE directory=?1 AND generation=?2",params![dir,integer(generation)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
         let Some((wire, manifest, selector, reference, message, retired, fenced)) = row else {
             return Err(StorageError::ObjectErased);
         };
@@ -157,9 +202,19 @@ impl SegmentStore<'_> {
                 &wire,
                 &manifest,
             ),
-            (None, None, None) if cfg!(test) => Ok(()),
+            (None, None, None) => self.check_provisional(&wire, &manifest),
             _ => Err(StorageError::ObjectErased),
         }
+    }
+    /// Recounts the retained local rows, including cleanup debt. No snapshot counter is trusted.
+    /// # Errors
+    /// Returns database errors.
+    pub fn resource_count(&self) -> Result<usize, StorageError> {
+        Ok(self.db.connection.query_row(
+            "SELECT count(*) FROM object_segment_resource",
+            [],
+            |r| r.get(0),
+        )?)
     }
     /// Retired files remain debt until their real lease drains and directory fsync succeeds.
     /// # Errors
@@ -172,14 +227,21 @@ pub(in crate::account_db) fn drain_account(
     db: &AccountDb,
     limit: usize,
 ) -> Result<(), StorageError> {
-    let root = db.path.with_extension("segments");
+    drain_connection(&db.connection, &db.path.with_extension("segments"), limit)
+}
+pub(in crate::account_db) fn drain_connection(
+    db: &Connection,
+    root: &Path,
+    limit: usize,
+) -> Result<(), StorageError> {
     if root.try_exists()? {
-        files::private_dir(&root)?;
+        files::private_dir(root)?;
         let root = std::fs::canonicalize(root)?;
-        let _ = drain(&db.connection, &root, None, limit)?;
+        let _ = drain(db, &root, None, limit)?;
     }
     Ok(())
 }
+
 fn drain(
     db: &Connection,
     root: &Path,
@@ -202,7 +264,7 @@ fn drain(
         if only.is_some_and(|p| p != parent) {
             break;
         }
-        if ramflux_protocol::decode_base64url(&dir).is_err()
+        if !ramflux_protocol::decode_base64url(&dir).is_ok_and(|b| b.len() == 32)
             || dir.contains('/')
             || dir.contains('\\')
             || generation <= 0
@@ -244,5 +306,14 @@ pub(in crate::account_db) fn merge_floors(db: &rusqlite::Connection) -> Result<(
     }
     db.execute_batch("INSERT OR IGNORE INTO main.object_segment_reference_veto SELECT reference_id FROM incoming.object_segment_reference_veto;
 INSERT INTO main.object_segment_floor SELECT directory,generation FROM incoming.object_segment_floor WHERE 1 ON CONFLICT(directory) DO UPDATE SET generation=max(generation,excluded.generation); UPDATE main.object_segment_resource SET retired=1 WHERE EXISTS(SELECT 1 FROM main.object_segment_floor f WHERE f.directory=object_segment_resource.directory AND f.generation>=object_segment_resource.generation);")?;
+    Ok(())
+}
+
+pub(super) fn check_capacity(db: &Connection) -> Result<(), StorageError> {
+    let count: usize =
+        db.query_row("SELECT count(*) FROM object_segment_resource", [], |r| r.get(0))?;
+    if count >= RESOURCE_LIMIT {
+        return Err(StorageError::SegmentResourceCapacity { limit: RESOURCE_LIMIT });
+    }
     Ok(())
 }
