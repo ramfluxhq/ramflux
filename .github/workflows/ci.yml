@@ -36,6 +36,9 @@ jobs:
           python3 -B scripts/test_device_identity.py
           python3 -B scripts/check-device-identity.py
 
+      - name: Independent pairing codec vectors
+        run: python3 -B scripts/check-pairing-oracle.py --check
+
   compose-preflight:
     name: Compose input preflight
     runs-on: ubuntu-24.04

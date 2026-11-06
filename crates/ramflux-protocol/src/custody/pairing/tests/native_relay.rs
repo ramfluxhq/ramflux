@@ -263,8 +263,10 @@ fn native_max_cases(
     }
     let mut maximal_ticket = ticket.clone();
     maximal_ticket["issuer_seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    maximal_ticket["issued_at"] = json!(MAX_SAFE_JSON_INTEGER - 300);
+    maximal_ticket["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
     maximal_ticket["primary_ref"]["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
-    maximal_ticket["primary_ref"]["device_id"] = json!("x".repeat(128));
+    maximal_ticket["primary_ref"]["device_id"] = json!("\\".repeat(128));
     round::<CreateTicket>(&maximal_ticket)?;
     for envelope in [signed_value(ticket), signed_value(&maximal_ticket)] {
         let canonical = bytes(&envelope)?;
@@ -287,9 +289,13 @@ fn native_max_cases(
     let mut full = spec.clone();
     full["purpose"] = json!("primary_transfer");
     full["recipient_mode"] = json!("existing");
+    full["base_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+    full["primary_ref"]["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+    full["lease_not_before"] = json!(MAX_SAFE_JSON_INTEGER - MAX_BRANCH_LEASE_SECONDS);
+    full["lease_expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
     full["destination_ref"] = full["primary_ref"].clone();
-    full["destination_ref"]["device_id"] = json!("d".repeat(128));
-    full["primary_ref"]["device_id"] = json!("p".repeat(128));
+    full["destination_ref"]["device_id"] = json!("\"".repeat(128));
+    full["primary_ref"]["device_id"] = json!("\\".repeat(128));
     full["capabilities"] = json!(["call", "group", "message", "register", "sync"]);
     full["data_selection"] = json!(
         (0..32)
@@ -299,9 +305,15 @@ fn native_max_cases(
     round::<CreateSpec>(&full)?;
     let mut full_i = invitation_fixture(&full);
     full_i["transfer_id"] = json!(id());
+    full_i["issuer_seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    full_i["created_at"] = json!(MAX_SAFE_JSON_INTEGER - 300);
+    full_i["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
     round::<Invitation>(&full_i)?;
     let mut full_create = create.clone();
     full_create["spec"] = full.clone();
+    full_create["ticket"]["body"]["issuer_seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    full_create["ticket"]["body"]["issued_at"] = json!(MAX_SAFE_JSON_INTEGER - 300);
+    full_create["ticket"]["body"]["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
     full_create["ticket"]["body"]["primary_ref"] = full["primary_ref"].clone();
     full_create["ticket"]["body"]["spec_hash"] =
         json!(decode_value::<CreateSpec>(&full)?.spec_hash()?);
@@ -309,6 +321,8 @@ fn native_max_cases(
     let mut full_created = created.clone();
     full_created["invitation"] = signed_value(&full_i);
     round::<Created>(&full_created)?;
+    decode_value::<Created>(&full_created)?
+        .validate_create(&decode_value::<Create>(&full_create)?)?;
     field::<CreateSpec>(
         &full,
         "/data_selection",
