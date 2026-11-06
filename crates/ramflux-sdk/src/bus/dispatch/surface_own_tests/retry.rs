@@ -48,7 +48,7 @@ pub(super) async fn exhaust_parked_target(
 }
 
 #[tokio::test]
-async fn parked_copy_is_indexed_when_due_and_fails_at_the_600_second_lifetime() -> TestResult {
+async fn parked_copy_is_indexed_when_due_and_fails_at_the_configured_lifetime() -> TestResult {
     let root = runtime_tests::root("own-copy-lifetime");
     let mut source = runtime_tests::account(
         &root.join("source"),
@@ -56,6 +56,7 @@ async fn parked_copy_is_indexed_when_due_and_fails_at_the_600_second_lifetime() 
         None,
         Arc::new(AtomicBool::new(false)),
     )?;
+    source.client.set_offline_retention_secs(3_600)?;
     let (sibling, config, _, directory) = sibling_fixture(&root, &mut source).await?;
     let mut gateway = super::super::super::fixture::RecordingGateway::new(Arc::default());
     gateway.fail_own_ack = true;
@@ -68,7 +69,8 @@ async fn parked_copy_is_indexed_when_due_and_fails_at_the_600_second_lifetime() 
     let key = db.actor_state_key_page("own-device/send/", 1)?.remove(0);
     let mut work: Value = db.load_actor_state(&key)?.ok_or("copy")?;
     let now = now_unix_timestamp();
-    work["intent"]["created_at"] = json!(now - 600);
+    work["intent"]["created_at"] = json!(now - 3_600);
+    work["intent"]["expires_at"] = json!(now);
     work["targets"][0]["next_at"] = json!(now + 60);
     db.persist_actor_state(&key, &work)?;
     assert_eq!(db.due_own_copy_keys(now - 1, 256)?, Vec::<String>::new());

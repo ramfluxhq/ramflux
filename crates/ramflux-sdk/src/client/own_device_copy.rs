@@ -253,11 +253,26 @@ pub(crate) struct OwnCopyDraft {
 }
 
 impl RamfluxClient {
+    #[cfg(test)]
     pub(crate) fn prepare_own_copy_draft(
         &self,
         config: &GatewaySessionConfig,
         input: OwnMessageInput<'_>,
         manifest: SdkDeviceManifestResponse,
+    ) -> Result<Option<OwnCopyDraft>, SdkError> {
+        self.prepare_own_copy_draft_until(
+            config,
+            input,
+            manifest,
+            input.created_at.saturating_add(i64::from(self.content_ttl()?)),
+        )
+    }
+    pub(crate) fn prepare_own_copy_draft_until(
+        &self,
+        config: &GatewaySessionConfig,
+        input: OwnMessageInput<'_>,
+        manifest: SdkDeviceManifestResponse,
+        expires_at: i64,
     ) -> Result<Option<OwnCopyDraft>, SdkError> {
         if input.body.len() > MAX_PACKET_BYTES {
             return Err(invalid(TOO_LARGE));
@@ -296,7 +311,7 @@ impl RamfluxClient {
             conversation: input.conversation.into(),
             group: input.group.map(str::to_owned),
             created_at: input.created_at,
-            expires_at: input.created_at.saturating_add(i64::from(self.content_ttl()?)),
+            expires_at,
         };
         let mut packet = OwnDeviceMessage {
             schema: DOMAIN.into(),

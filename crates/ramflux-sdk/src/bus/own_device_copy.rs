@@ -21,7 +21,15 @@ struct Intent {
     group: Option<String>,
     body: String,
     created_at: i64,
+    #[serde(default)]
+    expires_at: Option<i64>,
     owner_record: Option<(String, String)>,
+}
+impl Intent {
+    fn expiry(&self) -> i64 {
+        // Pre-parameter queued work retains its original ten-minute lifetime.
+        self.expires_at.unwrap_or(self.created_at.saturating_add(600))
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Work {
@@ -93,6 +101,7 @@ fn stage_inner(
             group: input.group.map(str::to_owned),
             body: ramflux_protocol::encode_base64url(input.body),
             created_at: input.created_at,
+            expires_at: Some(input.created_at.saturating_add(i64::from(client.content_ttl()?))),
             owner_record: owner_record.map(|(directory, id)| (directory.into(), id.into())),
         },
         packet: None,
@@ -207,7 +216,7 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
         client.finish_own_surface_context(context, value == "submitted")?;
     }
     let key = format!("own-device/status/{id}");
-    let status = json!({"state":value,"acknowledged":value == "submitted","completed":value != "pending","conversation_id":work.intent.conversation,"message_id":message_owner(work).unwrap_or(&work.intent.id),"expires_at":work.intent.created_at.saturating_add(i64::from(client.content_ttl()?)).saturating_add(300)});
+    let status = json!({"state":value,"acknowledged":value == "submitted","completed":value != "pending","conversation_id":work.intent.conversation,"message_id":message_owner(work).unwrap_or(&work.intent.id),"expires_at":work.intent.expiry().saturating_add(300)});
     if let Some(message) = message_owner(work) {
         db.persist_message_actor_state(message, &key, &status)?;
     } else {

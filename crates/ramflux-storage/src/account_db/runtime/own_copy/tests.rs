@@ -286,3 +286,34 @@ fn full_expired_batch_defers_live_eviction_until_all_expired_rows_are_removed()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn configured_expiry_updates_due_index_and_rebuilds_legacy_projection_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (root, db) = crate::tests::test_db("own-copy-configured-expiry")?;
+    let legacy = serde_json::json!({"intent":{"created_at":100},"held":true,"next_at":9000});
+    let mut configured = legacy.clone();
+    configured["intent"]["expires_at"] = 7300.into();
+    db.persist_actor_state("own-device/send/legacy", &legacy)?;
+    db.persist_actor_state("own-device/send/configured", &configured)?;
+    assert_eq!(db.due_own_copy_keys(700, 256)?, vec!["own-device/send/legacy"]);
+    assert_eq!(db.due_own_copy_keys(7299, 256)?, vec!["own-device/send/legacy"]);
+    assert_eq!(db.due_own_copy_keys(7300, 256)?.len(), 2);
+    let usage = db.own_copy_actor_usage(PREFIXES[3])?;
+    // Model an installed pre-parameter projection: old rows expired at created_at+600.
+    // Keep the legacy payload literal; only the derived cache/trigger is obsolete.
+    db.write_transaction(|| {
+        db.connection.execute_batch("DROP TRIGGER own_copy_index_3_INSERT; DROP TRIGGER own_copy_index_3_UPDATE;
+            CREATE TRIGGER own_copy_index_3_INSERT AFTER INSERT ON runtime_actor_state BEGIN SELECT 600; END;
+            UPDATE runtime_own_copy_state SET expires_at=700,next_attempt_at=700 WHERE namespace='own-device/send/';")?;
+        db.install_own_copy_schema()
+    })?;
+    assert_eq!(db.due_own_copy_keys(700, 256)?, vec!["own-device/send/legacy"]);
+    assert_eq!(db.own_copy_actor_usage(PREFIXES[3])?, usage);
+    db.install_own_copy_schema()?;
+    assert_eq!(db.own_copy_actor_usage(PREFIXES[3])?, usage);
+    assert_eq!(db.due_own_copy_keys(7300, 256)?.len(), 2);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

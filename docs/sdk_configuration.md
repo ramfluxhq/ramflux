@@ -12,3 +12,7 @@ still bound their carriers. Existing queued envelopes are unchanged. Call signal
 best-effort receipts and reset handshakes keep their named short deadlines; the
 server's seven-day maximum is unchanged. This is mailbox retention, independent
 of disappearing-message timers or attachment relay retention.
+
+Own-device retry work snapshots its expiry when staged, and the due index and
+private copy context use that same deadline. Older queued work without an explicit
+expiry retains its original ten-minute lifetime.
