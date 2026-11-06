@@ -234,6 +234,12 @@ waits for the injected ACK to own a raw mailbox slot. Socket injection alone doe
 not order the independent endpoint driver before the connection driver's expired
 loss timer. Mailbox admission makes ACK processing precede that timer, preserving
 the intended third SendRanges refusal when metadata credit is frozen.
+`rawq_tests::send_range_admission_precedes_expired_loss_timer` injects an expired
+clock deadline and synchronously polls the real connection driver on gate release,
+before yielding to endpoint admission. Removing only the mailbox wait makes the
+loss timer refuse LossScratch instead of the third SendRanges allocation. The
+clock and scheduling seam exist only in the test runtime; no sleeps are used.
+All hang guards in this fixture are at least ten seconds and panic on timeout.
 
 PTO transfer now reserves from a borrowed sent owner before taking it, so refusal
 retains the committed box and children. Packet-populate refusal truncates only the
