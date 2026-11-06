@@ -162,7 +162,8 @@ fn dm_fs_v3_x3dh_opk_and_spk_only_golden() -> Result {
         assert_eq!(rng.cursor, 2);
         assert_eq!(output.public.transcript.to_bytes()?, t.to_bytes()?);
         assert_eq!(output.public.bundle_hash, t.header.bundle_hash);
-        assert_eq!(output.public.transcript_hash, transcript_hash(&t)?);
+        let info = hex::decode(vector["kdf"]["info"].as_str().ok_or("info")?)?;
+        assert_eq!(output.public.transcript_hash.as_slice(), &info[info.len() - 32..]);
         let encoded = output.public.transcript.to_bytes()?;
         for forbidden in [
             fixed::<32>(&vector["seeds"]["ephemeral"])?,
@@ -176,17 +177,10 @@ fn dm_fs_v3_x3dh_opk_and_spk_only_golden() -> Result {
         }
         let NativeInitiatorHandoff { initial_sk, public: _, ratchet_seed } = output;
         drop(ratchet_seed);
-        let state = OBS.with(|obs| obs.take()).ok_or("observations")?;
+        let state = OBS.with(RefCell::take).ok_or("observations")?;
         assert_eq!(state.seen.len(), if lease.opk.is_some() { 4 } else { 3 });
-        let mut expected = BTreeMap::from([
-            ("e_seed", 1),
-            ("r0_seed", 1),
-            ("ephemeral_key", 1),
-            ("ratchet_key", 1),
-            ("dh2", 1),
-            ("dh3", 1),
-            ("ikm", 1),
-        ]);
+        let mut expected =
+            BTreeMap::from([("e_seed", 1), ("r0_seed", 1), ("dh2", 1), ("dh3", 1), ("ikm", 1)]);
         if lease.opk.is_some() {
             expected.insert("dh4", 1);
         }
@@ -212,7 +206,12 @@ fn native_rng_contract(rng: &mut dyn NativeBootstrapRng) -> Result {
 #[test]
 fn dm_fs_v3_initiator_uses_independent_e_and_r0() -> Result {
     let c = crypto()?;
-    let v = &c["bootstrap"][0];
+    for vector in c["bootstrap"].as_array().ok_or("bootstrap")? {
+        independence_case(vector)?;
+    }
+    Ok(())
+}
+fn independence_case(v: &Value) -> Result {
     let (lease, t, dh1) = parts(v)?;
     let key = node_key();
     native_rng_contract(&mut FixtureRng::new(v)?)?;
@@ -227,7 +226,9 @@ fn dm_fs_v3_initiator_uses_independent_e_and_r0() -> Result {
     );
     assert_eq!(rng.cursor, 2);
     // Retained R0 plus DH1/public data cannot reconstruct the captured E bootstrap.
-    let retained = StaticSecret::from(*result.ratchet_seed);
+    let mut retained_seed = Zeroizing::new([0; 32]);
+    retained_seed.copy_from_slice(result.ratchet_seed.as_ref());
+    let retained = StaticSecret::from(*retained_seed);
     let mut ikm = Zeroizing::new([0u8; 160]);
     ikm[..32].fill(0xff);
     ikm[32..64].copy_from_slice(&*dh1);
@@ -307,7 +308,7 @@ fn dm_fs_v3_initiator_failure_and_limits() -> Result {
             native_initiator(input(&lease, &t, &key, &dh1), &mut rng),
             Err(NativeBootstrapError::Entropy)
         ));
-        let state = OBS.with(|obs| obs.take()).ok_or("wipes")?;
+        let state = OBS.with(RefCell::take).ok_or("wipes")?;
         let mut expected = BTreeMap::from([("e_seed", 1)]);
         if failed_draw == 1 {
             expected.insert("r0_seed", 1);
@@ -341,5 +342,66 @@ fn dm_fs_v3_initiator_failure_and_limits() -> Result {
         native_initiator(input(&broken, &t, &key, &dh1), &mut rng),
         Err(NativeBootstrapError::Proof(NativePrekeyError::Signature))
     ));
+    Ok(())
+}
+
+fn signed_noncontributory_peer(vector: &Value, peer: [u8; 32], which: &str) -> Result {
+    let (mut lease, mut transcript, dh1) = parts(vector)?;
+    if which == "opk" && lease.opk.is_none() {
+        return Ok(());
+    }
+    let branch = crate::DeviceBranch {
+        principal_id: "fixture-target".into(),
+        device_id: "fixture-target-device".into(),
+        device_epoch: 1,
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&[14; 32]),
+    };
+    let node = crate::DeviceBranch {
+        principal_id: "fixture-node".into(),
+        device_id: "fixture-node-device".into(),
+        device_epoch: 1,
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&[60; 32]),
+    };
+    match which {
+        "agreement" => {
+            lease.target.agreement_key = peer;
+            lease.base.branch = lease.target.clone();
+        }
+        "spk" => lease.base.spk_key = peer,
+        "opk" => lease.opk.as_mut().ok_or("OPK")?.opk_key = peer,
+        _ => return Err("peer field".into()),
+    }
+    lease.base = sign_base(lease.base, &branch)?;
+    if let Some(mut opk) = lease.opk.take() {
+        opk.branch_binding = branch_binding(&lease.target)?;
+        lease.opk = Some(sign_opk(opk, &branch, &lease.target)?);
+    }
+    lease = sign_lease_result(lease, &node)?;
+    transcript.header.target = lease.target.clone();
+    transcript.header.base = lease.base.clone();
+    transcript.header.base_hash = base_hash(&lease.base)?;
+    transcript.header.bundle_hash = bundle_hash(&lease)?;
+    transcript.header.opk_key = lease.opk.as_ref().map(|opk| opk.opk_key);
+    let key = node.public_key();
+    let mut rng = FixtureRng::new(vector)?;
+    assert!(
+        matches!(
+            native_initiator(input(&lease, &transcript, &key, &dh1), &mut rng),
+            Err(NativeBootstrapError::NonContributory)
+        ),
+        "signed non-contributory {which}"
+    );
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_initiator_signed_zero_peers_rejected() -> Result {
+    let c = crypto()?;
+    for vector in c["bootstrap"].as_array().ok_or("bootstrap")? {
+        for fixture in c["dh_refusals"].as_array().ok_or("refusals")? {
+            for which in ["agreement", "spk", "opk"] {
+                signed_noncontributory_peer(vector, fixed(&fixture["peer_public"])?, which)?;
+            }
+        }
+    }
     Ok(())
 }

@@ -7,7 +7,7 @@ use super::{
     native_hkdf, transcript_hash, verify_bootstrap_transcript, verify_lease_result,
 };
 use ramflux_protocol::{dm_fs_v3 as p, domain};
-use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
+use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Component failures contain no secret or untrusted input values.
@@ -53,9 +53,8 @@ impl<const N: usize> NativeBootstrapSecret<N> {
         Self { bytes: [0; N], slot }
     }
 }
-impl<const N: usize> std::ops::Deref for NativeBootstrapSecret<N> {
-    type Target = [u8; N];
-    fn deref(&self) -> &Self::Target {
+impl<const N: usize> AsRef<[u8]> for NativeBootstrapSecret<N> {
+    fn as_ref(&self) -> &[u8] {
         &self.bytes
     }
 }
@@ -71,49 +70,31 @@ impl<const N: usize> Drop for NativeBootstrapSecret<N> {
     }
 }
 impl<const N: usize> ZeroizeOnDrop for NativeBootstrapSecret<N> {}
+// Dalek v3's concrete StaticSecret and SharedSecret Drop implementations wipe
+// their sole owned arrays under the already-enabled zeroize feature.
 struct ScopedKey {
     key: StaticSecret,
-    slot: &'static str,
 }
 impl ScopedKey {
-    fn new(seed: &[u8; 32], slot: &'static str) -> Self {
-        Self { key: StaticSecret::from(*seed), slot }
+    fn new(seed: &[u8; 32]) -> Self {
+        Self { key: StaticSecret::from(*seed) }
     }
     fn public(&self) -> [u8; 32] {
         PublicKey::from(&self.key).to_bytes()
-    }
-}
-impl Drop for ScopedKey {
-    fn drop(&mut self) {
-        self.key.zeroize();
-        observe_wiped(self.slot, &self.key.to_bytes());
-    }
-}
-pub(super) struct ScopedDh {
-    value: SharedSecret,
-    slot: &'static str,
-}
-impl ScopedDh {
-    pub(super) fn as_bytes(&self) -> &[u8; 32] {
-        self.value.as_bytes()
-    }
-}
-impl Drop for ScopedDh {
-    fn drop(&mut self) {
-        self.value.zeroize();
-        observe_wiped(self.slot, self.value.as_bytes());
     }
 }
 pub(super) fn checked_dh(
     secret: &StaticSecret,
     peer: &[u8; 32],
     slot: &'static str,
-) -> Result<ScopedDh> {
-    let value = ScopedDh { value: secret.diffie_hellman(&PublicKey::from(*peer)), slot };
-    if !value.value.was_contributory() {
+) -> Result<NativeBootstrapSecret<32>> {
+    let shared = secret.diffie_hellman(&PublicKey::from(*peer));
+    let mut guarded = NativeBootstrapSecret::<32>::new(slot);
+    guarded.bytes.copy_from_slice(shared.as_bytes());
+    if !shared.was_contributory() {
         return Err(NativeBootstrapError::NonContributory);
     }
-    Ok(value)
+    Ok(guarded)
 }
 /// Public inputs and borrowed DH1 supplied by the scoped agreement provider.
 /// The caller binds DH1 to this source branch and the selected signed SPK.
@@ -177,8 +158,8 @@ pub fn native_initiator(
     rng.fill_seed(&mut e_seed.bytes)?;
     let mut r0_seed = NativeBootstrapSecret::<32>::new("r0_seed");
     rng.fill_seed(&mut r0_seed.bytes)?;
-    let ephemeral = ScopedKey::new(&e_seed, "ephemeral_key");
-    let ratchet = ScopedKey::new(&r0_seed, "ratchet_key");
+    let ephemeral = ScopedKey::new(&e_seed.bytes);
+    let ratchet = ScopedKey::new(&r0_seed.bytes);
     if ephemeral.public() == ratchet.public() {
         return Err(NativeBootstrapError::RepeatedKey);
     }
@@ -203,16 +184,16 @@ pub fn native_initiator(
         .map(|opk| checked_dh(&ephemeral.key, &opk.opk_key, "dh4"))
         .transpose()?;
     observe_dh(0, input.agreement_dh1);
-    observe_dh(1, dh2.as_bytes());
-    observe_dh(2, dh3.as_bytes());
+    observe_dh(1, &dh2.bytes);
+    observe_dh(2, &dh3.bytes);
     let mut ikm = NativeBootstrapSecret::<160>::new("ikm");
     ikm.bytes[..32].fill(0xff);
     ikm.bytes[32..64].copy_from_slice(&**input.agreement_dh1);
-    ikm.bytes[64..96].copy_from_slice(dh2.as_bytes());
-    ikm.bytes[96..128].copy_from_slice(dh3.as_bytes());
+    ikm.bytes[64..96].copy_from_slice(&dh2.bytes);
+    ikm.bytes[96..128].copy_from_slice(&dh3.bytes);
     let length = if let Some(dh4) = &dh4 {
-        observe_dh(3, dh4.as_bytes());
-        ikm.bytes[128..].copy_from_slice(dh4.as_bytes());
+        observe_dh(3, &dh4.bytes);
+        ikm.bytes[128..].copy_from_slice(&dh4.bytes);
         160
     } else {
         128

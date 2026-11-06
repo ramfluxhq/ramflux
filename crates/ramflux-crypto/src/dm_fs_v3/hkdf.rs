@@ -346,7 +346,7 @@ impl<const N: usize> Session<N> {
 /// Derive a scoped native HKDF handoff, with no shared-kdf or bootstrap caller.
 /// # Errors
 /// Rejects zero/>8160 output bytes or a SHA-256 length overflow.
-pub fn native_hkdf<const N: usize>(
+pub(crate) fn native_hkdf<const N: usize>(
     ikm: &[u8],
     salt: &[u8],
     info: &[u8],
