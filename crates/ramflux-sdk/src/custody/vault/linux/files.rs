@@ -29,6 +29,7 @@ pub(super) enum Error {
     Full,
     #[error("vault generation conflict")]
     Generation,
+    #[cfg(test)]
     #[error("vault replacement forbidden")]
     Replacement,
     #[error("invalid vault record: {0}")]

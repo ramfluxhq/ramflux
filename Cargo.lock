@@ -3419,6 +3419,7 @@ name = "ramflux-rf"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dbus-secret-service",
  "ed25519-dalek",
  "keyring",
  "ramflux-crypto",

@@ -64,6 +64,24 @@
         "gnome-keyring daemon heap and persistence",
         "dependency decrypt intermediate copies"
       ]
+    },
+    {
+      "introduced_in": "P06",
+      "consumer": "typed primary/branch/data file adapters",
+      "test": "custody::vault::linux::primary::tests::linux_vault_owned_buffers_clear_on_all_exits",
+      "observer": "actual fixed seed and retained KEK allocations after clear before release",
+      "cases": [
+        "primary and branch load success",
+        "invalid branch epoch after seed copy",
+        "duplicate store failure",
+        "authentication failure after readback allocation",
+        "drop retained realm handles"
+      ],
+      "residuals": [
+        "existing crypto API by-value seed and register copies",
+        "SelfSigningKey and BranchCredentials own their existing crypto key lifetimes",
+        "systemd credential mappings and Secret Service dependency copies retain their existing trust boundary"
+      ]
     }
   ]
 }
