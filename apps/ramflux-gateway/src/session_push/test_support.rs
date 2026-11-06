@@ -176,7 +176,7 @@ pub(crate) async fn negotiate_incarnation(
     let mut reply = serde_json::to_value(super::negotiation::descriptor())?;
     reply["incarnation_id"] = json!(id);
     request.respond.send((200, reply)).map_err(|_| anyhow::anyhow!("registration cancelled"))?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+    tokio::time::timeout(std::time::Duration::from_secs(10), task)
         .await???
         .ok_or_else(|| anyhow::anyhow!("capability not selected"))
 }

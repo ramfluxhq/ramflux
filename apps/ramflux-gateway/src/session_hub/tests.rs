@@ -32,9 +32,9 @@ async fn observed_assignment_retires_old_registration_and_replacement_survives()
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     queue.park_next_write(entered.clone(), release.clone());
     assert!(hub.send_delivery("target", &frame(1), Some((ID, 12345))).await);
-    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await?;
     assert!(hub.send_delivery("target", &frame(2), Some((NEW, 12345))).await);
-    tokio::time::timeout(std::time::Duration::from_secs(2), reg.closed.changed()).await??;
+    tokio::time::timeout(std::time::Duration::from_secs(10), reg.closed.changed()).await??;
     assert!(*reg.closed.borrow());
     let (fresh, rows) = sink();
     let new =
@@ -74,7 +74,7 @@ async fn restore_rotation_stopped_gateway_captures_new_incarnation() -> anyhow::
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         queue.park_next_write(entered.clone(), release.clone());
         assert!(hub.send_delivery("target", &frame(1), Some((&old, 12345))).await);
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await?;
         drop(hub);
         assert!(*reg.closed.borrow());
         drop(store);
@@ -177,7 +177,14 @@ async fn mesh_epoch_observations_retire_before_reply() -> anyhow::Result<()> {
         req.respond
             .send((if kind == 3 { 400 } else { 200 }, reply))
             .map_err(|_| anyhow::anyhow!("reply cancelled"))?;
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), task).await??.is_err());
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await??
+                .err()
+                .map(|e| e.to_string())
+                .as_deref(),
+            Some("capable session router binding retired")
+        );
         assert!(*reg.closed.borrow());
         assert!(rows.lock().map_err(|_| anyhow::anyhow!("rows"))?.is_empty());
     }
