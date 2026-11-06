@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Real protected-image/private-primary transactions and deterministic clocks/fault boundaries.
+//! Real typed-store transactions, exact CAS rejection and deterministic clock/bound tests.
 use super::*;
 use ramflux_protocol::username_directory as wire;
 use std::path::PathBuf;
@@ -198,8 +198,32 @@ fn username_checkpoint_barrier_and_rollback_recovery_store_apply_reopen() -> Tes
     );
     let image = witness.image_page(None, 128)?.rows;
     assert_eq!(image.len(), delta.rows.len());
+    let first = witness.image_page(None, 1)?;
+    let rest = witness.image_page(first.next.as_deref(), 128)?;
+    assert_eq!([first.rows, rest.rows].concat(), image);
+    assert!(matches!(fixture.witness(), Err(CheckpointError::Refused("already_initialized"))));
     let head = witness.head();
     drop(witness);
+    assert!(matches!(
+        CheckpointWitness::open(
+            &fixture.path("missing"),
+            "center.example",
+            1,
+            fixture.clock.clone()
+        ),
+        Err(CheckpointError::Refused("missing_witness"))
+    ));
+    for (center, generation) in [("other.example", 1), ("center.example", 2)] {
+        assert!(matches!(
+            CheckpointWitness::open(
+                &fixture.path("witness"),
+                center,
+                generation,
+                fixture.clock.clone()
+            ),
+            Err(CheckpointError::Refused("identity"))
+        ));
+    }
     let mut witness = fixture.reopen()?;
     assert_eq!(witness.head(), head);
     assert_eq!(witness.image_page(None, 128)?.rows, image);
@@ -236,19 +260,29 @@ fn username_checkpoint_barrier_and_rollback_recovery_delta_cas_and_chain_negativ
             "head field {field}"
         );
     }
-    // Remove each image relationship independently, retaining a well-formed wire delta.
-    for table in ["root", "operation", "op_owner", "due", "counter"] {
-        let mut bad = delta.clone();
-        bad.rows.retain(|r| r.order_key().is_ok_and(|k| k.0 != table));
-        assert!(witness.append(&genesis, bad, &root_id, false).is_err(), "missing {table}");
-        assert_eq!(witness.head(), genesis);
-        assert_eq!(witness.image_page(None, 128)?.rows, Vec::new());
-    }
     let mut bad = delta.clone();
     bad.clock_floor += 1;
     assert!(matches!(
         witness.append(&genesis, bad, &root_id, false),
         Err(CheckpointError::Refused("commit_clock"))
+    ));
+    for limit in [0, 129] {
+        assert!(matches!(
+            witness.image_page(None, limit),
+            Err(CheckpointError::Refused("page_limit"))
+        ));
+    }
+    assert!(matches!(witness.compact(1), Err(CheckpointError::Refused("compact_head"))));
+    assert!(matches!(witness.transaction("short"), Err(CheckpointError::Refused("id"))));
+    assert!(matches!(
+        witness.append(&genesis, delta.clone(), "short", false),
+        Err(CheckpointError::Refused("id"))
+    ));
+    let mut bad = delta.clone();
+    bad.kind = wire::DeltaKind::Clock;
+    assert!(matches!(
+        witness.append(&genesis, bad, &root_id, false),
+        Err(CheckpointError::Codec(wire::CodecError::Field("operation")))
     ));
     witness.append(&genesis, delta, &root_id, false)?;
     let head = witness.head();
@@ -271,6 +305,35 @@ fn username_checkpoint_barrier_and_rollback_recovery_delta_cas_and_chain_negativ
     assert!(matches!(
         witness.append(&head, clock_delta(3, WALL - 1), &root_id, false),
         Err(CheckpointError::Refused("clock"))
+    ));
+    fixture.clock.wall.store(ramflux_protocol::MAX_SAFE_JSON_INTEGER + 1, Ordering::SeqCst);
+    assert!(matches!(
+        witness.append(&head, clock_delta(3, WALL), &root_id, false),
+        Err(CheckpointError::Refused("clock"))
+    ));
+    fixture.clock.wall.store(WALL, Ordering::SeqCst);
+    fixture.clock.mono.store(10, Ordering::SeqCst);
+    witness.append(&head, clock_delta(3, WALL), &root_id, false)?;
+    let head = witness.head();
+    fixture.clock.mono.store(9, Ordering::SeqCst);
+    assert!(matches!(
+        witness.append(&head, clock_delta(4, WALL), &root_id, false),
+        Err(CheckpointError::Refused("clock"))
+    ));
+    fixture.clock.mono.store(10, Ordering::SeqCst);
+    // Exhaustion is a durable head boundary, not a loop to reach the safe-integer limit.
+    let mut exhausted = head;
+    exhausted.lsn = ramflux_protocol::MAX_SAFE_JSON_INTEGER;
+    {
+        let tx = witness.db.begin_write().map_err(storage)?;
+        put_head(&tx, &exhausted)?;
+        tx.commit().map_err(storage)?;
+    }
+    drop(witness);
+    let mut witness = fixture.reopen()?;
+    assert!(matches!(
+        witness.append(&exhausted, clock_delta(4, WALL), &root_id, false),
+        Err(CheckpointError::Refused("lsn_exhausted"))
     ));
     Ok(())
 }
