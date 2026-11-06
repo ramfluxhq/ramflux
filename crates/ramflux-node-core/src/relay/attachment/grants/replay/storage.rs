@@ -49,10 +49,8 @@ pub(super) fn rebuild(
     let saved =
         tx.open_table(META).map_err(store)?.get("clock").map_err(store)?.map_or(0, |v| v.value());
     let now = now.max(saved);
-    let mut rows = tx.open_table(NONCES).map_err(store)?;
-    let had_evidence = rows.len().map_err(store)? != 0;
-    rows.retain(|key, end| key.len() != 96 || end.checked_add(5).is_none_or(|end| end > now))
-        .map_err(store)?;
+    let had_evidence = expire_before_rebuild(tx, now)?;
+    let rows = tx.open_table(NONCES).map_err(store)?;
     let _ = tx.delete_table(EXPIRY).map_err(store)?;
     let _ = tx.delete_table(PRINCIPALS).map_err(store)?;
     let mut expiry = tx.open_table(EXPIRY).map_err(store)?;
@@ -81,6 +79,41 @@ pub(super) fn rebuild(
         meta.insert("clock", now).map_err(store)?;
     }
     Ok(())
+}
+// Dropping each read iterator before removals lets redb mutate uncommitted
+// pages in place. retain() keeps the old tree alive and copies a path per delete.
+fn expire_before_rebuild(tx: &WriteTransaction, now: u64) -> Result<bool, AttachmentLedgerError> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    let mut rows = tx.open_table(NONCES).map_err(store)?;
+    let had_evidence = rows.len().map_err(store)? != 0;
+    let mut cursor: Option<Vec<u8>> = None;
+    loop {
+        let start = cursor.as_ref().map_or(Unbounded, |key| Excluded(key.as_slice()));
+        let page: Vec<(Vec<u8>, u64)> = rows
+            .range::<&[u8]>((start, Unbounded))
+            .map_err(store)?
+            .filter_map(|entry| match entry {
+                Ok((key, value)) if key.value().len() == 96 => {
+                    Some(Ok((key.value().to_vec(), value.value())))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(store(error))),
+            })
+            .take(64)
+            .collect::<Result<_, AttachmentLedgerError>>()?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|(key, _)| key.clone());
+        for (key, end) in page {
+            if end.checked_add(5).is_some_and(|end| end <= now)
+                && rows.remove(key.as_slice()).map_err(store)?.is_none()
+            {
+                return Err(AttachmentLedgerError::State);
+            }
+        }
+    }
+    Ok(had_evidence)
 }
 fn charge(rows: u64, row_charge: u64) -> u64 {
     ROOT_CHARGE.saturating_add(rows.saturating_mul(row_charge))
