@@ -343,16 +343,20 @@ fn large_scoped_grants_bind_reference_owner_and_grantee() {
     drop(ledger);
     drop(store);
     let store = RelayRedbStore::open(&path).unwrap();
-    assert!(
-        store
-            .ensure_generic_attachment_format(&shadow.object_id, Some(&shadow.manifest_hash))
-            .is_err()
-    );
-    assert!(store.ensure_generic_attachment_format(&shadow.object_id, Some("not-a-hash")).is_err());
-    assert!(
-        store.ensure_generic_attachment_format(&shadow.object_id, Some(&hex(&[0; 32]))).is_err()
-    );
-    store.ensure_generic_attachment_format("generic-control", Some("generic-manifest")).unwrap();
+    assert!(store.ensure_generic_attachment_format(&shadow.object_id).is_err());
+    for manifest in ["not-a-hash".to_owned(), hex(&[0; 32])] {
+        let mut changed = meta.clone();
+        changed.manifest_hash = manifest;
+        assert!(matches!(
+            relay_store_read_through(&store, &state, &changed, now),
+            Err(RelayStoreOpError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            relay_store_ack(&store, &state, |_| Ok(changed.clone())),
+            Err(RelayStoreOpError::Unauthorized(_))
+        ));
+    }
+    store.ensure_generic_attachment_format("generic-control").unwrap();
     let ledger = store.attachment_ledger(super::super::AttachmentPolicy::default()).unwrap();
     let registry = ledger.scoped_grants(config.clone()).unwrap();
     assert_eq!(
