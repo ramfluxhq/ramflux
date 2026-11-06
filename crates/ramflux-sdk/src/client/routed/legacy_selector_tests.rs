@@ -13,6 +13,14 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 struct Observation {
     imports: Vec<String>,
     late: bool,
+    registrations: usize,
+    refused: usize,
+}
+pub(in crate::client) fn registered(result: &Result<(), SdkError>) {
+    OBSERVED.with_borrow_mut(|o| {
+        o.registrations += 1;
+        o.refused += usize::from(matches!(result, Err(SdkError::ObjectErased)));
+    });
 }
 thread_local! { static OBSERVED: RefCell<Observation> = RefCell::default(); }
 pub(in crate::client) fn import_entry(
@@ -160,7 +168,45 @@ impl LegacyCase {
 }
 #[tokio::test]
 async fn e16_legacy_import_receives_only_admitted_subset() -> TestResult {
-    LegacyCase::new()?.mixed(false).await
+    let mut f = LegacyCase::new()?;
+    f.c.fence()?;
+    let rejected = f.c.refs[1].clone();
+    f.c.refs = vec![rejected.clone(), f.c.refs[2].clone(), rejected, f.c.refs[0].clone()];
+    let entry = f.entry("legacy-ordered-subset", 11)?;
+    let before = f.c.b.client.load_dm_session("legacy-thread", "recv")?.receive_counter;
+    let delivery = f.receive(&entry, true).await?.ok_or("subset message missing")?;
+    assert_eq!(
+        delivery.attachments.iter().map(|r| r.object_id.as_str()).collect::<Vec<_>>(),
+        ["good-two", "good-one"]
+    );
+    OBSERVED.with_borrow(|o| {
+        assert_eq!(o.registrations, 4);
+        assert_eq!(o.refused, 2);
+        assert_eq!(o.imports, ["good-two", "good-one"]);
+    });
+    assert_eq!(
+        ramflux_protocol::decode_base64url(&delivery.plaintext_body_base64)?,
+        b"preserved legacy text"
+    );
+    let db = f.c.b.client.account_db()?;
+    let terminal = f.c.b.client.legacy_committed_key(&entry)?;
+    assert_eq!(db.load_actor_state::<String>(&terminal)?, Some("legacy-thread".to_owned()));
+    assert_eq!(db.actor_state_keys("attachment/reference/refused")?.len(), 0);
+    assert!(f.c.b.client.object_content_key("refused").is_err());
+    assert!(f.c.b.client.recv_session_checkpoint_at("legacy-thread", "legacy-ordered-subset")?);
+    assert_eq!(f.c.b.client.gateway_receive_cursor("bob")?, 11);
+    assert_eq!(db.due_inbox_retries(i64::MAX)?.len(), 0);
+    let committed = f.c.b.client.load_dm_session("legacy-thread", "recv")?.receive_counter;
+    assert!(committed > before);
+    assert!(f.receive(&entry, true).await?.is_some());
+    assert_eq!(f.c.b.client.load_dm_session("legacy-thread", "recv")?.receive_counter, committed);
+    assert_eq!(f.c.b.client.gateway_receive_cursor("bob")?, 11);
+    OBSERVED.with_borrow(|o| {
+        assert_eq!(o.registrations, 4);
+        assert_eq!(o.refused, 2);
+        assert_eq!(o.imports, ["good-two", "good-one"]);
+    });
+    Ok(())
 }
 #[tokio::test]
 async fn e16_legacy_item_fenced_between_registration_and_import_is_consumed() -> TestResult {

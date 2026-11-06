@@ -353,3 +353,6 @@ mod tests;
 
 #[cfg(test)]
 pub(in crate::client) use tests::legacy_selector::import_entry as observe_legacy_import;
+
+#[cfg(test)]
+pub(in crate::client) use tests::legacy_selector::registered as observe_legacy_registration;

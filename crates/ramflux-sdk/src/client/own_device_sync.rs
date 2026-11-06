@@ -318,11 +318,20 @@ impl RamfluxClient {
         plaintext: &[u8],
     ) -> Result<(SdkOwnDeviceSyncImportResponse, Option<Box<SdkOwnDeviceSyncEnvelope>>), SdkError>
     {
+        self.apply_own_history_plaintext_mode::<false>(envelope, plaintext)
+    }
+
+    fn apply_own_history_plaintext_mode<const CONSUME_ERASED: bool>(
+        &self,
+        envelope: &SdkOwnDeviceSyncEnvelope,
+        plaintext: &[u8],
+    ) -> Result<(SdkOwnDeviceSyncImportResponse, Option<Box<SdkOwnDeviceSyncEnvelope>>), SdkError>
+    {
         let receipt = Self::own_sync_receipt_key(envelope)?;
         let bundle: SdkOwnDeviceHistoryBundle = serde_json::from_slice(plaintext)?;
         self.account_db()?.write_transaction(|| {
             let result = self.import_own_device_history_bundle(envelope, &bundle)?;
-            let retired = self.bind_history_transport_owners(
+            let retired = self.bind_history_transport_owners::<CONSUME_ERASED>(
                 &envelope.history_ref.object_id,
                 &envelope.history_ref.manifest_hash,
                 plaintext,
@@ -2002,3 +2011,7 @@ mod backup_page_shape_tests {
 #[cfg(test)]
 #[path = "own_device_sync/deletion_tests.rs"]
 mod deletion_tests;
+
+#[cfg(test)]
+#[path = "own_device_sync/historical_refusal_tests.rs"]
+pub(super) mod historical_refusal_tests;
