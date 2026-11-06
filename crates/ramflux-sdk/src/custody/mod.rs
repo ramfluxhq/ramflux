@@ -119,3 +119,6 @@ pub mod dm_fs_v3;
 
 #[cfg(target_os = "linux")]
 pub use vault::linux::{LinuxVaultInitError, LinuxVaultInstallation};
+
+#[cfg(target_os = "linux")]
+pub use vault::linux::{LinuxDataCredentials, LinuxPrimaryVault};

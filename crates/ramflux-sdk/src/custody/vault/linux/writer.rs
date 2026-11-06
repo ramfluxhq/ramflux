@@ -8,19 +8,39 @@ use super::{
     files::{Error, Store, open_file},
 };
 use rustix::fs::{self, FlockOperation, OFlags, RenameFlags};
-use std::{fs::File, io::Write, sync::Arc};
+#[cfg(test)]
+use std::sync::Arc;
+use std::{fs::File, io::Write};
 
 /// Test cut point; the crash harness parks or kills the process here.
 type Cut<'a> = &'a dyn Fn(&'static str) -> Result<(), Error>;
 
 pub(super) enum Operation {
-    Read { reference: String, kind: u8, generation: u64 },
-    Insert { reference: String, kind: u8, record: Vec<u8> },
-    Replace { reference: String, expected: u64, record: Vec<u8> },
-    Delete { reference: String, kind: u8, generation: u64 },
+    Read {
+        reference: String,
+        kind: u8,
+        generation: u64,
+    },
+    Insert {
+        reference: String,
+        kind: u8,
+        record: Vec<u8>,
+    },
+    #[cfg(test)]
+    Replace {
+        reference: String,
+        expected: u64,
+        record: Vec<u8>,
+    },
+    Delete {
+        reference: String,
+        kind: u8,
+        generation: u64,
+    },
 }
 impl Store {
     /// Slots and account locks live inside the worker, including after caller cancellation.
+    #[cfg(test)]
     pub(super) async fn execute(self: Arc<Self>, operation: Operation) -> Result<Vec<u8>, Error> {
         let slot = super::init::Slot::acquire().map_err(|_| Error::Busy)?;
         tokio::task::spawn_blocking(move || {
@@ -64,6 +84,7 @@ impl Store {
                 return Ok(Vec::new());
             }
             Operation::Insert { reference, kind, record } => (reference, kind, record, false),
+            #[cfg(test)]
             Operation::Replace { reference, expected, record } => {
                 if self.realm != 3 || !reference.starts_with("unlock:") {
                     return Err(Error::Replacement);
