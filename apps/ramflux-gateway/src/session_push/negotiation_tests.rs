@@ -213,3 +213,6 @@ async fn open_clamps_runtime_push_limit() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[path = "real_router_tests.rs"]
+mod real_router;

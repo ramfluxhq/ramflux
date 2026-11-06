@@ -144,7 +144,10 @@ fn inbox_incarnation_lifecycle() -> anyhow::Result<()> {
     assert!(legacy.get("incarnation_id").is_none());
     assert_eq!(legacy["entries"].as_array().map(Vec::len), Some(1));
     let capabilities = call(&router, "GET", "/mvp1/session-push-capabilities", Value::Null)?;
-    assert_eq!(capabilities, json!({"capabilities":[]}));
+    assert_eq!(
+        capabilities,
+        json!({"capabilities":[ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY]})
+    );
     let response = call(
         &router,
         "POST",

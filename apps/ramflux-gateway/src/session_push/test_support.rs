@@ -82,6 +82,8 @@ impl Fixture {
             Arc::new(move || Ok(vec![gateway.ca_pem.clone()])),
         )?;
         let mut context = crate::session::tests::test_gateway_context()?;
+        // Probe tests drive explicit rounds; unrelated protocol fixtures own every mesh request.
+        context.hub.probe_started.store(true, std::sync::atomic::Ordering::Release);
         context.router = crate::RouterMeshClient {
             endpoint: "127.0.0.1:0".into(),
             server_name: "ramflux-router".into(),

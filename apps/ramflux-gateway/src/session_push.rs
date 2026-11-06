@@ -503,6 +503,7 @@ pub(crate) async fn negotiate(
     descriptor: &ramflux_node_core::SessionDescriptor,
 ) -> anyhow::Result<Option<String>> {
     context.hub.readiness.start(&context.router);
+    crate::issued_probe::start(&context.hub, &context.router);
     let capable = context.hub.readiness.supports()
         && auth
             .device_proof

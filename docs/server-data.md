@@ -243,6 +243,33 @@ move or delete WAL segments by hand.
 - The check that a secret lies outside the database volume is a path heuristic: it
   rejects secrets under the database's parent directory. It does not compare mount
   points, so operators must still mount secrets from a separate location.
-- A delivery dead-lettered because the ACK window overflowed is dropped without a
-  signal to the recipient: cursor responses do not report dead letters. NACKed
-  deliveries are dead-lettered only after the recipient's own repeated NACKs.
+- Capable sessions expose bounded known-loss ranges (including ACK-window overflow,
+  expiry, repeated NACKs and proven pre-write aborts) through resume pages. Legacy
+  cursor responses still omit dead-letter details. Missing durable evidence is
+  reported as unknown, without inventing a loss reason.
+
+
+## Session push durability and recovery
+
+See [the node wire contract](session_push_node.md) for negotiated session push.
+Each inbox has a persisted 128-bit incarnation, encoded as 32 lowercase hex digits.
+An ordinary restart preserves it; restore and lost required WAL segments rotate
+it before readiness. A pre-session-push store migrates its counters and rows once
+through the startup barrier, preserving its issued sequence high-water marks.
+
+Publication uses a contiguous durable prefix P. Durable retirement R includes
+ACK, repeated NACK, expiry and other lifecycle settlement; the advertised settled
+prefix is S=min(R,P). Every recovered segment is synced after tail repair,
+required directories are synced, and an immediate redb commit completes before
+readiness. Proven never-written assignments become durable aborted tombstones;
+uncertain writes cannot be retried inside the process. A
+`fatal_durability_uncertain` log means the detecting writer fenced all subsequent
+publication and the service aborts. Restart runs the complete barrier again.
+Router and gateway must run under an external supervisor restart policy; the
+reference compose files do not install one. Hook-order tests do not establish
+physical-media durability after an earlier EIO or a false successful sync.
+
+Opening an upgraded store with a pre-session-push router is unsupported. Isolate
+that store before rollback; restore a suitable snapshot and follow the offline
+incarnation-rotation procedure above, stopping gateways as well as the router.
+Never discard a damaged segment manually: use the quarantine command above.

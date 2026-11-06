@@ -47,6 +47,29 @@ async fn durable_view_publication() -> Result<(), Box<dyn std::error::Error>> {
         .await??;
         assert_eq!(core.view("alice-target", &id).0, 0);
         assert_eq!(store.inbox_status("alice-target")?.1, 2);
+        assert_eq!(
+            router.session_push_status("alice-target").inbox_seq,
+            0,
+            "probe cannot expose held assignments"
+        );
+        let page = router.resume_page(
+            "alice-target",
+            0,
+            256,
+            i64::try_from(ramflux_node_core::now_unix_seconds())?,
+        )?;
+        assert_eq!(page.issued_inbox_seq, 0);
+        assert!(page.entries.is_empty());
+        assert_eq!(
+            router
+                .fetch_entry(
+                    "alice-target",
+                    2,
+                    i64::try_from(ramflux_node_core::now_unix_seconds())?
+                )
+                .err(),
+            Some(ramflux_node_core::EntryFetchError::InvalidSeq)
+        );
         let (send, sender_frames) = super::submit_ack_tests::sink();
         let (recipient, received) = super::submit_ack_tests::sink();
         context.hub.register("alice-target".into(), "recipient".into(), recipient).await?;

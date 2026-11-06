@@ -8,6 +8,7 @@ mod compio_gateway;
 mod custody;
 mod hub_index;
 mod ingress;
+mod issued_probe;
 #[cfg(feature = "itest-http")]
 mod itest_http;
 mod mesh_delivery;

@@ -17,9 +17,9 @@ pub(crate) struct GatewayRegistration {
 #[derive(Clone)]
 pub(crate) struct GatewayHubEntry {
     session_id: String,
-    token: GatewayRegistrationToken,
-    queue: crate::push_queue::PushQueue,
-    incarnation: Option<String>,
+    pub(crate) token: GatewayRegistrationToken,
+    pub(crate) queue: crate::push_queue::PushQueue,
+    pub(crate) incarnation: Option<String>,
     sender: GatewaySendHandle,
 }
 
@@ -27,6 +27,7 @@ pub(crate) struct GatewayHubEntry {
 pub(crate) struct GatewaySessionHub {
     senders_by_target: AsyncMutex<Arc<Index<GatewayHubEntry>>>,
     next_registration: std::sync::atomic::AtomicU64,
+    pub(crate) probe_started: std::sync::atomic::AtomicBool,
     pub(crate) readiness: Arc<crate::session_push::Readiness>,
 }
 
@@ -35,7 +36,7 @@ impl GatewaySessionHub {
         let snapshot = self.senders_by_target.blocking_lock().clone();
         snapshot.values().map(|entry| entry.session_id.clone()).collect()
     }
-    async fn snapshot(&self) -> Arc<Index<GatewayHubEntry>> {
+    pub(crate) async fn snapshot(&self) -> Arc<Index<GatewayHubEntry>> {
         self.senders_by_target.lock().await.clone()
     }
     async fn update<F>(&self, edit: F) -> anyhow::Result<Option<GatewayHubEntry>>
@@ -128,6 +129,44 @@ impl GatewaySessionHub {
         Ok(GatewayRegistration { token, closed: receiver })
     }
 
+    #[cfg(test)]
+    pub(crate) async fn population_fixture(&self, n: usize, id: &str, sender: &GatewaySendHandle) {
+        let mut index = Index::default();
+        for n in 0..n {
+            let (closed, _) = tokio::sync::watch::channel(false);
+            index.insert(
+                format!("target-{n:08}"),
+                GatewayHubEntry {
+                    session_id: format!("session-{n}"),
+                    token: GatewayRegistrationToken(n as u64),
+                    queue: crate::push_queue::PushQueue::new(16, closed),
+                    incarnation: Some(id.into()),
+                    sender: sender.clone(),
+                },
+            );
+        }
+        *self.senders_by_target.lock().await = Arc::new(index);
+    }
+    pub(crate) async fn probe_observation(
+        &self,
+        target: &str,
+        token: GatewayRegistrationToken,
+        observation: Option<&crate::issued_probe::IssuedSeq>,
+    ) {
+        let entry = self.snapshot().await.get(target).cloned();
+        if let Some(entry) = entry.filter(|e| e.token == token && !e.queue.is_closed()) {
+            if let Some(row) = observation
+                && row.incarnation_id.as_deref() != entry.incarnation.as_deref()
+                && entry.incarnation.is_some()
+            {
+                entry.queue.request_retirement(entry.sender.clone());
+                return;
+            }
+            if entry.incarnation.is_some() {
+                entry.queue.observe_issued(observation.map(|r| r.inbox_seq));
+            }
+        }
+    }
     pub(crate) async fn unregister(
         &self,
         target_delivery_id: &str,

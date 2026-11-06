@@ -60,6 +60,12 @@ impl<V> Index<V> {
     pub(crate) fn remove(&mut self, key: &str) -> Option<V> {
         self.locate(key).ok().map(|at| self.rows.remove(at).1)
     }
+    pub(crate) fn page(&self, offset: usize) -> Vec<(String, V)>
+    where
+        V: Clone,
+    {
+        self.rows.iter().skip(offset).take(1024).map(|(k, v)| (k.text.clone(), v.clone())).collect()
+    }
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.rows.iter().map(|(_, v)| v)
     }

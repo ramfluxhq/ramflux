@@ -886,3 +886,15 @@ and checks its port before restoring files or changing the transaction marker.
 An already running, owned router with the exact loopback mapping is permitted;
 an unrelated listener is refused with guidance to select a free port. A disabled
 router admin selection does not validate or save an unused port.
+
+
+### Session push durability supervision
+
+Router and gateway require an external supervisor restart policy. A router
+`fatal_durability_uncertain` line records a fenced uncertain storage outcome and
+is followed by process abort; restarting performs the complete durability barrier
+before admission. Reference compose files do not install or verify automatic
+restart. An upgraded session-push store cannot be opened by an older router.
+For rollback isolate the upgraded store, and for restore or damaged WAL follow
+[the offline rotation and quarantine procedure](../docs/server-data.md#restoring-router-inbox-state),
+including stopping and restarting every serving gateway.
