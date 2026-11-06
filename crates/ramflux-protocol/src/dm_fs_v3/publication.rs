@@ -74,6 +74,8 @@ pub struct SignedNativePrekeyBase {
     pub issued_at: u64,
     pub expires_at: u64,
     pub update_counter: u64,
+    /// Nonempty ASCII letters/digits or `_.,:-` (maximum 64 encoded bytes).
+    /// This is syntax only: the DM-FS-V3-03 verifier owns capability semantics.
     pub capabilities: String,
     pub signature: [u8; 64],
 }
@@ -93,7 +95,7 @@ impl SignedNativePrekeyBase {
         writer.push(7, &self.issued_at.to_be_bytes())?;
         writer.push(8, &self.expires_at.to_be_bytes())?;
         writer.push(9, &self.update_counter.to_be_bytes())?;
-        writer.push(10, self.capabilities.as_bytes())?;
+        writer.push(10, capability_bytes(self.capabilities.as_bytes())?)?;
         writer.push(11, &self.signature)?;
         writer.finish()
     }
@@ -113,7 +115,7 @@ impl SignedNativePrekeyBase {
             issued_at: u64::from_be_bytes(fixed(field(view, 7)?)?),
             expires_at: u64::from_be_bytes(fixed(field(view, 8)?)?),
             update_counter: u64::from_be_bytes(fixed(field(view, 9)?)?),
-            capabilities: owned_text(field(view, 10)?)?,
+            capabilities: owned_text(capability_bytes(field(view, 10)?)?)?,
             signature: fixed(field(view, 11)?)?,
         })
     }
@@ -249,7 +251,7 @@ impl OwnerPrekeyUpdate {
     /// # Errors
     /// Rejects every noncanonical field, nested object, count, size or trailing byte.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let view = scan(WireType::OwnerPrekeyUpdate, bytes)?;
+        let view = scan_publication(WireType::OwnerPrekeyUpdate, bytes)?;
         Ok(Self {
             profile: owned_text(field(view, 1)?)?,
             base: SignedNativePrekeyBase::from_bytes(field(view, 2)?)?,
@@ -312,7 +314,7 @@ impl PrekeyPublicationSnapshot {
     /// # Errors
     /// Rejects every noncanonical field, nested object, count, size or trailing byte.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let view = scan(WireType::PrekeyPublicationSnapshot, bytes)?;
+        let view = scan_publication(WireType::PrekeyPublicationSnapshot, bytes)?;
         Ok(Self {
             profile: owned_text(field(view, 1)?)?,
             update: OwnerPrekeyUpdate::from_bytes(field(view, 2)?)?,
@@ -466,4 +468,62 @@ fn decode_list<T>(
         return Err(DecodeError::Trailing);
     }
     Ok(values)
+}
+
+fn capability_bytes(value: &[u8]) -> Result<&[u8]> {
+    if value.is_empty()
+        || !value
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b',' | b':' | b'-'))
+    {
+        return Err(DecodeError::Value);
+    }
+    Ok(value)
+}
+
+// Preserve the scanner-first, no-allocation boundary. r7's tight encoded-list
+// ceilings can report FieldCeiling before Count. Classify complete over-count
+// payloads as Count without ever accepting an input the scanner rejected.
+fn scan_publication(kind: WireType, bytes: &[u8]) -> Result<Scanned<'_>> {
+    match scan(kind, bytes) {
+        Err(DecodeError::FieldCeiling)
+            if collection_count_exceeded(kind, bytes).unwrap_or(false) =>
+        {
+            Err(DecodeError::Count)
+        }
+        result => result,
+    }
+}
+
+fn collection_count_exceeded(kind: WireType, mut bytes: &[u8]) -> Result<bool> {
+    if bytes.len() > kind.ceiling() {
+        return Err(DecodeError::TypeCeiling);
+    }
+    if take(&mut bytes, 6)? != [b'R', b'F', b'S', b'1', kind as u8, 1] {
+        return Err(DecodeError::Header);
+    }
+    if usize::from(u16::from_be_bytes(fixed(take(&mut bytes, 2)?)?)) != kind.specs().len() {
+        return Err(DecodeError::Fields);
+    }
+    for spec in kind.specs() {
+        if u16::from_be_bytes(fixed(take(&mut bytes, 2)?)?) != spec.id {
+            return Err(DecodeError::Fields);
+        }
+        let length = usize::try_from(u32::from_be_bytes(fixed(take(&mut bytes, 4)?)?))
+            .map_err(|_| DecodeError::FieldCeiling)?;
+        let value = take(&mut bytes, length)?;
+        match spec.kind {
+            Kind::List(limit, _) => {
+                let count = usize::from(u16::from_be_bytes(fixed(
+                    value.get(..2).ok_or(DecodeError::Truncated)?,
+                )?));
+                if count > limit {
+                    return Ok(true);
+                }
+            }
+            Kind::Nested(child) if collection_count_exceeded(child, value)? => return Ok(true),
+            _ => {}
+        }
+    }
+    Ok(false)
 }

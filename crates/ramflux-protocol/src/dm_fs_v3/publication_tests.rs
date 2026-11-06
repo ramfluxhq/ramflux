@@ -289,3 +289,86 @@ fn dm_fs_v3_size_limits_exact_and_plus_one() -> Result {
     assert_eq!(PrekeyPublicationSnapshot::from_bytes(&oversized), Err(DecodeError::TypeCeiling));
     Ok(())
 }
+
+// Build negative frames directly from fixed literal bytes, bypassing the writers
+// whose count validation is being tested. All declared children are fully present.
+fn replace_raw_field(kind: WireType, raw: &[u8], id: u16, replacement: &[u8]) -> Result<Vec<u8>> {
+    let view = scan(kind, raw)?;
+    let mut out = raw[..8].to_vec();
+    for field in view.fields() {
+        let value = if field.id == id { replacement } else { field.value };
+        out.extend_from_slice(&field.id.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(value.len())?.to_be_bytes());
+        out.extend_from_slice(value);
+    }
+    Ok(out)
+}
+fn complete_raw_list(element: &[u8], count: u16) -> Result<Vec<u8>> {
+    let mut out = count.to_be_bytes().to_vec();
+    for _ in 0..count {
+        out.extend_from_slice(&u32::try_from(element.len())?.to_be_bytes());
+        out.extend_from_slice(element);
+    }
+    Ok(out)
+}
+
+#[test]
+fn dm_fs_v3_capabilities_syntax_is_bounded() -> Result {
+    let w = fixtures()?;
+    let v = vector(&w, "SignedNativePrekeyBase")?;
+    let original = raw(v)?;
+    let mut value = base(&v["input"])?;
+    for invalid in
+        ["", "register message", "régi", "register\nmessage", "register/message", "cap\u{80}"]
+    {
+        value.capabilities = invalid.into();
+        assert_eq!(
+            value.to_bytes(),
+            Err(DecodeError::Value),
+            "invalid capability syntax: {invalid:?}"
+        );
+        let bad =
+            replace_raw_field(WireType::SignedNativePrekeyBase, &original, 10, invalid.as_bytes())?;
+        assert_eq!(SignedNativePrekeyBase::from_bytes(&bad), Err(DecodeError::Value));
+    }
+    for valid in ["register,message", "Cap_1.foo:bar-baz", "c"] {
+        value.capabilities = valid.into();
+        assert_eq!(SignedNativePrekeyBase::from_bytes(&value.to_bytes()?)?, value);
+    }
+    value.capabilities = "c".repeat(64);
+    assert!(value.to_bytes().is_ok());
+    value.capabilities.push('c');
+    assert_eq!(value.to_bytes(), Err(DecodeError::FieldCeiling));
+    Ok(())
+}
+
+#[test]
+fn dm_fs_v3_over_limit_collection_frames_return_count() -> Result {
+    let w = fixtures()?;
+    let maxima = w["filled_maximum"].as_array().ok_or("maxima")?;
+    let update =
+        raw(maxima.iter().find(|v| v["type"] == "OwnerPrekeyUpdate").ok_or("max update")?)?;
+    let snapshot = raw(maxima
+        .iter()
+        .find(|v| v["type"] == "PrekeyPublicationSnapshot")
+        .ok_or("max snapshot")?)?;
+    let opk = raw(vector(&w, "SignedNativeOpk")?)?;
+    let retirement = raw(vector(&w, "RetirementRef")?)?;
+    let opks = complete_raw_list(&opk, 65)?;
+    let retirements = complete_raw_list(&retirement, 401)?;
+    for (field, list) in [(4, opks), (5, retirements.clone())] {
+        let bad_update = replace_raw_field(WireType::OwnerPrekeyUpdate, &update, field, &list)?;
+        assert_eq!(
+            OwnerPrekeyUpdate::from_bytes(&bad_update),
+            Err(DecodeError::Count),
+            "over-limit complete owner update"
+        );
+        let nested =
+            replace_raw_field(WireType::PrekeyPublicationSnapshot, &snapshot, 2, &bad_update)?;
+        assert_eq!(PrekeyPublicationSnapshot::from_bytes(&nested), Err(DecodeError::Count));
+    }
+    let bad_snapshot =
+        replace_raw_field(WireType::PrekeyPublicationSnapshot, &snapshot, 6, &retirements)?;
+    assert_eq!(PrekeyPublicationSnapshot::from_bytes(&bad_snapshot), Err(DecodeError::Count));
+    Ok(())
+}
