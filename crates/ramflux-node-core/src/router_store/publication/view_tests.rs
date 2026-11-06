@@ -302,3 +302,51 @@ fn point_view_checks_one_covering_range_and_published_watermark() -> Result {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn page_probe_is_scoped_to_the_calling_thread_and_core() -> Result {
+    fn core() -> Arc<PublicationCore> {
+        Arc::new(PublicationCore {
+            shared: Arc::new(Shared {
+                entry_cleanup: OnceLock::new(),
+                replay_cleanup: OnceLock::new(),
+                registry: Mutex::new(Registry::default()),
+                worker: OnceLock::new(),
+                stopping: AtomicBool::new(false),
+                changed: Notify::new(),
+                db: Weak::new(),
+                path: PathBuf::new(),
+                snapshot_hook: Mutex::new(None),
+            }),
+            worker: Mutex::new(None),
+        })
+    }
+    let a = core();
+    let b = core();
+    assert!(a.page_registry_unlocked());
+    assert!(b.page_registry_unlocked());
+    {
+        let _held = lock(&a.shared);
+        assert!(!a.page_registry_unlocked(), "caller-owned registry was missed");
+        assert!(b.page_registry_unlocked(), "another core contaminated the probe");
+    }
+    assert!(a.page_registry_unlocked());
+    let (entered, ready) = mpsc::channel();
+    let (release, finish) = mpsc::channel();
+    std::thread::scope(|scope| -> Result {
+        let worker = a.clone();
+        let holder = scope.spawn(move || -> std::result::Result<(), String> {
+            let _held = lock(&worker.shared);
+            entered.send(()).map_err(|e| e.to_string())?;
+            finish.recv_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+            Ok(())
+        });
+        ready.recv_timeout(Duration::from_secs(10))?;
+        let unlocked = a.page_registry_unlocked();
+        release.send(())?;
+        holder.join().expect("registry holder panicked").map_err(std::io::Error::other)?;
+        assert!(unlocked, "another thread contaminated the caller's lock-release probe");
+        Ok(())
+    })?;
+    Ok(())
+}

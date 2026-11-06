@@ -172,8 +172,51 @@ pub struct PublicationWrite {
     descriptor: Arc<Descriptor>,
 }
 
-fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Registry> {
-    shared.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+#[cfg(not(test))]
+type RegistryGuard<'a> = std::sync::MutexGuard<'a, Registry>;
+
+#[cfg(test)]
+std::thread_local! {
+    static HELD_REGISTRIES: std::cell::RefCell<BTreeSet<usize>> = const { std::cell::RefCell::new(BTreeSet::new()) };
+}
+#[cfg(test)]
+struct RegistryGuard<'a> {
+    guard: std::sync::MutexGuard<'a, Registry>,
+    core: usize,
+}
+#[cfg(test)]
+impl std::ops::Deref for RegistryGuard<'_> {
+    type Target = Registry;
+    fn deref(&self) -> &Registry {
+        &self.guard
+    }
+}
+#[cfg(test)]
+impl std::ops::DerefMut for RegistryGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Registry {
+        &mut self.guard
+    }
+}
+#[cfg(test)]
+impl Drop for RegistryGuard<'_> {
+    fn drop(&mut self) {
+        HELD_REGISTRIES.with(|held| {
+            held.borrow_mut().remove(&self.core);
+        });
+    }
+}
+fn lock(shared: &Shared) -> RegistryGuard<'_> {
+    let guard = shared.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(test)]
+    {
+        let core = std::ptr::from_ref(shared).addr();
+        HELD_REGISTRIES.with(|held| {
+            held.borrow_mut().insert(core);
+        });
+        RegistryGuard { guard, core }
+    }
+    #[cfg(not(test))]
+    guard
 }
 
 impl std::fmt::Debug for PublicationCore {
@@ -458,7 +501,9 @@ impl PublicationCore {
 
     #[cfg(test)]
     pub(crate) fn page_registry_unlocked(&self) -> bool {
-        self.shared.registry.try_lock().is_ok()
+        // Other threads (including this core's resolver) may legitimately own it.
+        let core = std::ptr::from_ref(self.shared.as_ref()).addr();
+        HELD_REGISTRIES.with(|held| !held.borrow().contains(&core))
     }
 
     /// Earliest unresolved assignment, under the same lock as allocation/publication.
