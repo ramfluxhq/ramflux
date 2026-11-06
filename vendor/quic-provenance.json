@@ -632,12 +632,12 @@
         "delta": "Dormant closed TLS identity, finite-byte and operation contract; independently checked exact-error fixtures and counted Session methods; Remove duplicate hardcoded space/sequence check from validator and oracle; reviewed registry alone defines permitted pairs; Reuse counted Session mock for E1; accept all E0 caps at exact equality with one Session call"
       },
       "src/connection/metadata_staging.rs": {
-        "patched_sha256": "04d0a0c761caf060dde3af88c99b76e0ffb93c8292e5c4f0a746cc941328b09d",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates"
+        "patched_sha256": "8ce59ae04d412256929619da1796b36797732456574486bbda0bece91a9c0249",
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary"
       },
       "src/connection/metadata_staging/tests.rs": {
-        "patched_sha256": "3a9bafa4556ca822e7e35d69165a909965c06c01269ce9f113b23ff49d3957ba",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates"
+        "patched_sha256": "401a3e18f27b3a16ee9b2d18c8f5307daf7f2b46ef46ecae59e5d237602b010a",
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality"
       }
     },
     "formatting": {

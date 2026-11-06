@@ -485,7 +485,11 @@ impl Fixture {
                     errors.push(InvalidLedger(domain));
                     continue;
                 }
-                let total = u128::from(used) + amount;
+                if self.action == 1 && amount > u128::from(used) {
+                    errors.push(InvalidLedger(domain));
+                    continue;
+                }
+                let total = u128::from(used) + if self.action == 1 { 0 } else { amount };
                 if total > u128::from(u64::MAX) {
                     errors.push(ArithmeticOverflow(op));
                     continue;
@@ -579,6 +583,12 @@ impl Fixture {
                     errors.push(OwnerUnexpected(o.owner));
                     continue;
                 };
+                if o.allocation != expected.allocation {
+                    errors.push(OwnerAllocationMismatch(i));
+                }
+                if o.lease != expected.lease {
+                    errors.push(LeaseMismatch(i));
+                }
                 if o.location_tag != expected.location_tag {
                     errors.push(OwnerLocationMismatch(i));
                 }
@@ -600,7 +610,9 @@ impl Fixture {
                 return errors;
             }
             for expected in &self.expected {
-                if !self.owners.iter().any(|o| o.owner == expected.owner) {
+                if !self.owners.iter().any(|o| {
+                    o.owner == expected.owner && o.allocation == expected.allocation && o.lease == expected.lease
+                }) {
                     errors.push(OwnerMissing(expected.owner));
                 }
             }
@@ -1617,61 +1629,123 @@ fn unused_and_prepared_leases_return_once() {
     drop(moved);
     assert_eq!(c.snapshot(), before);
 }
-static FREE_COMPLETED: AtomicUsize = AtomicUsize::new(0);
-static FREE_POINTER: AtomicUsize = AtomicUsize::new(0);
-static FREE_GATE: (Mutex<(bool, bool)>, Condvar) = (Mutex::new((false, false)), Condvar::new());
+#[derive(Default)]
+struct FreeGate {
+    state: Mutex<(bool, bool)>,
+    changed: Condvar,
+    pointer: AtomicUsize,
+    completed: AtomicUsize,
+}
+impl FreeGate {
+    fn wait_for_free(&self) {
+        let state = self.state.lock().unwrap();
+        let (state, timeout) = self.changed
+            .wait_timeout_while(state, Duration::from_secs(10), |s| !s.0).unwrap();
+        let reached = state.0;
+        drop(state);
+        assert!(!timeout.timed_out() && reached, "actual backing free was not reached");
+    }
+    fn release(&self) {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).1 = true;
+        self.changed.notify_all();
+    }
+}
+struct ReleaseFree(Arc<FreeGate>);
+impl Drop for ReleaseFree {
+    fn drop(&mut self) { self.0.release(); }
+}
+thread_local! {
+    static FREE_CONTROL: std::cell::RefCell<Option<Arc<FreeGate>>> = const { std::cell::RefCell::new(None) };
+}
 pub(super) fn before_backing_free(pointer: *const u8) {
-    if FREE_POINTER.load(Ordering::SeqCst) != pointer as usize {
-        return;
+    FREE_CONTROL.with(|control| {
+        let control = control.borrow();
+        let Some(gate) = control.as_ref() else { return; };
+        gate.pointer.store(pointer as usize, Ordering::SeqCst);
+        let mut state = gate.state.lock().unwrap();
+        state.0 = true;
+        gate.changed.notify_all();
+        let (next, timeout) = gate.changed
+            .wait_timeout_while(state, Duration::from_secs(10), |s| !s.1).unwrap();
+        state = next;
+        let released = state.1;
+        drop(state);
+        assert!(!timeout.timed_out() && released, "backing free gate was not released");
+    });
+}
+fn guarded_join<T>(worker: std::thread::JoinHandle<T>) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !worker.is_finished() {
+        assert!(std::time::Instant::now() < deadline, "worker completion timed out");
+        std::thread::yield_now();
     }
-    let mut gate = FREE_GATE.0.lock().unwrap();
-    gate.0 = true;
-    FREE_GATE.1.notify_all();
-    while !gate.1 {
-        gate = FREE_GATE.1.wait(gate).unwrap();
-    }
+    worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 #[test]
 fn discard_frees_all_packet_stages_after_actual_drop() {
     let f = Fixture::valid();
     let c = credit(128);
-    let lease = c.reserve::<1>(&f.request(), &f.context()).unwrap();
-    let stage = PreparedStage::prepare(lease).unwrap();
+    let stage = PreparedStage::prepare(c.reserve::<1>(&f.request(), &f.context()).unwrap()).unwrap();
     let pointer = stage.backing[0].as_ref().unwrap().pointer.as_ptr() as usize;
-    FREE_POINTER.store(pointer, Ordering::SeqCst);
-    let worker = std::thread::spawn(move || drop(stage));
-    let gate = FREE_GATE.0.lock().unwrap();
-    let (mut gate, timeout) =
-        FREE_GATE.1.wait_timeout_while(gate, Duration::from_secs(10), |g| !g.0).unwrap();
-    assert!(!timeout.timed_out(), "backing free gate not reached");
-    let held = c.snapshot();
-    let free_before = FREE_COMPLETED.load(Ordering::SeqCst);
-    // Independent thread attempts a binding-credit reservation during real backing lifetime.
+    let gate = Arc::new(FreeGate::default());
+    let release = ReleaseFree(gate.clone());
+    let worker_gate = gate.clone();
+    let worker = std::thread::spawn(move || {
+        FREE_CONTROL.with(|control| *control.borrow_mut() = Some(worker_gate));
+        drop(stage);
+    });
+    gate.wait_for_free();
+    assert_eq!(gate.pointer.load(Ordering::SeqCst), pointer);
+    assert_eq!(gate.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(c.snapshot().metadata_used, 128, "stage returned credit before freeing backing");
     let other = c.clone();
     let request = std::thread::spawn(move || {
         let f = Fixture::valid();
         other.reserve::<1>(&f.request(), &f.context()).map(|_| ())
     });
-    let result = request.join().unwrap();
-    gate.1 = true;
-    FREE_GATE.1.notify_all();
-    drop(gate);
-    worker.join().unwrap();
-    FREE_POINTER.store(0, Ordering::SeqCst);
-    assert_eq!(free_before, 0);
-    assert_eq!(
-        FREE_COMPLETED.load(Ordering::SeqCst),
-        pointer,
-        "exact backing deallocation completed before final ledger observation"
-    );
-    assert_eq!(held.metadata_used, 128, "stage returned credit before freeing backing");
-    assert_eq!(
-        result,
+    assert_eq!(guarded_join(request),
         Err(StageError::Resource(ResourceExhausted { class: MetadataClass::StreamAssemblers })),
-        "concurrent request spent live backing credit"
-    );
+        "concurrent request spent live backing credit");
+    drop(release);
+    guarded_join(worker);
+    assert_eq!(gate.completed.load(Ordering::SeqCst), pointer,
+        "exact backing deallocation completed before final ledger observation");
     assert_eq!(c.snapshot().metadata_used, 0);
     assert_eq!(c.snapshot().slice_used, 4096);
+}
+#[test]
+fn partial_prepare_keeps_credit_until_actual_backing_free() {
+    let mut f = Fixture::valid();
+    f.second();
+    let c = credit(256);
+    let before = c.snapshot();
+    let lease = c.reserve::<2>(&f.request(), &f.context()).unwrap();
+    let gate = Arc::new(FreeGate::default());
+    let release = ReleaseFree(gate.clone());
+    let worker_gate = gate.clone();
+    let worker = std::thread::spawn(move || {
+        FREE_CONTROL.with(|control| *control.borrow_mut() = Some(worker_gate));
+        REFUSE_ALLOCATION.with(|r| r.set(Some(1)));
+        PreparedStage::prepare(lease).map(|_| ())
+    });
+    gate.wait_for_free();
+    let pointer = gate.pointer.load(Ordering::SeqCst);
+    assert_ne!(pointer, 0, "row zero must have real allocator backing");
+    assert_eq!(gate.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(c.metadata.stats().allocations, 1, "row zero allocated, row one refused");
+    assert_eq!(c.snapshot().metadata_used, 256, "partial Prepare refunded before free");
+    let other = c.clone();
+    let contender = std::thread::spawn(move || {
+        let f = Fixture::valid();
+        other.reserve::<1>(&f.request(), &f.context()).map(|_| ())
+    });
+    assert_eq!(guarded_join(contender),
+        Err(StageError::Resource(ResourceExhausted { class: MetadataClass::StreamAssemblers })));
+    drop(release);
+    assert_eq!(guarded_join(worker),
+        Err(StageError::Resource(ResourceExhausted { class: MetadataClass::StreamAssemblers })));
+    assert_eq!(gate.completed.load(Ordering::SeqCst), pointer);
+    assert_eq!(c.snapshot(), before);
 }
 #[test]
 fn inventory_e1_discard_unused_without_backing() {
@@ -1712,9 +1786,11 @@ pub(super) fn allocator_refuses(row: usize) -> bool {
 }
 
 pub(super) fn after_backing_free(pointer: *const u8) {
-    if FREE_POINTER.load(Ordering::SeqCst) == pointer as usize {
-        FREE_COMPLETED.store(pointer as usize, Ordering::SeqCst);
-    }
+    FREE_CONTROL.with(|control| {
+        if let Some(gate) = control.borrow().as_ref() {
+            gate.completed.store(pointer as usize, Ordering::SeqCst);
+        }
+    });
 }
 
 fn observe_accepting_cell(action: Action, state: ReservationState) {
@@ -1748,4 +1824,76 @@ fn completed_free(allocation: AllocationId, lease: LeaseId, consumed: bool) -> F
     let physical = StageAllocation::allocate(8, 8).unwrap();
     drop(physical);
     FreeWitness { allocation, lease, consumed }
+}
+
+#[test]
+fn owner_cannot_substitute_unrelated_registered_allocation_and_lease() {
+    let mut f = Fixture::valid();
+    f.prepare();
+    let mut unrelated = f.owners[0];
+    unrelated.owner = OwnerId(99);
+    unrelated.allocation = AllocationId(99);
+    unrelated.lease = LeaseId(99);
+    f.registry.push(unrelated);
+    f.owners[0].allocation = unrelated.allocation;
+    f.owners[0].lease = unrelated.lease;
+    assert_eq!(validate_e1(&f.request(), &f.context()), Err(StageError::OwnerAllocationMismatch(0)));
+    // A registry entry sharing the expected allocation cannot replace its observed lease.
+    f.lifecycle(2, 1);
+    f.registry[0].allocation = AllocationId(10);
+    f.owners[0].allocation = AllocationId(10);
+    assert_eq!(validate_e1(&f.request(), &f.context()), Err(StageError::LeaseMismatch(0)));
+}
+#[test]
+fn prepare_validates_retained_metadata_and_raw_grants_without_second_debit() {
+    let mut f = Fixture::valid();
+    f.prepare();
+    f.ledgers.metadata_limit = 128;
+    f.ledgers.metadata_used = 128;
+    f.ledgers.slice_limit = 128;
+    f.ledgers.slice_used = 128;
+    let mut context = f.context();
+    context.reservation = Some((ReservationId(40), 64, 0));
+    assert_eq!(validate_e1(&f.request(), &context),
+        Err(StageError::ReservationChargeMismatch(Domain::Metadata)));
+    context.reservation = Some((ReservationId(40), 128, 0));
+    assert_eq!(validate_e1(&f.request(), &context),
+        Ok(ValidatedE1 { metadata: 128, raw: 0, next: ReservationState::Allocated }));
+    f.raw();
+    f.ledgers.raw_limit = 64;
+    f.ledgers.raw_used = 64;
+    let mut context = f.context();
+    context.reservation = Some((ReservationId(40), 0, 32));
+    assert_eq!(validate_e1(&f.request(), &context),
+        Err(StageError::ReservationChargeMismatch(Domain::RawBase)));
+    context.reservation = Some((ReservationId(40), 0, 64));
+    assert_eq!(validate_e1(&f.request(), &context),
+        Ok(ValidatedE1 { metadata: 0, raw: 64, next: ReservationState::Allocated }));
+}
+#[test]
+fn packet_number_and_target_usize_exact_equality_accept() {
+    let mut f = Fixture::valid();
+    f.binding.as_mut().unwrap().pn = (1u64 << 62) - 1;
+    let mut context = f.context();
+    context.binding.pn = (1u64 << 62) - 1;
+    assert!(validate_e1(&f.request(), &context).is_ok());
+    // Simulate a narrow target: each ledger value is representable, with the
+    // maximum itself accepted and every sibling field internally consistent.
+    f.ledgers.slice_limit = u32::MAX as u64;
+    f.target_max = u32::MAX as u64;
+    context = f.context();
+    context.binding.pn = (1u64 << 62) - 1;
+    assert!(validate_e1(&f.request(), &context).is_ok());
+}
+
+#[test]
+fn owner_completeness_requires_every_expected_allocation() {
+    let mut f = Fixture::valid();
+    f.lifecycle(2, 1);
+    let mut another = f.expected[0];
+    another.allocation = AllocationId(99);
+    another.lease = LeaseId(99);
+    f.expected.push(another);
+    assert_eq!(validate_e1(&f.request(), &f.context()),
+        Err(StageError::OwnerMissing(OwnerId(20))));
 }
