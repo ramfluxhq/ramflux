@@ -8,7 +8,6 @@ import json
 import socket
 import ssl
 import sys
-import subprocess
 import time
 from pathlib import Path
 
@@ -101,32 +100,27 @@ elif mode == "churn":
             assert status == 200, (status, body)
             return json.loads(body)
 
-    def threads():
-        if sys.platform == "linux":
-            return len(list(Path(f"/proc/{pid}/task").iterdir()))
-        return len(subprocess.check_output(["ps", "-M", "-p", pid], text=True).splitlines()) - 1
-
-    # Warm TLS/runtime thread caches before measuring.
-    for _ in range(32):
-        with connect() as peer:
-            request(peer)
-            response(peer)
-    time.sleep(0.1)
     baseline = stats()
-    baseline_threads = threads()
     for _ in range(2000):
         with connect() as peer:
             request(peer)
             status, _ = response(peer)
             assert status == 200, status
-    deadline = time.monotonic() + 5
-    while True:
+    # Prove the registry observes a live connection before waiting for its release.
+    # Membership drops after the socket and service context, unlike runtime thread caches.
+    with connect() as held:
+        request(held)
+        status, _ = response(held)
+        assert status == 200, status
         after = stats()
-        current_threads = threads()
-        if after["other_connections"] == 0 and current_threads <= baseline_threads:
-            break
-        assert time.monotonic() < deadline, (baseline, after, baseline_threads, current_threads)
-        time.sleep(0.02)
+        assert after["other_connections"] >= 1, after
+    deadline = time.monotonic() + 5
+    while after["other_connections"] != 0:
+        assert time.monotonic() < deadline, (baseline, after)
+        after = stats()
+        if after["other_connections"] != 0:
+            time.sleep(0.02)
+    assert after["other_connections"] == 0, ("connections did not drain", after)
     assert after["root_workers"] == baseline["root_workers"], (baseline, after)
     print("churn-complete", flush=True)
     sys.exit(0)
