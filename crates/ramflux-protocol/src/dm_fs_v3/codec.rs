@@ -105,6 +105,7 @@ pub(super) enum Kind {
     Fixed(usize),
     Text,
     Profile,
+    // Control-free UTF-8; P03-P05 typed codecs own code sets and empty-value rules.
     Code,
     Bytes,
     Nested(WireType),
@@ -133,9 +134,9 @@ impl WireType {
                 65_536
             }
             Self::PublicPrekeyView | Self::PrekeyLeaseIntent => 4_096,
-            Self::PrekeyLeaseResult | Self::OwnerStatusQuery | Self::NativePrekeyRequest => 8_192,
+            Self::PrekeyLeaseResult | Self::NativePrekeyRequest => 8_192,
             Self::OwnerStatusEntry => 256,
-            Self::NativePrekeyLease | Self::BootstrapHeader => 16_384,
+            Self::OwnerStatusQuery | Self::NativePrekeyLease | Self::BootstrapHeader => 16_384,
             Self::NativePrekeyPublish | Self::NativePrekeyResult => 131_072,
             Self::NativePrekeyStatus | Self::BootstrapTranscript => 32_768,
         }
@@ -318,7 +319,7 @@ const NATIVE_PREKEY_PUBLISH_FIELDS: &[Spec] = &[
 const NATIVE_PREKEY_STATUS_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 32, kind: Kind::Fixed(32) },
     Spec { id: 2, max: 8192, kind: Kind::Nested(WireType::NativePrekeyRequest) },
-    Spec { id: 3, max: 8192, kind: Kind::Nested(WireType::OwnerStatusQuery) },
+    Spec { id: 3, max: 16384, kind: Kind::Nested(WireType::OwnerStatusQuery) },
 ];
 
 const NATIVE_PREKEY_RESULT_FIELDS: &[Spec] = &[
@@ -370,7 +371,7 @@ const BOOTSTRAP_TRANSCRIPT_FIELDS: &[Spec] = &[
 /// An inherited custody identifier, using the private custody verifier's predicate.
 /// Byte length is UTF-8 length; Rust's Unicode control predicate includes C0/C1.
 #[must_use]
-pub fn valid_custody_id(value: &str) -> bool {
+pub(crate) fn valid_custody_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
 
@@ -459,7 +460,7 @@ impl<'a> Iterator for Fields<'a> {
 }
 
 /// Validate a complete RFS1 document and every nested value without allocating.
-/// Layout nesting is static and acyclic (maximum seven documents on the stack).
+/// Layout nesting is static and acyclic (maximum four documents on the stack).
 /// No collection count or attacker-selected type can introduce recursive layouts.
 ///
 /// # Errors
@@ -498,9 +499,12 @@ fn validate_value(kind: Kind, value: &[u8]) -> Result<(), DecodeError> {
         Kind::Fixed(_) | Kind::Profile => Err(DecodeError::Value),
         Kind::Text => {
             let text = std::str::from_utf8(value).map_err(|_| DecodeError::Value)?;
-            if valid_custody_id(text) { Ok(()) } else { Err(DecodeError::Value) }
+            if super::valid_custody_id(text) { Ok(()) } else { Err(DecodeError::Value) }
         }
-        Kind::Code => std::str::from_utf8(value).map(|_| ()).map_err(|_| DecodeError::Value),
+        Kind::Code => {
+            let text = std::str::from_utf8(value).map_err(|_| DecodeError::Value)?;
+            if text.chars().any(char::is_control) { Err(DecodeError::Value) } else { Ok(()) }
+        }
         Kind::Bytes => Ok(()),
         Kind::Nested(nested) => scan(nested, value).map(|_| ()),
         Kind::OptionalFixed(width) => optional(Kind::Fixed(width), value),

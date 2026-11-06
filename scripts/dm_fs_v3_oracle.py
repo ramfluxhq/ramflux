@@ -117,6 +117,8 @@ def encode_value(kind, value):
     result = value.encode('utf-8')
     if kind == 'text':
         require(0 < len(result) <= 256 and not any(unicodedata.category(c) == 'Cc' for c in value), 'invalid custody ID')
+    if kind == 'code':
+        require(not any(unicodedata.category(c) == 'Cc' for c in value), 'control character in Code')
     if kind == 'profile':
         require(value == PROFILE, 'unknown profile')
     return result

@@ -98,7 +98,7 @@ fn scanner_layout_and_borrowed_fields_match_p01_manifest() -> Result {
 fn dm_fs_v3_unknown_and_extra_fields_rejected() -> Result {
     let (schema, vectors) = json()?;
     let negatives = array(&vectors["negative"])?;
-    assert_eq!(negatives.len(), 130);
+    assert_eq!(negatives.len(), 132);
     for vector in negatives {
         let raw = bytes(string(&vector["bytes"])?)?;
         assert!(scan(kind(&schema, &vector["type"])?, &raw).is_err(), "{}", vector["name"]);
@@ -112,6 +112,21 @@ fn dm_fs_v3_unknown_and_extra_fields_rejected() -> Result {
     }
     let invalid = replace_field(WireType::QualifiedBranch, &original, 1, &[0; 31])?;
     assert_eq!(scan(WireType::QualifiedBranch, &invalid).err(), Some(DecodeError::Value));
+    let id_rows: Vec<_> = array(&vectors["invalid_inputs"])?
+        .iter()
+        .filter(|v| matches!(v["name"].as_str(), Some("id_257" | "id_control" | "id_empty")))
+        .collect();
+    assert_eq!(id_rows.len(), 3);
+    for row in id_rows {
+        assert_eq!(row["type"], "QualifiedBranch");
+        let invalid = replace_field(
+            WireType::QualifiedBranch,
+            &original,
+            3,
+            string(&row["input"]["device_id"])?.as_bytes(),
+        )?;
+        assert!(scan(WireType::QualifiedBranch, &invalid).is_err(), "{}", row["name"]);
+    }
     let mut invalid = original;
     invalid.resize(WireType::QualifiedBranch.ceiling() + 1, 0);
     assert_eq!(scan(WireType::QualifiedBranch, &invalid).err(), Some(DecodeError::TypeCeiling));
@@ -236,6 +251,12 @@ fn scanner_collection_and_optional_boundaries() -> Result {
                         assert!(scan(kind, &invalid).is_err());
                     }
                 }
+                Kind::Code => {
+                    for value in [b"bad\ncode".as_slice(), "bad\u{80}code".as_bytes()] {
+                        let invalid = replace_field(kind, &raw, spec.id, value)?;
+                        assert_eq!(scan(kind, &invalid).err(), Some(DecodeError::Value));
+                    }
+                }
                 _ => {}
             }
         }
@@ -347,4 +368,55 @@ mod allocation {
         drop(scope);
         (result, stats)
     }
+}
+
+fn maximum_collection_scans(owner: &str, field: u16, element: &str, count: u16) -> Result {
+    let (schema, vectors) = json()?;
+    let positives = array(&vectors["positive"])?;
+    let owner = positives.iter().find(|v| v["type"] == owner).ok_or("owner fixture")?;
+    let child = positives.iter().find(|v| v["type"] == element).ok_or("element fixture")?;
+    let raw = bytes(string(&owner["bytes"])?)?;
+    let child = bytes(string(&child["bytes"])?)?;
+    let mut list = count.to_be_bytes().to_vec();
+    for _ in 0..count {
+        list.extend_from_slice(&u32::try_from(child.len())?.to_be_bytes());
+        list.extend_from_slice(&child);
+    }
+    let kind = kind(&schema, &owner["type"])?;
+    let filled = replace_field(kind, &raw, field, &list)?;
+    let view = scan(kind, &filled)?;
+    assert_eq!(view.field(field), Some(list.as_slice()));
+    if kind == WireType::OwnerStatusQuery {
+        assert!(filled.len() > 8_192 && filled.len() <= 16_384);
+        let frame = positives.iter().find(|v| v["type"] == "NativePrekeyStatus").ok_or("frame")?;
+        let framed = replace_field(
+            WireType::NativePrekeyStatus,
+            &bytes(string(&frame["bytes"])?)?,
+            3,
+            &filled,
+        )?;
+        assert!(scan(WireType::NativePrekeyStatus, &framed).is_ok());
+    }
+    Ok(())
+}
+
+#[test]
+fn owner_update_maximum_additive_opks_scan() -> Result {
+    maximum_collection_scans("OwnerPrekeyUpdate", 4, "SignedNativeOpk", 64)
+}
+#[test]
+fn owner_update_maximum_retirements_scan() -> Result {
+    maximum_collection_scans("OwnerPrekeyUpdate", 5, "RetirementRef", 400)
+}
+#[test]
+fn publication_snapshot_maximum_pending_retirements_scan() -> Result {
+    maximum_collection_scans("PrekeyPublicationSnapshot", 6, "RetirementRef", 400)
+}
+#[test]
+fn owner_status_query_maximum_requested_ids_scan() -> Result {
+    maximum_collection_scans("OwnerStatusQuery", 3, "RetirementRef", 200)
+}
+#[test]
+fn owner_status_maximum_entries_scan() -> Result {
+    maximum_collection_scans("OwnerPrekeyStatus", 9, "OwnerStatusEntry", 200)
 }

@@ -564,7 +564,7 @@
     "OwnerStatusQuery": {
       "code": 10,
       "version": 1,
-      "ceiling": 8192,
+      "ceiling": 16384,
       "domain": null,
       "fields": [
         {
@@ -907,7 +907,7 @@
           "name": "query",
           "kind": "@OwnerStatusQuery",
           "required": true,
-          "max_bytes": 8192
+          "max_bytes": 16384
         }
       ]
     },
@@ -1422,5 +1422,6 @@
       ]
     }
   },
-  "test_vectors_only": "public fixture seeds"
+  "test_vectors_only": "public fixture seeds",
+  "code_fields": "Control-free UTF-8; P03-P05 typed decoders own value sets, empty values and combination semantics."
 }
