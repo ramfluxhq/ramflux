@@ -350,6 +350,45 @@ def check_custody(vectors):
             require(v['action'][label] == b64(bytes.fromhex(v['embedded_rfs1'])), 'embedded custody payload')
 
 
+def object_hash(value):
+    return b64(blake3(b'ramflux.identity.custody.object_hash.v1\0' + jcs(value)))
+
+
+def check_live(live, custody):
+    """P09 live-authority controls: independent bytes, hashes and signatures.
+
+    Each row reuses the P01 action of the same operation; the authority, challenge, proof
+    and receipt are checked against public fixture seeds only.
+    """
+    require(live['test_vectors_only'].startswith('public fixture seeds'), 'live fixture scope')
+    by_op = {v['action']['operation']: v for v in custody}
+    rows = live['rows']
+    require(sorted(r['operation'] for r in rows) == sorted(by_op), 'live action coverage')
+    cert_hash = object_hash(live['authority']['certificate'])
+    record_hash = object_hash(live['authority']['record'])
+    observed = b64(hashlib.sha256(bytes.fromhex(live['exporter'])).digest())
+    for row in rows:
+        require(row['action'] == by_op[row['operation']]['action'], 'live action is the P01 action')
+        digest = blake3(b'ramflux.identity.custody_action.v1\0' + jcs(row['action']))
+        require(b64(digest) == row['action_hash'] == row['challenge']['action_hash']
+                == row['proof_envelope']['body']['action_hash'], 'live action hash binding')
+        body = row['proof_envelope']['body']
+        require(body['certificate_hash'] == cert_hash and body['record_hash'] == record_hash,
+                'live authority hashes')
+        require(body['transport_binding'] == observed, 'live transport binding')
+        transcript = jcs({'domain': 'ramflux.identity.branch_proof.v3', 'body': body})
+        public, signature = sign(live['branch_seed'], transcript)
+        require(transcript.hex() == row['proof_transcript'] and public.hex() == row['branch_public']
+                and b64(signature) == row['proof_envelope']['signature'], 'live proof transcript and signature')
+        receipt = row['receipt']
+        rbody = receipt['body']
+        require(rbody['message_hash'] == object_hash(row['proof_envelope']), 'live receipt message hash')
+        require(rbody['client_exporter_hash'] == observed and rbody['challenge_nonce'] == body['challenge_nonce'],
+                'live receipt observation')
+        _, relay_signature = sign(live['proxy_seed'], jcs({'domain': 'ramflux.identity.relay_acceptance.v1', 'body': rbody}))
+        require(b64(relay_signature) == receipt['signature'], 'live receipt signature')
+
+
 def check_bindings(wire, crypto, custody):
     """Bind independent primitive slots to their actual canonical wire inputs."""
     by_name = {v['name']: v for v in wire['positive']}
@@ -603,6 +642,7 @@ def main():
     check_wire(wire)
     check_crypto(crypto)
     check_custody(custody)
+    check_live(load('custody_live_vectors.json'), custody)
     check_bindings(wire, crypto, custody)
     actual_coverage = dict(wire_types=len(TYPES), positive_wire_cases=len(wire['positive']),
         negative_wire_cases=len(wire['negative']), invalid_inputs=len(wire['invalid_inputs']),

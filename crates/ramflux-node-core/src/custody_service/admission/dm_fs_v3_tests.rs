@@ -49,6 +49,9 @@ fn dm_fs_v3_custody_proof_grammar_vectors() -> Result {
         branch.signing_key.verifying_key().verify_strict(&bytes, &signature)?;
         let action: CustodyProofAction = serde_json::from_value(row["action"].clone())?;
         assert_eq!(proof.body.action_hash, custody_action_hash(&action)?);
+        // Immutable grammar control: decoding and re-encoding reproduces the committed JSON.
+        assert_eq!(serde_json::to_value(&action)?, row["action"]);
+        assert_eq!(serde_json::to_value(&proof)?, row["proof_envelope"]);
         let mut wrong = proof.body.clone();
         wrong.action_hash = encode_base64url([0; 32]);
         let verifying = branch.signing_key.verifying_key();
@@ -79,31 +82,7 @@ fn attempt(
 ) -> Result<CustodyServerFrame> {
     // Build a correctly signed receipt even for deliberately malformed proofs,
     // so node-side negatives cannot be satisfied by the proxy signer's precheck.
-    let descriptor = driver.node.envelope().body.proxy_keys.first().ok_or("proxy")?;
-    let body = RelayAcceptance {
-        schema: domain::CUSTODY_RELAY_ACCEPTANCE.into(),
-        version: 1,
-        issuer_kind: AcceptanceIssuer::NodeProxy,
-        relay_id: descriptor.proxy_id.clone(),
-        relay_key_id: descriptor.key_id.clone(),
-        node_identity_record_hash: driver.node.hash().into(),
-        client_exporter_hash: Some(branch_exporter_hash(&[5; 32])),
-        receipt_id: encode_base64url(ramflux_crypto::random_32()?),
-        message_hash: object_hash(&proof)?,
-        purpose: AcceptancePurpose::BranchProof,
-        audience: proof.body.audience.clone(),
-        source_device_ref: Some(proof.body.device_ref.clone()),
-        branch_certificate_hash: Some(proof.body.certificate_hash.clone()),
-        target_anchor: None,
-        challenge_nonce: Some(proof.body.challenge_nonce.clone()),
-        accepted_at: NOW,
-    };
-    let receipt = Envelope {
-        signature: encode_base64url(
-            driver.proxy.sign(&signing_bytes(domain::CUSTODY_RELAY_ACCEPTANCE, &body)?).to_bytes(),
-        ),
-        body,
-    };
+    let receipt = forged_receipt(driver, &proof, &branch_exporter_hash(&[5; 32]))?;
     Ok(service.mesh(
         router,
         store,
@@ -291,6 +270,61 @@ fn proof_negatives(
     Ok(())
 }
 
+/// Correctly signed proxy receipt over `proof`, recording `observed` as the proxy's exporter.
+/// `sign_proxy_acceptance` refuses a mismatched observation by design, so the body is built
+/// directly; the proxy signature stays valid and only the node-side comparison can refuse.
+fn forged_receipt(
+    driver: &Driver,
+    proof: &Envelope<BranchProofV3>,
+    observed: &str,
+) -> Result<Envelope<RelayAcceptance>> {
+    let descriptor = driver.node.envelope().body.proxy_keys.first().ok_or("proxy")?;
+    let body = RelayAcceptance {
+        schema: domain::CUSTODY_RELAY_ACCEPTANCE.into(),
+        version: 1,
+        issuer_kind: AcceptanceIssuer::NodeProxy,
+        relay_id: descriptor.proxy_id.clone(),
+        relay_key_id: descriptor.key_id.clone(),
+        node_identity_record_hash: driver.node.hash().into(),
+        client_exporter_hash: Some(observed.into()),
+        receipt_id: encode_base64url(ramflux_crypto::random_32()?),
+        message_hash: object_hash(proof)?,
+        purpose: AcceptancePurpose::BranchProof,
+        audience: proof.body.audience.clone(),
+        source_device_ref: Some(proof.body.device_ref.clone()),
+        branch_certificate_hash: Some(proof.body.certificate_hash.clone()),
+        target_anchor: None,
+        challenge_nonce: Some(proof.body.challenge_nonce.clone()),
+        accepted_at: NOW,
+    };
+    Ok(Envelope {
+        signature: encode_base64url(
+            driver.proxy.sign(&signing_bytes(domain::CUSTODY_RELAY_ACCEPTANCE, &body)?).to_bytes(),
+        ),
+        body,
+    })
+}
+
+/// Exporter-comparison negative: the proof claims `[1;32]` while the proxy observed `[5;32]`.
+/// The proof is signed by the authorized branch key and the receipt is rebuilt over the
+/// mutated proof, so only the exporter comparison can refuse it.
+fn transport_refusal(
+    driver: &Driver,
+    branch: &SigningKey,
+    proof: &Envelope<BranchProofV3>,
+) -> Result<(Envelope<BranchProofV3>, Envelope<RelayAcceptance>)> {
+    let mut body = proof.body.clone();
+    body.transport_binding = encode_base64url([1; 32]);
+    let bad = Envelope {
+        signature: encode_base64url(
+            branch.sign(&signing_bytes(domain::BRANCH_PROOF_V3, &body)?).to_bytes(),
+        ),
+        body,
+    };
+    let receipt = forged_receipt(driver, &bad, &branch_exporter_hash(&[5; 32]))?;
+    Ok((bad, receipt))
+}
+
 /// Exact production-verifier refusal; `Signature` is the only signature-stage error.
 enum Refusal {
     Reason(&'static str),
@@ -337,6 +371,10 @@ fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result 
     let router = RouterCore::new();
     store.bootstrap_router(&router)?;
     let driver = Driver::new("dm-fs-verifier", 11)?;
+    // Authorized branch key: Driver derives it from seed + 2.
+    let branch = ramflux_crypto::create_device_branch("dm-fs-verifier", "primary", 1, [13; 32])
+        .signing_key
+        .clone();
     let service = CustodyService::new(driver.node.clone(), false, &store, NOW)?;
     assert!(matches!(
         run(&driver, &service, &router, &store, driver.publish())?,
@@ -374,6 +412,12 @@ fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result 
                 ) => {}
             other => return Err(format!("fixed fixture proof: {other:?}").into()),
         }
+        // Live admission: the immutable control's nonce was never issued, so the challenge
+        // stage refuses it before any signature or audience check.
+        refused(
+            &attempt(&driver, &service, &router, &store, action.clone(), fixed)?,
+            &CustodyRefusal::ChallengeUnknown,
+        );
         let mut stale = challenge.clone();
         stale.action_hash = encode_base64url([1; 32]);
         match live_verify(&driver, &authority, &stale, &proof, &receipt, capability) {
@@ -384,12 +428,25 @@ fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result 
                 ) => {}
             other => return Err(format!("action substitution: {other:?}").into()),
         }
-        let table = mutated_refusals(&proof)?;
+        let table = mutated_refusals(&proof, &branch)?;
         for (bad, expected) in &table {
             match live_verify(&driver, &authority, &challenge, bad, &receipt, capability) {
                 Err(error) if exact(&error, expected) => {}
                 other => return Err(format!("{}: {other:?}", row["action"]["operation"]).into()),
             }
+        }
+        // Exporter comparison in isolation: the signature is valid, the receipt is valid
+        // for the mutated proof, and only the observed exporter disagrees with the proof.
+        let (forged, forged_receipt) = transport_refusal(&driver, &branch, &proof)?;
+        match live_verify(&driver, &authority, &challenge, &forged, &forged_receipt, capability) {
+            Err(error)
+                if exact(
+                    &error,
+                    &Refusal::Reason(
+                        "proxy acceptance purpose, source or current revocation mismatch",
+                    ),
+                ) => {}
+            other => return Err(format!("transport exporter: {other:?}").into()),
         }
     }
     drop(service);
@@ -402,14 +459,13 @@ fn dm_fs_v3_custody_fixed_actions_production_verifier_exact_reasons() -> Result 
 /// one exact stage reason. Mutated bodies are re-signed by a foreign key on purpose.
 fn mutated_refusals(
     proof: &Envelope<BranchProofV3>,
+    branch: &SigningKey,
 ) -> Result<Vec<(Envelope<BranchProofV3>, Refusal)>> {
     let signed = |body: &BranchProofV3| -> Result<Envelope<BranchProofV3>> {
         Ok(Envelope {
             body: body.clone(),
             signature: encode_base64url(
-                SigningKey::from_bytes(&[12; 32])
-                    .sign(&signing_bytes(domain::BRANCH_PROOF_V3, body)?)
-                    .to_bytes(),
+                branch.sign(&signing_bytes(domain::BRANCH_PROOF_V3, body)?).to_bytes(),
             ),
         })
     };
@@ -457,10 +513,6 @@ fn mutated_refusals(
         reason("branch proof challenge or current head mismatch"),
     ));
     table.push((
-        signed(&mutate("transport_binding", json!(encode_base64url([1; 32])))?)?,
-        Refusal::Signature,
-    ));
-    table.push((
         signed(&mutate("issued_at", json!(future))?)?,
         reason("branch proof or challenge expired"),
     ));
@@ -485,4 +537,184 @@ fn mutated_refusals(
         Refusal::Signature,
     ));
     Ok(table)
+}
+
+/// Live-authority controls (P09 decision 2026-11-06). Unlike the immutable P01 grammar
+/// controls, these are generated from public fixture seeds against a stored authority,
+/// signed by the authorized branch key, and verified by the production verifier.
+const LIVE_PRINCIPAL: &str = "dm-fs-live";
+const LIVE_SEED: u8 = 11;
+const LIVE_EXPORTER: [u8; 32] = [5; 32];
+const LIVE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ramflux-protocol/fixtures/dm_fs_v3/custody_live_vectors.json"
+);
+
+fn hex_text(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
+        // Writing into a String cannot fail.
+        let _ = write!(text, "{byte:02x}");
+        text
+    })
+}
+
+/// Publish a fixture principal and hand its stored authority to `f`.
+fn with_live_authority<T>(
+    f: impl FnOnce(
+        &Driver,
+        &VerifiedRecord,
+        &RouterCore,
+        &RouterRedbStore,
+        &CustodyService,
+    ) -> Result<T>,
+) -> Result<T> {
+    let path = std::env::temp_dir().join(format!(
+        "ramflux-dm-fs-v3-live-{}.redb",
+        encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    let store = RouterRedbStore::open_without_wal(&path)?;
+    let router = RouterCore::new();
+    store.bootstrap_router(&router)?;
+    let driver = Driver::new(LIVE_PRINCIPAL, LIVE_SEED)?;
+    let service = CustodyService::new(driver.node.clone(), false, &store, NOW)?;
+    assert!(matches!(
+        run(&driver, &service, &router, &store, driver.publish())?,
+        CustodyServerFrame::Published { .. }
+    ));
+    let publication = router
+        .custody_record(&driver.publication.record.body.account_anchor, NOW)?
+        .ok_or("custody record unavailable")?;
+    let authority = router.verify_custody_possession_authority(&publication, NOW, true)?;
+    let result = f(&driver, &authority, &router, &store, &service);
+    drop(service);
+    drop(store);
+    std::fs::remove_file(path)?;
+    result
+}
+
+fn live_row(driver: &Driver, index: u8, row: &Value) -> Result<Value> {
+    let action: CustodyProofAction = serde_json::from_value(row["action"].clone())?;
+    let branch =
+        ramflux_crypto::create_device_branch(LIVE_PRINCIPAL, "primary", 1, [LIVE_SEED + 2; 32]);
+    let cert =
+        driver.publication.record.body.devices[0].branch_certificate.as_ref().ok_or("cert")?;
+    let challenge = BranchChallenge {
+        challenge_nonce: encode_base64url([0x5a + index; 32]),
+        action_hash: custody_action_hash(&action)?,
+        audience: "node".into(),
+        binding_mode: BindingMode::HomeRelayReceipt,
+        issued_at: NOW,
+        expires_at: NOW + 300,
+    };
+    let proof = sign_branch_proof_v3(
+        &branch,
+        BranchProofV3 {
+            schema: domain::BRANCH_PROOF_V3.into(),
+            version: 3,
+            device_ref: DeviceRef {
+                account_anchor: driver.reference.account_anchor.clone(),
+                device_id: "primary".into(),
+                device_epoch: 1,
+            },
+            certificate_hash: object_hash(cert)?,
+            record_hash: object_hash(&driver.publication.record)?,
+            proof_id: encode_base64url([0x70 + index; 32]),
+            challenge_nonce: challenge.challenge_nonce.clone(),
+            action_hash: challenge.action_hash.clone(),
+            audience: challenge.audience.clone(),
+            binding_mode: challenge.binding_mode,
+            transport_binding: branch_exporter_hash(&LIVE_EXPORTER),
+            issued_at: NOW,
+            expires_at: NOW + 300,
+        },
+    )?;
+    let receipt = sign_proxy_acceptance(
+        &driver.proxy,
+        &driver.node,
+        &proof,
+        &branch_exporter_hash(&LIVE_EXPORTER),
+        encode_base64url([0x6b + index; 32]),
+        NOW,
+    )?;
+    Ok(json!({
+        "operation": row["action"]["operation"],
+        "action": row["action"],
+        "action_hash": challenge.action_hash,
+        "branch_public": hex_text(&branch.signing_key.verifying_key().to_bytes()),
+        "proof_transcript": hex_text(&signing_bytes(domain::BRANCH_PROOF_V3, &proof.body)?),
+        "challenge": serde_json::to_value(&challenge)?,
+        "proof_envelope": serde_json::to_value(&proof)?,
+        "receipt": serde_json::to_value(&receipt)?,
+    }))
+}
+
+fn verify_live_rows(driver: &Driver, authority: &VerifiedRecord, rows: &[Value]) -> Result {
+    if rows.len() != 3 {
+        return Err(format!("live row count {}", rows.len()).into());
+    }
+    for row in rows {
+        let action: CustodyProofAction = serde_json::from_value(row["action"].clone())?;
+        let challenge: BranchChallenge = serde_json::from_value(row["challenge"].clone())?;
+        let proof: Envelope<BranchProofV3> = serde_json::from_value(row["proof_envelope"].clone())?;
+        let receipt: Envelope<RelayAcceptance> = serde_json::from_value(row["receipt"].clone())?;
+        if challenge.action_hash != custody_action_hash(&action)? {
+            return Err("live challenge action binding".into());
+        }
+        live_verify(driver, authority, &challenge, &proof, &receipt, action.capability())
+            .map_err(|error| format!("live control rejected: {error:?}"))?;
+    }
+    Ok(())
+}
+
+fn generate_live_fixture() -> Result<Value> {
+    with_live_authority(|driver, authority, _, _, _| {
+        let mut rows = Vec::new();
+        for (index, row) in vectors()?.iter().enumerate() {
+            rows.push(live_row(driver, u8::try_from(index)?, row)?);
+        }
+        verify_live_rows(driver, authority, &rows)?;
+        Ok(json!({
+            "test_vectors_only": "public fixture seeds; generated by dm_fs_v3_write_live_vectors",
+            "principal": LIVE_PRINCIPAL,
+            "branch_seed": hex_text(&[LIVE_SEED + 2; 32]),
+            "proxy_seed": hex_text(&[9; 32]),
+            "exporter": hex_text(&LIVE_EXPORTER),
+            "authority": {
+                "record": serde_json::to_value(&driver.publication.record)?,
+                "certificate": serde_json::to_value(
+                    driver.publication.record.body.devices[0].branch_certificate.as_ref().ok_or("cert")?
+                )?,
+            },
+            "rows": rows,
+        }))
+    })
+}
+
+#[test]
+fn dm_fs_v3_custody_live_authority_controls_production_verifier() -> Result {
+    let committed: Value = serde_json::from_str(&std::fs::read_to_string(LIVE_PATH)?)?;
+    with_live_authority(|driver, authority, _, _, _| {
+        assert_eq!(
+            committed["authority"]["record"],
+            serde_json::to_value(&driver.publication.record)?
+        );
+        verify_live_rows(driver, authority, committed["rows"].as_array().ok_or("rows")?)
+    })?;
+    assert_eq!(
+        committed,
+        generate_live_fixture()?,
+        "custody_live_vectors.json drifted from its seeds"
+    );
+    Ok(())
+}
+
+/// One-shot generator for `custody_live_vectors.json`; run only when the fixture must change.
+#[test]
+#[ignore = "one-shot generator for custody_live_vectors.json"]
+fn dm_fs_v3_write_live_vectors() -> Result {
+    let mut text = serde_json::to_string_pretty(&generate_live_fixture()?)?;
+    text.push('\n');
+    std::fs::write(LIVE_PATH, text)?;
+    Ok(())
 }
