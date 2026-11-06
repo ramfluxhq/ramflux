@@ -248,11 +248,17 @@ fn dm_fs_v3_status_limits_exact_and_plus_one() -> Result {
     let mut status = status(&vector(&w, "OwnerPrekeyStatus")?["input"])?;
     status.owner.principal_id = "i".repeat(256);
     status.owner.device_id = "i".repeat(256);
-    let entry = status.entries.first().ok_or("entry")?.clone();
+    let mut entry = status.entries.first().ok_or("entry")?.clone();
+    // The longest closed state code is unleased (8 bytes); raw size-only codes
+    // are deliberately not valid typed states.
+    entry.state = OwnerPrekeyState::Unleased;
+    entry.leased_at = 0;
+    entry.deadline = 0;
     status.entries = vec![entry; 200];
     assert_eq!(status.owner.principal_id.len(), 256);
     assert_eq!(status.owner.device_id.len(), 256);
     let bytes = status.to_bytes()?;
+    assert_eq!(bytes.len(), 24_992);
     assert_eq!(OwnerPrekeyStatus::from_bytes(&bytes)?, status);
     status.entries.push(status.entries.first().ok_or("entry")?.clone());
     assert_eq!(status.to_bytes(), Err(DecodeError::Count));
