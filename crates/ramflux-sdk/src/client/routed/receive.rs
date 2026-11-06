@@ -212,7 +212,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<false>(engine, pool, entry, attachments, None).await
+        self.apply_routed_entry_with_source::<true>(engine, pool, entry, attachments, None).await
     }
 
     pub(crate) async fn apply_routed_prepared_entry(
@@ -222,23 +222,8 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         prepared: Result<super::PreparedInbound, SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<false>(engine, pool, entry, false, Some(prepared))
+        self.apply_routed_entry_with_source::<true>(engine, pool, entry, false, Some(prepared))
             .await
-    }
-
-    // Selected together with the other reference callers once their policies are complete.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "routed candidate awaits complete caller activation")
-    )]
-    pub(crate) async fn apply_routed_entry_candidate(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        entry: &GatewayInboxEntry,
-        attachments: bool,
-    ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true>(engine, pool, entry, attachments, None).await
     }
 
     async fn apply_routed_entry_with_source<const CONSUME_ERASED: bool>(

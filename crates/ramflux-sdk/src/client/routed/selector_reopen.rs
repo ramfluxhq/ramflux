@@ -207,7 +207,7 @@ impl Case {
             ramflux_transport::RelayQuicPoolConfig::functional_default()
                 .map_err(|e| invalid(&e.to_string()))?,
         );
-        self.b.client.apply_routed_entry_candidate(&mut engine, &pool, entry, fetch).await
+        self.b.client.apply_routed_entry(&mut engine, &pool, entry, fetch).await
     }
     async fn assert_mixed(&mut self, late: bool) -> TestResult {
         if late {

@@ -194,31 +194,6 @@ impl RamfluxClient {
             plaintext,
             attachments,
             true,
-            false,
-        )
-        .await
-    }
-
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "post-send candidate awaits complete caller activation")
-    )]
-    pub(crate) async fn send_plaintext_direct_message_with_attachments_via_gateway_candidate(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        mut message: GatewayDirectMessage,
-        plaintext: &[u8],
-        attachments: &[LocalBusMessageAttachmentInput],
-    ) -> Result<GatewayInboxEntry, SdkError> {
-        message.ttl = self.content_ttl()?;
-        self.send_plaintext_direct_message_with_attachments_via_gateway_inner(
-            engine,
-            pool,
-            message,
-            plaintext,
-            attachments,
-            true,
             true,
         )
         .await

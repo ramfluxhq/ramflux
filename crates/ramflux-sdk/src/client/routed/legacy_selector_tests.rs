@@ -106,7 +106,7 @@ impl LegacyCase {
         self.c
             .b
             .client
-            .receive_legacy_entry_candidate(
+            .receive_legacy_entry(
                 &mut engine,
                 &pool,
                 entry.clone(),
@@ -192,7 +192,14 @@ async fn e16_legacy_import_receives_only_admitted_subset() -> TestResult {
     let terminal = f.c.b.client.legacy_committed_key(&entry)?;
     assert_eq!(db.load_actor_state::<String>(&terminal)?, Some("legacy-thread".to_owned()));
     assert_eq!(db.actor_state_keys("attachment/reference/refused")?.len(), 0);
-    assert!(f.c.b.client.object_content_key("refused").is_err());
+    assert!(matches!(f.c.b.client.object_content_key("refused"), Err(SdkError::ObjectErased)));
+    let raw = super::post_send::raw_connection(&f.c.b)?;
+    let key_rows: i64 = raw.query_row(
+        "SELECT count(*) FROM object_index WHERE object_id='refused' AND object_content_key IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(key_rows, 0, "refused object key slot must be absent from its row");
     assert!(f.c.b.client.recv_session_checkpoint_at("legacy-thread", "legacy-ordered-subset")?);
     assert_eq!(f.c.b.client.gateway_receive_cursor("bob")?, 11);
     assert_eq!(db.due_inbox_retries(i64::MAX)?.len(), 0);

@@ -318,7 +318,7 @@ impl RamfluxClient {
         plaintext: &[u8],
     ) -> Result<(SdkOwnDeviceSyncImportResponse, Option<Box<SdkOwnDeviceSyncEnvelope>>), SdkError>
     {
-        self.apply_own_history_plaintext_mode::<false>(envelope, plaintext)
+        self.apply_own_history_plaintext_mode::<true>(envelope, plaintext)
     }
 
     fn apply_own_history_plaintext_mode<const CONSUME_ERASED: bool>(

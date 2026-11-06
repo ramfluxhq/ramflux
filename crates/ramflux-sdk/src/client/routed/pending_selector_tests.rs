@@ -81,7 +81,7 @@ impl PendingCase {
             .account_db()?
             .contact_request(&self.root, "inbound")?
             .ok_or_else(|| invalid("request missing"))?;
-        self.c.b.client.decide_inbound_contact_candidate(&request, "accepted")
+        self.c.b.client.decide_inbound_contact(&request, "accepted")
     }
     fn assert_accepted(&self) -> Result<(), SdkError> {
         let db = self.c.b.client.account_db()?;

@@ -12,20 +12,6 @@ impl RamfluxClient {
         entry: GatewayInboxEntry,
         options: LegacyReceive<'_>,
     ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
-        self.receive_legacy_entry_mode(engine, pool, entry, options, false).await
-    }
-
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "legacy candidate awaits complete caller activation")
-    )]
-    pub(crate) async fn receive_legacy_entry_candidate(
-        &mut self,
-        engine: &mut impl GatewaySessionAccess,
-        pool: &ramflux_transport::RelayQuicPool,
-        entry: GatewayInboxEntry,
-        options: LegacyReceive<'_>,
-    ) -> Result<Option<GatewayPlaintextDelivery>, SdkError> {
         self.receive_legacy_entry_mode(engine, pool, entry, options, true).await
     }
 

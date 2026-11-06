@@ -105,7 +105,7 @@ impl Drop for Page {
 fn e16_own_copy_historical_registration_consumed_without_retry() -> TestResult {
     let p = Page::new("historical-candidate", true)?;
     for _ in 0..2 {
-        let (_, next) = p.client.apply_own_history_plaintext_mode::<true>(&p.envelope, &p.bytes)?;
+        let (_, next) = p.client.apply_own_history_plaintext(&p.envelope, &p.bytes)?;
         assert!(next.is_some());
         assert!(p.client.direct_message_by_id("page-first")?.is_some_and(|m| !m.deleted));
         let db = p.client.account_db()?;
@@ -134,17 +134,6 @@ fn e16_own_copy_historical_registration_consumed_without_retry() -> TestResult {
     Ok(())
 }
 #[test]
-fn inactive_public_history_mode_preserves_raw_refusal() -> TestResult {
-    let p = Page::new("historical-public", true)?;
-    assert!(matches!(
-        p.client.apply_own_history_plaintext(&p.envelope, &p.bytes),
-        Err(SdkError::ObjectErased)
-    ));
-    COUNTS.with(|c| assert_eq!(c.get(), (1, 1)));
-    p.assert_uncommitted()?;
-    Ok(())
-}
-#[test]
 fn historical_page_storage_error_rolls_back_content_and_receipt() -> TestResult {
     use ramflux_storage::{FileVaultSecretSource, VaultSecretSource};
     use std::fmt::Write;
@@ -163,12 +152,12 @@ fn historical_page_storage_error_rolls_back_content_and_receipt() -> TestResult 
     sql.execute_batch(&format!("PRAGMA key=\"x'{hex}'\"; PRAGMA cipher_page_size=4096; PRAGMA kdf_iter=256000; PRAGMA cipher_hmac_algorithm=HMAC_SHA512; PRAGMA cipher_kdf_algorithm=PBKDF2_HMAC_SHA512; PRAGMA foreign_keys=ON;"))?;
     sql.execute_batch("CREATE TRIGGER refuse_history_reference BEFORE INSERT ON object_retention_reference BEGIN SELECT RAISE(ABORT,'history writer failed'); END;")?;
     assert!(matches!(
-        p.client.apply_own_history_plaintext_mode::<true>(&p.envelope, &p.bytes),
+        p.client.apply_own_history_plaintext(&p.envelope, &p.bytes),
         Err(SdkError::Storage(ramflux_storage::StorageError::Sqlite(_)))
     ));
     p.assert_uncommitted()?;
     sql.execute_batch("DROP TRIGGER refuse_history_reference")?;
-    p.client.apply_own_history_plaintext_mode::<true>(&p.envelope, &p.bytes)?;
+    p.client.apply_own_history_plaintext(&p.envelope, &p.bytes)?;
     assert!(p.client.direct_message_by_id("page-second")?.is_some());
     Ok(())
 }

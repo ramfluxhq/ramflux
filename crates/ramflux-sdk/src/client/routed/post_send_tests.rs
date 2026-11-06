@@ -132,15 +132,21 @@ fn fence(c: &Case) -> Result<(), SdkError> {
     Ok(())
 }
 fn connection(c: &Case) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
+    raw_connection(&c.a)
+}
+/// Opens the account database file directly, bypassing the object access guard.
+pub(super) fn raw_connection(
+    f: &Fixture,
+) -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
     use ramflux_storage::{FileVaultSecretSource, VaultSecretSource};
     use std::fmt::Write;
-    let vault = FileVaultSecretSource::new(&c.a.root).vault_secret("alice")?;
-    let wrapped = c.a.client.account_index()?.load_wrapped_db_key("alice")?.ok_or("wrapped")?;
+    let vault = FileVaultSecretSource::new(&f.root).vault_secret(&f.id)?;
+    let wrapped = f.client.account_index()?.load_wrapped_db_key(&f.id)?.ok_or("wrapped")?;
     let key = ramflux_storage::unwrap_with_vault_secret(
         &crate::client::account::account_db_key_encryption_key(&vault, b"routed-test"),
         &wrapped,
     )?;
-    let sql = rusqlite::Connection::open(&c.a.client.account_db()?.path)?;
+    let sql = rusqlite::Connection::open(&f.client.account_db()?.path)?;
     let mut hex = String::new();
     for byte in key.bytes() {
         write!(&mut hex, "{byte:02x}")?;
@@ -218,19 +224,6 @@ async fn post_send_storage_failure_is_not_consumed_as_erasure() -> TestResult {
     assert_eq!(c.a.client.account_db()?.actor_state_keys("attachment/reference/")?.len(), 0);
     Ok(())
 }
-#[tokio::test]
-async fn post_send_public_mode_preserves_raw_refusal_until_activation() -> TestResult {
-    let mut c = Case::new()?;
-    let holds = stage(&c)?;
-    let entry = Box::pin(send(&mut c)).await?;
-    fence(&c)?;
-    let (result, capture) = finish(&c, Ok(entry), holds, false);
-    assert!(matches!(result, Err(SdkError::ObjectErased)));
-    assert_eq!(capture.text()?.len(), 0);
-    assert_eq!(c.a.client.account_db()?.actor_state_keys("attachment/reference/")?.len(), 0);
-    assert_eq!(c.a.client.direct_messages(context().conversation)?.len(), 1);
-    Ok(())
-}
 #[test]
 fn post_send_failed_submission_does_not_register_or_mask_io_and_validation_errors() -> TestResult {
     for error in [
@@ -256,20 +249,19 @@ fn post_send_failed_submission_does_not_register_or_mask_io_and_validation_error
 }
 
 #[tokio::test]
-async fn post_send_candidate_without_attachments_keeps_gateway_ack() -> TestResult {
+async fn post_send_empty_attachment_list_keeps_gateway_ack() -> TestResult {
     let mut c = Case::new()?;
     let _ = Box::pin(send(&mut c)).await?;
     let (mut engine, sent) = Wire::engine(&c.a, &c.b)?;
     let msg = super::r5::outgoing(&c.a, &c.b, "candidate-empty");
-    let entry =
-        Box::pin(c.a.client.send_plaintext_direct_message_with_attachments_via_gateway_candidate(
-            &mut engine,
-            &super::review::pool()?,
-            msg,
-            b"empty attachment list",
-            &[],
-        ))
-        .await?;
+    let entry = Box::pin(c.a.client.send_plaintext_direct_message_with_attachments_via_gateway(
+        &mut engine,
+        &super::review::pool()?,
+        msg,
+        b"empty attachment list",
+        &[],
+    ))
+    .await?;
     assert_eq!(sent.lock().map_err(|_| "sent mutex")?.len(), 1);
     assert_eq!(entry.inbox_seq, 2);
     assert_eq!(
