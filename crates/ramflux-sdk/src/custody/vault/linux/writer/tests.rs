@@ -296,23 +296,63 @@ const BODY_ENV: &str = "RF_VAULT_TEST_BODY";
 /// test's fork can ever see their descriptors, and no timing window or gate is needed. The wait
 /// is bounded, the child is killed and reaped on every path, and its output is propagated.
 fn run_in_child(body: &str) -> TestResult {
+    run_child(body, CHILD_DEADLINE, &mut 0)
+}
+/// CI's nextest slow-timeout is 60 s; the guard must kill and reap the child's process group
+/// well before that SIGTERM, and stay at least as long as the 10 s used for other waits.
+const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+const _: () = assert!(CHILD_DEADLINE.as_secs() >= 10 && CHILD_DEADLINE.as_secs() <= 40);
+fn run_child(body: &str, deadline: Duration, pid: &mut u32) -> TestResult {
     let dir = tempfile::tempdir()?;
     let log = dir.path().join("child.log");
     let out = File::create(&log)?;
-    let status = run_bounded(
+    let status = run_bounded_pid(
         Command::new(std::env::current_exe()?)
             .args(["--exact", &format!("custody::vault::linux::writer::tests::{body}")])
             .arg("--nocapture")
             .env(BODY_ENV, "1")
             .stdout(out.try_clone()?)
             .stderr(out),
-        Duration::from_secs(60),
+        deadline,
+        pid,
     )?;
     if !status.success() {
         let output = std::fs::read_to_string(&log).unwrap_or_default();
         return Err(format!("{body} failed ({status}):\n{output}").into());
     }
     Ok(())
+}
+/// Body that never returns; used only to prove the guard's stall cleanup.
+#[test]
+fn stalled_body() -> TestResult {
+    if std::env::var_os(BODY_ENV).is_none() {
+        return Ok(());
+    }
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+#[test]
+fn stalled_child_is_killed_and_its_group_is_gone() -> TestResult {
+    let started = Instant::now();
+    let mut leader = 0;
+    let err = run_child("stalled_body", Duration::from_secs(2), &mut leader)
+        .err()
+        .ok_or("a stalled child must fail the run")?;
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(started.elapsed() < CHILD_DEADLINE, "stall cleanup must stay inside the deadline");
+    let group =
+        rustix::process::Pid::from_raw(leader.cast_signed()).ok_or("child pid not recorded")?;
+    let end = Instant::now() + GUARD;
+    loop {
+        match rustix::process::test_kill_process_group(group) {
+            Err(rustix::io::Errno::SRCH) => return Ok(()),
+            _ if Instant::now() >= end => {
+                return Err("child process group still alive 10s after the guard returned".into());
+            }
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 /// Kills the whole process group of a traced run on every exit path and reaps the leader.
 struct GroupReaper(Child);
@@ -328,8 +368,17 @@ impl Drop for GroupReaper {
 /// Runs `command` in its own process group with a fail-loud deadline; tracer and tracee are
 /// killed and reaped when this returns, however it returns.
 fn run_bounded(command: &mut Command, deadline: Duration) -> TestResult<std::process::ExitStatus> {
+    run_bounded_pid(command, deadline, &mut 0)
+}
+/// Like `run_bounded`, and records the child's pid (also its process-group id) in `pid`.
+fn run_bounded_pid(
+    command: &mut Command,
+    deadline: Duration,
+    pid: &mut u32,
+) -> TestResult<std::process::ExitStatus> {
     use std::os::unix::process::CommandExt;
     let mut child = GroupReaper(command.process_group(0).spawn()?);
+    *pid = child.0.id();
     let end = Instant::now() + deadline;
     loop {
         if let Some(status) = child.0.try_wait()? {
