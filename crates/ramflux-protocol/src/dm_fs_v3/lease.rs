@@ -4,13 +4,103 @@
 //! Public lease/status documents. Canonical codecs do not establish signatures,
 //! current authority, operation-hash validity or lease-directory admission.
 use super::{
-    DecodeError, QualifiedBranch, RetirementRef, Scanned, SignedNativeOpk, SignedNativePrekeyBase,
-    WireType, scan,
+    DecodeError, QualifiedBranch, RetirementRef, SignedNativeOpk, SignedNativePrekeyBase, WireType,
+    scan,
 };
 
 /// Maximum entries in an owner status query or response.
 pub const MAX_OWNER_STATUS_ENTRIES: usize = 200;
+use super::publication::{
+    decode_list, encode_list, field, fixed, owned_text as text, scan_publication,
+    unsigned_body as unsigned,
+};
 type Result<T> = std::result::Result<T, DecodeError>;
+
+/// Closed `LeaseFallback` wire codes; the authenticated directory owns their semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaseFallback {
+    /// Wire code `none`.
+    None,
+    /// Wire code `requester_quota`.
+    RequesterQuota,
+    /// Wire code `pair_quota`.
+    PairQuota,
+    /// Wire code `target_quota`.
+    TargetQuota,
+    /// Wire code `prefix_quota`.
+    PrefixQuota,
+    /// Wire code `pool_exhausted`.
+    PoolExhausted,
+    /// Wire code `storage_capacity`.
+    StorageCapacity,
+}
+impl LeaseFallback {
+    /// Stable lower-snake wire code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::RequesterQuota => "requester_quota",
+            Self::PairQuota => "pair_quota",
+            Self::TargetQuota => "target_quota",
+            Self::PrefixQuota => "prefix_quota",
+            Self::PoolExhausted => "pool_exhausted",
+            Self::StorageCapacity => "storage_capacity",
+        }
+    }
+}
+impl TryFrom<&str> for LeaseFallback {
+    type Error = DecodeError;
+    fn try_from(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "requester_quota" => Ok(Self::RequesterQuota),
+            "pair_quota" => Ok(Self::PairQuota),
+            "target_quota" => Ok(Self::TargetQuota),
+            "prefix_quota" => Ok(Self::PrefixQuota),
+            "pool_exhausted" => Ok(Self::PoolExhausted),
+            "storage_capacity" => Ok(Self::StorageCapacity),
+            _ => Err(DecodeError::Value),
+        }
+    }
+}
+
+/// Closed `OwnerPrekeyState` wire codes; the authenticated directory owns their semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerPrekeyState {
+    /// Wire code `unleased`.
+    Unleased,
+    /// Wire code `leased`.
+    Leased,
+    /// Wire code `retired`.
+    Retired,
+    /// Wire code `unknown`.
+    Unknown,
+}
+impl OwnerPrekeyState {
+    /// Stable lower-snake wire code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unleased => "unleased",
+            Self::Leased => "leased",
+            Self::Retired => "retired",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+impl TryFrom<&str> for OwnerPrekeyState {
+    type Error = DecodeError;
+    fn try_from(value: &str) -> Result<Self> {
+        match value {
+            "unleased" => Ok(Self::Unleased),
+            "leased" => Ok(Self::Leased),
+            "retired" => Ok(Self::Retired),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(DecodeError::Value),
+        }
+    }
+}
 
 /// Public `PublicPrekeyView` wire fields; authenticated verification belongs to its consumer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +212,7 @@ pub struct PrekeyLeaseResult {
     pub issued_at: u64,
     pub leased_at: u64,
     pub deadline: u64,
-    pub fallback: String,
+    pub fallback: LeaseFallback,
     pub signature: [u8; 64],
 }
 
@@ -131,6 +221,7 @@ impl PrekeyLeaseResult {
     /// # Errors
     /// Rejects noncanonical values, counts, field sizes and total byte sizes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        validate_opk_fallback(self.opk.is_some(), self.fallback)?;
         encode_fields(
             WireType::PrekeyLeaseResult,
             &[
@@ -143,7 +234,7 @@ impl PrekeyLeaseResult {
                 &self.issued_at.to_be_bytes(),
                 &self.leased_at.to_be_bytes(),
                 &self.deadline.to_be_bytes(),
-                self.fallback.as_bytes(),
+                self.fallback.as_str().as_bytes(),
                 &self.signature,
             ],
         )
@@ -154,6 +245,8 @@ impl PrekeyLeaseResult {
     /// Rejects malformed canonical framing, nested payloads, values and bounds.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let view = scan(WireType::PrekeyLeaseResult, bytes)?;
+        let fallback = LeaseFallback::try_from(wire_code(field(view, 10)?)?)?;
+        validate_opk_fallback(field(view, 3)?.first() == Some(&1), fallback)?;
         Ok(Self {
             profile: text(field(view, 1)?)?,
             base: SignedNativePrekeyBase::from_bytes(field(view, 2)?)?,
@@ -164,7 +257,7 @@ impl PrekeyLeaseResult {
             issued_at: u64::from_be_bytes(fixed(field(view, 7)?)?),
             leased_at: u64::from_be_bytes(fixed(field(view, 8)?)?),
             deadline: u64::from_be_bytes(fixed(field(view, 9)?)?),
-            fallback: text(field(view, 10)?)?,
+            fallback,
             signature: fixed(field(view, 11)?)?,
         })
     }
@@ -195,7 +288,11 @@ impl OwnerStatusQuery {
             &[
                 self.profile.as_bytes(),
                 &self.owner.to_bytes()?,
-                &encode_list(&self.requested_ids, RetirementRef::to_bytes)?,
+                &encode_list(
+                    &self.requested_ids,
+                    MAX_OWNER_STATUS_ENTRIES,
+                    RetirementRef::to_bytes,
+                )?,
             ],
         )
     }
@@ -204,11 +301,15 @@ impl OwnerStatusQuery {
     /// # Errors
     /// Rejects malformed canonical framing, nested payloads, values and bounds.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let view = scan(WireType::OwnerStatusQuery, bytes)?;
+        let view = scan_publication(WireType::OwnerStatusQuery, bytes)?;
         Ok(Self {
             profile: text(field(view, 1)?)?,
             owner: QualifiedBranch::from_bytes(field(view, 2)?)?,
-            requested_ids: decode_list(field(view, 3)?, RetirementRef::from_bytes)?,
+            requested_ids: decode_list(
+                field(view, 3)?,
+                MAX_OWNER_STATUS_ENTRIES,
+                RetirementRef::from_bytes,
+            )?,
         })
     }
 }
@@ -221,7 +322,7 @@ pub struct OwnerStatusEntry {
     pub serial: u64,
     pub leased_at: u64,
     pub deadline: u64,
-    pub state: String,
+    pub state: OwnerPrekeyState,
 }
 
 impl OwnerStatusEntry {
@@ -237,7 +338,7 @@ impl OwnerStatusEntry {
                 &self.serial.to_be_bytes(),
                 &self.leased_at.to_be_bytes(),
                 &self.deadline.to_be_bytes(),
-                self.state.as_bytes(),
+                self.state.as_str().as_bytes(),
             ],
         )
     }
@@ -253,7 +354,7 @@ impl OwnerStatusEntry {
             serial: u64::from_be_bytes(fixed(field(view, 3)?)?),
             leased_at: u64::from_be_bytes(fixed(field(view, 4)?)?),
             deadline: u64::from_be_bytes(fixed(field(view, 5)?)?),
-            state: text(field(view, 6)?)?,
+            state: OwnerPrekeyState::try_from(wire_code(field(view, 6)?)?)?,
         })
     }
 }
@@ -289,7 +390,7 @@ impl OwnerPrekeyStatus {
                 &self.activation.to_be_bytes(),
                 &self.retirement_ack,
                 &self.unleased_count.to_be_bytes(),
-                &encode_list(&self.entries, OwnerStatusEntry::to_bytes)?,
+                &encode_list(&self.entries, MAX_OWNER_STATUS_ENTRIES, OwnerStatusEntry::to_bytes)?,
                 &self.signature,
             ],
         )
@@ -299,7 +400,7 @@ impl OwnerPrekeyStatus {
     /// # Errors
     /// Rejects malformed canonical framing, nested payloads, values and bounds.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let view = scan(WireType::OwnerPrekeyStatus, bytes)?;
+        let view = scan_publication(WireType::OwnerPrekeyStatus, bytes)?;
         Ok(Self {
             profile: text(field(view, 1)?)?,
             owner: QualifiedBranch::from_bytes(field(view, 2)?)?,
@@ -309,7 +410,11 @@ impl OwnerPrekeyStatus {
             activation: u64::from_be_bytes(fixed(field(view, 6)?)?),
             retirement_ack: fixed(field(view, 7)?)?,
             unleased_count: u64::from_be_bytes(fixed(field(view, 8)?)?),
-            entries: decode_list(field(view, 9)?, OwnerStatusEntry::from_bytes)?,
+            entries: decode_list(
+                field(view, 9)?,
+                MAX_OWNER_STATUS_ENTRIES,
+                OwnerStatusEntry::from_bytes,
+            )?,
             signature: fixed(field(view, 10)?)?,
         })
     }
@@ -356,15 +461,6 @@ fn encode_fields(kind: WireType, fields: &[&[u8]]) -> Result<Vec<u8>> {
     scan(kind, &bytes)?;
     Ok(bytes)
 }
-fn field(view: Scanned<'_>, id: u16) -> Result<&[u8]> {
-    view.field(id).ok_or(DecodeError::Fields)
-}
-fn fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
-    bytes.try_into().map_err(|_| DecodeError::Value)
-}
-fn text(bytes: &[u8]) -> Result<String> {
-    std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| DecodeError::Value)
-}
 fn encode_opk(value: Option<&SignedNativeOpk>) -> Result<Vec<u8>> {
     match value {
         None => Ok(vec![0]),
@@ -382,51 +478,10 @@ fn decode_opk(bytes: &[u8]) -> Result<Option<SignedNativeOpk>> {
         _ => Err(DecodeError::Value),
     }
 }
-fn encode_list<T>(values: &[T], encode: fn(&T) -> Result<Vec<u8>>) -> Result<Vec<u8>> {
-    if values.len() > MAX_OWNER_STATUS_ENTRIES {
-        return Err(DecodeError::Count);
-    }
-    let mut bytes =
-        u16::try_from(values.len()).map_err(|_| DecodeError::Count)?.to_be_bytes().to_vec();
-    for value in values {
-        let item = encode(value)?;
-        bytes.extend_from_slice(
-            &u32::try_from(item.len()).map_err(|_| DecodeError::FieldCeiling)?.to_be_bytes(),
-        );
-        bytes.extend_from_slice(&item);
-    }
-    Ok(bytes)
+
+fn wire_code(value: &[u8]) -> Result<&str> {
+    std::str::from_utf8(value).map_err(|_| DecodeError::Value)
 }
-fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
-    if length > bytes.len() {
-        return Err(DecodeError::Truncated);
-    }
-    let (value, rest) = bytes.split_at(length);
-    *bytes = rest;
-    Ok(value)
-}
-fn decode_list<T>(mut bytes: &[u8], decode: fn(&[u8]) -> Result<T>) -> Result<Vec<T>> {
-    let count = usize::from(u16::from_be_bytes(fixed(take(&mut bytes, 2)?)?));
-    if count > MAX_OWNER_STATUS_ENTRIES {
-        return Err(DecodeError::Count);
-    }
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        let size = usize::try_from(u32::from_be_bytes(fixed(take(&mut bytes, 4)?)?))
-            .map_err(|_| DecodeError::FieldCeiling)?;
-        out.push(decode(take(&mut bytes, size)?)?);
-    }
-    if !bytes.is_empty() {
-        return Err(DecodeError::Trailing);
-    }
-    Ok(out)
-}
-fn unsigned(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
-    let end = bytes.len().checked_sub(70).ok_or(DecodeError::Truncated)?;
-    let count = u16::from_be_bytes(fixed(bytes.get(6..8).ok_or(DecodeError::Truncated)?)?)
-        .checked_sub(1)
-        .ok_or(DecodeError::Fields)?;
-    bytes.truncate(end);
-    bytes.get_mut(6..8).ok_or(DecodeError::Truncated)?.copy_from_slice(&count.to_be_bytes());
-    Ok(bytes)
+fn validate_opk_fallback(present: bool, fallback: LeaseFallback) -> Result<()> {
+    if present == (fallback == LeaseFallback::None) { Ok(()) } else { Err(DecodeError::Value) }
 }

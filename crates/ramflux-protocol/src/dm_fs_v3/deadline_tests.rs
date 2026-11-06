@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use super::{
-    BootstrapMode, DeadlineError, DeadlineInputs, deadline_ceiling, validate_bootstrap_deadline,
-};
+use super::deadline::deadline_ceiling;
+use super::{BootstrapMode, DeadlineError, DeadlineInputs, validate_bootstrap_deadline};
 use serde_json::Value;
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 const WIRE: &str = include_str!("../../fixtures/dm_fs_v3/wire_vectors.json");
@@ -46,12 +45,24 @@ fn dm_fs_v3_deadline_boundaries() -> Result {
             spk_expires_at: value(i, "spk_expires_at")?,
             envelope_created_at: value(i, "created_at")?,
         };
-        assert_eq!(
-            validate_bootstrap_deadline(&input).is_ok(),
-            v["accepted"].as_bool().ok_or("expected")?,
-            "{}",
-            v["name"]
-        );
+        let name = v["name"].as_str().ok_or("case name")?;
+        let suffix = name
+            .strip_prefix("opk_")
+            .or_else(|| name.strip_prefix("spk_only_"))
+            .ok_or("mode prefix")?;
+        let expected = match suffix {
+            "D-1" | "ttl_T" | "future_S" | "other_start_does_not_limit" => Ok(()),
+            "D" | "D+1" => Err(DeadlineError::Expired),
+            "ttl_T+1" | "validity_2T+1" => Err(DeadlineError::Policy),
+            "future_S+1" => Err(DeadlineError::FutureLease),
+            "overflow" => Err(DeadlineError::Overflow),
+            "envelope_min" | "spk_min" | "start_min" | "start_limit_different_times" => {
+                Err(DeadlineError::ExceedsBound)
+            }
+            _ => return Err("unowned deadline vector outcome".into()),
+        };
+        assert_eq!(expected.is_ok(), v["accepted"].as_bool().ok_or("expected")?);
+        assert_eq!(validate_bootstrap_deadline(&input), expected, "{name}");
     }
     // Every bound term overflows independently; no min or skew can hide overflow.
     for mode in [BootstrapMode::Opk, BootstrapMode::SpkOnly] {

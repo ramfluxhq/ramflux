@@ -129,7 +129,7 @@ fn lease(v: &Value) -> Result<PrekeyLeaseResult> {
         issued_at: number(&v["issued_at"])?,
         leased_at: number(&v["leased_at"])?,
         deadline: number(&v["deadline"])?,
-        fallback: text(&v["fallback"])?,
+        fallback: LeaseFallback::try_from(v["fallback"].as_str().ok_or("fallback")?)?,
         signature: fixed(&v["signature"])?,
     })
 }
@@ -147,7 +147,7 @@ fn entry(v: &Value) -> Result<OwnerStatusEntry> {
         serial: number(&v["serial"])?,
         leased_at: number(&v["leased_at"])?,
         deadline: number(&v["deadline"])?,
-        state: text(&v["state"])?,
+        state: OwnerPrekeyState::try_from(v["state"].as_str().ok_or("state")?)?,
     })
 }
 fn status(v: &Value) -> Result<OwnerPrekeyStatus> {
@@ -245,16 +245,121 @@ fn dm_fs_v3_status_limits_exact_and_plus_one() -> Result {
     assert_eq!(OwnerStatusQuery::from_bytes(&bytes)?, query);
     query.requested_ids.push(query.requested_ids.first().ok_or("request")?.clone());
     assert_eq!(query.to_bytes(), Err(DecodeError::Count));
-    let maxima = w["filled_maximum"].as_array().ok_or("maxima")?;
-    let v = maxima.iter().find(|v| v["type"] == "OwnerPrekeyStatus").ok_or("status maximum")?;
-    let bytes = raw(v)?;
-    let mut status = OwnerPrekeyStatus::from_bytes(&bytes)?;
-    assert_eq!(status.entries.len(), 200);
+    let mut status = status(&vector(&w, "OwnerPrekeyStatus")?["input"])?;
+    status.owner.principal_id = "i".repeat(256);
+    status.owner.device_id = "i".repeat(256);
+    let entry = status.entries.first().ok_or("entry")?.clone();
+    status.entries = vec![entry; 200];
     assert_eq!(status.owner.principal_id.len(), 256);
     assert_eq!(status.owner.device_id.len(), 256);
-    assert_eq!(bytes.len(), 36_192);
-    assert_eq!(status.to_bytes()?, bytes);
+    let bytes = status.to_bytes()?;
+    assert_eq!(OwnerPrekeyStatus::from_bytes(&bytes)?, status);
     status.entries.push(status.entries.first().ok_or("entry")?.clone());
     assert_eq!(status.to_bytes(), Err(DecodeError::Count));
+    Ok(())
+}
+
+// Negative frames bypass typed writers and include every declared element.
+fn replace_raw_field(kind: WireType, raw: &[u8], id: u16, value: &[u8]) -> Result<Vec<u8>> {
+    let view = scan(kind, raw)?;
+    let mut out = raw[..8].to_vec();
+    for field in view.fields() {
+        let value = if field.id == id { value } else { field.value };
+        out.extend_from_slice(&field.id.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(value.len())?.to_be_bytes());
+        out.extend_from_slice(value);
+    }
+    Ok(out)
+}
+fn complete_raw_list(element: &[u8], count: u16) -> Result<Vec<u8>> {
+    let mut out = count.to_be_bytes().to_vec();
+    for _ in 0..count {
+        out.extend_from_slice(&u32::try_from(element.len())?.to_be_bytes());
+        out.extend_from_slice(element);
+    }
+    Ok(out)
+}
+#[test]
+fn dm_fs_v3_status_decoder_over_limit_frames() -> Result {
+    let w = fixtures()?;
+    let fixture = w["invalid_inputs"]
+        .as_array()
+        .ok_or("invalid inputs")?
+        .iter()
+        .find(|v| v["name"] == "status_ids_201")
+        .ok_or("status_ids_201")?;
+    assert_eq!(fixture["type"], "OwnerStatusQuery");
+    assert_eq!(fixture["repeat_field"], "requested_ids");
+    let mut literal_base = vector(&w, "OwnerStatusQuery")?["input"].clone();
+    assert!(literal_base.as_object_mut().ok_or("query object")?.remove("requested_ids").is_some());
+    assert_eq!(literal_base, fixture["base_input"]);
+    let count = u16::try_from(number(&fixture["count"])?)?;
+    assert_eq!(count, 201);
+    let element = retirement(&fixture["repeat_value"])?;
+    let list = complete_raw_list(&element.to_bytes()?, count)?;
+    let query = raw(vector(&w, "owner_status_query_maximum_ids")?)?;
+    let bad = replace_raw_field(WireType::OwnerStatusQuery, &query, 3, &list)?;
+    assert_eq!(OwnerStatusQuery::from_bytes(&bad), Err(DecodeError::Count));
+    let status = raw(vector(&w, "OwnerPrekeyStatus")?)?;
+    let entry = raw(vector(&w, "OwnerStatusEntry")?)?;
+    let list = complete_raw_list(&entry, count)?;
+    let bad = replace_raw_field(WireType::OwnerPrekeyStatus, &status, 9, &list)?;
+    assert_eq!(OwnerPrekeyStatus::from_bytes(&bad), Err(DecodeError::Count));
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_lease_code_sets_and_combinations() -> Result {
+    let w = fixtures()?;
+    let codes = [
+        (LeaseFallback::None, "none"),
+        (LeaseFallback::RequesterQuota, "requester_quota"),
+        (LeaseFallback::PairQuota, "pair_quota"),
+        (LeaseFallback::TargetQuota, "target_quota"),
+        (LeaseFallback::PrefixQuota, "prefix_quota"),
+        (LeaseFallback::PoolExhausted, "pool_exhausted"),
+        (LeaseFallback::StorageCapacity, "storage_capacity"),
+    ];
+    for (code, text) in codes {
+        assert_eq!(code.as_str(), text);
+        assert_eq!(LeaseFallback::try_from(text)?, code);
+    }
+    for (code, text) in [
+        (OwnerPrekeyState::Unleased, "unleased"),
+        (OwnerPrekeyState::Leased, "leased"),
+        (OwnerPrekeyState::Retired, "retired"),
+        (OwnerPrekeyState::Unknown, "unknown"),
+    ] {
+        assert_eq!(code.as_str(), text);
+        assert_eq!(OwnerPrekeyState::try_from(text)?, code);
+    }
+    for invalid in ["", "invented", " target_quota", "leased\n"] {
+        assert_eq!(LeaseFallback::try_from(invalid), Err(DecodeError::Value));
+        assert_eq!(OwnerPrekeyState::try_from(invalid), Err(DecodeError::Value));
+    }
+    let rows = [
+        ("present_with_fallback", "lease_opk", "target_quota"),
+        ("empty_fallback", "lease_opk", ""),
+        ("absent_with_none", "lease_spk_only", "none"),
+    ];
+    for (rule, name, fallback) in rows {
+        let bytes = raw(vector(&w, name)?)?;
+        let bad = replace_raw_field(WireType::PrekeyLeaseResult, &bytes, 10, fallback.as_bytes())?;
+        assert_eq!(PrekeyLeaseResult::from_bytes(&bad), Err(DecodeError::Value), "{rule}");
+    }
+    let mut invalid = lease(&vector(&w, "lease_opk")?["input"])?;
+    invalid.fallback = LeaseFallback::TargetQuota;
+    assert_eq!(invalid.to_bytes(), Err(DecodeError::Value));
+    let mut invalid = lease(&vector(&w, "lease_spk_only")?["input"])?;
+    invalid.fallback = LeaseFallback::None;
+    assert_eq!(invalid.to_bytes(), Err(DecodeError::Value));
+    let entry = raw(vector(&w, "OwnerStatusEntry")?)?;
+    for code in ["", "invented"] {
+        let bad = replace_raw_field(WireType::OwnerStatusEntry, &entry, 6, code.as_bytes())?;
+        assert_eq!(OwnerStatusEntry::from_bytes(&bad), Err(DecodeError::Value));
+        let status = raw(vector(&w, "OwnerPrekeyStatus")?)?;
+        let list = complete_raw_list(&bad, 1)?;
+        let bad = replace_raw_field(WireType::OwnerPrekeyStatus, &status, 9, &list)?;
+        assert_eq!(OwnerPrekeyStatus::from_bytes(&bad), Err(DecodeError::Value));
+    }
     Ok(())
 }

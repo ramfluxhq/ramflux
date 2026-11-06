@@ -398,19 +398,19 @@ fn id_bytes(value: &str) -> Result<&[u8]> {
     if valid_custody_id(value) { Ok(value.as_bytes()) } else { Err(DecodeError::Value) }
 }
 
-fn field(view: Scanned<'_>, id: u16) -> Result<&[u8]> {
+pub(super) fn field(view: Scanned<'_>, id: u16) -> Result<&[u8]> {
     view.field(id).ok_or(DecodeError::Fields)
 }
 
-fn fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
+pub(super) fn fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| DecodeError::Value)
 }
 
-fn owned_text(bytes: &[u8]) -> Result<String> {
+pub(super) fn owned_text(bytes: &[u8]) -> Result<String> {
     std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| DecodeError::Value)
 }
 
-fn unsigned_body(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
+pub(super) fn unsigned_body(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
     // All three signed publication types end with one fixed 64-byte signature TLV.
     let body_length = bytes.len().checked_sub(6 + 64).ok_or(DecodeError::Truncated)?;
     let count = u16::from_be_bytes(fixed(bytes.get(6..8).ok_or(DecodeError::Truncated)?)?)
@@ -421,7 +421,7 @@ fn unsigned_body(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn encode_list<T>(
+pub(super) fn encode_list<T>(
     values: &[T],
     limit: usize,
     encode: fn(&T) -> Result<Vec<u8>>,
@@ -449,7 +449,7 @@ fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
     Ok(value)
 }
 
-fn decode_list<T>(
+pub(super) fn decode_list<T>(
     mut bytes: &[u8],
     limit: usize,
     decode: fn(&[u8]) -> Result<T>,
@@ -484,7 +484,7 @@ fn capability_bytes(value: &[u8]) -> Result<&[u8]> {
 // Preserve the scanner-first, no-allocation boundary. r7's tight encoded-list
 // ceilings can report FieldCeiling before Count. Classify complete over-count
 // payloads as Count without ever accepting an input the scanner rejected.
-fn scan_publication(kind: WireType, bytes: &[u8]) -> Result<Scanned<'_>> {
+pub(super) fn scan_publication(kind: WireType, bytes: &[u8]) -> Result<Scanned<'_>> {
     match scan(kind, bytes) {
         Err(DecodeError::FieldCeiling)
             if collection_count_exceeded(kind, bytes).unwrap_or(false) =>

@@ -44,7 +44,7 @@ pub enum DeadlineError {
 /// Compute the minimum delivery bound without extending it by clock skew.
 /// # Errors
 /// Rejects TTL/validity policy violations, future leases and any conversion/add overflow.
-pub fn deadline_ceiling(input: &DeadlineInputs) -> Result<u64, DeadlineError> {
+pub(crate) fn deadline_ceiling(input: &DeadlineInputs) -> Result<u64, DeadlineError> {
     let horizon =
         u64::try_from(crate::MAX_ENVELOPE_TTL_SECONDS).map_err(|_| DeadlineError::Overflow)?;
     let validity = horizon.checked_mul(2).ok_or(DeadlineError::Overflow)?;

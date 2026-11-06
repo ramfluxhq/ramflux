@@ -22,13 +22,11 @@ mod publication_tests;
 
 mod lease;
 pub use lease::{
-    MAX_OWNER_STATUS_ENTRIES, OwnerPrekeyStatus, OwnerStatusEntry, OwnerStatusQuery,
-    PrekeyLeaseIntent, PrekeyLeaseResult, PublicPrekeyView,
+    LeaseFallback, MAX_OWNER_STATUS_ENTRIES, OwnerPrekeyState, OwnerPrekeyStatus, OwnerStatusEntry,
+    OwnerStatusQuery, PrekeyLeaseIntent, PrekeyLeaseResult, PublicPrekeyView,
 };
 mod deadline;
-pub use deadline::{
-    BootstrapMode, DeadlineError, DeadlineInputs, deadline_ceiling, validate_bootstrap_deadline,
-};
+pub use deadline::{BootstrapMode, DeadlineError, DeadlineInputs, validate_bootstrap_deadline};
 #[cfg(test)]
 mod deadline_tests;
 #[cfg(test)]
