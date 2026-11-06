@@ -71,12 +71,13 @@ async fn offline_two_hours_dm_and_group_survive_reconnect() -> TestResult {
     assert_eq!(received.len(), 2, "both content envelopes must survive two offline hours");
     assert_eq!(received[0].envelope.envelope_id, "dm-message");
     assert_eq!(received[1].envelope.envelope_id, "group-message");
-    assert!(
+    assert_eq!(
         inbox
             .lock()
             .map_err(|_| "mailbox poisoned")?
             .pull_live_after(&recipient.config.target_delivery_id, 0, 10, now + 604_800)
-            .is_empty()
+            .len(),
+        0
     );
     Ok(())
 }
