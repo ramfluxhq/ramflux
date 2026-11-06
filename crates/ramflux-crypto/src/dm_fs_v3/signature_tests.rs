@@ -346,8 +346,22 @@ fn dm_fs_v3_tamper_rejection_matrix() -> Result {
                 let last = body.last_mut().ok_or("field")?;
                 *last ^= 1;
             }
-            assert!(
-                verify_document(&kind, &replace(&raw, id, &body)?, &key).is_err(),
+            // Explicit decode rows: profile (all documents), overlong request
+            // expiry, invalid fallback/state codes, and absent OPK tag -> short present.
+            let expected = match (kind.as_str(), id) {
+                (_, 1)
+                | ("NativePrekeyRequest", 13)
+                | ("PrekeyLeaseResult", 10)
+                | ("OwnerPrekeyStatus", 9) => NativePrekeyError::Decode(p::DecodeError::Value),
+                ("PrekeyLeaseResult", 3) if body.len() == 1 => {
+                    NativePrekeyError::Decode(p::DecodeError::Truncated)
+                }
+                ("SignedNativeOpk", 2) | ("PrekeyLeaseResult", 5) => NativePrekeyError::Binding,
+                _ => NativePrekeyError::Signature,
+            };
+            assert_eq!(
+                verify_document(&kind, &replace(&raw, id, &body)?, &key),
+                Err(expected),
                 "{kind} field {id}"
             );
             count += 1;
@@ -447,5 +461,81 @@ fn dm_fs_v3_hash_helpers_reject_decoder_limits() -> Result {
         assert!(matches!(p::scan(kind, &oversized), Err(p::DecodeError::TypeCeiling)));
         assert!(w["positive"].as_array().ok_or("positive")?.iter().any(|v| v["type"] == name));
     }
+    Ok(())
+}
+
+#[test]
+fn dm_fs_v3_transcript_rejects_each_lease_binding_in_both_modes() -> Result {
+    type Mutation = (&'static str, fn(&mut p::BootstrapHeader));
+    let mutations: [Mutation; 15] = [
+        ("source", |h| h.source.record_hash[0] ^= 1),
+        ("target", |h| h.target.record_hash[0] ^= 1),
+        ("base", |h| h.base.signature[0] ^= 1),
+        ("base_hash", |h| h.base_hash[0] ^= 1),
+        ("bundle_hash", |h| h.bundle_hash[0] ^= 1),
+        ("spk_id", |h| h.spk_id[0] ^= 1),
+        ("spk_serial", |h| h.spk_serial += 1),
+        ("generation", |h| h.generation += 1),
+        ("operation_id", |h| h.operation_id[0] ^= 1),
+        ("issued_at", |h| h.issued_at += 1),
+        ("leased_at", |h| h.leased_at += 1),
+        ("deadline", |h| h.deadline += 1),
+        ("opk_id", |h| {
+            let mut id = h.opk_id.unwrap_or([0; 32]);
+            id[0] ^= 1;
+            h.opk_id = Some(id);
+        }),
+        ("opk_key", |h| {
+            let mut key = h.opk_key.unwrap_or([0; 32]);
+            key[0] ^= 1;
+            h.opk_key = Some(key);
+        }),
+        ("routed_ad", |h| h.routed_ad[0] ^= 1),
+    ];
+    let key = SigningKey::from_bytes(&[60; 32]).verifying_key().to_bytes();
+    let mut count = 0;
+    for mode in ["opk", "spk_only"] {
+        let original = p::BootstrapTranscript::from_bytes(&raw(&format!("transcript_{mode}"))?)?;
+        let lease = p::PrekeyLeaseResult::from_bytes(&raw(&format!("lease_{mode}"))?)?;
+        verify_bootstrap_transcript(&original, &lease, &key)?;
+        for (name, mutate) in mutations {
+            let mut changed = original.clone();
+            mutate(&mut changed.header);
+            let expected = if mode == "spk_only" && matches!(name, "opk_id" | "opk_key") {
+                NativePrekeyError::Decode(p::DecodeError::Value)
+            } else {
+                NativePrekeyError::Binding
+            };
+            assert_eq!(
+                verify_bootstrap_transcript(&changed, &lease, &key),
+                Err(expected),
+                "{mode} {name}"
+            );
+            count += 1;
+        }
+        let mut changed = original.clone();
+        if changed.header.opk_id.is_some() {
+            changed.header.opk_id = None;
+            changed.header.opk_key = None;
+        } else {
+            changed.header.opk_id = Some([0; 32]);
+            changed.header.opk_key = Some([0; 32]);
+        }
+        assert_eq!(
+            verify_bootstrap_transcript(&changed, &lease, &key),
+            Err(NativePrekeyError::Binding),
+            "{mode} OPK presence"
+        );
+        count += 1;
+        let mut changed = original;
+        changed.routed_ad[0] ^= 1;
+        assert_eq!(
+            verify_bootstrap_transcript(&changed, &lease, &key),
+            Err(NativePrekeyError::Binding),
+            "{mode} transcript AD"
+        );
+        count += 1;
+    }
+    assert_eq!(count, 34);
     Ok(())
 }
