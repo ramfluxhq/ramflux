@@ -517,7 +517,7 @@ pub(crate) async fn handle_mesh_quic_request_value(
     };
     let response = if request.path == ramflux_protocol::custody::CUSTODY_RPC_PATH
         || request.path == "/mvp0/ack-bound-batch"
-        || request.path == "/mvp0/ack-bound"
+        || request.path == "/mvp0/ack-bound" || request.path == "/mvp0/nack-bound"
         || request.path == "/s1/session"
         || request.path == ramflux_node_core::MIGRATION_PEER_PATH
     {

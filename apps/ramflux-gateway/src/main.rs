@@ -18,6 +18,7 @@ mod registration_forward_tests;
 mod retention;
 mod serve;
 mod session;
+mod session_push;
 mod session_response;
 mod state;
 mod submit_source;

@@ -136,6 +136,7 @@ mod tests {
             "shared",
         )?;
         let runtime = crate::GatewaySessionRuntime {
+        session_push: None,
             source_identity: attacker.clone(),
             session_id: "session".into(),
             resume_token: "resume".into(),
