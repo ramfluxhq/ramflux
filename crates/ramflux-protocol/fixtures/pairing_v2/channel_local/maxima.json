@@ -28,8 +28,8 @@
     "wire": "{\"generation\":9007199254740991,\"match\":false,\"operation_id\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"schema\":\"ramflux.pairing.Confirm.v2\",\"transcript_hash\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"version\":2}"
   },
   "CredentialRequest": {
-    "size": 270,
-    "wire": "{\"action\":\"setup\",\"frontend_generation\":9007199254740991,\"local_account_id\":\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\",\"reservation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}"
+    "size": 399,
+    "wire": "{\"action\":\"unlock\",\"frontend_generation\":9007199254740991,\"local_account_id\":\"\\\"\\\"\\\"\\\"\\\"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\",\"reservation_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\"}"
   },
   "Join": {
     "size": 11741,
