@@ -245,26 +245,33 @@ fn legacy_zero_payload_is_refused_before_nonce_consumption_and_output() {
     read(1, &mut ok.clone()).unwrap();
     assert_eq!(ok.0.lock().unwrap().0, ciphertext);
 
-    // Legacy-zero row: refused with the exact error, zero bytes, zero flushes.
-    fixture.set_legacy_zero(true);
-    let spy = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
-    assert!(matches!(read(2, &mut spy.clone()), Err(BackendError::Retired)));
-    assert_eq!(*spy.0.lock().unwrap(), (Vec::new(), 0));
-    assert!(matches!(
-        fixture.registry.admit_operation_after_authentication(
-            &fixture.grant,
-            1,
-            &replay_proof(now, 2),
-            now
-        ),
-        Err(AttachmentReplayError::Ledger(
-            ramflux_node_core::attachment::AttachmentLedgerError::State
-        ))
-    ));
-
-    // Nonce 2 was never consumed: once the generation is bound again it publishes.
-    fixture.set_legacy_zero(false);
-    let after = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
-    read(2, &mut after.clone()).unwrap();
-    assert_eq!(after.0.lock().unwrap().0, ciphertext);
+    // Each unbound shape, one field at a time: exact error, zero bytes, zero flushes.
+    for (n, (pending, committed)) in
+        [(0_u64, Some(0_u64)), (1, None), (1, Some(2)), (0, None)].into_iter().enumerate()
+    {
+        let nonce = u8::try_from(10 + n).unwrap();
+        fixture.set_generations(pending, committed);
+        let spy = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
+        assert!(
+            matches!(read(nonce, &mut spy.clone()), Err(BackendError::Retired)),
+            "({pending}, {committed:?})"
+        );
+        assert_eq!(*spy.0.lock().unwrap(), (Vec::new(), 0), "({pending}, {committed:?})");
+        assert!(matches!(
+            fixture.registry.admit_operation_after_authentication(
+                &fixture.grant,
+                1,
+                &replay_proof(now, nonce),
+                now
+            ),
+            Err(AttachmentReplayError::Ledger(
+                ramflux_node_core::attachment::AttachmentLedgerError::State
+            ))
+        ));
+        // The refused nonce was never consumed: it publishes once the row is bound.
+        fixture.set_generations(1, Some(1));
+        let after = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
+        read(nonce, &mut after.clone()).unwrap();
+        assert_eq!(after.0.lock().unwrap().0, ciphertext);
+    }
 }
