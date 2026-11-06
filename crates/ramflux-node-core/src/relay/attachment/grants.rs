@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 //! Durable scoped registration; operation admission and retirement are separate owners.
+mod admission;
 use super::{
     AttachmentLedger, AttachmentLedgerError, AttachmentOwner, AttachmentReservation,
     AttachmentReservationState, RECORDS, ReadableDatabase, ReadableTable, deadline, decode, encode,
@@ -10,6 +11,7 @@ use crate::{
     GatewayIssuerCertificate, ObjectRelayCapability, RelayInvocationV3, RelayTrustSnapshotCache,
     verify_relay_invocation_v3, verify_relay_token_v3_with_trust_snapshot,
 };
+pub use admission::SCOPED_GRANTS_PER_OWNER_MAX;
 use ed25519_dalek::{Signer, SigningKey};
 use ramflux_protocol::large_attachment::{
     AttachmentRegistrationReceipt, VerifiedContentManifest, VerifiedScopedGrant,
@@ -60,6 +62,7 @@ pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), AttachmentLedge
     let _ = tx.open_table(EXPIRY).map_err(store)?;
     let _ = tx.open_table(CONFIG).map_err(store)?;
     let _ = tx.open_table(REFERENCES).map_err(store)?;
+    admission::install(tx)?;
     Ok(())
 }
 fn invalid(_: impl std::fmt::Display) -> AttachmentLedgerError {
@@ -181,6 +184,7 @@ impl ScopedGrantRegistry {
         {
             return Err(AttachmentLedgerError::Expired);
         }
+        self.check_reference(&tx, grant, upload_id, now)?;
         let mut rows = tx.open_table(GRANTS).map_err(store)?;
         if let Some(value) = rows.get(g.grant_id.as_slice()).map_err(store)? {
             if value.value().len() > 32 * 1024 {
@@ -207,6 +211,7 @@ impl ScopedGrantRegistry {
         if rows.len().map_err(store)? >= 16_384 {
             return Err(AttachmentLedgerError::Capacity);
         }
+        admission::check_owner(&tx, &g.owner.account_anchor)?;
         let receipt = AttachmentRegistrationReceipt {
             grant_hash: g.hash().map_err(invalid)?,
             grant_epoch: g.epoch,
@@ -226,6 +231,7 @@ impl ScopedGrantRegistry {
             reference_id: g.reference_id,
             expires_at: receipt.expires_at,
         };
+        admission::record(&tx, &g.grant_id, &g.owner.account_anchor)?;
         rows.insert(g.grant_id.as_slice(), encode(&row)?.as_slice()).map_err(store)?;
         let until = g.expires_at.checked_add(305).ok_or(AttachmentLedgerError::Invalid)?;
         tx.open_table(EXPIRY)
@@ -291,6 +297,7 @@ impl ScopedGrantRegistry {
             let mut reference = row.reference_id.to_vec();
             reference.extend(id);
             refs.remove(reference.as_slice()).map_err(store)?;
+            admission::release(&tx, id)?;
             rows.remove(id).map_err(store)?;
             index.remove(k.as_slice()).map_err(store)?;
         }

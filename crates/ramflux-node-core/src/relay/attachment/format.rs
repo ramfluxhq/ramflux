@@ -86,26 +86,14 @@ impl crate::RelayRedbStore {
             .begin_read()
             .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
         let table = tx.open_table(NATIVE).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
-        let native = if let Some(hash) = manifest {
-            if let Some(hash) = identifier(hash) {
-                let mut k = object.to_vec();
-                k.extend(hash);
-                table
-                    .get(k.as_slice())
-                    .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?
-                    .is_some()
-            } else {
-                false
-            }
-        } else {
-            table
-                .range(object.as_slice()..)
-                .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?
-                .next()
-                .transpose()
-                .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?
-                .is_some_and(|(k, _)| k.value().starts_with(&object))
-        };
+        let _ = manifest;
+        let native = table
+            .range(object.as_slice()..)
+            .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?
+            .next()
+            .transpose()
+            .map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?
+            .is_some_and(|(k, _)| k.value().starts_with(&object));
         if native {
             return Err(crate::NodeCoreError::Unauthorized(
                 "native attachment requires scoped dispatch".into(),
