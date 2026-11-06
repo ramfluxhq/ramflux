@@ -589,3 +589,56 @@ fn generated_history_foreign_signed_task_and_cursor_constraints_reject_exactly()
     );
     Ok(())
 }
+
+#[test]
+fn generated_history_page_task_continuation_is_bound_to_prefix_task() -> TestResult {
+    let client = client();
+    let original = fixture(&client)?;
+    let packet = original.packets.first().ok_or("packet")?;
+    let context = packet.context.clone().ok_or("context")?;
+    let committed =
+        packet.history.as_ref().ok_or("history")?.events[0].carrier.clone().ok_or("carrier")?;
+    let prefix = std::slice::from_ref(&committed);
+    let mut same = packet.clone();
+    same.base = 1;
+    same.prefix_hash = super::history::prefix_hash(prefix)?;
+    same.history.as_mut().ok_or("history")?.events.remove(0);
+    client.check_generated_task_history_page(&same, &context, prefix)?;
+    // A validly signed page for another task that hash-matches the committed prefix.
+    let foreign = event(ramflux_protocol::TaskEventBody::Cancel(ramflux_protocol::TaskCancel {
+        task_id: "other-task".into(),
+        base_revision: 3,
+    }))?;
+    let bytes = client.encode_generated_task_carrier(foreign, "foreign".into())?;
+    let mut accepted = same.history.as_ref().ok_or("history")?.events[0].clone();
+    accepted.carrier = Some(client.decode_generated_task_carrier(&bytes)?);
+    let mut other = same.clone();
+    other.history.as_mut().ok_or("history")?.events = vec![accepted];
+    assert!(
+        matches!(client.check_generated_task_history_page(&other, &context, prefix), Err(SdkError::TaskRefused { reason: crate::TaskRefusalCode::InvalidRequest, message }) if message == "task history page task mismatch")
+    );
+    Ok(())
+}
+
+#[test]
+fn generated_history_inclusive_bounds_decode_and_round_trip() -> TestResult {
+    let client = client();
+    let original = fixture(&client)?;
+    let mut cursor = original.clone();
+    cursor.metadata.as_mut().ok_or("metadata")?.next_cursor = Some("x".repeat(256));
+    let mut member = original.clone();
+    member.packets[0].history.as_mut().ok_or("history")?.events[0]
+        .membership
+        .as_mut()
+        .ok_or("witness")?
+        .members[1] = "x".repeat(256);
+    let mut full = original.clone();
+    let count = full.packets[0].history.as_ref().ok_or("history")?.events.len();
+    full.packets[0].base = u64::try_from(289 - count)?;
+    for changed in [cursor, member, full] {
+        let bytes = wire(changed);
+        let decoded = client.decode_generated_task_history_export(&bytes)?;
+        assert_eq!(wire(decoded), bytes, "decode then encode is byte-identical");
+    }
+    Ok(())
+}

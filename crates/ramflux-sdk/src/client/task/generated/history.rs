@@ -6,6 +6,7 @@
 use super::{carrier, g, invalid};
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
+use ramflux_protocol::{TaskEvent, TaskSigner};
 
 const MAX_EXPORT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EVENTS: usize = 289;
@@ -84,13 +85,40 @@ impl RamfluxClient {
         {
             return Err(invalid("task history page context or prefix mismatch"));
         }
-        self.check_generated_task_history_packet(packet)
+        let page_task = self.check_generated_task_history_packet(packet)?;
+        // A continuation must extend the committed prefix's own task, not merely hash-match it.
+        if !committed_prefix.is_empty()
+            && self.committed_prefix_task(committed_prefix)? != page_task
+        {
+            return Err(invalid("task history page task mismatch"));
+        }
+        Ok(())
     }
 
+    /// Task ID shared by every carrier of a non-empty committed prefix.
+    fn committed_prefix_task(
+        &self,
+        committed_prefix: &[g::TaskCarrier],
+    ) -> Result<String, SdkError> {
+        let mut task_id: Option<String> = None;
+        for carrier in committed_prefix {
+            let bytes = g::Task { payload: Some(g::task::Payload::Carrier(carrier.clone())) }
+                .encode_to_vec();
+            let carrier = self.decode_generated_task_carrier(&bytes)?;
+            let id = self.native_carrier_event(&carrier)?.event().task_id().to_owned();
+            if task_id.as_ref().is_some_and(|previous| previous != &id) {
+                return Err(invalid("task history committed prefix task mismatch"));
+            }
+            task_id = Some(id);
+        }
+        task_id.ok_or_else(|| invalid("task history committed prefix empty"))
+    }
+
+    /// Checks one page and returns the task ID shared by its events.
     fn check_generated_task_history_packet(
         &self,
         packet: &g::TaskOwnPacket,
-    ) -> Result<(), SdkError> {
+    ) -> Result<String, SdkError> {
         super::super::check_delivery_size(packet.encoded_len())?;
         let context =
             packet.context.as_ref().ok_or_else(|| invalid("task history context missing"))?;
@@ -147,7 +175,24 @@ impl RamfluxClient {
             }
             task_id = Some(id);
         }
-        Ok(())
+        task_id.ok_or_else(|| invalid("task history events missing"))
+    }
+
+    /// Verify the carrier's native event signature against its pinned device key.
+    fn native_carrier_event(&self, carrier: &g::TaskCarrier) -> Result<TaskEvent, SdkError> {
+        let event = carrier.event.as_ref().ok_or_else(|| invalid("task history event missing"))?;
+        let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
+        let signer = TaskSigner {
+            principal_id: &carrier.principal_id,
+            actor_type: ramflux_protocol::ActorType::Human,
+            signing_key_id: &event
+                .signed
+                .as_ref()
+                .ok_or_else(|| invalid("task history signer missing"))?
+                .signing_key_id,
+            public_key_base64url: &public,
+        };
+        Self::decode_generated_task_event(&event.encode_to_vec(), &signer)
     }
 
     fn check_generated_task_history_event(
@@ -166,19 +211,7 @@ impl RamfluxClient {
         {
             return Err(invalid("task history signer or context mismatch"));
         }
-        let event = carrier.event.as_ref().ok_or_else(|| invalid("task history event missing"))?;
-        let public = self.task_signer_key(&carrier.principal_id, &carrier.device_id)?;
-        let signer = ramflux_protocol::TaskSigner {
-            principal_id: &carrier.principal_id,
-            actor_type: ramflux_protocol::ActorType::Human,
-            signing_key_id: &event
-                .signed
-                .as_ref()
-                .ok_or_else(|| invalid("task history signer missing"))?
-                .signing_key_id,
-            public_key_base64url: &public,
-        };
-        let native = Self::decode_generated_task_event(&event.encode_to_vec(), &signer)?;
+        let native = self.native_carrier_event(carrier)?;
         if let Some(certificate) = &accepted.decision_certificate {
             self.decode_generated_task_certificate(&certificate.encode_to_vec())?;
             carrier::check_resolution(carrier, certificate)?;
