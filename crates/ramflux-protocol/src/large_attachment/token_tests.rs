@@ -278,6 +278,9 @@ fn token_received_bytes_hit_each_error_site_and_inclusive_boundary() -> Result {
         |t| t.expires_at = t.issued_at + 300,
         |t| t.grant_epoch = u64::MAX,
         |t| t.authority_generation = u64::MAX,
+        |t| t.grant_epoch = 1,
+        |t| t.authority_generation = 1,
+        |t| t.token_issuer = "i".into(),
     ] {
         let mut v = t.clone();
         mutate(&mut v);
@@ -287,7 +290,7 @@ fn token_received_bytes_hit_each_error_site_and_inclusive_boundary() -> Result {
         assert_eq!(back.canonical_bytes()?, bytes);
         ok.push(bytes);
     }
-    assert_eq!(ok.len(), 9);
+    assert_eq!(ok.len(), 12);
     let mut over = t.clone();
     over.source_authority = "s".repeat(257);
     assert_eq!(over.canonical_bytes(), Err(FormatError("native identity length")));
