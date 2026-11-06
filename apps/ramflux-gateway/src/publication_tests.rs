@@ -61,8 +61,7 @@ async fn durable_view_publication() -> Result<(), Box<dyn std::error::Error>> {
                 nack: None,
             };
             let frame = ramflux_node_core::GatewayServerFrame::Deliver { entry };
-            reply_and_deliver_submitted(&send, &context, &runtime, &response, &frame, &envelope)
-                .await
+            reply_and_deliver_submitted(&send, &context, &runtime, &response, &frame, None).await
         });
         tokio::task::yield_now().await;
         assert!(!delivery.is_finished());

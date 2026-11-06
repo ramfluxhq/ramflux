@@ -58,7 +58,9 @@ mod inbox;
 mod inbox_page;
 pub use entry_bound::{ENTRY_FRAME_BYTE_CAP, check_entry_bound, single_entry_frame_size};
 pub use entry_fetch::{EntryFetchError, EntryGoneReason, InboxEntryResponse};
-pub use inbox_page::{KnownLoss, PageEntryRecord, PageError, PageReason, ResumePage};
+pub use inbox_page::{
+    KnownLoss, PAGE_BYTE_CAP, PageEntryRecord, PageError, PageReason, ResumePage,
+};
 mod lifecycle;
 mod mesh_identity;
 mod mvp1_registry;

@@ -83,7 +83,7 @@ pub(crate) mod tests {
             1,
         )?;
         let runtime = GatewaySessionRuntime {
-        session_push: None,
+            session_push: None,
             source_identity: authority.authenticated_device_identity()?,
             session_id: "session".into(),
             resume_token: "resume".into(),
