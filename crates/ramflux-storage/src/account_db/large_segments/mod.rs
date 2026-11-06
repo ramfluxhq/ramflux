@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant segment-file persistence. Call from bounded I/O workers, never the
-//! account actor. Activation, resource retirement and restore admission are
-//! separate prerequisites; this module provides no remote grant authority.
+//! Dormant segment-file persistence with local retirement and restore fences.
+//! Call from bounded I/O workers, never the account actor. Endpoint activation
+//! remains separate; this module provides no remote grant authority.
 mod files;
 mod lease;
 pub(super) mod retirement;
