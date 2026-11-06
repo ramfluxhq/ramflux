@@ -149,7 +149,8 @@ Current `bus_protocol` is `ramflux.local_bus.v1`.
 Current request methods include:
 
 - account: `account.create`, `account.list`, `account.switch`,
-  `account.status`, `account.lock`, `account.unlock`,
+  `account.status`, `account.config.get`, `account.config.set`,
+  `account.lock`, `account.unlock`,
   `account.backup.export`, `account.backup.import`,
   `account.passphrase.rotate`
 - device: `device.list`, `device.activate`
