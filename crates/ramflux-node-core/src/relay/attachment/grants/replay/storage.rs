@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
-//! Indexed nonce rows + expiry + principal counters; authoritative restrictions, never SDK data.
+//! Server backup classification: NONCES and META.clock are authority restrictions.
+//! EXPIRY, PRINCIPALS and META.rows/bytes are derived and rebuilt on normal open.
+//! SDK backups import none of these tables; server rollback needs a fresh,
+//! externally fenced authority generation, as required by grant registration.
 use super::{AttachmentReplayError as Error, AttachmentReplayProof};
 use crate::relay::attachment::{AttachmentLedgerError, store};
 use ramflux_protocol::large_attachment::QualifiedOwner;
