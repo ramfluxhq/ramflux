@@ -1878,18 +1878,15 @@ pub(crate) async fn write_gateway_handle(
     frame: &ramflux_node_core::GatewayServerFrame,
 ) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec(frame)?;
-    tokio::time::timeout(crate::push_queue::WRITE_DEADLINE, async {
-        #[cfg(feature = "itest-http")]
-        delay_itest_gateway_frame().await;
-        let mut sink = send.lock().await;
-        sink.send_frame(&bytes).await.map_err(super::session_response::ClientWriteFailure)
-    })
-    .await
-    .map_err(|_| {
-        super::session_response::ClientWriteFailure(ramflux_transport::TransportError::Quic(
-            "gateway frame write deadline".into(),
-        ))
-    })??;
+    #[cfg(feature = "itest-http")]
+    tokio::time::timeout(crate::push_queue::WRITE_DEADLINE, delay_itest_gateway_frame())
+        .await
+        .map_err(|_| {
+            super::session_response::ClientWriteFailure(ramflux_transport::TransportError::Quic(
+                "gateway test frame delay deadline".into(),
+            ))
+        })?;
+    crate::push_queue::write_frame(send, &bytes).await?;
     Ok(())
 }
 

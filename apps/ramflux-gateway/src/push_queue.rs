@@ -17,6 +17,25 @@ use std::{
 const BYTE_CAP: usize = 4 * 1024 * 1024;
 const EMPTY: u64 = u64::MAX;
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
+// Sink admission is queue waiting, with its own bound; only the I/O consumes 15s.
+const SINK_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) async fn write_frame(
+    send: &GatewaySendHandle,
+    bytes: &[u8],
+) -> Result<(), crate::session_response::ClientWriteFailure> {
+    use crate::session_response::ClientWriteFailure;
+    let mut sink =
+        tokio::time::timeout(SINK_ADMISSION_DEADLINE, send.lock()).await.map_err(|_| {
+            ClientWriteFailure(TransportError::Quic("gateway sink admission deadline".into()))
+        })?;
+    tokio::time::timeout(WRITE_DEADLINE, sink.send_frame(bytes))
+        .await
+        .map_err(|_| {
+            ClientWriteFailure(TransportError::Quic("gateway frame write deadline".into()))
+        })?
+        .map_err(ClientWriteFailure)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Admission {
     Queued,
@@ -214,18 +233,9 @@ impl PushQueue {
         self.inner.changed.notify_waiters();
     }
     async fn write(&self, send: &GatewaySendHandle, bytes: &[u8]) -> bool {
-        matches!(
-            tokio::time::timeout(WRITE_DEADLINE, async {
-                let mut sink = send.lock().await;
-                if self.is_closed() {
-                    return Err(TransportError::Quic("registration retired".into()));
-                }
-                sink.send_frame(bytes).await
-            })
-            .await,
-            Ok(Ok(()))
-        )
+        write_frame(send, bytes).await.is_ok()
     }
+
     #[cfg(test)]
     pub(crate) async fn flushed(&self) -> anyhow::Result<()> {
         tokio::time::timeout(Duration::from_secs(5), async {

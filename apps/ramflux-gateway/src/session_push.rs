@@ -98,14 +98,7 @@ pub(crate) async fn write(
     write_bytes(send, &bytes).await
 }
 async fn write_bytes(send: &GatewaySendHandle, bytes: &[u8]) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(15), async {
-        let mut sink = send.lock().await;
-        ramflux_transport::GatewaySessionFrameSink::send_frame(&mut **sink, bytes)
-            .await
-            .map_err(crate::session_response::ClientWriteFailure)
-    })
-    .await
-    .map_err(|_| Retired)??;
+    crate::push_queue::write_frame(send, bytes).await?;
     Ok(())
 }
 async fn nack(send: &GatewaySendHandle, id: &str, reason: Reason) -> anyhow::Result<()> {

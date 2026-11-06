@@ -123,3 +123,35 @@ async fn frame_atomic_sink_yields_between_deliveries() -> anyhow::Result<()> {
     hub.flushed("target").await?;
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn queue_wait_does_not_consume_write_deadline() -> anyhow::Result<()> {
+    let hub = Arc::new(crate::GatewaySessionHub::default());
+    let (events, mut received) = tokio::sync::mpsc::channel(8);
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let sender: GatewaySendHandle =
+        Arc::new(tokio::sync::Mutex::new(Box::new(StepSink { events, release: release.clone() })));
+    let mut registration = hub.register("target".into(), "session".into(), sender.clone()).await?;
+    let control = tokio::spawn(async move {
+        crate::session::write_gateway_handle(
+            &sender,
+            &ramflux_node_core::GatewayServerFrame::Heartbeat { now: 7 },
+        )
+        .await
+    });
+    assert_eq!(next(&mut received).await?["now"], 7);
+    assert!(
+        hub.send_to("target", &ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 }).await
+    );
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(14)).await;
+    release.add_permits(1);
+    control.await??;
+    assert_eq!(next(&mut received).await?["now"], 1);
+    tokio::time::advance(Duration::from_secs(14)).await;
+    assert!(!*registration.closed.borrow());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_secs(1), registration.closed.changed()).await??;
+    assert!(*registration.closed.borrow());
+    Ok(())
+}
