@@ -260,17 +260,12 @@ remains test-only. Transport dependency probes will use an isolated dedicated
 test crate; they will never enable diagnostic features in the product graph.
 
 The real-driver test `rawq_tests::receive_backing_credit_follows_last_bytes_owner`
-checks exact peer data, two views retaining one raw packet permit, held slice/clone
-through Drained and public-handle destruction, and final permit/charge release.
-Its zero-budget case independently checks no STREAM effect before allocation
-refusal. Allocation-site units exercise exact-full/refused capacity, split/cloned
-payloads in both diagnostic families, and a real CRYPTO handshake through the
-same copy path. Owner-envelope, assembler and atomicity proofs remain unissued.
-
-
-The receive backing oracle now holds views across explicit STOP_SENDING and a
-received RESET_STREAM before Drained and final handle release. Its exact-capacity assertion compares the actual
-copy capacity with the decrypted packet payload length observed in admission before
-reservation/allocation, rather than deriving both values inside the copy helper.
-A refused input records its payload length but reaches no copy allocation or STREAM
-effect. This observation adds no production activation or owner-envelope proof.
+compares physical copy capacity with decrypted payload length observed at admission
+before reservation/allocation. It checks exact peer data, two views retaining one
+raw packet permit, held slices/clones across STOP_SENDING and received RESET_STREAM,
+then Drained/public-handle destruction and final permit/charge release. A refused
+input records its payload length but reaches no copy allocation or STREAM effect.
+Allocation-site units exercise exact-full/refused capacity, split/cloned payloads
+in both diagnostic families, and a real CRYPTO handshake through the same copy path.
+Owner-envelope, assembler and atomicity proofs remain unissued; the independent
+input-length observation adds no activation or owner-envelope proof.
