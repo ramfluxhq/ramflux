@@ -358,3 +358,34 @@ Bypassing actual heap admission fails the named driver oracle. Unordered-history
 allocations, whole-packet metadata preflight, complete waiter/exhaustion coverage,
 executable profiles and allocator certificates remain later obligations. This
 component enables no production profile or activation.
+
+
+### Partial unordered receipt history hooks (PR1B-2d)
+
+Dormant unordered receive history uses the existing fallible charged ArrayRangeSet;
+the default path keeps the upstream B-tree and its intersection iterator. Storage
+beyond the two inline ranges reserves actual replacement capacity before growth,
+with old/new overlap and no independent item cap. Application chunk consumption
+does not remove receipt ranges or refund their retained backing. Union/split and
+empty-but-retained capacity keep the same actual storage charge until free/reinit.
+
+The complete history transition is admitted before compaction or mode change; a
+refused conversion preserves the ordered heap and removed receive owner. Incoming
+deduplication reserves union growth before exposing intersections. The bounded
+iterator reads those intersections without allocating a scratch list; its final
+union uses the already admitted slot. Partial iterator Drop still commits the whole
+union. Late conversion keeps the original tree until its successor is admitted.
+
+`rawq_tests::unordered_history_credit_survives_chunk_consumption` observes actual
+retained range capacity after chunks are consumed, refuses a third disjoint receipt
+while admitting only its packet payload/wrapper, and checks consumed-byte duplicate
+suppression under a fresh packet number plus later new data. It also verifies
+transition refusal preserves the receive owner and ordered descriptors, then final
+held-view lifetime through Drained. Test-only packet construction advances the peer
+packet number so normal ACK validation remains valid. Units compare intersections
+against the original tree and cover union/split, failed split/conversion, partial
+iterator destruction, clear/reinit and fresh fragments between consumed ranges.
+
+This completes the unordered-history hook component, not whole-packet transaction
+or exhaustive cross-class/waiter proof. Those remain separate parts, as do runtime
+profile enforcement, allocator certificates and activation/security gates.

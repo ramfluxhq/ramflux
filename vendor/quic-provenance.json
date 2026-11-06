@@ -616,8 +616,8 @@
         "delta": "Receive descriptor heap leases reserve before exact fallible allocation and retain old/new overlap until actual free"
       },
       "src/connection/assembler/history_tests.rs": {
-        "patched_sha256": "c64d4a2e0d9a4e988d972894159518cf7edd6f1b266dd3886d9647e94ed50760",
-        "delta": "History survives consumed chunks, duplicate/new retransmission, clear/reinit; refused transition preserves ordered heap and data"
+        "patched_sha256": "7136027263b7ca250d64a22244a1f5a71b5bd6260d8cea05ab8517916912d52a",
+        "delta": "History survives consumed chunks, duplicate/new retransmission, clear/reinit; refused transition preserves ordered heap and data; Cover fresh disjoint fragments split around already consumed receipt ranges"
       },
       "src/connection/metadata_history.rs": {
         "patched_sha256": "6a46e697cace8ca06cb0f5fb4ce81fbe2321af3678d007f56190bb683ace40b4",

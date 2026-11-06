@@ -27,3 +27,17 @@ fn refused_unordered_transition_preserves_ordered_heap_and_bytes() {
     assert_eq!(&assembler.data.peek().unwrap().bytes[..],b"x");
     assert_eq!(credit.stats().failed_class,Some(MetadataClass::UnorderedHistory));drop(assembler);assert_eq!(credit.stats().used,0);
 }
+
+#[test]
+fn overlapping_retransmit_splits_fresh_data_without_redelivering_consumed_ranges() {
+    let credit=MetadataCredit::new(1<<20);let mut assembler=Assembler::new();
+    assembler.bind(Some(credit.clone()),MetadataClass::StreamAssemblers).unwrap();assembler.ensure_ordering(false).unwrap();
+    for offset in [1,3,5] {assembler.insert(offset,Bytes::from_static(b"x"),1).unwrap();drop(assembler.read(1,false).unwrap());}
+    assembler.insert(0,Bytes::from_static(b"AxBxCxD"),7).unwrap();
+    let mut chunks=Vec::new();while let Some(chunk)=assembler.read(usize::MAX,false) {chunks.push(chunk);}
+    assert_eq!(chunks.iter().map(|c|c.offset).collect::<Vec<_>>(),[0,2,4,6]);
+    assert_eq!(chunks.iter().map(|c|c.bytes[0]).collect::<Vec<_>>(),b"ABCD");
+    assert!(chunks.iter().all(|c|c.bytes.len()==1));
+    assert_eq!(assembler.metadata_history_storage(),(64,1),"union retains allocated receipt capacity after merging");
+    drop(chunks);drop(assembler);assert_eq!(credit.stats().used,0);
+}
