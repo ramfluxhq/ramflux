@@ -20,7 +20,8 @@ impl tracing::field::Visit for Fields {
 }
 impl tracing::Subscriber for Capture {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        *metadata.level() <= tracing::Level::WARN
+        metadata.target() == "ramflux_sdk::client::dm::post_send"
+            && *metadata.level() == tracing::Level::WARN
     }
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         tracing::span::Id::from_u64(1)
@@ -28,6 +29,9 @@ impl tracing::Subscriber for Capture {
     fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
+        if !self.enabled(event.metadata()) {
+            return;
+        }
         let mut fields = Fields(String::new());
         event.record(&mut fields);
         if let Ok(mut bytes) = self.0.lock() {
