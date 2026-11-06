@@ -31,7 +31,7 @@ fn large_retired_grant_blocks_old_token_renewal_and_late_publish() {
         )
         .unwrap();
     ledger.bind(&owner, &upload, &native, now - 1).unwrap();
-    ledger.commit(&owner, &upload, now - 1).unwrap();
+    ledger.commit(&owner, &upload, 1, now - 1).unwrap();
     let signer = SigningKey::from_bytes(&[77; 32]);
     let config = AttachmentAuthority {
         source: V3_AUDIENCE_NODE.into(),

@@ -37,7 +37,7 @@ fn large_scoped_grants_bind_reference_owner_and_grantee() {
         )
         .unwrap();
     ledger.bind(&owner, &upload, &native, now - 1).unwrap();
-    ledger.commit(&owner, &upload, now - 1).unwrap();
+    ledger.commit(&owner, &upload, 1, now - 1).unwrap();
     let signer = SigningKey::from_bytes(&[77; 32]);
     let config = AttachmentAuthority {
         source: V3_AUDIENCE_NODE.into(),

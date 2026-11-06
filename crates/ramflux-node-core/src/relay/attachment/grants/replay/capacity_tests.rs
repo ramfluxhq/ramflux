@@ -43,7 +43,7 @@ fn open_committed_ledger(name: &str) -> (std::path::PathBuf, AttachmentLedger) {
         )
         .unwrap();
     ledger.bind(&owner, &UPLOAD, &native, NOW - 1).unwrap();
-    ledger.commit(&owner, &UPLOAD, NOW - 1).unwrap();
+    ledger.commit(&owner, &UPLOAD, 1, NOW - 1).unwrap();
     (path, ledger)
 }
 

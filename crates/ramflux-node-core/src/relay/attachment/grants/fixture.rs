@@ -57,7 +57,7 @@ impl RetirementFixture {
             )
             .unwrap();
         ledger.bind(&owner, &upload, &native, now - 1).unwrap();
-        ledger.commit(&owner, &upload, now - 1).unwrap();
+        ledger.commit(&owner, &upload, 1, now - 1).unwrap();
         let signer = SigningKey::from_bytes(&[77; 32]);
         let registry = ledger
             .scoped_grants(AttachmentAuthority {

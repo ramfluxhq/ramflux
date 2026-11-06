@@ -35,7 +35,7 @@ fn payload(
         )
         .unwrap();
     ledger.bind(&owner, &upload, native, now - 1).unwrap();
-    ledger.commit(&owner, &upload, now - 1).unwrap();
+    ledger.commit(&owner, &upload, 1, now - 1).unwrap();
 }
 fn registration(g: &VerifiedScopedGrant, native: &VerifiedContentManifest) -> VerifiedScopedGrant {
     let mut value = g.grant().clone();
