@@ -167,6 +167,18 @@ fn replay_proof_fields_and_cross_field_rules_refuse_without_consumption() {
         ),
         "another method cannot reopen a nonce namespace"
     );
+    for changed in [
+        AttachmentReplayProof { issued_at: now + 1, ..good },
+        AttachmentReplayProof { expires_at: now + 29, ..good },
+    ] {
+        assert!(
+            matches!(
+                f.registry.admit_operation_after_authentication(&f.grant, 1, &changed, now + 1),
+                Err(AttachmentReplayError::Replay)
+            ),
+            "changing one signed timestamp cannot reopen a consumed nonce"
+        );
+    }
     let g = f.grant.grant().grantee.clone();
     let digest = principal("node-a", &g);
     let mut routing = g.clone();
