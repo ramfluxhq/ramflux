@@ -2,6 +2,11 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant generated application schema. Native authority checks remain with their owners.
+//!
+//! Prost decoding is not canonical: it accepts reordered tags and overlong
+//! varints (for example `08 81 00` encodes layer 1). Before hashing, signing or
+//! executing peer input, P03 must reject noncanonical bytes with its descriptor
+//! scanner. Decode/re-encode cannot establish original-byte canonicality.
 // Generated protobuf/serde implementations follow upstream generator conventions.
 #[allow(clippy::all, clippy::pedantic)]
 mod generated;

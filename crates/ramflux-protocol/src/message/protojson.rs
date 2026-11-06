@@ -55,3 +55,52 @@ impl<'de, E: serde::de::DeserializeOwned + Into<i32>> serde::Deserialize<'de> fo
         deserializer.deserialize_any(EnumVisitor(std::marker::PhantomData))
     }
 }
+
+/// Generated map deserialization must preserve duplicate detection before collect.
+pub(crate) struct StrictMap<K, V>(std::collections::BTreeMap<K, V>);
+
+impl<'de, K, V> serde::Deserialize<'de> for StrictMap<K, V>
+where
+    K: serde::Deserialize<'de> + Ord,
+    V: serde::Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapVisitor<K, V>(std::marker::PhantomData<(K, V)>);
+        impl<'de, K, V> serde::de::Visitor<'de> for MapVisitor<K, V>
+        where
+            K: serde::Deserialize<'de> + Ord,
+            V: serde::Deserialize<'de>,
+        {
+            type Value = StrictMap<K, V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a protobuf JSON map with unique keys")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut values = std::collections::BTreeMap::new();
+                while let Some(key) = map.next_key::<K>()? {
+                    match values.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(map.next_value::<V>()?);
+                        }
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            return Err(serde::de::Error::custom("duplicate ProtoJSON map key"));
+                        }
+                    }
+                }
+                Ok(StrictMap(values))
+            }
+        }
+        deserializer.deserialize_map(MapVisitor(std::marker::PhantomData))
+    }
+}
+
+impl<K, V> IntoIterator for StrictMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::collections::btree_map::IntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
