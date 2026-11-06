@@ -460,7 +460,7 @@ def check_bindings(wire, crypto, custody):
 
 
 def maximum_values(name):
-    """Public size-only values: all IDs full, lists full and optionals present.
+    """Public size-only values: all IDs full, lists full and compatible optionals present.
 
     Signatures are public dummy bytes; this corpus proves codec sizes, not authority.
     """
@@ -484,6 +484,16 @@ def maximum_values(name):
             width = 32 if kind in ('opt_id','opt_key') else field['max_bytes']
             value = '11' * width
         values[field['name']] = value
+    if name == 'NativePrekeyRequest':
+        values['action'] = 'publish'
+    elif name in ('NativePrekeyLease','NativePrekeyPublish','NativePrekeyStatus'):
+        values['request']['action'] = name.removeprefix('NativePrekey').lower()
+    elif name == 'PrekeyLeaseResult':
+        values['fallback'] = 'none'
+    elif name == 'OwnerStatusEntry':
+        values.update(state='unleased', leased_at=0, deadline=0)
+    elif name == 'NativePrekeyResult':
+        values.update(result_kind='status', lease=None, refusal='', retry_scope='', retry_after_ms=0)
     return values
 
 
@@ -492,7 +502,14 @@ def maximum_size(name):
     total = 8
     for field in TYPES[name]['fields']:
         kind = field['kind']
-        if kind == 'profile':
+        key = field['name']
+        owned_sizes = {('PrekeyLeaseResult','fallback'):4, ('OwnerStatusEntry','state'):8,
+                       ('NativePrekeyRequest','action'):7, ('NativePrekeyResult','result_kind'):6,
+                       ('NativePrekeyResult','lease'):1, ('NativePrekeyResult','refusal'):0,
+                       ('NativePrekeyResult','retry_scope'):0}
+        if (name,key) in owned_sizes:
+            size = owned_sizes[name,key]
+        elif kind == 'profile':
             size = len(PROFILE.encode())
         elif kind.startswith('opt@'):
             size = 1 + maximum_size(kind[4:])
@@ -503,6 +520,8 @@ def maximum_size(name):
             size = 2 + int(count) * (4 + maximum_size(child))
         else:
             size = field['max_bytes']
+        if key == 'request':
+            size -= {'NativePrekeyLease':2, 'NativePrekeyStatus':1}.get(name,0)
         total += 6 + size
     return total
 
@@ -536,28 +555,8 @@ def check_size_policy(wire):
 
 
 def service_maximum_values(name):
-    """Maximal typed values with full IDs/lists and owned code combinations."""
-    values = maximum_values(name)
-    for field in TYPES[name]['fields']:
-        kind, key = field['kind'], field['name']
-        if kind.startswith('opt@'):
-            values[key] = service_maximum_values(kind[4:])
-        elif kind.startswith('@'):
-            values[key] = service_maximum_values(kind[1:])
-        elif kind.startswith('list'):
-            count, child = kind[4:].split('@')
-            values[key] = [service_maximum_values(child)] * int(count)
-    if name == 'NativePrekeyRequest':
-        values.update(action='publish', issued_at=(1 << 64)-301)
-    elif name in ('NativePrekeyLease','NativePrekeyPublish','NativePrekeyStatus'):
-        values['request']['action'] = name.removeprefix('NativePrekey').lower()
-    elif name == 'PrekeyLeaseResult':
-        values['fallback'] = 'none'
-    elif name == 'OwnerStatusEntry':
-        values['state'] = 'unleased'
-    elif name == 'NativePrekeyResult':
-        values.update(result_kind='status', lease=None, refusal='', retry_scope='', retry_after_ms=0)
-    return values
+    """All maxima now respect the owned code sets and field combinations."""
+    return maximum_values(name)
 
 
 def check_service_policy(wire):

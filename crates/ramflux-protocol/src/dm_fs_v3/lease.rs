@@ -330,6 +330,7 @@ impl OwnerStatusEntry {
     /// # Errors
     /// Rejects noncanonical values, counts, field sizes and total byte sizes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        self.validate_times()?;
         encode_fields(
             WireType::OwnerStatusEntry,
             &[
@@ -348,14 +349,22 @@ impl OwnerStatusEntry {
     /// Rejects malformed canonical framing, nested payloads, values and bounds.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let view = scan(WireType::OwnerStatusEntry, bytes)?;
-        Ok(Self {
+        let value = Self {
             key_id: fixed(field(view, 1)?)?,
             generation: u64::from_be_bytes(fixed(field(view, 2)?)?),
             serial: u64::from_be_bytes(fixed(field(view, 3)?)?),
             leased_at: u64::from_be_bytes(fixed(field(view, 4)?)?),
             deadline: u64::from_be_bytes(fixed(field(view, 5)?)?),
             state: OwnerPrekeyState::try_from(wire_code(field(view, 6)?)?)?,
-        })
+        };
+        value.validate_times()?;
+        Ok(value)
+    }
+    fn validate_times(&self) -> Result<()> {
+        if self.state == OwnerPrekeyState::Unleased && (self.leased_at != 0 || self.deadline != 0) {
+            return Err(DecodeError::Value);
+        }
+        Ok(())
     }
 }
 
