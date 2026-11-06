@@ -39,7 +39,7 @@ impl RetirementFixture {
             current.expires_at = now + 600;
             grant = signed(&current);
         }
-        let store = RelayRedbStore::open(path).unwrap();
+        let store = RelayRedbStore::open_at(path, now).unwrap();
         let ledger = store.attachment_ledger(super::super::AttachmentPolicy::default()).unwrap();
         let upload = [21; 32];
         let owner =

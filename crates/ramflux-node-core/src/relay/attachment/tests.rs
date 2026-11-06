@@ -263,7 +263,7 @@ fn memory_ledger(policy: AttachmentPolicy) -> AttachmentLedger {
         .create_with_backend(redb::backends::InMemoryBackend::new())
         .unwrap();
     let tx = db.begin_write().unwrap();
-    install(&tx).unwrap();
+    install(&tx, crate::now_unix_seconds()).unwrap();
     tx.commit().unwrap();
     AttachmentLedger::new(Arc::new(db), policy).unwrap()
 }
@@ -394,7 +394,7 @@ fn historical_released_records_compact_on_normal_schema_install() {
     }
     tx.commit().unwrap();
     let tx = ledger.db.begin_write().unwrap();
-    install(&tx).unwrap();
+    install(&tx, crate::now_unix_seconds()).unwrap();
     tx.commit().unwrap();
     let total = ledger.usage(&owner).unwrap();
     assert_eq!((total.used, total.reserved, total.records, total.fences), (0, 0, 0, 1));

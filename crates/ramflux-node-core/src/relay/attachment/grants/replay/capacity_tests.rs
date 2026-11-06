@@ -11,13 +11,12 @@ use crate::relay::attachment::{
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::Arc;
 
-#[test]
-fn replay_default_entry_and_byte_caps_are_reachable_through_public_admission() {
+pub(super) fn assert_default_capacity_through_public_admission() {
     let db = redb::Database::builder()
         .create_with_backend(redb::backends::InMemoryBackend::new())
         .unwrap();
     let tx = db.begin_write().unwrap();
-    crate::relay::attachment::install(&tx).unwrap();
+    crate::relay::attachment::install(&tx, 1_700_000_001).unwrap();
     tx.commit().unwrap();
     let ledger = AttachmentLedger::new(Arc::new(db), AttachmentPolicy::default()).unwrap();
     let (native, grant) = fixtures();
