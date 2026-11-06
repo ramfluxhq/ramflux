@@ -4,8 +4,10 @@
 //! Dormant large-attachment wire formats. These codecs confer no authority.
 mod grant;
 mod receipt;
+mod retirement;
 pub use grant::{ScopedAttachmentGrant, VerifiedScopedGrant};
 pub use receipt::AttachmentRegistrationReceipt;
+pub use retirement::{AttachmentRetirement, VerifiedAttachmentRetirement};
 mod media;
 mod native;
 pub use media::{MediaKeySlot, MediaManifest, MediaRef, PeerMedia, QualifiedDevice, Thumbnail};

@@ -58,7 +58,7 @@ impl Auth {
                 pop: &self.pop,
                 expected_audience_node_id: V3_AUDIENCE_NODE,
                 expected_body_hash: &self.body,
-                capability: ObjectRelayCapability::Put,
+                capability: self.proof.capability,
                 now: self.token.issued_at,
             },
             certificate: &self.token.issuer_certificate,
@@ -99,9 +99,16 @@ fn authority_token(
     (token, cache)
 }
 fn auth(native: &VerifiedContentManifest, grant: &VerifiedScopedGrant, now: u64) -> Auth {
+    auth_for(native, now, ObjectRelayCapability::Put, hex(&grant.grant().hash().unwrap()))
+}
+fn auth_for(
+    native: &VerifiedContentManifest,
+    now: u64,
+    cap: ObjectRelayCapability,
+    body: String,
+) -> Auth {
     let owner = &native.manifest().owner;
-    let body = hex(&grant.grant().hash().unwrap());
-    let mut proof = v3_signed_owner_proof(now, ObjectRelayCapability::Put).unwrap();
+    let mut proof = v3_signed_owner_proof(now, cap).unwrap();
     proof.object_id = hex(&native.manifest().object_id);
     proof.manifest_hash = Some(hex(&native.manifest().hash().unwrap()));
     proof.owner_home_node_id = owner.home_node_id.clone();
@@ -113,11 +120,8 @@ fn auth(native: &VerifiedContentManifest, grant: &VerifiedScopedGrant, now: u64)
     proof.owner_signature =
         v3_sign(&owner_authorization_proof_signing_bytes(&proof).unwrap(), owner_seed());
     let binding = owner_authorization_proof_binding_hash(&proof).unwrap();
-    let (token, cache) = authority_token(
-        native,
-        v3_owner_session_token(now, ObjectRelayCapability::Put, binding).unwrap(),
-        now,
-    );
+    let (token, cache) =
+        authority_token(native, v3_owner_session_token(now, cap, binding).unwrap(), now);
     let mut token = token;
     token.requester_device_id = owner.device_id.clone();
     token.requester_public_key = token.owner_public_key.clone();
@@ -127,7 +131,7 @@ fn auth(native: &VerifiedContentManifest, grant: &VerifiedScopedGrant, now: u64)
         owner.device_id.as_bytes(),
     );
     v3_resign_token(&mut token).unwrap();
-    let mut pop = v3_signed_pop(&token, ObjectRelayCapability::Put, owner_seed(), now).unwrap();
+    let mut pop = v3_signed_pop(&token, cap, owner_seed(), now).unwrap();
     pop.body_hash = body.clone();
     pop.signature = v3_sign(&requester_pop_signing_bytes(&pop).unwrap(), owner_seed());
     Auth { token, proof, pop, cache, body }
@@ -381,3 +385,5 @@ fn large_scoped_grants_bind_reference_owner_and_grantee() {
 }
 
 mod admission_tests;
+
+mod retirement_tests;

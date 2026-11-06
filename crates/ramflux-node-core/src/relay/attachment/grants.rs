@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 //! Durable scoped registration; operation admission and retirement are separate owners.
 mod admission;
+mod retirement;
 use super::{
     AttachmentLedger, AttachmentLedgerError, AttachmentOwner, AttachmentReservation,
     AttachmentReservationState, RECORDS, ReadableDatabase, ReadableTable, deadline, decode, encode,
@@ -17,6 +18,7 @@ use ramflux_protocol::large_attachment::{
     AttachmentRegistrationReceipt, VerifiedContentManifest, VerifiedScopedGrant,
 };
 use redb::{ReadableTableMetadata, TableDefinition};
+pub use retirement::{GrantPublicationLease, RetirementOutcome};
 use serde::{Deserialize, Serialize};
 const GRANTS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("native_attachment_scoped_grants_v1");
@@ -46,7 +48,9 @@ pub struct RegisteredAttachmentGrant {
     pub reference_id: [u8; 32],
     pub expires_at: u64,
 }
+#[derive(Clone)]
 pub struct ScopedGrantRegistry {
+    leases: std::sync::Arc<retirement::LeaseOwner>,
     ledger: AttachmentLedger,
     authority: AttachmentAuthority,
 }
@@ -63,6 +67,7 @@ pub(super) fn install(tx: &redb::WriteTransaction) -> Result<(), AttachmentLedge
     let _ = tx.open_table(CONFIG).map_err(store)?;
     let _ = tx.open_table(REFERENCES).map_err(store)?;
     admission::install(tx)?;
+    retirement::install(tx)?;
     Ok(())
 }
 fn invalid(_: impl std::fmt::Display) -> AttachmentLedgerError {
@@ -98,22 +103,40 @@ impl AttachmentLedger {
             config.insert("source", encode(&authority)?.as_slice()).map_err(store)?;
         }
         tx.commit().map_err(store)?;
-        Ok(ScopedGrantRegistry { ledger: self.clone(), authority })
+        Ok(ScopedGrantRegistry {
+            leases: retirement::owner(&self.db)?,
+            ledger: self.clone(),
+            authority,
+        })
     }
 }
 impl ScopedGrantRegistry {
     fn authenticate(
         &self,
         grant: &VerifiedScopedGrant,
-        native: &VerifiedContentManifest,
+        _native: &VerifiedContentManifest,
+        auth: &ScopedRegistrationAuth<'_>,
+    ) -> Result<(), AttachmentLedgerError> {
+        self.authenticate_owner(
+            grant.grant(),
+            ObjectRelayCapability::Put,
+            &hex(&grant.grant().hash().map_err(invalid)?),
+            auth,
+        )
+    }
+    fn authenticate_owner(
+        &self,
+        grant: &ramflux_protocol::large_attachment::ScopedAttachmentGrant,
+        capability: ObjectRelayCapability,
+        body: &str,
         auth: &ScopedRegistrationAuth<'_>,
     ) -> Result<(), AttachmentLedgerError> {
         let ctx = &auth.invocation;
-        let owner = &native.manifest().owner;
+        let owner = &grant.owner;
         let t = ctx.token;
-        if ctx.capability != ObjectRelayCapability::Put
+        if ctx.capability != capability
             || ctx.expected_audience_node_id != self.authority.source
-            || ctx.expected_body_hash != hex(&grant.grant().hash().map_err(invalid)?)
+            || ctx.expected_body_hash != body
             || ctx.issuer_public_key != auth.certificate.attestation_public_key
             || t.issuer_node_id != owner.home_node_id
             || t.owner_principal_id != owner.account_anchor
@@ -122,8 +145,8 @@ impl ScopedGrantRegistry {
             || t.owner_device_epoch != owner.device_epoch
             || t.requester_device_epoch != owner.device_epoch
             || t.owner_public_key != ramflux_protocol::encode_base64url(owner.signing_public_key)
-            || t.object_id != hex(&native.manifest().object_id)
-            || t.manifest_hash != hex(&native.manifest().hash().map_err(invalid)?)
+            || t.object_id != hex(&grant.object_id)
+            || t.manifest_hash != hex(&grant.manifest_hash)
         {
             return Err(AttachmentLedgerError::Conflict);
         }
@@ -275,6 +298,7 @@ impl ScopedGrantRegistry {
         if limit == 0 || limit > 64 {
             return Err(AttachmentLedgerError::Invalid);
         }
+        let leases = self.leases.lock()?;
         let tx = self.ledger.db.begin_write().map_err(store)?;
         clock(&tx, now)?;
         let mut index = tx.open_table(EXPIRY).map_err(store)?;
@@ -288,8 +312,13 @@ impl ScopedGrantRegistry {
             .collect::<Result<Vec<_>, _>>()?;
         let mut rows = tx.open_table(GRANTS).map_err(store)?;
         let mut refs = tx.open_table(REFERENCES).map_err(store)?;
+        let mut count = 0;
         for k in &keys {
             let id = k.get(8..).ok_or(AttachmentLedgerError::State)?;
+            let id_array: [u8; 32] = id.try_into().map_err(|_| AttachmentLedgerError::State)?;
+            if retirement::busy(&leases, &id_array) {
+                continue;
+            }
             let row: RegisteredAttachmentGrant = {
                 let v = rows.get(id).map_err(store)?.ok_or(AttachmentLedgerError::State)?;
                 decode(v.value())?
@@ -300,8 +329,10 @@ impl ScopedGrantRegistry {
             admission::release(&tx, id)?;
             rows.remove(id).map_err(store)?;
             index.remove(k.as_slice()).map_err(store)?;
+            retirement::forget(&tx, &id_array)?;
+            count += 1;
         }
-        let count = keys.len();
+
         drop(refs);
         drop(rows);
         drop(index);
