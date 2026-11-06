@@ -229,7 +229,11 @@ Clearing queued datagrams alone did not exclude a later cumulative ACK from the
 peer driver. A regression explicitly schedules that late ordinary ACK after each
 controlled ACK and checks actual wire delivery remains unchanged. Wait failures
 report the originating condition location; wait durations and protocol recovery
-parameters are unchanged.
+parameters are unchanged. Before reopening the connection driver, the fixture now
+waits for the injected ACK to own a raw mailbox slot. Socket injection alone does
+not order the independent endpoint driver before the connection driver's expired
+loss timer. Mailbox admission makes ACK processing precede that timer, preserving
+the intended third SendRanges refusal when metadata credit is frozen.
 
 PTO transfer now reserves from a borrowed sent owner before taking it, so refusal
 retains the committed box and children. Packet-populate refusal truncates only the

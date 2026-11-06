@@ -693,6 +693,10 @@ async fn metadata_send_ack_ranges_refuse_before_third_range() {
         wire.packets.lock().unwrap().push_back(packet);
         wire.held.store(false,Ordering::SeqCst);
         if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
+        // The endpoint and connection drivers are separate tasks. Keep the sender
+        // gated until the injected ACK owns a mailbox slot, so it is processed
+        // before an already-due loss timer can spend the frozen metadata credit.
+        until(||endpoint.rawq_pool().snapshot().0.items>0).await;
         gate.open();
         if index<2 {
             until(||connection.control_test(|p|p.metadata_test_send_ranges()).0==index+1).await;
