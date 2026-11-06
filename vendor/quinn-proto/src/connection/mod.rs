@@ -59,6 +59,7 @@ use packet_builder::PacketBuilder;
 
 pub(crate) mod control;
 pub(crate) mod metadata_credit;
+mod metadata_backing;
 mod metadata_scratch;
 mod loss_detection;
 pub(crate) mod metadata_vec;

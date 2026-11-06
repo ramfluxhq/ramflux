@@ -41,6 +41,9 @@ impl ResourceExhausted {
 /// Credit observation; capacity is charged once, with no second factor-two multiplier.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MetadataStats {
+    /// Actual capacity of the most recent admitted receive payload copy.
+    /// Owner/refcount-envelope allocation is not included or certified by this component.
+    pub receive_backing_capacity: usize,
     /// Frozen byte ceiling.
     pub limit: usize,
     /// Live allocation charges.
@@ -78,6 +81,7 @@ impl MetadataCredit {
         let bytes=bytes.unwrap();s.used+=bytes;s.peak=s.peak.max(s.used);
         Ok(AllocationCharge { credit:self.clone(), bytes })
     }
+    pub(crate) fn receive_backing_capacity(&self, capacity:usize){self.state.lock().unwrap().receive_backing_capacity=capacity;}
     pub(crate) fn allocated(&self) { let mut s=self.state.lock().unwrap();s.allocations=s.allocations.saturating_add(1); }
 }
 impl Drop for AllocationCharge {
@@ -100,7 +104,7 @@ impl super::Connection {
     /// Whether a fallible metadata producer has requested the terminal adapter.
     pub fn metadata_exhausted(&self) -> bool { self.metadata.as_ref().is_some_and(|m|m.stats().exhausted) }
     /// Configure dormant send metadata hooks in dependency tests only.
-    /// Receive classes remain unimplemented; no production activation or certificate.
+    /// Receive payload hooks are partial; no complete receive class, activation or certificate.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_limit(&mut self, limit: usize) -> MetadataProbe {
         assert!(self.metadata.is_none());

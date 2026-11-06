@@ -238,3 +238,32 @@ GSO count, and sends terminal close on the next poll. Focused protocol tests ass
 actual retained owners and completed prefix bytes/records independently of credit
 counters. The earlier loss/retransmit module relocations are cohesive responsibility
 extractions; their upstream source/deltas remain explicitly recorded.
+
+
+### Partial receive payload backing (PR1B-2a)
+
+Dormant metadata mode admits an exact-capacity copy of decrypted packet payload
+before allocating it. Only packets with nonempty STREAM or CRYPTO data use this
+copy. All retained frame views, returned chunks, slices and Bytes clones share
+that allocation and its raw-owner reference. Payload storage is destroyed before
+its allocation charge returns; two STREAM frames in one packet do not pay twice.
+Refused admission returns through the existing resource-close path before STREAM
+frame effects. Default mode takes the unchanged raw-backed plaintext path.
+
+This is the payload component only, not complete receive metadata enforcement.
+The separately allocated `Bytes::from_owner` owner/refcount envelope has not yet
+been certified or instrumented through final deallocation; PR1B-2b owns that work.
+Heap/descriptors, compaction copies, unordered history and whole-packet metadata
+transactions remain subsequent parts. No receipt of data, test counter or payload
+lease is a certificate for those allocations, TLS residuals or a runtime profile.
+The existing product-resolution guard is unchanged and metadata construction
+remains test-only. Transport dependency probes will use an isolated dedicated
+test crate; they will never enable diagnostic features in the product graph.
+
+The real-driver test `rawq_tests::receive_backing_credit_follows_last_bytes_owner`
+checks exact peer data, two views retaining one raw packet permit, held slice/clone
+through Drained and public-handle destruction, and final permit/charge release.
+Its zero-budget case independently checks no STREAM effect before allocation
+refusal. Allocation-site units exercise exact-full/refused capacity, split/cloned
+payloads in both diagnostic families, and a real CRYPTO handshake through the
+same copy path. Owner-envelope, assembler and atomicity proofs remain unissued.

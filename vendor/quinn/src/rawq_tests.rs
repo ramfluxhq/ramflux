@@ -801,3 +801,58 @@ async fn metadata_receiver_drop_propagates_pending_refusal(){
     timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
     drop((remote_send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }
+
+#[tokio::test]
+async fn receive_backing_credit_follows_last_bytes_owner(){
+    receive_backing_copy_refuses_before_stream().await;
+    let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
+    let raw=endpoint.rawq_pool();
+    peer.control_test_transmit(true);
+    let mut send1=peer.open_uni().await.unwrap();let mut send2=peer.open_uni().await.unwrap();
+    send1.write_chunk(bytes::Bytes::from_static(b"first")).await.unwrap();
+    send2.write_chunk(bytes::Bytes::from_static(b"second")).await.unwrap();
+    peer.control_test_transmit(false);gate.open();
+    let mut recv1=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+    let mut recv2=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+    let first=recv1.read_chunk(64,true).await.unwrap().unwrap().bytes;
+    let second=recv2.read_chunk(64,true).await.unwrap().unwrap().bytes;
+    let mut data=[first.to_vec(),second.to_vec()];data.sort();
+    assert_eq!(data,[b"first".to_vec(),b"second".to_vec()]);
+    assert_eq!(connection.stats().frame_rx.stream,2);
+    let capacity=probe.stats().receive_backing_capacity;
+    assert!(capacity>=first.len()+second.len());
+    let payload_charge=((capacity+63)&!63)+64;
+    let view=first.slice(1..);let held=view.clone();drop((first,view));
+    connection.close(0u32.into(),b"done");
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    drop((recv1,recv2,send1,send2,connection,peer,endpoint,peer_endpoint));
+    until(||probe.stats().used==payload_charge).await;
+    assert_eq!(raw.snapshot().0.items,1,"two STREAM views retain one shared packet owner");
+    assert!(!held.is_empty());assert!(!second.is_empty());
+    drop(second);
+    assert_eq!(probe.stats().used,payload_charge,"one remaining slice/clone retains the full allocation");
+    assert_eq!(raw.snapshot().0.items,1);
+    drop(held);until(||probe.stats().used==0&&raw.snapshot().0.items==0).await;
+
+
+}
+
+async fn receive_backing_copy_refuses_before_stream(){
+    // A refused copy closes before a STREAM frame or allocator effect is committed.
+    let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);
+    let probe=connection.control_test(|p|p.metadata_test_limit(0));
+    let before=connection.stats().frame_rx.stream;
+    let mut send=peer.open_uni().await.unwrap();send.write_all(b"uncommitted").await.unwrap();gate.open();
+    until(||connection.close_reason().is_some()||connection.stats().frame_rx.stream>before).await;
+    assert_eq!(connection.stats().frame_rx.stream,before,"unadmitted receive backing produced a STREAM effect");
+    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::StreamAssemblers));
+    assert_eq!(probe.stats().receive_backing_capacity,0);assert_eq!(probe.stats().allocations,0);
+    assert_eq!(connection.stats().frame_rx.stream,before,"refused payload does not produce STREAM effects");
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    drop((send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+}

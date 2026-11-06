@@ -210,12 +210,18 @@ impl Connection {
     }
 
     pub(super) fn admit_control_packet(&mut self, mut pending: PendingPacket) -> Option<Packet> {
-        if (self.control.is_some() || self.raw_owner.is_some())
+        if (self.control.is_some() || self.raw_owner.is_some() || self.metadata.is_some())
             && pending.packet.header.has_frames()
             && pending.packet.plaintext.is_none()
         {
             let bytes = mem::take(&mut pending.packet.payload).freeze();
-            pending.packet.plaintext = Some(if let Some(owner) = self.raw_owner.clone() {
+            let copied=if let Some((credit,class))=self.metadata.as_ref().and_then(|credit|metadata_backing::payload_class(&bytes).map(|class|(credit,class))){
+                match metadata_backing::copy_payload(&bytes,self.raw_owner.clone(),credit,class){
+                    Ok(copy)=>Some(copy),
+                    Err(_)=>{self.resource_exhausted(pending.now);return None;}
+                }
+            }else{None};
+            pending.packet.plaintext = Some(if let Some(copy)=copied {copy} else if let Some(owner) = self.raw_owner.clone() {
                 Bytes::from_owner(RawBacking {
                     bytes,
                     _owner: owner,
