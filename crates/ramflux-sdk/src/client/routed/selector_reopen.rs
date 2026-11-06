@@ -51,14 +51,22 @@ pub(super) struct Case {
 }
 impl Case {
     pub(super) fn new() -> Result<Self, SdkError> {
+        Self::with_consent(true)
+    }
+    pub(super) fn pending() -> Result<Self, SdkError> {
+        Self::with_consent(false)
+    }
+    fn with_consent(accepted: bool) -> Result<Self, SdkError> {
         OBSERVED.with_borrow_mut(|o| *o = Observation::default());
         let a = Fixture::new("alice", 21)?;
         let mut b = Fixture::new("bob", 31)?;
-        b.client.establish_friend_link(
-            "link",
-            a.client.owned_device_identity()?.root_commitment(),
-            b.client.owned_device_identity()?.root_commitment(),
-        )?;
+        if accepted {
+            b.client.establish_friend_link(
+                "link",
+                a.client.owned_device_identity()?.root_commitment(),
+                b.client.owned_device_identity()?.root_commitment(),
+            )?;
+        }
         let mut refs = Vec::new();
         for (n, id) in ["good-one", "refused", "good-two"].into_iter().enumerate() {
             let prepared = b.client.object_store.prepare_encrypted_object(id, id.as_bytes())?;
@@ -179,7 +187,7 @@ impl Case {
         ));
         Ok(())
     }
-    fn entry(&self, id: &str) -> Result<GatewayInboxEntry, SdkError> {
+    pub(super) fn entry(&self, id: &str) -> Result<GatewayInboxEntry, SdkError> {
         let body = serde_json::to_vec(&SdkDmAttachmentEnvelope {
             schema: "ramflux.sdk.dm_attachment_envelope.v1".into(),
             version: 1,
@@ -188,7 +196,7 @@ impl Case {
         })?;
         seal_as(&self.a, &self.b, message(id, "conversation"), &body, Route::attachments())
     }
-    async fn receive(
+    pub(super) async fn receive(
         &mut self,
         entry: &GatewayInboxEntry,
         fetch: bool,

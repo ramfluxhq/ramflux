@@ -288,6 +288,25 @@ impl RamfluxClient {
         request: &ContactRequestRecord,
         state: &str,
     ) -> Result<(), SdkError> {
+        self.decide_inbound_contact_mode(request, state, false)
+    }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "pending release candidate awaits complete caller activation")
+    )]
+    pub(crate) fn decide_inbound_contact_candidate(
+        &self,
+        request: &ContactRequestRecord,
+        state: &str,
+    ) -> Result<(), SdkError> {
+        self.decide_inbound_contact_mode(request, state, true)
+    }
+    fn decide_inbound_contact_mode(
+        &self,
+        request: &ContactRequestRecord,
+        state: &str,
+        consume_erased: bool,
+    ) -> Result<(), SdkError> {
         let db = self.account_db()?;
         if request.state == state {
             return Ok(());
@@ -343,7 +362,10 @@ impl RamfluxClient {
                     &request.contact_identity_commitment,
                 )?;
                 self.stage_contact_response(request, Decision::Accept)?;
-                self.release_contact_messages(&request.contact_identity_commitment)?;
+                self.release_contact_messages(
+                    &request.contact_identity_commitment,
+                    consume_erased,
+                )?;
             } else {
                 if state == "blocked" {
                     self.block_friend_link(&request.link_id)?;
