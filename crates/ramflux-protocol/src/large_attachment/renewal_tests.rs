@@ -366,27 +366,52 @@ fn renewal_attestation_and_pop_refuse_each_signed_binding() -> Result {
 }
 
 type Case = (String, Vec<u8>, &'static str);
+type Fe = std::result::Result<(), FormatError>;
+
+#[derive(Default)]
+struct Counts {
+    errors: usize,
+    positives: usize,
+}
+
+struct Vectors {
+    request: RenewalRequest,
+    renew: AttachmentOperation,
+    target: AttachmentOperation,
+    ro: Vec<u8>,
+    w: Vec<u8>,
+    p: Vec<u8>,
+    w_orig: ForwardAttestation,
+    p_orig: RequesterPop,
+    grant: VerifiedScopedGrant,
+}
+
+fn fixture_json() -> Result<serde_json::Value> {
+    Ok(serde_json::from_str(include_str!("../../tests/fixtures/large_attachment_renewal_v1.json"))?)
+}
 
 fn read_hex(v: &serde_json::Value) -> Result<Vec<u8>> {
     bytes(v.as_str().ok_or("hex")?)
 }
 
-/// Overwrites `value` starting `from_end` bytes before the end of `bytes`.
-fn put_from_end(bytes: &mut [u8], from_end: usize, value: &[u8]) {
-    let start = bytes.len() - from_end;
-    bytes[start..start + value.len()].copy_from_slice(value);
-}
-
-fn case(
-    cases: &mut Vec<Case>,
-    label: &str,
-    base: &[u8],
-    mutate: impl FnOnce(&mut Vec<u8>),
-    error: &'static str,
-) {
-    let mut b = base.to_vec();
-    mutate(&mut b);
-    cases.push((label.to_owned(), b, error));
+fn vectors() -> Result<Vectors> {
+    let j = fixture_json()?;
+    let r = &j["renewal"];
+    let request = fixture()?;
+    let (renew, target) = request.target()?;
+    let w = read_hex(&r["home"]["bytes_hex"])?;
+    let p = read_hex(&r["renewal_pop"]["bytes_hex"])?;
+    Ok(Vectors {
+        ro: request.operation.clone(),
+        w_orig: ForwardAttestation::decode(&w)?,
+        p_orig: RequesterPop::decode(&p)?,
+        grant: load_grant(&j)?,
+        request,
+        renew,
+        target,
+        w,
+        p,
+    })
 }
 
 fn load_grant(j: &serde_json::Value) -> Result<VerifiedScopedGrant> {
@@ -399,313 +424,794 @@ fn load_grant(j: &serde_json::Value) -> Result<VerifiedScopedGrant> {
     Ok(ScopedAttachmentGrant::decode_signed(&container)?)
 }
 
-#[test]
-fn renewal_operation_received_bytes_refuse_single_field_mutation() -> Result {
-    let request = fixture()?;
-    let (_, target) = request.target()?;
-    let target_bytes = target.canonical_bytes()?;
+/// Overwrites `value` starting `from_end` bytes before the end of `bytes`.
+fn put_from_end(bytes: &mut [u8], from_end: usize, value: &[u8]) {
+    let start = bytes.len() - from_end;
+    bytes[start..start + value.len()].copy_from_slice(value);
+}
 
-    // O: renewal (op 8) and embedded target (op 3). Shared header and tail fields.
-    let mut ops = Vec::new();
-    for (name, base) in [("renewal O", &request.operation), ("target O", &target_bytes)] {
-        let method_len = usize::try_from(u32::from_be_bytes(base[12..16].try_into()?))?;
-        let path_len_at = 16 + method_len;
-        let path_len =
-            usize::try_from(u32::from_be_bytes(base[path_len_at..path_len_at + 4].try_into()?))?;
-        let path_last = path_len_at + 4 + path_len - 1;
-        case(
-            &mut ops,
-            &format!("{name}: op kind"),
-            base,
-            |b| b[8..12].copy_from_slice(&4_u32.to_be_bytes()),
-            "operation kind",
-        );
-        case(&mut ops, &format!("{name}: version"), base, |b| b[7] = 2, "operation version");
-        case(&mut ops, &format!("{name}: method byte"), base, |b| b[16] ^= 1, "operation endpoint");
-        case(
-            &mut ops,
-            &format!("{name}: path byte"),
-            base,
-            |b| b[path_last] ^= 1,
-            "operation endpoint",
-        );
-        case(
-            &mut ops,
-            &format!("{name}: method identity over max"),
-            base,
-            |b| b[12..16].copy_from_slice(&257_u32.to_be_bytes()),
-            "native identity length",
-        );
-        case(
-            &mut ops,
-            &format!("{name}: grant epoch zero"),
-            base,
-            |b| put_from_end(b, 112, &[0; 8]),
-            "operation generation",
-        );
-        case(
-            &mut ops,
-            &format!("{name}: authority generation zero"),
-            base,
-            |b| put_from_end(b, 104, &[0; 8]),
-            "operation generation",
-        );
-        case(
-            &mut ops,
-            &format!("{name}: payload generation zero"),
-            base,
-            |b| put_from_end(b, 64, &[0; 8]),
-            "operation generation",
-        );
-        case(&mut ops, &format!("{name}: trailing byte"), base, |b| b.push(0), "operation framing");
+fn put_at(bytes: &mut [u8], at: usize, value: u64) {
+    bytes[at..at + 8].copy_from_slice(&value.to_be_bytes());
+}
+
+fn flip_from_end(bytes: &mut [u8], from_end: usize) {
+    let i = bytes.len() - from_end;
+    bytes[i] ^= 1;
+}
+
+fn mutated(base: &[u8], mutate: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let mut b = base.to_vec();
+    mutate(&mut b);
+    b
+}
+
+fn case(
+    cases: &mut Vec<Case>,
+    label: &str,
+    base: &[u8],
+    mutate: impl FnOnce(&mut Vec<u8>),
+    error: &'static str,
+) {
+    cases.push((label.to_owned(), mutated(base, mutate), error));
+}
+
+fn refuse(c: &mut Counts, label: &str, got: Fe, want: &'static str) {
+    c.errors += 1;
+    assert_eq!(got, Err(FormatError(want)), "{label}");
+}
+
+fn accept(c: &mut Counts, label: &str, got: Fe) {
+    c.positives += 1;
+    assert_eq!(got, Ok(()), "{label}");
+}
+
+fn dec_o(b: &[u8]) -> Fe {
+    AttachmentOperation::decode(b).map(|_| ())
+}
+
+fn dec_w(b: &[u8]) -> Fe {
+    ForwardAttestation::decode(b).map(|_| ())
+}
+
+fn dec_p(b: &[u8]) -> Fe {
+    RequesterPop::decode(b).map(|_| ())
+}
+
+fn run_decode(c: &mut Counts, cases: Vec<Case>, dec: fn(&[u8]) -> Fe) {
+    for (label, b, want) in cases {
+        refuse(c, &label, dec(&b), want);
     }
-    for (label, b, error) in &ops {
-        assert_eq!(AttachmentOperation::decode(b), Err(FormatError(error)), "{label}");
-    }
+}
+
+/// Byte offset just past the identity whose u32 length prefix starts at `at`.
+fn ident_end(b: &[u8], at: usize) -> Result<usize> {
+    let prefix = b.get(at..at + 4).ok_or("identity prefix")?;
+    Ok(at + 4 + usize::try_from(u32::from_be_bytes(prefix.try_into()?))?)
+}
+
+/// Replaces the identity whose length prefix starts at `at` with `content`, re-framing its length.
+fn splice_ident(b: &[u8], at: usize, content: &[u8]) -> Result<Vec<u8>> {
+    let end = ident_end(b, at)?;
+    let mut out = b[..at].to_vec();
+    out.extend(u32::try_from(content.len())?.to_be_bytes());
+    out.extend_from_slice(content);
+    out.extend_from_slice(&b[end..]);
+    Ok(out)
+}
+
+struct WPos {
+    anchor: usize,
+    device: usize,
+    device_epoch: usize,
+    key: usize,
+    home: usize,
+    grant_epoch: usize,
+    source: usize,
+    home_issuer: usize,
+    challenge: usize,
+    op_hash: usize,
+    issued: usize,
+}
+
+fn w_pos(w: &[u8]) -> Result<WPos> {
+    let anchor = 8;
+    let device = ident_end(w, anchor)?;
+    let device_epoch = ident_end(w, device)?;
+    let key = device_epoch + 8;
+    let home = key + 32;
+    let grant_epoch = ident_end(w, home)? + 64;
+    let source = grant_epoch + 8;
+    let home_issuer = ident_end(w, source)?;
+    let challenge = ident_end(w, home_issuer)?;
+    let op_hash = challenge + 32;
+    Ok(WPos {
+        anchor,
+        device,
+        device_epoch,
+        key,
+        home,
+        grant_epoch,
+        source,
+        home_issuer,
+        challenge,
+        op_hash,
+        issued: op_hash + 32,
+    })
+}
+
+fn operation_header_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let ro = &v.ro;
+    let path_at = ident_end(ro, 12)?;
+    let path_last = ident_end(ro, path_at)? - 1;
+    let mut cases: Vec<Case> = Vec::new();
+    cases.push(("O over 4096 bytes".into(), vec![0; 4097], "operation cap"));
+    case(&mut cases, "O version", ro, |b| b[7] = 2, "operation version");
+    case(&mut cases, "O trailing byte", ro, |b| b.push(0), "operation framing");
+    case(
+        &mut cases,
+        "O op kind 4",
+        ro,
+        |b| b[8..12].copy_from_slice(&4_u32.to_be_bytes()),
+        "operation kind",
+    );
+    case(&mut cases, "O method byte", ro, |b| b[16] ^= 1, "operation endpoint");
+    case(&mut cases, "O path last byte", ro, |b| b[path_last] ^= 1, "operation endpoint");
+    case(
+        &mut cases,
+        "O grant epoch zero",
+        ro,
+        |b| put_from_end(b, 112, &[0; 8]),
+        "operation generation",
+    );
+    case(
+        &mut cases,
+        "O authority generation zero",
+        ro,
+        |b| put_from_end(b, 104, &[0; 8]),
+        "operation generation",
+    );
+    case(
+        &mut cases,
+        "O payload generation zero",
+        ro,
+        |b| put_from_end(b, 64, &[0; 8]),
+        "operation generation",
+    );
+    case(&mut cases, "O method byte non-UTF-8", ro, |b| b[16] = 0xff, "native UTF8");
+    case(
+        &mut cases,
+        "O truncated by one byte",
+        ro,
+        |b| {
+            b.pop();
+        },
+        "truncated native",
+    );
+    run_decode(c, cases, dec_o);
     Ok(())
 }
 
-#[test]
-fn renewal_operation_range_received_bytes_refuse_single_field_mutation() -> Result {
-    let request = fixture()?;
-    let (_, target) = request.target()?;
-    let mut ops = Vec::new();
-    // Renewal O carries no range: any non-zero segment, offset or length is refused.
-    let renewal_base = &request.operation;
+fn operation_unused_range_rows(v: &Vectors, c: &mut Counts) {
+    let ro = &v.ro;
+    let mut cases: Vec<Case> = Vec::new();
     case(
-        &mut ops,
-        "renewal O: segment index",
-        renewal_base,
+        &mut cases,
+        "renewal O segment index",
+        ro,
         |b| put_from_end(b, 56, &1_u64.to_be_bytes()),
         "operation unused range",
     );
     case(
-        &mut ops,
-        "renewal O: offset",
-        renewal_base,
+        &mut cases,
+        "renewal O offset",
+        ro,
         |b| put_from_end(b, 48, &1_u64.to_be_bytes()),
         "operation unused range",
     );
     case(
-        &mut ops,
-        "renewal O: length",
-        renewal_base,
+        &mut cases,
+        "renewal O length",
+        ro,
         |b| put_from_end(b, 40, &1_u64.to_be_bytes()),
         "operation unused range",
     );
-    // Page op 3 carries the page range: segment 0, length 1..=256, offset+length no overflow.
-    let mut page3 = target.clone();
-    page3.op = 3;
-    page3.method = "POST".into();
-    page3.path =
-        format!("/attachments/{}/{}/missing", hex(&page3.object_id), hex(&page3.manifest_hash));
-    page3.length = 1;
-    page3.offset = 0;
-    let page_base = page3.canonical_bytes()?;
-    case(
-        &mut ops,
-        "page O (op 3): segment",
-        &page_base,
-        |b| put_from_end(b, 56, &1_u64.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut ops,
-        "page O (op 3): length zero",
-        &page_base,
-        |b| put_from_end(b, 40, &0_u64.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut ops,
-        "page O (op 3): length 257",
-        &page_base,
-        |b| put_from_end(b, 40, &257_u64.to_be_bytes()),
-        "operation page",
-    );
-    case(
-        &mut ops,
-        "page O (op 3): offset max",
-        &page_base,
-        |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()),
-        "operation page",
-    );
-    // Read op 1 range: length 1..=1 MiB and offset+length inside one segment.
-    let mut op1 = target.clone();
-    op1.op = 1;
-    op1.method = "GET".into();
-    op1.path =
-        format!("/attachments/{}/{}/segments/0", hex(&op1.object_id), hex(&op1.manifest_hash));
-    op1.length = 1;
-    op1.offset = u64::from(super::super::SEGMENT_BYTES) - 1;
-    op1.body_digest = body_digest(&[]);
-    let op1_bytes = op1.canonical_bytes()?;
-    AttachmentOperation::decode(&op1_bytes)?;
-    case(
-        &mut ops,
-        "read O: length zero",
-        &op1_bytes,
-        |b| put_from_end(b, 40, &0_u64.to_be_bytes()),
-        "operation range",
-    );
-    case(
-        &mut ops,
-        "read O: length over 1 MiB",
-        &op1_bytes,
-        |b| put_from_end(b, 40, &1_048_577_u64.to_be_bytes()),
-        "operation range",
-    );
-    case(
-        &mut ops,
-        "read O: range past segment end",
-        &op1_bytes,
-        |b| put_from_end(b, 48, &u64::from(super::super::SEGMENT_BYTES).to_be_bytes()),
-        "operation range",
-    );
-    for (label, b, error) in &ops {
-        assert_eq!(AttachmentOperation::decode(b), Err(FormatError(error)), "{label}");
-    }
-
-    Ok(())
+    run_decode(c, cases, dec_o);
 }
 
-#[test]
-fn renewal_forward_received_bytes_refuse_single_field_mutation() -> Result {
-    let j: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/large_attachment_renewal_v1.json"
-    ))?;
-    let w_bytes = read_hex(&j["renewal"]["home"]["bytes_hex"])?;
-    // W: home-signed attestation. Requester identity and trailing bytes are decode-level.
-    let mut attest = Vec::new();
-    case(&mut attest, "W: version", &w_bytes, |b| b[7] = 2, "forward version");
-    case(&mut attest, "W: trailing byte", &w_bytes, |b| b.push(0), "forward framing");
-    case(
-        &mut attest,
-        "W: requester identity over max",
-        &w_bytes,
-        |b| b[8..12].copy_from_slice(&257_u32.to_be_bytes()),
-        "native identity length",
-    );
-    case(
-        &mut attest,
-        "W: requester identity empty",
-        &w_bytes,
-        |b| b[8..12].copy_from_slice(&0_u32.to_be_bytes()),
-        "native identity length",
-    );
-    for (label, b, error) in &attest {
-        assert_eq!(ForwardAttestation::decode(b), Err(FormatError(error)), "{label}");
-    }
-
-    Ok(())
-}
-
-#[test]
-fn renewal_pop_received_bytes_refuse_single_field_mutation() -> Result {
-    let j: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/large_attachment_renewal_v1.json"
-    ))?;
-    let p_bytes = read_hex(&j["renewal"]["renewal_pop"]["bytes_hex"])?;
-    // P: fixed-length proof. Binding mismatches decode and fail at validate.
-    let mut pops = Vec::new();
-    case(&mut pops, "P: version", &p_bytes, |b| b[7] = 2, "pop version");
-    case(&mut pops, "P: trailing byte", &p_bytes, |b| b.push(0), "pop length");
-    case(
-        &mut pops,
-        "P: truncated",
-        &p_bytes,
-        |b| {
-            b.pop();
-        },
-        "pop length",
-    );
-    for (label, b, error) in &pops {
-        assert_eq!(RequesterPop::decode(b), Err(FormatError(error)), "{label}");
-    }
-    Ok(())
-}
-
-#[test]
-fn renewal_received_bytes_validate_each_binding_mismatch() -> Result {
-    let j: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/large_attachment_renewal_v1.json"
-    ))?;
-    let r = &j["renewal"];
-    let request = fixture()?;
-    let w = ForwardAttestation::decode(&read_hex(&r["home"]["bytes_hex"])?)?;
-    let p_bytes = read_hex(&r["renewal_pop"]["bytes_hex"])?;
-    let grant = load_grant(&j)?;
-    let now = w.issued_at;
-    w.validate(&request, &grant, &w.requester, &w.challenge, now)?;
-
-    let mut pops = Vec::new();
-    case(&mut pops, "P: operation hash", &p_bytes, |b| b[8] ^= 1, "pop binding");
-    case(&mut pops, "P: requester digest", &p_bytes, |b| b[40] ^= 1, "pop binding");
-    case(&mut pops, "P: forward digest", &p_bytes, |b| b[120] ^= 1, "pop binding");
-    for (label, b, error) in &pops {
-        let p = RequesterPop::decode(b)?;
-        assert_eq!(p.validate(&w, now), Err(FormatError(error)), "{label}");
-    }
-
-    // W expiry later than the grant expiry is a validate-time refusal, and the boundary is inclusive.
-    let g_exp = grant.grant().expires_at;
-    let mut late = read_hex(&r["home"]["bytes_hex"])?;
-    put_from_end(&mut late, 16, &(g_exp - 29).to_be_bytes());
-    put_from_end(&mut late, 8, &(g_exp + 1).to_be_bytes());
-    let late = ForwardAttestation::decode(&late)?;
-    assert_eq!(
-        late.validate(&request, &grant, &late.requester, &late.challenge, late.issued_at),
-        Err(FormatError("forward time"))
-    );
-    let mut edge = read_hex(&r["home"]["bytes_hex"])?;
-    put_from_end(&mut edge, 16, &(g_exp - 30).to_be_bytes());
-    put_from_end(&mut edge, 8, &g_exp.to_be_bytes());
-    let edge = ForwardAttestation::decode(&edge)?;
-    edge.validate(&request, &grant, &edge.requester, &edge.challenge, edge.issued_at)?;
-    Ok(())
-}
-
-#[test]
-fn renewal_positive_inclusive_boundaries_decode() -> Result {
-    let request = fixture()?;
-    let (_, target) = request.target()?;
-    let j: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/large_attachment_renewal_v1.json"
-    ))?;
-    let w = ForwardAttestation::decode(&read_hex(&j["renewal"]["home"]["bytes_hex"])?)?;
-
-    // Requester identity at exactly the 256-byte maximum.
-    let mut max_w = w.clone();
-    max_w.requester.account_anchor = "a".repeat(256);
-    let max_bytes = max_w.canonical_bytes()?;
-    assert_eq!(ForwardAttestation::decode(&max_bytes)?, max_w);
-
-    // Page range at offset+length == u64::MAX (no overflow) and read range ending at the segment edge.
-    let mut page = target.clone();
+fn operation_range_rows(v: &Vectors, c: &mut Counts) -> Result {
+    operation_unused_range_rows(v, c);
+    let mut page = v.target.clone();
     page.op = 3;
     page.method = "POST".into();
     page.path =
         format!("/attachments/{}/{}/missing", hex(&page.object_id), hex(&page.manifest_hash));
-    page.length = 256;
-    page.offset = u64::MAX - 256;
-    assert_eq!(AttachmentOperation::decode(&page.canonical_bytes()?)?, page);
-    let mut read = target.clone();
+    page.length = 1;
+    page.offset = 0;
+    let page = page.canonical_bytes()?;
+    let mut read = v.target.clone();
     read.op = 1;
     read.method = "GET".into();
     read.path =
         format!("/attachments/{}/{}/segments/0", hex(&read.object_id), hex(&read.manifest_hash));
-    read.length = 1_048_576;
-    read.offset = u64::from(super::super::SEGMENT_BYTES) - 1_048_576;
+    read.length = 1;
+    read.offset = 0;
     read.body_digest = body_digest(&[]);
-    assert_eq!(AttachmentOperation::decode(&read.canonical_bytes()?)?, read);
+    let read = read.canonical_bytes()?;
+    let seg = u64::from(super::super::SEGMENT_BYTES);
+    let mut cases: Vec<Case> = Vec::new();
+    case(
+        &mut cases,
+        "page segment index",
+        &page,
+        |b| put_from_end(b, 56, &1_u64.to_be_bytes()),
+        "operation page",
+    );
+    case(
+        &mut cases,
+        "page length zero",
+        &page,
+        |b| put_from_end(b, 40, &0_u64.to_be_bytes()),
+        "operation page",
+    );
+    case(
+        &mut cases,
+        "page length 257",
+        &page,
+        |b| put_from_end(b, 40, &257_u64.to_be_bytes()),
+        "operation page",
+    );
+    case(
+        &mut cases,
+        "page offset u64::MAX",
+        &page,
+        |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()),
+        "operation page",
+    );
+    case(
+        &mut cases,
+        "read length zero",
+        &read,
+        |b| put_from_end(b, 40, &0_u64.to_be_bytes()),
+        "operation range",
+    );
+    case(
+        &mut cases,
+        "read length 1 MiB + 1 at offset 0",
+        &read,
+        |b| put_from_end(b, 40, &1_048_577_u64.to_be_bytes()),
+        "operation range",
+    );
+    case(
+        &mut cases,
+        "read offset u64::MAX length 1 (overflow)",
+        &read,
+        |b| put_from_end(b, 48, &u64::MAX.to_be_bytes()),
+        "operation range",
+    );
+    case(
+        &mut cases,
+        "read range past segment end",
+        &read,
+        |b| put_from_end(b, 48, &seg.to_be_bytes()),
+        "operation range",
+    );
+    run_decode(c, cases, dec_o);
+    let read_body = mutated(&read, |b| flip_from_end(b, 32));
+    refuse(c, "read body digest", dec_o(&read_body), "read body");
+    operation_range_positives(v, c)?;
+
+    Ok(())
+}
+
+fn operation_range_positives(v: &Vectors, c: &mut Counts) -> Result {
+    let seg = u64::from(super::super::SEGMENT_BYTES);
+    // Inclusive positives: length cap, segment edge, page range edge.
+    let mut max_read = v.target.clone();
+    max_read.op = 1;
+    max_read.method = "GET".into();
+    max_read.path = read_path(&max_read);
+    max_read.length = 1_048_576;
+    max_read.offset = 0;
+    max_read.body_digest = body_digest(&[]);
+    accept(c, "read length exactly 1 MiB", dec_o(&max_read.canonical_bytes()?));
+    let mut edge_read = max_read.clone();
+    edge_read.length = 1;
+    edge_read.offset = seg - 1;
+    accept(c, "read last byte of segment", dec_o(&edge_read.canonical_bytes()?));
+    let mut max_page = v.target.clone();
+    max_page.op = 3;
+    max_page.method = "POST".into();
+    max_page.path = format!(
+        "/attachments/{}/{}/missing",
+        hex(&max_page.object_id),
+        hex(&max_page.manifest_hash)
+    );
+    max_page.length = 256;
+    max_page.offset = 0;
+    accept(c, "page length exactly 256", dec_o(&max_page.canonical_bytes()?));
+    max_page.offset = u64::MAX - 256;
+    accept(c, "page offset+length == u64::MAX", dec_o(&max_page.canonical_bytes()?));
+    Ok(())
+}
+
+fn read_path(op: &AttachmentOperation) -> String {
+    format!("/attachments/{}/{}/segments/0", hex(&op.object_id), hex(&op.manifest_hash))
+}
+
+fn identity_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let ro = &v.ro;
+    let w = &v.w;
+    let path_at = ident_end(ro, 12)?;
+    let aud_at = ident_end(ro, path_at)?;
+    let wp = w_pos(w)?;
+    let mut ocases: Vec<Case> = Vec::new();
+    for (name, at) in [("method", 12), ("path", path_at), ("audience", aud_at)] {
+        case(
+            &mut ocases,
+            &format!("O {name} length zero"),
+            ro,
+            |b| b[at..at + 4].copy_from_slice(&0_u32.to_be_bytes()),
+            "native identity length",
+        );
+        case(
+            &mut ocases,
+            &format!("O {name} length 257"),
+            ro,
+            |b| b[at..at + 4].copy_from_slice(&257_u32.to_be_bytes()),
+            "native identity length",
+        );
+    }
+    let mut wcases: Vec<Case> = Vec::new();
+    for (name, at) in [
+        ("account anchor", wp.anchor),
+        ("device id", wp.device),
+        ("home node", wp.home),
+        ("source issuer", wp.source),
+        ("home issuer", wp.home_issuer),
+    ] {
+        case(
+            &mut wcases,
+            &format!("W {name} length zero"),
+            w,
+            |b| b[at..at + 4].copy_from_slice(&0_u32.to_be_bytes()),
+            "native identity length",
+        );
+        case(
+            &mut wcases,
+            &format!("W {name} length 257"),
+            w,
+            |b| b[at..at + 4].copy_from_slice(&257_u32.to_be_bytes()),
+            "native identity length",
+        );
+    }
+    run_decode(c, ocases, dec_o);
+    run_decode(c, wcases, dec_w);
+
+    // Inclusive maxima (256 bytes). Method and path cannot be valid at 256 bytes, so they
+    // prove the length check passed by reaching the endpoint refusal.
+    let max = vec![b'a'; 256];
+    let mut method = b"POST".to_vec();
+    method.resize(256, b'x');
+    let mut path = b"/s9/attachments/renew".to_vec();
+    path.resize(256, b'x');
+    for (label, bytes) in [
+        ("O method at max", splice_ident(ro, 12, &method)?),
+        ("O path at max", splice_ident(ro, path_at, &path)?),
+    ] {
+        c.positives += 1;
+        assert_eq!(dec_o(&bytes), Err(FormatError("operation endpoint")), "{label}");
+    }
+    accept(c, "O audience at max", dec_o(&splice_ident(ro, aud_at, &max)?));
+    accept(c, "W account anchor at max", dec_w(&splice_ident(w, wp.anchor, &max)?));
+    accept(c, "W device id at max", dec_w(&splice_ident(w, wp.device, &max)?));
+    accept(c, "W source issuer at max", dec_w(&splice_ident(w, wp.source, &max)?));
+    let pair = splice_ident(&splice_ident(w, wp.home_issuer, &max)?, wp.home, &max)?;
+    accept(c, "W home node and home issuer at max", dec_w(&pair));
+    Ok(())
+}
+
+fn forward_decode_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let w = &v.w;
+    let wp = w_pos(w)?;
+    let issued: [u8; 8] = w[wp.issued..wp.issued + 8].try_into()?;
+    let iss = u64::from_be_bytes(issued);
+    let mut cases: Vec<Case> = Vec::new();
+    cases.push(("W over 2048 bytes".into(), vec![0; 2049], "forward cap"));
+    case(&mut cases, "W version", w, |b| b[7] = 2, "forward version");
+    case(&mut cases, "W trailing byte", w, |b| b.push(0), "forward framing");
+    case(
+        &mut cases,
+        "W truncated by one byte",
+        w,
+        |b| {
+            b.pop();
+        },
+        "truncated native",
+    );
+    case(&mut cases, "W device epoch zero", w, |b| put_at(b, wp.device_epoch, 0), "device epoch");
+    case(
+        &mut cases,
+        "W grant epoch zero",
+        w,
+        |b| put_at(b, wp.grant_epoch, 0),
+        "forward home binding",
+    );
+    case(
+        &mut cases,
+        "W home node differs from home issuer",
+        w,
+        |b| b[wp.home + 4] ^= 1,
+        "forward home binding",
+    );
+    case(
+        &mut cases,
+        "W lifetime zero (expires == issued)",
+        w,
+        |b| put_at(b, wp.issued + 8, iss),
+        "proof lifetime",
+    );
+    case(
+        &mut cases,
+        "W lifetime 31 seconds",
+        w,
+        |b| put_at(b, wp.issued + 8, iss + 31),
+        "proof lifetime",
+    );
+    run_decode(c, cases, dec_w);
+    accept(
+        c,
+        "W lifetime exactly 30 seconds",
+        dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 30))),
+    );
+    accept(
+        c,
+        "W lifetime exactly 1 second",
+        dec_w(&mutated(w, |b| put_at(b, wp.issued + 8, iss + 1))),
+    );
+    Ok(())
+}
+
+fn forward_validate_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let w0 = &v.w_orig;
+    let now = w0.issued_at;
+    let gexp = v.grant.grant().expires_at;
+    let wb = &v.w;
+    let p = w_pos(wb)?;
+    let ge = p.grant_epoch;
+    let rows: Vec<(&str, Vec<u8>, &'static str)> = vec![
+        ("W requester key", mutated(wb, |b| b[p.key] ^= 1), "forward request binding"),
+        ("W grant hash", mutated(wb, |b| b[ge - 64] ^= 1), "forward request binding"),
+        ("W grant id", mutated(wb, |b| b[ge - 32] ^= 1), "forward request binding"),
+        ("W grant epoch", mutated(wb, |b| b[ge + 7] = 2), "forward request binding"),
+        ("W source issuer", mutated(wb, |b| b[p.source + 4] ^= 1), "forward request binding"),
+        ("W challenge", mutated(wb, |b| b[p.challenge] ^= 1), "forward request binding"),
+        ("W operation hash", mutated(wb, |b| b[p.op_hash] ^= 1), "forward request binding"),
+        (
+            "W issued more than 5 s ahead",
+            mutated(wb, |b| {
+                put_from_end(b, 16, &(now + 6).to_be_bytes());
+                put_from_end(b, 8, &(now + 7).to_be_bytes());
+            }),
+            "forward time",
+        ),
+        (
+            "W expired at validation time",
+            mutated(wb, |b| {
+                put_from_end(b, 16, &(now - 1).to_be_bytes());
+                put_from_end(b, 8, &now.to_be_bytes());
+            }),
+            "forward time",
+        ),
+        (
+            "W expiry after grant expiry",
+            mutated(wb, |b| {
+                put_from_end(b, 16, &(gexp - 29).to_be_bytes());
+                put_from_end(b, 8, &(gexp + 1).to_be_bytes());
+            }),
+            "forward time",
+        ),
+    ];
+    for (label, bytes, want) in rows {
+        let got = ForwardAttestation::decode(&bytes)?.validate(
+            &v.request,
+            &v.grant,
+            &w0.requester,
+            &w0.challenge,
+            now,
+        );
+        refuse(c, label, got, want);
+    }
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
+    let pk = sk.verifying_key().to_bytes();
+    let sig = sk.sign(&w0.signing_bytes()?).to_bytes();
+    accept(c, "W signature verifies", w0.verify(&pk, &sig));
+    let mut bad = sig;
+    bad[0] ^= 1;
+    refuse(c, "W signature byte flip", w0.verify(&pk, &bad), "grant signature");
+
+    // Inclusive positives: issued exactly 5 s ahead, expiry exactly at grant expiry.
+    let at_skew = mutated(wb, |b| {
+        put_from_end(b, 16, &(now + 5).to_be_bytes());
+        put_from_end(b, 8, &(now + 6).to_be_bytes());
+    });
+    accept(
+        c,
+        "W issued exactly 5 s ahead",
+        ForwardAttestation::decode(&at_skew)?.validate(
+            &v.request,
+            &v.grant,
+            &w0.requester,
+            &w0.challenge,
+            now,
+        ),
+    );
+    let at_grant = mutated(wb, |b| {
+        put_from_end(b, 16, &(gexp - 30).to_be_bytes());
+        put_from_end(b, 8, &gexp.to_be_bytes());
+    });
+    accept(
+        c,
+        "W expiry exactly at grant expiry",
+        ForwardAttestation::decode(&at_grant)?.validate(
+            &v.request,
+            &v.grant,
+            &w0.requester,
+            &w0.challenge,
+            gexp - 30,
+        ),
+    );
+    accept(
+        c,
+        "W unmodified vector validates",
+        w0.validate(&v.request, &v.grant, &w0.requester, &w0.challenge, now),
+    );
+    Ok(())
+}
+
+fn pop_decode_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let pb = &v.p;
+    let iss = u64::from_be_bytes(pb[104..112].try_into()?);
+    let mut cases: Vec<Case> = Vec::new();
+    case(&mut cases, "P version", pb, |b| b[7] = 2, "pop version");
+    case(&mut cases, "P trailing byte", pb, |b| b.push(0), "pop length");
+    case(&mut cases, "P lifetime zero", pb, |b| put_at(b, 112, iss), "proof lifetime");
+    case(&mut cases, "P lifetime 31 seconds", pb, |b| put_at(b, 112, iss + 31), "proof lifetime");
+    run_decode(c, cases, dec_p);
+    accept(c, "P lifetime exactly 30 seconds", dec_p(&mutated(pb, |b| put_at(b, 112, iss + 30))));
+    accept(c, "P lifetime exactly 1 second", dec_p(&mutated(pb, |b| put_at(b, 112, iss + 1))));
+    Ok(())
+}
+
+fn pop_validate_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let w0 = &v.w_orig;
+    let now = w0.issued_at;
+    let pb = &v.p;
+    let iss = u64::from_be_bytes(pb[104..112].try_into()?);
+    let times = |issued: u64, expires: u64| {
+        mutated(pb, |b| {
+            put_at(b, 104, issued);
+            put_at(b, 112, expires);
+        })
+    };
+    let rows: Vec<(&str, Vec<u8>, u64, &'static str)> = vec![
+        ("P operation hash", mutated(pb, |b| b[8] ^= 1), now, "pop binding"),
+        ("P requester digest", mutated(pb, |b| b[40] ^= 1), now, "pop binding"),
+        ("P forward digest", mutated(pb, |b| b[120] ^= 1), now, "pop binding"),
+        ("P issued before W issued", times(iss - 1, iss + 29), now, "pop time"),
+        ("P expiry after W expiry", times(iss + 1, iss + 31), now, "pop time"),
+        ("P issued more than 5 s ahead", times(now + 6, now + 7), now, "pop time"),
+        ("P expired at validation time", times(now + 28, now + 29), now + 40, "pop time"),
+    ];
+    for (label, bytes, at, want) in rows {
+        let got = RequesterPop::decode(&bytes)?.validate(w0, at);
+        refuse(c, label, got, want);
+    }
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[83; 32]);
+    let pk = sk.verifying_key().to_bytes();
+    let p0 = &v.p_orig;
+    let sig = sk.sign(&p0.signing_bytes()?).to_bytes();
+    accept(c, "P signature verifies", p0.verify(&pk, &sig));
+    let mut bad = sig;
+    bad[0] ^= 1;
+    refuse(c, "P signature byte flip", p0.verify(&pk, &bad), "grant signature");
+    accept(
+        c,
+        "P issued exactly 5 s ahead",
+        RequesterPop::decode(&times(now + 5, now + 6))?.validate(w0, now),
+    );
+    accept(c, "P unmodified vector validates", p0.validate(w0, now));
+    Ok(())
+}
+
+fn renewal_body_rows(v: &Vectors, c: &mut Counts) -> Result {
+    let body = &v.request.body;
+    let ro = &v.ro;
+    let tid = v.target.operation_id;
+    let req =
+        |op: Vec<u8>, body: Vec<u8>| RenewalRequest { operation: op, body }.target().map(|_| ());
+    refuse(c, "renewal body over 8192 bytes", req(ro.clone(), vec![0; 8193]), "renewal body cap");
+    refuse(
+        c,
+        "renewal body version",
+        req(ro.clone(), mutated(body, |b| b[0] ^= 1)),
+        "renewal body version",
+    );
+    refuse(
+        c,
+        "renewal body trailing byte",
+        req(ro.clone(), mutated(body, |b| b.push(0))),
+        "renewal body framing",
+    );
+    refuse(
+        c,
+        "renewal body target length beyond body",
+        req(ro.clone(), mutated(body, |b| b[8..12].copy_from_slice(&u32::MAX.to_be_bytes()))),
+        "truncated native",
+    );
+    refuse(
+        c,
+        "renewal body digest",
+        req(mutated(ro, |b| flip_from_end(b, 32)), body.clone()),
+        "renewal body digest",
+    );
+    let binding: Vec<(&str, Vec<u8>)> = vec![
+        ("object id", mutated(ro, |b| flip_from_end(b, 208))),
+        ("manifest hash", mutated(ro, |b| flip_from_end(b, 176))),
+        ("grant id", mutated(ro, |b| flip_from_end(b, 144))),
+        ("grant epoch", mutated(ro, |b| put_from_end(b, 112, &2_u64.to_be_bytes()))),
+        ("authority generation", mutated(ro, |b| put_from_end(b, 104, &2_u64.to_be_bytes()))),
+        ("payload generation", mutated(ro, |b| put_from_end(b, 64, &2_u64.to_be_bytes()))),
+        ("operation id equal to target", mutated(ro, |b| put_from_end(b, 96, &tid))),
+    ];
+    for (label, op) in binding {
+        refuse(
+            c,
+            &format!("renewal target binding: {label}"),
+            req(op, body.clone()),
+            "renewal target binding",
+        );
+    }
+
+    // Renewal audience (O) and relay audience (target) are checked against the caller's source and relay.
+    let requester = v.grant.grant().grantee.clone();
+    let now = v.w_orig.issued_at;
+    let source = v.renew.audience.clone();
+    let relay = v.target.audience.clone();
+    let path_at = ident_end(ro, 12)?;
+    let aud_at = ident_end(ro, path_at)?;
+    let renew_aud =
+        RenewalRequest { operation: mutated(ro, |b| b[aud_at + 4] ^= 1), body: body.clone() };
+    refuse(
+        c,
+        "renewal O audience byte",
+        renew_aud.validate(&v.grant, &requester, &source, &relay, now),
+        "renewal audience",
+    );
+    let tb = v.target.canonical_bytes()?;
+    let t_path = ident_end(&tb, 12)?;
+    let t_aud = ident_end(&tb, t_path)?;
+    let body2 = mutated(body, |b| b[12 + t_aud + 4] ^= 1);
+    let mut renew2 = v.renew.clone();
+    renew2.body_digest = body_digest(&body2);
+    let relay_aud = RenewalRequest { operation: renew2.canonical_bytes()?, body: body2 };
+    refuse(
+        c,
+        "renewal target relay audience byte",
+        relay_aud.validate(&v.grant, &requester, &source, &relay, now),
+        "renewal audience",
+    );
+
+    // A well-formed renewal whose target is an operation 8 is refused by kind, not by binding.
+    let mut t8 = v.target.clone();
+    t8.op = 8;
+    t8.method = "POST".into();
+    t8.path = "/s9/attachments/renew".into();
+    t8.segment_index = 0;
+    t8.offset = 0;
+    t8.length = 0;
+    let mut frame = b"RFRQ".to_vec();
+    frame.extend(1_u32.to_be_bytes());
+    lp(&mut frame, &t8.canonical_bytes()?)?;
+    let mut renew8 = v.renew.clone();
+    renew8.body_digest = body_digest(&frame);
+    refuse(
+        c,
+        "renewal target kind 8",
+        req(renew8.canonical_bytes()?, frame),
+        "renewal target kind",
+    );
+    Ok(())
+}
+
+const INVENTORY_OPERATION_HEADER: usize = 11;
+const INVENTORY_OPERATION_RANGE: usize = 12;
+const INVENTORY_IDENTITY: usize = 16;
+const INVENTORY_FORWARD_DECODE: usize = 9;
+const INVENTORY_FORWARD_VALIDATE: usize = 11;
+const INVENTORY_POP_DECODE: usize = 4;
+const INVENTORY_POP_VALIDATE: usize = 8;
+const INVENTORY_RENEWAL_BODY: usize = 15;
+/// Sum of the family counts above; the pre-existing grant-level test adds 11 more refusals.
+const INVENTORY_ERROR_ROWS: usize = 86;
+
+#[test]
+fn renewal_received_bytes_operation_header_matrix() -> Result {
+    let v = vectors()?;
+    let mut c = Counts::default();
+    operation_header_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_OPERATION_HEADER);
     Ok(())
 }
 
 #[test]
+fn renewal_received_bytes_operation_range_matrix() -> Result {
+    let v = vectors()?;
+    let mut c = Counts::default();
+    operation_range_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_OPERATION_RANGE);
+    assert_eq!(c.positives, 4);
+    Ok(())
+}
+
+#[test]
+fn renewal_received_bytes_identity_matrix() -> Result {
+    let v = vectors()?;
+    let mut c = Counts::default();
+    identity_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_IDENTITY);
+    assert_eq!(c.positives, 7);
+    Ok(())
+}
+
+#[test]
+fn renewal_received_bytes_forward_matrix() -> Result {
+    let v = vectors()?;
+    let mut c = Counts::default();
+    forward_decode_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_FORWARD_DECODE);
+    let mut c = Counts::default();
+    forward_validate_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_FORWARD_VALIDATE);
+    Ok(())
+}
+
+#[test]
+fn renewal_received_bytes_pop_matrix() -> Result {
+    let v = vectors()?;
+    let mut c = Counts::default();
+    pop_decode_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_POP_DECODE);
+    let mut c = Counts::default();
+    pop_validate_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_POP_VALIDATE);
+    Ok(())
+}
+
+#[test]
+fn renewal_received_bytes_body_matrix() -> Result {
+    let v = vectors()?;
+    let mut c = Counts::default();
+    renewal_body_rows(&v, &mut c)?;
+    assert_eq!(c.errors, INVENTORY_RENEWAL_BODY);
+    Ok(())
+}
+
+#[test]
+fn renewal_inventory_total_matches_test_rows() {
+    let sum = INVENTORY_OPERATION_HEADER
+        + INVENTORY_OPERATION_RANGE
+        + INVENTORY_IDENTITY
+        + INVENTORY_FORWARD_DECODE
+        + INVENTORY_FORWARD_VALIDATE
+        + INVENTORY_POP_DECODE
+        + INVENTORY_POP_VALIDATE
+        + INVENTORY_RENEWAL_BODY;
+    assert_eq!(sum, INVENTORY_ERROR_ROWS);
+}
+
+#[test]
 fn renewal_vectors_round_trip_byte_identical() -> Result {
-    let j: serde_json::Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/large_attachment_renewal_v1.json"
-    ))?;
+    let j = fixture_json()?;
     let r = &j["renewal"];
     let request = fixture()?;
     let (renew, target) = request.target()?;
