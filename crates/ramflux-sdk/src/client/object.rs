@@ -1003,7 +1003,7 @@ impl RamfluxClient {
                 Some(prepared.object_key()),
                 ObjectRetention::OwnDeviceTransport,
             )?;
-            self.bind_history_transport_owners(
+            self.bind_history_transport_owners::<false>(
                 object_id,
                 &object.manifest_hash,
                 plaintext,
@@ -1015,7 +1015,7 @@ impl RamfluxClient {
         Ok(self.object_store.install_prepared_object(prepared))
     }
 
-    pub(super) fn bind_history_transport_owners(
+    pub(super) fn bind_history_transport_owners<const CONSUME_ERASED: bool>(
         &self,
         object_id: &str,
         manifest_hash: &str,
@@ -1054,18 +1054,30 @@ impl RamfluxClient {
                 "ramflux.object.transport.owner.v1",
                 &ramflux_protocol::canonical_json_bytes(&(object_id, manifest_hash, message_id))?,
             );
-            self.account_db()?.register_object_reference(
-                ramflux_storage::ObjectReferenceAdmission::OwnCopy,
-                &ramflux_storage::ObjectReferenceOwner {
-                    reference_hash: &hash,
-                    wire_id: object_id,
-                    manifest_hash,
-                    selector: object_id,
-                    message_id,
-                    reference: &serde_json::json!({}),
-                    metadata: &serde_json::json!({}),
-                },
-            )?;
+            let registration = self
+                .account_db()?
+                .register_object_reference(
+                    ramflux_storage::ObjectReferenceAdmission::OwnCopy,
+                    &ramflux_storage::ObjectReferenceOwner {
+                        reference_hash: &hash,
+                        wire_id: object_id,
+                        manifest_hash,
+                        selector: object_id,
+                        message_id,
+                        reference: &serde_json::json!({}),
+                        metadata: &serde_json::json!({}),
+                    },
+                )
+                .map_err(SdkError::from);
+            #[cfg(test)]
+            super::own_device_sync::historical_refusal_tests::registered(&registration);
+            match registration {
+                Ok(()) => {}
+                Err(SdkError::ObjectErased) if CONSUME_ERASED => {
+                    retire = true;
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         if retire {

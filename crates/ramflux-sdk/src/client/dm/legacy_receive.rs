@@ -187,6 +187,8 @@ impl RamfluxClient {
                 conversation_id,
                 message_id,
             );
+            #[cfg(test)]
+            super::super::routed::observe_legacy_registration(&result);
             match result {
                 Ok(()) => admitted.push(attachment.clone()),
                 Err(SdkError::ObjectErased) if consume_erased => {}
