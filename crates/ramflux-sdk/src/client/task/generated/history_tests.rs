@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    tests::{TestResult, body_variants, event},
+    tests::{TestResult, body_variants, event, event_in},
     *,
 };
 
@@ -616,6 +616,54 @@ fn generated_history_page_task_continuation_is_bound_to_prefix_task() -> TestRes
     other.history.as_mut().ok_or("history")?.events = vec![accepted];
     assert!(
         matches!(client.check_generated_task_history_page(&other, &context, prefix), Err(SdkError::TaskRefused { reason: crate::TaskRefusalCode::InvalidRequest, message }) if message == "task history page task mismatch")
+    );
+    Ok(())
+}
+
+#[test]
+fn generated_history_prefix_carriers_are_bound_to_authenticated_conversation() -> TestResult {
+    let client = client();
+    let original = fixture(&client)?;
+    let packet = original.packets.first().ok_or("packet")?;
+    let context = packet.context.clone().ok_or("context")?;
+    let committed =
+        packet.history.as_ref().ok_or("history")?.events[0].carrier.clone().ok_or("carrier")?;
+    let mut page = packet.clone();
+    page.base = 1;
+    page.history.as_mut().ok_or("history")?.events.remove(0);
+    let prefix = std::slice::from_ref(&committed);
+    page.prefix_hash = super::history::prefix_hash(prefix)?;
+    // Positive control: a same-conversation committed prefix for the same task is accepted.
+    client.check_generated_task_history_page(&page, &context, prefix)?;
+    // A validly signed carrier for the same task ID in another conversation.
+    let foreign_event = event_in(
+        "other-thread",
+        ramflux_protocol::TaskEventBody::Cancel(ramflux_protocol::TaskCancel {
+            task_id: "task".into(),
+            base_revision: 3,
+        }),
+    )?;
+    let foreign = client.decode_generated_task_carrier(
+        &client.encode_generated_task_carrier(foreign_event, "foreign".into())?,
+    )?;
+    let only_foreign_prefix = vec![foreign.clone()];
+    let mut only_foreign = page.clone();
+    only_foreign.prefix_hash = super::history::prefix_hash(&only_foreign_prefix)?;
+    let mixed_prefix = vec![committed.clone(), foreign.clone()];
+    let mut mixed = page.clone();
+    mixed.base = 2;
+    mixed.prefix_hash = super::history::prefix_hash(&mixed_prefix)?;
+    for (candidate, used_prefix) in [(&only_foreign, &only_foreign_prefix), (&mixed, &mixed_prefix)]
+    {
+        assert!(
+            matches!(client.check_generated_task_history_page(candidate, &context, used_prefix), Err(SdkError::TaskRefused { reason: crate::TaskRefusalCode::InvalidRequest, message }) if message == "task history committed prefix conversation mismatch")
+        );
+    }
+    // A page whose carrier is from another conversation is refused by the existing per-event binding.
+    let mut foreign_page = page.clone();
+    foreign_page.history.as_mut().ok_or("history")?.events[0].carrier = Some(foreign);
+    assert!(
+        matches!(client.check_generated_task_history_page(&foreign_page, &context, prefix), Err(SdkError::TaskRefused { reason: crate::TaskRefusalCode::InvalidRequest, message }) if message == "task history signer or context mismatch")
     );
     Ok(())
 }
