@@ -565,7 +565,7 @@ async fn router_async_compio_mesh_quic_accept_loop(
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
 #[derive(Clone)]
 struct RouterSubmitBridge {
     router: Arc<crate::router_runtime::RouterHandle>,
@@ -684,8 +684,9 @@ impl<T> std::future::Future for BridgeReply<T> {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+#[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
 impl RouterSubmitBridge {
+    #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
     async fn handle_json_request(
         &self,
         request: ramflux_transport::GatewayQuicRequest,
@@ -705,14 +706,14 @@ impl RouterSubmitBridge {
         body: Vec<u8>,
         total_started: std::time::Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
-    ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
         let (sender, receiver) =
-            bridge_reply_channel::<ramflux_node_core::EnvelopeSubmitResponse>();
+            bridge_reply_channel::<ramflux_node_core::SessionPushSubmitResponse>();
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
             let result = async move {
                 let envelope = serde_json::from_slice::<ramflux_protocol::Envelope>(&body)?;
-                router.submit_envelope_async_from(envelope, total_started, origin).await
+                router.submit_envelope_mesh_async_from(envelope, total_started, origin).await
             }
             .await;
             sender.send(result);
@@ -1270,6 +1271,41 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let result = runtime.block_on(receiver);
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn raw_submit_bridge_returns_committed_mesh_metadata() -> anyhow::Result<()> {
+        let (state, store, path) = crate::router_runtime::tests::test_router("compio-metadata")?;
+        let router =
+            std::sync::Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
+        let bridge = super::RouterSubmitBridge {
+            router: router.clone(),
+            tokio: tokio::runtime::Handle::current(),
+        };
+        let envelope =
+            crate::router_runtime::tests::current_envelope("bridge-envelope", "bridge-target")?;
+        let now = envelope.created_at;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bridge.submit_raw_envelope(
+                serde_json::to_vec(&envelope)?,
+                std::time::Instant::now(),
+                ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+            ),
+        )
+        .await??;
+        let point = serde_json::to_value(router.state().fetch_entry("bridge-target", 1, now)?)?;
+        let wire = serde_json::to_value(response)?;
+        assert_eq!(wire["inbox_seq"], 1);
+        assert_eq!(wire["target_delivery_id"], "bridge-target");
+        assert_eq!(wire["incarnation_id"], point["incarnation_id"]);
+        assert!(wire["incarnation_id"].as_str().is_some_and(|id| id.len() == 32));
+        assert_eq!(wire["retain_until"], point["record"]["retain_until"]);
+        assert!(wire["retain_until"].as_i64().is_some());
+        drop(bridge);
+        drop(router);
+        std::fs::remove_file(path)?;
         Ok(())
     }
 
