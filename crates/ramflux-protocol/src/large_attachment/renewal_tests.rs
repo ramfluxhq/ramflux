@@ -4,7 +4,9 @@ use super::*;
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn bytes(s: &str) -> Result<Vec<u8>> {
     s.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| Ok(u8::from_str_radix(std::str::from_utf8(p)?, 16)?))
         .collect()
 }
@@ -71,7 +73,10 @@ fn renewal_codecs_refuse_exact_bounds_and_cross_field_changes() -> Result {
     op[7] = 2;
     assert_eq!(AttachmentOperation::decode(&op), Err(FormatError("operation version")));
     for n in 0..request.operation.len() {
-        assert!(AttachmentOperation::decode(&request.operation[..n]).is_err());
+        assert_eq!(
+            AttachmentOperation::decode(&request.operation[..n]),
+            Err(FormatError("truncated native"))
+        );
     }
     let mut head = target.clone();
     head.op = 2;
@@ -144,7 +149,7 @@ fn renewal_proof_lifetime_and_requester_identity_bounds() -> Result {
     Ok(())
 }
 
-fn operation_bounds(target:&AttachmentOperation)->Result {
+fn operation_bounds(target: &AttachmentOperation) -> Result {
     for (field, error) in [
         (0, "operation kind"),
         (1, "operation endpoint"),
@@ -185,28 +190,90 @@ fn operation_bounds(target:&AttachmentOperation)->Result {
     Ok(())
 }
 #[test]
-fn renewal_attestation_and_pop_refuse_each_signed_binding()->Result {
-    let j:serde_json::Value=serde_json::from_str(include_str!("../../tests/fixtures/large_attachment_renewal_v1.json"))?;
-    let read=|v:&serde_json::Value|->Result<Vec<u8>> {bytes(v.as_str().ok_or("hex")?)};
-    let r=&j["renewal"];let w=ForwardAttestation::decode(&read(&r["home"]["bytes_hex"])?)?;
-    let p=RequesterPop::decode(&read(&r["renewal_pop"]["bytes_hex"])?)?;
-    let gbytes=read(&j["case"]["grant_unsigned_hex"])?;let mut container=b"RFC1".to_vec();container.extend(u32::try_from(gbytes.len())?.to_be_bytes());container.extend(gbytes);container.extend(64_u32.to_be_bytes());container.extend(read(&j["case"]["grant_signature_hex"])?);
-    let grant=super::super::ScopedAttachmentGrant::decode_signed(&container)?;
-    let request=fixture()?;let now=w.issued_at;w.validate(&request,&grant,&w.requester,&w.challenge,now)?;p.validate(&w,now)?;
-    for field in 0..8 {let mut bad=w.clone();match field {0=>bad.requester.signing_public_key[0]^=1,1=>bad.grant_hash[0]^=1,2=>bad.grant_id[0]^=1,3=>bad.grant_epoch+=1,4=>bad.source_issuer.push('x'),5=>bad.challenge[0]^=1,6=>bad.operation_hash[0]^=1,_=>bad.requester.home_node_id.push('x')};assert_eq!(bad.validate(&request,&grant,&w.requester,&w.challenge,now),Err(FormatError("forward request binding")));}
-    for field in 0..3 {let mut bad=p.clone();match field {0=>bad.operation_hash[0]^=1,1=>bad.requester_digest[0]^=1,_=>bad.forward_digest[0]^=1};assert_eq!(bad.validate(&w,now),Err(FormatError("pop binding")));}
-    assert_eq!(p.validate(&w,p.expires_at),Err(FormatError("pop time")));
-    let mut early=p.clone();early.issued_at-=1;early.expires_at-=1;assert_eq!(early.validate(&w,now),Err(FormatError("pop time")));
-    let mut late=p.clone();late.issued_at+=1;late.expires_at+=1;assert_eq!(late.validate(&w,now),Err(FormatError("pop time")));
-    let mut future=p.clone();future.issued_at+=6;assert_eq!(future.validate(&w,now),Err(FormatError("pop time")));
-    assert_eq!(w.validate(&request,&grant,&w.requester,&w.challenge,w.expires_at),Err(FormatError("forward time")));
-    assert_eq!(w.validate(&request,&grant,&w.requester,&w.challenge,now-6),Err(FormatError("forward time")));
-    let mut bad=w.clone();bad.grant_epoch=0;assert_eq!(bad.canonical_bytes(),Err(FormatError("forward home binding")));
-    bad=w.clone();bad.home_issuer="x".repeat(257);bad.requester.home_node_id=bad.home_issuer.clone();assert_eq!(bad.canonical_bytes(),Err(FormatError("native identity length")));
-    let mut encoded=w.canonical_bytes()?;encoded.push(0);assert_eq!(ForwardAttestation::decode(&encoded),Err(FormatError("forward framing")));
-    assert_eq!(ForwardAttestation::decode(&vec![0;2049]),Err(FormatError("forward cap")));
-    encoded=w.canonical_bytes()?;encoded[7]=2;assert_eq!(ForwardAttestation::decode(&encoded),Err(FormatError("forward version")));
-    let mut encoded=p.canonical_bytes()?;encoded.push(0);assert_eq!(RequesterPop::decode(&encoded),Err(FormatError("pop length")));
-    encoded=p.canonical_bytes()?;encoded[7]=2;assert_eq!(RequesterPop::decode(&encoded),Err(FormatError("pop version")));
+fn renewal_attestation_and_pop_refuse_each_signed_binding() -> Result {
+    let j: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/large_attachment_renewal_v1.json"
+    ))?;
+    let read = |v: &serde_json::Value| -> Result<Vec<u8>> { bytes(v.as_str().ok_or("hex")?) };
+    let r = &j["renewal"];
+    let w = ForwardAttestation::decode(&read(&r["home"]["bytes_hex"])?)?;
+    let p = RequesterPop::decode(&read(&r["renewal_pop"]["bytes_hex"])?)?;
+    let gbytes = read(&j["case"]["grant_unsigned_hex"])?;
+    let mut container = b"RFC1".to_vec();
+    container.extend(u32::try_from(gbytes.len())?.to_be_bytes());
+    container.extend(gbytes);
+    container.extend(64_u32.to_be_bytes());
+    container.extend(read(&j["case"]["grant_signature_hex"])?);
+    let grant = super::super::ScopedAttachmentGrant::decode_signed(&container)?;
+    let request = fixture()?;
+    let now = w.issued_at;
+    w.validate(&request, &grant, &w.requester, &w.challenge, now)?;
+    p.validate(&w, now)?;
+    for field in 0..8 {
+        let mut bad = w.clone();
+        match field {
+            0 => bad.requester.signing_public_key[0] ^= 1,
+            1 => bad.grant_hash[0] ^= 1,
+            2 => bad.grant_id[0] ^= 1,
+            3 => bad.grant_epoch += 1,
+            4 => bad.source_issuer.push('x'),
+            5 => bad.challenge[0] ^= 1,
+            6 => bad.operation_hash[0] ^= 1,
+            _ => bad.requester.home_node_id.push('x'),
+        };
+        assert_eq!(
+            bad.validate(&request, &grant, &w.requester, &w.challenge, now),
+            Err(FormatError("forward request binding"))
+        );
+    }
+    for field in 0..3 {
+        let mut bad = p.clone();
+        match field {
+            0 => bad.operation_hash[0] ^= 1,
+            1 => bad.requester_digest[0] ^= 1,
+            _ => bad.forward_digest[0] ^= 1,
+        };
+        assert_eq!(bad.validate(&w, now), Err(FormatError("pop binding")));
+    }
+    assert_eq!(p.validate(&w, p.expires_at), Err(FormatError("pop time")));
+    let mut early = p.clone();
+    early.issued_at -= 1;
+    early.expires_at -= 1;
+    assert_eq!(early.validate(&w, now), Err(FormatError("pop time")));
+    let mut late = p.clone();
+    late.issued_at += 1;
+    late.expires_at += 1;
+    assert_eq!(late.validate(&w, now), Err(FormatError("pop time")));
+    let mut future = p.clone();
+    future.issued_at += 6;
+    assert_eq!(future.validate(&w, now), Err(FormatError("pop time")));
+    assert_eq!(
+        w.validate(&request, &grant, &w.requester, &w.challenge, w.expires_at),
+        Err(FormatError("forward time"))
+    );
+    assert_eq!(
+        w.validate(&request, &grant, &w.requester, &w.challenge, now - 6),
+        Err(FormatError("forward time"))
+    );
+    let mut bad = w.clone();
+    bad.grant_epoch = 0;
+    assert_eq!(bad.canonical_bytes(), Err(FormatError("forward home binding")));
+    bad = w.clone();
+    bad.home_issuer = "x".repeat(257);
+    bad.requester.home_node_id = bad.home_issuer.clone();
+    assert_eq!(bad.canonical_bytes(), Err(FormatError("native identity length")));
+    let mut encoded = w.canonical_bytes()?;
+    encoded.push(0);
+    assert_eq!(ForwardAttestation::decode(&encoded), Err(FormatError("forward framing")));
+    assert_eq!(ForwardAttestation::decode(&vec![0; 2049]), Err(FormatError("forward cap")));
+    encoded = w.canonical_bytes()?;
+    encoded[7] = 2;
+    assert_eq!(ForwardAttestation::decode(&encoded), Err(FormatError("forward version")));
+    let mut encoded = p.canonical_bytes()?;
+    encoded.push(0);
+    assert_eq!(RequesterPop::decode(&encoded), Err(FormatError("pop length")));
+    encoded = p.canonical_bytes()?;
+    encoded[7] = 2;
+    assert_eq!(RequesterPop::decode(&encoded), Err(FormatError("pop version")));
     Ok(())
 }

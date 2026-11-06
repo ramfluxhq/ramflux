@@ -58,7 +58,10 @@ impl AttachmentOperation {
         if self.op == 1
             && (self.length == 0
                 || self.length > 1_048_576
-                || self.offset.checked_add(self.length).is_none_or(|end| end > u64::from(super::SEGMENT_BYTES)))
+                || self
+                    .offset
+                    .checked_add(self.length)
+                    .is_none_or(|end| end > u64::from(super::SEGMENT_BYTES)))
         {
             return Err(FormatError("operation range"));
         }
