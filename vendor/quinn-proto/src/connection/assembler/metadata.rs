@@ -95,15 +95,17 @@ mod tests {
         let old_capacity=initial.metadata_storage().0;drop(initial);
         let old_charge=((old_capacity+63)&!63)+64;
         let next_capacity=2*std::mem::size_of::<Buffer>();let next_charge=((next_capacity+63)&!63)+64;
-        // The replacement heap fits exactly, leaving no credit for the compaction copy.
-        let credit=MetadataCredit::new(old_charge+next_charge);
-        let mut assembler=Assembler::new();assembler.bind(Some(credit.clone()),MetadataClass::StreamAssemblers).unwrap();
-        assembler.insert(0,Bytes::from_static(b"abc"),3).unwrap();assembler.insert(3,Bytes::from_static(b"def"),3).unwrap();
-        assert!(assembler.defragment().is_err());assert_eq!(assembler.metadata_storage(),(old_capacity,2));
-        assert_eq!(credit.stats().used,old_charge);
-        assert_eq!(&assembler.read(usize::MAX,true).unwrap().bytes[..],b"abc");
-        assert_eq!(&assembler.read(usize::MAX,true).unwrap().bytes[..],b"def");
-        drop(assembler);assert_eq!(credit.stats().used,0);
+        // Let the replacement heap fit; then refuse either copy storage or its owner envelope.
+        for copy_allowance in [0,128] {
+            let credit=MetadataCredit::new(old_charge+next_charge+copy_allowance);
+            let mut assembler=Assembler::new();assembler.bind(Some(credit.clone()),MetadataClass::StreamAssemblers).unwrap();
+            assembler.insert(0,Bytes::from_static(b"abc"),3).unwrap();assembler.insert(3,Bytes::from_static(b"def"),3).unwrap();
+            assert!(assembler.defragment().is_err());assert_eq!(assembler.metadata_storage(),(old_capacity,2));
+            assert_eq!(credit.stats().used,old_charge);
+            assert_eq!(&assembler.read(usize::MAX,true).unwrap().bytes[..],b"abc");
+            assert_eq!(&assembler.read(usize::MAX,true).unwrap().bytes[..],b"def");
+            drop(assembler);assert_eq!(credit.stats().used,0);
+        }
     }
 }
 
@@ -125,5 +127,29 @@ mod space_tests {
         let capacities:usize=spaces.iter().map(|s|((s.crypto_stream.metadata_storage().0+63)&!63)+64).sum();
         assert_eq!(credit.stats().used,capacities);
         drop(spaces);assert_eq!(credit.stats().used,0);
+    }
+}
+
+
+#[cfg(test)]
+mod mixed_tests {
+    use super::*;
+    #[test]
+    fn mixed_kept_and_copied_gapped_chunks_share_one_exact_copy() {
+        let credit=MetadataCredit::new(1<<20);
+        let large=crate::connection::metadata_backing::copy_payload(&[42;256],None,&credit,MetadataClass::StreamAssemblers).unwrap();
+        let mut assembler=Assembler::new();assembler.bind(Some(credit.clone()),MetadataClass::StreamAssemblers).unwrap();
+        for (offset,bytes) in [(3,Bytes::from_static(b"abc")),(4,Bytes::from_static(b"bc")),(10,large),(270,Bytes::from_static(b"tail")),(276,Bytes::from_static(b"xx"))] {
+            let length=bytes.len();assembler.insert(offset,bytes,length).unwrap();
+        }
+        assembler.defragment().unwrap();
+        assert_eq!(credit.stats().receive_backing_capacity,9,"only small unique fragments are copied; large backing stays retained");
+        assert_eq!(credit.stats().receive_owner_allocations,2,"one original large owner and one shared small-fragment copy");
+        let mut chunks=Vec::new();while let Some(chunk)=assembler.read(usize::MAX,false) { chunks.push(chunk); }
+        assert_eq!(chunks.iter().map(|c|c.offset).collect::<Vec<_>>(),[3,10,270,276]);
+        assert_eq!(&chunks[0].bytes[..],b"abc");assert_eq!(&chunks[1].bytes[..],&[42;256]);
+        assert_eq!(&chunks[2].bytes[..],b"tail");assert_eq!(&chunks[3].bytes[..],b"xx");
+        drop(assembler);assert!(credit.stats().used>0,"returned chunks retain both actual payload owners");
+        drop(chunks);assert_eq!(credit.stats().used,0);
     }
 }

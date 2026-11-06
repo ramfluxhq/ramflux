@@ -608,8 +608,8 @@
         "delta": "Test-only System allocator observes actual production payload/wrapper extents and final-free barrier; Observe raw ownership retained at the actual wrapper deallocation barrier"
       },
       "src/connection/assembler/metadata.rs": {
-        "patched_sha256": "391bf561bed4cad4bc4976f80d7b15ee49cff49d279f14cfabd943c5a2de2e5c",
-        "delta": "Fallible old/new heap plus guarded-copy compaction; sorted storage retains old lease; restore original heap on refusal; independent capacity/lifetime and three-space tests"
+        "patched_sha256": "4f9fb9b66d1f451f44f93a22140de2d3632aff4dbfc7a8f2714426ea4afee1da",
+        "delta": "Fallible old/new heap plus guarded-copy compaction; sorted storage retains old lease; restore original heap on refusal; independent capacity/lifetime and three-space tests; Cover mixed large retained and small copied fragments, gaps/duplicates, and owner-envelope refusal rollback"
       },
       "src/connection/metadata_heap.rs": {
         "patched_sha256": "d98d8302de39455e73e47d940281313736fa29b20ce046a21bf02bf2791f43ea",

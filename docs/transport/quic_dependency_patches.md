@@ -253,8 +253,8 @@ This is the payload component only, not complete receive metadata enforcement.
 The separately allocated Bytes owner/refcount envelope now uses the guarded
 constructor described below; its allocation has separate admission and lifetime.
 The partial receive classes remain uncertified.
-Heap/descriptors, compaction copies, unordered history and whole-packet metadata
-transactions remain subsequent parts. No receipt of data, test counter or payload
+Heap/descriptors and compaction copies have the separate hooks below. Unordered
+history and whole-packet metadata transactions remain subsequent parts. No receipt of data, test counter or payload
 lease is a certificate for those allocations, TLS residuals or a runtime profile.
 The existing product-resolution guard is unchanged and metadata construction
 remains test-only. Transport dependency probes will use an isolated dedicated
@@ -268,8 +268,8 @@ then Drained/public-handle destruction and final permit/charge release. A refuse
 input records its payload length but reaches no copy allocation or STREAM effect.
 Allocation-site units exercise exact-full/refused capacity, split/cloned payloads
 in both diagnostic families, and a real CRYPTO handshake through the same copy path.
-Owner-envelope, assembler and atomicity proofs remain unissued; the independent
-input-length observation adds no activation or owner-envelope proof.
+Complete receive-class and whole-packet atomicity proofs remain unissued. The
+component owner/assembler oracles below add no profile certificate or activation.
 
 
 ### Pinned Bytes after-free prerequisite
@@ -330,3 +330,31 @@ zero admitted STREAM effects and zero wrapper allocations; its positive case hol
 shared Chunks/slices/clones across STOP_SENDING, RESET_STREAM and Drained. This is
 owner-component evidence; it is not a receive-class,
 allocator-profile or envelope certificate, and enables no production capability.
+
+
+### Partial receive assembler allocation hooks (PR1B-2c)
+
+Dormant STREAM and all three CRYPTO packet-space assemblers reserve actual receive
+heap capacity before fallible allocation/growth. Replacement heaps retain old and
+new leases together; converting the old heap to a sorted Vec reuses its allocation
+and keeps its lease until that storage is destroyed. Clear/reinit preserve both
+retained heap capacity and its charge, including reused receive owners.
+
+Bounded compaction plans unique fragments without modifying the original buffers,
+reserves a replacement heap, and fills one exact-capacity guarded payload copy
+directly. Large well-utilized chunks keep their existing backing; small contiguous
+fragments share slices of the copy. It creates no uncharged BytesMut split/header
+or scratch copy. Original descriptors and payload owners remain live through all
+replacement admission. Refusal restores the old heap, exact bytes and removed read
+owner before the real Quinn adapter propagates terminal resource-close. The default
+path keeps its upstream compaction behavior and thresholds.
+
+`rawq_tests::receive_assemblers_charge_compaction_peaks` exercises actual unordered
+read compaction, separately binding heap and copy limits, exact returned bytes and
+physical descriptor capacities, plus held copied views through Drained. Units cover
+both receive classes, three actual packet-space owners, replacement/copy/owner
+refusal, retained reinit capacity, and mixed kept/copied/gapped/duplicate fragments.
+Bypassing actual heap admission fails the named driver oracle. Unordered-history
+allocations, whole-packet metadata preflight, complete waiter/exhaustion coverage,
+executable profiles and allocator certificates remain later obligations. This
+component enables no production profile or activation.
