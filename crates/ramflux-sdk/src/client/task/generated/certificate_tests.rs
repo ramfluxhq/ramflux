@@ -45,6 +45,9 @@ fn fixture(
         evidence_hash: native.evidence_hash.clone(),
         signature: native.signature.clone(),
     };
+    let generated = g::TaskCertificate::decode(
+        client.encode_generated_task_certificate(&generated)?.as_slice(),
+    )?;
     Ok((native, generated))
 }
 fn client() -> RamfluxClient {
@@ -63,14 +66,26 @@ fn invalid_request(result: &Result<g::TaskCertificate, SdkError>) {
 }
 
 #[test]
-fn generated_certificates_preserve_every_native_field_and_signature() -> TestResult {
+fn generated_certificates_preserve_fields_and_use_typed_executor_signature() -> TestResult {
     let client = client();
     for committed in [false, true] {
         let (native, generated) = fixture(&client, committed)?;
         let bytes = client.encode_generated_task_certificate(&generated)?;
         let decoded = client.decode_generated_task_certificate(&bytes)?;
         assert_eq!(generated, decoded);
-        let round_trip = native_certificate(&decoded)?;
+        let mut unsigned = decoded.clone();
+        unsigned.signature.clear();
+        let domain = b"ramflux.message.typed.TaskCertificate.v1";
+        let body = unsigned.encode_to_vec();
+        let mut transcript = u32::try_from(domain.len())?.to_be_bytes().to_vec();
+        transcript.extend(domain);
+        transcript.extend(u32::try_from(body.len())?.to_be_bytes());
+        transcript.extend(body);
+        let public = client.task_signer_key("human", "device")?;
+        ramflux_crypto::verify_canonical_signature(&transcript, &decoded.signature, &public)?;
+        let mut round_trip = native_certificate(&decoded)?;
+        assert_ne!(native.signature, decoded.signature);
+        round_trip.signature.clone_from(&native.signature);
         assert_eq!(serde_json::to_value(&native)?, serde_json::to_value(&round_trip)?);
         assert_eq!(native.signing_bytes()?, round_trip.signing_bytes()?);
         assert_eq!(client.encode_generated_task_certificate(&decoded)?, bytes);
@@ -105,6 +120,15 @@ fn generated_certificates_preserve_every_native_field_and_signature() -> TestRes
                 8 => changed.decision_key.push('x'),
                 9 => changed.evidence_hash.push('x'),
                 _ => changed.signature = ramflux_protocol::encode_base64url([0; 64]),
+            }
+            if matches!(field, 2 | 3) {
+                assert!(matches!(
+                    client.encode_generated_task_certificate(&changed),
+                    Err(SdkError::TaskRefused {
+                        reason: crate::TaskRefusalCode::InvalidRequest,
+                        ..
+                    })
+                ));
             }
             let result = client.decode_generated_task_certificate(&changed.encode_to_vec());
             if field == 2 {

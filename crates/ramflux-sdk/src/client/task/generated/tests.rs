@@ -629,3 +629,12 @@ fn generated_event_step_rules_and_revision_bounds_keep_native_refusals() -> Test
     refusal(decode(&extension.encode_to_vec()), crate::TaskRefusalCode::InvalidEvent);
     Ok(())
 }
+
+// Shared event, carrier and approval scenarios for the complete Task round trip.
+#[test]
+fn t17a_event_carrier_approval_scenarios_round_trip() -> TestResult {
+    all_seven_generated_task_events_preserve_native_signing_bytes()?;
+    typed_task_carrier_binds_every_outer_field_and_native_signature()?;
+    generated_approval_preserves_native_grant_signature_and_rejects_every_grant_field()?;
+    Ok(())
+}
