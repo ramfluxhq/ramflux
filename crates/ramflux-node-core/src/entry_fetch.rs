@@ -74,8 +74,7 @@ impl OpaqueDeviceInbox {
         now: i64,
     ) -> Result<InboxEntryResponse, EntryFetchError> {
         if let (Some(core), Some(id)) = (&self.publication, self.incarnation_id(target)) {
-            let (issued, _, ranges) = core.page_view(target, id, seq.saturating_sub(1));
-            let aborted = ranges.first().is_some_and(|(lo, hi)| *lo <= seq && seq <= *hi);
+            let (issued, aborted) = core.point_view(target, id, seq);
             return self.point_view(target, seq, now, issued, aborted);
         }
         let ranges = self.aborted_ranges.get(target).map_or(&[][..], Vec::as_slice);

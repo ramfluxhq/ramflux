@@ -263,3 +263,42 @@ fn page_snapshot_copies_bounded_atomic_cursor_and_abort_view() -> Result {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn point_view_checks_one_covering_range_and_published_watermark() -> Result {
+    let root = fixture("point-abort-view");
+    let store = test_store(&root, 0, 1024 * 1024)?;
+    let id = store.initialize_inbox("target")?;
+    let core = store.publication_core()?;
+    {
+        let mut registry = lock(&core.shared);
+        let inbox = registry
+            .inboxes
+            .get_mut(&Key { target: "target".into(), incarnation: id.clone() })
+            .expect("inbox");
+        inbox.published = 1500;
+        inbox.aborted.insert(2, 5);
+        inbox.aborted.extend((3..=4096).map(|n| (2 * n, 2 * n)));
+    }
+    for (seq, expected) in [
+        (0, false),
+        (1, false),
+        (2, true),
+        (4, true),
+        (5, true),
+        (6, true),
+        (7, false),
+        (1499, false),
+        (1500, true),
+        (1502, false),
+    ] {
+        assert_eq!(core.point_view("target", &id, seq), (1500, expected));
+    }
+    assert_eq!(core.point_view("missing", &id, 2), (0, false));
+    assert_eq!(core.point_view("target", "old", 2), (0, false));
+    assert_eq!(store.inbox_status("missing")?, (None, 0));
+    drop(core);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

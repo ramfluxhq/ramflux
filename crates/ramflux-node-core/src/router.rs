@@ -691,7 +691,9 @@ impl RouterCore {
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
-        self.accept_fanout_targets(request, targets, now_unix_seconds)
+        let source = self.authenticated_envelope_source(&request.envelope)?;
+        let deliveries = self.prepare_fanout_deliveries(&request, &targets)?;
+        self.accept_fanout_targets(request, deliveries, &source, now_unix_seconds)
     }
 
     /// Acquire every frozen fanout target before accepting replay or assigning any sequence.
@@ -704,14 +706,7 @@ impl RouterCore {
         now: i64,
     ) -> Result<(ReplayAcceptedFanoutPlan, Vec<crate::SubmissionLease>), NodeCoreError> {
         let targets = self.mvp10_own_device_targets(&request)?;
-        let mut normalized = request.envelope.clone();
-        self.refresh_registered_envelope_authority(&mut normalized)?;
-        for (device, target) in &targets {
-            let mut child = normalized.clone();
-            child.target_delivery_id.clone_from(target);
-            child.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, device);
-            crate::check_entry_bound(&child)?;
-        }
+        let deliveries = self.prepare_fanout_deliveries(&request, &targets)?;
         for (_, target) in &targets {
             self.prepare_publication_target(store, target)?;
         }
@@ -738,34 +733,39 @@ impl RouterCore {
         if let Some(core) = self.publication.get() {
             crate::router_store::publication::operation::reserve_targets(core, &identities)?;
         }
-        Ok((self.accept_fanout_targets(request, targets, now)?, leases))
+        Ok((self.accept_fanout_targets(request, deliveries, &source, now)?, leases))
+    }
+    fn prepare_fanout_deliveries(
+        &self,
+        request: &ItestMvp10OwnDeviceFanoutRequest,
+        targets: &[(String, String)],
+    ) -> Result<Vec<ReplayAcceptedFanoutDelivery>, NodeCoreError> {
+        let mut normalized = request.envelope.clone();
+        self.refresh_registered_envelope_authority(&mut normalized)?;
+        targets
+            .iter()
+            .map(|(device_id, target_delivery_id)| {
+                let mut envelope = normalized.clone();
+                envelope.target_delivery_id.clone_from(target_delivery_id);
+                envelope.envelope_id =
+                    mvp10_fanout_envelope_id(&request.envelope.envelope_id, device_id);
+                crate::check_entry_bound(&envelope)?;
+                Ok(ReplayAcceptedFanoutDelivery {
+                    device_id: device_id.clone(),
+                    target_delivery_id: target_delivery_id.clone(),
+                    envelope,
+                })
+            })
+            .collect()
     }
     fn accept_fanout_targets(
         &self,
         request: ItestMvp10OwnDeviceFanoutRequest,
-        targets: Vec<(String, String)>,
+        deliveries: Vec<ReplayAcceptedFanoutDelivery>,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
-        let source = self.authenticated_envelope_source(&request.envelope)?;
-        let mut normalized = request.envelope.clone();
-        self.refresh_registered_envelope_authority(&mut normalized)?;
-        for (device, target) in &targets {
-            let mut child = normalized.clone();
-            child.target_delivery_id.clone_from(target);
-            child.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, device);
-            crate::check_entry_bound(&child)?;
-        }
-        self.check_envelope_replay_once(&source, &request.envelope, now_unix_seconds)?;
-        let deliveries = targets
-            .into_iter()
-            .map(|(device_id, target_delivery_id)| {
-                let mut envelope = normalized.clone();
-                envelope.target_delivery_id.clone_from(&target_delivery_id);
-                envelope.envelope_id =
-                    mvp10_fanout_envelope_id(&request.envelope.envelope_id, &device_id);
-                ReplayAcceptedFanoutDelivery { device_id, target_delivery_id, envelope }
-            })
-            .collect();
+        self.check_envelope_replay_once(source, &request.envelope, now_unix_seconds)?;
         Ok(ReplayAcceptedFanoutPlan {
             principal_id: request.principal_id,
             source_device_id: request.source_device_id,

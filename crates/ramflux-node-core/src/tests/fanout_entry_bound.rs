@@ -101,3 +101,52 @@ fn legacy_retry(
     assert_eq!(store.sender_retry_registry_size(), 0);
     Ok(())
 }
+
+#[test]
+fn legacy_fanout_prepares_and_measures_each_child_once() -> Result {
+    for mode in 0..=1 {
+        for leased in [false, true] {
+            let root = temp_store_path(&format!("legacy-fanout-once-{mode}-{leased}"))?;
+            let store = crate::publication::open_durability_fixture(&root, mode)?;
+            let router = RouterCore::new();
+            store.bootstrap_router(&router)?;
+            for (device, seed) in [("source", 601), ("left", 602)] {
+                let mut registration =
+                    registration_request(&router, "fanout", device, seed, None, device)?;
+                registration.target_delivery_id = format!("target_{device}");
+                registration.session_id = format!("session_{device}");
+                router.mvp1_register_identity(&registration)?;
+            }
+            let mut raw = envelope("legacy-once", "unused", DeliveryClass::SelfDeviceControl);
+            raw.created_at = i64::try_from(crate::now_unix_seconds())?;
+            raw.encrypted_payload = "x".repeat(64 * 1024);
+            let envelope = signed_registered_envelope(raw, "fanout", "source", 601)?;
+            let now = envelope.created_at;
+            let request = ItestMvp10OwnDeviceFanoutRequest {
+                principal_id: "fanout".into(),
+                source_device_id: "source".into(),
+                envelope,
+            };
+            let mut child = request.envelope.clone();
+            router.refresh_registered_envelope_authority(&mut child)?;
+            child.target_delivery_id = "target_left".into();
+            child.envelope_id = mvp10_fanout_envelope_id(&request.envelope.envelope_id, "left");
+            let expected = serde_json::to_vec(&serde_json::json!({"inbox_seq":u64::MAX,"target_delivery_id":child.target_delivery_id,"envelope":child}))?.len();
+            crate::entry_bound::SIZED_BYTES.with(|count| count.set(0));
+            let (plan, leases) = if leased {
+                crate::publication::capture(|| router.accept_leased_fanout(request, &store, now))?
+                    .published_blocking()??
+            } else {
+                (router.accept_own_device_fanout_replay(request, now)?, Vec::new())
+            };
+            let measured = crate::entry_bound::SIZED_BYTES.with(std::cell::Cell::get);
+            assert_eq!(plan.deliveries.len(), 1);
+            assert_eq!(
+                measured, expected,
+                "actual serializer bytes: one normalized child per check"
+            );
+            drop(leases);
+        }
+    }
+    Ok(())
+}

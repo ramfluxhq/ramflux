@@ -7,39 +7,22 @@ use serde::Serialize;
 use std::io;
 
 pub const ENTRY_FRAME_BYTE_CAP: usize = 1_048_576;
-const WIDEST_INCARNATION: &str = "ffffffffffffffffffffffffffffffff";
+// Exact fixed JSON bytes around the WireEntry slot. Empty slots below contribute
+// no entry bytes; the independent wire oracle checks all three complete shapes.
+const LEGACY_OVERHEAD: usize = r#"{"frame_type":"deliver","entry":}"#.len();
+const CAPABLE_OVERHEAD: usize = r#"{"frame_type":"deliver","incarnation_id":"ffffffffffffffffffffffffffffffff","entry":,"retain_until":-9223372036854775808}"#.len();
+const ENTRY_OVERHEAD: usize = r#"{"frame_type":"entry","incarnation_id":"ffffffffffffffffffffffffffffffff","record":{"entry":,"retain_until":-9223372036854775808}}"#.len();
 #[derive(Serialize)]
 struct WireEntry<'a> {
     inbox_seq: u64,
     target_delivery_id: &'a str,
     envelope: &'a ramflux_protocol::Envelope,
 }
-#[derive(Serialize)]
-struct Record<'a> {
-    entry: WireEntry<'a>,
-    retain_until: i64,
-}
-#[derive(Serialize)]
-struct LegacyDeliver<'a> {
-    frame_type: &'static str,
-    entry: WireEntry<'a>,
-}
-#[derive(Serialize)]
-struct CapableDeliver<'a> {
-    frame_type: &'static str,
-    incarnation_id: &'static str,
-    entry: WireEntry<'a>,
-    retain_until: i64,
-}
-#[derive(Serialize)]
-struct EntryReply<'a> {
-    frame_type: &'static str,
-    incarnation_id: &'static str,
-    record: Record<'a>,
-}
 struct Count(usize);
 impl io::Write for Count {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        SIZED_BYTES.with(|count| count.set(count.get() + bytes.len()));
         self.0 = self
             .0
             .checked_add(bytes.len())
@@ -65,19 +48,9 @@ fn wire(envelope: &ramflux_protocol::Envelope) -> WireEntry<'_> {
 pub fn single_entry_frame_size(
     envelope: &ramflux_protocol::Envelope,
 ) -> Result<usize, NodeCoreError> {
-    let legacy = serialized_size(&LegacyDeliver { frame_type: "deliver", entry: wire(envelope) })?;
-    let capable = serialized_size(&CapableDeliver {
-        frame_type: "deliver",
-        incarnation_id: WIDEST_INCARNATION,
-        entry: wire(envelope),
-        retain_until: i64::MIN,
-    })?;
-    let entry = serialized_size(&EntryReply {
-        frame_type: "entry",
-        incarnation_id: WIDEST_INCARNATION,
-        record: Record { entry: wire(envelope), retain_until: i64::MIN },
-    })?;
-    Ok(legacy.max(capable).max(entry))
+    serialized_size(&wire(envelope))?
+        .checked_add(LEGACY_OVERHEAD.max(CAPABLE_OVERHEAD).max(ENTRY_OVERHEAD))
+        .ok_or_else(|| NodeCoreError::ItestJson("frame size overflow".into()))
 }
 /// Refuse a new delivery that cannot fit every downstream single-entry shape.
 /// # Errors
@@ -91,3 +64,6 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+thread_local! { pub(crate) static SIZED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }

@@ -412,6 +412,20 @@ impl PublicationCore {
             .map_or((0, 0), |inbox| (inbox.published, inbox.committed_settled.min(inbox.published)))
     }
 
+    /// Published issued and one predecessor lookup, without allocating an abort snapshot.
+    pub(crate) fn point_view(&self, target: &str, incarnation: &str, seq: u64) -> (u64, bool) {
+        let registry = lock(&self.shared);
+        registry
+            .inboxes
+            .get(&Key { target: target.into(), incarnation: incarnation.into() })
+            .map_or((0, false), |inbox| {
+                let aborted = seq > 0
+                    && seq <= inbox.published
+                    && inbox.aborted.range(..=seq).next_back().is_some_and(|(_, hi)| *hi >= seq);
+                (inbox.published, aborted)
+            })
+    }
+
     /// Copy a bounded page view atomically; callers walk after releasing the registry.
     pub(crate) fn page_view(
         &self,

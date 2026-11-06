@@ -26,3 +26,20 @@ fn downstream_entry_bound_matches_actual_wire_shapes() -> Result<(), Box<dyn std
     }
     Ok(())
 }
+
+#[test]
+fn single_entry_bound_serializes_envelope_once() -> Result<(), Box<dyn std::error::Error>> {
+    let mut envelope = entry(1).envelope;
+    envelope.encrypted_payload = "x".repeat(64 * 1024);
+    envelope.ext.ext.insert("escaped".into(), serde_json::json!("\"\\\n".repeat(30)));
+    let expected_wire = serde_json::to_vec(&serde_json::json!({"inbox_seq":u64::MAX,"target_delivery_id":envelope.target_delivery_id,"envelope":envelope}))?.len();
+    SIZED_BYTES.with(|count| count.set(0));
+    let size = single_entry_frame_size(&envelope)?;
+    assert_eq!(
+        SIZED_BYTES.with(std::cell::Cell::get),
+        expected_wire,
+        "actual counting-writer bytes: one WireEntry"
+    );
+    assert_eq!(size, independent_size(&envelope));
+    Ok(())
+}
