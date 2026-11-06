@@ -50,3 +50,13 @@ pub use bootstrap::{
 };
 #[cfg(test)]
 mod initiator_tests;
+
+mod recipient;
+pub use recipient::{
+    NativeRecipientHandoff, NativeRecipientInput, NativeSelectedOpk, NativeSelectedSpk,
+    native_recipient,
+};
+#[cfg(test)]
+mod recipient_tests;
+#[cfg(test)]
+mod secret_tests;

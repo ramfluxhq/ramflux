@@ -304,3 +304,15 @@ fn dm_fs_v3_hkdf_seeded_differential_primitives() -> Result {
     }
     Ok(())
 }
+
+/// Reuse the actual-state HKDF observer for both native bootstrap callers.
+pub(super) fn native_cleanup_contract(
+    ikm: usize,
+    info: usize,
+    steps: usize,
+    run: impl FnOnce() -> Result,
+) -> Result {
+    let events = capture(run)?;
+    assert_erased(events, &expected(ikm, 32, info, steps));
+    Ok(())
+}
