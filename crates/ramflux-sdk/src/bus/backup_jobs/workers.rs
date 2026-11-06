@@ -398,14 +398,6 @@ impl BackupJobs {
         job: &BackupJob,
         secret: Zeroizing<String>,
     ) -> Result<(), BackupFailure> {
-        self.verify_archive_mode(job, secret, true)
-    }
-    pub(super) fn verify_archive_mode(
-        &self,
-        job: &BackupJob,
-        secret: Zeroizing<String>,
-        candidate: bool,
-    ) -> Result<(), BackupFailure> {
         let cancel =
             self.cancellation(&job.job_id).map_err(|_| failure(BackupFailureCode::Interrupted))?;
         let file =
@@ -464,7 +456,7 @@ impl BackupJobs {
             &path,
             &AccountDbKey::from_bytes(metadata.database_key),
             &counts,
-            input_mode(candidate),
+            ramflux_storage::BackupOpenMode::PreNormalization,
         )?;
         check_opened_input(&db)?;
         db.rekey(&key).map_err(|error| restore_storage_error(&error))?;
@@ -474,20 +466,11 @@ impl BackupJobs {
         {
             return Err(failure(BackupFailureCode::Tampered));
         }
-        let checks = self.verify_files_mode(job, &db, &cancel, &counts, candidate)?;
+        let checks = self.verify_files_mode(job, &db, &cancel, &counts, true)?;
         let original_input = db.original_input().clone();
         drop(db);
-        let preview = if candidate {
-            self.archive_preview_mode(
-                &metadata,
-                &path,
-                &key,
-                (context.created_at, &job.job_id),
-                true,
-            )?
-        } else {
-            self.archive_preview(&metadata, &path, &key, context.created_at, &job.job_id)?
-        };
+        let preview =
+            self.archive_preview(&metadata, &path, &key, context.created_at, &job.job_id)?;
         format::save_metadata(&directory.join("identity.sealed"), &master, &metadata)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         std::fs::File::open(&directory)
@@ -515,17 +498,6 @@ impl BackupJobs {
         created_at: u64,
         job_id: &str,
     ) -> Result<BackupArchivePreview, BackupFailure> {
-        self.archive_preview_mode(metadata, incoming, key, (created_at, job_id), true)
-    }
-    fn archive_preview_mode(
-        &self,
-        metadata: &Metadata,
-        incoming: &std::path::Path,
-        key: &AccountDbKey,
-        origin: (u64, &str),
-        candidate: bool,
-    ) -> Result<BackupArchivePreview, BackupFailure> {
-        let (created_at, job_id) = origin;
         let (id, merge) = if let format::Identity::Native { native } = &metadata.identity {
             let target = self.check_existing_native_identity(native)?;
             let merge = target.is_some();
@@ -544,11 +516,7 @@ impl BackupJobs {
         } else {
             (
                 metadata.identity.account_id().to_owned(),
-                if candidate {
-                    self.check_existing_identity_mode(metadata, incoming, key, true)?
-                } else {
-                    self.check_existing_identity(metadata, incoming, key)?
-                },
+                self.check_existing_identity(metadata, incoming, key)?,
             )
         };
         Ok(BackupArchivePreview {
@@ -563,15 +531,6 @@ impl BackupJobs {
         metadata: &Metadata,
         incoming: &std::path::Path,
         key: &AccountDbKey,
-    ) -> Result<bool, BackupFailure> {
-        self.check_existing_identity_mode(metadata, incoming, key, true)
-    }
-    pub(super) fn check_existing_identity_mode(
-        &self,
-        metadata: &Metadata,
-        incoming: &std::path::Path,
-        key: &AccountDbKey,
-        candidate: bool,
     ) -> Result<bool, BackupFailure> {
         let manifest =
             metadata.identity.legacy().map_err(|_| failure(BackupFailureCode::RootConflict))?;
@@ -612,7 +571,7 @@ impl BackupJobs {
                     crate::SdkError::Storage(error) => restore_storage_error(&error),
                     _ => failure(BackupFailureCode::Unreadable),
                 })?;
-                super::install::open_live_stage(&path, &local_key, candidate)
+                super::install::open_live_stage(&path, &local_key)
                     .map_err(|error| restore_storage_error(&error))?
                     .check_backup_pins(incoming, key)
                     .map_err(|_| failure(BackupFailureCode::RootConflict))?;
@@ -701,14 +660,6 @@ pub(super) fn open_checked_input(
         return Err(failure(BackupFailureCode::Tampered));
     }
     Ok(db)
-}
-
-fn input_mode(candidate: bool) -> ramflux_storage::BackupOpenMode {
-    if candidate {
-        ramflux_storage::BackupOpenMode::PreNormalization
-    } else {
-        ramflux_storage::BackupOpenMode::Normalized
-    }
 }
 
 fn check_database_size(

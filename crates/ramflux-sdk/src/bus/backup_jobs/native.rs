@@ -192,9 +192,9 @@ impl BackupJobs {
         job: &BackupJob,
         staging: &VerifiedBackupStaging,
         metadata: &Metadata,
-        options: (Option<super::NativeInstallKey>, Option<super::NativeRestoreSetup>, bool),
+        options: (Option<super::NativeInstallKey>, Option<super::NativeRestoreSetup>),
     ) -> Result<(crate::backup::BackupInstalledAccount, BackupCounts, BackupCounts), SdkError> {
-        let (local_key, setup, candidate) = options;
+        let (local_key, setup) = options;
         let Identity::Native { native } = &metadata.identity else {
             return Err(refused("root_conflict"));
         };
@@ -217,7 +217,6 @@ impl BackupJobs {
         let source = super::install::open_live_stage(
             &self.data_root.join(&previous.db_relative_path),
             &local_key,
-            candidate,
         )?;
         install_step("pins", source.check_backup_pins(&incoming, &incoming_key))?;
         let parent = self.native_generation_parent(id, &incoming)?;
@@ -236,23 +235,13 @@ impl BackupJobs {
         let mut merged = source.reopen_restore_input(
             &target,
             &local_key,
-            if candidate {
-                ramflux_storage::BackupOpenMode::PreNormalization
-            } else {
-                ramflux_storage::BackupOpenMode::Normalized
-            },
+            ramflux_storage::BackupOpenMode::PreNormalization,
         )?;
         let report = install_step(
             "merge",
-            if candidate {
-                merged.merge_native_backup_candidate(&incoming, &incoming_key, || Ok(()))
-            } else {
-                merged.merge_native_backup(&incoming, &incoming_key, || Ok(()))
-            },
+            merged.merge_native_backup_candidate(&incoming, &incoming_key, || Ok(())),
         )?;
-        if candidate {
-            merged = strict_candidate(&merged, &target, &local_key)?;
-        }
+        merged = strict_candidate(&merged, &target, &local_key)?;
         install_step("integrity", merged.check_integrity())?;
         install_step("events", merged.enqueue_restore_events(id, &job.job_id))?;
         install_step(
