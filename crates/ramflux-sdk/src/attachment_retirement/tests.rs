@@ -74,6 +74,16 @@ fn sdk_retirement_pending_is_durable_and_only_exact_source_ack_settles() -> Resu
     let outbox = AttachmentRetirementOutbox::new(&db, &index, &account)?;
     outbox.bind_registered("message", "authenticated-reference", &capability, &source, now)?;
     outbox.begin(&[3; 32], &vault, now)?;
+    // Persist an old-device signature so the first read must refresh exactly once.
+    let old = db.pending_attachment_retirements(None, 1)?.remove(0);
+    let signature = original.sign(&old.signed.request().signing_bytes()?).to_bytes();
+    let old = AttachmentRetirement::verify(
+        &old.signed.request().canonical_bytes()?,
+        &signature,
+        &original.verifying_key().to_bytes(),
+    )?;
+    db.refresh_attachment_retirement_signature(&old)?;
+    reject_redundant_signature_updates(&db.path, &key)?;
     let pending = outbox.pending(None, 1, &vault, now)?;
     assert_eq!(pending.len(), 1);
     assert_eq!(
@@ -101,5 +111,20 @@ fn sdk_retirement_pending_is_durable_and_only_exact_source_ack_settles() -> Resu
     outbox.apply_authenticated_response(request, &source, RetirementDeliveryStatus::Retired)?;
     outbox.begin(&[3; 32], &vault, now + 1)?;
     assert!(outbox.pending(None, 64, &vault, now)?.is_empty());
+    Ok(())
+}
+
+// An independent SQLite guard rejects even byte-identical rewrites. A real signer
+// change is allowed; subsequent pending reads and restart must perform no refresh.
+fn reject_redundant_signature_updates(path: &std::path::Path, key: &AccountDbKey) -> Result {
+    use std::fmt::Write;
+    let mut hex = zeroize::Zeroizing::new(String::new());
+    for byte in key.bytes() {
+        write!(&mut *hex, "{byte:02x}")?;
+    }
+    let sql = zeroize::Zeroizing::new(format!("PRAGMA key=\"x'{}'\"", hex.as_str()));
+    let db = rusqlite::Connection::open(path)?;
+    db.execute_batch(&sql)?;
+    db.execute_batch("CREATE TRIGGER reject_redundant_retirement_signature BEFORE UPDATE OF signature,signer ON runtime_attachment_retirement WHEN NEW.signer=OLD.signer BEGIN SELECT RAISE(ABORT,'redundant retirement signature update'); END;")?;
     Ok(())
 }

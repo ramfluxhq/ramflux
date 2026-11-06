@@ -138,7 +138,8 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         Ok(())
     }
     /// # Errors
-    /// Refuses unbounded pages or corrupt durable operations. No timer clears work.
+    /// Refuses unbounded pages or corrupt durable operations. Pending work survives
+    /// until an authenticated ACK or signed grant expiry plus clock tolerance.
     pub fn pending(
         &self,
         after: Option<&[u8; 32]>,
@@ -153,7 +154,11 @@ impl<'a> AttachmentRetirementOutbox<'a> {
         }
         let (_, credentials) =
             self.account.credentials(vault, self.account.local_device_id()?, now)?;
+        let current_signer = credentials.signing.signing_key.verifying_key().to_bytes();
         for row in &mut rows {
+            if row.signed.signer() == &current_signer {
+                continue;
+            }
             let request = row.signed.request();
             let signature: [u8; 64] = ramflux_protocol::decode_base64url(
                 &ramflux_crypto::sign_canonical_bytes_with_device_branch(
@@ -167,7 +172,7 @@ impl<'a> AttachmentRetirementOutbox<'a> {
             row.signed = AttachmentRetirement::verify(
                 &request.canonical_bytes().map_err(refused)?,
                 &signature,
-                &credentials.signing.signing_key.verifying_key().to_bytes(),
+                &current_signer,
             )
             .map_err(refused)?;
             self.db.refresh_attachment_retirement_signature(&row.signed)?;

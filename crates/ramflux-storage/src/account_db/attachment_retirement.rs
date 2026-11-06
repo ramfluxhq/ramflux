@@ -234,7 +234,7 @@ pub(super) fn recount_archive(db: &rusqlite::Connection) -> Result<(), StorageEr
     Ok(())
 }
 impl AccountDb {
-    /// Bounded reclamation. An expired signed grant needs no server retirement ACK.
+    /// Bounded reclamation. Expiry plus five seconds of clock tolerance needs no server ACK.
     /// # Errors
     /// Refuses invalid bounds and corrupt durable work.
     pub fn gc_attachment_retirements(&self, now: u64, limit: usize) -> Result<usize, StorageError> {
@@ -246,7 +246,7 @@ impl AccountDb {
             let mut ids=q.query_map(params![limit],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?;
             drop(q);
             let mut q=self.connection.prepare("SELECT grant_id FROM runtime_attachment_expiry WHERE expires<=?1 ORDER BY expires,grant_id LIMIT ?2")?;
-            ids.extend(q.query_map(params![now,limit-ids.len()],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?);
+            ids.extend(q.query_map(params![now.checked_sub(5),limit-ids.len()],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?);
             let mut count=0;
             for id in ids {
                 let reference:Option<Vec<u8>>=self.connection.query_row("SELECT reference_id FROM runtime_attachment_grant WHERE grant_id=?1",params![id],|r|r.get(0)).optional()?;
