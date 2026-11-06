@@ -48,49 +48,58 @@ impl ScopedGrantRegistry {
         proof: &AttachmentReplayProof,
         now: u64,
     ) -> Result<super::GrantPublicationLease, AttachmentReplayError> {
-        self.lease_with_admission(grant, right, now, |tx| {
-            let effective = storage::clock(tx, now)?;
-            // Re-read authority in the SAME write transaction as nonce consumption.
-            let row = super::ReadableTable::get(
-                &tx.open_table(super::GRANTS).map_err(store)?,
-                grant.grant().grant_id.as_slice(),
-            )
-            .map_err(store)?
-            .map(|v| super::decode::<super::RegisteredAttachmentGrant>(v.value()))
-            .transpose()?
-            .ok_or(AttachmentLedgerError::State)?;
-            if row.state != super::ScopedGrantState::Active
-                || self.stored_grant(&row)?.grant() != grant.grant()
-            {
-                return Err(AttachmentLedgerError::State.into());
-            }
-            let owner = super::AttachmentOwner::from_authenticated_session(
-                &grant.grant().owner.account_anchor,
-            )?;
-            let table = tx.open_table(super::RECORDS).map_err(store)?;
-            let value =
-                super::ReadableTable::get(&table, super::key(&owner, &row.upload_id).as_slice())
-                    .map_err(store)?
-                    .ok_or(AttachmentLedgerError::State)?;
-            let payload: super::AttachmentReservation = super::decode(value.value())?;
-            if payload.state != super::AttachmentReservationState::Committed
-                || payload.object_id != grant.grant().object_id
-                || payload.manifest_hash != Some(grant.grant().manifest_hash)
-                || payload.expires_at.is_none_or(|t| effective >= t)
-                || effective >= row.expires_at
-            {
-                return Err(AttachmentLedgerError::Expired.into());
-            }
-            consume(
-                tx,
-                &self.authority.source,
-                &grant.grant().grantee,
-                proof,
-                effective,
-                storage::Limits::default(),
-            )?;
-            Ok(effective)
-        })
+        self.lease_with_admission(grant, right, now, |tx| self.admit_in(tx, grant, proof, now))
+    }
+    /// Re-reads authority and consumes the nonce in the caller's write transaction.
+    pub(super) fn admit_in(
+        &self,
+        tx: &redb::WriteTransaction,
+        grant: &VerifiedScopedGrant,
+        proof: &AttachmentReplayProof,
+        now: u64,
+    ) -> Result<u64, AttachmentReplayError> {
+        let effective = storage::clock(tx, now)?;
+        // Re-read authority in the SAME write transaction as nonce consumption.
+        let row = super::ReadableTable::get(
+            &tx.open_table(super::GRANTS).map_err(store)?,
+            grant.grant().grant_id.as_slice(),
+        )
+        .map_err(store)?
+        .map(|v| super::decode::<super::RegisteredAttachmentGrant>(v.value()))
+        .transpose()?
+        .ok_or(AttachmentLedgerError::State)?;
+        if row.state != super::ScopedGrantState::Active
+            || self.stored_grant(&row)?.grant() != grant.grant()
+        {
+            return Err(AttachmentLedgerError::State.into());
+        }
+        let owner = super::AttachmentOwner::from_authenticated_session(
+            &grant.grant().owner.account_anchor,
+        )?;
+        let table = tx.open_table(super::RECORDS).map_err(store)?;
+        let value =
+            super::ReadableTable::get(&table, super::key(&owner, &row.upload_id).as_slice())
+                .map_err(store)?
+                .ok_or(AttachmentLedgerError::State)?;
+        let payload: super::AttachmentReservation = super::decode(value.value())?;
+        if payload.state != super::AttachmentReservationState::Committed
+            || payload.object_id != grant.grant().object_id
+            || payload.manifest_hash != Some(grant.grant().manifest_hash)
+            || payload.expires_at.is_none_or(|t| effective >= t)
+            || effective >= row.expires_at
+        {
+            return Err(AttachmentLedgerError::Expired.into());
+        }
+        payload.require_bound_generation()?;
+        consume(
+            tx,
+            &self.authority.source,
+            &grant.grant().grantee,
+            proof,
+            effective,
+            storage::Limits::default(),
+        )?;
+        Ok(effective)
     }
     /// Reclaims at most64 expired consumption rows. Never evicts live evidence.
     /// # Errors

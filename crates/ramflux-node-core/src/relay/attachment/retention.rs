@@ -243,12 +243,7 @@ impl AttachmentLedger {
         if record.state != AttachmentReservationState::Committed {
             return Err(AttachmentLedgerError::State);
         }
-        // Legacy-zero refusal: a payload without an authoritative generation is never served.
-        if record.pending_generation == 0
-            || record.committed_generation != Some(record.pending_generation)
-        {
-            return Err(AttachmentLedgerError::State);
-        }
+        record.require_bound_generation()?;
         Ok(record)
     }
 }

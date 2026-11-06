@@ -107,6 +107,19 @@ pub struct AttachmentReservation {
     #[serde(default)]
     pub committed_generation: Option<u64>,
 }
+impl AttachmentReservation {
+    /// The one legacy-zero refusal shared by every admission and authority reader
+    /// (ATTACH-LARGE-01 §4): a payload needs a nonzero pending generation and an equal
+    /// committed generation before it can be read, granted or leased.
+    pub(super) fn require_bound_generation(&self) -> Result<(), AttachmentLedgerError> {
+        if self.pending_generation == 0
+            || self.committed_generation != Some(self.pending_generation)
+        {
+            return Err(AttachmentLedgerError::State);
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct AttachmentQuota {
     pub used: u64,

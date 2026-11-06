@@ -197,3 +197,74 @@ fn relay_guard_holds_backend_until_join_and_refuses_late_write_and_flush() {
 fn replay_proof(now: u64, n: u8) -> AttachmentReplayProof {
     AttachmentReplayProof { nonce: [n; 32], issued_at: now, expires_at: now + 30 }
 }
+#[test]
+fn legacy_zero_payload_is_refused_before_nonce_consumption_and_output() {
+    let root = std::env::temp_dir().join(format!("rf-relay-legacy-gen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let fixture = RetirementFixture::new(&root.join("db"));
+    let now = fixture.now;
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../crates/ramflux-protocol/tests/fixtures/large_attachment_v1.json"
+    ))
+    .unwrap();
+    let ciphertext: Vec<u8> = vectors["cases"][0]["segments"][0]["ciphertext_hex"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap(), 16).unwrap())
+        .collect();
+    // A real local backend holding the committed segment at generation 1.
+    let backend = fixture.store.local_attachment_backend([3; 32], root.join("files")).unwrap();
+    let spec = BackendSegment::from_manifest(&fixture.native, 1, 0).unwrap();
+    backend.write_chunk(&spec, 0, &mut io::Cursor::new(&ciphertext)).unwrap();
+    backend.commit(&spec).unwrap();
+    let request = ScopedAttachmentRange {
+        grant: &fixture.grant,
+        manifest: &fixture.native,
+        generation: 1,
+        segment: 0,
+        offset: 0,
+        length: 16,
+    };
+    let read = |nonce: u8, out: &mut Spy| {
+        read_after_operation_admission(
+            &fixture.registry,
+            &backend,
+            &request,
+            &replay_proof(now, nonce),
+            out,
+            &|| now,
+        )
+    };
+    // Control: a bound payload publishes its bytes.
+    let ok = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
+    read(1, &mut ok.clone()).unwrap();
+    assert_eq!(ok.0.lock().unwrap().0, ciphertext);
+
+    // Legacy-zero row: refused with the exact error, zero bytes, zero flushes.
+    fixture.set_legacy_zero(true);
+    let spy = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
+    assert!(matches!(read(2, &mut spy.clone()), Err(BackendError::Retired)));
+    assert_eq!(*spy.0.lock().unwrap(), (Vec::new(), 0));
+    assert!(matches!(
+        fixture.registry.admit_operation_after_authentication(
+            &fixture.grant,
+            1,
+            &replay_proof(now, 2),
+            now
+        ),
+        Err(AttachmentReplayError::Ledger(
+            ramflux_node_core::attachment::AttachmentLedgerError::State
+        ))
+    ));
+
+    // Nonce 2 was never consumed: once the generation is bound again it publishes.
+    fixture.set_legacy_zero(false);
+    let after = Spy(Arc::new(Mutex::new((Vec::new(), 0))));
+    read(2, &mut after.clone()).unwrap();
+    assert_eq!(after.0.lock().unwrap().0, ciphertext);
+}

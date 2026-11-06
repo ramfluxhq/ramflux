@@ -222,6 +222,7 @@ impl ScopedGrantRegistry {
         {
             return Err(AttachmentLedgerError::Expired);
         }
+        payload.require_bound_generation()?;
         self.check_reference(&tx, grant, upload_id, now)?;
         let mut rows = tx.open_table(GRANTS).map_err(store)?;
         if let Some(value) = rows.get(g.grant_id.as_slice()).map_err(store)? {
@@ -355,6 +356,8 @@ impl ScopedGrantRegistry {
         Ok(count)
     }
 }
+#[cfg(test)]
+mod legacy_generation_tests;
 #[cfg(test)]
 mod tests;
 

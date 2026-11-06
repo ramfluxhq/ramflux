@@ -401,7 +401,14 @@ fn terminal_encoding_size_oracle_and_policy_ranges() {
     ] {
         for (value, ok) in [(0, false), (1, true), (max, true), (max + 1, false)] {
             let policy = with(|p| set(p, value));
-            assert_eq!(policy.validate().is_ok(), ok, "value {value}");
+            if ok {
+                policy.validate().unwrap();
+            } else {
+                assert!(
+                    matches!(policy.validate(), Err(AttachmentLedgerError::Invalid)),
+                    "value {value}"
+                );
+            }
         }
     }
 }

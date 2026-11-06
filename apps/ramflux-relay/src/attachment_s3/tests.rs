@@ -272,7 +272,7 @@ fn large_s3_backend_matches_local_commit_and_cleanup_contract() {
     backend.reconcile(&spec).unwrap();
     assert_eq!(backend.enumerate(None, 1).unwrap().len(), 1);
     let ledger = store.attachment_ledger(AttachmentPolicy::default()).unwrap();
-    ledger.commit(&owner, &upload, 200).unwrap();
+    ledger.commit(&owner, &upload, spec.generation(), 200).unwrap();
     assert_eq!(ledger.usage(&owner).unwrap().used, 16);
     ledger.gc_due(200 + 7 * 86_400, 64).unwrap();
     // An upload created before its local journal commit is discovered by remote listing.
