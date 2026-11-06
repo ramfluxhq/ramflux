@@ -7,31 +7,7 @@ use super::{
     files::{Error, Store, open_file},
 };
 use rustix::fs::{self, AtFlags, FlockOperation, OFlags, RenameFlags};
-use std::{
-    fs::File,
-    io::Write,
-    os::fd::OwnedFd,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
-
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-struct Slot;
-impl Slot {
-    fn acquire() -> Result<Self, Error> {
-        ACTIVE
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 4).then_some(n + 1))
-            .map_err(|_| Error::Busy)?;
-        Ok(Self)
-    }
-}
-impl Drop for Slot {
-    fn drop(&mut self) {
-        ACTIVE.fetch_sub(1, Ordering::AcqRel);
-    }
-}
+use std::{fs::File, io::Write, os::fd::OwnedFd, sync::Arc};
 
 /// FD-scoped durability operations. The writer performs every fsync, rename and unlink only
 /// through this trait, so an oracle that implements it observes (and can fail) the real calls.
@@ -71,7 +47,7 @@ pub(super) enum Operation {
 impl Store {
     /// Slots and account locks live inside the worker, including after caller cancellation.
     pub(super) async fn execute(self: Arc<Self>, operation: Operation) -> Result<Vec<u8>, Error> {
-        let slot = Slot::acquire()?;
+        let slot = super::init::Slot::acquire().map_err(|_| Error::Busy)?;
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
             self.apply(operation, |_| {})

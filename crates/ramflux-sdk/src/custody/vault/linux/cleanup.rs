@@ -12,6 +12,8 @@ pub(super) struct Secret<const N: usize> {
 
 impl<const N: usize> Secret<N> {
     pub(super) fn new(label: &'static str) -> Self {
+        #[cfg(not(test))]
+        let _ = label;
         Self {
             bytes: Box::new([0; N]),
             #[cfg(test)]

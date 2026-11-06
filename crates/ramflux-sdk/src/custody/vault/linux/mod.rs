@@ -9,7 +9,7 @@ pub use config::{LinuxCredentialPaths, LinuxVaultConfig, LinuxVaultMode, LinuxVa
 pub use error::LinuxVaultConfigError;
 
 // Private codec foundation; P03 supplies its first production file-store consumer.
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 mod cleanup;
 #[cfg(all(target_os = "linux", test))]
 mod codec;
@@ -18,3 +18,10 @@ mod codec;
 mod files;
 #[cfg(all(target_os = "linux", test))]
 mod writer;
+
+#[cfg(target_os = "linux")]
+mod init;
+#[cfg(target_os = "linux")]
+mod systemd;
+#[cfg(target_os = "linux")]
+pub use init::{LinuxVaultInitError, LinuxVaultInstallation};

@@ -91,6 +91,7 @@ if [ -n "$test_binary" ]; then
   chown "$fixture_user:$fixture_group" "$fixture/platform-test" "$fixture/rf"
   chmod 0500 "$fixture/platform-test" "$fixture/rf"
   fixture_env=("RF_LINUX_VAULT_FIXTURE_RF=$fixture/rf")
+  RF_LINUX_VAULT_FIXTURE_ROOT="$fixture" "$fixture/platform-test" --ignored --exact linux_vault_systemd_credential_roundtrip_and_mode_refusal
   test_command=("$fixture/platform-test" --ignored --exact linux_vault_platform_fixture_is_private)
 else
   command -v getfacl >/dev/null
@@ -113,7 +114,7 @@ else
   chown "$fixture_user:$fixture_group" "$fixture/rest.tar.zst" "$fixture/cargo-nextest"
   archive="$fixture/rest.tar.zst"
   nextest="$fixture/cargo-nextest"
-  filter='binary(linux_vault_platform)'
+  filter='binary(linux_vault_platform) & not test(linux_vault_systemd_credential_roundtrip_and_mode_refusal)'
   "$nextest" nextest list --archive-file "$archive" --workspace-remap . \
     --extract-to . --extract-overwrite --message-format json > "$fixture/list.json"
   python3 - "$fixture/list.json" <<'PY'
@@ -147,6 +148,9 @@ PY
     [ "$ancestor" != / ] || break
     ancestor="$(dirname "$ancestor")"
   done
+  RF_LINUX_VAULT_FIXTURE_ROOT="$fixture" "$nextest" nextest run --archive-file "$archive" --workspace-remap . \
+    --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail \
+    -E 'binary(linux_vault_platform) & test(linux_vault_systemd_credential_roundtrip_and_mode_refusal)'
   # Only disposable archive output is transferred, never a shared build target.
   chown -R "$fixture_user:$fixture_group" "$workspace/target"
   test_command=("$nextest" nextest run --archive-file "$archive" --workspace-remap .
