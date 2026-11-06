@@ -56,7 +56,10 @@ pub(super) fn forget(
     let mut requests = tx.open_table(REQUESTS).map_err(store)?;
     let op = requests.remove(id.as_slice()).map_err(store)?.map(|v| v.value().to_vec());
     if let Some(op) = op {
-        tx.open_table(OPERATIONS).map_err(store)?.remove(op.as_slice()).map_err(store)?;
+        tx.open_table(OPERATIONS)
+            .map_err(store)?
+            .remove(operation_key(id, &op).as_slice())
+            .map_err(store)?;
     }
     Ok(())
 }
@@ -200,7 +203,8 @@ impl ScopedGrantRegistry {
             || r.grant_epoch != g.epoch
             || r.source_authority != self.authority.source
             || r.authority_generation != self.authority.generation
-            || signed.signer() != &g.owner.signing_public_key
+            || ramflux_protocol::encode_base64url(signed.signer())
+                != auth.invocation.token.owner_public_key
             || now.saturating_add(5) < r.issued_at
         {
             return Err(AttachmentLedgerError::Conflict);
@@ -221,7 +225,8 @@ impl ScopedGrantRegistry {
         let canonical = r.canonical_bytes().map_err(invalid)?;
         let mut ops = tx.open_table(OPERATIONS).map_err(store)?;
         let mut requests = tx.open_table(REQUESTS).map_err(store)?;
-        if let Some(old) = ops.get(r.operation_id.as_slice()).map_err(store)?
+        if let Some(old) =
+            ops.get(operation_key(&r.grant_id, &r.operation_id).as_slice()).map_err(store)?
             && old.value() != canonical
         {
             return Err(AttachmentLedgerError::Conflict);
@@ -231,7 +236,8 @@ impl ScopedGrantRegistry {
         {
             return Err(AttachmentLedgerError::Conflict);
         }
-        ops.insert(r.operation_id.as_slice(), canonical.as_slice()).map_err(store)?;
+        ops.insert(operation_key(&r.grant_id, &r.operation_id).as_slice(), canonical.as_slice())
+            .map_err(store)?;
         requests.insert(r.grant_id.as_slice(), r.operation_id.as_slice()).map_err(store)?;
         let pending = busy(&leases, &r.grant_id);
         let already_retired = current.state == ScopedGrantState::Retired;
@@ -262,4 +268,10 @@ impl ScopedGrantRegistry {
         }
         Ok(RetirementOutcome::Retired)
     }
+}
+
+fn operation_key(grant: &[u8], operation: &[u8]) -> Vec<u8> {
+    let mut key = grant.to_vec();
+    key.extend(operation);
+    key
 }

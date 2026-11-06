@@ -306,3 +306,20 @@ impl Write for BoundedWriter<'_> {
 }
 #[cfg(test)]
 mod tests;
+
+impl<C: AuthenticatedS3Client> S3AttachmentBackend<C> {
+    /// Native operation authentication precedes this bounded publication owner.
+    /// # Errors
+    /// Returns scope, live-grant, backend and output failures.
+    pub fn read_scoped_range(
+        &self,
+        registry: &ramflux_node_core::attachment::ScopedGrantRegistry,
+        request: &crate::attachment_publication::ScopedAttachmentRange<'_>,
+        output: &mut dyn std::io::Write,
+        clock: &dyn Fn() -> u64,
+    ) -> Result<(), BackendError> {
+        crate::attachment_publication::read_after_operation_admission(
+            registry, self, request, output, clock,
+        )
+    }
+}

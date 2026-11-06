@@ -46,7 +46,10 @@ impl AccountDb {
           pending INTEGER NOT NULL CHECK(pending IN(0,1)));
           CREATE INDEX IF NOT EXISTS runtime_attachment_retirement_pending ON runtime_attachment_retirement(pending,operation);
           CREATE TABLE IF NOT EXISTS runtime_attachment_budget(singleton INTEGER PRIMARY KEY CHECK(singleton=1),grants INTEGER NOT NULL CHECK(grants BETWEEN 0 AND 4096));
-          INSERT OR IGNORE INTO runtime_attachment_budget VALUES(1,0);")?;
+          INSERT OR IGNORE INTO runtime_attachment_budget VALUES(1,0);
+          CREATE TABLE IF NOT EXISTS runtime_attachment_expiry(grant_id BLOB PRIMARY KEY,expires INTEGER NOT NULL);
+          CREATE INDEX IF NOT EXISTS runtime_attachment_expiry_due ON runtime_attachment_expiry(expires,grant_id);")?;
+        self.connection.call(|db| Ok(recount_archive(db).and_then(|()| backfill_expiry(db))))??;
         Ok(())
     }
     /// Bind only after authenticating and persisting the exact message reference.
@@ -85,6 +88,7 @@ impl AccountDb {
             self.connection.execute("INSERT INTO runtime_attachment_grant VALUES(?1,?2,?3,?4,?5)",params![g.grant_id.as_slice(),g.reference_id.as_slice(),signed,association.source_authority,association.authority_generation])?;
             self.connection.execute("UPDATE runtime_attachment_reference SET grants=grants+1 WHERE reference_id=?1",params![g.reference_id.as_slice()])?;
             self.connection.execute("UPDATE runtime_attachment_budget SET grants=grants+1 WHERE singleton=1",[])?;
+            self.connection.execute("INSERT INTO runtime_attachment_expiry VALUES(?1,?2)",params![g.grant_id.as_slice(),g.expires_at])?;
             Ok(())
         })
     }
@@ -149,7 +153,7 @@ impl AccountDb {
                 let r=signed.request();
                 let a=grants.iter().find(|g| g.grant.grant().grant_id==r.grant_id).ok_or(StorageError::AuthorizationRejected)?;
                 let g=a.grant.grant();
-                if !seen.insert(r.grant_id) || r.reference_id!=*reference || r.grant_hash!=g.hash().map_err(invalid)? || r.grant_epoch!=g.epoch || r.source_authority!=a.source_authority || r.authority_generation!=a.authority_generation || signed.signer()!=&g.owner.signing_public_key { return Err(StorageError::AuthorizationRejected); }
+                if !seen.insert(r.grant_id) || r.reference_id!=*reference || r.grant_hash!=g.hash().map_err(invalid)? || r.grant_epoch!=g.epoch || r.source_authority!=a.source_authority || r.authority_generation!=a.authority_generation { return Err(StorageError::AuthorizationRejected); }
                 let body=r.canonical_bytes().map_err(invalid)?;
                 let old:Option<Vec<u8>>=self.connection.query_row("SELECT body FROM runtime_attachment_retirement WHERE operation=?1",params![r.operation_id.as_slice()],|r|r.get(0)).optional()?;
                 if old.as_ref().is_some_and(|old| *old!=body) { return Err(StorageError::AuthorizationRejected); }
@@ -213,3 +217,82 @@ impl AccountDb {
 }
 #[cfg(test)]
 mod tests;
+
+/// Target rows are authoritative. Incoming grants/work/counters are never unioned.
+pub(super) fn recount_archive(db: &rusqlite::Connection) -> Result<(), StorageError> {
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='runtime_attachment_grant')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    db.execute_batch("UPDATE runtime_attachment_reference SET grants=(SELECT count(*) FROM runtime_attachment_grant g WHERE g.reference_id=runtime_attachment_reference.reference_id); UPDATE runtime_attachment_budget SET grants=(SELECT count(*) FROM runtime_attachment_grant) WHERE singleton=1;")?;
+    Ok(())
+}
+impl AccountDb {
+    /// Bounded reclamation. An expired signed grant needs no server retirement ACK.
+    /// # Errors
+    /// Refuses invalid bounds and corrupt durable work.
+    pub fn gc_attachment_retirements(&self, now: u64, limit: usize) -> Result<usize, StorageError> {
+        if limit == 0 || limit > 64 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        self.write_transaction(|| {
+            let mut q=self.connection.prepare("SELECT grant_id FROM runtime_attachment_retirement WHERE pending=0 ORDER BY operation LIMIT ?1")?;
+            let mut ids=q.query_map(params![limit],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?;
+            drop(q);
+            let mut q=self.connection.prepare("SELECT grant_id FROM runtime_attachment_expiry WHERE expires<=?1 ORDER BY expires,grant_id LIMIT ?2")?;
+            ids.extend(q.query_map(params![now,limit-ids.len()],|r|r.get::<_,Vec<u8>>(0))?.collect::<Result<Vec<_>,_>>()?);
+            let mut count=0;
+            for id in ids {
+                let reference:Option<Vec<u8>>=self.connection.query_row("SELECT reference_id FROM runtime_attachment_grant WHERE grant_id=?1",params![id],|r|r.get(0)).optional()?;
+                self.connection.execute("DELETE FROM runtime_attachment_retirement WHERE grant_id=?1",params![id])?;
+                self.connection.execute("DELETE FROM runtime_attachment_expiry WHERE grant_id=?1",params![id])?;
+                if let Some(reference)=reference {
+                    self.connection.execute("DELETE FROM runtime_attachment_grant WHERE grant_id=?1",params![id])?;
+                    self.connection.execute("UPDATE runtime_attachment_reference SET grants=grants-1 WHERE reference_id=?1",params![reference])?;
+                    self.connection.execute("UPDATE runtime_attachment_budget SET grants=grants-1 WHERE singleton=1",[])?;
+                    count+=1;
+                }
+            }
+            Ok(count)
+        })
+    }
+    /// Persist replacement current-device signature without changing immutable intent.
+    /// # Errors
+    /// Refuses changed body or missing work.
+    pub fn refresh_attachment_retirement_signature(
+        &self,
+        signed: &VerifiedAttachmentRetirement,
+    ) -> Result<(), StorageError> {
+        let r = signed.request();
+        let body = r.canonical_bytes().map_err(invalid)?;
+        self.write_transaction(|| {
+            if self.connection.execute("UPDATE runtime_attachment_retirement SET signature=?3,signer=?4 WHERE operation=?1 AND body=?2 AND pending=1",params![r.operation_id.as_slice(),body,signed.signature().as_slice(),signed.signer().as_slice()])?!=1 { return Err(StorageError::AuthorizationRejected); } Ok(())
+        })
+    }
+}
+
+fn backfill_expiry(db: &rusqlite::Connection) -> Result<(), StorageError> {
+    let mut after = Vec::new();
+    loop {
+        let mut q=db.prepare("SELECT g.grant_id,g.signed_grant FROM runtime_attachment_grant g WHERE g.grant_id>?1 AND NOT EXISTS(SELECT 1 FROM runtime_attachment_expiry e WHERE e.grant_id=g.grant_id) ORDER BY g.grant_id LIMIT 64")?;
+        let rows = q
+            .query_map(params![after], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, bytes) in rows {
+            after.clone_from(&id);
+            let grant = ScopedAttachmentGrant::decode_signed(&bytes).map_err(invalid)?;
+            db.execute(
+                "INSERT INTO runtime_attachment_expiry VALUES(?1,?2)",
+                params![id, grant.grant().expires_at],
+            )?;
+        }
+    }
+    Ok(())
+}

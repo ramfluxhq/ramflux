@@ -19,10 +19,11 @@ fn sdk_retirement_pending_is_durable_and_only_exact_source_ack_settles() -> Resu
     let key = AccountDbKey::generate()?;
     let db = AccountDb::open(&index, "human", &key)?;
     let (actor, credentials) = account.credentials(&vault, "primary", now)?;
-    let signer = &credentials.signing.signing_key;
+    let original = ed25519_dalek::SigningKey::from_bytes(&[55; 32]);
+    let signer = &original;
     let owner = QualifiedOwner {
         account_anchor: actor.account_anchor,
-        device_id: actor.device_id,
+        device_id: "previous-owner-device".into(),
         device_epoch: actor.device_epoch,
         signing_public_key: signer.verifying_key().to_bytes(),
         home_node_id: "home".into(),
@@ -73,15 +74,19 @@ fn sdk_retirement_pending_is_durable_and_only_exact_source_ack_settles() -> Resu
     let outbox = AttachmentRetirementOutbox::new(&db, &index, &account)?;
     outbox.bind_registered("message", "authenticated-reference", &capability, &source, now)?;
     outbox.begin(&[3; 32], &vault, now)?;
-    let pending = outbox.pending(None, 1)?;
+    let pending = outbox.pending(None, 1, &vault, now)?;
     assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].signed.signer(),
+        &credentials.signing.signing_key.verifying_key().to_bytes()
+    );
     let request = pending[0].signed.request();
     outbox.apply_authenticated_response(
         request,
         &source,
         RetirementDeliveryStatus::RevocationPending,
     )?;
-    assert_eq!(outbox.pending(None, 64)?.len(), 1);
+    assert_eq!(outbox.pending(None, 64, &vault, now)?.len(), 1);
     let wrong = RetirementSource { generation: 2, ..source };
     assert!(
         outbox
@@ -91,10 +96,10 @@ fn sdk_retirement_pending_is_durable_and_only_exact_source_ack_settles() -> Resu
     drop(db);
     let db = AccountDb::open(&index, "human", &key)?;
     let outbox = AttachmentRetirementOutbox::new(&db, &index, &account)?;
-    let resumed = outbox.pending(None, 1)?;
+    let resumed = outbox.pending(None, 1, &vault, now)?;
     assert_eq!(resumed[0].signed.request(), request);
     outbox.apply_authenticated_response(request, &source, RetirementDeliveryStatus::Retired)?;
     outbox.begin(&[3; 32], &vault, now + 1)?;
-    assert!(outbox.pending(None, 64)?.is_empty());
+    assert!(outbox.pending(None, 64, &vault, now)?.is_empty());
     Ok(())
 }

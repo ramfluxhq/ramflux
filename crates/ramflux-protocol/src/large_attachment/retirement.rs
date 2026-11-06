@@ -133,13 +133,24 @@ mod tests {
         let sig = key.sign(&transcript).to_bytes();
         let public = key.verifying_key().to_bytes();
         assert_eq!(AttachmentRetirement::verify(&expected, &sig, &public)?.request(), &request);
-        for offset in [4, 8, 40, 72, 104, 118, 126, 158] {
+        for offset in [4, 8, 40, 72, 104, 112, 118, 126, 158, 162] {
             let mut bad = expected.clone();
             bad[offset] ^= 1;
-            assert!(AttachmentRetirement::verify(&bad, &sig, &public).is_err());
+            let error = match offset {
+                4 => "retirement version",
+                112 => "native identity length",
+                _ => "grant signature",
+            };
+            assert_eq!(
+                AttachmentRetirement::verify(&bad, &sig, &public).err(),
+                Some(FormatError(error))
+            );
         }
         expected.push(0);
-        assert!(AttachmentRetirement::verify(&expected, &sig, &public).is_err());
+        assert_eq!(
+            AttachmentRetirement::verify(&expected, &sig, &public).err(),
+            Some(FormatError("retirement canonical"))
+        );
         Ok(())
     }
 }
