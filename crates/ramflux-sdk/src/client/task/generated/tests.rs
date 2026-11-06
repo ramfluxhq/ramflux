@@ -3,12 +3,12 @@
 
 use super::*;
 use ramflux_protocol::{TaskEventBody as B, TaskStatus as S, *};
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+pub(super) type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn device() -> ramflux_crypto::DeviceBranch {
     ramflux_crypto::create_device_branch("human", "device", 1, [23; 32])
 }
-fn body_variants() -> Vec<B> {
+pub(super) fn body_variants() -> Vec<B> {
     vec![
         B::Start(TaskStart {
             task_id: "task".into(),
