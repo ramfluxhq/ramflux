@@ -80,6 +80,9 @@ Durable sender refusals preserve aborted_retry_safe, capacity_retry_after
 wait for contiguous durable publication; connection loss during fail-stop is
 uncertain and requires an identical-envelope retry.
 
+Legacy forward requests omit incarnation/deadline metadata as a pair; explicit
+null metadata is refused. Modern requests carry both fields.
+
 Mesh forwarding returns delivered plus optional outcome queued, overflowed,
 no_session, full, unsupported or expired. Durable overflow is handled=true and
 must not wake an offline device. A deficient old-forwarder Deliver to a capable

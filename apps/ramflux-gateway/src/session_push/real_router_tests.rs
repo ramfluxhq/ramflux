@@ -29,13 +29,15 @@ async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
     std::fs::write(
         &config,
         format!(
-            "node_id = \"node-test\"\nservice_id = \"ramflux-router\"\nredb_path = {:?}\n[mesh]\nlisten_addr = \"127.0.0.1:0\"\nca_cert = {:?}\nservice_cert = {:?}\nservice_key = {:?}\nallowed_service_ids = [\"ramflux-gateway\"]\n",
+            "node_id = \"node-test\"\nservice_id = \"ramflux-router\"\nredb_path = {:?}\n[mesh]\nlisten_addr = \"127.0.0.1:0\"\nca_cert = {:?}\nservice_cert = {:?}\nservice_key = {:?}\nallowed_service_ids = [\"ramflux-gateway\",\"ramflux-router\"]\n[mesh.endpoints]\nrouter = {:?}\n",
             root.join("router.redb"),
             roots,
             router.tls.service_cert,
-            router.tls.service_key
+            router.tls.service_key,
+            endpoint
         ),
     )?;
+    ramflux_node_core::load_config(&config, "ramflux-router")?;
     drop(udp);
     let process = std::process::Command::new(binary)
         .arg("--config")
@@ -80,7 +82,7 @@ async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
     Ok((child, context))
 }
 
-/// Run explicitly with RAMFLUX_P17_ROUTER_BINARY pointing at the same-tree router.
+/// Run explicitly with `RAMFLUX_P17_ROUTER_BINARY` pointing at the same-tree router.
 #[tokio::test]
 #[ignore = "requires a separately built same-tree router binary"]
 async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()> {

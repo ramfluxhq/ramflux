@@ -238,13 +238,13 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let store = publication::open_durability_fixture(&root, 0)?;
     let router = RouterCore::new();
-    let runtime = crate::submit_ack_tests::test_runtime()?;
+    let runtime = crate::session::submit_ack_tests::test_runtime()?;
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     store.initialize_inbox("alice-target")?;
     router.prepare_publication_target(&store, "alice-target")?;
     let mut rows = Vec::new();
     for seq in 1..=2 {
-        let mut envelope = crate::submit_ack_tests::signed_submit(&runtime, now)?.envelope;
+        let mut envelope = crate::session::submit_ack_tests::signed_submit(&runtime, now)?.envelope;
         envelope.envelope_id = format!("probe-origin-{seq}");
         envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
             &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
@@ -262,13 +262,19 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
                 Some(&queued.entry),
             )?;
             Ok(queued.entry)
-        });
+        })?;
         rows.push(accepted.published().await?);
     }
     let observed: IssuedSeq =
         serde_json::from_value(serde_json::to_value(router.session_push_status("alice-target"))?)?;
     assert_eq!(observed.inbox_seq, 2);
     let id = observed.incarnation_id.as_deref().ok_or_else(|| anyhow::anyhow!("router E"))?;
+    let ramflux_node_core::InboxEntryResponse::Entry { record, .. } =
+        router.fetch_entry("alice-target", 2, now)?
+    else {
+        anyhow::bail!("live second entry");
+    };
+    let deadline = record.retain_until;
     let (send, captured) = sink();
     let hub = &fixture.context.hub;
     let registration = hub
@@ -278,7 +284,7 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
         hub.send_delivery(
             "alice-target",
             &ramflux_node_core::GatewayServerFrame::Deliver { entry: rows[1].clone() },
-            Some((id, now + 3600))
+            Some((id, deadline))
         )
         .await
     );
@@ -289,6 +295,7 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
     hub.flushed("alice-target").await?;
     let wire = captured.lock().map_err(|_| anyhow::anyhow!("capture poisoned"))?;
     assert_eq!(wire[0]["entry"]["inbox_seq"], 2);
+    assert_eq!(wire[0]["retain_until"], deadline);
     assert_eq!(wire[1]["after_inbox_seq"], 0, "router-origin sequence one remains uncovered");
     assert_eq!(wire[1]["incarnation_id"], id);
     drop(wire);
