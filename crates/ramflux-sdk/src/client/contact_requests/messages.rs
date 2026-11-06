@@ -72,7 +72,11 @@ impl RamfluxClient {
         let text = String::from_utf8_lossy(&held.body).chars().take(256).collect::<String>();
         Ok(Some(ramflux_protocol::text_safety::quote_fallback_field(&text)))
     }
-    pub(super) fn release_contact_messages(&self, root: &str) -> Result<(), SdkError> {
+    pub(super) fn release_contact_messages(
+        &self,
+        root: &str,
+        consume_erased: bool,
+    ) -> Result<(), SdkError> {
         for bytes in self.account_db()?.held_contact_messages(root)? {
             let bytes = Zeroizing::new(bytes);
             let held: Held = serde_json::from_slice(&bytes)?;
@@ -93,7 +97,7 @@ impl RamfluxClient {
                             legacy_slot: None,
                         }
                     });
-                    self.persist_sender_attachment_reference(
+                    let registration = self.persist_sender_attachment_reference(
                         &attachment.reference,
                         sender.device_id(),
                         crate::client::deferred_attachment::ReferenceContext {
@@ -102,7 +106,12 @@ impl RamfluxClient {
                             message: &held.route.message_id,
                         },
                         prepared,
-                    )?;
+                    );
+                    match registration {
+                        Ok(()) => {}
+                        Err(SdkError::ObjectErased) if consume_erased => {}
+                        Err(error) => return Err(error),
+                    }
                 }
                 self.project_accepted_contact_message_at(
                     &held.route,

@@ -884,3 +884,6 @@ pub(super) mod selector_reopen;
 
 #[path = "legacy_selector_tests.rs"]
 pub(super) mod legacy_selector;
+
+#[path = "pending_selector_tests.rs"]
+pub(super) mod pending_selector;
