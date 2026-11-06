@@ -246,7 +246,7 @@ pub(super) async fn request_resync(
         let mut submitted=0;
         for device in manifest.devices {
             if request.author==engine.config.principal_id && device.device_id==engine.config.device_id {continue;}
-            let request:LocalBusMessageSubmitRequest=serde_json::from_value(json!({"conversation_id":request.conversation_id,"message_id":crate::new_surface_message_id()?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":engine.config.principal_id,"sender_id":engine.config.device_id,"recipient_device_id":device.device_id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}))?;
+            let request:LocalBusMessageSubmitRequest=serde_json::from_value(json!({"conversation_id":request.conversation_id,"message_id":crate::new_surface_message_id()?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":engine.config.principal_id,"sender_id":engine.config.device_id,"recipient_device_id":device.device_id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":account.client.content_ttl()?}))?;
             let message=request.into_gateway_message_with_body(Vec::new());
             match super::surface_transport::submit_pair_control(&account.client,&mut engine,message,&body,None).await {
                 Ok(())=>submitted+=1,

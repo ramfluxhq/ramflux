@@ -48,10 +48,12 @@ macro_rules! methods {
 }
 
 methods! {
+    LocalRead(Always) => Actor: ["account.config.get"];
     NeedsNetwork(RelaySelected) => Actor: ["object.put", "object.put.finish", "object.delete"];
     LocalFirst(Always) => Actor: ["object.get", "object.get.begin"];
     LocalRead(Always) => Actor: ["a2i.list_pending"];
     LocalMutation(Always) => Actor: [
+        "account.config.set",
         "a2i.acknowledge",
         "a2ui.action",
         "a2ui.render",

@@ -104,8 +104,14 @@ async fn seal_and_send(
         target_delivery_id: device.target_delivery_id,
         encrypted_body: Vec::new(),
         created_at: now,
-        ttl: u32::try_from(expires_at.saturating_sub(now).clamp(1, 7 * 86400))
+        ttl: account.client.content_ttl()?.min(
+            u32::try_from(
+                expires_at
+                    .saturating_sub(now)
+                    .clamp(1, i64::from(crate::DEFAULT_OFFLINE_RETENTION_SECS)),
+            )
             .map_err(|_| SdkError::LocalBus("group courier TTL overflow".into()))?,
+        ),
     };
     let mut engine = account.session_client().await?;
     let result = async {

@@ -546,8 +546,10 @@ async fn send_one(
         target_delivery_id: device.target_delivery_id.clone(),
         encrypted_body: Vec::new(),
         created_at: now_unix_timestamp(),
-        ttl: u32::try_from(intent.expires_at.saturating_sub(now_unix_timestamp()).clamp(1, TTL))
-            .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
+        ttl: client.content_ttl()?.min(
+            u32::try_from(intent.expires_at.saturating_sub(now_unix_timestamp()).clamp(1, TTL))
+                .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
+        ),
     };
     let mut packet = client
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())

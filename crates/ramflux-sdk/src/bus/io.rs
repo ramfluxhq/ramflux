@@ -220,6 +220,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::AccountRestoreFailed { .. } => "AccountRestoreFailed",
         SdkError::AccountManifestUnreadable => "ManifestUnreadable",
         SdkError::TaskRefused { reason, .. } => reason.as_str(),
+        SdkError::InvalidOfflineRetention(_) => "InvalidOfflineRetention",
         SdkError::Storage(StorageError::Protocol(
             ramflux_protocol::ProtocolError::GroupTransferRequiresSync,
         ))

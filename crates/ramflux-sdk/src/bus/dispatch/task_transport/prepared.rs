@@ -38,7 +38,7 @@ impl Draft {
             target_delivery_id: target.delivery.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 3600,
+            ttl: account.client.content_ttl()?,
         };
         let config = account.gateway_config.clone();
         let request = account.client.routed_send_material_request(&config, &message)?;

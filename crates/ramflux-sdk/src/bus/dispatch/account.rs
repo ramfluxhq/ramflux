@@ -47,6 +47,15 @@ pub(crate) async fn dispatch_account_bus_request(
             Ok(local_bus_ok(serde_json::json!({ "active_account_id": account_id })))
         }
         "account.status" => account_status(state, request),
+        "account.config.get" | "account.config.set" => {
+            let account_id = request_account_id(request)?;
+            let account = local_bus_account_mut(state, account_id)?;
+            if request.method == "account.config.set" {
+                let config = crate::offline_retention::decode_config(request.body.clone())?;
+                account.client.set_offline_retention_secs(config.offline_retention_secs)?;
+            }
+            Ok(local_bus_ok(serde_json::to_value(account.client.account_config()?)?))
+        }
         "account.lock" => {
             let account_id = request_account_id(request)?.to_owned();
             local_bus_account_lock(state, &account_id)?;

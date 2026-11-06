@@ -348,8 +348,14 @@ fn target(
         target_delivery_id: device.target_delivery_id.clone(),
         encrypted_body: Vec::new(),
         created_at: now,
-        ttl: u32::try_from(expires_at.saturating_sub(now).clamp(1, 7 * 86400))
+        ttl: account.client.content_ttl()?.min(
+            u32::try_from(
+                expires_at
+                    .saturating_sub(now)
+                    .clamp(1, i64::from(crate::DEFAULT_OFFLINE_RETENTION_SECS)),
+            )
             .map_err(|_| SdkError::LocalBus("group courier TTL overflow".into()))?,
+        ),
     };
     let request = account.client.routed_send_material_request(&plan.config, &message)?;
     Ok(Some(Target { plan, root: root.into(), device, message, route, request, expires_at }))

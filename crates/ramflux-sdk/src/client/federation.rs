@@ -31,10 +31,11 @@ impl RamfluxClient {
     pub fn send_plaintext_federated_direct_message(
         &self,
         engine: &impl GatewaySessionAccess,
-        message: GatewayDirectMessage,
+        mut message: GatewayDirectMessage,
         plaintext: &[u8],
         federation: &LocalBusFederationRoute,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
+        message.ttl = self.content_ttl()?;
         self.send_plaintext_federated_direct_message_inner(
             engine,
             message,
@@ -165,7 +166,7 @@ impl RamfluxClient {
         event_type: &str,
         request: &LocalBusContactFederatedRequest,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let (message, body) = contact_message(event_type, request)?;
+        let (message, body) = contact_message(self, event_type, request)?;
         self.send_plaintext_federated_direct_message_without_franking(
             engine,
             message,
@@ -243,6 +244,7 @@ struct PendingForward {
     own_copy: Option<String>,
 }
 fn contact_message(
+    client: &RamfluxClient,
     event_type: &str,
     request: &LocalBusContactFederatedRequest,
 ) -> Result<(GatewayDirectMessage, Vec<u8>), SdkError> {
@@ -265,7 +267,7 @@ fn contact_message(
             target_delivery_id: request.target_delivery_id.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 300,
+            ttl: client.content_ttl()?,
         },
         body,
     ))

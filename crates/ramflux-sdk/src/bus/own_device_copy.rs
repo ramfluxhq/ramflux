@@ -207,7 +207,7 @@ fn state(client: &RamfluxClient, work: &Work, value: &str, latest: bool) -> Resu
         client.finish_own_surface_context(context, value == "submitted")?;
     }
     let key = format!("own-device/status/{id}");
-    let status = json!({"state":value,"acknowledged":value == "submitted","completed":value != "pending","conversation_id":work.intent.conversation,"message_id":message_owner(work).unwrap_or(&work.intent.id),"expires_at":work.intent.created_at.saturating_add(900)});
+    let status = json!({"state":value,"acknowledged":value == "submitted","completed":value != "pending","conversation_id":work.intent.conversation,"message_id":message_owner(work).unwrap_or(&work.intent.id),"expires_at":work.intent.created_at.saturating_add(i64::from(client.content_ttl()?)).saturating_add(300)});
     if let Some(message) = message_owner(work) {
         db.persist_message_actor_state(message, &key, &status)?;
     } else {

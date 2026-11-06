@@ -426,7 +426,7 @@ fn prepare_controls(
             target_delivery_id: target.delivery.clone(),
             encrypted_body: Vec::new(),
             created_at: now_unix_timestamp(),
-            ttl: 3600,
+            ttl: crate::offline_retention::CALL_SIGNAL_TTL_SECS,
         };
         let request = account.client.routed_send_material_request(&plan.config, &message)?;
         controls.push(Control { plan: plan.clone(), target, message, bytes, request });

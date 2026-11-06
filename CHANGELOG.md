@@ -1,5 +1,8 @@
 # Changelog
 
+- SDK content envelopes now default to seven days of offline retention, configurable
+  per account through the SDK and local bus (3600–604800 seconds).
+
 - Unlock, creation confirmation and recovery promotion now open locally before
   background admission; networking outcomes publish immediately. Keyed lifecycle
   work survives client deadlines and disconnects, shares in-flight retries and

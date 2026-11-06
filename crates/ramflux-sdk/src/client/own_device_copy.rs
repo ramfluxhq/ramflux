@@ -117,7 +117,8 @@ impl PrivateContext {
             || self.created_at > now.saturating_add(300)
             || self.expires_at < now
             || self.expires_at <= self.created_at
-            || self.expires_at > self.created_at.saturating_add(600)
+            || self.expires_at
+                > self.created_at.saturating_add(i64::from(crate::DEFAULT_OFFLINE_RETENTION_SECS))
             || id != copy_id(&self.root, &self.source, &self.message)?
         {
             return Err(invalid("own-device private scope or lifetime mismatch"));
@@ -295,7 +296,7 @@ impl RamfluxClient {
             conversation: input.conversation.into(),
             group: input.group.map(str::to_owned),
             created_at: input.created_at,
-            expires_at: input.created_at.saturating_add(600),
+            expires_at: input.created_at.saturating_add(i64::from(self.content_ttl()?)),
         };
         let mut packet = OwnDeviceMessage {
             schema: DOMAIN.into(),
@@ -329,7 +330,7 @@ impl RamfluxClient {
                 NativeOperation::Sync,
             )?;
             let request: LocalBusMessageSubmitRequest = serde_json::from_value(
-                json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":input.created_at,"ttl":600}),
+                json!({"conversation_id":packet.id,"message_id":packet.id,"envelope_id":packet.id,"source_principal_id":context.principal,"sender_id":source,"recipient_device_id":target.device_id,"recipient_principal_commitment":context.root,"target_delivery_id":target.target_delivery_id,"encrypted_body_base64":"","created_at":input.created_at,"ttl":self.content_ttl()?}),
             )?;
             let message = request.into_gateway_message_with_body(Vec::new());
             messages.push(message);
@@ -475,6 +476,28 @@ pub(crate) fn copy_id(root: &str, source: &str, message: &str) -> Result<String,
 #[cfg(test)]
 mod receipt_compatibility {
     use super::*;
+    #[test]
+    fn own_copy_private_context_accepts_configured_retention_and_legacy_lifetime()
+    -> Result<(), SdkError> {
+        let created_at = 2_000_000_000;
+        let mut context = PrivateContext {
+            message: "message".into(),
+            principal: "principal".into(),
+            root: "root".into(),
+            source: "device".into(),
+            conversation: "conversation".into(),
+            group: None,
+            created_at,
+            expires_at: created_at + i64::from(crate::DEFAULT_OFFLINE_RETENTION_SECS),
+        };
+        let id = copy_id("root", "device", "message")?;
+        context.validate(&id, "principal", "root", "device", created_at + 7200)?;
+        context.expires_at += 1;
+        assert!(context.validate(&id, "principal", "root", "device", created_at).is_err());
+        context.expires_at = created_at + 600;
+        context.validate(&id, "principal", "root", "device", created_at)?;
+        Ok(())
+    }
     #[test]
     fn names_and_private_receipts_default_acknowledgement_without_changing_scope()
     -> Result<(), SdkError> {

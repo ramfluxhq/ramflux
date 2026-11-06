@@ -116,7 +116,7 @@ async fn send_direct(
         for device in manifest.devices {
             let id = device.device_id.clone();
             let body: LocalBusMessageSubmitRequest = serde_json::from_value(
-                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"plaintext_body_base64":ramflux_protocol::encode_base64url(bytes),"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":600}),
+                json!({"conversation_id":carrier.conversation_id,"message_id":RamfluxClient::surface_timeline_id(carrier)?,"envelope_id":crate::new_surface_message_id()?,"source_principal_id":carrier.sender_principal_id,"sender_id":carrier.sender_device_id,"recipient_device_id":id,"recipient_principal_commitment":root,"target_delivery_id":device.target_delivery_id,"plaintext_body_base64":ramflux_protocol::encode_base64url(bytes),"encrypted_body_base64":"","created_at":now_unix_timestamp(),"ttl":account.client.content_ttl()?}),
             )?;
             match super::message::submit_message(account, body).await {
                 Ok(_) => devices.push(json!({"root":root,"device_id":id,"state":"submitted"})),
