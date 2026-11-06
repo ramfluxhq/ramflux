@@ -471,7 +471,7 @@ pub(super) fn decode_list<T>(
 }
 
 fn capability_bytes(value: &[u8]) -> Result<&[u8]> {
-    if value.is_empty()
+    if value.split(|b| *b == b',').any(<[u8]>::is_empty)
         || !value
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b',' | b':' | b'-'))
@@ -522,6 +522,11 @@ fn collection_count_exceeded(kind: WireType, mut bytes: &[u8]) -> Result<bool> {
                 }
             }
             Kind::Nested(child) if collection_count_exceeded(child, value)? => return Ok(true),
+            Kind::OptionalNested(child)
+                if value.first() == Some(&1) && collection_count_exceeded(child, &value[1..])? =>
+            {
+                return Ok(true);
+            }
             _ => {}
         }
     }

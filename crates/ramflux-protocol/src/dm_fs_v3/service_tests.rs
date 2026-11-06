@@ -403,3 +403,61 @@ fn dm_fs_v3_service_code_combinations() -> Result {
     assert!(result.validate_for(&result.correlation_id, &result.request_hash, &request).is_err());
     Ok(())
 }
+
+#[test]
+fn dm_fs_v3_largest_lease_status_fixtures_decode() -> Result {
+    let w = vectors()?;
+    let maxima = w["filled_maximum"].as_array().ok_or("maxima")?;
+    for (name, size) in
+        [("PrekeyLeaseResult", 3017), ("OwnerStatusEntry", 116), ("OwnerPrekeyStatus", 24992)]
+    {
+        let v = maxima.iter().find(|v| v["type"] == name).ok_or("maximum")?;
+        let bytes = hex(v["bytes"].as_str().ok_or("bytes")?)?;
+        assert_eq!(bytes.len(), size);
+        let encoded = match name {
+            "PrekeyLeaseResult" => PrekeyLeaseResult::from_bytes(&bytes)?.to_bytes()?,
+            "OwnerStatusEntry" => OwnerStatusEntry::from_bytes(&bytes)?.to_bytes()?,
+            "OwnerPrekeyStatus" => OwnerPrekeyStatus::from_bytes(&bytes)?.to_bytes()?,
+            _ => return Err("fixture type".into()),
+        };
+        assert_eq!(encoded, bytes);
+    }
+    let status =
+        maxima.iter().find(|v| v["type"] == "OwnerPrekeyStatus").ok_or("status maximum")?;
+    let bytes = hex(status["bytes"].as_str().ok_or("bytes")?)?;
+    let decoded = OwnerPrekeyStatus::from_bytes(&bytes)?;
+    let entry = decoded.entries.first().ok_or("entry")?.to_bytes()?;
+    let bad = replace(&bytes, 9, &list(201, &entry)?)?;
+    assert_eq!(OwnerPrekeyStatus::from_bytes(&bad), Err(DecodeError::Count));
+    let mut optional = vec![1];
+    optional.extend_from_slice(&bad);
+    assert_eq!(
+        NativePrekeyResult::from_bytes(&replace(&raw("result_status")?, 5, &optional)?),
+        Err(DecodeError::Count)
+    );
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_unleased_state_requires_zero_times() -> Result {
+    let mut entry = OwnerStatusEntry {
+        key_id: [1; 32],
+        generation: 1,
+        serial: 1,
+        leased_at: 0,
+        deadline: 0,
+        state: OwnerPrekeyState::Unleased,
+    };
+    let original = entry.to_bytes()?;
+    assert_eq!(OwnerStatusEntry::from_bytes(&original)?, entry);
+    for (leased_at, deadline) in [(1u64, 0u64), (0, 1), (1, 1)] {
+        entry.leased_at = leased_at;
+        entry.deadline = deadline;
+        assert_eq!(entry.to_bytes(), Err(DecodeError::Value));
+        let bad =
+            replace(&replace(&original, 4, &leased_at.to_be_bytes())?, 5, &deadline.to_be_bytes())?;
+        assert_eq!(OwnerStatusEntry::from_bytes(&bad), Err(DecodeError::Value));
+        let status = replace(&raw("OwnerPrekeyStatus")?, 9, &list(1, &bad)?)?;
+        assert_eq!(OwnerPrekeyStatus::from_bytes(&status), Err(DecodeError::Value));
+    }
+    Ok(())
+}

@@ -361,7 +361,7 @@ impl NativePrekeyFrame {
             "native_prekey_lease" => (WireType::NativePrekeyLease, 6_144),
             "native_prekey_publish" => (WireType::NativePrekeyPublish, 70_656),
             "native_prekey_status" => (WireType::NativePrekeyStatus, 26_624),
-            "native_prekey_result" => (WireType::NativePrekeyResult, 55_296),
+            "native_prekey_result" => (WireType::NativePrekeyResult, 35_840),
             _ => return Err(DecodeError::Value),
         };
         if bytes.len() > json_ceiling {

@@ -318,9 +318,18 @@ fn dm_fs_v3_capabilities_syntax_is_bounded() -> Result {
     let v = vector(&w, "SignedNativePrekeyBase")?;
     let original = raw(v)?;
     let mut value = base(&v["input"])?;
-    for invalid in
-        ["", "register message", "régi", "register\nmessage", "register/message", "cap\u{80}"]
-    {
+    for invalid in [
+        "",
+        ",register",
+        "register,",
+        "register,,message",
+        ",",
+        "register message",
+        "régi",
+        "register\nmessage",
+        "register/message",
+        "cap\u{80}",
+    ] {
         value.capabilities = invalid.into();
         assert_eq!(
             value.to_bytes(),

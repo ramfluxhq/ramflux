@@ -405,9 +405,23 @@ fn canonical_maximum(kind: WireType) -> Result<usize> {
         let size = match spec.kind {
             Kind::Fixed(n) => n,
             Kind::Profile => b"ramflux.dm.bootstrap.fs.v1".len(),
-            Kind::Text | Kind::Code | Kind::Bytes => spec.max,
-            Kind::Nested(child) => canonical_maximum(child)?,
+            Kind::Text | Kind::Code | Kind::Bytes => match (kind, spec.id) {
+                (WireType::PrekeyLeaseResult, 10) => 4,
+                (WireType::OwnerStatusEntry, 6) => 8,
+                (WireType::NativePrekeyRequest, 2) => 7,
+                (WireType::NativePrekeyResult, 3) => 6,
+                (WireType::NativePrekeyResult, 6 | 7) => 0,
+                _ => spec.max,
+            },
+            Kind::Nested(child) => canonical_maximum(child)?
+                .checked_sub(match (kind, spec.id) {
+                    (WireType::NativePrekeyLease, 2) => 2,
+                    (WireType::NativePrekeyStatus, 2) => 1,
+                    _ => 0,
+                })
+                .ok_or("size underflow")?,
             Kind::OptionalFixed(n) => n.checked_add(1).ok_or("size overflow")?,
+            Kind::OptionalNested(_) if kind == WireType::NativePrekeyResult && spec.id == 4 => 1,
             Kind::OptionalNested(child) => {
                 canonical_maximum(child)?.checked_add(1).ok_or("size overflow")?
             }
@@ -426,8 +440,21 @@ fn assert_maximum_fields(kind: WireType, raw: &[u8]) -> Result {
     for (field, spec) in view.fields().zip(kind.specs()) {
         match spec.kind {
             Kind::Text => assert_eq!(field.value.len(), 256),
-            Kind::Code | Kind::Bytes => assert_eq!(field.value.len(), spec.max),
+            Kind::Code => match (kind, spec.id) {
+                (WireType::PrekeyLeaseResult, 10) => assert_eq!(field.value, b"none"),
+                (WireType::OwnerStatusEntry, 6) => assert_eq!(field.value, b"unleased"),
+                (WireType::NativePrekeyRequest, 2) => {
+                    assert!(matches!(field.value, b"lease" | b"publish" | b"status"));
+                }
+                (WireType::NativePrekeyResult, 3) => assert_eq!(field.value, b"status"),
+                (WireType::NativePrekeyResult, 6 | 7) => assert_eq!(field.value, b""),
+                _ => assert_eq!(field.value.len(), spec.max),
+            },
+            Kind::Bytes => assert_eq!(field.value.len(), spec.max),
             Kind::Nested(child) => assert_maximum_fields(child, field.value)?,
+            Kind::OptionalNested(_) if kind == WireType::NativePrekeyResult && spec.id == 4 => {
+                assert_eq!(field.value, &[0]);
+            }
             Kind::OptionalNested(child) => {
                 assert_eq!(field.value.first(), Some(&1));
                 assert_maximum_fields(child, &field.value[1..])?;

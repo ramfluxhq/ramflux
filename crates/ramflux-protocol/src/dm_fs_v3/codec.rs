@@ -137,12 +137,12 @@ impl WireType {
             Self::PrekeyPublicationSnapshot => 81_920,
             Self::PrekeyLeaseResult => 4_096,
             Self::OwnerStatusQuery => 17_408,
-            Self::OwnerPrekeyStatus => 37_888,
+            Self::OwnerPrekeyStatus => 25_600,
             Self::NativePrekeyRequest => 3_072,
             Self::NativePrekeyLease => 5_120,
             Self::NativePrekeyPublish => 53_248,
             Self::NativePrekeyStatus => 19_456,
-            Self::NativePrekeyResult => 40_960,
+            Self::NativePrekeyResult => 26_624,
             Self::BootstrapHeader => 8_192,
             Self::BootstrapTranscript => 12_288,
         }
@@ -289,7 +289,7 @@ const OWNER_PREKEY_STATUS_FIELDS: &[Spec] = &[
     Spec { id: 6, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 7, max: 32, kind: Kind::Fixed(32) },
     Spec { id: 8, max: 8, kind: Kind::Fixed(8) },
-    Spec { id: 9, max: 35202, kind: Kind::List(200, WireType::OwnerStatusEntry) },
+    Spec { id: 9, max: 24002, kind: Kind::List(200, WireType::OwnerStatusEntry) },
     Spec { id: 10, max: 64, kind: Kind::Fixed(64) },
 ];
 
@@ -333,7 +333,7 @@ const NATIVE_PREKEY_RESULT_FIELDS: &[Spec] = &[
     Spec { id: 2, max: 32, kind: Kind::Fixed(32) },
     Spec { id: 3, max: 64, kind: Kind::Code },
     Spec { id: 4, max: 4097, kind: Kind::OptionalNested(WireType::PrekeyLeaseResult) },
-    Spec { id: 5, max: 37889, kind: Kind::OptionalNested(WireType::OwnerPrekeyStatus) },
+    Spec { id: 5, max: 25601, kind: Kind::OptionalNested(WireType::OwnerPrekeyStatus) },
     Spec { id: 6, max: 64, kind: Kind::Code },
     Spec { id: 7, max: 64, kind: Kind::Code },
     Spec { id: 8, max: 4, kind: Kind::Fixed(4) },
