@@ -225,6 +225,8 @@ fn assert_refusal(error: &SdkError) {
 async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
     let mut c = Case::new(false, failures)?;
     assert_refusal(&c.raw_error().await?);
+    // Include the driver's unrelated contact-maintenance markers in the baseline.
+    c.b.client.maintain_contact_requests()?;
     let before = c.snapshot()?;
     {
         let mut state = c.state.lock().map_err(|_| "wire mutex")?;
