@@ -3062,6 +3062,7 @@ dependencies = [
  "mime",
  "poly1305",
  "prost",
+ "quinn",
  "ramflux-crypto",
  "ramflux-node-core",
  "ramflux-protocol",

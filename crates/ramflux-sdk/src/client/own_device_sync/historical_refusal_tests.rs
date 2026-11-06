@@ -103,6 +103,10 @@ impl Drop for Page {
 }
 #[test]
 fn e16_own_copy_historical_registration_consumed_without_retry() -> TestResult {
+    historical_registration_is_consumed()
+}
+/// An own-copy historical page with a fenced reference consumes the refusal and commits.
+pub(in crate::client) fn historical_registration_is_consumed() -> TestResult {
     let p = Page::new("historical-candidate", true)?;
     for _ in 0..2 {
         let (_, next) = p.client.apply_own_history_plaintext(&p.envelope, &p.bytes)?;

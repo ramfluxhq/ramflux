@@ -7,15 +7,25 @@ use super::review::{pool, trust};
 use super::*;
 use std::sync::{Arc, Mutex};
 pub(super) type Sent = Arc<Mutex<Vec<GatewayInboxEntry>>>;
+/// Runs inside the gateway Submit handler, after acceptance and before the ACK is returned.
+pub(super) type AcceptanceHook = Box<dyn Fn() -> Result<(), String> + Send>;
 pub(super) struct Wire {
     bundle: ramflux_crypto::PrekeyBundle,
     responses: VecDeque<Vec<u8>>,
     sent: Sent,
+    on_accept: Option<AcceptanceHook>,
 }
 impl Wire {
     pub(super) fn engine(
         local: &Fixture,
         remote: &Fixture,
+    ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
+        Self::engine_with_hook(local, remote, None)
+    }
+    pub(super) fn engine_with_hook(
+        local: &Fixture,
+        remote: &Fixture,
+        on_accept: Option<AcceptanceHook>,
     ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
         let sent = Arc::new(Mutex::new(Vec::new()));
         Ok((
@@ -28,6 +38,7 @@ impl Wire {
                         .bundle,
                     responses: VecDeque::new(),
                     sent: sent.clone(),
+                    on_accept,
                 }),
             ),
             sent,
@@ -66,7 +77,17 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                         .lock()
                         .map_err(|_| ramflux_transport::TransportError::Quic("mutex".to_owned()))?
                         .push(entry.clone());
+                    if let Some(hook) = &self.on_accept {
+                        hook().map_err(ramflux_transport::TransportError::Quic)?;
+                    }
                     GatewayServerFrame::Deliver { entry }
+                }
+                GatewayClientFrame::RelayTokenV3Issue { request } => {
+                    GatewayServerFrame::RelayTokenV3Issued {
+                        response: Box::new(crate::gateway::GatewayRelayTokenV3IssueResponse {
+                            relay_token: echo_token(&request.body),
+                        }),
+                    }
                 }
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
                 GatewayClientFrame::Resume { .. } => {
@@ -102,6 +123,41 @@ impl ramflux_transport::GatewaySessionFrameSource for Wire {
                 .pop_front()
                 .ok_or_else(|| ramflux_transport::TransportError::Quic("no response".to_owned()))
         })
+    }
+}
+/// Answers a token issuance by echoing the request fields; the in-process relay checks the binding.
+fn echo_token(body: &crate::gateway::SdkRelayTokenV3IssueBody) -> ramflux_protocol::RelayTokenV3 {
+    ramflux_protocol::RelayTokenV3 {
+        token_version: ramflux_protocol::OBJECT_RELAY_V3_PROOF_VERSION,
+        token_id: format!("token-{}", body.nonce),
+        requester_device_id: body.requester_device_id.clone(),
+        requester_device_hash: body.requester_device_hash.clone(),
+        requester_public_key: body.requester_public_key.clone(),
+        requester_device_epoch: body.requester_device_epoch,
+        owner_signing_key_id: body.owner_signing_key_id.clone(),
+        owner_public_key: body.owner_public_key.clone(),
+        owner_home_node_id: body.owner_home_node_id.clone(),
+        owner_principal_id: body.owner_principal_id.clone(),
+        owner_device_epoch: body.owner_device_epoch,
+        issuer_node_id: body.issuer_node_id.clone(),
+        gateway_instance_id: body.gateway_instance_id.clone(),
+        issuer_certificate_id: body.issuer_certificate.cert_id.clone(),
+        attestation_key_id: body.issuer_certificate.attestation_key_id.clone(),
+        issuer_certificate: body.issuer_certificate.clone(),
+        audience_service: ramflux_protocol::RELAY_TOKEN_V3_AUDIENCE_RELAY.to_owned(),
+        audience_node_id: body.audience_node_id.clone(),
+        relay_instance_id: body.relay_instance_id.clone(),
+        object_id: body.object_id.clone(),
+        manifest_hash: body.manifest_hash.clone(),
+        chunk_id: body.chunk_id.clone(),
+        capabilities: body.capabilities.clone(),
+        authorization_kind: body.authorization_kind,
+        authorization_binding_hash: body.authorization_binding_hash.clone(),
+        delete_after_ack: body.delete_after_ack,
+        issued_at: body.issued_at,
+        expires_at: body.expires_at,
+        nonce: body.nonce.clone(),
+        issuer_signature: String::new(),
     }
 }
 pub(super) fn active(f: &Fixture, remote: &str) -> Result<String, SdkError> {

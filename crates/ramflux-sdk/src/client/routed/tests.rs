@@ -891,5 +891,8 @@ pub(super) mod pending_selector;
 #[path = "post_send_tests.rs"]
 pub(super) mod post_send;
 
+#[path = "p310_tests.rs"]
+mod p310;
+
 #[path = "revocation_receive_tests.rs"]
 mod revocation_receive_tests;

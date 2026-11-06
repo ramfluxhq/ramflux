@@ -221,6 +221,10 @@ async fn e16_legacy_item_fenced_between_registration_and_import_is_consumed() ->
 }
 #[tokio::test]
 async fn e16_legacy_receive_mixed_valid_and_fenced_attachments_auto_fetch() -> TestResult {
+    mixed_fenced_is_consumed().await
+}
+/// Legacy direct receive of a mixed fenced and valid message consumes the refusal and commits.
+pub(super) async fn mixed_fenced_is_consumed() -> TestResult {
     LegacyCase::new()?.mixed(false).await
 }
 #[tokio::test]

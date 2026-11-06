@@ -248,6 +248,10 @@ impl Case {
 }
 #[tokio::test]
 async fn e16_payload_fenced_m3_refused_without_retry() -> TestResult {
+    Box::pin(payload_fenced_is_consumed()).await
+}
+/// Routed receive of a message carrying a fenced reference consumes the refusal and commits.
+pub(super) async fn payload_fenced_is_consumed() -> TestResult {
     let mut c = Case::new()?;
     c.fence()?;
     c.refs = vec![c.refs[1].clone()];

@@ -97,6 +97,10 @@ impl PendingCase {
 }
 #[tokio::test]
 async fn e16_pending_contact_fenced_attachment_held_item_survives_until_release() -> TestResult {
+    Box::pin(fenced_held_item_is_consumed()).await
+}
+/// Releasing a held contact message with a fenced reference consumes the refusal and releases.
+pub(super) async fn fenced_held_item_is_consumed() -> TestResult {
     let mut f = Box::pin(PendingCase::new()).await?;
     let mixed = f.hold("held-mixed", b"held mixed text", f.c.refs.clone()).await?;
     let other = f.hold("held-other", b"other held content", Vec::new()).await?;
