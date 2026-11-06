@@ -458,6 +458,48 @@ async fn custody_gateway_refuses_before_network_io_and_legacy_proof_generation()
     Ok(())
 }
 
+/// P07 case set of the growing cleanup contract: export conversion and serializer/destination
+/// failure paths. Every owned buffer is observed after cleanup, not merely trait-asserted.
+#[test]
+fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let now = super::network_now()?;
+    create(&root.0, "human", &vault, now)?;
+    mark_live(&root.0, "human", now)?;
+    let mut observed = Vec::new();
+    for (secret, exists) in
+        [(&b"\xff\xfe-not-utf8-passphrase"[..], false), (&b"valid-agent-data-passphrase"[..], true)]
+    {
+        let account = if exists { "agent-b" } else { "agent-a" };
+        let mut input = input(account);
+        input.principal_kind = PrincipalKind::HeadlessAi;
+        input.custodian_account_id = Some("human".into());
+        let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
+        mark_live(&root.0, account, now)?;
+        let path = root.0.join(format!("{account}.bundle"));
+        if exists {
+            // Destination failure after the passphrase String was built.
+            std::fs::write(&path, b"occupied")?;
+        }
+        super::store::export_observer::begin();
+        assert!(
+            super::store::export_agent_credentials(&root.0, "human", account, &path, &vault, now)
+                .is_err()
+        );
+        observed.extend(super::store::export_observer::take());
+    }
+    for label in ["p07-export-utf8", "p07-export-passphrase"] {
+        assert!(observed.iter().any(|(l, _)| *l == label), "missing {label}");
+    }
+    for (label, bytes) in observed {
+        assert!(bytes.iter().all(|b| *b == 0), "P07 uncleared {label}");
+    }
+    Ok(())
+}
 #[test]
 fn custody_partial_vault_import_cannot_be_retried_as_a_legacy_account() -> Result {
     let root = Root::new()?;
