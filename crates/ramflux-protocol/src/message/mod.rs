@@ -12,6 +12,10 @@
 mod generated;
 pub use generated::*;
 mod protojson;
+pub mod registry;
+mod scanner;
+pub mod validation;
+mod wire;
 pub use protojson::from_protojson;
 
 /// Exact descriptor shared by protobuf, `ProtoJSON` and binding generators.
@@ -19,3 +23,6 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor.bin");
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod registry_tests;
