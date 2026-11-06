@@ -7,29 +7,29 @@ use std::sync::{
 };
 use std::time::Duration;
 
-struct Fixture {
-    binding: Option<Binding>,
-    rows: Vec<AllocationRow>,
-    observations: Vec<AllocationObservation>,
-    owners: Vec<OwnerRecord>,
-    expected: Vec<OwnerRecord>,
-    registry: Vec<OwnerRecord>,
-    batch_present: bool,
-    owners_present: bool,
-    row_count: u64,
-    owner_count: u64,
-    batch_charge: u64,
-    raw_charge: u64,
-    ledgers: Ledgers,
-    target_max: u64,
-    action: u8,
-    state: u8,
-    reservation: Option<ReservationId>,
-    target: Option<OwnerId>,
-    expected_charge: u64,
-    reserved_charge: u64,
-    terminal: bool,
-    actual_allocated: bool,
+pub(super) struct Fixture {
+    pub(super) binding: Option<Binding>,
+    pub(super) rows: Vec<AllocationRow>,
+    pub(super) observations: Vec<AllocationObservation>,
+    pub(super) owners: Vec<OwnerRecord>,
+    pub(super) expected: Vec<OwnerRecord>,
+    pub(super) registry: Vec<OwnerRecord>,
+    pub(super) batch_present: bool,
+    pub(super) owners_present: bool,
+    pub(super) row_count: u64,
+    pub(super) owner_count: u64,
+    pub(super) batch_charge: u64,
+    pub(super) raw_charge: u64,
+    pub(super) ledgers: Ledgers,
+    pub(super) target_max: u64,
+    pub(super) action: u8,
+    pub(super) state: u8,
+    pub(super) reservation: Option<ReservationId>,
+    pub(super) target: Option<OwnerId>,
+    pub(super) expected_charge: u64,
+    pub(super) reserved_charge: u64,
+    pub(super) terminal: bool,
+    pub(super) actual_allocated: bool,
 }
 fn canonical_binding() -> Binding {
     Binding {
@@ -45,7 +45,7 @@ fn canonical_binding() -> Binding {
     }
 }
 impl Fixture {
-    fn valid() -> Self {
+    pub(super) fn valid() -> Self {
         let rows = vec![AllocationRow {
             allocation: AllocationId(10),
             role: Role::StreamPayload as u8,
@@ -103,7 +103,7 @@ impl Fixture {
             actual_allocated: false,
         }
     }
-    fn request(&self) -> Request<'_> {
+    pub(super) fn request(&self) -> Request<'_> {
         Request {
             binding: self.binding,
             batch: self.batch_present.then_some(Batch {
@@ -122,7 +122,7 @@ impl Fixture {
             reserved_charge: self.reserved_charge,
         }
     }
-    fn context(&self) -> Context<'_> {
+    pub(super) fn context(&self) -> Context<'_> {
         Context {
             binding: canonical_binding(),
             terminal: self.terminal,
@@ -136,11 +136,11 @@ impl Fixture {
             actual_allocated: self.actual_allocated,
         }
     }
-    fn prepare(&mut self) {
+    pub(super) fn prepare(&mut self) {
         self.action = 1;
         self.reservation = Some(ReservationId(40));
     }
-    fn lifecycle(&mut self, action: u8, state: u8) {
+    pub(super) fn lifecycle(&mut self, action: u8, state: u8) {
         self.action = action;
         self.state = state;
         self.reservation = if action == 0 { None } else { Some(ReservationId(40)) };
@@ -153,7 +153,7 @@ impl Fixture {
     }
     // Reference arithmetic uses u128; derive all capacities and charges before altering
     // exactly the named observation. Wide synthetic fixtures never allocate those sizes.
-    fn resize(&mut self, capacity: u64, element_size: u64, count: u64) {
+    pub(super) fn resize(&mut self, capacity: u64, element_size: u64, count: u64) {
         let r = &mut self.rows[0];
         r.capacity = capacity;
         r.element_size = element_size;
@@ -170,13 +170,13 @@ impl Fixture {
         self.expected_charge = self.batch_charge;
         self.reserved_charge = self.batch_charge;
     }
-    fn raw(&mut self) {
+    pub(super) fn raw(&mut self) {
         self.rows[0].role = Role::KeyOwner as u8;
         self.rows[0].domain_tag = 1;
         self.rows[0].class_tag = 6;
         self.resize(64, 8, 8);
     }
-    fn wide(&mut self) {
+    pub(super) fn wide(&mut self) {
         self.ledgers = Ledgers {
             metadata_limit: u64::MAX,
             metadata_used: 0,
@@ -186,7 +186,7 @@ impl Fixture {
             raw_used: 0,
         };
     }
-    fn second(&mut self) {
+    pub(super) fn second(&mut self) {
         let mut r = self.rows[0];
         r.allocation = AllocationId(11);
         self.rows.push(r);
@@ -199,7 +199,7 @@ impl Fixture {
         self.expected_charge = self.batch_charge;
         self.reserved_charge = self.batch_charge;
     }
-    fn second_owner(&mut self) {
+    pub(super) fn second_owner(&mut self) {
         let mut o = self.owners[0];
         o.owner = OwnerId(21);
         o.allocation = AllocationId(11);
@@ -211,7 +211,7 @@ impl Fixture {
     // Independent reference evaluator: u128 byte equations, explicit role table,
     // and full-rule collection within each structurally applicable validation level.
     // It does not call any production validator, q(), or role decoder.
-    fn violations(&self) -> Vec<StageError> {
+    pub(super) fn violations(&self) -> Vec<StageError> {
         use StageError::*;
         let mut errors = Vec::new();
         if self.terminal {
@@ -629,7 +629,7 @@ impl Fixture {
         }
         errors
     }
-    fn reject(&self, error: StageError) {
+    pub(super) fn reject(&self, error: StageError) {
         assert_eq!(
             self.violations(),
             vec![error],
@@ -1818,7 +1818,7 @@ fn observe_accepting_cell(action: Action, state: ReservationState) {
     assert_eq!(c.snapshot(), initial);
 }
 
-fn completed_free(allocation: AllocationId, lease: LeaseId, consumed: bool) -> FreeWitness {
+pub(super) fn completed_free(allocation: AllocationId, lease: LeaseId, consumed: bool) -> FreeWitness {
     // The borrowed validation seam observes genuine allocator completion. These
     // test-only registry keys never issue a production lease or byte allowance.
     let physical = StageAllocation::allocate(8, 8).unwrap();

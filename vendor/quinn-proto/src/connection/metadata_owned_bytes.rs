@@ -66,3 +66,16 @@ pub(super) fn owner_layout() -> std::alloc::Layout {
 
 #[cfg(test)]
 mod tests;
+
+/// The dormant aggregate owns the debit and forbids an owning view from escaping.
+/// Query the exact same wrapper type used by the staged constructor.
+pub(super) fn staged_owner_layout() -> std::alloc::Layout {
+    let mut observed=None;
+    let _=Bytes::try_from_owner_with_guard(Vec::<u8>::new(), |layout| -> Result<(),()> {
+        observed=Some(layout);Err(())
+    });
+    observed.expect("staged owner layout callback")
+}
+pub(super) fn into_staged_bytes(bytes: Vec<u8>) -> Result<Bytes, ()> {
+    Bytes::try_from_owner_with_guard(bytes, |_| Ok::<(),()>(())).map_err(|_|())
+}

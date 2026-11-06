@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod tests;
 pub(crate) mod tls_contract;
+pub(crate) mod receive;
 
 // IDs are nominal, opaque registry keys. Zero encodes an absent/uninitialized key
 // only at the borrowed validation seam; no key is interpreted as a byte allowance.
@@ -48,6 +49,14 @@ pub(crate) enum Field {
     Owner,
     Allocation,
     Lease,
+    FrameCount,
+    Length,
+    ViewStart,
+    ViewEnd,
+    DescriptorCount,
+    PreparedSlots,
+    StreamId,
+    Offset,
     ExpectedCharge,
     ReservedCharge,
 }
@@ -61,11 +70,13 @@ pub(crate) enum Domain {
 pub(crate) enum Count {
     Rows,
     Owners,
+    ReceiveFrames,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arithmetic {
     AllocationProduct(usize),
     AllocationCharge(usize),
+    StreamEnd(usize),
     MetadataSum,
     RawSum,
     MetadataOverlap,
@@ -221,6 +232,19 @@ impl Role {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StageError {
+    StreamIdOutOfRange,
+    FrameMismatch(Field, usize),
+    StreamEndOutOfRange(usize),
+    ReceiveBackingMismatch(usize),
+    InvalidViewOrder(usize),
+    ViewOutOfBounds(usize),
+    ViewLengthMismatch(usize),
+    DescriptorCountMismatch(usize),
+    ReceiveSlotsInsufficient(usize),
+    ReceiveSlotObservationMismatch(usize),
+    StreamOwnerMismatch(usize),
+    StreamPreparationMissing(u64),
+    SharedPayloadFamilyMismatch,
     MissingBinding,
     EmptyBinding(Field),
     BindingMismatch(Field),
@@ -433,11 +457,15 @@ fn binding(r: &Request<'_>, c: &Context<'_>) -> Result<Binding, StageError> {
     }
     Ok(b)
 }
-fn validate_batch(
+fn validate_batch(batch: Option<Batch<'_>>, c: &Context<'_>, retained: Option<(u64,u64)>) -> Result<(u64, u64), StageError> {
+    validate_batch_for(batch, c, Role::e1, retained)
+}
+fn validate_batch_for(
     batch: Option<Batch<'_>>,
     c: &Context<'_>,
-    retained: Option<(u64, u64)>,
-) -> Result<(u64, u64), StageError> {
+    allowed: fn(Role) -> bool,
+    retained: Option<(u64,u64)>,
+) -> Result<(u64,u64),StageError> {
     use StageError::*;
     let b = batch.ok_or(MissingBatch)?;
     for (f, v) in [
@@ -468,7 +496,7 @@ fn validate_batch(
             return Err(AllocationAlreadyLive(i));
         }
         let role = Role::decode(r.role, i)?;
-        if !role.e1() {
+        if !allowed(role) {
             return Err(RoleNotAllowed(i));
         }
         if r.domain_tag > 1 {

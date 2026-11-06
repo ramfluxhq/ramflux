@@ -346,8 +346,8 @@
       },
       "src/connection/assembler.rs": {
         "upstream_sha256": "5e205df22a27e1735536378836eb5c8d06cb88358c37f72f9935da09b5575852",
-        "patched_sha256": "9f8a9985f4c552fa1f1a95cc5c471ea63ecf3000ba4da20b3262d93e889bfcc2",
-        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Use actual-capacity receive heap admission; preserve leases across clear/reinit; fallible compaction and descriptor insertion; Use charged unordered receipt history; admit transition before compaction; retain default tree path and preflight dedupe insertion"
+        "patched_sha256": "f97d83d91da1ed90a63ad533792e7d368cd9f9655d0fa205cee8887fea3ebd67",
+        "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Use actual-capacity receive heap admission; preserve leases across clear/reinit; fallible compaction and descriptor insertion; Use charged unordered receipt history; admit transition before compaction; retain default tree path and preflight dedupe insertion; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
       },
       "src/connection/cid_state.rs": {
         "upstream_sha256": "485b3821af4b706789b9ef6d78aaa60b1d49f54dbb2c6785daee801ad2696d24",
@@ -604,8 +604,8 @@
         "delta": "PR1B-2a: dormant exact-capacity receive payload copy, final Bytes-view/raw-owner lease, pre-copy refusal and real driver/CRYPTO tests; owner-envelope and assembler metadata remain uncertified; Keep separate payload admission; construct shared receive backing through guarded owner envelope; Allow guarded exact-capacity compaction copies to fill directly without uncharged scratch backing"
       },
       "src/connection/metadata_owned_bytes.rs": {
-        "patched_sha256": "4f041e4914aaab7325f821f2aaab47ba834bd8df274154abdaec2cfea28392e4",
-        "delta": "Reserve compiler-reported Bytes owner layout and retain AllocationCharge through actual wrapper free; Retain raw owner in the unique after-free guard alongside its actual-layout charge"
+        "patched_sha256": "eff1aded4f5267a6a30042e3016a7afaccd96cf99cbd830e8bd1a236310f1842",
+        "delta": "Reserve compiler-reported Bytes owner layout and retain AllocationCharge through actual wrapper free; Retain raw owner in the unique after-free guard alongside its actual-layout charge; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
       },
       "src/connection/metadata_owned_bytes/tests.rs": {
         "patched_sha256": "bd7a920cb2b933fccdc307654c2f9bee021213e56ee34b431c936c412d71f530",
@@ -616,8 +616,8 @@
         "delta": "Fallible old/new heap plus guarded-copy compaction; sorted storage retains old lease; restore original heap on refusal; independent capacity/lifetime and three-space tests; Cover mixed large retained and small copied fragments, gaps/duplicates, and owner-envelope refusal rollback"
       },
       "src/connection/metadata_heap.rs": {
-        "patched_sha256": "d98d8302de39455e73e47d940281313736fa29b20ce046a21bf02bf2791f43ea",
-        "delta": "Receive descriptor heap leases reserve before exact fallible allocation and retain old/new overlap until actual free"
+        "patched_sha256": "f60107e5fb8b6664e46664df5c26dfffdbb459decf44904a58facd93f311fe1a",
+        "delta": "Receive descriptor heap leases reserve before exact fallible allocation and retain old/new overlap until actual free; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
       },
       "src/connection/assembler/history_tests.rs": {
         "patched_sha256": "7136027263b7ca250d64a22244a1f5a71b5bd6260d8cea05ab8517916912d52a",
@@ -632,12 +632,22 @@
         "delta": "Dormant closed TLS identity, finite-byte and operation contract; independently checked exact-error fixtures and counted Session methods; Remove duplicate hardcoded space/sequence check from validator and oracle; reviewed registry alone defines permitted pairs; Reuse counted Session mock for E1; accept all E0 caps at exact equality with one Session call"
       },
       "src/connection/metadata_staging.rs": {
-        "patched_sha256": "8ce59ae04d412256929619da1796b36797732456574486bbda0bece91a9c0249",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary"
+        "patched_sha256": "49dafe9d7beded10cb64ed779e43e62edf0a04148ae9c751b09ede1eff00e8b6",
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bind owners to observed allocation/lease; match retained Prepare metadata/raw grants without double debit; free hook at actual allocator boundary; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
       },
       "src/connection/metadata_staging/tests.rs": {
-        "patched_sha256": "401a3e18f27b3a16ee9b2d18c8f5307daf7f2b46ef46ecae59e5d237602b010a",
-        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality"
+        "patched_sha256": "af463ab7e4ff26ab7b93e6bf291444b0b67c398b237010aa40530a658072fbc3",
+        "delta": "Dormant E1 charged packet stage core, atomic metadata/slice/base reservation and move-only allocation ownership; exact closed-map tests and actual backing-free gates; E1 r2: bounded panic-safe gates/joins; registered-owner substitution and completeness; retained grant refusal/equality; partial Prepare actual free ordering; PN and target-usize equality; dormant STREAM receive preparation, actual typed heap layouts and shared validation fixtures"
+      },
+      "src/connection/metadata_staging/receive.rs": {
+        "upstream_sha256": null,
+        "patched_sha256": "237d2a7d383686bb4b610dbc8ef6d145dea869189cfbdda5387e628d9e1b380a",
+        "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests"
+      },
+      "src/connection/metadata_staging/receive/tests.rs": {
+        "upstream_sha256": null,
+        "patched_sha256": "11943ca2cbfb5475923ce875fdf80aa220f81883a227c82a37280d48657ec1e2",
+        "delta": "Dormant STREAM receive preparation and independent exact-error/physical-owner tests"
       }
     },
     "formatting": {

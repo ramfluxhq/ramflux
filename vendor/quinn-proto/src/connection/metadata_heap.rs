@@ -13,6 +13,13 @@ impl<T> Default for MetadataHeap<T> {
     fn default() -> Self { Self { values: BinaryHeap::new(), charge: None, context: None } }
 }
 impl<T: Ord> MetadataHeap<T> {
+    /// Allocate real descriptor storage under an already held aggregate stage lease.
+    pub(super) fn prepare_staged(capacity: usize) -> Result<Self, TooManyChunks> {
+        let mut values=BinaryHeap::new();
+        values.try_reserve_exact(capacity).map_err(|_|TooManyChunks)?;
+        assert_eq!(values.capacity(),capacity);
+        Ok(Self { values, ..Self::default() })
+    }
     pub(super) fn with_capacity(capacity: usize) -> Self {
         Self { values: BinaryHeap::with_capacity(capacity), ..Self::default() }
     }
