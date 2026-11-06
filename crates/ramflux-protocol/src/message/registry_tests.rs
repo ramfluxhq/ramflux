@@ -29,6 +29,7 @@ fn kind_registry_is_exhaustive_and_reserved() -> TestResult {
     );
     assert!(proto.reserved_name.iter().any(|name| name == "KIND_LEGACY_OPAQUE"));
     for binding in CONTROLS {
+        assert_eq!(binding.tag, binding.operation + 15, "approved section 3.2 binding");
         let field = descriptor("Control")?.get_field(binding.tag).ok_or("Control arm missing")?;
         assert!(matches!(field.kind(), Kind::Message(message) if message.name()==binding.body));
     }
@@ -42,6 +43,27 @@ fn kind_registry_is_exhaustive_and_reserved() -> TestResult {
             );
         }
     }
+    let mut frozen = std::collections::BTreeSet::new();
+    for row in FIELD_LAYERS.lines().filter(|row| !row.starts_with('#')) {
+        let mut cells = row.split('\t');
+        let message = cells.next().ok_or("missing layer message")?;
+        let name = cells.next().ok_or("missing layer field")?;
+        let tag: u32 = cells.next().ok_or("missing layer tag")?.parse()?;
+        let layer: u32 = cells.next().ok_or("missing layer number")?.parse()?;
+        assert!((1..=4).contains(&layer));
+        assert!(frozen.insert((message, tag)), "duplicate field introduction");
+        let field = pool
+            .all_messages()
+            .find(|owner| owner.name() == message)
+            .ok_or("missing field owner")?
+            .get_field_by_name(name)
+            .ok_or("stale field introduction")?;
+        assert_eq!(field.number(), tag);
+    }
+    assert_eq!(
+        frozen.len(),
+        pool.all_messages().map(|message| message.fields().len()).sum::<usize>()
+    );
     verify_approved_fields()?;
     Ok(())
 }
@@ -70,6 +92,11 @@ fn verify_approved_fields() -> TestResult {
         if first == "repeated" {
             assert!(field.is_list(), "{message}.{name}");
         }
+        if field.is_map() {
+            assert!(ty.starts_with("map<"));
+            count += 1;
+            continue;
+        }
         let actual = match field.kind() {
             Kind::Message(message) => message.name().to_string(),
             Kind::Enum(enumeration) => enumeration.name().to_string(),
@@ -84,16 +111,16 @@ fn verify_approved_fields() -> TestResult {
 
 // Descriptor-created choices exercise every generated sub-operation, rather than
 // hand-writing a parallel set of enum variants in the fixture.
-fn populated(descriptor: prost_reflect::MessageDescriptor, depth: usize) -> DynamicMessage {
+fn populated(descriptor: &prost_reflect::MessageDescriptor, depth: usize) -> DynamicMessage {
     let mut message = DynamicMessage::new(descriptor.clone());
     if depth > 16 {
         return message;
     }
     for oneof in descriptor.oneofs().filter(|oneof| !oneof.is_synthetic()) {
-        if let Some(field) = oneof.fields().next() {
-            if let Kind::Message(child) = field.kind() {
-                message.set_field(&field, Value::Message(populated(child, depth + 1)));
-            }
+        if let Some(field) = oneof.fields().next()
+            && let Kind::Message(child) = field.kind()
+        {
+            message.set_field(&field, Value::Message(populated(&child, depth + 1)));
         }
     }
     if descriptor.name() == "Control" {
@@ -172,7 +199,7 @@ fn verify_every_operation() -> TestResult {
                     continue;
                 };
                 let mut body = DynamicMessage::new(message.clone());
-                body.set_field(&field, Value::Message(populated(child, 0)));
+                body.set_field(&field, Value::Message(populated(&child, 0)));
                 if message.name() == "Control" {
                     let operation = CONTROLS
                         .iter()
@@ -250,6 +277,9 @@ fn entity_unknown_is_projection_only_and_reaction_token_is_bounded() -> TestResu
 
 #[test]
 fn scanner_preserves_unknown_and_rejects_noncanonical_bounds() -> TestResult {
+    for bytes in [&[0x08, 0x81, 0][..], &[0x10, 1, 0x08, 1][..]] {
+        assert_eq!(scan_message("Inner", bytes, 2), Err(ValidationError::NonCanonical));
+    }
     assert_eq!(
         scan_message("Message", &[0x0a, 0x81, 0x00, b'x'], 2),
         Err(ValidationError::NonCanonical)
@@ -270,6 +300,24 @@ fn scanner_preserves_unknown_and_rejects_noncanonical_bounds() -> TestResult {
     let scanned = scan_inner(&unknown)?;
     assert_eq!(scanned.outcome, ScanOutcome::Unsupported);
     assert_eq!(scanned.exact_inner, unknown);
+    let map = SurfaceExportMetadata {
+        skipped: [(String::new(), 0), ("a".into(), 1), ("b".into(), 2)].into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        scan_message("SurfaceExportMetadata", &map.encode_to_vec(), 2)?,
+        ScanOutcome::Supported
+    );
+    let repeated = [0x1a, 5, 0x0a, 1, b'a', 0x10, 1, 0x1a, 5, 0x0a, 1, b'a', 0x10, 2];
+    assert_eq!(
+        scan_message("SurfaceExportMetadata", &repeated, 2),
+        Err(ValidationError::NonCanonical)
+    );
+    let reordered = [0x1a, 5, 0x0a, 1, b'b', 0x10, 1, 0x1a, 5, 0x0a, 1, b'a', 0x10, 2];
+    assert_eq!(
+        scan_message("SurfaceExportMetadata", &reordered, 2),
+        Err(ValidationError::NonCanonical)
+    );
     let max_entities = Message {
         text: "a".into(),
         entities: vec![Entity { offset: 0, length: 1, kind: 1, value: None }; MAX_ENTITIES],

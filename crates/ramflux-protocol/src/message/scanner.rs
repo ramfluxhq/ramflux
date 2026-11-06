@@ -31,6 +31,7 @@ pub(crate) fn scan(
     let mut outcome = ScanOutcome::Supported;
     let (mut operation, mut payload) = (0, 0);
     let mut object_key: Option<&str> = None;
+    let mut map_keys = BTreeMap::<u32, &str>::new();
     while !input.is_empty() {
         let field = wire::field(&mut input)?;
         if field.tag < previous {
@@ -52,6 +53,13 @@ pub(crate) fn scan(
             return Err(ValidationError::MissingChoice);
         }
         collection_cap(descriptor.name(), schema.name(), *count)?;
+        if schema.is_map() {
+            let key = json_member_key(field.bytes)?;
+            if map_keys.get(&field.tag).is_some_and(|previous| *previous >= key) {
+                return Err(ValidationError::NonCanonical);
+            }
+            map_keys.insert(field.tag, key);
+        }
         if descriptor.name() == "JsonObject" && schema.name() == "members" {
             let key = json_member_key(field.bytes)?;
             if object_key.is_some_and(|previous| {
@@ -165,9 +173,23 @@ fn scan_field(
 
 fn validate_string(schema: &FieldDescriptor, bytes: &[u8]) -> Result<(), ValidationError> {
     let identifier = schema.name().ends_with("_id")
+        || schema.name().ends_with("_anchor")
+        || schema.name().ends_with("_principal")
+        || schema.name().ends_with("_device")
         || matches!(
             schema.name(),
-            "id" | "device" | "account_anchor" | "principal" | "conversation" | "group"
+            "id" | "device"
+                | "account_anchor"
+                | "principal"
+                | "conversation"
+                | "group"
+                | "root"
+                | "requester"
+                | "assignee"
+                | "author"
+                | "proposer"
+                | "sender"
+                | "receiver"
         );
     if bytes.len() > if identifier { 256 } else { MAX_TEXT_BYTES } {
         return Err(ValidationError::Limit);
