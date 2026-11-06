@@ -269,6 +269,9 @@ impl CustodyService {
             None
         };
         match attempt.action {
+            CustodyProofAction::PrekeyStatus { .. } | CustodyProofAction::RegisterUpdate { .. } => {
+                Err(CustodyRefusal::Unsupported.into())
+            }
             CustodyProofAction::HomeMigration { control_hash, publication, purpose } => {
                 let session = CustodySession {
                     session_id: String::new(),
@@ -649,3 +652,6 @@ fn home_operation(
         .acquire_home_operation(&device.account_anchor)
         .map_err(|error| home_refusal(scope.router, scope.store, device, nonce, now, error))
 }
+
+#[cfg(test)]
+mod dm_fs_v3_tests;

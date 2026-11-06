@@ -45,3 +45,6 @@ mod header;
 pub use header::{BootstrapHeader, BootstrapTranscript};
 #[cfg(test)]
 mod service_tests;
+
+#[cfg(test)]
+mod custody_tests;
