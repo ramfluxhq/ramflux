@@ -45,16 +45,9 @@ pub(super) async fn post(
             },
         )
         .await;
-        match result {
-            Ok(bytes) => return Ok(Reply { bytes, mesh_frame: true }),
-            Err(ramflux_transport::TransportError::Quic(_)) => {}
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        return http(router, &value, http_deadline, admission).await;
+        // One wire attempt per batch per round: a failed batch is retried by the next round.
+        return Ok(Reply { bytes: result?, mesh_frame: true });
     }
-    // QUIC has terminated and released its permit before an HTTP fallback can enter.
-    let admission = requests.admit(deadline).await?;
     http(router, &value, http_deadline, admission).await
 }
 async fn http(

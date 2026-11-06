@@ -1106,7 +1106,7 @@ fn run_mesh_quic_client_runtime(
             let response = tokio::select! {
                 biased;
                 () = response_sender.closed() => return,
-                response = mesh_quic_cached_request(pools, breakers, request, pool_size) => response,
+                response = mesh_quic_cached_request(pools, breakers, request, pool_size, true) => response,
             };
             response_sender.send(response);
         });
@@ -1114,11 +1114,14 @@ fn run_mesh_quic_client_runtime(
     Ok(())
 }
 
+/// `retry_cached` permits one re-send after a failed cached-connection attempt. Callers
+/// with a hard wire-attempt budget pass `false`: the request is then sent at most once.
 async fn mesh_quic_cached_request(
     pools: Arc<MeshQuicPoolRegistry>,
     breakers: Arc<MeshQuicCircuitBreakers>,
     job: MeshQuicClientRequestJob,
     pool_size: usize,
+    retry_cached: bool,
 ) -> Result<MeshQuicClientResponsePayload, TransportError> {
     record_mesh_client_request();
     let peer_addr = if matches!(&job.request, MeshQuicClientRequestPayload::RawJson(_)) {
@@ -1140,7 +1143,7 @@ async fn mesh_quic_cached_request(
     let (connection, reused_cached_connection) =
         mesh_quic_acquire_connection(&pool, &breakers, peer_addr, &job, pool_size).await?;
     record_mesh_client_acquire(acquire_started.elapsed());
-    let request_timeout = if reused_cached_connection {
+    let request_timeout = if reused_cached_connection && retry_cached {
         MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT
     } else {
         MESH_QUIC_REQUEST_TIMEOUT
@@ -1153,7 +1156,7 @@ async fn mesh_quic_cached_request(
     .await
     {
         Ok(response) => Ok(response),
-        Err(error) if reused_cached_connection => {
+        Err(error) if reused_cached_connection && retry_cached => {
             record_mesh_client_cached_request_failure();
             record_mesh_client_retry();
             tracing::warn!(

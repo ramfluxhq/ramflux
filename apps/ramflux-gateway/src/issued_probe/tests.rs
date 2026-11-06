@@ -247,13 +247,13 @@ async fn probe_router_origin_hole() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let store = publication::open_durability_fixture(&root, 0)?;
     let router = RouterCore::new();
-    let runtime = crate::session::submit_ack_tests::test_runtime()?;
+    let runtime = crate::session::submit_fixtures::test_runtime()?;
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     store.initialize_inbox("alice-target")?;
     router.prepare_publication_target(&store, "alice-target")?;
     let mut rows = Vec::new();
     for seq in 1..=2 {
-        let mut envelope = crate::session::submit_ack_tests::signed_submit(&runtime, now)?.envelope;
+        let mut envelope = crate::session::submit_fixtures::signed_submit(&runtime, now)?.envelope;
         envelope.envelope_id = format!("probe-origin-{seq}");
         envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
             &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
@@ -404,5 +404,58 @@ async fn probe_live_requests_across_batches_and_rounds() -> anyhow::Result<()> {
         assert!(tokio::time::timeout(Duration::from_secs(10), task).await??);
         assert_eq!(fixture.context.hub.probe_requests.0.available_permits(), 4);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_wire_attempts_are_bounded_and_deferred() -> anyhow::Result<()> {
+    use crate::session_push::tests::support::{Fixture, sink};
+    let mut fixture = Fixture::raw("probe-wire-bound")?;
+    let (send, _) = sink();
+    fixture.context.hub.population_fixture(3, ID, &send).await;
+    let run = |fixture: &Fixture| {
+        let hub = fixture.context.hub.clone();
+        let router = fixture.context.router.clone();
+        tokio::spawn(async move { round(&hub, &router).await })
+    };
+    let reply = |request: &crate::session_push::tests::support::Request| {
+        let rows: Vec<_> = request.body["targets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| json!({"target_delivery_id":t,"incarnation_id":ID,"inbox_seq":0}))
+            .collect();
+        json!({"issued":rows})
+    };
+    // Fill the default eight-connection pool so the next request reuses a cached connection.
+    for _ in 0..8 {
+        let task = run(&fixture);
+        let first = fixture.next().await?;
+        let value = reply(&first);
+        first.respond.send((200, value)).map_err(|_| anyhow::anyhow!("cancelled"))?;
+        assert!(!tokio::time::timeout(Duration::from_secs(10), task).await??);
+    }
+    // The server receives the cached request, then resets the connection before replying.
+    // (comment) receives the request, then resets the connection before replying.
+    let task = run(&fixture);
+    let reset = fixture.next().await?;
+    drop(reset);
+    assert!(tokio::time::timeout(Duration::from_secs(10), task).await??, "failed batch reported");
+    // The request count for the round is exactly ceil(3/1024) = 1: no re-send, no fallback.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(800), fixture.requests.recv()).await.is_err(),
+        "a reset batch was sent again within the round"
+    );
+    assert_eq!(fixture.context.hub.probe_requests.0.available_permits(), 4);
+    // Round 3 delivers the deferred batch.
+    let task = run(&fixture);
+    let next = fixture.next().await?;
+    let value = reply(&next);
+    next.respond.send((200, value)).map_err(|_| anyhow::anyhow!("cancelled"))?;
+    assert!(!tokio::time::timeout(Duration::from_secs(10), task).await??);
+    assert!(matches!(
+        fixture.requests.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     Ok(())
 }

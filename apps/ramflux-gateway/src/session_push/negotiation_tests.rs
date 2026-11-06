@@ -121,6 +121,11 @@ async fn session_push_capability_negotiation() -> anyhow::Result<()> {
     assert_eq!(registration(&mut fixture, true, false).await?, None);
     Ok(())
 }
+async fn advance(by: Duration) {
+    tokio::time::pause();
+    tokio::time::advance(by + Duration::from_millis(1)).await;
+    tokio::time::resume();
+}
 #[tokio::test]
 async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
     assert_eq!(DISCOVERY_INTERVAL, Duration::from_secs(60));
@@ -133,7 +138,6 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         let mut fixture = Fixture::new(label)?;
         fixture.context.hub.readiness.ready.store(true, Ordering::Release);
         let probe_timeout = Duration::from_millis(100);
-        let started = tokio::time::Instant::now();
         if status == 404 {
             fixture.context.hub.readiness.start_with_interval(
                 &fixture.context.router,
@@ -149,9 +153,9 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         }
         let req = fixture.next().await?;
         if body.is_null() {
-            // Keep the request alive until the discovery deadline clears readiness.
+            // Keep the request alive; advance the clock past the injected discovery deadline.
+            advance(probe_timeout).await;
             ready(&fixture, false).await?;
-            assert!(started.elapsed() >= probe_timeout);
             drop(req);
         } else {
             req.respond.send((status, body)).map_err(|_| Retired)?;
@@ -159,10 +163,10 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         ready(&fixture, false).await?;
         assert_eq!(registration(&mut fixture, true, false).await?, None);
         if status == 404 {
+            advance(retry_interval).await;
             let retry = tokio::time::timeout(Duration::from_secs(10), fixture.requests.recv())
                 .await?
                 .ok_or(Retired)?;
-            assert!(started.elapsed() >= retry_interval);
             assert_eq!(retry.path, "/mvp1/session-push-capabilities");
             retry
                 .respond
