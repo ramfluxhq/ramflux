@@ -50,7 +50,7 @@ pub(super) fn body_variants() -> Vec<B> {
 fn step(state: S, needs_me: Option<NeedsMe>) -> TaskStep {
     TaskStep { id: "step".into(), title: "title".into(), state, needs_me }
 }
-fn event(body: B) -> Result<TaskEvent, Box<dyn std::error::Error>> {
+pub(super) fn event(body: B) -> Result<TaskEvent, Box<dyn std::error::Error>> {
     let event = TaskEvent::new(
         "thread".into(),
         body,
@@ -230,7 +230,7 @@ fn typed_task_carrier_binds_every_outer_field_and_native_signature() -> TestResu
     Ok(())
 }
 
-fn approval_packet()
+pub(super) fn approval_packet()
 -> Result<(g::TaskApprovalPacket, crate::LocalMcpGrantSigningBody), Box<dyn std::error::Error>> {
     let binding = g::TaskApprovalBinding {
         conversation_id: "thread".into(),

@@ -17,6 +17,19 @@ impl RamfluxClient {
         event: TaskEvent,
         message_id: String,
     ) -> Result<Vec<u8>, SdkError> {
+        self.encode_generated_task_carrier_with_certificate(event, message_id, None)
+    }
+
+    /// Sign a candidate carrier with an optional already signed executor certificate.
+    /// No Task decision is admitted and no state is changed.
+    /// # Errors
+    /// Rejects invalid carrier fields, signatures, certificate bindings or byte caps.
+    pub fn encode_generated_task_carrier_with_certificate(
+        &self,
+        event: TaskEvent,
+        message_id: String,
+        decision_proof: Option<g::TaskCertificate>,
+    ) -> Result<Vec<u8>, SdkError> {
         let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         if event.signed().signing_key_id
             != crate::prelude::sdk_device_signed_fields(&device.device_id, "").signing_key_id
@@ -42,7 +55,7 @@ impl RamfluxClient {
                     .map_err(|_| invalid("invalid generated task event"))?,
             ),
             signature: String::new(),
-            decision_proof: None,
+            decision_proof,
         };
         carrier.signature =
             ramflux_crypto::sign_canonical_bytes_with_device_branch(&transcript(&carrier)?, device);
@@ -69,9 +82,13 @@ impl RamfluxClient {
         let Some(g::task::Payload::Carrier(carrier)) = task.payload else {
             return Err(invalid("generated task carrier required"));
         };
-        // P17b replaces this temporary refusal with certificate verification and bindings.
-        if carrier.decision_proof.is_some() {
-            return Err(invalid("generated task decision proof verification unavailable"));
+        for field in [&carrier.message_id, &carrier.principal_id, &carrier.device_id] {
+            if field.is_empty()
+                || field.len() > 256
+                || !ramflux_protocol::text_safety::single_line_is_safe(field)
+            {
+                return Err(invalid("invalid generated task carrier identifier"));
+            }
         }
         if carrier.content_type != "task"
             || carrier.message_id.is_empty()
@@ -94,6 +111,10 @@ impl RamfluxClient {
             public_key_base64url: &public,
         };
         Self::decode_generated_task_event(&event.encode_to_vec(), &signer)?;
+        if let Some(certificate) = &carrier.decision_proof {
+            self.decode_generated_task_certificate(&certificate.encode_to_vec())?;
+            check_resolution(&carrier, certificate)?;
+        }
         ramflux_crypto::verify_canonical_signature(
             &transcript(&carrier)?,
             &carrier.signature,
@@ -107,4 +128,33 @@ fn transcript(carrier: &g::TaskCarrier) -> Result<Vec<u8>, SdkError> {
     let mut unsigned = carrier.clone();
     unsigned.signature.clear();
     super::typed_transcript("TaskCarrier", &unsigned.encode_to_vec())
+}
+
+pub(super) fn check_resolution(
+    carrier: &g::TaskCarrier,
+    certificate: &g::TaskCertificate,
+) -> Result<(), SdkError> {
+    let resolution = match carrier
+        .event
+        .as_ref()
+        .and_then(|event| event.event.as_ref())
+        .and_then(|event| event.value.as_ref())
+    {
+        Some(g::task_event_body::Value::Resolve(value)) => value.value.as_ref(),
+        _ => None,
+    }
+    .ok_or_else(|| invalid("task certificate requires a resolution carrier"))?;
+    if certificate.conversation_id != carrier.conversation_id
+        || certificate.resolution.as_ref() != Some(resolution)
+    {
+        return Err(invalid("task certificate resolution binding mismatch"));
+    }
+    Ok(())
+}
+
+pub(super) fn carrier_hash(carrier: &g::TaskCarrier) -> String {
+    ramflux_protocol::hash_base64url(
+        "ramflux.message.typed.TaskCarrier.v1",
+        &carrier.encode_to_vec(),
+    )
 }
