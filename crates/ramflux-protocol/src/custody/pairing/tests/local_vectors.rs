@@ -10,7 +10,7 @@ fn maxima() -> TestResult<Value> {
         "../../../../fixtures/pairing_v2/channel_local/maxima.json"
     ))?)
 }
-fn witness<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
+fn independent_bytes<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
     let wire = all[key]["wire"].as_str().ok_or("missing independent bytes")?.as_bytes();
     assert_eq!(wire.len() as u64, all[key]["size"].as_u64().ok_or("missing size")?);
     assert_eq!(T::from_wire_bytes(wire)?.to_wire_bytes()?, wire, "{key}");
@@ -26,7 +26,6 @@ fn witness<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
     padded.push(b' ');
     assert_eq!(T::from_wire_bytes(&padded).err(), Some(WireError::Size), "{key} over input cap");
     let value: Value = serde_json::from_slice(wire)?;
-    nested_shapes::<T>(&value)?;
     for secret in ["passphrase", "confirmation", "provider_handle"] {
         let mut wrong = value.clone();
         wrong[secret] = json!("synthetic");
@@ -34,8 +33,24 @@ fn witness<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
     }
     Ok(value)
 }
+fn witness<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
+    let value = independent_bytes::<T>(all, key)?;
+    nested_shapes::<T>(&value)?;
+    Ok(value)
+}
+fn b32_vectors<T: PairingWire>(value: &Value, path: &str, error: &'static str) -> TestResult {
+    for bad in [
+        json!("A".repeat(42)),
+        json!("A".repeat(44)),
+        json!(format!("{}B", "A".repeat(42))),
+        json!("+".repeat(43)),
+    ] {
+        field::<T>(value, path, bad, error)?;
+    }
+    Ok(())
+}
 fn local_base_vectors<T: PairingWire>(v: &Value) -> TestResult {
-    field::<T>(v, "/operation_id", json!("bad"), "operation_id")?;
+    b32_vectors::<T>(v, "/operation_id", "operation_id")?;
     field::<T>(v, "/generation", json!(0), "generation")?;
     invalid::<T>(v, "/generation", json!(MAX_SAFE_JSON_INTEGER + 1), WireError::Json)?;
     let mut low = v.clone();
@@ -64,6 +79,7 @@ fn rights_vectors<T: PairingWire>(v: &Value) -> TestResult {
     low["lease_expires_at"] = json!(MAX_BRANCH_LEASE_SECONDS);
     decode_value::<T>(&low)?;
     field::<T>(&low, "/lease_expires_at", json!(MAX_BRANCH_LEASE_SECONDS + 1), "lease")?;
+    field::<T>(v, "/lease_expires_at", v["lease_not_before"].clone(), "lease")?;
     for end in [0, MAX_SAFE_JSON_INTEGER - 301] {
         field::<T>(v, "/lease_expires_at", json!(end), "lease")?;
     }
@@ -88,7 +104,10 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
     local_result_vectors(&all)?;
     witness::<LocalEvent>(&all, "LocalEvent")?;
     credential_request_vectors(&witness::<CredentialRequest>(&all, "CredentialRequest")?)?;
-    witness::<TransferPayload>(&all, "TransferPayload")?;
+    // Keep the independent collection-size witness separate from per-field
+    // shape/context vectors, avoiding repeated shape mutations at256 identical
+    // reference layouts.
+    independent_bytes::<TransferPayload>(&all, "TransferPayload")?;
     witness::<Channel>(&all, "Channel_hpke")?;
     witness::<Channel>(&all, "Channel_candidate")?;
     witness::<Update>(&all, "Update_installed")?;
@@ -168,7 +187,7 @@ fn local_request_vectors(all: &Value) -> TestResult {
         ($ty:ty,$key:literal,$($hash:literal),*) => {{
             let v = witness::<$ty>(all,$key)?;
             local_base_vectors::<$ty>(&v)?;
-            $(field::<$ty>(&v,$hash,json!("bad"), &$hash[1..])?;)*
+            $(b32_vectors::<$ty>(&v,$hash, &$hash[1..])?;)*
         }};
     }
     request!(Confirm, "Confirm", "/transcript_hash");
@@ -191,6 +210,7 @@ fn local_request_vectors(all: &Value) -> TestResult {
 fn local_result_vectors(all: &Value) -> TestResult {
     for tag in ["begin", "update", "error"] {
         let value = witness::<LocalResult>(all, &format!("LocalResult_{tag}"))?;
+        invalid::<LocalResult>(&value, "/outcome/tag", json!("other"), WireError::Shape)?;
         let result = decode_value::<LocalResult>(&value)?;
         for method in [
             "pair.begin",
@@ -235,7 +255,7 @@ fn update_vectors(v: &Value) -> TestResult {
     name_vectors::<Update>(v, "/peer_name")?;
     invalid::<Update>(v, "/expires_at", json!(MAX_SAFE_JSON_INTEGER + 1), WireError::Json)?;
     for key in ["transcript_hash", "proposal_hash", "record_hash"] {
-        field::<Update>(v, &format!("/{key}"), json!("bad"), key)?;
+        b32_vectors::<Update>(v, &format!("/{key}"), key)?;
     }
     field::<Update>(v, "/phase", json!("other"), "phase")?;
     field::<Update>(v, "/cleanup", json!("other"), "cleanup")?;
@@ -265,6 +285,14 @@ fn update_phase_vectors(v: &Value) -> TestResult {
         current["record_hash"] =
             if i >= 6 { json!(encode_base64url([1; 32])) } else { Value::Null };
         current["result"] = if i >= 11 { json!("Expired") } else { Value::Null };
+        if i >= 10 {
+            let mut cleared = current.clone();
+            for key in ["transcript_hash", "peer_ref", "peer_name", "proposal_hash", "record_hash"]
+            {
+                cleared[key] = Value::Null;
+            }
+            decode_value::<Update>(&cleared)?;
+        }
         let mut pending = current.clone();
         pending["result"] = json!("PublicationPending");
         decode_value::<Update>(&pending)?;
@@ -323,6 +351,10 @@ fn update_phase_vectors(v: &Value) -> TestResult {
 }
 
 fn reference_vectors<T: PairingWire>(value: &Value, prefix: &str) -> TestResult {
+    b32_vectors::<T>(value, &format!("{prefix}/account_anchor"), "ref.account_anchor")?;
+    let mut minimum = value.clone();
+    minimum.pointer_mut(prefix).ok_or("reference path")?["device_epoch"] = json!(1);
+    decode_value::<T>(&minimum)?;
     for (name, bad, error) in [
         ("account_anchor", json!("bad"), "ref.account_anchor"),
         ("device_id", json!(""), "ref.device_id"),
@@ -346,6 +378,7 @@ fn reference_vectors<T: PairingWire>(value: &Value, prefix: &str) -> TestResult 
     Ok(())
 }
 fn credential_request_vectors(value: &Value) -> TestResult {
+    b32_vectors::<CredentialRequest>(value, "/reservation_id", "reservation_id")?;
     invalid::<CredentialRequest>(
         value,
         "/frontend_generation",

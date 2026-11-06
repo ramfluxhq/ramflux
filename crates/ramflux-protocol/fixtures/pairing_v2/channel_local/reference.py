@@ -41,7 +41,7 @@ br = obj('BeginResult', **base, expires_at=U, invite_token=token)
 update = obj('Update', **base, phase='mutually_confirmed', expires_at=U, transcript_hash=b(1), emoji_indices=[63]*7, peer_ref=ref(), peer_name=name, **rights, proposal_hash=None, record_hash=None, result='PublicationPending', cleanup='pending')
 prepared = dict(update, phase='locally_installed', emoji_indices=None, proposal_hash=b(2), record_hash=b(3))
 terminal = dict(prepared, phase='cancelled', result='PublicationPending')
-objects = dict(Begin=begin, TransferBegin=transfer, Join=obj('Join', token=token, display_name=name), BeginResult=br, Update=update, LocalEvent=obj('LocalEvent', update=prepared), CredentialRequest=dict(local_account_id='é'*64, reservation_id=b(1), frontend_generation=U, action='setup'))
+objects = dict(Begin=begin, TransferBegin=transfer, Join=obj('Join', token=token, display_name=name), BeginResult=br, Update=update, LocalEvent=obj('LocalEvent', update=prepared), CredentialRequest=dict(local_account_id=escaped_id(0,128), reservation_id=b(1), frontend_generation=U, action='unlock'))
 objects['Update_installed'] = prepared
 objects['Update_terminal'] = terminal
 for typ, extra in [('Confirm',dict(transcript_hash=b(1), match=False)), ('Approve',dict(transcript_hash=b(1), proposal_hash=b(2), approved=False)), ('Prepare',dict(transcript_hash=b(1))), ('Cancel',{}), ('StatusRequest',{})]:
