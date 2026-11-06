@@ -81,6 +81,14 @@ pub enum CustodyProofAction {
         )]
         update: String,
     },
+    /// Dormant native pairing carrier (P01W).
+    PairingIssue {
+        request: Box<super::pairing::native::Issue>,
+    },
+    /// Dormant native pairing carrier (P01W).
+    PairingCreate {
+        request: Box<super::pairing::native::Create>,
+    },
 }
 impl CustodyProofAction {
     #[must_use]
@@ -89,7 +97,9 @@ impl CustodyProofAction {
             Self::Publish { .. }
             | Self::Register { .. }
             | Self::PrekeyStatus { .. }
-            | Self::RegisterUpdate { .. } => "register",
+            | Self::RegisterUpdate { .. }
+            | Self::PairingIssue { .. }
+            | Self::PairingCreate { .. } => "register",
             Self::HomeMigration { purpose, .. } => purpose.capability(),
             Self::OpenSession => "message",
         }

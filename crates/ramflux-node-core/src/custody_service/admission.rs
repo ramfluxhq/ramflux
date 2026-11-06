@@ -269,9 +269,10 @@ impl CustodyService {
             None
         };
         match attempt.action {
-            CustodyProofAction::PrekeyStatus { .. } | CustodyProofAction::RegisterUpdate { .. } => {
-                Err(CustodyRefusal::Unsupported.into())
-            }
+            CustodyProofAction::PrekeyStatus { .. }
+            | CustodyProofAction::RegisterUpdate { .. }
+            | CustodyProofAction::PairingIssue { .. }
+            | CustodyProofAction::PairingCreate { .. } => Err(CustodyRefusal::Unsupported.into()),
             CustodyProofAction::HomeMigration { control_hash, publication, purpose } => {
                 let session = CustodySession {
                     session_id: String::new(),
