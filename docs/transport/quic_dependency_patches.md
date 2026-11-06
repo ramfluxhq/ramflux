@@ -435,4 +435,9 @@ inline plan require existing precharged storage; this patch issues no finite
 allocator/TLS evidence and does not resolve the later publication/activation gates.
 The E1 oracle uses independent wide arithmetic and causal deallocation gates;
 the E0 positive boundary case reaches exactly one Session call with every cap
-at equality.
+at equality. Owner completeness includes each observed allocation/lease pair;
+registered unrelated backing cannot substitute for an expected owner. Prepare
+matches both retained metadata and raw grants, validating current usage without
+a second debit. Test free hooks run at the actual allocator deallocation boundary,
+including partial Prepare rollback; causal gates release on panic and every
+completion wait is bounded by a panicking guard of at least ten seconds.

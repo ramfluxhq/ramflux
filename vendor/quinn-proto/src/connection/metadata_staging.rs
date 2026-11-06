@@ -259,6 +259,7 @@ pub(crate) enum StageError {
     DuplicateOwner(usize),
     UnknownAllocation(usize),
     LeaseMismatch(usize),
+    OwnerAllocationMismatch(usize),
     DuplicateBackingCharge(usize),
     LeaseAliased(usize),
     InvalidOwnerLocation(usize, u8),
@@ -273,6 +274,7 @@ pub(crate) enum StageError {
     InvalidReservationState(u8),
     MissingReservation,
     ReservationMismatch,
+    ReservationChargeMismatch(Domain),
     UnexpectedReservation,
     ReservationStateMismatch(Action, ReservationState),
     ExpectedChargeMismatch,
@@ -431,7 +433,11 @@ fn binding(r: &Request<'_>, c: &Context<'_>) -> Result<Binding, StageError> {
     }
     Ok(b)
 }
-fn validate_batch(batch: Option<Batch<'_>>, c: &Context<'_>) -> Result<(u64, u64), StageError> {
+fn validate_batch(
+    batch: Option<Batch<'_>>,
+    c: &Context<'_>,
+    retained: Option<(u64, u64)>,
+) -> Result<(u64, u64), StageError> {
     use StageError::*;
     let b = batch.ok_or(MissingBatch)?;
     for (f, v) in [
@@ -525,6 +531,14 @@ fn validate_batch(batch: Option<Batch<'_>>, c: &Context<'_>) -> Result<(u64, u64
     if raw != b.raw_charge {
         return Err(BatchChargeMismatch(Domain::RawBase));
     }
+    if let Some((reserved_metadata, reserved_raw)) = retained {
+        if metadata != reserved_metadata {
+            return Err(ReservationChargeMismatch(Domain::Metadata));
+        }
+        if raw != reserved_raw {
+            return Err(ReservationChargeMismatch(Domain::RawBase));
+        }
+    }
     for (domain, used, limit, debit, overflow) in [
         (
             Domain::Metadata,
@@ -542,9 +556,12 @@ fn validate_batch(batch: Option<Batch<'_>>, c: &Context<'_>) -> Result<(u64, u64
             Arithmetic::SliceOverlap,
         ),
     ] {
-        if used > limit {
+        if used > limit || (retained.is_some() && debit > used) {
             return Err(InvalidLedger(domain));
         }
+        // Prepare consumes an existing grant already present in these ledgers.
+        // Reserve alone adds a fresh debit, including old/new allocation overlap.
+        let debit = if retained.is_some() { 0 } else { debit };
         let total = used.checked_add(debit).ok_or(ArithmeticOverflow(overflow))?;
         if total > limit {
             if domain == Domain::RawBase {
@@ -610,6 +627,12 @@ fn validate_owners(r: &Request<'_>, c: &Context<'_>) -> Result<(), StageError> {
             .iter()
             .find(|x| x.owner == o.owner)
             .ok_or(OwnerUnexpected(o.owner))?;
+        if o.allocation != expected.allocation {
+            return Err(OwnerAllocationMismatch(i));
+        }
+        if o.lease != expected.lease {
+            return Err(LeaseMismatch(i));
+        }
         if o.location_tag != expected.location_tag {
             return Err(OwnerLocationMismatch(i));
         }
@@ -629,7 +652,9 @@ fn validate_owners(r: &Request<'_>, c: &Context<'_>) -> Result<(), StageError> {
         }
     }
     for expected in c.expected_owners {
-        if !owners.iter().any(|o| o.owner == expected.owner) {
+        if !owners.iter().any(|o| {
+            o.owner == expected.owner && o.allocation == expected.allocation && o.lease == expected.lease
+        }) {
             return Err(OwnerMissing(expected.owner));
         }
     }
@@ -685,7 +710,11 @@ pub(crate) fn validate_e1(r: &Request<'_>, c: &Context<'_>) -> Result<ValidatedE
         _ => return Err(ReservationStateMismatch(action, state)),
     };
     let (metadata, raw) = if matches!(action, Action::Reserve | Action::Prepare) {
-        validate_batch(r.batch, c)?
+        let retained = if action == Action::Prepare {
+            let (_, metadata, raw) = c.reservation.ok_or(MissingReservation)?;
+            Some((metadata, raw))
+        } else { None };
+        validate_batch(r.batch, c, retained)?
     } else {
         let (_, metadata, raw) = c.reservation.ok_or(MissingReservation)?;
         (metadata, raw)
@@ -859,8 +888,6 @@ impl<const N: usize> PreparedStage<N> {
 impl<const N: usize> Drop for PreparedStage<N> {
     fn drop(&mut self) {
         for backing in &mut self.backing {
-            #[cfg(test)]
-            tests::before_backing_free(backing.as_ref().unwrap().pointer.as_ptr());
             drop(backing.take());
         }
         drop(self.lease.take());
@@ -892,6 +919,8 @@ impl StageAllocation {
 impl Drop for StageAllocation {
     fn drop(&mut self) {
         if self.layout.size() != 0 {
+            #[cfg(test)]
+            tests::before_backing_free(self.pointer.as_ptr());
             // SAFETY: this exact pointer/Layout pair was allocated above; ownership
             // is unique and this destructor runs once, before the enclosing lease.
             unsafe { std::alloc::dealloc(self.pointer.as_ptr(), self.layout) };
