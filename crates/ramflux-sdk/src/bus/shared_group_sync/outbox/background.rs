@@ -4,11 +4,10 @@
 //! One bounded group-delivery round split into network steps and local row-fenced commits.
 
 use super::{
-    BOUNDARY_SECONDS, DEVICES_PER_DRAIN, DRIVER_PROGRESS, Delivered, GatewayDirectMessage,
-    GatewaySessionConfig, Intent, LocalBusAccountState, LocalBusFederationRoute, MAX_DEVICES,
-    ROOTS_PER_DRAIN, RecipientCursor, SdkError, StagedEnvelope, VerifiedGroupState, defer_round,
-    delivered_key, key, now_unix_timestamp, persist_intent, prepare_intent, recipient_snapshot,
-    recipients,
+    DEVICES_PER_DRAIN, DRIVER_PROGRESS, Delivered, GatewayDirectMessage, GatewaySessionConfig,
+    Intent, LocalBusAccountState, LocalBusFederationRoute, MAX_DEVICES, ROOTS_PER_DRAIN,
+    RecipientCursor, SdkError, StagedEnvelope, VerifiedGroupState, defer_round, delivered_key, key,
+    now_unix_timestamp, persist_intent, prepare_intent, recipient_snapshot, recipients,
 };
 use crate::bus::{
     connection_manager::SessionContext,

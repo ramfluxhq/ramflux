@@ -59,7 +59,7 @@ impl RamfluxClient {
         request: &LocalBusContactFederatedRequest,
         timeout: Duration,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let (message, body) = contact_message(event_type, request)?;
+        let (message, body) = contact_message(self, event_type, request)?;
         self.send_plaintext_federated_message_async(
             engine,
             PlaintextForward {
