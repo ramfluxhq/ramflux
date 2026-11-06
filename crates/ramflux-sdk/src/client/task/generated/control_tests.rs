@@ -326,9 +326,12 @@ pub(super) fn generated_ack_native_manifest_fields_and_documents_preserve_verifi
     let generated = g::NativeDeviceManifest::decode(bytes.as_slice())?;
     let mut history = super::history_tests::fixture(&client)?;
     history.packets[0].manifests = vec![generated.clone()];
-    assert_eq!(client.decode_generated_task_history_export(
-        &client.encode_generated_task_history_export(&history)?
-    )?, history);
+    assert_eq!(
+        client.decode_generated_task_history_export(
+            &client.encode_generated_task_history_export(&history)?
+        )?,
+        history
+    );
     let mut original = ack(&client)?;
     original.manifests = vec![generated.clone()];
     let bytes = client.encode_generated_task_control(control(original))?;

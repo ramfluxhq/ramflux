@@ -56,9 +56,12 @@ pub(super) fn generated_task_native_custody_manifest_round_trips_without_install
     assert!(generated.devices.iter().all(|device| device.branch_proof.is_none()));
     let mut history = super::history_tests::fixture(&client)?;
     history.packets[0].manifests = vec![generated.clone()];
-    assert_eq!(client.decode_generated_task_history_export(
-        &client.encode_generated_task_history_export(&history)?
-    )?, history);
+    assert_eq!(
+        client.decode_generated_task_history_export(
+            &client.encode_generated_task_history_export(&history)?
+        )?,
+        history
+    );
     assert_eq!(client.account_db()?.client_record("identity", &manifest.principal_id)?, before);
     let mut changed = generated;
     changed.custody.as_mut().ok_or("custody")?.canonical.push(b' ');
