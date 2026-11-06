@@ -107,6 +107,7 @@ fn generate(root: &Path, check: bool) -> Result<(), Box<dyn Error>> {
         let serde = serde
             .replace("std::collections::HashMap<", "crate::message::protojson::StrictMap<")
             .replace("std::collections::BTreeMap<", "crate::message::protojson::StrictMap<");
+        let rust = canonical_own_message_copy(&rust)?;
         let items = partition(&rust, &serde)?;
         let mut outputs = BTreeMap::new();
         outputs.insert("descriptor.bin".to_string(), descriptor_bytes);
@@ -155,6 +156,29 @@ fn generate(root: &Path, check: bool) -> Result<(), Box<dyn Error>> {
     })();
     fs::remove_dir_all(temporary)?;
     result
+}
+
+// Prost orders an entire oneof at its lowest tag. This message has ordinary
+// fields between its arms; its Message implementation lives in message/canonical.
+fn canonical_own_message_copy(source: &str) -> Result<String, Box<dyn Error>> {
+    let mut ast = syn::parse_file(source)?;
+    let mut found = false;
+    for item in &mut ast.items {
+        if let syn::Item::Struct(item) = item
+            && item.ident == "OwnMessageCopy"
+        {
+            item.attrs.clear();
+            item.attrs.push(syn::parse_quote!(#[derive(Clone, PartialEq, Debug, Default)]));
+            for field in &mut item.fields {
+                field.attrs.retain(|attr| !attr.path().is_ident("prost"));
+            }
+            found = true;
+        }
+    }
+    if !found {
+        return Err("OwnMessageCopy generator shape changed".into());
+    }
+    Ok(ast.into_token_stream().to_string())
 }
 
 fn partition(rust: &str, serde: &str) -> Result<BTreeMap<String, Vec<syn::Item>>, Box<dyn Error>> {

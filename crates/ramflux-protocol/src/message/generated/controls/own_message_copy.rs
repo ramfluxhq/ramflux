@@ -5,17 +5,12 @@
 #[allow(unused_imports)]
 use super::super::*;
 
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct OwnMessageCopy {
-    #[prost(message, optional, tag = "2")]
     pub source: ::core::option::Option<QualifiedDevice>,
-    #[prost(message, optional, tag = "3")]
     pub target: ::core::option::Option<QualifiedDevice>,
-    #[prost(int64, tag = "4")]
     pub created_at: i64,
-    #[prost(int64, tag = "5")]
     pub expires_at: i64,
-    #[prost(oneof = "own_message_copy::Payload", tags = "1, 6")]
     pub payload: ::core::option::Option<own_message_copy::Payload>,
 }
 /// Nested message and enum types in `OwnMessageCopy`.
