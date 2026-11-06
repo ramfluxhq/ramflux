@@ -184,3 +184,8 @@ archive-only group tombstone and a target-only binding to veto the candidate.
 without that binding, exports the kept candidate and restriction through the
 production encrypted backup-copy API, then checks the same veto on merge.
 Both exclude alternative DM deletion, fence and lookup explanations.
+
+Target-side fence retention is pinned by `probe_r5r_target_fence_retained`, which
+requires erasure, the original fence, and its selector lookup after merge.
+`probe_r5r_surviving_second_owner_keeps` compares restore with live deletion of
+one of two owners and requires the live surviving-owner control to remain kept.
