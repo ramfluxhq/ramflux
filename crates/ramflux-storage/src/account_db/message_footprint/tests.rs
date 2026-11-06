@@ -514,3 +514,65 @@ fn replay_quarantine_envelope_is_footprinted_and_erased() -> Result<(), StorageE
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn actor_owners(db: &AccountDb, locator: &str) -> Result<Vec<String>, StorageError> {
+    let mut query = db.connection.prepare(
+        "SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=?1 \
+         ORDER BY message_id",
+    )?;
+    let rows = query.query_map(params![locator], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn full_envelope() -> serde_json::Value {
+    json!({"source_principal_id":"principal-private","source_device_id":"device-private",
+        "signing_key_id":"key-private","payload_hash":"payload-private-hash",
+        "created_at":1,"ttl":2,"encrypted_payload":"unlisted-private-content"})
+}
+
+#[test]
+fn admits_predicate_controls_are_isolated() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-admits-controls")?;
+    db.send_direct_message("thread", "message", "peer", b"secret")?;
+    // Listed prefix without any envelope is registered.
+    db.persist_actor_state("routed/message-owner/message", &"private-source")?;
+    assert_eq!(actor_owners(&db, "routed/message-owner/message")?, vec!["message".to_owned()]);
+    // Unlisted prefix with a complete envelope at a fixed path is registered and owned by M.
+    db.persist_actor_state(
+        "zz-new/x",
+        &json!({"routing":{"message_id":"message"},"entry":{"envelope":full_envelope()}}),
+    )?;
+    assert_eq!(
+        actor_owners(&db, "zz-new/x")?,
+        vec!["copy:payload:payload-private-hash".to_owned(), "message".to_owned()]
+    );
+    // Unlisted prefix with an incomplete or off-path envelope is not registered.
+    let mut incomplete = full_envelope();
+    incomplete.as_object_mut().map(|fields| fields.remove("ttl"));
+    db.persist_actor_state(
+        "zz-new/incomplete",
+        &json!({"routing":{"message_id":"message"},"entry":{"envelope":incomplete}}),
+    )?;
+    db.persist_actor_state(
+        "zz-new/planted",
+        &json!({"routing":{"message_id":"message"},"ext":{"envelope":full_envelope()}}),
+    )?;
+    assert_eq!(actor_owners(&db, "zz-new/incomplete")?, Vec::<String>::new());
+    assert_eq!(actor_owners(&db, "zz-new/planted")?, Vec::<String>::new());
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    assert!(!db.actor_state_exists("zz-new/x")?);
+    assert!(!db.actor_state_exists("routed/message-owner/message")?);
+    assert!(db.actor_state_exists("zz-new/incomplete")?);
+    assert!(db.actor_state_exists("zz-new/planted")?);
+    drop(db);
+    let db = AccountDb::open(
+        &AccountIndex::open(&root)?,
+        "acct",
+        &AccountDbKey::derive("acct", b"storage-test-secret"),
+    )?;
+    assert!(!db.actor_state_exists("zz-new/x")?);
+    assert!(db.actor_state_exists("zz-new/incomplete")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -24,7 +24,7 @@ impl AccountDb {
         value: &Value,
     ) -> Result<(), StorageError> {
         self.guard_object_actor(key, value)?;
-        if !actor_state_may_reference_message(key) {
+        if !admits(key, value) {
             return Ok(());
         }
         if drop_actor_registration_for_mutation_test() {
@@ -330,7 +330,29 @@ const fn drop_actor_registration_for_mutation_test() -> bool {
     false
 }
 
-pub(super) fn actor_state_may_reference_message(key: &str) -> bool {
+/// Shared registration predicate for both runtime gates: a listed prefix, or a value that holds
+/// a complete envelope at a fixed path, so a future key name cannot bypass ownership.
+pub(super) fn admits(key: &str, value: &Value) -> bool {
+    actor_state_may_reference_message(key) || value_holds_envelope(value)
+}
+
+fn value_holds_envelope(value: &Value) -> bool {
+    [value.pointer(""), value.pointer("/envelope"), value.pointer("/entry/envelope")]
+        .into_iter()
+        .flatten()
+        .any(|candidate| {
+            let text = |name: &str| candidate.get(name).is_some_and(Value::is_string);
+            let number = |name: &str| candidate.get(name).is_some_and(Value::is_number);
+            text("source_principal_id")
+                && text("source_device_id")
+                && text("signing_key_id")
+                && text("payload_hash")
+                && number("created_at")
+                && number("ttl")
+        })
+}
+
+fn actor_state_may_reference_message(key: &str) -> bool {
     !key.starts_with("routed/seen/")
         && [
             "routed/",
