@@ -6,6 +6,12 @@
 //! separate prerequisites; this module provides no remote grant authority.
 mod files;
 mod lease;
+pub(super) mod retirement;
+pub use retirement::{SegmentCleanupPage, SegmentReference};
+mod orphan;
+pub use orphan::SegmentOrphanSweep;
+#[cfg(test)]
+mod retirement_tests;
 #[cfg(test)]
 mod tests;
 use super::AccountDb;
@@ -67,6 +73,7 @@ impl AccountDb {
             during_write: None,
         };
         if self.segment_reconciled.get().is_none() {
+            store.cleanup_retired(32)?;
             store.recover_startup()?;
             let _ = self.segment_reconciled.set(());
         }
@@ -79,12 +86,13 @@ impl SegmentStore<'_> {
     /// Network negotiation, quota and selector admission are caller prerequisites.
     /// # Errors
     /// Refuses stale generations, identity changes, invalid layout or storage errors.
-    pub fn admit(
+    fn admit_inner(
         &mut self,
         transfer_id: &str,
         generation: u64,
         direction: SegmentDirection,
         verified: &VerifiedContentManifest,
+        reference: Option<&SegmentReference<'_>>,
     ) -> Result<(), StorageError> {
         if transfer_id.is_empty() || transfer_id.len() > 256 || generation == 0 {
             return Err(StorageError::Integrity("segment transfer identity"));
@@ -100,6 +108,10 @@ impl SegmentStore<'_> {
         );
         let tx = self.db.connection.immediate_transaction()?;
         self.db.check_object_identity(&wire, &hash)?;
+        if let Some(reference) = reference {
+            self.check_reference(reference, &wire, &hash)?;
+        }
+        self.record_resource(transfer_id, generation, &wire, &hash, reference)?;
         let previous = self.db.connection.query_row("SELECT object_id,manifest_hash,direction,segment_generation,segment_manifest FROM object_transfer_state WHERE transfer_id=?1",params![transfer_id],|r| Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<i64>>(3)?,r.get::<_,Option<Vec<u8>>>(4)?))).optional()?;
         if let Some((old_wire, old_hash, old_direction, old_generation, old_manifest)) = previous {
             if old_wire != wire
@@ -204,6 +216,7 @@ impl SegmentStore<'_> {
         {
             return Err(StorageError::ObjectIdentityConflict);
         }
+        self.check_resource(id, generation)?;
         let hash =
             std::str::from_utf8(&row.2).map_err(|_| StorageError::Integrity("manifest hash"))?;
         self.db.check_object_identity(&row.1, hash)?;
@@ -223,9 +236,11 @@ impl SegmentStore<'_> {
         self.metadata_page(id, generation, start, limit)
     }
 
-    fn lease(&self, id: &str) -> Result<lease::Lease, StorageError> {
+    fn lease(&self, id: &str) -> Result<retirement::ResourceLease, StorageError> {
         let name = ramflux_protocol::encode_base64url(blake3::hash(id.as_bytes()).as_bytes());
-        lease::Lease::acquire(self.root.join(name))
+        let path = self.root.join(name);
+        let held = lease::Lease::acquire(path.clone())?;
+        Ok(retirement::ResourceLease::new(held, self.db.connection.clone(), path))
     }
 
     fn recover_startup(&mut self) -> Result<(), StorageError> {

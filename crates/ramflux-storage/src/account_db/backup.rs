@@ -129,6 +129,7 @@ impl AccountDb {
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             super::backup_selector_admission::drop_scratch(&target)?;
             super::home_migration::strip_from_backup(&target)?;
+            target.execute("DELETE FROM object_segment_resource", [])?;
             // Domain history, keys and object payloads were copied by SQLite itself.
             let counts=read_counts(&target)?;
             target.close().map_err(|(_, error)| error)?;

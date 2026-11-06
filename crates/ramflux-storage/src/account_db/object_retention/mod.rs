@@ -118,6 +118,7 @@ impl AccountDb {
                 )?;
                 self.object_retirement.cursor.set(*last);
             }
+            super::large_segments::retirement::drain_account(self, 32)?;
             Ok(())
         })();
         if result.is_err()

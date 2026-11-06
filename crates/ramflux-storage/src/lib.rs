@@ -54,7 +54,10 @@ pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{
     InboxFailurePolicy, InboxFailureSource, JournalBounds, JournalEvent,
 };
-pub use account_db::large_segments::{SegmentDirection, SegmentPageEntry, SegmentStore};
+pub use account_db::large_segments::{
+    SegmentCleanupPage, SegmentDirection, SegmentOrphanSweep, SegmentPageEntry, SegmentReference,
+    SegmentStore,
+};
 pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,

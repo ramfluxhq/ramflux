@@ -32,6 +32,7 @@ struct RowSelection<'a> {
 }
 fn skip_merge_table(table: &str) -> bool {
     if table.starts_with("runtime_attachment_")
+        || table == "object_segment_reference_veto"
         || super::backup_selector_admission::is_scratch(table)
     {
         return true;
@@ -39,6 +40,8 @@ fn skip_merge_table(table: &str) -> bool {
     matches!(
         table,
         "object_segment_file"
+            | "object_segment_resource"
+            | "object_segment_floor"
             | "account_mac_bundle"
             | "account_mac_marker_bundle"
             | "account_mac_legacy_origin"
@@ -222,6 +225,7 @@ impl BackupDatabase {
         let result = (|| {
             let tables = self.begin_merge_inputs(candidate, after_capture)?;
             let marker_ids = super::mac_subkeys::merge::prepare(&self.db)?;
+            super::large_segments::retirement::merge_floors(&self.db)?;
             self.merge_object_erasure(progress)?;
             let legacy_verifications = self.begin_legacy_verification_import(native_data_only)?;
             let shared_groups = self.select_backup_shared_groups(mode)?;

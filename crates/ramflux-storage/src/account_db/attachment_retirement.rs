@@ -76,6 +76,8 @@ impl AccountDb {
         }
         let signed = association.grant.signed_bytes().map_err(invalid)?;
         self.write_transaction(|| {
+            let veto:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_segment_reference_veto WHERE reference_id=?1)",params![g.reference_id.as_slice()],|r|r.get(0))?;
+            if veto { return Err(StorageError::ObjectErased); }
             let matched: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM object_message_reference m JOIN object_retention_reference r USING(reference_hash) JOIN object_retention_payload p USING(commitment) WHERE m.message_id=?1 AND m.reference_hash=?2 AND p.wire_id IN(?3,?4) AND p.manifest_hash IN(?5,?6))", params![message_id,reference_hash,id(&g.object_id),ramflux_protocol::encode_base64url(g.object_id),id(&g.manifest_hash),ramflux_protocol::encode_base64url(g.manifest_hash)], |r|r.get(0))?;
             if !matched { return Err(StorageError::AuthorizationRejected); }
             self.connection.execute("INSERT INTO runtime_attachment_reference(reference_id,message_id,reference_hash) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",params![g.reference_id.as_slice(),message_id,reference_hash])?;

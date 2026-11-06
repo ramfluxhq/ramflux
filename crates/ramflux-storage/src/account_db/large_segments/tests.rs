@@ -9,7 +9,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use std::fs;
-fn fixture(case: usize) -> (VerifiedContentManifest, Vec<Vec<u8>>) {
+pub(super) fn fixture(case: usize) -> (VerifiedContentManifest, Vec<Vec<u8>>) {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../ramflux-protocol/tests/fixtures/large_attachment_v1.json"
     ))
@@ -70,7 +70,7 @@ fn fixture(case: usize) -> (VerifiedContentManifest, Vec<Vec<u8>>) {
 fn raw_progress(db: &AccountDb, id: &str) -> (u8, bool, i64, u64) {
     db.connection.query_row("SELECT f.received_bitmap,f.cipher_verified,t.done_bytes,t.segment_sequence FROM object_segment_file f JOIN object_transfer_state t USING(transfer_id) WHERE transfer_id=?1 ORDER BY f.segment_index LIMIT 1",params![id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap()
 }
-fn reopen(root: &std::path::Path) -> AccountDb {
+pub(super) fn reopen(root: &std::path::Path) -> AccountDb {
     let index = AccountIndex::open(root).unwrap();
     AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret")).unwrap()
 }
