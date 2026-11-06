@@ -87,6 +87,13 @@ impl Connection {
         );
         (bytes, payload_len)
     }
+    /// Construct a fresh numbered diagnostic packet; peer ACKs remain valid.
+    #[doc(hidden)]
+    pub fn control_test_fresh_packet(&mut self, frames: &[u8]) -> Vec<u8> {
+        let number=self.spaces[SpaceId::Data].next_packet_number;
+        self.spaces[SpaceId::Data].next_packet_number=number.checked_add(1).unwrap();
+        self.control_test_packet(number,false,frames)
+    }
     /// Arm the normal CID timer; the real Tokio driver must execute it.
     #[doc(hidden)]
     pub fn control_test_timer(&mut self, now: Instant) {

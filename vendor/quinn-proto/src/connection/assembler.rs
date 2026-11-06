@@ -7,10 +7,12 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::range_set::RangeSet;
+use super::metadata_history::ReceiveHistory;
 use super::{metadata_heap::MetadataHeap, metadata_credit::{MetadataClass, MetadataCredit}};
 use std::sync::Arc;
 mod metadata;
+#[cfg(test)]
+mod history_tests;
 
 /// Helper to assemble unordered stream frames into an ordered stream
 #[derive(Debug, Default)]
@@ -34,7 +36,9 @@ impl Assembler {
     }
 
     pub(super) fn bind(&mut self, credit: Option<Arc<MetadataCredit>>, class: MetadataClass) -> Result<(),TooManyChunks> {
-        self.data.bind(credit,class)
+        self.data.bind(credit.clone(),class)?;
+        if let State::Unordered {recvd}=&mut self.state { recvd.bind(credit).map_err(|_|TooManyChunks)?; }
+        Ok(())
     }
     /// Reset to the initial state
     pub(super) fn reinit(&mut self) {
@@ -48,15 +52,16 @@ impl Assembler {
         if ordered && !self.state.is_ordered() {
             return Err(IllegalOrderedRead);
         } else if !ordered && self.state.is_ordered() {
-            // Enter unordered mode
-            if !self.data.is_empty() {
-                // Get rid of possible duplicates
-                self.defragment().map_err(|_|IllegalOrderedRead)?;
-            }
-            let mut recvd = RangeSet::new();
-            recvd.insert(0..self.bytes_read);
+            // Admit the complete receipt history before changing the read mode or
+            // compacting existing data. A refused transition preserves ordered state.
+            let credit=self.data.context().map(|(credit,_)|credit);
+            let mut recvd = ReceiveHistory::new(credit);
+            recvd.insert(0..self.bytes_read).map_err(|_|IllegalOrderedRead)?;
             for chunk in &self.data {
-                recvd.insert(chunk.offset..chunk.offset + chunk.bytes.len() as u64);
+                recvd.insert(chunk.offset..chunk.offset+chunk.bytes.len() as u64).map_err(|_|IllegalOrderedRead)?;
+            }
+            if !self.data.is_empty() {
+                self.defragment().map_err(|_|IllegalOrderedRead)?;
             }
             self.state = State::Unordered { recvd };
         }
@@ -174,7 +179,7 @@ impl Assembler {
         self.end = self.end.max(offset + bytes.len() as u64);
         if let State::Unordered { ref mut recvd } = self.state {
             // Discard duplicate data
-            for duplicate in recvd.replace(offset..offset + bytes.len() as u64) {
+            for duplicate in recvd.replace(offset..offset + bytes.len() as u64).map_err(|_|TooManyChunks)? {
                 if duplicate.start > offset {
                     let buffer = Buffer::new(
                         offset,
@@ -236,6 +241,11 @@ impl Assembler {
     pub(super) fn metadata_storage(&self) -> (usize,usize) { (self.data.capacity_bytes(),self.data.len()) }
     #[cfg(feature="__control-test")]
     pub(super) fn metadata_descriptor_size() -> usize { std::mem::size_of::<Buffer>() }
+
+    #[cfg(any(test,feature="__control-test"))]
+    pub(super) fn metadata_history_storage(&self) -> (usize,usize) {
+        match &self.state { State::Ordered=>(0,0),State::Unordered {recvd}=>recvd.storage() }
+    }
 
     /// Number of bytes consumed by the application
     pub(super) fn bytes_read(&self) -> u64 {
@@ -350,7 +360,7 @@ enum State {
     Unordered {
         /// The set of offsets that have been received from the peer, including portions not yet
         /// read by the application.
-        recvd: RangeSet,
+        recvd: ReceiveHistory,
     },
 }
 

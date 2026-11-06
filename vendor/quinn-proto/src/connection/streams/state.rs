@@ -274,6 +274,13 @@ impl StreamsState {
             recv.assembler.metadata_storage()
         }).fold((0,0),|(a,b),(c,d)|(a+c,b+d))
     }
+    #[cfg(feature="__control-test")]
+    pub(crate) fn metadata_receive_history_storage(&self) -> (usize,usize) {
+        self.recv.values().flatten().chain(self.free_recv.iter()).map(|recv| {
+            let recv=match recv { StreamRecv::Open(recv)|StreamRecv::Free(recv)=>recv };
+            recv.assembler.metadata_history_storage()
+        }).fold((0,0),|(a,b),(c,d)|(a+c,b+d))
+    }
     /// Process incoming stream frame
     ///
     /// If successful, returns whether a `MAX_DATA` frame needs to be transmitted

@@ -135,6 +135,9 @@ impl super::Connection {
     /// Actual STREAM receive descriptor capacities and count, including retained free owners.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_receive_storage(&self) -> (usize,usize) { self.streams.metadata_receive_storage() }
+    /// Bounded unordered-history heap capacity and receipt range count.
+    #[cfg(feature="__control-test")]
+    pub fn metadata_test_unordered_history_storage(&self) -> (usize,usize) { self.streams.metadata_receive_history_storage() }
     /// Actual receive descriptor layout used by replacement heaps.
     #[cfg(feature="__control-test")]
     pub fn metadata_test_receive_descriptor_size(&self) -> usize { super::assembler::Assembler::metadata_descriptor_size() }

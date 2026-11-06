@@ -966,3 +966,73 @@ async fn receive_assemblers_charge_compaction_peaks() {
         drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
     }
 }
+
+async fn inject_unordered_history_byte(connection:&Connection,peer:&Connection,gate:&Arc<Gate>,wire:&Arc<Wire>,offset:u8,byte:u8) {
+    gate.closed.store(true,Ordering::SeqCst);wire.held.store(true,Ordering::SeqCst);wire.suppress_send.store(true,Ordering::SeqCst);
+    let packet=peer.control_test(|p|p.control_test_fresh_packet(&[0x0e,2,offset,1,byte]));
+    let before=connection.stats().frame_rx.stream;
+    wire.packets.lock().unwrap().clear();wire.packets.lock().unwrap().push_back(packet);
+    wire.held.store(false,Ordering::SeqCst);if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}gate.open();
+    until(||connection.stats().frame_rx.stream>before||connection.close_reason().is_some()).await;
+    gate.closed.store(true,Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn unordered_history_credit_survives_chunk_consumption() {
+    for refuse in [true,false] {
+        let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
+        gate.closed.store(true,Ordering::SeqCst);let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));
+        let send=peer.open_uni().await.unwrap();assert_eq!(VarInt::from(send.id()).into_inner(),2);
+        inject_unordered_history_byte(&connection,&peer,&gate,&wire,1,b'a').await;
+        let mut recv=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+        let first=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&first[..],b"a");drop(first);
+        inject_unordered_history_byte(&connection,&peer,&gate,&wire,3,b'b').await;
+        let second=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&second[..],b"b");drop(second);
+        assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(0,2));
+        assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()).1,0);
+        if refuse {
+            // Incoming packet payload and owner may allocate; the history spill may not.
+            let layout=connection.control_test(|p|p.metadata_test_receive_owner_layout());
+            let extra=128+((layout+63)&!63)+64;
+            probe.freeze_with_additional_bytes(extra);
+        }
+        inject_unordered_history_byte(&connection,&peer,&gate,&wire,5,b'c').await;
+        if refuse {
+            assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(0,2),"unadmitted unordered history grew physical backing");
+            assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::UnorderedHistory));
+            assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()).1,0,"refused history inserted application data");
+            gate.open();assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+        } else {
+            let third=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&third[..],b"c");drop(third);
+            assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(64,3));
+            assert!(probe.stats().used>=128,"consuming data does not refund retained receipt storage");
+            inject_unordered_history_byte(&connection,&peer,&gate,&wire,3,b'!').await;
+            let mut read=Box::pin(recv.read_chunk(16,false));
+            assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(),"retransmitted consumed byte was delivered twice");drop(read);
+            inject_unordered_history_byte(&connection,&peer,&gate,&wire,7,b'd').await;
+            let bytes=recv.read_chunk(16,false).await.unwrap().unwrap().bytes;assert_eq!(&bytes[..],b"d");
+            assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(64,4));
+            let clone=bytes.slice(..).clone();drop(bytes);let owner_charge=((probe.stats().receive_owner_layout+63)&!63)+64;
+            gate.open();connection.close(0u32.into(),b"done");timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+            drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==128+owner_charge).await;
+            assert_eq!(&clone[..],b"d");drop(clone);until(||probe.stats().used==0).await;continue;
+        }
+        timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    }
+    unordered_history_transition_refusal_restores_receiver().await;
+}
+
+async fn unordered_history_transition_refusal_restores_receiver() {
+    let(endpoint,peer_endpoint,connection,peer,gate,wire)=pair(65536,64,524288,512,65536,128).await;
+    gate.closed.store(true,Ordering::SeqCst);let probe=connection.control_test(|p|p.metadata_test_limit(1<<20));let send=peer.open_uni().await.unwrap();
+    for offset in [1,3,5] {inject_unordered_history_byte(&connection,&peer,&gate,&wire,offset,b'x').await;}
+    let mut recv=timeout(Duration::from_secs(5),connection.accept_uni()).await.unwrap().unwrap();
+    let storage=connection.control_test(|p|p.metadata_test_receive_storage());assert_eq!(storage.1,3);
+    probe.freeze_at_live_allocations();let error=recv.read_chunk(16,false).await.unwrap_err();
+    assert!(matches!(error,ReadError::ConnectionLost(ConnectionError::LocallyClosed)));
+    assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::UnorderedHistory));
+    assert_eq!(connection.control_test(|p|p.metadata_test_receive_storage()),storage,"refused transition lost removed receive owner");
+    assert_eq!(connection.control_test(|p|p.metadata_test_unordered_history_storage()),(0,0),"refused transition committed unordered mode");
+    gate.open();assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();drop((recv,send,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+}

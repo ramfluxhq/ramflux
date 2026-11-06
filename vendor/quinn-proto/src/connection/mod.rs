@@ -62,6 +62,7 @@ pub(crate) mod metadata_credit;
 mod metadata_backing;
 mod metadata_owned_bytes;
 mod metadata_heap;
+mod metadata_history;
 mod metadata_scratch;
 mod loss_detection;
 pub(crate) mod metadata_vec;

@@ -59,6 +59,10 @@ impl ArrayRangeSet {
     }
     pub(crate) fn try_insert_one(&mut self,n:u64)->Result<bool,crate::connection::metadata_credit::ResourceExhausted>{self.reserve_insert(&(n..n+1))?;Ok(self.insert_inner(n..n+1))}
 
+    /// Caller must reserve this insertion before exposing any related effects.
+    pub(crate) fn insert_reserved(&mut self, range: Range<u64>) -> bool { self.insert_inner(range) }
+    pub(crate) fn range_at(&self, index: usize) -> Option<Range<u64>> { self.0.get(index).cloned() }
+
     pub fn new() -> Self {
         Default::default()
     }
