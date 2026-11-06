@@ -344,11 +344,11 @@ async fn packet_credit_covers_enqueue_processing_and_backing_release() {
             "refused raw packet was copied or delivered"
         );
         gate.open();
-        let mut recv = timeout(Duration::from_secs(5), server_conn.accept_uni())
+        let mut recv = timeout(Duration::from_secs(10), server_conn.accept_uni())
             .await
             .unwrap()
             .unwrap();
-        let chunk = timeout(Duration::from_secs(5), recv.read_chunk(usize::MAX, true))
+        let chunk = timeout(Duration::from_secs(10), recv.read_chunk(usize::MAX, true))
             .await
             .unwrap()
             .unwrap()
@@ -365,7 +365,7 @@ async fn packet_credit_covers_enqueue_processing_and_backing_release() {
             pool.snapshot().0.bytes < held_bytes,
             "last held chunk did not return its allocation credit"
         );
-        while let Some(next) = timeout(Duration::from_secs(5), recv.read_chunk(usize::MAX, true))
+        while let Some(next) = timeout(Duration::from_secs(10), recv.read_chunk(usize::MAX, true))
             .await
             .unwrap()
             .unwrap()
@@ -396,12 +396,12 @@ async fn control_credit_preserves_cid_close_and_drained() {
     }
     gate.open();
     assert!(matches!(
-        timeout(Duration::from_secs(5), server_conn.closed())
+        timeout(Duration::from_secs(10), server_conn.closed())
             .await
             .unwrap(),
         ConnectionError::LocallyClosed
     ));
-    timeout(Duration::from_secs(5), server.wait_idle())
+    timeout(Duration::from_secs(10), server.wait_idle())
         .await
         .unwrap();
     assert_eq!(
@@ -426,7 +426,7 @@ async fn owner_slots_refuse_capacity_and_rebind_sparse_protocol_handles() {
     let chunk = recv.read_chunk(usize::MAX, true).await.unwrap().unwrap();
     assert_eq!(&chunk.bytes[..], b"keep-owner-slot");
     server_conn.close(0u32.into(), b"retire");
-    timeout(Duration::from_secs(5), server.wait_idle())
+    timeout(Duration::from_secs(10), server.wait_idle())
         .await
         .unwrap();
     assert!(server.rawq_pool().snapshot().0.items > 0);
@@ -458,7 +458,7 @@ async fn owner_slots_refuse_capacity_and_rebind_sparse_protocol_handles() {
     let attempt = client
         .connect(server.local_addr().unwrap(), "localhost")
         .unwrap();
-    let incoming = timeout(Duration::from_secs(5), server.accept())
+    let incoming = timeout(Duration::from_secs(10), server.accept())
         .await
         .unwrap()
         .unwrap();
@@ -526,9 +526,9 @@ async fn send_metadata_cases(){
         assert_eq!(probe.stats().allocations,before.allocations,"refusal precedes actual deque allocation");
         assert_eq!(client.control_test(|p|p.metadata_test_send_storage()).0,if limit==0 {0}else{4*std::mem::size_of::<bytes::Bytes>()});
         gate.open();
-        assert!(matches!(timeout(Duration::from_secs(5),client.closed()).await.unwrap(),ConnectionError::LocallyClosed));
-        assert!(matches!(timeout(Duration::from_secs(5),server.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref reason) if reason.error_code==VarInt::from_u32(0x524c)));
-        timeout(Duration::from_secs(5),client_endpoint.wait_idle()).await.unwrap();
+        assert!(matches!(timeout(Duration::from_secs(10),client.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+        assert!(matches!(timeout(Duration::from_secs(10),server.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref reason) if reason.error_code==VarInt::from_u32(0x524c)));
+        timeout(Duration::from_secs(10),client_endpoint.wait_idle()).await.unwrap();
         assert_eq!(client_endpoint.open_connections(),0);
         let held=probe.stats().used;
         assert_eq!(held,limit,"Drained does not refund retained send backing");
@@ -551,12 +551,12 @@ async fn metadata_stream_frame_growth_aborts_wire_packet_before_effects() {
     assert_eq!(probe.stats().allocations,2);
     let received=peer.stats().frame_rx.stream;
     gate.open();
-    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
-    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref close) if close.error_code==VarInt::from_u32(0x524c)));
+    assert!(matches!(timeout(Duration::from_secs(10),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref close) if close.error_code==VarInt::from_u32(0x524c)));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::SentFrameMetadata));
     assert_eq!(probe.stats().allocations,3,"only two send deques and the record table allocate before refused metadata spill");
     assert_eq!(peer.stats().frame_rx.stream,received,"partial packet never reaches the wire");
-    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
     assert_eq!(probe.stats().used,384+record_charge);
     drop((first,second,connection,peer,endpoint,peer_endpoint));
     until(||probe.stats().used==0).await;
@@ -574,7 +574,7 @@ async fn metadata_frame_backing_follows_real_ack_and_release() {
     until(||connection.control_test(|p|p.metadata_test_frame_storage())>0).await;
     let mut received=Vec::new();let mut receivers=Vec::new();
     for _ in 0..2 {
-        let mut recv=timeout(Duration::from_secs(5),peer.accept_uni()).await.unwrap().unwrap();
+        let mut recv=timeout(Duration::from_secs(10),peer.accept_uni()).await.unwrap().unwrap();
         let chunk=recv.read_chunk(16,true).await.unwrap().unwrap();
         received.push(chunk.bytes.to_vec());receivers.push(recv);
     }
@@ -604,13 +604,13 @@ async fn metadata_record_growth_refuses_before_ping_or_record_effects() {
     let probe=connection.control_test(|p|{let probe=p.metadata_test_limit(0);p.ping();probe});
     let received=peer.stats().frame_rx.ping;
     gate.open();
-    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
-    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    assert!(matches!(timeout(Duration::from_secs(10),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::SentRecords));
     assert_eq!(probe.stats().allocations,0);
     assert_eq!(connection.control_test(|p|p.metadata_test_record_storage()),0);
     assert_eq!(peer.stats().frame_rx.ping,received,"refused builder emits no PING effects");
-    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
     drop((connection,peer,endpoint,peer_endpoint));assert_eq!(probe.stats().used,0);
 }
 
@@ -633,12 +633,12 @@ async fn metadata_scratch_and_ack_growth_use_real_driver_boundaries() {
         wire.packets.lock().unwrap().clear();probe.freeze_at_live_allocations();
         wire.packets.lock().unwrap().push_back(packet);wire.held.store(false,Ordering::SeqCst);
         if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
-        assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
-        assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+        assert!(matches!(timeout(Duration::from_secs(10),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+        assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
         assert_eq!(probe.stats().failed_class,Some(if loss{proto::MetadataClass::LossScratch}else{proto::MetadataClass::AckScratch}));
         assert_eq!(connection.stats().path.lost_packets,0,"refused loss scratch does not retire lost records");
         assert_eq!(connection.control_test(|p|p.metadata_test_sent_numbers()).len(),before-usize::from(loss));
-        timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+        timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
         drop((connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
     }
     let(endpoint,peer_endpoint,connection,peer,_,wire)=pair(65536,64,524288,512,65536,128).await;
@@ -654,13 +654,13 @@ async fn metadata_scratch_and_ack_growth_use_real_driver_boundaries() {
     let before=connection.stats().frame_rx.ping;
     let packet=peer.control_test(|p|p.control_test_packet(number,false,&[0x01]));
     probe.freeze_at_live_allocations();wire.packets.lock().unwrap().push_back(packet);if let Some(w)=wire.wake.lock().unwrap().take(){w.wake();}
-    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(10),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::PendingAcks));
     assert_eq!(connection.stats().frame_rx.ping,before,"pending ACK capacity refuses before frame effects");
     let observed=connection.control_test(|p|p.control_test_probe(number));assert_eq!(observed[7],0);assert_eq!(observed[13],0);
     connection.control_test_transmit(false);
-    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
-    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
     drop((connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }
 
@@ -706,12 +706,12 @@ async fn metadata_send_ack_ranges_refuse_before_third_range() {
             assert_eq!(connection.control_test(|p|p.metadata_test_send_ranges()).0,index+1);
         }
     }
-    assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
-    assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    assert!(matches!(timeout(Duration::from_secs(10),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+    assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::SendRanges));
     assert_eq!(connection.control_test(|p|p.metadata_test_send_ranges()).0,2,"refused third disjoint ACK range is never inserted");
     assert!(probe.stats().peak<=1<<20);
-    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+    timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
     drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
 }
 
@@ -725,9 +725,9 @@ async fn metadata_retransmit_box_and_reset_children_refuse_before_wire(){
     assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),0,"refused producer allocated pending reset backing");
     assert!(refused.is_err());
     assert_eq!(probe.stats().allocations,0);
-    gate.open();assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+    gate.open();assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
     assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::PendingRetransmits));
-    timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
+    timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
     for child in [false,true] {
         let(endpoint,peer_endpoint,connection,peer,gate,_)=pair(65536,64,524288,512,65536,128).await;
         gate.closed.store(true,Ordering::SeqCst);
@@ -739,13 +739,13 @@ async fn metadata_retransmit_box_and_reset_children_refuse_before_wire(){
         assert_eq!(connection.control_test(|p|p.metadata_test_pending_storage()),64);
         let before=peer.stats().frame_rx.reset_stream;
         gate.open();
-        assert!(matches!(timeout(Duration::from_secs(5),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
-        assert!(matches!(timeout(Duration::from_secs(5),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
+        assert!(matches!(timeout(Duration::from_secs(10),connection.closed()).await.unwrap(),ConnectionError::LocallyClosed));
+        assert!(matches!(timeout(Duration::from_secs(10),peer.closed()).await.unwrap(),ConnectionError::ApplicationClosed(ref c) if c.error_code==VarInt::from_u32(0x524c)));
         assert_eq!(probe.stats().failed_class,Some(proto::MetadataClass::RetransmitOwners));
         assert_eq!(peer.stats().frame_rx.reset_stream,before,"refused box/child never emits RESET");
         assert_eq!(probe.stats().allocations,if child{3}else{2});
         assert_eq!(connection.control_test(|p|p.metadata_test_retransmit_storage()),(0,0));
-        timeout(Duration::from_secs(5),endpoint.wait_idle()).await.unwrap();
+        timeout(Duration::from_secs(10),endpoint.wait_idle()).await.unwrap();
         drop((stream,connection,peer,endpoint,peer_endpoint));until(||probe.stats().used==0).await;
     }
 

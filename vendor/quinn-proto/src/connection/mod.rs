@@ -50,10 +50,10 @@ use cid_state::CidState;
 mod datagrams;
 use datagrams::DatagramState;
 pub use datagrams::{Datagrams, SendDatagramError};
-
 mod mtud;
 mod pacing;
-
+#[allow(dead_code)] // Dormant until complete packet publication is available.
+pub(crate) mod metadata_staging { pub(crate) mod tls_contract; }
 mod packet_builder;
 use packet_builder::PacketBuilder;
 

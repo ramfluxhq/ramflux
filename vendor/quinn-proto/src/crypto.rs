@@ -222,3 +222,23 @@ impl From<UnsupportedVersion> for ConnectError {
         Self::UnsupportedVersion
     }
 }
+
+use crate::connection::metadata_staging::tls_contract::{
+    TlsContext, TlsContractError, TlsEnvelope, ValidatedTlsEnvelope,
+};
+
+/// Dormant gate for a caller with reviewed pre-Session registry evidence.
+/// Validation never consults the session. A successful token is not evidence issuance.
+///
+/// # Errors
+/// Returns the exact contract failure without invoking the operation or Session.
+#[allow(dead_code)] // Intentionally unwired until packet atomicity and source evidence exist.
+pub(crate) fn with_validated_tls_envelope<T>(
+    envelope: Option<&TlsEnvelope<'_>>,
+    context: &TlsContext<'_>,
+    session: &mut dyn Session,
+    operation: impl FnOnce(&mut dyn Session, ValidatedTlsEnvelope) -> T,
+) -> Result<T, TlsContractError> {
+    let validated = crate::connection::metadata_staging::tls_contract::validate(envelope, context)?;
+    Ok(operation(session, validated))
+}

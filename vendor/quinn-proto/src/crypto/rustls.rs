@@ -36,6 +36,9 @@ impl From<Side> for rustls::Side {
 }
 
 /// A rustls TLS session
+///
+/// No finite allocation envelope is issued here. Dormant contract validation must
+/// receive reviewed source evidence before any bounded production TLS invocation.
 pub struct TlsSession {
     version: Version,
     got_handshake_data: bool,
