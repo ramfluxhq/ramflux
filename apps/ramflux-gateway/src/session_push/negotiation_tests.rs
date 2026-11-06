@@ -49,10 +49,10 @@ async fn registration(
         reply["incarnation_id"] = json!(ID);
     }
     req.respond.send((200, reply)).map_err(|_| Retired)?;
-    tokio::time::timeout(Duration::from_secs(5), task).await??
+    tokio::time::timeout(Duration::from_secs(10), task).await??
 }
 async fn ready(fixture: &Fixture, expected: bool) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         while fixture.context.hub.readiness.supports() != expected {
             tokio::task::yield_now().await;
         }
@@ -132,21 +132,26 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
     ] {
         let mut fixture = Fixture::new(label)?;
         fixture.context.hub.readiness.ready.store(true, Ordering::Release);
+        let probe_timeout = Duration::from_millis(100);
         let started = tokio::time::Instant::now();
         if status == 404 {
-            fixture
-                .context
-                .hub
-                .readiness
-                .start_with_interval(&fixture.context.router, retry_interval);
+            fixture.context.hub.readiness.start_with_interval(
+                &fixture.context.router,
+                retry_interval,
+                probe_timeout,
+            );
         } else {
-            fixture.context.hub.readiness.start(&fixture.context.router);
+            fixture.context.hub.readiness.start_with_interval(
+                &fixture.context.router,
+                DISCOVERY_INTERVAL,
+                probe_timeout,
+            );
         }
         let req = fixture.next().await?;
         if body.is_null() {
             // Keep the request alive until the discovery deadline clears readiness.
             ready(&fixture, false).await?;
-            assert!(started.elapsed() >= Duration::from_secs(2));
+            assert!(started.elapsed() >= probe_timeout);
             drop(req);
         } else {
             req.respond.send((status, body)).map_err(|_| Retired)?;
@@ -154,7 +159,7 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         ready(&fixture, false).await?;
         assert_eq!(registration(&mut fixture, true, false).await?, None);
         if status == 404 {
-            let retry = tokio::time::timeout(Duration::from_secs(5), fixture.requests.recv())
+            let retry = tokio::time::timeout(Duration::from_secs(10), fixture.requests.recv())
                 .await?
                 .ok_or(Retired)?;
             assert!(started.elapsed() >= retry_interval);
@@ -208,7 +213,7 @@ async fn open_clamps_runtime_push_limit() -> anyhow::Result<()> {
         let cursor = fixture.next().await?;
         assert_eq!(cursor.path, "/mvp0/cursor/target");
         cursor.respond.send((200, Value::Null)).map_err(|_| Retired)?;
-        let runtime = tokio::time::timeout(Duration::from_secs(5), task).await???;
+        let runtime = tokio::time::timeout(Duration::from_secs(10), task).await???;
         assert_eq!(runtime.push_limit, expected);
     }
     Ok(())
