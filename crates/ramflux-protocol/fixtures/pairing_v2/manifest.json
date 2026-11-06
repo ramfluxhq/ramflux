@@ -21,5 +21,16 @@
   "profile": "device_pairing_v2",
   "oracle": "scripts/pairing_oracle.py",
   "secrets": "synthetic only",
-  "custody_control_sha256": "400efa43d0ba3b9262ff3ccc141fc60eec777cb9c0ac7015b3f9422ae233da87"
+  "custody_control_sha256": "400efa43d0ba3b9262ff3ccc141fc60eec777cb9c0ac7015b3f9422ae233da87",
+  "oracle_sha256": "71b9947cb8f6694baabedbfe8fc4253d9619d444de0ecba2b1f767ce8665d4df",
+  "adapter_sha256": "4b09b62aa67bd582363e9eb3a36184eabf2970cc50798357f84ffbae8d6ae7b8",
+  "openssl": {
+    "version": "3.6.2",
+    "repository": "https://github.com/openssl/openssl",
+    "tag_object": {
+      "sha": "f800a53185a76d633d469607937c3c55383f0fff",
+      "type": "tag",
+      "url": "https://api.github.com/repos/openssl/openssl/git/tags/f800a53185a76d633d469607937c3c55383f0fff"
+    }
+  }
 }

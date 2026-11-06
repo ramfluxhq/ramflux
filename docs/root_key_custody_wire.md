@@ -68,8 +68,9 @@ signing bytes. All new labels below are now reserved in
 [domain.rs](../crates/ramflux-protocol/src/domain.rs), including `ALL`; reservation
 alone enables no custody decoder, signing path or verifier. Uniqueness, absence
 of NUL and prefix-freeness are tested across the entire registry. All new labels
-use `ramflux.identity.`. The transcript schema and hash label deliberately share
-the retained v1 control and the separate v2 full-context transcript domain.
+use `ramflux.identity.`. V1 transcript schema/hash keep their shared control spelling. V2 object schemas
+use `ramflux.pairing.T.v2`; full-context hash domains use the distinct identity
+namespace shown below.
 
 | Constant | Exact label | Purpose |
 | --- | --- | --- |
@@ -944,7 +945,9 @@ metadata. Total plaintext and array limits apply to the summary too.
 Validate the decrypted contents against current state before staging. Journal a
 transfer id and ciphertext hash once; an exact retry returns the saved result,
 a different ciphertext under that id fails. Accepted/expired/cancelled transfer
-ids are permanently consumed; a crash cannot restart their signing effect.
+ids cannot regain signing authority. A bounded terminal cache is only a result
+cache; issuer/generation fences and saved live-context checks prevent resurrection
+after eviction or crash. An unknown or retired id never creates a new context.
 
 The destination separately derives the master from the user-entered phrase,
 creates a fresh self-signing key/certificate at a higher range and publishes its

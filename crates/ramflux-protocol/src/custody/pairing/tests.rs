@@ -103,10 +103,21 @@ fn scalar_cases(common: &Value, role: &Value) -> TestResult {
         ("lease_expires_at", "lease_expires_at"),
         ("expires_at", "expires_at"),
     ] {
-        invalid::<Common>(common, &format!("/{name}"), json!(MAX_SAFE_JSON_INTEGER + 1), WireError::Json)?;
-        let mut typed:Common=decode_value(common)?;
-        match exact { "issuer_seq"=>typed.issuer_seq=MAX_SAFE_JSON_INTEGER+1,"device_set_epoch"=>typed.device_set_epoch=MAX_SAFE_JSON_INTEGER+1,"lease_not_before"=>typed.lease_not_before=MAX_SAFE_JSON_INTEGER+1,"lease_expires_at"=>typed.lease_expires_at=MAX_SAFE_JSON_INTEGER+1,_=>typed.expires_at=MAX_SAFE_JSON_INTEGER+1 }
-        assert_eq!(typed.validate(),Err(WireError::Field(exact)));
+        invalid::<Common>(
+            common,
+            &format!("/{name}"),
+            json!(MAX_SAFE_JSON_INTEGER + 1),
+            WireError::Json,
+        )?;
+        let mut typed: Common = decode_value(common)?;
+        match exact {
+            "issuer_seq" => typed.issuer_seq = MAX_SAFE_JSON_INTEGER + 1,
+            "device_set_epoch" => typed.device_set_epoch = MAX_SAFE_JSON_INTEGER + 1,
+            "lease_not_before" => typed.lease_not_before = MAX_SAFE_JSON_INTEGER + 1,
+            "lease_expires_at" => typed.lease_expires_at = MAX_SAFE_JSON_INTEGER + 1,
+            _ => typed.expires_at = MAX_SAFE_JSON_INTEGER + 1,
+        }
+        assert_eq!(typed.validate(), Err(WireError::Field(exact)));
         invalid::<Common>(common, &format!("/{name}"), json!(-1), WireError::Shape)?;
         invalid::<Common>(common, &format!("/{name}"), json!(1.5), WireError::Shape)?;
     }
@@ -184,8 +195,17 @@ fn transfer_selection_cases(common: &Value, role: &Value, transcript: &Value) ->
         ("device_epoch", json!(0), "ref.device_epoch"),
         ("device_epoch", json!(MAX_SAFE_JSON_INTEGER + 1), "ref.device_epoch"),
     ] {
-        let expected=if bad == json!(MAX_SAFE_JSON_INTEGER+1) { WireError::Json } else { WireError::Field(error) };
-        invalid::<Common>(&existing, &format!("/destination_ref/{name}"), bad.clone(), expected.clone())?;
+        let expected = if bad == json!(MAX_SAFE_JSON_INTEGER + 1) {
+            WireError::Json
+        } else {
+            WireError::Field(error)
+        };
+        invalid::<Common>(
+            &existing,
+            &format!("/destination_ref/{name}"),
+            bad.clone(),
+            expected.clone(),
+        )?;
         invalid::<RoleContext>(role, &format!("/device_ref/{name}"), bad, expected)?;
     }
     let selection = json!([{"key_id":"a","purpose":"history"}]);
@@ -314,6 +334,9 @@ fn transcript_controls(
         role["device_ref"].clone(),
         "distinct_devices",
     )?;
+    let mut reused_id = role["device_ref"].clone();
+    reused_id["device_epoch"] = json!(2);
+    field::<Transcript>(transcript, "/responder/device_ref", reused_id, "distinct_devices")?;
     let offer = json!({"schema":"ramflux.pairing.ContextOffer.v2","version":2,"common":common});
     closed::<ContextOffer>(&offer)?;
     let commit = json!({"schema":"ramflux.pairing.Commit.v2","version":2,"invitation_id":common["invitation_id"],"role":"initiator","commitment":common["record_hash"]});
@@ -405,30 +428,35 @@ fn nested_shapes<T: PairingWire>(value: &Value) -> TestResult {
     walk::<T>(value, value, "")
 }
 
-fn maximal_objects(original:&Value) -> TestResult {
-    let mut value=original.clone();
-    let mut common=transfer(&original["initiator"]["common"]);
-    common["issuer_seq"]=json!(MAX_SAFE_JSON_INTEGER);
-    common["device_set_epoch"]=json!(MAX_SAFE_JSON_INTEGER);
-    common["expires_at"]=json!(MAX_SAFE_JSON_INTEGER);
-    common["lease_not_before"]=json!(MAX_SAFE_JSON_INTEGER-MAX_BRANCH_LEASE_SECONDS);
-    common["lease_expires_at"]=json!(MAX_SAFE_JSON_INTEGER);
-    common["data_selection"]=json!((0..32).map(|n|json!({"key_id":format!("{n:02}{}","\"".repeat(126)),"purpose":"attachment"})).collect::<Vec<_>>());
-    for name in ["initiator","responder"] {
-        value[name]["common"]=common.clone();
-        value[name]["device_ref"]["device_id"]=json!(format!("{name}{}","\"".repeat(128-name.len())));
-        value[name]["device_ref"]["device_epoch"]=json!(MAX_SAFE_JSON_INTEGER);
-        value[name]["display_name"]=json!("\"".repeat(128));
-        value[name]["hpke_key"]=original[name]["sas_key"].clone();
+fn maximal_objects(original: &Value) -> TestResult {
+    let mut value = original.clone();
+    let mut common = transfer(&original["initiator"]["common"]);
+    common["issuer_seq"] = json!(MAX_SAFE_JSON_INTEGER);
+    common["device_set_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+    common["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
+    common["lease_not_before"] = json!(MAX_SAFE_JSON_INTEGER - MAX_BRANCH_LEASE_SECONDS);
+    common["lease_expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
+    common["data_selection"] = json!(
+        (0..32)
+            .map(|n| json!({"key_id":format!("{n:02}{}","\"".repeat(126)),"purpose":"attachment"}))
+            .collect::<Vec<_>>()
+    );
+    for name in ["initiator", "responder"] {
+        value[name]["common"] = common.clone();
+        value[name]["device_ref"]["device_id"] =
+            json!(format!("{name}{}", "\"".repeat(128 - name.len())));
+        value[name]["device_ref"]["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
+        value[name]["display_name"] = json!("\"".repeat(128));
+        value[name]["hpke_key"] = original[name]["sas_key"].clone();
         closed::<RoleContext>(&value[name])?;
     }
     closed::<Transcript>(&value)?;
-    let offer=json!({"schema":"ramflux.pairing.ContextOffer.v2","version":2,"common":common});
+    let offer = json!({"schema":"ramflux.pairing.ContextOffer.v2","version":2,"common":common});
     closed::<ContextOffer>(&offer)?;
-    let reveal=json!({"schema":"ramflux.pairing.Reveal.v2","version":2,"invitation_id":common["invitation_id"],"role":"responder","salt":common["record_hash"],"context":value["responder"]});
+    let reveal = json!({"schema":"ramflux.pairing.Reveal.v2","version":2,"invitation_id":common["invitation_id"],"role":"responder","salt":common["record_hash"],"context":value["responder"]});
     closed::<Reveal>(&reveal)?;
     nested_shapes::<Reveal>(&reveal)?;
-    let typed:Common=decode_value(&common)?;
-    typed.validate_bounds(MAX_SAFE_JSON_INTEGER-300,0,MAX_SAFE_JSON_INTEGER)?;
+    let typed: Common = decode_value(&common)?;
+    typed.validate_bounds(MAX_SAFE_JSON_INTEGER - 300, 0, MAX_SAFE_JSON_INTEGER)?;
     Ok(())
 }
