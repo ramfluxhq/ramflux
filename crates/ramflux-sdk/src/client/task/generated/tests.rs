@@ -51,8 +51,14 @@ fn step(state: S, needs_me: Option<NeedsMe>) -> TaskStep {
     TaskStep { id: "step".into(), title: "title".into(), state, needs_me }
 }
 pub(super) fn event(body: B) -> Result<TaskEvent, Box<dyn std::error::Error>> {
+    event_in("thread", body)
+}
+pub(super) fn event_in(
+    conversation: &str,
+    body: B,
+) -> Result<TaskEvent, Box<dyn std::error::Error>> {
     let event = TaskEvent::new(
-        "thread".into(),
+        conversation.into(),
         body,
         SignedFields {
             signing_key_id: "device:device".into(),

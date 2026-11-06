@@ -88,7 +88,7 @@ impl RamfluxClient {
         let page_task = self.check_generated_task_history_packet(packet)?;
         // A continuation must extend the committed prefix's own task, not merely hash-match it.
         if !committed_prefix.is_empty()
-            && self.committed_prefix_task(committed_prefix)? != page_task
+            && self.committed_prefix_task(committed_prefix, &context.conversation_id)? != page_task
         {
             return Err(invalid("task history page task mismatch"));
         }
@@ -96,15 +96,20 @@ impl RamfluxClient {
     }
 
     /// Task ID shared by every carrier of a non-empty committed prefix.
+    /// Every carrier must also belong to the authenticated conversation.
     fn committed_prefix_task(
         &self,
         committed_prefix: &[g::TaskCarrier],
+        conversation_id: &str,
     ) -> Result<String, SdkError> {
         let mut task_id: Option<String> = None;
         for carrier in committed_prefix {
             let bytes = g::Task { payload: Some(g::task::Payload::Carrier(carrier.clone())) }
                 .encode_to_vec();
             let carrier = self.decode_generated_task_carrier(&bytes)?;
+            if carrier.conversation_id != conversation_id {
+                return Err(invalid("task history committed prefix conversation mismatch"));
+            }
             let id = self.native_carrier_event(&carrier)?.event().task_id().to_owned();
             if task_id.as_ref().is_some_and(|previous| previous != &id) {
                 return Err(invalid("task history committed prefix task mismatch"));
