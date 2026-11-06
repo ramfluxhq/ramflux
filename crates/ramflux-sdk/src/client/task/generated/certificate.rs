@@ -1,27 +1,39 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Candidate certificates preserve the executor's native signing transcript.
+//! Candidate certificates use the approved typed executor signing transcript.
 use super::super::certificate::{Certificate, Phase};
 use super::{g, invalid};
 use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 
 impl RamfluxClient {
-    /// Encode a candidate certificate carrying an existing native executor signature.
+    /// Sign a candidate certificate with the local executor using the typed transcript.
     /// This checks content and signature only; it does not admit a decision or write state.
     /// # Errors
-    /// Rejects invalid fields, phase bindings, native signatures or delivery limits.
+    /// Rejects invalid fields, phase bindings, wrong local executor or delivery limits.
     pub fn encode_generated_task_certificate(
         &self,
         certificate: &g::TaskCertificate,
     ) -> Result<Vec<u8>, SdkError> {
+        native_certificate(certificate)?;
+        let device = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        if device.principal_id != certificate.assignee
+            || device.device_id != certificate.issuer_device
+        {
+            return Err(invalid("task certificate must be signed by its executor"));
+        }
+        let mut certificate = certificate.clone();
+        certificate.signature = ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &transcript(&certificate)?,
+            device,
+        );
         let bytes = certificate.encode_to_vec();
         self.decode_generated_task_certificate(&bytes)?;
         Ok(bytes)
     }
 
-    /// Decode canonical certificate bytes and verify the unchanged native signature
+    /// Decode canonical certificate bytes and verify the typed executor signature
     /// against the pinned executor device. Membership and revision admission remain
     /// with the Task owner; successful authentication has no persistent effect.
     /// # Errors
@@ -40,8 +52,13 @@ impl RamfluxClient {
         }
         let generated = g::TaskCertificate::decode(bytes)
             .map_err(|_| invalid("invalid generated task certificate"))?;
-        let native = native_certificate(&generated)?;
-        self.check_task_certificate_signature(&native)?;
+        native_certificate(&generated)?;
+        let public = self.task_signer_key(&generated.assignee, &generated.issuer_device)?;
+        ramflux_crypto::verify_canonical_signature(
+            &transcript(&generated)?,
+            &generated.signature,
+            &public,
+        )?;
         Ok(generated)
     }
 }
@@ -128,4 +145,10 @@ pub(super) fn native_certificate(value: &g::TaskCertificate) -> Result<Certifica
         evidence_hash: value.evidence_hash.clone(),
         signature: value.signature.clone(),
     })
+}
+
+fn transcript(certificate: &g::TaskCertificate) -> Result<Vec<u8>, SdkError> {
+    let mut unsigned = certificate.clone();
+    unsigned.signature.clear();
+    super::typed_transcript("TaskCertificate", &unsigned.encode_to_vec())
 }
