@@ -113,3 +113,6 @@ pub(crate) mod capacity_hint;
 pub(crate) use capacity_backoff::{
     RETRY_AFTER_MS as CAPACITY_RETRY_AFTER_MS, RETRY_AFTER_SECS as CAPACITY_RETRY_AFTER_SECS,
 };
+
+/// Dormant native DM bootstrap component adapters.
+pub mod dm_fs_v3;
