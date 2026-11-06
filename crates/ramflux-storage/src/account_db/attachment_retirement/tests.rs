@@ -243,8 +243,18 @@ fn assert_reclamation(db: &AccountDb) -> Result {
             .get::<_, u64>(0))?,
         before - 64
     );
-    // Expired pending work is settled without any relay row/ACK, in bounded pages.
-    while db.gc_attachment_retirements(10_001, 64)? > 0 {}
+    // Drain unrelated ACKs, but never drop pending work while a relay five seconds
+    // behind this clock can still serve it (relay time 9999, local time 10004).
+    while db.gc_attachment_retirements(10_004, 64)? > 0 {}
+    assert_eq!(db.pending_attachment_retirements(None, 64)?.len(), 1);
+    assert_eq!(
+        db.connection.query_row("SELECT grants FROM runtime_attachment_budget", [], |r| r
+            .get::<_, u64>(0))?,
+        1
+    );
+    assert_eq!(db.gc_attachment_retirements(10_004, 64)?, 0);
+    // Only at expiry + tolerance may pending work settle without a relay ACK.
+    while db.gc_attachment_retirements(10_005, 64)? > 0 {}
     assert!(db.pending_attachment_retirements(None, 64)?.is_empty());
     assert_eq!(
         db.connection.query_row("SELECT grants FROM runtime_attachment_budget", [], |r| r
