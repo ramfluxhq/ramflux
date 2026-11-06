@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Minimal MVP-0 cryptographic helpers for protocol fixtures.
+pub mod agent_profile;
 
 pub mod backup_stream;
 pub mod custody;

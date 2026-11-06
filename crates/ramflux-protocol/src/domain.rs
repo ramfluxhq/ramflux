@@ -345,6 +345,11 @@ pub const USERNAME_RECEIPT: &str = "ramflux.identity.username_receipt.v1";
 pub const USERNAME_RESOLVE: &str = "ramflux.identity.username_resolve.v1";
 pub const AVATAR_CONTENT: &str = "ramflux.identity.avatar_content.v1";
 
+/// Signed public agent metadata, independent of native identity profiles.
+pub const AGENT_PROFILE: &str = "ramflux.agent.profile.v1";
+/// Complete signed agent metadata envelope digest.
+pub const AGENT_PROFILE_HASH: &str = "ramflux.agent.profile.hash.v1";
+
 #[cfg(test)]
 mod tests {
     #[test]
