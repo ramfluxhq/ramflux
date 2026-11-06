@@ -182,6 +182,12 @@ fn username_checkpoint_barrier_and_rollback_recovery() -> TestResult {
     username_checkpoint_barrier_and_rollback_recovery_store_apply_reopen()?;
     username_checkpoint_barrier_and_rollback_recovery_delta_cas_and_chain_negatives()?;
     username_checkpoint_barrier_and_rollback_recovery_redo_compaction_saturation()?;
+    username_checkpoint_reopen_clock_refusals()?;
+    username_checkpoint_tampered_head_refused()?;
+    username_checkpoint_noncanonical_head_refused()?;
+    username_checkpoint_missing_marker_refused()?;
+    username_checkpoint_second_live_open_refused()?;
+    username_checkpoint_compaction_cap_and_retry()?;
     Ok(())
 }
 fn username_checkpoint_barrier_and_rollback_recovery_store_apply_reopen() -> TestResult {
@@ -227,9 +233,9 @@ fn username_checkpoint_barrier_and_rollback_recovery_store_apply_reopen() -> Tes
     let mut witness = fixture.reopen()?;
     assert_eq!(witness.head(), head);
     assert_eq!(witness.image_page(None, 128)?.rows, image);
-    assert_eq!(witness.transaction(&delta.tx_id)?, Some(checkpoint));
+    assert_eq!(witness.transaction(&delta.tx_id)?, Some(checkpoint.clone()));
     assert_eq!(witness.compact(1)?, 1);
-    assert!(witness.transaction(&delta.tx_id)?.is_none());
+    assert_eq!(witness.transaction(&delta.tx_id)?, Some(checkpoint));
     drop(witness);
     let witness = fixture.reopen()?;
     assert_eq!(witness.head(), head);
@@ -260,12 +266,6 @@ fn username_checkpoint_barrier_and_rollback_recovery_delta_cas_and_chain_negativ
             "head field {field}"
         );
     }
-    let mut bad = delta.clone();
-    bad.clock_floor += 1;
-    assert!(matches!(
-        witness.append(&genesis, bad, &root_id, false),
-        Err(CheckpointError::Refused("commit_clock"))
-    ));
     for limit in [0, 129] {
         assert!(matches!(
             witness.image_page(None, limit),
@@ -352,6 +352,7 @@ fn username_checkpoint_barrier_and_rollback_recovery_redo_compaction_saturation(
     ));
     assert_eq!(witness.compact(64)?, 64);
     assert_eq!(witness.head(), head);
+    fixture.clock.wall.store(WALL + 86_400, Ordering::SeqCst);
     witness.append(&head, clock_delta(65, WALL), &root_id, false)?;
     // Populate the physical redo boundary in one fixture transaction; no timing/stress loop.
     {
@@ -386,6 +387,179 @@ fn username_checkpoint_barrier_and_rollback_recovery_redo_compaction_saturation(
     ));
     drop(witness);
     let witness = fixture.reopen()?;
+    assert_eq!(witness.head(), head);
+    Ok(())
+}
+
+#[test]
+fn username_checkpoint_reopen_clock_refusals() -> TestResult {
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    let head = witness.head();
+    drop(witness);
+    for wall in [WALL - 1, ramflux_protocol::MAX_SAFE_JSON_INTEGER + 1] {
+        fixture.clock.wall.store(wall, Ordering::SeqCst);
+        assert!(
+            matches!(fixture.reopen(), Err(CheckpointError::Refused("clock"))),
+            "reopen wall {wall}"
+        );
+    }
+    fixture.clock.wall.store(WALL, Ordering::SeqCst);
+    assert_eq!(fixture.reopen()?.head(), head);
+    Ok(())
+}
+#[test]
+fn username_checkpoint_tampered_head_refused() -> TestResult {
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    let mut head = witness.head();
+    head.codec_version = 2;
+    {
+        let tx = witness.db.begin_write().map_err(storage)?;
+        put_head(&tx, &head)?;
+        tx.commit().map_err(storage)?;
+    }
+    drop(witness);
+    assert!(matches!(fixture.reopen(), Err(CheckpointError::Refused("schema"))));
+    Ok(())
+}
+#[test]
+fn username_checkpoint_noncanonical_head_refused() -> TestResult {
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    let mut bytes = vec![b' '];
+    bytes.extend(canonical(&witness.head())?);
+    {
+        let tx = witness.db.begin_write().map_err(storage)?;
+        tx.open_table(META).map_err(storage)?.insert("head", bytes.as_slice()).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+    }
+    drop(witness);
+    assert!(matches!(fixture.reopen(), Err(CheckpointError::Refused("head_canonical"))));
+    Ok(())
+}
+#[test]
+fn username_checkpoint_missing_marker_refused() -> TestResult {
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    {
+        let tx = witness.db.begin_write().map_err(storage)?;
+        tx.open_table(META).map_err(storage)?.remove("initialized").map_err(storage)?;
+        tx.commit().map_err(storage)?;
+    }
+    drop(witness);
+    assert!(matches!(fixture.reopen(), Err(CheckpointError::Refused("uninitialized"))));
+    Ok(())
+}
+#[test]
+fn username_checkpoint_second_live_open_refused() -> TestResult {
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    match fixture.reopen() {
+        Err(CheckpointError::Storage(message)) => {
+            assert_eq!(message, "Database already open. Cannot acquire lock.");
+        }
+        Err(other) => return Err(format!("unexpected live-open refusal: {other}").into()),
+        Ok(_) => return Err("second live witness open was accepted".into()),
+    }
+    let head = witness.head();
+    drop(witness);
+    assert_eq!(fixture.reopen()?.head(), head);
+    Ok(())
+}
+#[test]
+fn username_checkpoint_compaction_cap_and_retry() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    let mut original = None;
+    for n in 0..129 {
+        let checkpoint = witness.append(
+            &witness.head(),
+            clock_delta(n, WALL),
+            &id(u8::try_from(n / 64)?),
+            false,
+        )?;
+        if n == 0 {
+            original = Some(checkpoint);
+        }
+    }
+    let original = original.ok_or("original result")?;
+    let head = witness.head();
+    fixture.clock.wall.store(WALL - 1, Ordering::SeqCst);
+    assert!(matches!(witness.compact(129), Err(CheckpointError::Refused("clock"))));
+    fixture.clock.wall.store(WALL, Ordering::SeqCst);
+    assert_eq!(witness.compact(129)?, 128, "bounded compaction must reach128");
+    {
+        use redb::{ReadableDatabase, ReadableTableMetadata};
+        let tx = witness.db.begin_read().map_err(storage)?;
+        assert_eq!(tx.open_table(REDO).map_err(storage)?.len().map_err(storage)?, 1);
+        assert_eq!(tx.open_table(COMPACTED).map_err(storage)?.len().map_err(storage)?, 128);
+    }
+    assert_eq!(witness.transaction(&original.delta.tx_id)?, Some(original.clone()));
+    assert!(matches!(
+        witness.append(&head, original.delta.clone(), &id(0), false),
+        Err(CheckpointError::Refused("tx_id"))
+    ));
+    assert_eq!(witness.head(), head);
+    drop(witness);
+    let mut witness = fixture.reopen()?;
+    assert_eq!(witness.transaction(&original.delta.tx_id)?, Some(original.clone()));
+    assert_eq!(witness.compact(129)?, 1);
+    // Witness time wins over an older caller reading, including across a second boundary.
+    fixture.clock.wall.store(WALL + 1, Ordering::SeqCst);
+    let checkpoint = witness.append(&witness.head(), clock_delta(200, WALL - 99), &id(4), false)?;
+    assert_eq!(checkpoint.delta.clock_floor, WALL + 1);
+    assert_eq!(witness.head().clock_floor, WALL + 1);
+    fixture.clock.wall.store(WALL + 86_399, Ordering::SeqCst);
+    assert_eq!(witness.transaction(&original.delta.tx_id)?, Some(original.clone()));
+    fixture.clock.wall.store(WALL + 86_400, Ordering::SeqCst);
+    witness.append(&witness.head(), clock_delta(201, WALL), &id(4), false)?;
+    assert!(witness.transaction(&original.delta.tx_id)?.is_none());
+    username_checkpoint_retained_result_capacity()?;
+    Ok(())
+}
+
+fn username_checkpoint_retained_result_capacity() -> TestResult {
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    let mut head = witness.head();
+    // Seed a complete valid retained chain in one transaction at the physical boundary.
+    {
+        let tx = witness.db.begin_write().map_err(storage)?;
+        let mut results = tx.open_table(COMPACTED).map_err(storage)?;
+        let mut ids = tx.open_table(TX_IDS).map_err(storage)?;
+        for lsn in 1..=16368 {
+            let checkpoint = wire::Checkpoint {
+                center_id: head.center_id.clone(),
+                generation: head.generation,
+                lsn,
+                previous_digest: head.digest.clone(),
+                delta: clock_delta(lsn, WALL),
+            };
+            results.insert(lsn, wire::encode(&checkpoint)?.as_slice()).map_err(storage)?;
+            ids.insert(checkpoint.delta.tx_id.as_str(), lsn).map_err(storage)?;
+            head.lsn = lsn;
+            head.digest = ramflux_crypto::username_directory::checkpoint_hash(&checkpoint)?;
+        }
+        drop(ids);
+        drop(results);
+        put_head(&tx, &head)?;
+        tx.commit().map_err(storage)?;
+    }
+    drop(witness);
+    let mut witness = fixture.reopen()?;
+    assert!(matches!(
+        witness.append(&witness.head(), clock_delta(20000, WALL), &id(3), false),
+        Err(CheckpointError::Refused("result_global"))
+    ));
+    for n in 20000..20016 {
+        witness.append(&witness.head(), clock_delta(n, WALL), &id(3), true)?;
+    }
+    let head = witness.head();
+    assert!(matches!(
+        witness.append(&head, clock_delta(20016, WALL), &id(3), true),
+        Err(CheckpointError::Refused("result_global"))
+    ));
     assert_eq!(witness.head(), head);
     Ok(())
 }

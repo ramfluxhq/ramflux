@@ -4,9 +4,9 @@
 //! Dormant typed persistence primitive: durable image, bounded redo and atomic delta CAS.
 //! Semantic authority admission is a prerequisite supplied by the directory layer.
 use super::{
-    CheckpointClock, CheckpointError, CheckpointHead, IMAGE, ImagePage, META, REDO, ReadableTable,
-    Result, TX_IDS, apply, canonical, fixed, page, put_head, read_head, require, reserve_file,
-    storage,
+    COMPACTED, CheckpointClock, CheckpointError, CheckpointHead, IMAGE, ImagePage, META, REDO,
+    ReadableTable, Result, TX_IDS, apply, canonical, fixed, page, put_head, read_head, require,
+    reserve_file, storage,
 };
 use ramflux_protocol::username_directory as wire;
 use redb::{ReadableDatabase, ReadableTableMetadata};
@@ -36,6 +36,9 @@ impl CheckpointWitness {
         require(!path.exists(), "already_initialized")?;
         let head = CheckpointHead::genesis(center, generation, clock.now().wall)?;
         reserve_file(path)?;
+        crate::durability_io::sync_dir(
+            path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")),
+        )?;
         let db = redb::Database::create(path).map_err(storage)?;
         let mut tx = db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
@@ -43,6 +46,7 @@ impl CheckpointWitness {
         tx.open_table(IMAGE).map_err(storage)?;
         tx.open_table(REDO).map_err(storage)?;
         tx.open_table(TX_IDS).map_err(storage)?;
+        tx.open_table(COMPACTED).map_err(storage)?;
         tx.open_table(META)
             .map_err(storage)?
             .insert("initialized", b"1".as_slice())
@@ -92,13 +96,14 @@ impl CheckpointWitness {
     }
     /// Append one prevalidated typed delta atomically with its image, digest and retained redo.
     /// `root_id` is the caller-validated redo attribution; `control` requires cleanup authority.
+    /// The witness stamps its sampled time; callers do not choose the durable clock floor.
     /// This layer validates wire grammar and exact old images, not authority semantics.
     /// # Errors
     /// Refuses stale heads, invalid rows, rollback, exhaustion or storage failure.
     pub fn append(
         &mut self,
         expected: &CheckpointHead,
-        delta: wire::CheckpointDelta,
+        mut delta: wire::CheckpointDelta,
         root_id: &str,
         control: bool,
     ) -> Result<wire::Checkpoint> {
@@ -111,7 +116,7 @@ impl CheckpointWitness {
                 && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
             "clock",
         )?;
-        require(delta.clock_floor == time.wall, "commit_clock")?;
+        delta.clock_floor = time.wall;
         self.last_monotonic = time.monotonic;
         wire::encode(&delta)?;
         let lsn = self
@@ -132,8 +137,14 @@ impl CheckpointWitness {
         let next = CheckpointHead { lsn, digest, clock_floor: time.wall, ..self.head.clone() };
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
+        prune_results(&tx, time.wall)?;
         let redo = tx.open_table(REDO).map_err(storage)?;
         require(redo.len().map_err(storage)? < if control { 16384 } else { 16368 }, "redo_global")?;
+        let retained = tx.open_table(COMPACTED).map_err(storage)?.len().map_err(storage)?;
+        require(
+            redo.len().map_err(storage)? + retained < if control { 16384 } else { 16368 },
+            "result_global",
+        )?;
         drop(redo);
         {
             let ids = tx.open_table(TX_IDS).map_err(storage)?;
@@ -173,15 +184,21 @@ impl CheckpointWitness {
     }
     /// Resolve a lost reply by its exact transaction ID; never append a replacement blindly.
     /// # Errors
-    /// Refuses invalid IDs or corrupt storage. Compacted historical IDs may be absent.
+    /// Refuses invalid IDs or corrupt storage. Results survive compaction for at least 24 hours.
     pub fn transaction(&self, id: &str) -> Result<Option<wire::Checkpoint>> {
         fixed(id)?;
         let tx = self.db.begin_read().map_err(storage)?;
         let ids = tx.open_table(TX_IDS).map_err(storage)?;
         let Some(lsn) = ids.get(id).map_err(storage)?.map(|v| v.value()) else { return Ok(None) };
         let redo = tx.open_table(REDO).map_err(storage)?;
-        let frame =
-            redo.get(lsn).map_err(storage)?.ok_or(CheckpointError::Refused("redo_missing"))?;
+        if let Some(frame) = redo.get(lsn).map_err(storage)? {
+            return Ok(Some(wire::decode(frame.value())?));
+        }
+        let compacted = tx.open_table(COMPACTED).map_err(storage)?;
+        let frame = compacted
+            .get(lsn)
+            .map_err(storage)?
+            .ok_or(CheckpointError::Refused("result_missing"))?;
         Ok(Some(wire::decode(frame.value())?))
     }
     /// # Errors
@@ -195,6 +212,14 @@ impl CheckpointWitness {
     /// primary recovery can use the image after redo compaction.
     pub fn compact(&mut self, through: u64) -> Result<usize> {
         require(through <= self.head.lsn, "compact_head")?;
+        let time = self.clock.now();
+        require(
+            time.monotonic >= self.last_monotonic
+                && time.wall >= self.head.clock_floor
+                && time.wall <= ramflux_protocol::MAX_SAFE_JSON_INTEGER,
+            "clock",
+        )?;
+        self.last_monotonic = time.monotonic;
         let mut tx = self.db.begin_write().map_err(storage)?;
         tx.set_durability(redb::Durability::Immediate).map_err(storage)?;
         let mut redo = tx.open_table(REDO).map_err(storage)?;
@@ -202,10 +227,17 @@ impl CheckpointWitness {
         for row in redo.range(..=through).map_err(storage)?.take(128) {
             let (lsn, frame) = row.map_err(storage)?;
             let checkpoint: wire::Checkpoint = wire::decode(frame.value())?;
-            entries.push((lsn.value(), checkpoint.delta.tx_id));
+            entries.push((
+                lsn.value(),
+                checkpoint.delta.tx_id,
+                checkpoint.delta.clock_floor,
+                frame.value().to_vec(),
+            ));
         }
         let mut ids = tx.open_table(TX_IDS).map_err(storage)?;
-        for (lsn, id) in &entries {
+        let now = time.wall;
+        let mut compacted = tx.open_table(COMPACTED).map_err(storage)?;
+        for (lsn, id, at, frame) in &entries {
             let mut meta = tx.open_table(META).map_err(storage)?;
             let owner_key = format!("redo_owner:{lsn}");
             let owner: String = serde_json::from_slice(
@@ -230,11 +262,36 @@ impl CheckpointWitness {
             }
             meta.remove(owner_key.as_str()).map_err(storage)?;
             redo.remove(*lsn).map_err(storage)?;
-            ids.remove(id.as_str()).map_err(storage)?;
+            if now.saturating_sub(*at) < 86400 {
+                compacted.insert(*lsn, frame.as_slice()).map_err(storage)?;
+            } else {
+                ids.remove(id.as_str()).map_err(storage)?;
+            }
         }
+        drop(compacted);
         drop(ids);
         drop(redo);
         tx.commit().map_err(storage)?;
         Ok(entries.len())
     }
+}
+
+// lsn and witness time are monotonic, so oldest retained results form an indexed prefix.
+fn prune_results(tx: &redb::WriteTransaction, now: u64) -> Result<()> {
+    let mut compacted = tx.open_table(COMPACTED).map_err(storage)?;
+    let mut expired = Vec::new();
+    for entry in compacted.iter().map_err(storage)?.take(128) {
+        let (lsn, frame) = entry.map_err(storage)?;
+        let checkpoint: wire::Checkpoint = wire::decode(frame.value())?;
+        if now.saturating_sub(checkpoint.delta.clock_floor) < 86400 {
+            break;
+        }
+        expired.push((lsn.value(), checkpoint.delta.tx_id));
+    }
+    let mut ids = tx.open_table(TX_IDS).map_err(storage)?;
+    for (lsn, id) in expired {
+        compacted.remove(lsn).map_err(storage)?;
+        ids.remove(id.as_str()).map_err(storage)?;
+    }
+    Ok(())
 }

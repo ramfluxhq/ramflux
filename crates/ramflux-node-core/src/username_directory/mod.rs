@@ -16,6 +16,8 @@ pub(crate) const IMAGE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("username_checkpoint_image");
 pub(crate) const REDO: TableDefinition<u64, &[u8]> =
     TableDefinition::new("username_checkpoint_redo");
+pub(crate) const COMPACTED: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("username_checkpoint_compacted_results");
 pub(crate) const TX_IDS: TableDefinition<&str, u64> =
     TableDefinition::new("username_checkpoint_tx_ids");
 
