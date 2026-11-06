@@ -328,5 +328,5 @@ real-driver `receive_owner_metadata_survives_final_payload_drop` adds a limit on
 byte short of payload+wrapper admission, independent pre-encryption payload length,
 zero admitted STREAM effects and zero wrapper allocations; its positive case holds
 shared Chunks/slices/clones across STOP_SENDING, RESET_STREAM and Drained. This is
-owner-component evidence, pending dependency audit; it is not a receive-class,
+owner-component evidence; it is not a receive-class,
 allocator-profile or envelope certificate, and enables no production capability.
