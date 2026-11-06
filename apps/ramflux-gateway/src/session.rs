@@ -1314,6 +1314,12 @@ pub(crate) async fn handle_gateway_submit(
         runtime.session_push.is_some()
             && matches!(response.outcome.as_str(), "online" | "offline_queued"),
     )?;
+    if response.outcome == "incarnation_mismatch"
+        && let Some(id) = runtime.session_push.as_deref()
+    {
+        context.hub.retire_incarnation(&runtime.target_delivery_id, id, send).await;
+        return Err(crate::session_push::Retired.into());
+    }
     if crate::session_push::submit_refused(&response.outcome) {
         write_gateway_handle(
             send,
@@ -1367,6 +1373,13 @@ async fn reply_and_deliver_submitted(
         anyhow::bail!("submit reply requires accepted entry");
     };
     let envelope = &entry.envelope;
+    if response.target_delivery_id == runtime.target_delivery_id
+        && let (Some(expected), Some((observed, _))) = (runtime.session_push.as_deref(), metadata)
+        && observed != expected
+    {
+        context.hub.retire_incarnation(&runtime.target_delivery_id, expected, send).await;
+        return Err(crate::session_push::Retired.into());
+    }
     crate::session_push::submit_reply(send, runtime, response, envelope, frame, metadata).await?;
     // After this reply, peer forwarding and notification cannot send a second response.
     if let Err(error) =
@@ -1400,7 +1413,13 @@ async fn deliver_submitted_to_peer(
             )
             .await;
         if !delivered
-            && !forward_deliver_on_local_miss(context, &response.target_delivery_id, frame).await?
+            && !forward_deliver_on_local_miss(
+                context,
+                &response.target_delivery_id,
+                frame,
+                metadata,
+            )
+            .await?
         {
             dispatch_offline_wake(context, &response.target_delivery_id, envelope).await?;
         }
@@ -1549,8 +1568,13 @@ async fn deliver_own_device_fanout_entry(
                 )
                 .await;
             if !local_delivered
-                && !forward_deliver_on_local_miss(context, &delivery.target_delivery_id, &frame)
-                    .await?
+                && !forward_deliver_on_local_miss(
+                    context,
+                    &delivery.target_delivery_id,
+                    &frame,
+                    metadata,
+                )
+                .await?
             {
                 dispatch_offline_wake(context, &delivery.target_delivery_id, &entry.envelope)
                     .await?;
@@ -1692,6 +1716,7 @@ async fn forward_deliver_on_local_miss(
     context: &GatewayQuicContext,
     target_delivery_id: &str,
     frame: &ramflux_node_core::GatewayServerFrame,
+    metadata: Option<&(String, i64)>,
 ) -> anyhow::Result<bool> {
     if context.peers.is_empty() {
         return Ok(false);
@@ -1714,6 +1739,8 @@ async fn forward_deliver_on_local_miss(
         source_gateway_id: context.gateway_id.clone(),
         target_delivery_id: target_delivery_id.to_owned(),
         forwarded: true,
+        incarnation_id: metadata.map(|m| m.0.clone()),
+        retain_until: metadata.map(|m| m.1),
         frame: frame.clone(),
     };
     let tls = context.peers.tls().clone();
@@ -1730,7 +1757,7 @@ async fn forward_deliver_on_local_miss(
         })
         .await;
     match result {
-        Ok(Ok(response)) => Ok(response.delivered),
+        Ok(Ok(response)) => crate::mesh_delivery::handled(&response),
         Ok(Err(error)) => {
             tracing::warn!(
                 %error,

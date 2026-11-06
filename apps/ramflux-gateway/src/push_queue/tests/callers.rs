@@ -81,6 +81,8 @@ async fn produce(
                 source_gateway_id: "source".into(),
                 target_delivery_id: "alice-target".into(),
                 forwarded: true,
+                incarnation_id: None,
+                retain_until: None,
                 frame: ramflux_node_core::GatewayServerFrame::Deliver {
                     entry: ramflux_node_core::InboxEntry {
                         inbox_seq: seq,
