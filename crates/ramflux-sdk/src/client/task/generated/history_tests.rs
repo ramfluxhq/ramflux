@@ -13,7 +13,9 @@ fn client() -> RamfluxClient {
     client
 }
 
-pub(super) fn fixture(client: &RamfluxClient) -> Result<g::TaskHistoryExport, Box<dyn std::error::Error>> {
+pub(super) fn fixture(
+    client: &RamfluxClient,
+) -> Result<g::TaskHistoryExport, Box<dyn std::error::Error>> {
     let mut events = Vec::new();
     for (index, body) in body_variants().into_iter().enumerate() {
         let bytes = client.encode_generated_task_carrier(event(body)?, format!("event-{index}"))?;
