@@ -17,7 +17,10 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const LOCAL_SECRET: &str = "independent local data passphrase";
 const ARCHIVE_SECRET: &str = "independent archive passphrase";
 
-fn initialize(root: &Path, index: AccountIndex) -> Result<LocalBusAccountState, SdkError> {
+pub(super) fn initialize(
+    root: &Path,
+    index: AccountIndex,
+) -> Result<LocalBusAccountState, SdkError> {
     let mut client = RamfluxClient::new();
     client.account_index = Some(index);
     client.open_account_index(root)?;
