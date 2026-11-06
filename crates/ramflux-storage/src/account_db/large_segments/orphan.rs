@@ -51,8 +51,18 @@ impl SegmentStore<'_> {
             if let Some(children) = &mut sweep.children {
                 if let Some(entry) = children.next() {
                     let entry = entry?;
+                    let name = entry.file_name();
+                    let numeric =
+                        name.to_str().and_then(|s| s.parse::<i64>().ok()).filter(|g| *g > 0);
                     if !entry.file_type()?.is_dir() {
-                        return Err(StorageError::Integrity("segment generation directory"));
+                        if numeric.is_some() {
+                            return Err(StorageError::Integrity("segment generation directory"));
+                        }
+                        tracing::warn!(
+                            error_code = "segment_orphan_stray_entry",
+                            "skipped unknown segment-root file"
+                        );
+                        continue;
                     }
                     let path: PathBuf = entry.path();
                     let generation = entry
@@ -60,6 +70,9 @@ impl SegmentStore<'_> {
                         .to_str()
                         .and_then(|s| s.parse::<i64>().ok())
                         .filter(|g| *g > 0)
+                        .filter(|g| {
+                            entry.file_name().to_str().is_some_and(|name| name == g.to_string())
+                        })
                         .ok_or(StorageError::Integrity("segment orphan generation"))?;
                     let dir = path
                         .parent()
@@ -75,11 +88,17 @@ impl SegmentStore<'_> {
             if let Some(entry) = sweep.roots.next() {
                 let entry = entry?;
                 let name = entry.file_name();
-                let dir =
-                    name.to_str().ok_or(StorageError::Integrity("segment orphan directory"))?;
-                if !entry.file_type()?.is_dir()
-                    || !ramflux_protocol::decode_base64url(dir).is_ok_and(|b| b.len() == 32)
-                {
+                let Some(_) = name
+                    .to_str()
+                    .filter(|s| ramflux_protocol::decode_base64url(s).is_ok_and(|b| b.len() == 32))
+                else {
+                    tracing::warn!(
+                        error_code = "segment_orphan_stray_entry",
+                        "skipped unknown segment-root entry"
+                    );
+                    continue;
+                };
+                if !entry.file_type()?.is_dir() {
                     return Err(StorageError::Integrity("segment orphan directory"));
                 }
                 sweep.children = Some(std::fs::read_dir(entry.path())?);

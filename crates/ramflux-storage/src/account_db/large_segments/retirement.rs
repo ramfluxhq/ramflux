@@ -2,8 +2,7 @@
 // Copyright (c) 2026 Span Brain
 //! Portable generation restrictions and local, lease-drained physical cleanup debt.
 use super::{
-    AccountDb, SegmentDirection, SegmentStore, StorageError, VerifiedContentManifest, files,
-    integer, lease,
+    SegmentDirection, SegmentStore, StorageError, VerifiedContentManifest, files, integer, lease,
 };
 use crate::database::Connection;
 use rusqlite::{OptionalExtension, params};
@@ -229,26 +228,13 @@ impl SegmentStore<'_> {
     /// # Errors
     /// Refuses unbounded work or filesystem/database failures; failed rows remain queued.
     pub fn cleanup_retired(&self, limit: usize) -> Result<SegmentCleanupPage, StorageError> {
-        drain(&self.db.connection, &self.root, None, limit)
+        let page = drain(&self.db.connection, &self.root, None, limit)?;
+        self.db
+            .object_retirement
+            .segment_cleanup_pending
+            .store(page.more || page.busy != 0, std::sync::atomic::Ordering::Release);
+        Ok(page)
     }
-}
-pub(in crate::account_db) fn drain_account(
-    db: &AccountDb,
-    limit: usize,
-) -> Result<(), StorageError> {
-    drain_connection(&db.connection, &db.path.with_extension("segments"), limit)
-}
-pub(in crate::account_db) fn drain_connection(
-    db: &Connection,
-    root: &Path,
-    limit: usize,
-) -> Result<(), StorageError> {
-    if root.try_exists()? {
-        files::private_dir(root)?;
-        let root = std::fs::canonicalize(root)?;
-        let _ = drain(db, &root, None, limit)?;
-    }
-    Ok(())
 }
 
 fn drain(
@@ -260,6 +246,8 @@ fn drain(
     if limit == 0 || limit > 32 {
         return Err(StorageError::Integrity("segment cleanup limit"));
     }
+    #[cfg(test)]
+    files::note_filesystem_operation();
     let mut q=db.prepare("SELECT directory,generation FROM object_segment_resource WHERE retired=1 AND directory>=?1 ORDER BY directory,generation LIMIT ?2")?;
     let start = only.and_then(Path::file_name).and_then(|s| s.to_str()).unwrap_or("");
     let rows = q
@@ -297,7 +285,14 @@ fn drain(
             }
             std::fs::remove_dir_all(&path)?;
         }
-        files::sync_dir(if parent.try_exists()? { &parent } else { root })?;
+        match std::fs::remove_dir(&parent) {
+            Ok(()) => files::sync_dir(root)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => files::sync_dir(root)?,
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                files::sync_dir(&parent)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         let tx = db.immediate_transaction()?;
         db.execute("DELETE FROM object_segment_resource WHERE directory=?1 AND generation=?2 AND retired=1",params![dir,generation])?;
         tx.commit()?;
