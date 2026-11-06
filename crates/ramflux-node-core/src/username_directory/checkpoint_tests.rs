@@ -410,17 +410,52 @@ fn username_checkpoint_reopen_clock_refusals() -> TestResult {
 }
 #[test]
 fn username_checkpoint_tampered_head_refused() -> TestResult {
-    let fixture = Fixture::new()?;
-    let witness = fixture.witness()?;
-    let mut head = witness.head();
-    head.codec_version = 2;
-    {
+    let max = ramflux_protocol::MAX_SAFE_JSON_INTEGER;
+    for (field, value, error) in [
+        ("codec_version", serde_json::json!(2), StoredError::Refused("schema")),
+        ("policy", serde_json::json!("wrong-policy"), StoredError::Refused("schema")),
+        ("clock_floor", serde_json::json!(max + 1), StoredError::Refused("clock")),
+        ("digest", serde_json::json!("!"), StoredError::Refused("id")),
+        ("center_id", serde_json::json!("Wrong!"), StoredError::Codec("node")),
+        ("generation", serde_json::json!(0), StoredError::Codec("generation")),
+        ("lsn", serde_json::json!(max + 1), StoredError::Codec("lsn")),
+        ("center_id", serde_json::json!("foreign.example"), StoredError::Refused("identity")),
+        ("generation", serde_json::json!(2), StoredError::Refused("identity")),
+        ("digest", serde_json::json!(id(1)), StoredError::Codec("lsn")),
+    ] {
+        let fixture = Fixture::new()?;
+        let witness = fixture.witness()?;
+        let mut head = serde_json::to_value(witness.head())?;
+        head[field] = value;
         let tx = witness.db.begin_write().map_err(storage)?;
-        put_head(&tx, &head)?;
+        // Raw corruption deliberately bypasses the product's canonical/number validator.
+        tx.open_table(META)
+            .map_err(storage)?
+            .insert("head", serde_json::to_vec(&head)?.as_slice())
+            .map_err(storage)?;
         tx.commit().map_err(storage)?;
+        drop(witness);
+        assert_stored_error(fixture.reopen(), error)?;
     }
-    drop(witness);
-    assert!(matches!(fixture.reopen(), Err(CheckpointError::Refused("schema"))));
+    Ok(())
+}
+#[derive(Clone, Copy)]
+enum StoredError {
+    Refused(&'static str),
+    Codec(&'static str),
+}
+fn assert_stored_error(result: Result<CheckpointWitness>, expected: StoredError) -> TestResult {
+    match (result, expected) {
+        (Err(CheckpointError::Refused(actual)), StoredError::Refused(expected)) => {
+            assert_eq!(actual, expected);
+        }
+        (
+            Err(CheckpointError::Codec(wire::CodecError::Field(actual))),
+            StoredError::Codec(expected),
+        ) => assert_eq!(actual, expected),
+        (Err(other), _) => return Err(format!("unexpected stored-field error: {other}").into()),
+        (Ok(_), _) => return Err("corrupt stored field was accepted".into()),
+    }
     Ok(())
 }
 #[test]
@@ -440,15 +475,15 @@ fn username_checkpoint_noncanonical_head_refused() -> TestResult {
 }
 #[test]
 fn username_checkpoint_missing_marker_refused() -> TestResult {
-    let fixture = Fixture::new()?;
-    let witness = fixture.witness()?;
-    {
+    for key in ["initialized", "head"] {
+        let fixture = Fixture::new()?;
+        let witness = fixture.witness()?;
         let tx = witness.db.begin_write().map_err(storage)?;
-        tx.open_table(META).map_err(storage)?.remove("initialized").map_err(storage)?;
+        tx.open_table(META).map_err(storage)?.remove(key).map_err(storage)?;
         tx.commit().map_err(storage)?;
+        drop(witness);
+        assert_stored_error(fixture.reopen(), StoredError::Refused("uninitialized"))?;
     }
-    drop(witness);
-    assert!(matches!(fixture.reopen(), Err(CheckpointError::Refused("uninitialized"))));
     Ok(())
 }
 #[test]
@@ -561,5 +596,163 @@ fn username_checkpoint_retained_result_capacity() -> TestResult {
         Err(CheckpointError::Refused("result_global"))
     ));
     assert_eq!(witness.head(), head);
+    Ok(())
+}
+
+#[test]
+fn username_checkpoint_retained_root_cap() -> TestResult {
+    use redb::{ReadableDatabase, ReadableTableMetadata};
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    let owner = id(77);
+    for tx_id in 0..64 {
+        witness.append(&witness.head(), clock_delta(tx_id, WALL), &owner, false)?;
+    }
+    assert_eq!(witness.compact(64)?, 64);
+    let head = witness.head();
+    assert!(matches!(
+        witness.append(&head, clock_delta(65, WALL), &owner, false),
+        Err(CheckpointError::Refused("redo_root"))
+    ));
+    assert_eq!(witness.head(), head);
+    {
+        let tx = witness.db.begin_read().map_err(storage)?;
+        assert_eq!(tx.open_table(COMPACTED).map_err(storage)?.len().map_err(storage)?, 64);
+        let meta = tx.open_table(META).map_err(storage)?;
+        for lsn in 1..=64 {
+            assert_eq!(
+                serde_json::from_slice::<String>(
+                    meta.get(format!("redo_owner:{lsn}").as_str())
+                        .map_err(storage)?
+                        .ok_or("owner missing")?
+                        .value()
+                )?,
+                owner
+            );
+        }
+    }
+    witness.append(&head, clock_delta(66, WALL), &id(78), false)?;
+    drop(witness);
+    let mut witness = fixture.reopen()?;
+    let head = witness.head();
+    assert!(matches!(
+        witness.append(&head, clock_delta(65, WALL), &owner, false),
+        Err(CheckpointError::Refused("redo_root"))
+    ));
+    assert_eq!(witness.head(), head);
+    Ok(())
+}
+#[test]
+fn username_checkpoint_expiry_clock_floor_durable() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut witness = fixture.witness()?;
+    let original = witness.append(&witness.head(), clock_delta(500, WALL), &id(3), false)?;
+    let head = witness.head();
+    fixture.clock.wall.store(WALL + 86400, Ordering::SeqCst);
+    assert_eq!(witness.compact(head.lsn)?, 1);
+    assert!(witness.transaction(&original.delta.tx_id)?.is_none());
+    fixture.clock.wall.store(WALL, Ordering::SeqCst);
+    assert!(matches!(
+        witness.append(&head, original.delta.clone(), &id(3), false),
+        Err(CheckpointError::Refused("clock"))
+    ));
+    assert!(matches!(witness.compact(head.lsn), Err(CheckpointError::Refused("clock"))));
+    drop(witness);
+    assert_stored_error(fixture.reopen(), StoredError::Refused("clock"))?;
+    fixture.clock.wall.store(WALL + 86400, Ordering::SeqCst);
+    let witness = fixture.reopen()?;
+    assert_eq!(witness.head(), head);
+    assert!(witness.transaction(&original.delta.tx_id)?.is_none());
+    Ok(())
+}
+#[test]
+fn username_checkpoint_compaction_clock_bounds() -> TestResult {
+    let fixture = Fixture::new()?;
+    fixture.clock.mono.store(1, Ordering::SeqCst);
+    let mut witness = fixture.witness()?;
+    witness.append(&witness.head(), clock_delta(600, WALL), &id(3), false)?;
+    let head = witness.head();
+    fixture.clock.mono.store(0, Ordering::SeqCst);
+    assert!(matches!(witness.compact(head.lsn), Err(CheckpointError::Refused("clock"))));
+    fixture.clock.mono.store(1, Ordering::SeqCst);
+    fixture.clock.wall.store(ramflux_protocol::MAX_SAFE_JSON_INTEGER + 1, Ordering::SeqCst);
+    assert!(matches!(witness.compact(head.lsn), Err(CheckpointError::Refused("clock"))));
+    assert_eq!(witness.head(), head);
+    fixture.clock.wall.store(WALL, Ordering::SeqCst);
+    assert_eq!(witness.compact(head.lsn)?, 1);
+    Ok(())
+}
+#[test]
+fn username_checkpoint_clock_boundaries_and_markers() -> TestResult {
+    username_checkpoint_generation_and_center_boundaries()?;
+    let max = ramflux_protocol::MAX_SAFE_JSON_INTEGER;
+    for wall in [0, max] {
+        let fixture = Fixture::new()?;
+        fixture.clock.wall.store(wall, Ordering::SeqCst);
+        let mut witness = fixture.witness()?;
+        let record = witness.append(&witness.head(), clock_delta(700, wall), &id(3), false)?;
+        assert_eq!(record.delta.clock_floor, wall);
+        assert_eq!(witness.compact(record.lsn)?, 1);
+        let head = witness.head();
+        drop(witness);
+        assert_eq!(fixture.reopen()?.head(), head);
+    }
+    for (value, error) in [
+        (None, "clock_marker"),
+        (Some(b"null".to_vec()), "clock"),
+        (Some((max + 1).to_string().into_bytes()), "clock"),
+        (Some((WALL - 1).to_string().into_bytes()), "clock"),
+        (Some(format!(" {WALL}").into_bytes()), "clock_canonical"),
+    ] {
+        let fixture = Fixture::new()?;
+        let witness = fixture.witness()?;
+        let tx = witness.db.begin_write().map_err(storage)?;
+        {
+            let mut meta = tx.open_table(META).map_err(storage)?;
+            if let Some(bytes) = value {
+                meta.insert("safe_clock", bytes.as_slice()).map_err(storage)?;
+            } else {
+                meta.remove("safe_clock").map_err(storage)?;
+            }
+        }
+        tx.commit().map_err(storage)?;
+        drop(witness);
+        assert_stored_error(fixture.reopen(), StoredError::Refused(error))?;
+    }
+    let fixture = Fixture::new()?;
+    let witness = fixture.witness()?;
+    let tx = witness.db.begin_write().map_err(storage)?;
+    tx.open_table(META)
+        .map_err(storage)?
+        .insert("initialized", b"0".as_slice())
+        .map_err(storage)?;
+    tx.commit().map_err(storage)?;
+    drop(witness);
+    assert_stored_error(fixture.reopen(), StoredError::Refused("uninitialized"))?;
+    Ok(())
+}
+
+fn username_checkpoint_generation_and_center_boundaries() -> TestResult {
+    let max = ramflux_protocol::MAX_SAFE_JSON_INTEGER;
+    let center = ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(61)].join(".");
+    assert_eq!(center.len(), 253);
+    let fixture = Fixture::new()?;
+    let mut witness = CheckpointWitness::initialize(
+        &fixture.path("maximum"),
+        &center,
+        max,
+        fixture.clock.clone(),
+    )?;
+    witness.append(&witness.head(), clock_delta(800, WALL), &id(3), false)?;
+    let mut maximal = witness.head();
+    maximal.lsn = max;
+    maximal.validate()?;
+    let head = witness.head();
+    drop(witness);
+    assert_eq!(
+        CheckpointWitness::open(&fixture.path("maximum"), &center, max, fixture.clock.clone())?
+            .head(),
+        head
+    );
     Ok(())
 }
