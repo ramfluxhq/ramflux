@@ -327,17 +327,34 @@ sender-side attachment owner can lose its own copy when the send hold expires.
 Receiver ownership is durable before import, so an interrupted receive can retry
 without orphan reclamation fencing its attachment.
 
-Pre-import attachment revocations are exported as tombstone placeholder rows, including their
-owner and revocation provenance. They have zero chunks and no payload or content key, so payload
-verification and missing-download preparation skip them. Export keeps the fence, and merge never
-replaces a current tombstone with an archived live object, even if its timestamp is newer.
-The placeholder manifest comes from the authenticated attachment reference, ahead of cached
-display metadata. Explicit last-message erasure therefore removes the placeholder and its
-owner/revocation provenance, including rows stored under private selectors; later exports contain no attachment row for that erased payload.
-Older payload-free placeholders with a 32-zero-byte manifest do not conflict with a live
-object during restore. Normal timestamp arbitration still applies; a restored legacy fence
-inherits the current object's known manifest. Live payload manifest conflicts remain errors.
-Retention maintenance preserves a placeholder while its private attachment reference remains;
-explicit message erasure installs the stronger portable erasure fence. `ObjectErased` remains
-distinct from `attachment deleted`. Sender revocations without a known, matching-owner client
-reference remain refused.
+Pre-import attachment revocations are exported as payload-free placeholders with
+no chunks or content key. A placeholder lives exactly while a live reference to
+its private selector survives and no payload fence covers it. Removing the last
+reference to that selector removes its placeholder and revocation provenance,
+even when another selector keeps the shared payload alive. Later exports omit the
+erased selector and its private copies. `ObjectErased` remains distinct from
+`attachment deleted`.
+
+New revocations require a nonzero manifest from an authenticated reference or a
+valid legacy actor with an agreeing owner and an exact owning message. Display
+metadata alone cannot authorize one. Valid legacy revocations remain honored and
+are retired with their owning message, including before ownership discovery has
+finished. Sender revocations without matching authenticated ownership are refused.
+
+During restore, a legacy payload-free placeholder with a zero manifest can inherit
+the verified manifest of an admitted live reference. When it overlaps a live wire
+object, ordinary timestamp arbitration still applies; a newer live object can win.
+A surviving same-selector reference preserves the revocation veto. Erased selectors,
+fenced payloads and rejected owners do not restore their placeholder or provenance.
+Unowned legacy placeholders and their selector-only copies are omitted while other
+valid data can restore; ambiguous or conflicting authenticated ownership fails with
+an ownership or authorization error. Restore never invents a payload identity from
+zeros or rewrites the input archive. Existing untouched live-store orphan rows are
+not scrubbed by startup.
+
+> Restoring historical data can keep a message while omitting its attachment,
+> even if you never deleted that message. If this device previously erased the
+> attachment's selector and has no surviving reference for it, the historical
+> attachment is refused as `ObjectErased`. A newly authenticated message using
+> the same selector can be accepted when its payload is not fenced; historical
+> restore does not receive that fresh-message exception.

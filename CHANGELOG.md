@@ -31,7 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Restore attachment references per owner and selector, reject stale aliases behind
   erased selectors or payload fences, and omit unowned legacy placeholders while
-  preserving registered revocations.
+  preserving registered revocations. Historical messages can survive without their
+  attachments, including messages never deleted on this device. See
+  [attachment erasure and restore boundaries](docs/account_backup.md#attachment-erasure-and-restore-boundaries)
+  and the existing **BREAKING (downgrade)** schema v13 notice below.
 
 - Keep admitted native group history readable after authority observations expire:
   `group.history` reads stored history, name and roster offline while retaining
