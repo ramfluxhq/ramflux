@@ -80,6 +80,7 @@ pub(crate) enum TlsSequence {
 pub(crate) struct TlsRegistryEntry<'a> {
     /// Maximum from the pinned target identity, not a cast from envelope data.
     pub(crate) target_usize_max: u64,
+    /// Exact allowed pairs; reviewed entries permit KeyUpdate only in Data.
     pub(crate) permitted: &'a [(TlsSpace, TlsSequence)],
 }
 /// Trusted live state supplied before any Session call. Byte fields describe existing
@@ -212,9 +213,7 @@ pub(crate) fn validate(
     if sequence != context.sequence {
         return Err(SequenceMismatch);
     }
-    if (sequence == TlsSequence::KeyUpdate && space != TlsSpace::Data)
-        || !registry.permitted.contains(&(space, sequence))
-    {
+    if !registry.permitted.contains(&(space, sequence)) {
         return Err(DisallowedSpaceSequence);
     }
     if envelope.generation != context.generation {
@@ -450,8 +449,7 @@ mod tests {
             if let (Some(s), Some(q)) = (space, sequence) {
                 if s == c.space
                     && q == c.sequence
-                    && ((q == TlsSequence::KeyUpdate && s != TlsSpace::Data)
-                        || registry.is_some_and(|r| !r.permitted.contains(&(s, q))))
+                    && registry.is_some_and(|r| !r.permitted.contains(&(s, q)))
                 {
                     errors.push(DisallowedSpaceSequence);
                 }

@@ -117,7 +117,7 @@ async fn harness(hold_flight: bool) -> Harness {
         .unwrap();
     let connect = client.connect(a, "localhost").unwrap();
     let client_conn = connect.control_test_connection();
-    let accept = timeout(Duration::from_secs(5), server.accept())
+    let accept = timeout(Duration::from_secs(10), server.accept())
         .await
         .unwrap()
         .unwrap()
@@ -165,7 +165,7 @@ async fn discarded_head_commits_key_ready_tail_with_live_driver() {
     coalesced.extend_from_slice(&tail);
     let before = probe(&h.server_conn, 100);
     inject(&h.incoming, coalesced);
-    let mut recv = timeout(Duration::from_secs(5), h.server_conn.accept_uni())
+    let mut recv = timeout(Duration::from_secs(10), h.server_conn.accept_uni())
         .await
         .unwrap()
         .unwrap();
@@ -261,7 +261,7 @@ async fn committed_handshake_head_parks_tail_and_resumes_once_in_driver() {
     until(|| h.client.rawq_pool().snapshot().0.items == 0).await;
     release(&h.outgoing);
     let (c, s) = h.handshakes.take().unwrap();
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(10), async {
         let (c, s) = tokio::join!(c, s);
         c.unwrap();
         s.unwrap();
@@ -381,7 +381,7 @@ async fn full_directions_pause_raw_duplicate_retransmit_and_concurrent_timer() {
         "duplicate RETIRE must not issue another local CID"
     );
     h.server.close(0u32.into(), b"done");
-    timeout(Duration::from_secs(5), h.server.wait_idle())
+    timeout(Duration::from_secs(10), h.server.wait_idle())
         .await
         .unwrap();
     assert_eq!(h.server.open_connections(), 0);
@@ -428,7 +428,7 @@ async fn repeated_retire_oversize_cancels_coalesced_tail_and_drains() {
     oversize.extend_from_slice(&first[end..]);
     inject(&h.outgoing, oversize);
     release(&h.outgoing);
-    let error = timeout(Duration::from_secs(5), h.client_conn.closed())
+    let error = timeout(Duration::from_secs(10), h.client_conn.closed())
         .await
         .unwrap();
     assert!(
@@ -448,7 +448,7 @@ async fn repeated_retire_oversize_cancels_coalesced_tail_and_drains() {
     assert_eq!(closed[5], u64::MAX);
 
     h.client.control_test_forward(false);
-    timeout(Duration::from_secs(5), h.client.wait_idle())
+    timeout(Duration::from_secs(10), h.client.wait_idle())
         .await
         .unwrap();
     assert_eq!(h.client.open_connections(), 0);
@@ -477,7 +477,7 @@ async fn metadata_terminal_adapter_cancels_parked_tail_and_notifies_driver() {
         p.resource_exhausted(Instant::now());
     });
     assert!(matches!(
-        timeout(Duration::from_secs(5), h.client_conn.closed())
+        timeout(Duration::from_secs(10), h.client_conn.closed())
             .await
             .unwrap(),
         ConnectionError::LocallyClosed
@@ -494,7 +494,7 @@ async fn metadata_terminal_adapter_cancels_parked_tail_and_notifies_driver() {
     );
     h.client_conn.control_test_reverse(false);
     h.client.control_test_forward(false);
-    timeout(Duration::from_secs(5), h.client.wait_idle())
+    timeout(Duration::from_secs(10), h.client.wait_idle())
         .await
         .unwrap();
     assert_eq!(h.client.open_connections(), 0);

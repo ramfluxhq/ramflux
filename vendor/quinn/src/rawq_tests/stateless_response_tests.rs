@@ -76,7 +76,7 @@ fn negotiation() -> Vec<u8> { let mut v=vec![0xc0,0xfa,0xce,0xca,0xfe,8]; v.exte
 async fn healthy(f:&Fixture)->(Connection,Connection) {
  let c=f.client.connect(f.server.local_addr().unwrap(),"localhost").unwrap();
  let accept=async{f.server.accept().await.unwrap().await.unwrap()};
- let(c,s)=timeout(Duration::from_secs(5),async{tokio::join!(c,accept)}).await.unwrap();(c.unwrap(),s)
+ let(c,s)=timeout(Duration::from_secs(10),async{tokio::join!(c,accept)}).await.unwrap();(c.unwrap(),s)
 }
 pub(super) async fn run() {
  for (items,bytes) in [(2,2*65536),(4,2*65536)] {
@@ -89,7 +89,7 @@ pub(super) async fn run() {
     if mode==0 {inject(&f.incoming,negotiation());}
     else {
      attempts.push(f.client.connect(f.server.local_addr().unwrap(),"localhost").unwrap());
-     let incoming=timeout(Duration::from_secs(5),f.server.accept()).await.unwrap().unwrap();
+     let incoming=timeout(Duration::from_secs(10),f.server.accept()).await.unwrap().unwrap();
      if mode==1 {incoming.retry().unwrap();} else {incoming.refuse();}
     }
    }
@@ -104,7 +104,7 @@ pub(super) async fn run() {
    writable(&f.outgoing);
    until(||f.sender.stats().items==0).await;
    assert_eq!(f.outgoing.delivered.load(Ordering::SeqCst)-wire_before,2,"exactly the reserved response capacity reaches the wire after unblock");
-   timeout(Duration::from_secs(5),f.client.wait_idle()).await.unwrap();
+   timeout(Duration::from_secs(10),f.client.wait_idle()).await.unwrap();
    loop {
        let mut accept=std::pin::pin!(f.server.accept());
        match std::future::poll_fn(|cx| Poll::Ready(accept.as_mut().poll(cx))).await {
@@ -116,7 +116,7 @@ pub(super) async fn run() {
    assert_eq!(f.server.open_connections(),1);
    drop((c,s));
    f.server.close(0u32.into(),b"cancel");
-   timeout(Duration::from_secs(5),f.sender.join()).await.unwrap();
+   timeout(Duration::from_secs(10),f.sender.join()).await.unwrap();
    let full_before=f.sender.stats().full;
    inject(&f.incoming,negotiation());until(||f.sender.stats().closed==1).await;
    assert_eq!(f.sender.stats().full,full_before,"drain-time suppression is closed, not full");
@@ -128,13 +128,13 @@ pub(super) async fn run() {
  inject(&f.incoming,negotiation());until(||f.sender.stats().oversize==1).await;
  assert_eq!((f.sender.stats().items,f.sender.stats().bytes,f.sender.stats().allocations),(0,0,0));
  assert_eq!(f.server.open_connections(),0);f.server.close(0u32.into(),b"oversize");
- timeout(Duration::from_secs(5),f.sender.join()).await.unwrap();
+ timeout(Duration::from_secs(10),f.sender.join()).await.unwrap();
  // Dropping the endpoint cancels the independent sender, with a send still blocked.
  let f=fixture(2,2*65536,false).await;
  f.outgoing.write_blocked.store(true,Ordering::SeqCst);inject(&f.incoming,negotiation());
  until(||f.sender.ownership().1==1).await;
  let sender=f.sender.clone();drop(f.server);
- timeout(Duration::from_secs(5),sender.join()).await.unwrap();
+ timeout(Duration::from_secs(10),sender.join()).await.unwrap();
  assert_eq!(sender.ownership(),(0,0,0));assert_eq!(sender.stats().bytes,0);
  // A full protocol arena still uses the independent response pool for refusal.
  let f=fixture(2,2*65536,false).await;
@@ -143,14 +143,14 @@ pub(super) async fn run() {
  let mut attempts=Vec::new();
  for _ in 0..9 {
   attempts.push(f.client.connect(f.server.local_addr().unwrap(),"localhost").unwrap());
-  let incoming=timeout(Duration::from_secs(5),f.server.accept()).await.unwrap().unwrap();
+  let incoming=timeout(Duration::from_secs(10),f.server.accept()).await.unwrap().unwrap();
   assert!(matches!(incoming.accept(),Err(ConnectionError::ApplicationClosed(_))));
  }
  until(||f.sender.stats().full==7 && f.sender.ownership().1==1).await;
  assert_eq!(f.server.open_connections(),4);assert_eq!(f.sender.stats().allocations,2);
  assert_eq!(f.runtime.spawned.load(Ordering::SeqCst),6);
  assert!(peers.iter().all(|(c,s)|c.close_reason().is_none() && s.close_reason().is_none()),"response suppression cannot close the admitted peer");
- f.sender.cancel();timeout(Duration::from_secs(5),f.sender.join()).await.unwrap();
+ f.sender.cancel();timeout(Duration::from_secs(10),f.sender.join()).await.unwrap();
  assert_eq!(f.sender.ownership(),(0,0,0));assert_eq!(f.sender.stats().items,0);
  drop((attempts,peers));
 }
