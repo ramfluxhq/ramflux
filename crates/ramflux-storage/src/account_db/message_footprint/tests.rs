@@ -576,3 +576,122 @@ fn admits_predicate_controls_are_isolated() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn audit(db: &AccountDb) -> Result<Vec<String>, StorageError> {
+    Ok(db.connection.call(|raw| audit::unregistered_envelope_copies(raw, 16))?)
+}
+
+fn envelope_value(message: &str) -> serde_json::Value {
+    json!({"routing":{"message_id":message},"entry":{"envelope":full_envelope()}})
+}
+
+#[test]
+fn envelope_writers_are_registered() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-envelope-writers")?;
+    db.send_direct_message("thread", "message", "peer", b"secret")?;
+    // (a)(b)(c) An unlisted prefix is owned by M, erased by deletion and absent after reopen.
+    db.persist_actor_state("zz-new/x", &envelope_value("message"))?;
+    assert_eq!(
+        actor_owners(&db, "zz-new/x")?,
+        vec!["copy:payload:payload-private-hash".to_owned(), "message".to_owned()]
+    );
+    // (d) Every runtime chokepoint leaves the audit empty.
+    db.persist_actor_state("routed/committed/listed", &envelope_value("message"))?;
+    db.persist_actor_state_batch(&[("zz-new/batch".to_owned(), envelope_value("message"))])?;
+    db.persist_message_actor_state("message", "zz-new/message", &envelope_value("message"))?;
+    let quarantined = format!(
+        "legacy/replay/committed/{}",
+        ramflux_protocol::encode_base64url(b"routed/committed/old")
+    );
+    db.persist_actor_state(&quarantined, &envelope_value("message"))?;
+    db.append_event("event-envelope", "text", &serde_json::to_vec(&full_envelope())?)?;
+    assert_eq!(audit(&db)?, Vec::<String>::new());
+    // (e) Archive tables: only the unconditional local-event trigger is in scope here.
+    db.connection.execute_batch(
+        "CREATE TABLE backup_archived_local_event AS SELECT '' AS source,* FROM local_event_log WHERE 0;",
+    )?;
+    db.connection.call(|raw| super::install(raw))?;
+    db.connection.execute_batch(
+        "INSERT INTO backup_archived_local_event SELECT 'archive',* FROM local_event_log;",
+    )?;
+    assert_eq!(audit(&db)?, Vec::<String>::new());
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    for key in ["zz-new/x", "zz-new/batch", "zz-new/message", "routed/committed/listed"] {
+        assert!(!db.actor_state_exists(key)?, "{key} survived deletion");
+    }
+    assert!(!db.actor_state_exists(&quarantined)?);
+    drop(db);
+    let db = AccountDb::open(
+        &AccountIndex::open(&root)?,
+        "acct",
+        &AccountDbKey::derive("acct", b"storage-test-secret"),
+    )?;
+    assert!(!db.actor_state_exists("zz-new/x")?);
+    assert_eq!(audit(&db)?, Vec::<String>::new());
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn envelope_audit_reports_an_unregistered_copy() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-envelope-audit")?;
+    db.connection.execute(
+        "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES('zz-new/raw',?1)",
+        params![serde_json::to_vec(&envelope_value("message"))?],
+    )?;
+    assert_eq!(audit(&db)?, vec!["runtime_actor_state:zz-new/raw".to_owned()]);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn envelope_merge_import_leaves_no_unregistered_copy() -> Result<(), StorageError> {
+    let root = crate::tests::temp_root("footprint-envelope-merge");
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let local_index = AccountIndex::open(root.join("local"))?;
+    source_index.create_account("account", "root")?;
+    local_index.create_account("account", "root")?;
+    let source = AccountDb::open(&source_index, "account", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&local_index, "account", &AccountDbKey::generate()?)?;
+    source.send_direct_message("thread", "message", "peer", b"secret")?;
+    source.persist_actor_state("zz-new/merged", &envelope_value("message"))?;
+    source.append_event("event-merged", "text", &serde_json::to_vec(&full_envelope())?)?;
+    let incoming = root.join("incoming.db");
+    let snapshot = source.write_backup_snapshot(&incoming)?;
+    let path = root.join("merged.db");
+    let target = local.write_backup_snapshot(&path)?;
+    let mut merged = crate::BackupDatabase::open(&path, &target.key)?;
+    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    // (f) Incoming rows were footprinted at the source; the merge must keep them registered.
+    let imported: i64 = merged.db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind='zz-new/merged'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(imported, 1);
+    assert_eq!(audit::unregistered_envelope_copies(&merged.db, 16)?, Vec::<String>::new());
+    drop(merged);
+    drop(source);
+    drop(local);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn envelope_history_import_leaves_no_unregistered_copy() -> Result<(), StorageError> {
+    let (source_root, source, _device) = crate::tests::signed_test_db("footprint-history-source")?;
+    source.append_event("history-envelope", "text", &serde_json::to_vec(&full_envelope())?)?;
+    let bundle = source.export_history_bundle("device", "target-device")?;
+    assert_eq!(bundle.encrypted_event_batch.len(), 1);
+    let (target_root, target) = crate::tests::test_db("footprint-history-target")?;
+    target.import_history_bundle(&bundle)?;
+    assert!(target.event_body("history-envelope")?.is_some());
+    assert_eq!(audit(&target)?, Vec::<String>::new());
+    drop(target);
+    drop(source);
+    std::fs::remove_dir_all(target_root)?;
+    std::fs::remove_dir_all(source_root)?;
+    Ok(())
+}
