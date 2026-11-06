@@ -183,6 +183,9 @@ async fn router_refusal(send: &GatewaySendHandle, id: &str, value: &Value) -> an
     if value.get("incarnation_id").is_some_and(|v| v != id) {
         return Err(Retired.into());
     }
+    if reason == "incarnation_mismatch" {
+        return Err(Retired.into());
+    }
     let reason = serde_json::from_value::<Reason>(reason.clone()).map_err(|_| Retired)?;
     nack(send, id, reason).await?;
     Ok(true)
@@ -206,6 +209,21 @@ pub(crate) async fn handle(
     handle_authorized(send, context, runtime, bytes, None).await
 }
 pub(crate) async fn handle_authorized(
+    send: &GatewaySendHandle,
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    bytes: &[u8],
+    native: Option<&crate::custody::GatewayGrant>,
+) -> anyhow::Result<()> {
+    let result = handle_bound(send, context, runtime, bytes, native).await;
+    if result.as_ref().is_err_and(|e| e.downcast_ref::<Retired>().is_some())
+        && let Some(id) = runtime.session_push.as_deref()
+    {
+        context.hub.retire_incarnation(&runtime.target_delivery_id, id, send).await;
+    }
+    result
+}
+async fn handle_bound(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,

@@ -26,10 +26,10 @@ fn queue_half_drain_and_inflight() {
             let Next::Frame(frame) = queue.next() else { unreachable!() };
             queue.complete(Some(&frame));
         }
-        assert!(matches!(queue.next(), Next::Hint(299)));
+        assert!(matches!(queue.next(), Next::Hint(299, _)));
         assert_eq!(queue.try_push(vec![1], 200), Admission::Overflowed);
         queue.complete(None);
-        assert!(matches!(queue.next(), Next::Hint(199)));
+        assert!(matches!(queue.next(), Next::Hint(199, _)));
         queue.complete(None);
     }
 }
@@ -46,10 +46,10 @@ fn resync_threshold() {
     // Three frames are below the frame threshold but above the byte threshold.
     let Next::Frame(frame) = queue.next() else { unreachable!() };
     queue.complete(Some(&frame));
-    assert!(matches!(queue.next(), Next::Hint(19)));
+    assert!(matches!(queue.next(), Next::Hint(19, _)));
     assert_eq!(queue.try_push(vec![0], 19), Admission::Overflowed);
     queue.complete(None);
-    assert!(matches!(queue.next(), Next::Hint(18)));
+    assert!(matches!(queue.next(), Next::Hint(18, _)));
 }
 
 #[cfg(feature = "itest-local-mint")]

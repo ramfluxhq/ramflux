@@ -539,8 +539,15 @@ pub(crate) async fn handle_gateway_forward_deliver(
     if !forward.forwarded {
         return Err(anyhow::anyhow!("forward marker is required"));
     }
-    let delivered = hub.send_to(&forward.target_delivery_id, &forward.frame).await;
-    Ok(GatewayForwardDeliverResponse { delivered, outcome: None })
+    crate::mesh_delivery::validate(&forward)?;
+    let outcome = hub
+        .send_delivery_result(
+            &forward.target_delivery_id,
+            &forward.frame,
+            forward.incarnation_id.as_deref().zip(forward.retain_until),
+        )
+        .await;
+    Ok(crate::mesh_delivery::response(outcome))
 }
 
 #[cfg(test)]
@@ -586,6 +593,8 @@ mod tests {
                 source_gateway_id: "gw-a".to_owned(),
                 target_delivery_id: "target_cross_gateway_bob".to_owned(),
                 forwarded: true,
+                incarnation_id: None,
+                retain_until: None,
                 frame: frame.clone(),
             },
         )
@@ -606,6 +615,8 @@ mod tests {
                 source_gateway_id: "gw-b".to_owned(),
                 target_delivery_id: "target_cross_gateway_bob".to_owned(),
                 forwarded: true,
+                incarnation_id: None,
+                retain_until: None,
                 frame,
             },
         )

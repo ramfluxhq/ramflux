@@ -5,9 +5,11 @@ mod clients;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
 mod custody;
+mod hub_index;
 mod ingress;
 #[cfg(feature = "itest-http")]
 mod itest_http;
+mod mesh_delivery;
 mod object_issue;
 mod principal_directory;
 mod push_queue;
@@ -19,6 +21,7 @@ mod registration_forward_tests;
 mod retention;
 mod serve;
 mod session;
+mod session_hub;
 mod session_push;
 mod session_response;
 mod state;
