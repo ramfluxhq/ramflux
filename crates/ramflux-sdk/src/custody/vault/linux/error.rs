@@ -19,6 +19,9 @@ pub enum LinuxVaultConfigError {
     /// Credential paths cannot contain parent-directory traversal.
     #[error("credential path contains a parent component")]
     CredentialPathTraversal,
+    /// Credential paths cannot contain NUL bytes, which C path APIs would truncate.
+    #[error("credential path contains a NUL byte")]
+    CredentialPathNul,
     /// Credential paths are limited to 4095 encoded bytes, excluding the terminator.
     #[error("credential path exceeds 4095 bytes")]
     CredentialPathLength,

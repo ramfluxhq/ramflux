@@ -110,6 +110,9 @@ impl LinuxVaultConfig {
             if !path.is_absolute() {
                 return Err(LinuxVaultConfigError::CredentialPath);
             }
+            if path.as_os_str().as_encoded_bytes().contains(&0) {
+                return Err(LinuxVaultConfigError::CredentialPathNul);
+            }
             if path.as_os_str().as_encoded_bytes().len() > 4095 {
                 return Err(LinuxVaultConfigError::CredentialPathLength);
             }
@@ -206,6 +209,54 @@ mod tests {
                     assert_eq!(result, Err(LinuxVaultConfigError::CredentialPathLength));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn assert_nul_path_rejected(realm: usize) {
+        let mut supplied = paths(true, true, true);
+        let slot = match realm {
+            0 => &mut supplied.primary,
+            1 => &mut supplied.device,
+            _ => &mut supplied.data,
+        };
+        *slot = Some("/credentials/rf\0kek".into());
+        assert_eq!(
+            LinuxVaultConfig::new("systemd-host", LinuxVaultRole::AttendedPrimary, supplied),
+            Err(LinuxVaultConfigError::CredentialPathNul),
+            "realm index {realm}"
+        );
+    }
+    #[test]
+    fn linux_vault_credentials_reject_nul_primary_path() {
+        assert_nul_path_rejected(0);
+    }
+    #[test]
+    fn linux_vault_credentials_reject_nul_device_path() {
+        assert_nul_path_rejected(1);
+    }
+    #[test]
+    fn linux_vault_credentials_reject_nul_data_path() {
+        assert_nul_path_rejected(2);
+    }
+    #[test]
+    fn linux_vault_credentials_accept_path_at_length_cap() -> Result<(), LinuxVaultConfigError> {
+        for realm in 0..3 {
+            let cap = format!("/{}", "x".repeat(4094));
+            assert_eq!(cap.len(), 4095);
+            let mut supplied = paths(true, true, true);
+            let slot = match realm {
+                0 => &mut supplied.primary,
+                1 => &mut supplied.device,
+                _ => &mut supplied.data,
+            };
+            *slot = Some(cap.into());
+            let config = LinuxVaultConfig::new(
+                "systemd-host",
+                LinuxVaultRole::AttendedPrimary,
+                supplied.clone(),
+            )?;
+            assert_eq!(config.credentials(), &supplied, "realm index {realm}");
         }
         Ok(())
     }

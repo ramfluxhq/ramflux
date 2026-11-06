@@ -27,15 +27,37 @@ fixture_user="${fixture_user,,}"
 unit="${fixture_user}-probe"
 created_user=0
 cleanup() {
+  # Record failures, finish every remaining step, then exit non-zero if anything failed.
+  local script_status=$? cleanup_failed=0
   systemctl stop "$unit.service" >/dev/null 2>&1 || true
   if [ "$created_user" -eq 1 ]; then
     pkill -u "$fixture_user" >/dev/null 2>&1 || true
   fi
-  if [ -s "$fixture/ancestor-acls" ]; then setfacl --restore="$fixture/ancestor-acls"; fi
-  if [ "$created_user" -eq 1 ]; then userdel "$fixture_user" >/dev/null 2>&1 || true; fi
-  rm -rf -- "$fixture"
-  if [ -n "$created_target_alias" ]; then rm -f -- "$created_target_alias"; fi
-  if [ -n "$created_workspace" ]; then rm -rf -- "$created_workspace"; fi
+  if [ -s "$fixture/ancestor-acls" ]; then
+    setfacl --restore="$fixture/ancestor-acls" || {
+      echo 'cleanup: setfacl --restore failed' >&2; cleanup_failed=1;
+    }
+  fi
+  if [ "$created_user" -eq 1 ]; then
+    userdel "$fixture_user" >/dev/null 2>&1 || {
+      echo 'cleanup: userdel failed' >&2; cleanup_failed=1;
+    }
+  fi
+  rm -rf -- "$fixture" || { echo 'cleanup: fixture removal failed' >&2; cleanup_failed=1; }
+  if [ -n "$created_target_alias" ]; then
+    rm -f -- "$created_target_alias" || {
+      echo 'cleanup: target alias removal failed' >&2; cleanup_failed=1;
+    }
+  fi
+  if [ -n "$created_workspace" ]; then
+    rm -rf -- "$created_workspace" || {
+      echo 'cleanup: workspace removal failed' >&2; cleanup_failed=1;
+    }
+  fi
+  if [ "$script_status" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then
+    exit 1
+  fi
+  exit "$script_status"
 }
 trap cleanup EXIT
 useradd --no-create-home --home-dir "$fixture/home" --shell /bin/sh "$fixture_user"
