@@ -426,7 +426,7 @@
       },
       "src/connection/streams/state.rs": {
         "upstream_sha256": "f3e993c4cdb34ac89bd379a601f19a3c928332445e98233de921f153ccb6a59e",
-        "patched_sha256": "5551f1e0fdad3a87f552fd4d2220ba1d46d39d6124caec725e4ff02618119163",
+        "patched_sha256": "5f5c8b2db725eea2f2cb826ca34df0e5e3cfdc446c85d67e8f8517f2eabc0939",
         "delta": "Prepend original-license SPDX header; otherwise retain upstream bytes; Carry the shared metadata ledger, preflight STREAM vector spill before stream mutation, expose dependency-test actual storage observations; B1 continuation slot2: shared actual-capacity send ACK and retransmit ranges, fallible ACK/loss terminal propagation and independent real-driver refusal tests; PR1B-1: actual-capacity retransmit box/children and pending transfers, fallible producers, retained ownership and independent send-only driver/space/Retry/handshake tests; Bind STREAM assembler metadata and observe actual retained receive capacities; Observe actual unordered-history backing across live/reused receive owners; Mode-paired regression for upstream default removal and bounded receive-owner restoration"
       },
       "src/connection/timer.rs": {
