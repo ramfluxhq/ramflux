@@ -14,6 +14,17 @@ fn witness<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
     let wire = all[key]["wire"].as_str().ok_or("missing independent bytes")?.as_bytes();
     assert_eq!(wire.len() as u64, all[key]["size"].as_u64().ok_or("missing size")?);
     assert_eq!(T::from_wire_bytes(wire)?.to_wire_bytes()?, wire, "{key}");
+    let typed = T::from_wire_bytes(wire)?;
+    let cap = typed.received_limit();
+    let mut padded = wire.to_vec();
+    padded.resize(cap, b' ');
+    assert_eq!(
+        T::from_wire_bytes(&padded).err(),
+        Some(WireError::NonCanonical),
+        "{key} at input cap"
+    );
+    padded.push(b' ');
+    assert_eq!(T::from_wire_bytes(&padded).err(), Some(WireError::Size), "{key} over input cap");
     let value: Value = serde_json::from_slice(wire)?;
     nested_shapes::<T>(&value)?;
     for secret in ["passphrase", "confirmation", "provider_handle"] {
@@ -59,7 +70,7 @@ fn rights_vectors<T: PairingWire>(v: &Value) -> TestResult {
     Ok(())
 }
 fn name_vectors<T: PairingWire>(v: &Value, path: &str) -> TestResult {
-    for text in ["".to_owned(), "x".repeat(128), "é".repeat(64)] {
+    for text in [String::new(), "x".repeat(128), "é".repeat(64)] {
         let mut valid = v.clone();
         *valid.pointer_mut(path).ok_or("name path")? = json!(text);
         decode_value::<T>(&valid)?;
@@ -72,14 +83,29 @@ fn name_vectors<T: PairingWire>(v: &Value, path: &str) -> TestResult {
 #[test]
 fn pairing_local_bounds_and_independent_maxima() -> TestResult {
     let all = maxima()?;
-    let begin = witness::<Begin>(&all, "Begin")?;
+    local_begin_vectors(&all)?;
+    local_request_vectors(&all)?;
+    local_result_vectors(&all)?;
+    witness::<LocalEvent>(&all, "LocalEvent")?;
+    credential_request_vectors(&witness::<CredentialRequest>(&all, "CredentialRequest")?)?;
+    witness::<TransferPayload>(&all, "TransferPayload")?;
+    witness::<Channel>(&all, "Channel_hpke")?;
+    witness::<Channel>(&all, "Channel_candidate")?;
+    witness::<Update>(&all, "Update_installed")?;
+    witness::<Update>(&all, "Update_terminal")?;
+    update_vectors(&witness::<Update>(&all, "Update")?)?;
+    Ok(())
+}
+fn local_begin_vectors(all: &Value) -> TestResult {
+    let begin = witness::<Begin>(all, "Begin")?;
     rights_vectors::<Begin>(&begin)?;
     name_vectors::<Begin>(&begin, "/display_name")?;
-    let transfer = witness::<TransferBegin>(&all, "TransferBegin")?;
+    let transfer = witness::<TransferBegin>(all, "TransferBegin")?;
     rights_vectors::<TransferBegin>(&transfer)?;
     name_vectors::<TransferBegin>(&transfer, "/display_name")?;
     field::<TransferBegin>(&transfer, "/recipient_mode", json!("other"), "recipient_mode")?;
     field::<TransferBegin>(&transfer, "/destination_ref", Value::Null, "destination_ref")?;
+    reference_vectors::<TransferBegin>(&transfer, "/destination_ref")?;
     let mut new = transfer.clone();
     new["recipient_mode"] = json!("new");
     new["destination_ref"] = Value::Null;
@@ -117,13 +143,15 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
         json!(MAX_SAFE_JSON_INTEGER + 1),
         WireError::Json,
     )?;
+    let mut single = transfer.clone();
+    single["data_selection"] = json!([transfer["data_selection"][0]]);
     for (path, value, error) in [
         ("/data_selection/0/key_id", json!(""), "selection.key_id"),
         ("/data_selection/0/key_id", json!("x".repeat(129)), "selection.key_id"),
         ("/data_selection/0/key_id", json!("\n"), "selection.key_id"),
         ("/data_selection/0/purpose", json!("other"), "selection.purpose"),
     ] {
-        field::<TransferBegin>(&transfer, path, value, error)?;
+        field::<TransferBegin>(&single, path, value, error)?;
     }
     let mut selection = transfer["data_selection"].as_array().ok_or("selection")?.clone();
     selection.swap(0, 1);
@@ -131,11 +159,14 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
     selection.swap(0, 1);
     selection[1] = selection[0].clone();
     field::<TransferBegin>(&transfer, "/data_selection", json!(selection), "data_selection")?;
-    let join = witness::<Join>(&all, "Join")?;
+    let join = witness::<Join>(all, "Join")?;
     name_vectors::<Join>(&join, "/display_name")?;
+    Ok(())
+}
+fn local_request_vectors(all: &Value) -> TestResult {
     macro_rules! request {
         ($ty:ty,$key:literal,$($hash:literal),*) => {{
-            let v = witness::<$ty>(&all,$key)?;
+            let v = witness::<$ty>(all,$key)?;
             local_base_vectors::<$ty>(&v)?;
             $(field::<$ty>(&v,$hash,json!("bad"), &$hash[1..])?;)*
         }};
@@ -145,7 +176,7 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
     request!(Prepare, "Prepare", "/transcript_hash");
     request!(Cancel, "Cancel",);
     request!(StatusRequest, "StatusRequest",);
-    let br = witness::<BeginResult>(&all, "BeginResult")?;
+    let br = witness::<BeginResult>(all, "BeginResult")?;
     local_base_vectors::<BeginResult>(&br)?;
     field::<BeginResult>(
         &br,
@@ -155,8 +186,11 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
     )?;
     field::<BeginResult>(&br, "/expires_at", json!(0), "expiry_binding")?;
     invalid::<BeginResult>(&br, "/expires_at", json!(MAX_SAFE_JSON_INTEGER + 1), WireError::Json)?;
+    Ok(())
+}
+fn local_result_vectors(all: &Value) -> TestResult {
     for tag in ["begin", "update", "error"] {
-        let value = witness::<LocalResult>(&all, &format!("LocalResult_{tag}"))?;
+        let value = witness::<LocalResult>(all, &format!("LocalResult_{tag}"))?;
         let result = decode_value::<LocalResult>(&value)?;
         for method in [
             "pair.begin",
@@ -171,7 +205,9 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
             "transfer.cancel",
             "transfer.status",
         ] {
-            let expected = if tag == "error" || (tag == "begin") == method.ends_with(".begin") {
+            let expected = if tag == "error"
+                || (tag == "begin") == matches!(method, "pair.begin" | "transfer.begin")
+            {
                 Ok(())
             } else {
                 Err(WireError::Field("result_method"))
@@ -180,7 +216,7 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
         }
         assert_eq!(result.validate_method("other"), Err(WireError::Field("method")));
         let cap = match tag {
-            "begin" => 18432,
+            "begin" => 18_432,
             "update" => 4608,
             _ => 1024,
         };
@@ -190,14 +226,9 @@ fn pairing_local_bounds_and_independent_maxima() -> TestResult {
         wire.push(b' ');
         assert_eq!(LocalResult::from_wire_bytes(&wire).err(), Some(WireError::Size));
     }
-    witness::<LocalEvent>(&all, "LocalEvent")?;
-    witness::<CredentialRequest>(&all, "CredentialRequest")?;
-    witness::<TransferPayload>(&all, "TransferPayload")?;
-    witness::<Channel>(&all, "Channel_hpke")?;
-    witness::<Channel>(&all, "Channel_candidate")?;
-    update_vectors(&witness::<Update>(&all, "Update")?)?;
     Ok(())
 }
+
 fn update_vectors(v: &Value) -> TestResult {
     local_base_vectors::<Update>(v)?;
     rights_vectors::<Update>(v)?;
@@ -210,10 +241,16 @@ fn update_vectors(v: &Value) -> TestResult {
     field::<Update>(v, "/cleanup", json!("other"), "cleanup")?;
     field::<Update>(v, "/result", json!("other"), "code")?;
     field::<Update>(v, "/peer_name", Value::Null, "peer_fields")?;
+    field::<Update>(v, "/peer_ref", Value::Null, "peer_fields")?;
+    reference_vectors::<Update>(v, "/peer_ref")?;
+
     for indices in [json!([]), json!(vec![0; 6]), json!(vec![0; 8]), json!([64, 0, 0, 0, 0, 0, 0])]
     {
         field::<Update>(v, "/emoji_indices", indices, "emoji_indices")?;
     }
+    update_phase_vectors(v)
+}
+fn update_phase_vectors(v: &Value) -> TestResult {
     for (i, phase) in PHASES.iter().enumerate() {
         let mut current = v.clone();
         current["phase"] = json!(phase);
@@ -228,6 +265,9 @@ fn update_vectors(v: &Value) -> TestResult {
         current["record_hash"] =
             if i >= 6 { json!(encode_base64url([1; 32])) } else { Value::Null };
         current["result"] = if i >= 11 { json!("Expired") } else { Value::Null };
+        let mut pending = current.clone();
+        pending["result"] = json!("PublicationPending");
+        decode_value::<Update>(&pending)?;
         for cleanup in ["none", "pending", "done"] {
             current["cleanup"] = json!(cleanup);
             decode_value::<Update>(&current)?;
@@ -278,6 +318,67 @@ fn update_vectors(v: &Value) -> TestResult {
                 "phase_emoji",
             )?;
         }
+    }
+    Ok(())
+}
+
+fn reference_vectors<T: PairingWire>(value: &Value, prefix: &str) -> TestResult {
+    for (name, bad, error) in [
+        ("account_anchor", json!("bad"), "ref.account_anchor"),
+        ("device_id", json!(""), "ref.device_id"),
+        ("device_id", json!("x".repeat(129)), "ref.device_id"),
+        ("device_id", json!("\n"), "ref.device_id"),
+        ("device_epoch", json!(0), "ref.device_epoch"),
+    ] {
+        field::<T>(value, &format!("{prefix}/{name}"), bad, error)?;
+    }
+    invalid::<T>(
+        value,
+        &format!("{prefix}/device_epoch"),
+        json!(MAX_SAFE_JSON_INTEGER + 1),
+        WireError::Json,
+    )?;
+    for (name, text) in [("device_id", "x".into()), ("device_id", "é".repeat(64))] {
+        let mut valid = value.clone();
+        *valid.pointer_mut(&format!("{prefix}/{name}")).ok_or("reference path")? = json!(text);
+        decode_value::<T>(&valid)?;
+    }
+    Ok(())
+}
+fn credential_request_vectors(value: &Value) -> TestResult {
+    invalid::<CredentialRequest>(
+        value,
+        "/frontend_generation",
+        json!(MAX_SAFE_JSON_INTEGER + 1),
+        WireError::Json,
+    )?;
+    for account in ["x".to_owned(), "é".repeat(64)] {
+        let mut valid = value.clone();
+        valid["local_account_id"] = json!(account);
+        decode_value::<CredentialRequest>(&valid)?;
+    }
+    let request = decode_value::<CredentialRequest>(value)?;
+    for (confirmation, error) in [
+        (b"".as_slice(), "credential_length"),
+        (&[255], "credential_utf8"),
+        (&vec![b'x'; 1025], "credential_length"),
+    ] {
+        assert_eq!(
+            request.validate_input(
+                &request,
+                CredentialInput { passphrase: b"x", confirmation: Some(confirmation) }
+            ),
+            Err(WireError::Field(error))
+        );
+    }
+    let mut unlock = value.clone();
+    unlock["action"] = json!("unlock");
+    let request = decode_value::<CredentialRequest>(&unlock)?;
+    for n in [1, 1024] {
+        request.validate_input(
+            &request,
+            CredentialInput { passphrase: &vec![b'x'; n], confirmation: None },
+        )?;
     }
     Ok(())
 }
