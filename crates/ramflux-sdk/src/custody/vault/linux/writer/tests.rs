@@ -239,38 +239,80 @@ fn linux_vault_publication_call_order_is_durable() -> TestResult {
     let _gate = fork_gate();
     order_oracle()
 }
-/// Forced overlap: a thread spawns subprocess fixtures back to back while the order oracle runs
-/// repeatedly. Fixtures spawn under the fork gate, so the oracle never sees an inherited lock.
-#[test]
-fn subprocess_fixtures_cannot_race_the_order_oracle() -> TestResult {
-    let stop = Arc::new(AtomicBool::new(false));
-    let spawner = {
-        let stop = stop.clone();
-        std::thread::spawn(move || {
-            let mut count = 0_u32;
-            while !stop.load(Ordering::SeqCst) {
-                if let Ok(mut child) = spawn_fixture(&mut Command::new("true")) {
-                    let _ = child.wait();
-                    count += 1;
-                }
+/// One fixture spawn on its own thread. It reports the attempt before it calls the gated spawn
+/// and the outcome after the child was waited for. The child is reaped by `Reaper` on every
+/// path, the wait is bounded, and `Drop` waits a bounded time for the thread before joining.
+struct OneSpawn {
+    attempted: mpsc::Receiver<()>,
+    completed: mpsc::Receiver<Result<(), String>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+impl OneSpawn {
+    fn start() -> Self {
+        let (attempt_tx, attempted) = mpsc::channel();
+        let (done_tx, completed) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = attempt_tx.send(());
+            let outcome = spawn_fixture(&mut Command::new("true"))
+                .map(Reaper)
+                .map_err(|e| format!("spawn failed: {e}"))
+                .and_then(|mut child| {
+                    let end = Instant::now() + GUARD;
+                    loop {
+                        match child.0.try_wait() {
+                            Ok(Some(_)) => return Ok(()),
+                            Ok(None) if Instant::now() < end => {
+                                std::thread::sleep(Duration::from_millis(2));
+                            }
+                            Ok(None) => return Err("fixture child still running after 10s".into()),
+                            Err(e) => return Err(format!("wait failed: {e}")),
+                        }
+                    }
+                });
+            let _ = done_tx.send(outcome);
+        });
+        Self { attempted, completed, handle: Some(handle) }
+    }
+}
+impl Drop for OneSpawn {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            // Bounded: never join a thread that has not finished.
+            let _ = self.completed.recv_timeout(GUARD);
+            if handle.is_finished() {
+                let _ = handle.join();
             }
-            count
-        })
-    };
-    let mut result = Ok(());
-    for _ in 0..150 {
-        result = {
-            let _gate = fork_gate();
-            order_oracle()
-        };
-        if result.is_err() {
-            break;
         }
     }
-    stop.store(true, Ordering::SeqCst);
-    let count = spawner.join().map_err(|_| "spawner panicked")?;
-    result?;
-    assert!(count > 0, "the spawner never overlapped the oracle");
+}
+/// Deterministic window: a fixture spawn is attempted while the oracle holds the fork gate, must
+/// not complete while the gate is held, and completes only after the gate is released.
+#[test]
+fn subprocess_fixtures_cannot_race_the_order_oracle() -> TestResult {
+    let gate = fork_gate();
+    let spawn = OneSpawn::start();
+    let held = (|| -> TestResult {
+        spawn
+            .attempted
+            .recv_timeout(GUARD)
+            .map_err(|e| format!("no fixture spawn attempt within 10s: {e}"))?;
+        order_oracle()?;
+        // The attempt is on record; give a missing gate every chance to let the spawn finish.
+        let window = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < window {
+            if spawn.completed.try_recv().is_ok() {
+                return Err("fixture spawn completed while the oracle held the gate".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    })();
+    drop(gate);
+    held?;
+    spawn
+        .completed
+        .recv_timeout(GUARD)
+        .map_err(|e| format!("fixture spawn did not complete within 10s of release: {e}"))??;
     Ok(())
 }
 fn order_oracle() -> TestResult {
@@ -376,54 +418,85 @@ fn parse_calls(text: &str) -> Vec<Call<'_>> {
         })
         .collect()
 }
-/// Checks the insert-then-delete publication by descriptor identity, not by syscall name:
-/// the temporary file's own fsync, then the rename of that temp name between the realm
-/// directory, then a realm-directory fsync, then unlink and a final directory fsync. Every call
-/// must have succeeded. Directory fsyncs from `Store::open` come before the temp file exists and
-/// cannot stand in for the file fsync.
-fn check_publication_trace(text: &str) -> Result<(), String> {
+/// Why a trace was refused. Each negative case is pinned to exactly one variant.
+#[derive(Debug, PartialEq, Eq)]
+enum TraceError {
+    NoTempFileSync,
+    WrongCount(usize),
+    TempNotInRealm(String),
+    NotARename,
+    RenameSourceDir(String),
+    RenameDestDir(String),
+    RenameNames,
+    NoDirSyncAfterRename,
+    NotRealmUnlink,
+    NoDirSyncAfterUnlink,
+    Failed(String),
+}
+/// The path inside `N<path>` of a `-y` descriptor argument.
+fn fd_path(arg: &str) -> Option<&str> {
+    arg.split_once('<')?.1.strip_suffix('>')
+}
+fn quoted(arg: &str) -> Option<&str> {
+    arg.strip_prefix('"')?.strip_suffix('"')
+}
+/// Checks the insert-then-delete publication by descriptor identity, not by syscall name: the
+/// temporary file's own fsync (full path inside `realm`), then the rename of that temp name with
+/// both directory descriptors equal to `realm`, a realm-directory fsync, the unlink in `realm`
+/// and a final realm-directory fsync. Every call must have succeeded. Directory fsyncs from
+/// `Store::open` come before the temp file exists and cannot stand in for the file fsync.
+fn check_publication_trace(text: &str, realm: &str) -> Result<(), TraceError> {
     let calls = parse_calls(text);
     let is_sync = |c: &Call<'_>| matches!(c.name, "fsync" | "fdatasync");
+    let temp_prefix = format!("{realm}/.pending-");
     let first = calls
         .iter()
-        .position(|c| is_sync(c) && c.args.contains("/.pending-"))
-        .ok_or("no fsync on the temporary file descriptor")?;
+        .position(|c| is_sync(c) && fd_path(c.args).is_some_and(|p| p.contains("/.pending-")))
+        .ok_or(TraceError::NoTempFileSync)?;
     let seq = &calls[first..];
     if seq.len() != 5 {
-        return Err(format!("expected 5 publication calls, saw {}", seq.len()));
+        return Err(TraceError::WrongCount(seq.len()));
     }
-    let temp = seq[0].args.split_once("/.pending-").map(|(_, t)| t.trim_end_matches('>'));
-    let temp = temp.ok_or("temp fd path")?;
-    let realm = seq[1]
-        .args
-        .split_once(", \".pending-")
-        .map(|(dir, _)| dir)
-        .ok_or("rename source is not the temp name")?;
-    if !seq[1].name.starts_with("rename") || !realm.ends_with("/alice/3>") {
-        return Err(format!("second call is not a realm rename: {}", seq[1].args));
+    let temp_path = fd_path(seq[0].args).unwrap_or_default();
+    if !temp_path.starts_with(&temp_prefix) {
+        return Err(TraceError::TempNotInRealm(temp_path.to_string()));
     }
-    if !seq[1].args.contains(&format!(".pending-{temp}\""))
-        || !seq[1].args.contains("\"unlock:alice\"")
-    {
-        return Err("rename does not move the synced temp name to the reference".into());
+    let temp_name = &temp_path[realm.len() + 1..];
+    if !seq[1].name.starts_with("rename") {
+        return Err(TraceError::NotARename);
     }
-    if !(is_sync(&seq[2]) && seq[2].args == realm) {
-        return Err("rename is not followed by a realm-directory fsync".into());
+    let parts: Vec<&str> = seq[1].args.split(", ").collect();
+    if parts.len() < 4 {
+        return Err(TraceError::NotARename);
     }
+    if fd_path(parts[0]) != Some(realm) {
+        return Err(TraceError::RenameSourceDir(parts[0].to_string()));
+    }
+    if fd_path(parts[2]) != Some(realm) {
+        return Err(TraceError::RenameDestDir(parts[2].to_string()));
+    }
+    if quoted(parts[1]) != Some(temp_name) || quoted(parts[3]) != Some("unlock:alice") {
+        return Err(TraceError::RenameNames);
+    }
+    if !(is_sync(&seq[2]) && fd_path(seq[2].args) == Some(realm)) {
+        return Err(TraceError::NoDirSyncAfterRename);
+    }
+    let unlink: Vec<&str> = seq[3].args.split(", ").collect();
     if !(seq[3].name.starts_with("unlink")
-        && seq[3].args.starts_with(realm)
-        && seq[3].args.contains("\"unlock:alice\""))
+        && fd_path(unlink[0]) == Some(realm)
+        && unlink.get(1).copied().and_then(quoted) == Some("unlock:alice"))
     {
-        return Err("delete is not a realm unlinkat of the reference".into());
+        return Err(TraceError::NotRealmUnlink);
     }
-    if !(is_sync(&seq[4]) && seq[4].args == realm) {
-        return Err("unlink is not followed by a realm-directory fsync".into());
+    if !(is_sync(&seq[4]) && fd_path(seq[4].args) == Some(realm)) {
+        return Err(TraceError::NoDirSyncAfterUnlink);
     }
     if let Some(bad) = seq.iter().find(|c| !c.ok) {
-        return Err(format!("syscall failed: {}({})", bad.name, bad.args));
+        return Err(TraceError::Failed(format!("{}({})", bad.name, bad.args)));
     }
     Ok(())
 }
+const REALM: &str = "/r/alice/3";
 const GOOD_TRACE: &str = "7 fsync(4</r/alice>) = 0
 7 fsync(6</r/alice/3/.pending-AbC>) = 0
 7 renameat2(5</r/alice/3>, \".pending-AbC\", 5</r/alice/3>, \"unlock:alice\", RENAME_NOREPLACE) = 0
@@ -433,18 +506,30 @@ const GOOD_TRACE: &str = "7 fsync(4</r/alice>) = 0
 ";
 #[test]
 fn trace_checker_pins_file_sync_identity_and_results() {
-    assert_eq!(check_publication_trace(GOOD_TRACE), Ok(()));
+    let check = |trace: &str| check_publication_trace(trace, REALM);
+    assert_eq!(check(GOOD_TRACE), Ok(()));
     // Missing file fsync: Store::open's directory fsync is still there, yet the trace is refused.
     let no_file_sync = GOOD_TRACE.replace("7 fsync(6</r/alice/3/.pending-AbC>) = 0\n", "");
-    assert!(check_publication_trace(&no_file_sync).is_err());
-    // Directory fsync standing in for the file fsync, immediately before the rename.
+    assert_eq!(check(&no_file_sync), Err(TraceError::NoTempFileSync));
+    // Directory fsync standing in for the file fsync.
     let swapped = GOOD_TRACE.replace("fsync(6</r/alice/3/.pending-AbC>)", "fsync(5</r/alice/3>)");
-    assert!(check_publication_trace(&swapped).is_err());
+    assert_eq!(check(&swapped), Err(TraceError::NoTempFileSync));
+    // Temp file fsync on a file of an unrelated directory with the same basename.
+    let unrelated = GOOD_TRACE.replace("6</r/alice/3/.pending-AbC>", "6</unrelated/.pending-AbC>");
+    assert_eq!(
+        check(&unrelated),
+        Err(TraceError::TempNotInRealm("/unrelated/.pending-AbC".into()))
+    );
+    let dest =
+        GOOD_TRACE.replace("5</r/alice/3>, \"unlock:alice\"", "8</unrelated>, \"unlock:alice\"");
+    assert_eq!(check(&dest), Err(TraceError::RenameDestDir("8</unrelated>".into())));
+    let source = GOOD_TRACE.replace("renameat2(5</r/alice/3>", "renameat2(8</unrelated>");
+    assert_eq!(check(&source), Err(TraceError::RenameSourceDir("8</unrelated>".into())));
     let failed =
         GOOD_TRACE.replacen("fsync(5</r/alice/3>) = 0", "fsync(5</r/alice/3>) = -1 EIO", 1);
-    assert!(check_publication_trace(&failed).is_err(), "failed syscall result is refused");
+    assert_eq!(check(&failed), Err(TraceError::Failed("fsync(5</r/alice/3>)".into())));
     let wrong_dir = GOOD_TRACE.replacen("fsync(5</r/alice/3>)", "fsync(4</r/alice>)", 1);
-    assert!(check_publication_trace(&wrong_dir).is_err());
+    assert_eq!(check(&wrong_dir), Err(TraceError::NoDirSyncAfterRename));
 }
 /// Proves `RealDurabilityOps` itself: the real syscalls, on the right descriptors, in order.
 #[test]
@@ -468,7 +553,9 @@ fn real_durability_ops_issue_syscalls_in_durable_order() -> TestResult {
     .map_err(|e| format!("strace is required for this test and failed: {e}"))?;
     assert!(status.success(), "traced child failed: {status}");
     let text = std::fs::read_to_string(&trace)?;
-    check_publication_trace(&text).map_err(|e| format!("{e}\n{text}"))?;
+    let realm = root.join("alice/3");
+    let realm = realm.to_str().ok_or("non-utf8 realm path")?;
+    check_publication_trace(&text, realm).map_err(|e| format!("{e:?}\n{text}"))?;
     Ok(())
 }
 fn invalid_store_configs(root: &Path) {
