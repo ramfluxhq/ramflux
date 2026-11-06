@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Service {
+    #[prost(enumeration = "ServiceAction", tag = "1")]
+    pub action: i32,
+    #[prost(message, repeated, tag = "2")]
+    pub subjects: ::prost::alloc::vec::Vec<QualifiedDevice>,
+    #[prost(string, optional, tag = "3")]
+    pub text: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "4")]
+    pub target: ::core::option::Option<MessageRef>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub native_authority_proof: ::prost::alloc::vec::Vec<u8>,
+}
+impl serde::Serialize for Service {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.action != 0 {
+            len += 1;
+        }
+        if !self.subjects.is_empty() {
+            len += 1;
+        }
+        if self.text.is_some() {
+            len += 1;
+        }
+        if self.target.is_some() {
+            len += 1;
+        }
+        if !self.native_authority_proof.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Service", len)?;
+        if self.action != 0 {
+            let v = crate::message::protojson::EnumValue::<ServiceAction>::new(self.action);
+            struct_ser.serialize_field("action", &v)?;
+        }
+        if !self.subjects.is_empty() {
+            struct_ser.serialize_field("subjects", &self.subjects)?;
+        }
+        if let Some(v) = self.text.as_ref() {
+            struct_ser.serialize_field("text", v)?;
+        }
+        if let Some(v) = self.target.as_ref() {
+            struct_ser.serialize_field("target", v)?;
+        }
+        if !self.native_authority_proof.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "nativeAuthorityProof",
+                pbjson::private::base64::encode(&self.native_authority_proof).as_str(),
+            )?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for Service {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "action",
+            "subjects",
+            "text",
+            "target",
+            "native_authority_proof",
+            "nativeAuthorityProof",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Action,
+            Subjects,
+            Text,
+            Target,
+            NativeAuthorityProof,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "action" => Ok(GeneratedField::Action),
+                            "subjects" => Ok(GeneratedField::Subjects),
+                            "text" => Ok(GeneratedField::Text),
+                            "target" => Ok(GeneratedField::Target),
+                            "nativeAuthorityProof" | "native_authority_proof" => {
+                                Ok(GeneratedField::NativeAuthorityProof)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = Service;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.Service")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<Service, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut action__ = None;
+                let mut subjects__ = None;
+                let mut text__ = None;
+                let mut target__ = None;
+                let mut native_authority_proof__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Action => {
+                            if action__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("action"));
+                            }
+                            action__ = Some(
+                                map_
+                                    .next_value::<
+                                        crate::message::protojson::EnumValue<ServiceAction>,
+                                    >()?
+                                    .value,
+                            );
+                        }
+                        GeneratedField::Subjects => {
+                            if subjects__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("subjects"));
+                            }
+                            subjects__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Text => {
+                            if text__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("text"));
+                            }
+                            text__ = map_.next_value()?;
+                        }
+                        GeneratedField::Target => {
+                            if target__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("target"));
+                            }
+                            target__ = map_.next_value()?;
+                        }
+                        GeneratedField::NativeAuthorityProof => {
+                            if native_authority_proof__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "nativeAuthorityProof",
+                                ));
+                            }
+                            native_authority_proof__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(Service {
+                    action: action__.unwrap_or_default(),
+                    subjects: subjects__.unwrap_or_default(),
+                    text: text__,
+                    target: target__,
+                    native_authority_proof: native_authority_proof__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.Service", FIELDS, GeneratedVisitor)
+    }
+}

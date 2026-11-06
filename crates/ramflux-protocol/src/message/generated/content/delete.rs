@@ -1,0 +1,187 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Delete {
+    #[prost(message, repeated, tag = "1")]
+    pub targets: ::prost::alloc::vec::Vec<MessageRef>,
+    #[prost(enumeration = "DeleteScope", tag = "2")]
+    pub scope: i32,
+    #[prost(bytes = "vec", tag = "3")]
+    pub tombstone_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub native_group_authorization: ::prost::alloc::vec::Vec<u8>,
+}
+impl serde::Serialize for Delete {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.targets.is_empty() {
+            len += 1;
+        }
+        if self.scope != 0 {
+            len += 1;
+        }
+        if !self.tombstone_id.is_empty() {
+            len += 1;
+        }
+        if !self.native_group_authorization.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Delete", len)?;
+        if !self.targets.is_empty() {
+            struct_ser.serialize_field("targets", &self.targets)?;
+        }
+        if self.scope != 0 {
+            let v = crate::message::protojson::EnumValue::<DeleteScope>::new(self.scope);
+            struct_ser.serialize_field("scope", &v)?;
+        }
+        if !self.tombstone_id.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "tombstoneId",
+                pbjson::private::base64::encode(&self.tombstone_id).as_str(),
+            )?;
+        }
+        if !self.native_group_authorization.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "nativeGroupAuthorization",
+                pbjson::private::base64::encode(&self.native_group_authorization).as_str(),
+            )?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for Delete {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "targets",
+            "scope",
+            "tombstone_id",
+            "tombstoneId",
+            "native_group_authorization",
+            "nativeGroupAuthorization",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Targets,
+            Scope,
+            TombstoneId,
+            NativeGroupAuthorization,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "targets" => Ok(GeneratedField::Targets),
+                            "scope" => Ok(GeneratedField::Scope),
+                            "tombstoneId" | "tombstone_id" => Ok(GeneratedField::TombstoneId),
+                            "nativeGroupAuthorization" | "native_group_authorization" => {
+                                Ok(GeneratedField::NativeGroupAuthorization)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = Delete;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.Delete")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<Delete, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut targets__ = None;
+                let mut scope__ = None;
+                let mut tombstone_id__ = None;
+                let mut native_group_authorization__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Targets => {
+                            if targets__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("targets"));
+                            }
+                            targets__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Scope => {
+                            if scope__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("scope"));
+                            }
+                            scope__ = Some(
+                                map_
+                                    .next_value::<
+                                        crate::message::protojson::EnumValue<DeleteScope>,
+                                    >()?
+                                    .value,
+                            );
+                        }
+                        GeneratedField::TombstoneId => {
+                            if tombstone_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("tombstoneId"));
+                            }
+                            tombstone_id__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::NativeGroupAuthorization => {
+                            if native_group_authorization__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "nativeGroupAuthorization",
+                                ));
+                            }
+                            native_group_authorization__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(Delete {
+                    targets: targets__.unwrap_or_default(),
+                    scope: scope__.unwrap_or_default(),
+                    tombstone_id: tombstone_id__.unwrap_or_default(),
+                    native_group_authorization: native_group_authorization__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.Delete", FIELDS, GeneratedVisitor)
+    }
+}

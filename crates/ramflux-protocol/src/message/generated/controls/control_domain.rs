@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlDomain {
+    #[prost(oneof = "control_domain::Value", tags = "1, 2, 3, 4")]
+    pub value: ::core::option::Option<control_domain::Value>,
+}
+/// Nested message and enum types in `ControlDomain`.
+pub mod control_domain {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Value {
+        #[prost(message, tag = "1")]
+        Message(super::ControlDomainMessage),
+        #[prost(message, tag = "2")]
+        Conversation(super::ControlDomainConversation),
+        #[prost(message, tag = "3")]
+        A2ui(super::ControlDomainA2ui),
+        #[prost(message, tag = "4")]
+        McpTool(super::ControlDomainMcpTool),
+    }
+}
+impl serde::Serialize for ControlDomain {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.value.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.ControlDomain", len)?;
+        if let Some(v) = self.value.as_ref() {
+            match v {
+                control_domain::Value::Message(v) => {
+                    struct_ser.serialize_field("message", v)?;
+                }
+                control_domain::Value::Conversation(v) => {
+                    struct_ser.serialize_field("conversation", v)?;
+                }
+                control_domain::Value::A2ui(v) => {
+                    struct_ser.serialize_field("a2ui", v)?;
+                }
+                control_domain::Value::McpTool(v) => {
+                    struct_ser.serialize_field("mcpTool", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for ControlDomain {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &["message", "conversation", "a2ui", "mcp_tool", "mcpTool"];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Message,
+            Conversation,
+            A2ui,
+            McpTool,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "message" => Ok(GeneratedField::Message),
+                            "conversation" => Ok(GeneratedField::Conversation),
+                            "a2ui" => Ok(GeneratedField::A2ui),
+                            "mcpTool" | "mcp_tool" => Ok(GeneratedField::McpTool),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = ControlDomain;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.ControlDomain")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<ControlDomain, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut value__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Message => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("message"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(control_domain::Value::Message);
+                        }
+                        GeneratedField::Conversation => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("conversation"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(control_domain::Value::Conversation);
+                        }
+                        GeneratedField::A2ui => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("a2ui"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(control_domain::Value::A2ui);
+                        }
+                        GeneratedField::McpTool => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("mcpTool"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(control_domain::Value::McpTool);
+                        }
+                    }
+                }
+                Ok(ControlDomain { value: value__ })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.ControlDomain",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

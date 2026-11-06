@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Forward {
+    #[prost(message, optional, tag = "1")]
+    pub original: ::core::option::Option<MessageRef>,
+    #[prost(string, optional, tag = "2")]
+    pub original_display_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub origin_assertion: ::prost::alloc::vec::Vec<u8>,
+}
+impl serde::Serialize for Forward {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.original.is_some() {
+            len += 1;
+        }
+        if self.original_display_name.is_some() {
+            len += 1;
+        }
+        if !self.origin_assertion.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Forward", len)?;
+        if let Some(v) = self.original.as_ref() {
+            struct_ser.serialize_field("original", v)?;
+        }
+        if let Some(v) = self.original_display_name.as_ref() {
+            struct_ser.serialize_field("originalDisplayName", v)?;
+        }
+        if !self.origin_assertion.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "originAssertion",
+                pbjson::private::base64::encode(&self.origin_assertion).as_str(),
+            )?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for Forward {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "original",
+            "original_display_name",
+            "originalDisplayName",
+            "origin_assertion",
+            "originAssertion",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Original,
+            OriginalDisplayName,
+            OriginAssertion,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "original" => Ok(GeneratedField::Original),
+                            "originalDisplayName" | "original_display_name" => {
+                                Ok(GeneratedField::OriginalDisplayName)
+                            }
+                            "originAssertion" | "origin_assertion" => {
+                                Ok(GeneratedField::OriginAssertion)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = Forward;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.Forward")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<Forward, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut original__ = None;
+                let mut original_display_name__ = None;
+                let mut origin_assertion__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Original => {
+                            if original__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("original"));
+                            }
+                            original__ = map_.next_value()?;
+                        }
+                        GeneratedField::OriginalDisplayName => {
+                            if original_display_name__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "originalDisplayName",
+                                ));
+                            }
+                            original_display_name__ = map_.next_value()?;
+                        }
+                        GeneratedField::OriginAssertion => {
+                            if origin_assertion__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("originAssertion"));
+                            }
+                            origin_assertion__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(Forward {
+                    original: original__,
+                    original_display_name: original_display_name__,
+                    origin_assertion: origin_assertion__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.Forward", FIELDS, GeneratedVisitor)
+    }
+}

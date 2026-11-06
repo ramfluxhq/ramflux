@@ -1,0 +1,685 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GroupSealedContent {
+    #[prost(string, tag = "1")]
+    pub group_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub author: ::core::option::Option<QualifiedDevice>,
+    #[prost(uint64, tag = "3")]
+    pub key_epoch: u64,
+    #[prost(bytes = "vec", tag = "4")]
+    pub group_state_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "6")]
+    pub counter: u64,
+    #[prost(bytes = "vec", tag = "7")]
+    pub nonce: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub ciphertext: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "9")]
+    pub ratchet_public_key: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "10")]
+    pub previous_chain_length: u64,
+    #[prost(bytes = "vec", tag = "11")]
+    pub canonical_crypto_header: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "12")]
+    pub key_commitment: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "13")]
+    pub content_commitment: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "14")]
+    pub ciphertext_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "15")]
+    pub native_authority_proof: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "16")]
+    pub sender_device_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "17")]
+    pub recipient_device_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "18")]
+    pub device_epoch: u64,
+    #[prost(bytes = "vec", tag = "19")]
+    pub event_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "20")]
+    pub header_hash: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "21")]
+    pub franking_commitment: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "22")]
+    pub commitment: ::prost::alloc::vec::Vec<u8>,
+}
+impl serde::Serialize for GroupSealedContent {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.group_id.is_empty() {
+            len += 1;
+        }
+        if self.author.is_some() {
+            len += 1;
+        }
+        if self.key_epoch != 0 {
+            len += 1;
+        }
+        if !self.group_state_hash.is_empty() {
+            len += 1;
+        }
+        if !self.session_id.is_empty() {
+            len += 1;
+        }
+        if self.counter != 0 {
+            len += 1;
+        }
+        if !self.nonce.is_empty() {
+            len += 1;
+        }
+        if !self.ciphertext.is_empty() {
+            len += 1;
+        }
+        if !self.ratchet_public_key.is_empty() {
+            len += 1;
+        }
+        if self.previous_chain_length != 0 {
+            len += 1;
+        }
+        if !self.canonical_crypto_header.is_empty() {
+            len += 1;
+        }
+        if !self.key_commitment.is_empty() {
+            len += 1;
+        }
+        if !self.content_commitment.is_empty() {
+            len += 1;
+        }
+        if !self.ciphertext_hash.is_empty() {
+            len += 1;
+        }
+        if !self.native_authority_proof.is_empty() {
+            len += 1;
+        }
+        if !self.sender_device_hash.is_empty() {
+            len += 1;
+        }
+        if !self.recipient_device_hash.is_empty() {
+            len += 1;
+        }
+        if self.device_epoch != 0 {
+            len += 1;
+        }
+        if !self.event_id.is_empty() {
+            len += 1;
+        }
+        if !self.header_hash.is_empty() {
+            len += 1;
+        }
+        if !self.franking_commitment.is_empty() {
+            len += 1;
+        }
+        if !self.commitment.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.GroupSealedContent", len)?;
+        if !self.group_id.is_empty() {
+            struct_ser.serialize_field("groupId", &self.group_id)?;
+        }
+        if let Some(v) = self.author.as_ref() {
+            struct_ser.serialize_field("author", v)?;
+        }
+        if self.key_epoch != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("keyEpoch", ToString::to_string(&self.key_epoch).as_str())?;
+        }
+        if !self.group_state_hash.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "groupStateHash",
+                pbjson::private::base64::encode(&self.group_state_hash).as_str(),
+            )?;
+        }
+        if !self.session_id.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "sessionId",
+                pbjson::private::base64::encode(&self.session_id).as_str(),
+            )?;
+        }
+        if self.counter != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("counter", ToString::to_string(&self.counter).as_str())?;
+        }
+        if !self.nonce.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("nonce", pbjson::private::base64::encode(&self.nonce).as_str())?;
+        }
+        if !self.ciphertext.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "ciphertext",
+                pbjson::private::base64::encode(&self.ciphertext).as_str(),
+            )?;
+        }
+        if !self.ratchet_public_key.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "ratchetPublicKey",
+                pbjson::private::base64::encode(&self.ratchet_public_key).as_str(),
+            )?;
+        }
+        if self.previous_chain_length != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "previousChainLength",
+                ToString::to_string(&self.previous_chain_length).as_str(),
+            )?;
+        }
+        if !self.canonical_crypto_header.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "canonicalCryptoHeader",
+                pbjson::private::base64::encode(&self.canonical_crypto_header).as_str(),
+            )?;
+        }
+        if !self.key_commitment.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "keyCommitment",
+                pbjson::private::base64::encode(&self.key_commitment).as_str(),
+            )?;
+        }
+        if !self.content_commitment.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "contentCommitment",
+                pbjson::private::base64::encode(&self.content_commitment).as_str(),
+            )?;
+        }
+        if !self.ciphertext_hash.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "ciphertextHash",
+                pbjson::private::base64::encode(&self.ciphertext_hash).as_str(),
+            )?;
+        }
+        if !self.native_authority_proof.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "nativeAuthorityProof",
+                pbjson::private::base64::encode(&self.native_authority_proof).as_str(),
+            )?;
+        }
+        if !self.sender_device_hash.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "senderDeviceHash",
+                pbjson::private::base64::encode(&self.sender_device_hash).as_str(),
+            )?;
+        }
+        if !self.recipient_device_hash.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "recipientDeviceHash",
+                pbjson::private::base64::encode(&self.recipient_device_hash).as_str(),
+            )?;
+        }
+        if self.device_epoch != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("deviceEpoch", ToString::to_string(&self.device_epoch).as_str())?;
+        }
+        if !self.event_id.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "eventId",
+                pbjson::private::base64::encode(&self.event_id).as_str(),
+            )?;
+        }
+        if !self.header_hash.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "headerHash",
+                pbjson::private::base64::encode(&self.header_hash).as_str(),
+            )?;
+        }
+        if !self.franking_commitment.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "frankingCommitment",
+                pbjson::private::base64::encode(&self.franking_commitment).as_str(),
+            )?;
+        }
+        if !self.commitment.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "commitment",
+                pbjson::private::base64::encode(&self.commitment).as_str(),
+            )?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for GroupSealedContent {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "group_id",
+            "groupId",
+            "author",
+            "key_epoch",
+            "keyEpoch",
+            "group_state_hash",
+            "groupStateHash",
+            "session_id",
+            "sessionId",
+            "counter",
+            "nonce",
+            "ciphertext",
+            "ratchet_public_key",
+            "ratchetPublicKey",
+            "previous_chain_length",
+            "previousChainLength",
+            "canonical_crypto_header",
+            "canonicalCryptoHeader",
+            "key_commitment",
+            "keyCommitment",
+            "content_commitment",
+            "contentCommitment",
+            "ciphertext_hash",
+            "ciphertextHash",
+            "native_authority_proof",
+            "nativeAuthorityProof",
+            "sender_device_hash",
+            "senderDeviceHash",
+            "recipient_device_hash",
+            "recipientDeviceHash",
+            "device_epoch",
+            "deviceEpoch",
+            "event_id",
+            "eventId",
+            "header_hash",
+            "headerHash",
+            "franking_commitment",
+            "frankingCommitment",
+            "commitment",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            GroupId,
+            Author,
+            KeyEpoch,
+            GroupStateHash,
+            SessionId,
+            Counter,
+            Nonce,
+            Ciphertext,
+            RatchetPublicKey,
+            PreviousChainLength,
+            CanonicalCryptoHeader,
+            KeyCommitment,
+            ContentCommitment,
+            CiphertextHash,
+            NativeAuthorityProof,
+            SenderDeviceHash,
+            RecipientDeviceHash,
+            DeviceEpoch,
+            EventId,
+            HeaderHash,
+            FrankingCommitment,
+            Commitment,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "groupId" | "group_id" => Ok(GeneratedField::GroupId),
+                            "author" => Ok(GeneratedField::Author),
+                            "keyEpoch" | "key_epoch" => Ok(GeneratedField::KeyEpoch),
+                            "groupStateHash" | "group_state_hash" => {
+                                Ok(GeneratedField::GroupStateHash)
+                            }
+                            "sessionId" | "session_id" => Ok(GeneratedField::SessionId),
+                            "counter" => Ok(GeneratedField::Counter),
+                            "nonce" => Ok(GeneratedField::Nonce),
+                            "ciphertext" => Ok(GeneratedField::Ciphertext),
+                            "ratchetPublicKey" | "ratchet_public_key" => {
+                                Ok(GeneratedField::RatchetPublicKey)
+                            }
+                            "previousChainLength" | "previous_chain_length" => {
+                                Ok(GeneratedField::PreviousChainLength)
+                            }
+                            "canonicalCryptoHeader" | "canonical_crypto_header" => {
+                                Ok(GeneratedField::CanonicalCryptoHeader)
+                            }
+                            "keyCommitment" | "key_commitment" => Ok(GeneratedField::KeyCommitment),
+                            "contentCommitment" | "content_commitment" => {
+                                Ok(GeneratedField::ContentCommitment)
+                            }
+                            "ciphertextHash" | "ciphertext_hash" => {
+                                Ok(GeneratedField::CiphertextHash)
+                            }
+                            "nativeAuthorityProof" | "native_authority_proof" => {
+                                Ok(GeneratedField::NativeAuthorityProof)
+                            }
+                            "senderDeviceHash" | "sender_device_hash" => {
+                                Ok(GeneratedField::SenderDeviceHash)
+                            }
+                            "recipientDeviceHash" | "recipient_device_hash" => {
+                                Ok(GeneratedField::RecipientDeviceHash)
+                            }
+                            "deviceEpoch" | "device_epoch" => Ok(GeneratedField::DeviceEpoch),
+                            "eventId" | "event_id" => Ok(GeneratedField::EventId),
+                            "headerHash" | "header_hash" => Ok(GeneratedField::HeaderHash),
+                            "frankingCommitment" | "franking_commitment" => {
+                                Ok(GeneratedField::FrankingCommitment)
+                            }
+                            "commitment" => Ok(GeneratedField::Commitment),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = GroupSealedContent;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.GroupSealedContent")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<GroupSealedContent, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut group_id__ = None;
+                let mut author__ = None;
+                let mut key_epoch__ = None;
+                let mut group_state_hash__ = None;
+                let mut session_id__ = None;
+                let mut counter__ = None;
+                let mut nonce__ = None;
+                let mut ciphertext__ = None;
+                let mut ratchet_public_key__ = None;
+                let mut previous_chain_length__ = None;
+                let mut canonical_crypto_header__ = None;
+                let mut key_commitment__ = None;
+                let mut content_commitment__ = None;
+                let mut ciphertext_hash__ = None;
+                let mut native_authority_proof__ = None;
+                let mut sender_device_hash__ = None;
+                let mut recipient_device_hash__ = None;
+                let mut device_epoch__ = None;
+                let mut event_id__ = None;
+                let mut header_hash__ = None;
+                let mut franking_commitment__ = None;
+                let mut commitment__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::GroupId => {
+                            if group_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("groupId"));
+                            }
+                            group_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Author => {
+                            if author__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("author"));
+                            }
+                            author__ = map_.next_value()?;
+                        }
+                        GeneratedField::KeyEpoch => {
+                            if key_epoch__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("keyEpoch"));
+                            }
+                            key_epoch__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::GroupStateHash => {
+                            if group_state_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("groupStateHash"));
+                            }
+                            group_state_hash__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::SessionId => {
+                            if session_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("sessionId"));
+                            }
+                            session_id__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Counter => {
+                            if counter__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("counter"));
+                            }
+                            counter__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Nonce => {
+                            if nonce__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("nonce"));
+                            }
+                            nonce__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Ciphertext => {
+                            if ciphertext__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ciphertext"));
+                            }
+                            ciphertext__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::RatchetPublicKey => {
+                            if ratchet_public_key__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ratchetPublicKey"));
+                            }
+                            ratchet_public_key__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::PreviousChainLength => {
+                            if previous_chain_length__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "previousChainLength",
+                                ));
+                            }
+                            previous_chain_length__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::CanonicalCryptoHeader => {
+                            if canonical_crypto_header__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "canonicalCryptoHeader",
+                                ));
+                            }
+                            canonical_crypto_header__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::KeyCommitment => {
+                            if key_commitment__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("keyCommitment"));
+                            }
+                            key_commitment__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::ContentCommitment => {
+                            if content_commitment__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("contentCommitment"));
+                            }
+                            content_commitment__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::CiphertextHash => {
+                            if ciphertext_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ciphertextHash"));
+                            }
+                            ciphertext_hash__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::NativeAuthorityProof => {
+                            if native_authority_proof__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "nativeAuthorityProof",
+                                ));
+                            }
+                            native_authority_proof__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::SenderDeviceHash => {
+                            if sender_device_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("senderDeviceHash"));
+                            }
+                            sender_device_hash__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::RecipientDeviceHash => {
+                            if recipient_device_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "recipientDeviceHash",
+                                ));
+                            }
+                            recipient_device_hash__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::DeviceEpoch => {
+                            if device_epoch__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("deviceEpoch"));
+                            }
+                            device_epoch__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::EventId => {
+                            if event_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("eventId"));
+                            }
+                            event_id__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::HeaderHash => {
+                            if header_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("headerHash"));
+                            }
+                            header_hash__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::FrankingCommitment => {
+                            if franking_commitment__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "frankingCommitment",
+                                ));
+                            }
+                            franking_commitment__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Commitment => {
+                            if commitment__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("commitment"));
+                            }
+                            commitment__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(GroupSealedContent {
+                    group_id: group_id__.unwrap_or_default(),
+                    author: author__,
+                    key_epoch: key_epoch__.unwrap_or_default(),
+                    group_state_hash: group_state_hash__.unwrap_or_default(),
+                    session_id: session_id__.unwrap_or_default(),
+                    counter: counter__.unwrap_or_default(),
+                    nonce: nonce__.unwrap_or_default(),
+                    ciphertext: ciphertext__.unwrap_or_default(),
+                    ratchet_public_key: ratchet_public_key__.unwrap_or_default(),
+                    previous_chain_length: previous_chain_length__.unwrap_or_default(),
+                    canonical_crypto_header: canonical_crypto_header__.unwrap_or_default(),
+                    key_commitment: key_commitment__.unwrap_or_default(),
+                    content_commitment: content_commitment__.unwrap_or_default(),
+                    ciphertext_hash: ciphertext_hash__.unwrap_or_default(),
+                    native_authority_proof: native_authority_proof__.unwrap_or_default(),
+                    sender_device_hash: sender_device_hash__.unwrap_or_default(),
+                    recipient_device_hash: recipient_device_hash__.unwrap_or_default(),
+                    device_epoch: device_epoch__.unwrap_or_default(),
+                    event_id: event_id__.unwrap_or_default(),
+                    header_hash: header_hash__.unwrap_or_default(),
+                    franking_commitment: franking_commitment__.unwrap_or_default(),
+                    commitment: commitment__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.GroupSealedContent",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

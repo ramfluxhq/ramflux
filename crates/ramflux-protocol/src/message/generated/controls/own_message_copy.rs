@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OwnMessageCopy {
+    #[prost(message, optional, tag = "2")]
+    pub source: ::core::option::Option<QualifiedDevice>,
+    #[prost(message, optional, tag = "3")]
+    pub target: ::core::option::Option<QualifiedDevice>,
+    #[prost(int64, tag = "4")]
+    pub created_at: i64,
+    #[prost(int64, tag = "5")]
+    pub expires_at: i64,
+    #[prost(oneof = "own_message_copy::Payload", tags = "1, 6")]
+    pub payload: ::core::option::Option<own_message_copy::Payload>,
+}
+/// Nested message and enum types in `OwnMessageCopy`.
+pub mod own_message_copy {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag = "1")]
+        Item(super::HistoryItem),
+        #[prost(message, tag = "6")]
+        Sent(super::OwnSentMessage),
+    }
+}
+impl serde::Serialize for OwnMessageCopy {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.source.is_some() {
+            len += 1;
+        }
+        if self.target.is_some() {
+            len += 1;
+        }
+        if self.created_at != 0 {
+            len += 1;
+        }
+        if self.expires_at != 0 {
+            len += 1;
+        }
+        if self.payload.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.OwnMessageCopy", len)?;
+        if let Some(v) = self.source.as_ref() {
+            struct_ser.serialize_field("source", v)?;
+        }
+        if let Some(v) = self.target.as_ref() {
+            struct_ser.serialize_field("target", v)?;
+        }
+        if self.created_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("createdAt", ToString::to_string(&self.created_at).as_str())?;
+        }
+        if self.expires_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("expiresAt", ToString::to_string(&self.expires_at).as_str())?;
+        }
+        if let Some(v) = self.payload.as_ref() {
+            match v {
+                own_message_copy::Payload::Item(v) => {
+                    struct_ser.serialize_field("item", v)?;
+                }
+                own_message_copy::Payload::Sent(v) => {
+                    struct_ser.serialize_field("sent", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for OwnMessageCopy {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "source",
+            "target",
+            "created_at",
+            "createdAt",
+            "expires_at",
+            "expiresAt",
+            "item",
+            "sent",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Source,
+            Target,
+            CreatedAt,
+            ExpiresAt,
+            Item,
+            Sent,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "source" => Ok(GeneratedField::Source),
+                            "target" => Ok(GeneratedField::Target),
+                            "createdAt" | "created_at" => Ok(GeneratedField::CreatedAt),
+                            "expiresAt" | "expires_at" => Ok(GeneratedField::ExpiresAt),
+                            "item" => Ok(GeneratedField::Item),
+                            "sent" => Ok(GeneratedField::Sent),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = OwnMessageCopy;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.OwnMessageCopy")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<OwnMessageCopy, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut source__ = None;
+                let mut target__ = None;
+                let mut created_at__ = None;
+                let mut expires_at__ = None;
+                let mut payload__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Source => {
+                            if source__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("source"));
+                            }
+                            source__ = map_.next_value()?;
+                        }
+                        GeneratedField::Target => {
+                            if target__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("target"));
+                            }
+                            target__ = map_.next_value()?;
+                        }
+                        GeneratedField::CreatedAt => {
+                            if created_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("createdAt"));
+                            }
+                            created_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::ExpiresAt => {
+                            if expires_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("expiresAt"));
+                            }
+                            expires_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Item => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("item"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(own_message_copy::Payload::Item);
+                        }
+                        GeneratedField::Sent => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("sent"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(own_message_copy::Payload::Sent);
+                        }
+                    }
+                }
+                Ok(OwnMessageCopy {
+                    source: source__,
+                    target: target__,
+                    created_at: created_at__.unwrap_or_default(),
+                    expires_at: expires_at__.unwrap_or_default(),
+                    payload: payload__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.OwnMessageCopy",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

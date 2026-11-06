@@ -1,0 +1,403 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MediaManifest {
+    #[prost(bytes = "vec", tag = "1")]
+    pub manifest_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub plaintext_digest: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "3")]
+    pub plaintext_length: u64,
+    #[prost(uint64, tag = "4")]
+    pub ciphertext_length: u64,
+    #[prost(uint32, tag = "5")]
+    pub encrypted_segment_bytes: u32,
+    #[prost(uint32, tag = "6")]
+    pub network_chunk_bytes: u32,
+    #[prost(bytes = "vec", repeated, tag = "7")]
+    pub segment_digests: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    #[prost(message, repeated, tag = "8")]
+    pub key_slots: ::prost::alloc::vec::Vec<MediaKeySlot>,
+    #[prost(string, tag = "9")]
+    pub relay_origin: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "10")]
+    pub read_capability: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "11")]
+    pub expires_at: u64,
+    #[prost(string, tag = "12")]
+    pub retention_class: ::prost::alloc::string::String,
+}
+impl serde::Serialize for MediaManifest {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.manifest_id.is_empty() {
+            len += 1;
+        }
+        if !self.plaintext_digest.is_empty() {
+            len += 1;
+        }
+        if self.plaintext_length != 0 {
+            len += 1;
+        }
+        if self.ciphertext_length != 0 {
+            len += 1;
+        }
+        if self.encrypted_segment_bytes != 0 {
+            len += 1;
+        }
+        if self.network_chunk_bytes != 0 {
+            len += 1;
+        }
+        if !self.segment_digests.is_empty() {
+            len += 1;
+        }
+        if !self.key_slots.is_empty() {
+            len += 1;
+        }
+        if !self.relay_origin.is_empty() {
+            len += 1;
+        }
+        if !self.read_capability.is_empty() {
+            len += 1;
+        }
+        if self.expires_at != 0 {
+            len += 1;
+        }
+        if !self.retention_class.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.MediaManifest", len)?;
+        if !self.manifest_id.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "manifestId",
+                pbjson::private::base64::encode(&self.manifest_id).as_str(),
+            )?;
+        }
+        if !self.plaintext_digest.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "plaintextDigest",
+                pbjson::private::base64::encode(&self.plaintext_digest).as_str(),
+            )?;
+        }
+        if self.plaintext_length != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "plaintextLength",
+                ToString::to_string(&self.plaintext_length).as_str(),
+            )?;
+        }
+        if self.ciphertext_length != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "ciphertextLength",
+                ToString::to_string(&self.ciphertext_length).as_str(),
+            )?;
+        }
+        if self.encrypted_segment_bytes != 0 {
+            struct_ser.serialize_field("encryptedSegmentBytes", &self.encrypted_segment_bytes)?;
+        }
+        if self.network_chunk_bytes != 0 {
+            struct_ser.serialize_field("networkChunkBytes", &self.network_chunk_bytes)?;
+        }
+        if !self.segment_digests.is_empty() {
+            struct_ser.serialize_field(
+                "segmentDigests",
+                &self
+                    .segment_digests
+                    .iter()
+                    .map(pbjson::private::base64::encode)
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        if !self.key_slots.is_empty() {
+            struct_ser.serialize_field("keySlots", &self.key_slots)?;
+        }
+        if !self.relay_origin.is_empty() {
+            struct_ser.serialize_field("relayOrigin", &self.relay_origin)?;
+        }
+        if !self.read_capability.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "readCapability",
+                pbjson::private::base64::encode(&self.read_capability).as_str(),
+            )?;
+        }
+        if self.expires_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("expiresAt", ToString::to_string(&self.expires_at).as_str())?;
+        }
+        if !self.retention_class.is_empty() {
+            struct_ser.serialize_field("retentionClass", &self.retention_class)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for MediaManifest {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "manifest_id",
+            "manifestId",
+            "plaintext_digest",
+            "plaintextDigest",
+            "plaintext_length",
+            "plaintextLength",
+            "ciphertext_length",
+            "ciphertextLength",
+            "encrypted_segment_bytes",
+            "encryptedSegmentBytes",
+            "network_chunk_bytes",
+            "networkChunkBytes",
+            "segment_digests",
+            "segmentDigests",
+            "key_slots",
+            "keySlots",
+            "relay_origin",
+            "relayOrigin",
+            "read_capability",
+            "readCapability",
+            "expires_at",
+            "expiresAt",
+            "retention_class",
+            "retentionClass",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            ManifestId,
+            PlaintextDigest,
+            PlaintextLength,
+            CiphertextLength,
+            EncryptedSegmentBytes,
+            NetworkChunkBytes,
+            SegmentDigests,
+            KeySlots,
+            RelayOrigin,
+            ReadCapability,
+            ExpiresAt,
+            RetentionClass,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "manifestId" | "manifest_id" => Ok(GeneratedField::ManifestId),
+                            "plaintextDigest" | "plaintext_digest" => {
+                                Ok(GeneratedField::PlaintextDigest)
+                            }
+                            "plaintextLength" | "plaintext_length" => {
+                                Ok(GeneratedField::PlaintextLength)
+                            }
+                            "ciphertextLength" | "ciphertext_length" => {
+                                Ok(GeneratedField::CiphertextLength)
+                            }
+                            "encryptedSegmentBytes" | "encrypted_segment_bytes" => {
+                                Ok(GeneratedField::EncryptedSegmentBytes)
+                            }
+                            "networkChunkBytes" | "network_chunk_bytes" => {
+                                Ok(GeneratedField::NetworkChunkBytes)
+                            }
+                            "segmentDigests" | "segment_digests" => {
+                                Ok(GeneratedField::SegmentDigests)
+                            }
+                            "keySlots" | "key_slots" => Ok(GeneratedField::KeySlots),
+                            "relayOrigin" | "relay_origin" => Ok(GeneratedField::RelayOrigin),
+                            "readCapability" | "read_capability" => {
+                                Ok(GeneratedField::ReadCapability)
+                            }
+                            "expiresAt" | "expires_at" => Ok(GeneratedField::ExpiresAt),
+                            "retentionClass" | "retention_class" => {
+                                Ok(GeneratedField::RetentionClass)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = MediaManifest;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.MediaManifest")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<MediaManifest, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut manifest_id__ = None;
+                let mut plaintext_digest__ = None;
+                let mut plaintext_length__ = None;
+                let mut ciphertext_length__ = None;
+                let mut encrypted_segment_bytes__ = None;
+                let mut network_chunk_bytes__ = None;
+                let mut segment_digests__ = None;
+                let mut key_slots__ = None;
+                let mut relay_origin__ = None;
+                let mut read_capability__ = None;
+                let mut expires_at__ = None;
+                let mut retention_class__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::ManifestId => {
+                            if manifest_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("manifestId"));
+                            }
+                            manifest_id__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::PlaintextDigest => {
+                            if plaintext_digest__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("plaintextDigest"));
+                            }
+                            plaintext_digest__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::PlaintextLength => {
+                            if plaintext_length__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("plaintextLength"));
+                            }
+                            plaintext_length__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::CiphertextLength => {
+                            if ciphertext_length__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ciphertextLength"));
+                            }
+                            ciphertext_length__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::EncryptedSegmentBytes => {
+                            if encrypted_segment_bytes__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "encryptedSegmentBytes",
+                                ));
+                            }
+                            encrypted_segment_bytes__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::NetworkChunkBytes => {
+                            if network_chunk_bytes__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("networkChunkBytes"));
+                            }
+                            network_chunk_bytes__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::SegmentDigests => {
+                            if segment_digests__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("segmentDigests"));
+                            }
+                            segment_digests__ = Some(
+                                map_.next_value::<Vec<::pbjson::private::BytesDeserialize<_>>>()?
+                                    .into_iter()
+                                    .map(|x| x.0)
+                                    .collect(),
+                            );
+                        }
+                        GeneratedField::KeySlots => {
+                            if key_slots__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("keySlots"));
+                            }
+                            key_slots__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::RelayOrigin => {
+                            if relay_origin__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("relayOrigin"));
+                            }
+                            relay_origin__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ReadCapability => {
+                            if read_capability__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("readCapability"));
+                            }
+                            read_capability__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::ExpiresAt => {
+                            if expires_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("expiresAt"));
+                            }
+                            expires_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::RetentionClass => {
+                            if retention_class__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("retentionClass"));
+                            }
+                            retention_class__ = Some(map_.next_value()?);
+                        }
+                    }
+                }
+                Ok(MediaManifest {
+                    manifest_id: manifest_id__.unwrap_or_default(),
+                    plaintext_digest: plaintext_digest__.unwrap_or_default(),
+                    plaintext_length: plaintext_length__.unwrap_or_default(),
+                    ciphertext_length: ciphertext_length__.unwrap_or_default(),
+                    encrypted_segment_bytes: encrypted_segment_bytes__.unwrap_or_default(),
+                    network_chunk_bytes: network_chunk_bytes__.unwrap_or_default(),
+                    segment_digests: segment_digests__.unwrap_or_default(),
+                    key_slots: key_slots__.unwrap_or_default(),
+                    relay_origin: relay_origin__.unwrap_or_default(),
+                    read_capability: read_capability__.unwrap_or_default(),
+                    expires_at: expires_at__.unwrap_or_default(),
+                    retention_class: retention_class__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.MediaManifest",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

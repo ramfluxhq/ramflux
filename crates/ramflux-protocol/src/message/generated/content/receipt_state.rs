@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ReceiptState {
+    ReceiptUnspecified = 0,
+    ReceiptDelivered = 1,
+    ReceiptRead = 2,
+}
+impl ReceiptState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::ReceiptUnspecified => "RECEIPT_UNSPECIFIED",
+            Self::ReceiptDelivered => "RECEIPT_DELIVERED",
+            Self::ReceiptRead => "RECEIPT_READ",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RECEIPT_UNSPECIFIED" => Some(Self::ReceiptUnspecified),
+            "RECEIPT_DELIVERED" => Some(Self::ReceiptDelivered),
+            "RECEIPT_READ" => Some(Self::ReceiptRead),
+            _ => None,
+        }
+    }
+}
+impl serde::Serialize for ReceiptState {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let variant = match self {
+            Self::ReceiptUnspecified => "RECEIPT_UNSPECIFIED",
+            Self::ReceiptDelivered => "RECEIPT_DELIVERED",
+            Self::ReceiptRead => "RECEIPT_READ",
+        };
+        serializer.serialize_str(variant)
+    }
+}
+impl<'de> serde::Deserialize<'de> for ReceiptState {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &["RECEIPT_UNSPECIFIED", "RECEIPT_DELIVERED", "RECEIPT_READ"];
+        struct GeneratedVisitor;
+        impl serde::de::Visitor<'_> for GeneratedVisitor {
+            type Value = ReceiptState;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "expected one of: {:?}", &FIELDS)
+            }
+            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(v).ok().and_then(|x| x.try_into().ok()).ok_or_else(|| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Signed(v), &self)
+                })
+            }
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(v).ok().and_then(|x| x.try_into().ok()).ok_or_else(|| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Unsigned(v), &self)
+                })
+            }
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "RECEIPT_UNSPECIFIED" => Ok(ReceiptState::ReceiptUnspecified),
+                    "RECEIPT_DELIVERED" => Ok(ReceiptState::ReceiptDelivered),
+                    "RECEIPT_READ" => Ok(ReceiptState::ReceiptRead),
+                    _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
+                }
+            }
+        }
+        deserializer.deserialize_any(GeneratedVisitor)
+    }
+}

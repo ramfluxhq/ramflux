@@ -1,0 +1,292 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Content {
+    #[prost(oneof = "content::Value", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
+    pub value: ::core::option::Option<content::Value>,
+}
+/// Nested message and enum types in `Content`.
+pub mod content {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Value {
+        #[prost(message, tag = "1")]
+        Message(super::Message),
+        #[prost(message, tag = "2")]
+        Service(super::Service),
+        #[prost(message, tag = "3")]
+        Edit(super::Edit),
+        #[prost(message, tag = "4")]
+        Delete(super::Delete),
+        #[prost(message, tag = "5")]
+        Reaction(super::Reaction),
+        #[prost(message, tag = "6")]
+        Receipt(super::Receipt),
+        #[prost(message, tag = "7")]
+        Typing(super::Typing),
+        #[prost(message, tag = "8")]
+        Control(super::Control),
+        #[prost(message, tag = "9")]
+        Surface(super::Surface),
+        #[prost(message, tag = "10")]
+        Task(super::Task),
+        #[prost(message, tag = "11")]
+        Call(super::Call),
+        #[prost(message, tag = "12")]
+        SelfSync(super::SelfSync),
+    }
+}
+impl serde::Serialize for Content {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.value.is_some() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.Content", len)?;
+        if let Some(v) = self.value.as_ref() {
+            match v {
+                content::Value::Message(v) => {
+                    struct_ser.serialize_field("message", v)?;
+                }
+                content::Value::Service(v) => {
+                    struct_ser.serialize_field("service", v)?;
+                }
+                content::Value::Edit(v) => {
+                    struct_ser.serialize_field("edit", v)?;
+                }
+                content::Value::Delete(v) => {
+                    struct_ser.serialize_field("delete", v)?;
+                }
+                content::Value::Reaction(v) => {
+                    struct_ser.serialize_field("reaction", v)?;
+                }
+                content::Value::Receipt(v) => {
+                    struct_ser.serialize_field("receipt", v)?;
+                }
+                content::Value::Typing(v) => {
+                    struct_ser.serialize_field("typing", v)?;
+                }
+                content::Value::Control(v) => {
+                    struct_ser.serialize_field("control", v)?;
+                }
+                content::Value::Surface(v) => {
+                    struct_ser.serialize_field("surface", v)?;
+                }
+                content::Value::Task(v) => {
+                    struct_ser.serialize_field("task", v)?;
+                }
+                content::Value::Call(v) => {
+                    struct_ser.serialize_field("call", v)?;
+                }
+                content::Value::SelfSync(v) => {
+                    struct_ser.serialize_field("selfSync", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for Content {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "message",
+            "service",
+            "edit",
+            "delete",
+            "reaction",
+            "receipt",
+            "typing",
+            "control",
+            "surface",
+            "task",
+            "call",
+            "self_sync",
+            "selfSync",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Message,
+            Service,
+            Edit,
+            Delete,
+            Reaction,
+            Receipt,
+            Typing,
+            Control,
+            Surface,
+            Task,
+            Call,
+            SelfSync,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "message" => Ok(GeneratedField::Message),
+                            "service" => Ok(GeneratedField::Service),
+                            "edit" => Ok(GeneratedField::Edit),
+                            "delete" => Ok(GeneratedField::Delete),
+                            "reaction" => Ok(GeneratedField::Reaction),
+                            "receipt" => Ok(GeneratedField::Receipt),
+                            "typing" => Ok(GeneratedField::Typing),
+                            "control" => Ok(GeneratedField::Control),
+                            "surface" => Ok(GeneratedField::Surface),
+                            "task" => Ok(GeneratedField::Task),
+                            "call" => Ok(GeneratedField::Call),
+                            "selfSync" | "self_sync" => Ok(GeneratedField::SelfSync),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = Content;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.Content")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<Content, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut value__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Message => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("message"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Message);
+                        }
+                        GeneratedField::Service => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("service"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Service);
+                        }
+                        GeneratedField::Edit => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("edit"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Edit);
+                        }
+                        GeneratedField::Delete => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("delete"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Delete);
+                        }
+                        GeneratedField::Reaction => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("reaction"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Reaction);
+                        }
+                        GeneratedField::Receipt => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("receipt"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Receipt);
+                        }
+                        GeneratedField::Typing => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("typing"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Typing);
+                        }
+                        GeneratedField::Control => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("control"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Control);
+                        }
+                        GeneratedField::Surface => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("surface"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Surface);
+                        }
+                        GeneratedField::Task => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("task"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Task);
+                        }
+                        GeneratedField::Call => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("call"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::Call);
+                        }
+                        GeneratedField::SelfSync => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("selfSync"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(content::Value::SelfSync);
+                        }
+                    }
+                }
+                Ok(Content { value: value__ })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.Content", FIELDS, GeneratedVisitor)
+    }
+}

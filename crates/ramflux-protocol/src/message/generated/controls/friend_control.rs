@@ -1,0 +1,239 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FriendControl {
+    #[prost(uint32, tag = "1")]
+    pub action: u32,
+    #[prost(string, tag = "2")]
+    pub link_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub requester: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub target: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "5")]
+    pub remove_scope: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag = "6")]
+    pub blocked: bool,
+    #[prost(int64, optional, tag = "7")]
+    pub capability_revoked_at: ::core::option::Option<i64>,
+}
+impl serde::Serialize for FriendControl {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.action != 0 {
+            len += 1;
+        }
+        if !self.link_id.is_empty() {
+            len += 1;
+        }
+        if !self.requester.is_empty() {
+            len += 1;
+        }
+        if !self.target.is_empty() {
+            len += 1;
+        }
+        if self.remove_scope.is_some() {
+            len += 1;
+        }
+        if self.blocked {
+            len += 1;
+        }
+        if self.capability_revoked_at.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.FriendControl", len)?;
+        if self.action != 0 {
+            struct_ser.serialize_field("action", &self.action)?;
+        }
+        if !self.link_id.is_empty() {
+            struct_ser.serialize_field("linkId", &self.link_id)?;
+        }
+        if !self.requester.is_empty() {
+            struct_ser.serialize_field("requester", &self.requester)?;
+        }
+        if !self.target.is_empty() {
+            struct_ser.serialize_field("target", &self.target)?;
+        }
+        if let Some(v) = self.remove_scope.as_ref() {
+            struct_ser.serialize_field("removeScope", v)?;
+        }
+        if self.blocked {
+            struct_ser.serialize_field("blocked", &self.blocked)?;
+        }
+        if let Some(v) = self.capability_revoked_at.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("capabilityRevokedAt", ToString::to_string(&v).as_str())?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for FriendControl {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "action",
+            "link_id",
+            "linkId",
+            "requester",
+            "target",
+            "remove_scope",
+            "removeScope",
+            "blocked",
+            "capability_revoked_at",
+            "capabilityRevokedAt",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Action,
+            LinkId,
+            Requester,
+            Target,
+            RemoveScope,
+            Blocked,
+            CapabilityRevokedAt,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "action" => Ok(GeneratedField::Action),
+                            "linkId" | "link_id" => Ok(GeneratedField::LinkId),
+                            "requester" => Ok(GeneratedField::Requester),
+                            "target" => Ok(GeneratedField::Target),
+                            "removeScope" | "remove_scope" => Ok(GeneratedField::RemoveScope),
+                            "blocked" => Ok(GeneratedField::Blocked),
+                            "capabilityRevokedAt" | "capability_revoked_at" => {
+                                Ok(GeneratedField::CapabilityRevokedAt)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = FriendControl;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.FriendControl")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<FriendControl, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut action__ = None;
+                let mut link_id__ = None;
+                let mut requester__ = None;
+                let mut target__ = None;
+                let mut remove_scope__ = None;
+                let mut blocked__ = None;
+                let mut capability_revoked_at__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Action => {
+                            if action__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("action"));
+                            }
+                            action__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::LinkId => {
+                            if link_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("linkId"));
+                            }
+                            link_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Requester => {
+                            if requester__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("requester"));
+                            }
+                            requester__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Target => {
+                            if target__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("target"));
+                            }
+                            target__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::RemoveScope => {
+                            if remove_scope__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("removeScope"));
+                            }
+                            remove_scope__ = map_.next_value()?;
+                        }
+                        GeneratedField::Blocked => {
+                            if blocked__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("blocked"));
+                            }
+                            blocked__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::CapabilityRevokedAt => {
+                            if capability_revoked_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "capabilityRevokedAt",
+                                ));
+                            }
+                            capability_revoked_at__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                    }
+                }
+                Ok(FriendControl {
+                    action: action__.unwrap_or_default(),
+                    link_id: link_id__.unwrap_or_default(),
+                    requester: requester__.unwrap_or_default(),
+                    target: target__.unwrap_or_default(),
+                    remove_scope: remove_scope__,
+                    blocked: blocked__.unwrap_or_default(),
+                    capability_revoked_at: capability_revoked_at__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.FriendControl",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

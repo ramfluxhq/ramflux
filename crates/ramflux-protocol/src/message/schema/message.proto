@@ -1,0 +1,1492 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+syntax = "proto3";
+package ramflux.message.v1;
+
+enum KindId {
+  KIND_UNSPECIFIED = 0;
+  KIND_MESSAGE = 1;
+  KIND_SERVICE = 2;
+  KIND_EDIT = 3;
+  KIND_DELETE = 4;
+  KIND_REACTION = 5;
+  KIND_RECEIPT = 6;
+  KIND_TYPING = 7;
+  KIND_CONTROL = 8;
+  KIND_SURFACE = 9;
+  KIND_TASK = 10;
+  KIND_CALL = 11;
+  KIND_SELF_SYNC = 12;
+  reserved 13 to 15;
+  reserved "KIND_LEGACY_OPAQUE";
+}
+message QualifiedDevice {
+  string account_anchor = 1;
+  string device_id = 2;
+  uint64 device_epoch = 3;
+}
+message EventIdentity {
+  bytes id = 1;
+  string conversation_id = 2;
+  QualifiedDevice author = 3;
+  uint64 device_sequence = 4;
+  uint64 hlc = 5;
+  optional string group_id = 6;
+  optional uint64 group_epoch = 7;
+  reserved 8, 9;
+}
+message Inner {
+  uint32 layer = 1;
+  uint32 kind = 2;
+  EventIdentity identity = 3;
+  bytes body = 4;
+  reserved 5 to 15;
+  reserved "schema", "body_base64", "padding";
+}
+message Padding {
+  uint32 unpadded_frame_length = 1;
+  uint32 padded_frame_length = 2;
+  bytes zeroes = 3;
+}
+message PaddedInner {
+  bytes exact_inner = 1;
+  bytes report_opening = 2;
+  Padding padding = 3;
+}
+message Unsupported {
+  uint32 layer = 1;
+  uint32 kind = 2;
+  bytes raw_inner = 3;
+  bytes raw_digest = 4;
+  string reason = 5;
+}
+message UnsupportedView {
+  uint32 layer = 1;
+  uint32 kind = 2;
+  bytes raw_digest = 3;
+  uint32 raw_length = 4;
+  bytes raw_handle = 5;
+  string reason = 6;
+}
+message SignedLayerDeclaration {
+  bytes declaration = 1;
+  bytes branch_signature = 2;
+}
+message LayerDeclaration {
+  QualifiedDevice device = 1;
+  uint32 max_layer = 2;
+  uint64 declaration_sequence = 3;
+  uint64 issued_at = 4;
+  uint64 expires_at = 5;
+}
+message MessageRef {
+  bytes id = 1;
+  string conversation_id = 2;
+  string author_anchor = 3;
+}
+message Forward {
+  MessageRef original = 1;
+  optional string original_display_name = 2;
+  bytes origin_assertion = 3;
+}
+enum EntityKind {
+  ENTITY_UNSPECIFIED = 0;
+  ENTITY_BOLD = 1;
+  ENTITY_ITALIC = 2;
+  ENTITY_CODE = 3;
+  ENTITY_LINK = 4;
+  ENTITY_MENTION = 5;
+  ENTITY_SPOILER = 6;
+  reserved 7 to 15;
+}
+message Entity {
+  uint32 offset = 1;
+  uint32 length = 2;
+  EntityKind kind = 3;
+  optional string value = 4;
+  reserved 5;
+  reserved "unknown";
+}
+message Thumbnail {
+  string mime_type = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  bytes encoded_image = 4;
+}
+message MediaKeySlot {
+  QualifiedDevice recipient = 1;
+  bytes encrypted_key = 2;
+  uint32 format = 3;
+}
+message MediaManifest {
+  bytes manifest_id = 1;
+  bytes plaintext_digest = 2;
+  uint64 plaintext_length = 3;
+  uint64 ciphertext_length = 4;
+  uint32 encrypted_segment_bytes = 5;
+  uint32 network_chunk_bytes = 6;
+  repeated bytes segment_digests = 7;
+  repeated MediaKeySlot key_slots = 8;
+  string relay_origin = 9;
+  bytes read_capability = 10;
+  uint64 expires_at = 11;
+  string retention_class = 12;
+  reserved 13 to 15;
+}
+message MediaRef {
+  string object_id = 1;
+  bytes manifest_digest = 2;
+  string mime_type = 3;
+  uint64 size = 4;
+  repeated MediaKeySlot key_slots = 5;
+  optional string file_name = 6;
+  Thumbnail inline_thumbnail = 7;
+  MediaManifest large_manifest = 8;
+}
+message Message {
+  string text = 1;
+  repeated Entity entities = 2;
+  MessageRef reply_to = 3;
+  Forward forward = 4;
+  repeated MediaRef media = 5;
+  reserved 6 to 15;
+  GroupSealedContent sealed_group = 16;
+}
+message GroupSealedContent {
+  string group_id = 1;
+  QualifiedDevice author = 2;
+  uint64 key_epoch = 3;
+  bytes group_state_hash = 4;
+  bytes session_id = 5;
+  uint64 counter = 6;
+  bytes nonce = 7;
+  bytes ciphertext = 8;
+  bytes ratchet_public_key = 9;
+  uint64 previous_chain_length = 10;
+  bytes canonical_crypto_header = 11;
+  bytes key_commitment = 12;
+  bytes content_commitment = 13;
+  bytes ciphertext_hash = 14;
+  bytes native_authority_proof = 15;
+  bytes sender_device_hash = 16;
+  bytes recipient_device_hash = 17;
+  uint64 device_epoch = 18;
+  bytes event_id = 19;
+  bytes header_hash = 20;
+  bytes franking_commitment = 21;
+  bytes commitment = 22;
+}
+enum ServiceAction {
+  SERVICE_UNSPECIFIED = 0;
+  SERVICE_MEMBER_ADDED = 1;
+  SERVICE_MEMBER_REMOVED = 2;
+  SERVICE_NAME_CHANGED = 3;
+  SERVICE_PIN_CHANGED = 4;
+  SERVICE_KEY_CHANGED = 5;
+}
+message Service {
+  ServiceAction action = 1;
+  repeated QualifiedDevice subjects = 2;
+  optional string text = 3;
+  MessageRef target = 4;
+  bytes native_authority_proof = 5;
+}
+message Edit {
+  MessageRef target = 1;
+  uint64 revision = 2;
+  bytes previous_content_digest = 3;
+  Message replacement = 4;
+}
+enum DeleteScope {
+  DELETE_SCOPE_UNSPECIFIED = 0;
+  DELETE_SCOPE_LOCAL = 1;
+  DELETE_SCOPE_EVERYONE = 2;
+}
+message Delete {
+  repeated MessageRef targets = 1;
+  DeleteScope scope = 2;
+  bytes tombstone_id = 3;
+  bytes native_group_authorization = 4;
+}
+message Reaction {
+  MessageRef target = 1;
+  string token = 2;
+  bool remove = 3;
+  bytes operation_id = 4;
+}
+enum ReceiptState {
+  RECEIPT_UNSPECIFIED = 0;
+  RECEIPT_DELIVERED = 1;
+  RECEIPT_READ = 2;
+}
+message Receipt {
+  repeated MessageRef targets = 1;
+  ReceiptState state = 2;
+  uint64 at = 3;
+  QualifiedDevice receiver = 4;
+}
+message Typing {
+  bool active = 1;
+  uint64 expires_at = 2;
+}
+enum ControlOperation {
+  CONTROL_UNSPECIFIED = 0;
+  CONTROL_PAIR_RESET = 1;
+  CONTROL_PAIR_RESET_ACK = 2;
+  CONTROL_CONTACT = 3;
+  CONTROL_GROUP_STATE = 4;
+  CONTROL_GROUP_KEY = 5;
+  CONTROL_OWN_CONTACT = 6;
+  CONTROL_OWN_HISTORY = 7;
+  CONTROL_HOME_MIGRATION = 8;
+  CONTROL_RECOVERY = 9;
+  CONTROL_LIVE_PRESENCE = 10;
+  CONTROL_A2I = 11;
+  CONTROL_OBJECT_REVOKE = 12;
+  CONTROL_OWN_CONTACT_TOMBSTONE = 13;
+  CONTROL_OWN_GROUP_CONSENT = 14;
+  CONTROL_OWN_MESSAGE_COPY = 15;
+  CONTROL_FRIEND = 16;
+}
+message Control {
+  ControlOperation operation = 1;
+  reserved 2 to 15;
+  reserved "target", "correlation_id", "native_signed_document", "history", "epoch",
+           "subjects", "contact", "group_key", "pair_recovery", "recovery", "own_contact";
+  oneof payload {
+    PairReset reset = 16;
+    PairResetAck reset_ack = 17;
+    ContactControl contact_control = 18;
+    GroupStateControl group_state = 19;
+    GroupKeyControl group_key_control = 20;
+    OwnContactSync own_contact_sync = 21;
+    HistoryPage own_history = 22;
+    HomeMigrationControl home_migration = 23;
+    RecoveryControl recovery_control = 24;
+    LivePresence live_presence = 25;
+    A2iControlEvent a2i = 26;
+    ObjectRevokeAccess object_revoke = 27;
+    OwnContactTombstone own_contact_tombstone = 28;
+    OwnGroupConsent own_group_consent = 29;
+    OwnMessageCopy own_message_copy = 30;
+    FriendControl friend = 31;
+  }
+}
+message PairReset { uint64 rejected_bootstrap_floor = 1; }
+message PairResetAck { uint64 rejected_bootstrap_floor = 1; }
+message ContactControl { NativeContactConsent consent = 1; }
+message HomeMigrationControl { NativeHomeAuthorization proposal = 1; }
+message RecoveryControl {
+  oneof payload { GuardianInvite invite = 1; GuardianAccept accept = 2; }
+}
+message LivePresence { uint64 epoch = 1; repeated QualifiedDevice subjects = 2; }
+message ObjectRevokeAccess {
+  string object_id = 1;
+  string recipient_principal_id = 2;
+  string link_id = 3;
+  string reason = 4;
+  int64 effective_at = 5;
+}
+message FriendControl {
+  uint32 action = 1;
+  string link_id = 2;
+  string requester = 3;
+  string target = 4;
+  optional string remove_scope = 5;
+  bool blocked = 6;
+  optional int64 capability_revoked_at = 7;
+}
+message OwnMessageCopy {
+  oneof payload {
+    HistoryItem item = 1;
+    OwnSentMessage sent = 6;
+  }
+  QualifiedDevice source = 2;
+  QualifiedDevice target = 3;
+  int64 created_at = 4;
+  int64 expires_at = 5;
+}
+message OwnSentMessage {
+  string envelope_id = 1;
+  string message_id = 2;
+  string sender_id = 3;
+  repeated string original_recipients = 4;
+  optional bytes ciphertext_digest = 5;
+  OwnContext context = 6;
+  optional int64 authored_at = 7;
+  bytes exact_inner = 8;
+}
+message HistoryItem {
+  bytes exact_inner = 1;
+  reserved 2;
+  reserved "origin_evidence";
+  HistoryOriginEvidence source_evidence = 16;
+  optional Delete tombstone = 3;
+}
+message HistoryOriginEvidence {
+  bytes canonical_sender_envelope = 1;
+  NativeCustodyManifest source_authority = 2;
+  optional NativeGroupSnapshot group_membership = 3;
+}
+message HistoryPage {
+  bytes transfer_id = 1;
+  uint64 page = 2;
+  bytes previous_page_digest = 3;
+  repeated HistoryItem items = 4;
+  bytes page_digest = 5;
+}
+message JsonNull {}
+message JsonArray { repeated JsonValue values = 1; }
+message JsonMember { string key = 1; JsonValue value = 2; }
+message JsonObject { repeated JsonMember members = 1; }
+message JsonValue {
+  oneof value {
+    JsonNull null = 1;
+    bool boolean = 2;
+    string number = 3;
+    string text = 4;
+    JsonArray array = 5;
+    JsonObject object = 6;
+  }
+}
+message NativeCustodyManifest { bytes canonical = 1; }
+message NativeSignedDeviceSet { bytes canonical = 1; }
+message NativePrekeyBundle { bytes canonical = 1; }
+message NativeBranchProof { bytes canonical = 1; }
+message NativeGroupActor { bytes canonical = 1; }
+message NativeGroupSnapshot { bytes canonical = 1; }
+message NativeGroupChangeRequest { bytes canonical = 1; }
+message NativeGroupChangeResult { bytes canonical = 1; }
+message NativeGroupTransferAcceptance { bytes canonical = 1; }
+message NativeContactConsent { bytes canonical = 1; }
+message NativeGroupEvent { bytes canonical = 1; }
+message NativeHomeAuthorization { bytes canonical = 1; }
+message CallEndpoint {
+  string principal_id = 1;
+  string root_public_key = 2;
+  string device_id = 3;
+}
+message CallActionInvite {
+  string base_key = 1;
+}
+message CallActionRinging {
+
+}
+message CallActionAnswer {
+  string base_key = 1;
+}
+message CallActionAck {
+  VoicePeerAllocation allocation = 1;
+}
+message CallActionReady {
+  VoiceLeaseConsent consent = 1;
+}
+message CallActionReject {
+
+}
+message CallActionBusy {
+
+}
+message CallActionHangup {
+
+}
+message CallActionTimeout {
+
+}
+message CallActionFailed {
+
+}
+message CallActionAnsweredElsewhere {
+
+}
+message CallActionRekey {
+  uint64 generation = 1;
+  string base_key = 2;
+}
+message CallActionRekeyAck {
+  uint64 generation = 1;
+  string base_key = 2;
+}
+message CallAction {
+  oneof value {
+    CallActionInvite invite = 1;
+    CallActionRinging ringing = 2;
+    CallActionAnswer answer = 3;
+    CallActionAck ack = 4;
+    CallActionReady ready = 5;
+    CallActionReject reject = 6;
+    CallActionBusy busy = 7;
+    CallActionHangup hangup = 8;
+    CallActionTimeout timeout = 9;
+    CallActionFailed failed = 10;
+    CallActionAnsweredElsewhere answered_elsewhere = 11;
+    CallActionRekey rekey = 12;
+    CallActionRekeyAck rekey_ack = 13;
+  }
+}
+message CallControl {
+  string schema = 1;
+  string call_id = 2;
+  string conversation_id = 3;
+  CallEndpoint caller = 4;
+  CallEndpoint callee = 5;
+  CallEndpoint sender = 6;
+  uint64 seq = 7;
+  int64 created_at = 8;
+  CallAction body = 9;
+  string signature = 10;
+}
+message VoiceAllocationRequest {
+  string call_id = 1;
+  CallEndpoint caller = 2;
+  CallEndpoint callee = 3;
+}
+message VoicePeerAllocation {
+  string lease_id = 1;
+  string endpoint = 2;
+  uint64 expires_at = 3;
+  uint64 hard_expires_at = 4;
+}
+message VoiceLeaseConsent {
+  VoiceAllocationRequest scope = 1;
+  string lease_id = 2;
+  uint64 expires_at = 3;
+  string signature = 4;
+}
+message SurfaceEvent {
+  string schema = 1;
+  string conversation_id = 2;
+  uint64 version = 3;
+  SurfaceCommand command = 4;
+}
+message SurfaceAction {
+  string schema = 1;
+  string conversation_id = 2;
+  string surface_id = 3;
+  uint64 version = 4;
+  string surface_hash = 5;
+  string action_id = 6;
+  JsonValue values = 7;
+  string args_hash = 8;
+  optional SurfaceTaskBinding task_binding = 9;
+}
+message SurfaceTaskBinding {
+  string task_id = 1;
+  string step_id = 2;
+}
+message SurfaceCommandCreateSurface {
+  CreateSurfaceCommand value = 1;
+}
+message SurfaceCommandUpdateComponents {
+  UpdateComponentsCommand value = 1;
+}
+message SurfaceCommandUpdateDataModel {
+  UpdateDataModelCommand value = 1;
+}
+message SurfaceCommandDeleteSurface {
+  DeleteSurfaceCommand value = 1;
+}
+message SurfaceCommandPatchSurface {
+  PatchSurfaceCommand value = 1;
+}
+message SurfaceCommandStreamAppend {
+  StreamAppendCommand value = 1;
+}
+message SurfaceCommand {
+  oneof value {
+    SurfaceCommandCreateSurface create_surface = 1;
+    SurfaceCommandUpdateComponents update_components = 2;
+    SurfaceCommandUpdateDataModel update_data_model = 3;
+    SurfaceCommandDeleteSurface delete_surface = 4;
+    SurfaceCommandPatchSurface patch_surface = 5;
+    SurfaceCommandStreamAppend stream_append = 6;
+  }
+}
+message PatchSurfaceCommand {
+  string surface_id = 1;
+  string base_surface_hash = 2;
+  repeated SurfacePatchOp ops = 3;
+  string new_surface_hash = 4;
+}
+message SurfacePatchOpReplaceBlock {
+  JsonValue component = 1;
+}
+message SurfacePatchOpInsertBlock {
+  uint64 index = 1;
+  JsonValue component = 2;
+}
+message SurfacePatchOpRemoveBlock {
+  string component_id = 1;
+}
+message SurfacePatchOpSetActions {
+  repeated JsonValue actions = 1;
+}
+message SurfacePatchOpSetFallbackText {
+  string fallback_text = 1;
+}
+message SurfacePatchOp {
+  oneof value {
+    SurfacePatchOpReplaceBlock replace_block = 1;
+    SurfacePatchOpInsertBlock insert_block = 2;
+    SurfacePatchOpRemoveBlock remove_block = 3;
+    SurfacePatchOpSetActions set_actions = 4;
+    SurfacePatchOpSetFallbackText set_fallback_text = 5;
+  }
+}
+message StreamAppendCommand {
+  string surface_id = 1;
+  string component_id = 2;
+  string text_delta = 3;
+  bool final_ = 4;
+}
+message CreateSurfaceCommand {
+  string surface_id = 1;
+  SurfaceType surface_type = 2;
+  string catalog = 3;
+  string catalog_version = 4;
+  string fallback_text = 5;
+  optional string fallback_markdown = 6;
+  repeated JsonValue components = 7;
+  JsonObject data_model = 8;
+  repeated JsonValue allowed_actions = 9;
+}
+message UpdateComponentsCommand {
+  string surface_id = 1;
+  string base_surface_hash = 2;
+  repeated JsonValue components = 3;
+  repeated string remove_component_ids = 4;
+  string new_surface_hash = 5;
+}
+message UpdateDataModelCommand {
+  string surface_id = 1;
+  string base_surface_hash = 2;
+  JsonObject data_patch = 3;
+  string new_surface_hash = 4;
+}
+message DeleteSurfaceCommand {
+  string surface_id = 1;
+  optional DeleteSurfaceReason reason = 2;
+}
+message SurfaceTypeMessageCard {
+
+}
+message SurfaceTypeApprovalCard {
+
+}
+message SurfaceTypeFormCard {
+
+}
+message SurfaceTypeStatusPanel {
+
+}
+message SurfaceTypeTaskCard {
+
+}
+message SurfaceTypeFilePreview {
+
+}
+message SurfaceTypeCallCard {
+
+}
+message SurfaceTypeAgentResult {
+
+}
+message SurfaceTypeNotificationCard {
+
+}
+message SurfaceType {
+  oneof value {
+    SurfaceTypeMessageCard message_card = 1;
+    SurfaceTypeApprovalCard approval_card = 2;
+    SurfaceTypeFormCard form_card = 3;
+    SurfaceTypeStatusPanel status_panel = 4;
+    SurfaceTypeTaskCard task_card = 5;
+    SurfaceTypeFilePreview file_preview = 6;
+    SurfaceTypeCallCard call_card = 7;
+    SurfaceTypeAgentResult agent_result = 8;
+    SurfaceTypeNotificationCard notification_card = 9;
+  }
+}
+message DeleteSurfaceReasonCompleted {
+
+}
+message DeleteSurfaceReasonCancelled {
+
+}
+message DeleteSurfaceReasonReplaced {
+
+}
+message DeleteSurfaceReasonExpired {
+
+}
+message DeleteSurfaceReasonError {
+
+}
+message DeleteSurfaceReason {
+  oneof value {
+    DeleteSurfaceReasonCompleted completed = 1;
+    DeleteSurfaceReasonCancelled cancelled = 2;
+    DeleteSurfaceReasonReplaced replaced = 3;
+    DeleteSurfaceReasonExpired expired = 4;
+    DeleteSurfaceReasonError error = 5;
+  }
+}
+message A2iControlEvent {
+  string schema = 1;
+  uint32 version = 2;
+  string domain = 3;
+  Ext ext = 4;
+  SignedFields signed = 5;
+  A2iControlEventType event_type = 6;
+  ControlDomain control_domain = 7;
+  string action = 8;
+  JsonValue subject = 9;
+  string correlation_id = 10;
+  string source_device_id = 11;
+  string target_device_id = 12;
+  optional string grant_id = 13;
+  optional int64 expires_at = 14;
+}
+message ControlDomainMessage {
+
+}
+message ControlDomainConversation {
+
+}
+message ControlDomainA2ui {
+
+}
+message ControlDomainMcpTool {
+
+}
+message ControlDomain {
+  oneof value {
+    ControlDomainMessage message = 1;
+    ControlDomainConversation conversation = 2;
+    ControlDomainA2ui a2ui = 3;
+    ControlDomainMcpTool mcp_tool = 4;
+  }
+}
+message A2iControlEventTypeControl {
+
+}
+message A2iControlEventType {
+  oneof value {
+    A2iControlEventTypeControl control = 1;
+  }
+}
+message TaskStatusProposed {
+
+}
+message TaskStatusRunning {
+
+}
+message TaskStatusNeedsMe {
+
+}
+message TaskStatusDone {
+
+}
+message TaskStatusFailed {
+
+}
+message TaskStatusCancelled {
+
+}
+message TaskStatus {
+  oneof value {
+    TaskStatusProposed proposed = 1;
+    TaskStatusRunning running = 2;
+    TaskStatusNeedsMe needs_me = 3;
+    TaskStatusDone done = 4;
+    TaskStatusFailed failed = 5;
+    TaskStatusCancelled cancelled = 6;
+  }
+}
+message NeedsMeApproval {
+  string grant_id = 1;
+}
+message NeedsMeChoice {
+  string surface_id = 1;
+}
+message NeedsMeInput {
+  string surface_id = 1;
+}
+message NeedsMe {
+  oneof value {
+    NeedsMeApproval approval = 1;
+    NeedsMeChoice choice = 2;
+    NeedsMeInput input = 3;
+  }
+}
+message TaskStep {
+  string id = 1;
+  string title = 2;
+  TaskStatus state = 3;
+  optional NeedsMe needs_me = 4;
+}
+message TaskStart {
+  string task_id = 1;
+  string conversation_id = 2;
+  string requester = 3;
+  string assignee = 4;
+  string text = 5;
+  optional string constraints = 6;
+}
+message TaskProposal {
+  string task_id = 1;
+  string conversation_id = 2;
+  string proposer = 3;
+  string assignee = 4;
+  string title = 5;
+  repeated TaskStep steps = 6;
+}
+message TaskAccept {
+  string task_id = 1;
+  uint64 version = 2;
+}
+message TaskDecline {
+  string task_id = 1;
+  uint64 version = 2;
+}
+message TaskUpdate {
+  string task_id = 1;
+  uint64 version = 2;
+  TaskStatus state = 3;
+  repeated TaskStep steps = 4;
+  optional string result_ref = 5;
+  optional string result_summary = 6;
+}
+message TaskCancel {
+  string task_id = 1;
+  uint64 base_revision = 2;
+}
+message TaskDecisionResume {
+
+}
+message TaskDecisionDeny {
+
+}
+message TaskDecision {
+  oneof value {
+    TaskDecisionResume resume = 1;
+    TaskDecisionDeny deny = 2;
+  }
+}
+message TaskResolve {
+  string task_id = 1;
+  uint64 base_revision = 2;
+  string step_id = 3;
+  NeedsMe target = 4;
+  string decision_id = 5;
+  TaskDecision decision = 6;
+}
+message TaskEventBodyStart {
+  TaskStart value = 1;
+}
+message TaskEventBodyProposal {
+  TaskProposal value = 1;
+}
+message TaskEventBodyAccept {
+  TaskAccept value = 1;
+}
+message TaskEventBodyDecline {
+  TaskDecline value = 1;
+}
+message TaskEventBodyUpdate {
+  TaskUpdate value = 1;
+}
+message TaskEventBodyCancel {
+  TaskCancel value = 1;
+}
+message TaskEventBodyResolve {
+  TaskResolve value = 1;
+}
+message TaskEventBody {
+  oneof value {
+    TaskEventBodyStart start = 1;
+    TaskEventBodyProposal proposal = 2;
+    TaskEventBodyAccept accept = 3;
+    TaskEventBodyDecline decline = 4;
+    TaskEventBodyUpdate update = 5;
+    TaskEventBodyCancel cancel = 6;
+    TaskEventBodyResolve resolve = 7;
+  }
+}
+message TaskEvent {
+  string schema = 1;
+  uint32 version = 2;
+  string domain = 3;
+  Ext ext = 4;
+  SignedFields signed = 5;
+  string conversation_id = 6;
+  TaskEventBody event = 7;
+}
+message SignedFields {
+  string signing_key_id = 1;
+  SignatureAlg signature_alg = 2;
+  string signature = 3;
+}
+message Ext {
+  JsonObject ext = 1;
+}
+message SurfaceCarrier {
+  string schema = 1;
+  string content_type = 2;
+  optional int64 posted_at = 3;
+  optional int64 updated_at = 4;
+  string conversation_id = 5;
+  string surface_id = 6;
+  string message_id = 7;
+  string sender_principal_id = 8;
+  string sender_device_id = 9;
+  string author_principal_id = 10;
+  string signature = 11;
+  optional SurfaceSnapshotProof snapshot = 12;
+  oneof payload {
+    SurfaceEvent event = 16;
+    SurfaceAction action = 17;
+    SurfaceCarrier action_receipt = 18;
+  }
+  reserved 14, 15;
+}
+message SurfaceSnapshotProof {
+  SurfaceEvent event = 1;
+  SurfaceCheckpoint checkpoint = 2;
+  optional string surface_hash = 3;
+  SurfaceResyncMetadata metadata = 4;
+  string author_device_id = 5;
+}
+message SurfaceDelivery {
+  SurfaceControlKind kind = 1;
+  SurfaceCarrier carrier = 2;
+  optional uint64 group_epoch = 3;
+  optional OwnContext context = 4;
+  repeated NativeDeviceManifest manifests = 5;
+}
+message SurfaceControlKindPeer {
+
+}
+message SurfaceControlKindOwn {
+
+}
+message SurfaceControlKind {
+  oneof value {
+    SurfaceControlKindPeer peer = 1;
+    SurfaceControlKindOwn own = 2;
+  }
+}
+message OwnContext {
+  string conversation_id = 1;
+  repeated string participants = 2;
+  optional SdkOwnDeviceGroupSnapshot group = 3;
+  optional FriendLinkRecord friend = 4;
+}
+message TaskCarrier {
+  string content_type = 1;
+  string conversation_id = 2;
+  string message_id = 3;
+  string principal_id = 4;
+  string device_id = 5;
+  TaskEvent event = 6;
+  string signature = 7;
+  TaskCertificate decision_proof = 8;
+}
+message TaskApprovalRequest {
+  TaskApprovalBinding binding = 1;
+  LocalMcpApprovalRecord approval = 2;
+  LocalMcpGrantSigningBody grant_body = 3;
+}
+message TaskApprovalPayloadRequest {
+  TaskApprovalRequest request = 1;
+}
+message TaskApprovalPayloadDecision {
+  TaskApprovalRequest request = 1;
+  bool approved = 2;
+  optional string grant_signature = 3;
+}
+message TaskApprovalPayload {
+  oneof value {
+    TaskApprovalPayloadRequest request = 1;
+    TaskApprovalPayloadDecision decision = 2;
+  }
+}
+message TaskApprovalPacket {
+  TaskApprovalPayload payload = 1;
+  string principal = 2;
+  string device = 3;
+  string signature = 4;
+  reserved 5;
+}
+message TaskAck {
+  TaskCarrier carrier = 1;
+  TaskCertificate certificate = 2;
+  repeated NativeDeviceManifest manifests = 3;
+  string signer_principal = 4;
+  string signer_device = 5;
+  string signature = 6;
+}
+message TaskControlIntent {
+  TaskCarrier carrier = 1;
+}
+message TaskControlAck {
+  TaskAck value = 1;
+}
+message TaskControl {
+  oneof value {
+    TaskControlIntent intent = 1;
+    TaskControlAck ack = 2;
+  }
+}
+message TaskCertificate {
+  string conversation_id = 1;
+  TaskResolve resolution = 2;
+  string assignee = 3;
+  string issuer_device = 4;
+  int64 issued_at = 5;
+  TaskCertificatePhase phase = 6;
+  optional uint64 committed_version = 7;
+  optional string carrier_hash = 8;
+  string decision_key = 9;
+  string evidence_hash = 10;
+  string signature = 11;
+}
+message TaskCertificatePhaseReserved {
+
+}
+message TaskCertificatePhaseCommitted {
+
+}
+message TaskCertificatePhase {
+  oneof value {
+    TaskCertificatePhaseReserved reserved = 1;
+    TaskCertificatePhaseCommitted committed = 2;
+  }
+}
+message TaskAcceptedEvent {
+  TaskCarrier carrier = 1;
+  string public_key = 2;
+  bool actor_kind_verified = 3;
+  int64 received_at = 4;
+  optional TaskCertificate decision_certificate = 5;
+  optional TaskMembership membership = 6;
+}
+message TaskHistory {
+  repeated TaskAcceptedEvent events = 1;
+  int64 created_at = 2;
+  int64 updated_at = 3;
+  reserved 4;
+  reserved "checkpoint";
+}
+message TaskMembership {
+  string conversation = 1;
+  optional string group = 2;
+  optional uint64 epoch = 3;
+  int64 at = 4;
+  repeated string members = 5;
+}
+message TaskOwnPacket {
+  OwnContext context = 1;
+  TaskHistory history = 2;
+  repeated NativeDeviceManifest manifests = 3;
+  repeated SdkOwnDeviceGroupMemberPin pins = 4;
+  uint64 base = 5;
+  string prefix_hash = 6;
+}
+message TaskApprovalBinding {
+  string conversation_id = 1;
+  string task_id = 2;
+  string step_id = 3;
+  uint64 opening_revision = 4;
+  string requester = 5;
+  string assignee = 6;
+  string executor_device_id = 7;
+}
+message LocalMcpGrantSigningBody {
+  optional TaskApprovalBinding task_binding = 1;
+  string approval_id = 2;
+  string grant_id = 3;
+  string server_id = 4;
+  string tool_name = 5;
+  optional string tool_scope = 6;
+  McpCapability capability = 7;
+  string registry_hash = 8;
+  string tool_manifest_set_hash = 9;
+  bool full_delegation = 10;
+  bool single_use = 11;
+  optional string arguments_hash = 12;
+  int64 expires_at = 13;
+}
+message LocalBusFederationRoute {
+  string federation_url = 1;
+  string source_node_id = 2;
+  string target_node_id = 3;
+  string required_capability = 4;
+  optional string admin_token = 5;
+  optional string recipient_prekey_url = 6;
+}
+message LocalMcpApprovalRecord {
+  string approval_id = 1;
+  string server_id = 2;
+  string tool_name = 3;
+  McpCapability capability = 4;
+  RiskLevel risk_level = 5;
+  optional string tool_scope = 6;
+  string confirmation_mode = 7;
+  int64 expires_at = 8;
+  string status = 9;
+  JsonValue details = 10;
+}
+message GroupStateControl {
+  string schema = 1;
+  GroupControlBody body = 2;
+}
+message GroupControlBodyRequest {
+  NativeGroupChangeRequest request = 1;
+  optional LocalBusFederationRoute federation = 2;
+}
+message GroupControlBodyResult {
+  NativeGroupChangeResult result = 1;
+}
+message GroupControlBodyDeviceSet {
+  string group_id = 1;
+  NativeGroupActor actor = 2;
+  uint64 device_set_epoch = 3;
+}
+message GroupControlBodyTransfer {
+  TransferControl control = 1;
+}
+message GroupControlBody {
+  oneof value {
+    GroupControlBodyRequest request = 1;
+    GroupControlBodyResult result = 2;
+    GroupControlBodyDeviceSet device_set = 3;
+    GroupControlBodyTransfer transfer = 4;
+  }
+}
+message TransferDevice {
+  string root = 1;
+  string device = 2;
+}
+message TransferProbe {
+  string id = 1;
+  NativeGroupActor actor = 2;
+  NativeGroupActor creator = 3;
+  NativeGroupSnapshot base = 4;
+  repeated TransferDevice required = 5;
+  int64 issued_at = 6;
+  int64 expires_at = 7;
+}
+message TransferHead {
+  string proposal = 1;
+  NativeGroupActor actor = 2;
+  string requested_hash = 3;
+  NativeGroupSnapshot head = 4;
+  optional NativeGroupTransferAcceptance acceptance = 5;
+  bool requires_sync = 6;
+  TransferDevice target = 7;
+  repeated TransferDevice additional_targets = 8;
+  bool cancelled = 9;
+  bool cancel_ack = 10;
+  int64 issued_at = 11;
+  int64 expires_at = 12;
+}
+message TransferBodyProbe {
+  TransferProbe probe = 1;
+}
+message TransferBodyHead {
+  TransferHead reply = 1;
+}
+message TransferBody {
+  oneof value {
+    TransferBodyProbe probe = 1;
+    TransferBodyHead head = 2;
+  }
+}
+message TransferControl {
+  TransferBody body = 1;
+  string signature = 2;
+}
+message OwnContactSync {
+  NativeDeviceManifest manifest = 1;
+  FriendLinkRecord link = 2;
+}
+message OwnContactTombstone {
+  FriendLinkRecord link = 1;
+  optional int64 decided_at = 2;
+}
+message OwnGroupConsent {
+  string schema = 1;
+  NativeGroupActor actor = 2;
+  NativeGroupSnapshot snapshot = 3;
+  bool accepted = 4;
+  int64 issued_at = 5;
+  int64 expires_at = 6;
+  string signature = 7;
+}
+message SurfaceCheckpoint {
+  string schema = 1;
+  optional CreateSurfaceCommand content = 2;
+  optional string conversation_id = 3;
+  uint64 version = 4;
+  bool closed = 5;
+  repeated SurfaceFinalEntry final_text = 6;
+}
+message SurfaceFinalEntry {
+  string id = 1;
+  bool nested = 2;
+  string text_hash = 3;
+}
+message SurfaceResyncMetadata {
+  string schema = 1;
+  string conversation_id = 2;
+  uint64 version = 3;
+  bool closed = 4;
+  string finality_base64 = 5;
+}
+message SurfaceResyncRequest {
+  string kind = 1;
+  string conversation_id = 2;
+  string surface_ref = 3;
+  string author = 4;
+  string surface_id = 5;
+  optional string group = 6;
+  optional uint64 epoch = 7;
+}
+message GuardianRecoveryShare {
+  uint32 share_id = 1;
+  uint32 threshold = 2;
+  uint32 total = 3;
+  RecoveryQuorumMemberKind member_kind = 4;
+  string value_base64 = 5;
+}
+message GuardianInvite {
+  string schema = 1;
+  uint32 version = 2;
+  string invite_id = 3;
+  string inviter_principal_id = 4;
+  string inviter_device_id = 5;
+  uint64 inviter_device_epoch = 6;
+  string inviter_device_public_key_base64url = 7;
+  string guardian_principal_id = 8;
+  string recovery_quorum_id = 9;
+  GuardianRecoveryShare share = 10;
+  int64 issued_at = 11;
+  int64 expires_at = 12;
+  SignedFields signed = 13;
+}
+message GuardianAccept {
+  string schema = 1;
+  uint32 version = 2;
+  string accept_id = 3;
+  string invite_id = 4;
+  string owner_principal_id = 5;
+  string guardian_principal_id = 6;
+  string guardian_device_id = 7;
+  uint64 guardian_device_epoch = 8;
+  string guardian_device_public_key_base64url = 9;
+  string recovery_quorum_id = 10;
+  int64 accepted_at = 11;
+  SignedFields signed = 12;
+}
+message SdkOwnDeviceGroupSnapshot {
+  optional NativeGroupSnapshot shared_state = 1;
+  string group_id = 2;
+  uint64 group_epoch = 3;
+  uint32 max_members = 4;
+  string new_member_history = 5;
+  string local_role = 6;
+  uint64 local_joined_epoch = 7;
+  repeated SdkOwnDeviceGroupMemberSnapshot members = 8;
+  repeated LocalBusGroupMemberRoute routes = 9;
+}
+message SdkOwnDeviceGroupMemberPin {
+  string group_id = 1;
+  string device_id = 2;
+  string signing_public_key = 3;
+  optional string principal_id = 4;
+  optional string principal_commitment = 5;
+}
+message SdkOwnDeviceGroupMemberSnapshot {
+  string member_id = 1;
+  string role = 2;
+  uint64 joined_epoch = 3;
+}
+message LocalBusGroupMemberRoute {
+  string member_id = 1;
+  optional string member_principal_commitment = 2;
+  optional string device_signing_public_key = 3;
+  optional string target_delivery_id = 4;
+  optional LocalBusFederationRoute federation = 5;
+}
+message GroupKeyDistribution {
+  string schema = 1;
+  uint32 version = 2;
+  string group_id = 3;
+  string sender_id = 4;
+  uint64 group_key_epoch = 5;
+  optional string group_state_hash = 6;
+  bytes sender_key_seed = 7;
+  optional string sender_key_signature = 8;
+  optional string sender_device_signing_public_key = 9;
+}
+message GroupKeyControl {
+  string schema = 1;
+  uint32 version = 2;
+  NativeGroupEvent membership_event = 3;
+  optional string actor_manifest_url = 4;
+  GroupKeyDistribution distribution = 5;
+}
+message SurfaceExportMetadata {
+  bool truncated = 1;
+  optional int64 next_before = 2;
+  map<string, uint32> skipped = 3;
+}
+message SurfaceHistoryExport {
+  repeated SurfaceDelivery controls = 1;
+  repeated OwnedSurfaceCheckpoint checkpoints = 2;
+  SurfaceExportMetadata metadata = 3;
+}
+message OwnedSurfaceCheckpoint {
+  StoredSurface record = 1;
+  SurfaceEvent snapshot_event = 2;
+  uint64 version = 3;
+  string surface_hash = 4;
+  JsonValue conversation = 5;
+  optional uint64 group_epoch = 6;
+}
+message StoredSurface {
+  string surface_id = 1;
+  string conversation_id = 2;
+  string author_principal_id = 3;
+  string author_device_id = 4;
+  SurfaceCheckpoint checkpoint = 5;
+  optional int64 created_at = 6;
+  optional int64 updated_at = 7;
+}
+message TaskExportMetadata {
+  bool truncated = 1;
+  uint32 skipped_items = 2;
+  optional string next_cursor = 3;
+}
+message NativeDeviceManifest {
+  optional NativeCustodyManifest custody = 1;
+  optional NativeSignedDeviceSet signed_device_set = 2;
+  string principal_id = 3;
+  string principal_commitment = 4;
+  string root_public_key = 5;
+  repeated ManifestDevice devices = 6;
+}
+message ManifestDevice {
+  string principal_id = 1;
+  string principal_commitment = 2;
+  string device_id = 3;
+  uint64 device_epoch = 4;
+  string branch_public_key = 5;
+  string target_delivery_id = 6;
+  optional NativeBranchProof branch_proof = 7;
+  NativePrekeyBundle prekey_bundle = 8;
+  string branch_authorized_event_id = 9;
+}
+message SignatureAlgEd25519 {
+
+}
+message SignatureAlg {
+  oneof value {
+    SignatureAlgEd25519 ed25519 = 1;
+  }
+}
+message FriendLinkRecord {
+  string link_id = 1;
+  string requester_id = 2;
+  string target_id = 3;
+  string state = 4;
+  optional string remove_scope = 5;
+  bool blocked = 6;
+  optional int64 capability_revoked_at = 7;
+}
+message McpCapabilityReadConversation {
+
+}
+message McpCapabilityDraftMessage {
+
+}
+message McpCapabilitySendMessage {
+
+}
+message McpCapabilityReadLocalFiles {
+
+}
+message McpCapabilityWriteLocalFiles {
+
+}
+message McpCapabilityRunShell {
+
+}
+message McpCapabilityManageContacts {
+
+}
+message McpCapabilityManageGroup {
+
+}
+message McpCapabilityManageMedia {
+
+}
+message McpCapabilityManageNode {
+
+}
+message McpCapabilityExternalToolInvoke {
+
+}
+message McpCapability {
+  oneof value {
+    McpCapabilityReadConversation read_conversation = 1;
+    McpCapabilityDraftMessage draft_message = 2;
+    McpCapabilitySendMessage send_message = 3;
+    McpCapabilityReadLocalFiles read_local_files = 4;
+    McpCapabilityWriteLocalFiles write_local_files = 5;
+    McpCapabilityRunShell run_shell = 6;
+    McpCapabilityManageContacts manage_contacts = 7;
+    McpCapabilityManageGroup manage_group = 8;
+    McpCapabilityManageMedia manage_media = 9;
+    McpCapabilityManageNode manage_node = 10;
+    McpCapabilityExternalToolInvoke external_tool_invoke = 11;
+  }
+}
+message RiskLevelLow {
+
+}
+message RiskLevelMedium {
+
+}
+message RiskLevelHigh {
+
+}
+message RiskLevelCritical {
+
+}
+message RiskLevel {
+  oneof value {
+    RiskLevelLow low = 1;
+    RiskLevelMedium medium = 2;
+    RiskLevelHigh high = 3;
+    RiskLevelCritical critical = 4;
+  }
+}
+message RecoveryQuorumMemberKindRootShare {
+
+}
+message RecoveryQuorumMemberKindDeviceShare {
+
+}
+message RecoveryQuorumMemberKindGuardianShare {
+
+}
+message RecoveryQuorumMemberKindHardwareTokenShare {
+
+}
+message RecoveryQuorumMemberKind {
+  oneof value {
+    RecoveryQuorumMemberKindRootShare root_share = 1;
+    RecoveryQuorumMemberKindDeviceShare device_share = 2;
+    RecoveryQuorumMemberKindGuardianShare guardian_share = 3;
+    RecoveryQuorumMemberKindHardwareTokenShare hardware_token_share = 4;
+  }
+}
+message Surface {
+  reserved 1, 2;
+  reserved "operation", "state";
+  oneof payload {
+    SurfaceDelivery delivery = 16;
+    SurfaceResyncRequest resync_request = 17;
+    SurfaceHistoryExport own_history = 18;
+  }
+}
+message Task {
+  reserved 1 to 4;
+  reserved "operation", "event", "decision_certificate", "native_membership_witnesses";
+  oneof payload {
+    TaskCarrier carrier = 16;
+    TaskApprovalPacket approval = 17;
+    TaskControl control = 18;
+    TaskHistoryExport own_history = 19;
+  }
+}
+message TaskHistoryExport {
+  repeated TaskOwnPacket packets = 1;
+  TaskExportMetadata metadata = 2;
+}
+message Call {
+  reserved 1, 2;
+  reserved "operation", "signal";
+  CallControl control = 16;
+}
+message SelfSync {
+  uint32 operation = 1;
+  MessageRef read_through = 2;
+  optional Message draft = 3;
+  MessageRef pin = 4;
+  bool mute = 5;
+  uint64 revision = 6;
+}
+message RatchetHeader {
+  bytes session_id = 1;
+  uint64 counter = 2;
+  bytes ratchet_public_key = 3;
+  uint64 previous_chain_length = 4;
+  bytes sender_device_hash = 5;
+  bytes recipient_device_hash = 6;
+  uint64 device_epoch = 7;
+  bytes event_id = 8;
+  bytes key_commitment = 9;
+  bytes body_commitment = 10;
+  bytes authority_hash = 11;
+  bytes bootstrap_transcript_hash = 12;
+  bytes bundle_hash = 13;
+  reserved 14 to 31;
+}
+message Content {
+  oneof value {
+    Message message = 1;
+    Service service = 2;
+    Edit edit = 3;
+    Delete delete = 4;
+    Reaction reaction = 5;
+    Receipt receipt = 6;
+    Typing typing = 7;
+    Control control = 8;
+    Surface surface = 9;
+    Task task = 10;
+    Call call = 11;
+    SelfSync self_sync = 12;
+  }
+  reserved 13 to 15;
+}
+message SendMessage {
+  string conversation_id = 1;
+  Content content = 2;
+  bytes operation_id = 3;
+  MessageRef reply_to = 4;
+}
+message MessageRequest {
+  string request_id = 1;
+  string account_id = 2;
+  oneof action {
+    SendMessage send = 3;
+    Edit edit = 4;
+    Delete delete = 5;
+    Reaction reaction = 6;
+    Typing typing = 7;
+  }
+}
+message MessageUpdate {
+  string account_id = 1;
+  uint64 journal_sequence = 2;
+  EventIdentity identity = 3;
+  oneof state {
+    Content content = 4;
+    UnsupportedView unsupported = 5;
+    Delete tombstone = 6;
+  }
+}

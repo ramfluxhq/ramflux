@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum KindId {
+    KindUnspecified = 0,
+    KindMessage = 1,
+    KindService = 2,
+    KindEdit = 3,
+    KindDelete = 4,
+    KindReaction = 5,
+    KindReceipt = 6,
+    KindTyping = 7,
+    KindControl = 8,
+    KindSurface = 9,
+    KindTask = 10,
+    KindCall = 11,
+    KindSelfSync = 12,
+}
+impl KindId {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::KindUnspecified => "KIND_UNSPECIFIED",
+            Self::KindMessage => "KIND_MESSAGE",
+            Self::KindService => "KIND_SERVICE",
+            Self::KindEdit => "KIND_EDIT",
+            Self::KindDelete => "KIND_DELETE",
+            Self::KindReaction => "KIND_REACTION",
+            Self::KindReceipt => "KIND_RECEIPT",
+            Self::KindTyping => "KIND_TYPING",
+            Self::KindControl => "KIND_CONTROL",
+            Self::KindSurface => "KIND_SURFACE",
+            Self::KindTask => "KIND_TASK",
+            Self::KindCall => "KIND_CALL",
+            Self::KindSelfSync => "KIND_SELF_SYNC",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "KIND_UNSPECIFIED" => Some(Self::KindUnspecified),
+            "KIND_MESSAGE" => Some(Self::KindMessage),
+            "KIND_SERVICE" => Some(Self::KindService),
+            "KIND_EDIT" => Some(Self::KindEdit),
+            "KIND_DELETE" => Some(Self::KindDelete),
+            "KIND_REACTION" => Some(Self::KindReaction),
+            "KIND_RECEIPT" => Some(Self::KindReceipt),
+            "KIND_TYPING" => Some(Self::KindTyping),
+            "KIND_CONTROL" => Some(Self::KindControl),
+            "KIND_SURFACE" => Some(Self::KindSurface),
+            "KIND_TASK" => Some(Self::KindTask),
+            "KIND_CALL" => Some(Self::KindCall),
+            "KIND_SELF_SYNC" => Some(Self::KindSelfSync),
+            _ => None,
+        }
+    }
+}
+impl serde::Serialize for KindId {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let variant = match self {
+            Self::KindUnspecified => "KIND_UNSPECIFIED",
+            Self::KindMessage => "KIND_MESSAGE",
+            Self::KindService => "KIND_SERVICE",
+            Self::KindEdit => "KIND_EDIT",
+            Self::KindDelete => "KIND_DELETE",
+            Self::KindReaction => "KIND_REACTION",
+            Self::KindReceipt => "KIND_RECEIPT",
+            Self::KindTyping => "KIND_TYPING",
+            Self::KindControl => "KIND_CONTROL",
+            Self::KindSurface => "KIND_SURFACE",
+            Self::KindTask => "KIND_TASK",
+            Self::KindCall => "KIND_CALL",
+            Self::KindSelfSync => "KIND_SELF_SYNC",
+        };
+        serializer.serialize_str(variant)
+    }
+}
+impl<'de> serde::Deserialize<'de> for KindId {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "KIND_UNSPECIFIED",
+            "KIND_MESSAGE",
+            "KIND_SERVICE",
+            "KIND_EDIT",
+            "KIND_DELETE",
+            "KIND_REACTION",
+            "KIND_RECEIPT",
+            "KIND_TYPING",
+            "KIND_CONTROL",
+            "KIND_SURFACE",
+            "KIND_TASK",
+            "KIND_CALL",
+            "KIND_SELF_SYNC",
+        ];
+        struct GeneratedVisitor;
+        impl serde::de::Visitor<'_> for GeneratedVisitor {
+            type Value = KindId;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "expected one of: {:?}", &FIELDS)
+            }
+            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(v).ok().and_then(|x| x.try_into().ok()).ok_or_else(|| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Signed(v), &self)
+                })
+            }
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(v).ok().and_then(|x| x.try_into().ok()).ok_or_else(|| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Unsigned(v), &self)
+                })
+            }
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "KIND_UNSPECIFIED" => Ok(KindId::KindUnspecified),
+                    "KIND_MESSAGE" => Ok(KindId::KindMessage),
+                    "KIND_SERVICE" => Ok(KindId::KindService),
+                    "KIND_EDIT" => Ok(KindId::KindEdit),
+                    "KIND_DELETE" => Ok(KindId::KindDelete),
+                    "KIND_REACTION" => Ok(KindId::KindReaction),
+                    "KIND_RECEIPT" => Ok(KindId::KindReceipt),
+                    "KIND_TYPING" => Ok(KindId::KindTyping),
+                    "KIND_CONTROL" => Ok(KindId::KindControl),
+                    "KIND_SURFACE" => Ok(KindId::KindSurface),
+                    "KIND_TASK" => Ok(KindId::KindTask),
+                    "KIND_CALL" => Ok(KindId::KindCall),
+                    "KIND_SELF_SYNC" => Ok(KindId::KindSelfSync),
+                    _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
+                }
+            }
+        }
+        deserializer.deserialize_any(GeneratedVisitor)
+    }
+}

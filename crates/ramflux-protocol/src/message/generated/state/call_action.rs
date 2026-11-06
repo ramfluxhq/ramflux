@@ -1,0 +1,311 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CallAction {
+    #[prost(oneof = "call_action::Value", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13")]
+    pub value: ::core::option::Option<call_action::Value>,
+}
+/// Nested message and enum types in `CallAction`.
+pub mod call_action {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Value {
+        #[prost(message, tag = "1")]
+        Invite(super::CallActionInvite),
+        #[prost(message, tag = "2")]
+        Ringing(super::CallActionRinging),
+        #[prost(message, tag = "3")]
+        Answer(super::CallActionAnswer),
+        #[prost(message, tag = "4")]
+        Ack(super::CallActionAck),
+        #[prost(message, tag = "5")]
+        Ready(super::CallActionReady),
+        #[prost(message, tag = "6")]
+        Reject(super::CallActionReject),
+        #[prost(message, tag = "7")]
+        Busy(super::CallActionBusy),
+        #[prost(message, tag = "8")]
+        Hangup(super::CallActionHangup),
+        #[prost(message, tag = "9")]
+        Timeout(super::CallActionTimeout),
+        #[prost(message, tag = "10")]
+        Failed(super::CallActionFailed),
+        #[prost(message, tag = "11")]
+        AnsweredElsewhere(super::CallActionAnsweredElsewhere),
+        #[prost(message, tag = "12")]
+        Rekey(super::CallActionRekey),
+        #[prost(message, tag = "13")]
+        RekeyAck(super::CallActionRekeyAck),
+    }
+}
+impl serde::Serialize for CallAction {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.value.is_some() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.CallAction", len)?;
+        if let Some(v) = self.value.as_ref() {
+            match v {
+                call_action::Value::Invite(v) => {
+                    struct_ser.serialize_field("invite", v)?;
+                }
+                call_action::Value::Ringing(v) => {
+                    struct_ser.serialize_field("ringing", v)?;
+                }
+                call_action::Value::Answer(v) => {
+                    struct_ser.serialize_field("answer", v)?;
+                }
+                call_action::Value::Ack(v) => {
+                    struct_ser.serialize_field("ack", v)?;
+                }
+                call_action::Value::Ready(v) => {
+                    struct_ser.serialize_field("ready", v)?;
+                }
+                call_action::Value::Reject(v) => {
+                    struct_ser.serialize_field("reject", v)?;
+                }
+                call_action::Value::Busy(v) => {
+                    struct_ser.serialize_field("busy", v)?;
+                }
+                call_action::Value::Hangup(v) => {
+                    struct_ser.serialize_field("hangup", v)?;
+                }
+                call_action::Value::Timeout(v) => {
+                    struct_ser.serialize_field("timeout", v)?;
+                }
+                call_action::Value::Failed(v) => {
+                    struct_ser.serialize_field("failed", v)?;
+                }
+                call_action::Value::AnsweredElsewhere(v) => {
+                    struct_ser.serialize_field("answeredElsewhere", v)?;
+                }
+                call_action::Value::Rekey(v) => {
+                    struct_ser.serialize_field("rekey", v)?;
+                }
+                call_action::Value::RekeyAck(v) => {
+                    struct_ser.serialize_field("rekeyAck", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for CallAction {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "invite",
+            "ringing",
+            "answer",
+            "ack",
+            "ready",
+            "reject",
+            "busy",
+            "hangup",
+            "timeout",
+            "failed",
+            "answered_elsewhere",
+            "answeredElsewhere",
+            "rekey",
+            "rekey_ack",
+            "rekeyAck",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Invite,
+            Ringing,
+            Answer,
+            Ack,
+            Ready,
+            Reject,
+            Busy,
+            Hangup,
+            Timeout,
+            Failed,
+            AnsweredElsewhere,
+            Rekey,
+            RekeyAck,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "invite" => Ok(GeneratedField::Invite),
+                            "ringing" => Ok(GeneratedField::Ringing),
+                            "answer" => Ok(GeneratedField::Answer),
+                            "ack" => Ok(GeneratedField::Ack),
+                            "ready" => Ok(GeneratedField::Ready),
+                            "reject" => Ok(GeneratedField::Reject),
+                            "busy" => Ok(GeneratedField::Busy),
+                            "hangup" => Ok(GeneratedField::Hangup),
+                            "timeout" => Ok(GeneratedField::Timeout),
+                            "failed" => Ok(GeneratedField::Failed),
+                            "answeredElsewhere" | "answered_elsewhere" => {
+                                Ok(GeneratedField::AnsweredElsewhere)
+                            }
+                            "rekey" => Ok(GeneratedField::Rekey),
+                            "rekeyAck" | "rekey_ack" => Ok(GeneratedField::RekeyAck),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = CallAction;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.CallAction")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<CallAction, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut value__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Invite => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("invite"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Invite);
+                        }
+                        GeneratedField::Ringing => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ringing"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Ringing);
+                        }
+                        GeneratedField::Answer => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("answer"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Answer);
+                        }
+                        GeneratedField::Ack => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ack"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Ack);
+                        }
+                        GeneratedField::Ready => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ready"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Ready);
+                        }
+                        GeneratedField::Reject => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("reject"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Reject);
+                        }
+                        GeneratedField::Busy => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("busy"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Busy);
+                        }
+                        GeneratedField::Hangup => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("hangup"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Hangup);
+                        }
+                        GeneratedField::Timeout => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("timeout"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Timeout);
+                        }
+                        GeneratedField::Failed => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("failed"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Failed);
+                        }
+                        GeneratedField::AnsweredElsewhere => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("answeredElsewhere"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::AnsweredElsewhere);
+                        }
+                        GeneratedField::Rekey => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("rekey"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::Rekey);
+                        }
+                        GeneratedField::RekeyAck => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("rekeyAck"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(call_action::Value::RekeyAck);
+                        }
+                    }
+                }
+                Ok(CallAction { value: value__ })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.CallAction", FIELDS, GeneratedVisitor)
+    }
+}

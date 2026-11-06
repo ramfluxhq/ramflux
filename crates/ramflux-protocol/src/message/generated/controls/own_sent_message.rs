@@ -1,0 +1,280 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OwnSentMessage {
+    #[prost(string, tag = "1")]
+    pub envelope_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub message_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub sender_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub original_recipients: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bytes = "vec", optional, tag = "5")]
+    pub ciphertext_digest: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    #[prost(message, optional, tag = "6")]
+    pub context: ::core::option::Option<OwnContext>,
+    #[prost(int64, optional, tag = "7")]
+    pub authored_at: ::core::option::Option<i64>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub exact_inner: ::prost::alloc::vec::Vec<u8>,
+}
+impl serde::Serialize for OwnSentMessage {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.envelope_id.is_empty() {
+            len += 1;
+        }
+        if !self.message_id.is_empty() {
+            len += 1;
+        }
+        if !self.sender_id.is_empty() {
+            len += 1;
+        }
+        if !self.original_recipients.is_empty() {
+            len += 1;
+        }
+        if self.ciphertext_digest.is_some() {
+            len += 1;
+        }
+        if self.context.is_some() {
+            len += 1;
+        }
+        if self.authored_at.is_some() {
+            len += 1;
+        }
+        if !self.exact_inner.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.OwnSentMessage", len)?;
+        if !self.envelope_id.is_empty() {
+            struct_ser.serialize_field("envelopeId", &self.envelope_id)?;
+        }
+        if !self.message_id.is_empty() {
+            struct_ser.serialize_field("messageId", &self.message_id)?;
+        }
+        if !self.sender_id.is_empty() {
+            struct_ser.serialize_field("senderId", &self.sender_id)?;
+        }
+        if !self.original_recipients.is_empty() {
+            struct_ser.serialize_field("originalRecipients", &self.original_recipients)?;
+        }
+        if let Some(v) = self.ciphertext_digest.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "ciphertextDigest",
+                pbjson::private::base64::encode(&v).as_str(),
+            )?;
+        }
+        if let Some(v) = self.context.as_ref() {
+            struct_ser.serialize_field("context", v)?;
+        }
+        if let Some(v) = self.authored_at.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("authoredAt", ToString::to_string(&v).as_str())?;
+        }
+        if !self.exact_inner.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "exactInner",
+                pbjson::private::base64::encode(&self.exact_inner).as_str(),
+            )?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for OwnSentMessage {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "envelope_id",
+            "envelopeId",
+            "message_id",
+            "messageId",
+            "sender_id",
+            "senderId",
+            "original_recipients",
+            "originalRecipients",
+            "ciphertext_digest",
+            "ciphertextDigest",
+            "context",
+            "authored_at",
+            "authoredAt",
+            "exact_inner",
+            "exactInner",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            EnvelopeId,
+            MessageId,
+            SenderId,
+            OriginalRecipients,
+            CiphertextDigest,
+            Context,
+            AuthoredAt,
+            ExactInner,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "envelopeId" | "envelope_id" => Ok(GeneratedField::EnvelopeId),
+                            "messageId" | "message_id" => Ok(GeneratedField::MessageId),
+                            "senderId" | "sender_id" => Ok(GeneratedField::SenderId),
+                            "originalRecipients" | "original_recipients" => {
+                                Ok(GeneratedField::OriginalRecipients)
+                            }
+                            "ciphertextDigest" | "ciphertext_digest" => {
+                                Ok(GeneratedField::CiphertextDigest)
+                            }
+                            "context" => Ok(GeneratedField::Context),
+                            "authoredAt" | "authored_at" => Ok(GeneratedField::AuthoredAt),
+                            "exactInner" | "exact_inner" => Ok(GeneratedField::ExactInner),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = OwnSentMessage;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.OwnSentMessage")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<OwnSentMessage, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut envelope_id__ = None;
+                let mut message_id__ = None;
+                let mut sender_id__ = None;
+                let mut original_recipients__ = None;
+                let mut ciphertext_digest__ = None;
+                let mut context__ = None;
+                let mut authored_at__ = None;
+                let mut exact_inner__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::EnvelopeId => {
+                            if envelope_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("envelopeId"));
+                            }
+                            envelope_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::MessageId => {
+                            if message_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("messageId"));
+                            }
+                            message_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::SenderId => {
+                            if sender_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("senderId"));
+                            }
+                            sender_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::OriginalRecipients => {
+                            if original_recipients__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "originalRecipients",
+                                ));
+                            }
+                            original_recipients__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::CiphertextDigest => {
+                            if ciphertext_digest__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ciphertextDigest"));
+                            }
+                            ciphertext_digest__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::BytesDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::Context => {
+                            if context__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("context"));
+                            }
+                            context__ = map_.next_value()?;
+                        }
+                        GeneratedField::AuthoredAt => {
+                            if authored_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("authoredAt"));
+                            }
+                            authored_at__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::ExactInner => {
+                            if exact_inner__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("exactInner"));
+                            }
+                            exact_inner__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(OwnSentMessage {
+                    envelope_id: envelope_id__.unwrap_or_default(),
+                    message_id: message_id__.unwrap_or_default(),
+                    sender_id: sender_id__.unwrap_or_default(),
+                    original_recipients: original_recipients__.unwrap_or_default(),
+                    ciphertext_digest: ciphertext_digest__,
+                    context: context__,
+                    authored_at: authored_at__,
+                    exact_inner: exact_inner__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.OwnSentMessage",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

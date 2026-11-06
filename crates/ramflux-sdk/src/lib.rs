@@ -3,6 +3,10 @@
 
 //! Rust core SDK facade and stable C-ABI boundary substrate.
 
+/// Dormant generated message schema and local request/update types.
+pub use ramflux_protocol::message;
+pub use ramflux_protocol::message::{MessageRequest, MessageUpdate};
+
 pub mod backup;
 #[cfg(all(feature = "itest-memory-vault", not(any(test, ramflux_itest))))]
 compile_error!(

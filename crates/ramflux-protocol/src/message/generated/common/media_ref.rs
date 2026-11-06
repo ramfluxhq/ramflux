@@ -1,0 +1,258 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MediaRef {
+    #[prost(string, tag = "1")]
+    pub object_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub manifest_digest: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub mime_type: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "4")]
+    pub size: u64,
+    #[prost(message, repeated, tag = "5")]
+    pub key_slots: ::prost::alloc::vec::Vec<MediaKeySlot>,
+    #[prost(string, optional, tag = "6")]
+    pub file_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "7")]
+    pub inline_thumbnail: ::core::option::Option<Thumbnail>,
+    #[prost(message, optional, tag = "8")]
+    pub large_manifest: ::core::option::Option<MediaManifest>,
+}
+impl serde::Serialize for MediaRef {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.object_id.is_empty() {
+            len += 1;
+        }
+        if !self.manifest_digest.is_empty() {
+            len += 1;
+        }
+        if !self.mime_type.is_empty() {
+            len += 1;
+        }
+        if self.size != 0 {
+            len += 1;
+        }
+        if !self.key_slots.is_empty() {
+            len += 1;
+        }
+        if self.file_name.is_some() {
+            len += 1;
+        }
+        if self.inline_thumbnail.is_some() {
+            len += 1;
+        }
+        if self.large_manifest.is_some() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.MediaRef", len)?;
+        if !self.object_id.is_empty() {
+            struct_ser.serialize_field("objectId", &self.object_id)?;
+        }
+        if !self.manifest_digest.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "manifestDigest",
+                pbjson::private::base64::encode(&self.manifest_digest).as_str(),
+            )?;
+        }
+        if !self.mime_type.is_empty() {
+            struct_ser.serialize_field("mimeType", &self.mime_type)?;
+        }
+        if self.size != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("size", ToString::to_string(&self.size).as_str())?;
+        }
+        if !self.key_slots.is_empty() {
+            struct_ser.serialize_field("keySlots", &self.key_slots)?;
+        }
+        if let Some(v) = self.file_name.as_ref() {
+            struct_ser.serialize_field("fileName", v)?;
+        }
+        if let Some(v) = self.inline_thumbnail.as_ref() {
+            struct_ser.serialize_field("inlineThumbnail", v)?;
+        }
+        if let Some(v) = self.large_manifest.as_ref() {
+            struct_ser.serialize_field("largeManifest", v)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for MediaRef {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "object_id",
+            "objectId",
+            "manifest_digest",
+            "manifestDigest",
+            "mime_type",
+            "mimeType",
+            "size",
+            "key_slots",
+            "keySlots",
+            "file_name",
+            "fileName",
+            "inline_thumbnail",
+            "inlineThumbnail",
+            "large_manifest",
+            "largeManifest",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            ObjectId,
+            ManifestDigest,
+            MimeType,
+            Size,
+            KeySlots,
+            FileName,
+            InlineThumbnail,
+            LargeManifest,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "objectId" | "object_id" => Ok(GeneratedField::ObjectId),
+                            "manifestDigest" | "manifest_digest" => {
+                                Ok(GeneratedField::ManifestDigest)
+                            }
+                            "mimeType" | "mime_type" => Ok(GeneratedField::MimeType),
+                            "size" => Ok(GeneratedField::Size),
+                            "keySlots" | "key_slots" => Ok(GeneratedField::KeySlots),
+                            "fileName" | "file_name" => Ok(GeneratedField::FileName),
+                            "inlineThumbnail" | "inline_thumbnail" => {
+                                Ok(GeneratedField::InlineThumbnail)
+                            }
+                            "largeManifest" | "large_manifest" => Ok(GeneratedField::LargeManifest),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = MediaRef;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.MediaRef")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<MediaRef, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut object_id__ = None;
+                let mut manifest_digest__ = None;
+                let mut mime_type__ = None;
+                let mut size__ = None;
+                let mut key_slots__ = None;
+                let mut file_name__ = None;
+                let mut inline_thumbnail__ = None;
+                let mut large_manifest__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::ObjectId => {
+                            if object_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("objectId"));
+                            }
+                            object_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ManifestDigest => {
+                            if manifest_digest__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("manifestDigest"));
+                            }
+                            manifest_digest__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::MimeType => {
+                            if mime_type__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("mimeType"));
+                            }
+                            mime_type__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Size => {
+                            if size__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("size"));
+                            }
+                            size__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::KeySlots => {
+                            if key_slots__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("keySlots"));
+                            }
+                            key_slots__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::FileName => {
+                            if file_name__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("fileName"));
+                            }
+                            file_name__ = map_.next_value()?;
+                        }
+                        GeneratedField::InlineThumbnail => {
+                            if inline_thumbnail__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("inlineThumbnail"));
+                            }
+                            inline_thumbnail__ = map_.next_value()?;
+                        }
+                        GeneratedField::LargeManifest => {
+                            if large_manifest__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("largeManifest"));
+                            }
+                            large_manifest__ = map_.next_value()?;
+                        }
+                    }
+                }
+                Ok(MediaRef {
+                    object_id: object_id__.unwrap_or_default(),
+                    manifest_digest: manifest_digest__.unwrap_or_default(),
+                    mime_type: mime_type__.unwrap_or_default(),
+                    size: size__.unwrap_or_default(),
+                    key_slots: key_slots__.unwrap_or_default(),
+                    file_name: file_name__,
+                    inline_thumbnail: inline_thumbnail__,
+                    large_manifest: large_manifest__,
+                })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.MediaRef", FIELDS, GeneratedVisitor)
+    }
+}

@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ObjectRevokeAccess {
+    #[prost(string, tag = "1")]
+    pub object_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub recipient_principal_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub link_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub effective_at: i64,
+}
+impl serde::Serialize for ObjectRevokeAccess {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.object_id.is_empty() {
+            len += 1;
+        }
+        if !self.recipient_principal_id.is_empty() {
+            len += 1;
+        }
+        if !self.link_id.is_empty() {
+            len += 1;
+        }
+        if !self.reason.is_empty() {
+            len += 1;
+        }
+        if self.effective_at != 0 {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.ObjectRevokeAccess", len)?;
+        if !self.object_id.is_empty() {
+            struct_ser.serialize_field("objectId", &self.object_id)?;
+        }
+        if !self.recipient_principal_id.is_empty() {
+            struct_ser.serialize_field("recipientPrincipalId", &self.recipient_principal_id)?;
+        }
+        if !self.link_id.is_empty() {
+            struct_ser.serialize_field("linkId", &self.link_id)?;
+        }
+        if !self.reason.is_empty() {
+            struct_ser.serialize_field("reason", &self.reason)?;
+        }
+        if self.effective_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("effectiveAt", ToString::to_string(&self.effective_at).as_str())?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for ObjectRevokeAccess {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "object_id",
+            "objectId",
+            "recipient_principal_id",
+            "recipientPrincipalId",
+            "link_id",
+            "linkId",
+            "reason",
+            "effective_at",
+            "effectiveAt",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            ObjectId,
+            RecipientPrincipalId,
+            LinkId,
+            Reason,
+            EffectiveAt,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "objectId" | "object_id" => Ok(GeneratedField::ObjectId),
+                            "recipientPrincipalId" | "recipient_principal_id" => {
+                                Ok(GeneratedField::RecipientPrincipalId)
+                            }
+                            "linkId" | "link_id" => Ok(GeneratedField::LinkId),
+                            "reason" => Ok(GeneratedField::Reason),
+                            "effectiveAt" | "effective_at" => Ok(GeneratedField::EffectiveAt),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = ObjectRevokeAccess;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.ObjectRevokeAccess")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<ObjectRevokeAccess, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut object_id__ = None;
+                let mut recipient_principal_id__ = None;
+                let mut link_id__ = None;
+                let mut reason__ = None;
+                let mut effective_at__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::ObjectId => {
+                            if object_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("objectId"));
+                            }
+                            object_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::RecipientPrincipalId => {
+                            if recipient_principal_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "recipientPrincipalId",
+                                ));
+                            }
+                            recipient_principal_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::LinkId => {
+                            if link_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("linkId"));
+                            }
+                            link_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Reason => {
+                            if reason__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("reason"));
+                            }
+                            reason__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::EffectiveAt => {
+                            if effective_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("effectiveAt"));
+                            }
+                            effective_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(ObjectRevokeAccess {
+                    object_id: object_id__.unwrap_or_default(),
+                    recipient_principal_id: recipient_principal_id__.unwrap_or_default(),
+                    link_id: link_id__.unwrap_or_default(),
+                    reason: reason__.unwrap_or_default(),
+                    effective_at: effective_at__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.ObjectRevokeAccess",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

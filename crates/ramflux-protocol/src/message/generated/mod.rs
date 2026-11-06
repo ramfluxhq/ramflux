@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Generated schema types grouped by responsibility.
+
+#[path = "api/mod.rs"]
+pub mod api_types;
+pub use api_types::*;
+#[path = "common/mod.rs"]
+pub mod common_types;
+pub use common_types::*;
+#[path = "content/mod.rs"]
+pub mod content_types;
+pub use content_types::*;
+#[path = "controls/mod.rs"]
+pub mod controls_types;
+pub use controls_types::*;
+#[path = "state/mod.rs"]
+pub mod state_types;
+pub use state_types::*;

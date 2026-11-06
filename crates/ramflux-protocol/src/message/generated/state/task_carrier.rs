@@ -1,0 +1,244 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskCarrier {
+    #[prost(string, tag = "1")]
+    pub content_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub conversation_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub message_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub principal_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub device_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "6")]
+    pub event: ::core::option::Option<TaskEvent>,
+    #[prost(string, tag = "7")]
+    pub signature: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "8")]
+    pub decision_proof: ::core::option::Option<TaskCertificate>,
+}
+impl serde::Serialize for TaskCarrier {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.content_type.is_empty() {
+            len += 1;
+        }
+        if !self.conversation_id.is_empty() {
+            len += 1;
+        }
+        if !self.message_id.is_empty() {
+            len += 1;
+        }
+        if !self.principal_id.is_empty() {
+            len += 1;
+        }
+        if !self.device_id.is_empty() {
+            len += 1;
+        }
+        if self.event.is_some() {
+            len += 1;
+        }
+        if !self.signature.is_empty() {
+            len += 1;
+        }
+        if self.decision_proof.is_some() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.TaskCarrier", len)?;
+        if !self.content_type.is_empty() {
+            struct_ser.serialize_field("contentType", &self.content_type)?;
+        }
+        if !self.conversation_id.is_empty() {
+            struct_ser.serialize_field("conversationId", &self.conversation_id)?;
+        }
+        if !self.message_id.is_empty() {
+            struct_ser.serialize_field("messageId", &self.message_id)?;
+        }
+        if !self.principal_id.is_empty() {
+            struct_ser.serialize_field("principalId", &self.principal_id)?;
+        }
+        if !self.device_id.is_empty() {
+            struct_ser.serialize_field("deviceId", &self.device_id)?;
+        }
+        if let Some(v) = self.event.as_ref() {
+            struct_ser.serialize_field("event", v)?;
+        }
+        if !self.signature.is_empty() {
+            struct_ser.serialize_field("signature", &self.signature)?;
+        }
+        if let Some(v) = self.decision_proof.as_ref() {
+            struct_ser.serialize_field("decisionProof", v)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for TaskCarrier {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "content_type",
+            "contentType",
+            "conversation_id",
+            "conversationId",
+            "message_id",
+            "messageId",
+            "principal_id",
+            "principalId",
+            "device_id",
+            "deviceId",
+            "event",
+            "signature",
+            "decision_proof",
+            "decisionProof",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            ContentType,
+            ConversationId,
+            MessageId,
+            PrincipalId,
+            DeviceId,
+            Event,
+            Signature,
+            DecisionProof,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "contentType" | "content_type" => Ok(GeneratedField::ContentType),
+                            "conversationId" | "conversation_id" => {
+                                Ok(GeneratedField::ConversationId)
+                            }
+                            "messageId" | "message_id" => Ok(GeneratedField::MessageId),
+                            "principalId" | "principal_id" => Ok(GeneratedField::PrincipalId),
+                            "deviceId" | "device_id" => Ok(GeneratedField::DeviceId),
+                            "event" => Ok(GeneratedField::Event),
+                            "signature" => Ok(GeneratedField::Signature),
+                            "decisionProof" | "decision_proof" => Ok(GeneratedField::DecisionProof),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = TaskCarrier;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.TaskCarrier")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<TaskCarrier, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut content_type__ = None;
+                let mut conversation_id__ = None;
+                let mut message_id__ = None;
+                let mut principal_id__ = None;
+                let mut device_id__ = None;
+                let mut event__ = None;
+                let mut signature__ = None;
+                let mut decision_proof__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::ContentType => {
+                            if content_type__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("contentType"));
+                            }
+                            content_type__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ConversationId => {
+                            if conversation_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("conversationId"));
+                            }
+                            conversation_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::MessageId => {
+                            if message_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("messageId"));
+                            }
+                            message_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::PrincipalId => {
+                            if principal_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("principalId"));
+                            }
+                            principal_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::DeviceId => {
+                            if device_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("deviceId"));
+                            }
+                            device_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Event => {
+                            if event__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("event"));
+                            }
+                            event__ = map_.next_value()?;
+                        }
+                        GeneratedField::Signature => {
+                            if signature__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("signature"));
+                            }
+                            signature__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::DecisionProof => {
+                            if decision_proof__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("decisionProof"));
+                            }
+                            decision_proof__ = map_.next_value()?;
+                        }
+                    }
+                }
+                Ok(TaskCarrier {
+                    content_type: content_type__.unwrap_or_default(),
+                    conversation_id: conversation_id__.unwrap_or_default(),
+                    message_id: message_id__.unwrap_or_default(),
+                    principal_id: principal_id__.unwrap_or_default(),
+                    device_id: device_id__.unwrap_or_default(),
+                    event: event__,
+                    signature: signature__.unwrap_or_default(),
+                    decision_proof: decision_proof__,
+                })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.TaskCarrier", FIELDS, GeneratedVisitor)
+    }
+}

@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskStatus {
+    #[prost(oneof = "task_status::Value", tags = "1, 2, 3, 4, 5, 6")]
+    pub value: ::core::option::Option<task_status::Value>,
+}
+/// Nested message and enum types in `TaskStatus`.
+pub mod task_status {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Value {
+        #[prost(message, tag = "1")]
+        Proposed(super::TaskStatusProposed),
+        #[prost(message, tag = "2")]
+        Running(super::TaskStatusRunning),
+        #[prost(message, tag = "3")]
+        NeedsMe(super::TaskStatusNeedsMe),
+        #[prost(message, tag = "4")]
+        Done(super::TaskStatusDone),
+        #[prost(message, tag = "5")]
+        Failed(super::TaskStatusFailed),
+        #[prost(message, tag = "6")]
+        Cancelled(super::TaskStatusCancelled),
+    }
+}
+impl serde::Serialize for TaskStatus {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.value.is_some() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.TaskStatus", len)?;
+        if let Some(v) = self.value.as_ref() {
+            match v {
+                task_status::Value::Proposed(v) => {
+                    struct_ser.serialize_field("proposed", v)?;
+                }
+                task_status::Value::Running(v) => {
+                    struct_ser.serialize_field("running", v)?;
+                }
+                task_status::Value::NeedsMe(v) => {
+                    struct_ser.serialize_field("needsMe", v)?;
+                }
+                task_status::Value::Done(v) => {
+                    struct_ser.serialize_field("done", v)?;
+                }
+                task_status::Value::Failed(v) => {
+                    struct_ser.serialize_field("failed", v)?;
+                }
+                task_status::Value::Cancelled(v) => {
+                    struct_ser.serialize_field("cancelled", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for TaskStatus {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] =
+            &["proposed", "running", "needs_me", "needsMe", "done", "failed", "cancelled"];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Proposed,
+            Running,
+            NeedsMe,
+            Done,
+            Failed,
+            Cancelled,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "proposed" => Ok(GeneratedField::Proposed),
+                            "running" => Ok(GeneratedField::Running),
+                            "needsMe" | "needs_me" => Ok(GeneratedField::NeedsMe),
+                            "done" => Ok(GeneratedField::Done),
+                            "failed" => Ok(GeneratedField::Failed),
+                            "cancelled" => Ok(GeneratedField::Cancelled),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = TaskStatus;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.TaskStatus")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<TaskStatus, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut value__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Proposed => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("proposed"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(task_status::Value::Proposed);
+                        }
+                        GeneratedField::Running => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("running"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(task_status::Value::Running);
+                        }
+                        GeneratedField::NeedsMe => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("needsMe"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(task_status::Value::NeedsMe);
+                        }
+                        GeneratedField::Done => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("done"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(task_status::Value::Done);
+                        }
+                        GeneratedField::Failed => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("failed"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(task_status::Value::Failed);
+                        }
+                        GeneratedField::Cancelled => {
+                            if value__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("cancelled"));
+                            }
+                            value__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(task_status::Value::Cancelled);
+                        }
+                    }
+                }
+                Ok(TaskStatus { value: value__ })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.TaskStatus", FIELDS, GeneratedVisitor)
+    }
+}

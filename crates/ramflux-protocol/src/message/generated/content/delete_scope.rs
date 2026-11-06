@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DeleteScope {
+    Unspecified = 0,
+    Local = 1,
+    Everyone = 2,
+}
+impl DeleteScope {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DELETE_SCOPE_UNSPECIFIED",
+            Self::Local => "DELETE_SCOPE_LOCAL",
+            Self::Everyone => "DELETE_SCOPE_EVERYONE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DELETE_SCOPE_UNSPECIFIED" => Some(Self::Unspecified),
+            "DELETE_SCOPE_LOCAL" => Some(Self::Local),
+            "DELETE_SCOPE_EVERYONE" => Some(Self::Everyone),
+            _ => None,
+        }
+    }
+}
+impl serde::Serialize for DeleteScope {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let variant = match self {
+            Self::Unspecified => "DELETE_SCOPE_UNSPECIFIED",
+            Self::Local => "DELETE_SCOPE_LOCAL",
+            Self::Everyone => "DELETE_SCOPE_EVERYONE",
+        };
+        serializer.serialize_str(variant)
+    }
+}
+impl<'de> serde::Deserialize<'de> for DeleteScope {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] =
+            &["DELETE_SCOPE_UNSPECIFIED", "DELETE_SCOPE_LOCAL", "DELETE_SCOPE_EVERYONE"];
+        struct GeneratedVisitor;
+        impl serde::de::Visitor<'_> for GeneratedVisitor {
+            type Value = DeleteScope;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "expected one of: {:?}", &FIELDS)
+            }
+            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(v).ok().and_then(|x| x.try_into().ok()).ok_or_else(|| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Signed(v), &self)
+                })
+            }
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(v).ok().and_then(|x| x.try_into().ok()).ok_or_else(|| {
+                    serde::de::Error::invalid_value(serde::de::Unexpected::Unsigned(v), &self)
+                })
+            }
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "DELETE_SCOPE_UNSPECIFIED" => Ok(DeleteScope::Unspecified),
+                    "DELETE_SCOPE_LOCAL" => Ok(DeleteScope::Local),
+                    "DELETE_SCOPE_EVERYONE" => Ok(DeleteScope::Everyone),
+                    _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
+                }
+            }
+        }
+        deserializer.deserialize_any(GeneratedVisitor)
+    }
+}

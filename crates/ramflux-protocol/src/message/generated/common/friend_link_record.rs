@@ -1,0 +1,239 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FriendLinkRecord {
+    #[prost(string, tag = "1")]
+    pub link_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub requester_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub target_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub state: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "5")]
+    pub remove_scope: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, tag = "6")]
+    pub blocked: bool,
+    #[prost(int64, optional, tag = "7")]
+    pub capability_revoked_at: ::core::option::Option<i64>,
+}
+impl serde::Serialize for FriendLinkRecord {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.link_id.is_empty() {
+            len += 1;
+        }
+        if !self.requester_id.is_empty() {
+            len += 1;
+        }
+        if !self.target_id.is_empty() {
+            len += 1;
+        }
+        if !self.state.is_empty() {
+            len += 1;
+        }
+        if self.remove_scope.is_some() {
+            len += 1;
+        }
+        if self.blocked {
+            len += 1;
+        }
+        if self.capability_revoked_at.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.FriendLinkRecord", len)?;
+        if !self.link_id.is_empty() {
+            struct_ser.serialize_field("linkId", &self.link_id)?;
+        }
+        if !self.requester_id.is_empty() {
+            struct_ser.serialize_field("requesterId", &self.requester_id)?;
+        }
+        if !self.target_id.is_empty() {
+            struct_ser.serialize_field("targetId", &self.target_id)?;
+        }
+        if !self.state.is_empty() {
+            struct_ser.serialize_field("state", &self.state)?;
+        }
+        if let Some(v) = self.remove_scope.as_ref() {
+            struct_ser.serialize_field("removeScope", v)?;
+        }
+        if self.blocked {
+            struct_ser.serialize_field("blocked", &self.blocked)?;
+        }
+        if let Some(v) = self.capability_revoked_at.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("capabilityRevokedAt", ToString::to_string(&v).as_str())?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for FriendLinkRecord {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "link_id",
+            "linkId",
+            "requester_id",
+            "requesterId",
+            "target_id",
+            "targetId",
+            "state",
+            "remove_scope",
+            "removeScope",
+            "blocked",
+            "capability_revoked_at",
+            "capabilityRevokedAt",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            LinkId,
+            RequesterId,
+            TargetId,
+            State,
+            RemoveScope,
+            Blocked,
+            CapabilityRevokedAt,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "linkId" | "link_id" => Ok(GeneratedField::LinkId),
+                            "requesterId" | "requester_id" => Ok(GeneratedField::RequesterId),
+                            "targetId" | "target_id" => Ok(GeneratedField::TargetId),
+                            "state" => Ok(GeneratedField::State),
+                            "removeScope" | "remove_scope" => Ok(GeneratedField::RemoveScope),
+                            "blocked" => Ok(GeneratedField::Blocked),
+                            "capabilityRevokedAt" | "capability_revoked_at" => {
+                                Ok(GeneratedField::CapabilityRevokedAt)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = FriendLinkRecord;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.FriendLinkRecord")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<FriendLinkRecord, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut link_id__ = None;
+                let mut requester_id__ = None;
+                let mut target_id__ = None;
+                let mut state__ = None;
+                let mut remove_scope__ = None;
+                let mut blocked__ = None;
+                let mut capability_revoked_at__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::LinkId => {
+                            if link_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("linkId"));
+                            }
+                            link_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::RequesterId => {
+                            if requester_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("requesterId"));
+                            }
+                            requester_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::TargetId => {
+                            if target_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("targetId"));
+                            }
+                            target_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::State => {
+                            if state__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("state"));
+                            }
+                            state__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::RemoveScope => {
+                            if remove_scope__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("removeScope"));
+                            }
+                            remove_scope__ = map_.next_value()?;
+                        }
+                        GeneratedField::Blocked => {
+                            if blocked__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("blocked"));
+                            }
+                            blocked__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::CapabilityRevokedAt => {
+                            if capability_revoked_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "capabilityRevokedAt",
+                                ));
+                            }
+                            capability_revoked_at__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                    }
+                }
+                Ok(FriendLinkRecord {
+                    link_id: link_id__.unwrap_or_default(),
+                    requester_id: requester_id__.unwrap_or_default(),
+                    target_id: target_id__.unwrap_or_default(),
+                    state: state__.unwrap_or_default(),
+                    remove_scope: remove_scope__,
+                    blocked: blocked__.unwrap_or_default(),
+                    capability_revoked_at: capability_revoked_at__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.FriendLinkRecord",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

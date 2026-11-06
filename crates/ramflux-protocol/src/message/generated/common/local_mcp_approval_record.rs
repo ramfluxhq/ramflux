@@ -1,0 +1,296 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LocalMcpApprovalRecord {
+    #[prost(string, tag = "1")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub server_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub tool_name: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub capability: ::core::option::Option<McpCapability>,
+    #[prost(message, optional, tag = "5")]
+    pub risk_level: ::core::option::Option<RiskLevel>,
+    #[prost(string, optional, tag = "6")]
+    pub tool_scope: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "7")]
+    pub confirmation_mode: ::prost::alloc::string::String,
+    #[prost(int64, tag = "8")]
+    pub expires_at: i64,
+    #[prost(string, tag = "9")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "10")]
+    pub details: ::core::option::Option<JsonValue>,
+}
+impl serde::Serialize for LocalMcpApprovalRecord {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.approval_id.is_empty() {
+            len += 1;
+        }
+        if !self.server_id.is_empty() {
+            len += 1;
+        }
+        if !self.tool_name.is_empty() {
+            len += 1;
+        }
+        if self.capability.is_some() {
+            len += 1;
+        }
+        if self.risk_level.is_some() {
+            len += 1;
+        }
+        if self.tool_scope.is_some() {
+            len += 1;
+        }
+        if !self.confirmation_mode.is_empty() {
+            len += 1;
+        }
+        if self.expires_at != 0 {
+            len += 1;
+        }
+        if !self.status.is_empty() {
+            len += 1;
+        }
+        if self.details.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.LocalMcpApprovalRecord", len)?;
+        if !self.approval_id.is_empty() {
+            struct_ser.serialize_field("approvalId", &self.approval_id)?;
+        }
+        if !self.server_id.is_empty() {
+            struct_ser.serialize_field("serverId", &self.server_id)?;
+        }
+        if !self.tool_name.is_empty() {
+            struct_ser.serialize_field("toolName", &self.tool_name)?;
+        }
+        if let Some(v) = self.capability.as_ref() {
+            struct_ser.serialize_field("capability", v)?;
+        }
+        if let Some(v) = self.risk_level.as_ref() {
+            struct_ser.serialize_field("riskLevel", v)?;
+        }
+        if let Some(v) = self.tool_scope.as_ref() {
+            struct_ser.serialize_field("toolScope", v)?;
+        }
+        if !self.confirmation_mode.is_empty() {
+            struct_ser.serialize_field("confirmationMode", &self.confirmation_mode)?;
+        }
+        if self.expires_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("expiresAt", ToString::to_string(&self.expires_at).as_str())?;
+        }
+        if !self.status.is_empty() {
+            struct_ser.serialize_field("status", &self.status)?;
+        }
+        if let Some(v) = self.details.as_ref() {
+            struct_ser.serialize_field("details", v)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for LocalMcpApprovalRecord {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "approval_id",
+            "approvalId",
+            "server_id",
+            "serverId",
+            "tool_name",
+            "toolName",
+            "capability",
+            "risk_level",
+            "riskLevel",
+            "tool_scope",
+            "toolScope",
+            "confirmation_mode",
+            "confirmationMode",
+            "expires_at",
+            "expiresAt",
+            "status",
+            "details",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            ApprovalId,
+            ServerId,
+            ToolName,
+            Capability,
+            RiskLevel,
+            ToolScope,
+            ConfirmationMode,
+            ExpiresAt,
+            Status,
+            Details,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "approvalId" | "approval_id" => Ok(GeneratedField::ApprovalId),
+                            "serverId" | "server_id" => Ok(GeneratedField::ServerId),
+                            "toolName" | "tool_name" => Ok(GeneratedField::ToolName),
+                            "capability" => Ok(GeneratedField::Capability),
+                            "riskLevel" | "risk_level" => Ok(GeneratedField::RiskLevel),
+                            "toolScope" | "tool_scope" => Ok(GeneratedField::ToolScope),
+                            "confirmationMode" | "confirmation_mode" => {
+                                Ok(GeneratedField::ConfirmationMode)
+                            }
+                            "expiresAt" | "expires_at" => Ok(GeneratedField::ExpiresAt),
+                            "status" => Ok(GeneratedField::Status),
+                            "details" => Ok(GeneratedField::Details),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = LocalMcpApprovalRecord;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.LocalMcpApprovalRecord")
+            }
+            fn visit_map<V>(
+                self,
+                mut map_: V,
+            ) -> std::result::Result<LocalMcpApprovalRecord, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut approval_id__ = None;
+                let mut server_id__ = None;
+                let mut tool_name__ = None;
+                let mut capability__ = None;
+                let mut risk_level__ = None;
+                let mut tool_scope__ = None;
+                let mut confirmation_mode__ = None;
+                let mut expires_at__ = None;
+                let mut status__ = None;
+                let mut details__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::ApprovalId => {
+                            if approval_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("approvalId"));
+                            }
+                            approval_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ServerId => {
+                            if server_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("serverId"));
+                            }
+                            server_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ToolName => {
+                            if tool_name__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("toolName"));
+                            }
+                            tool_name__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Capability => {
+                            if capability__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("capability"));
+                            }
+                            capability__ = map_.next_value()?;
+                        }
+                        GeneratedField::RiskLevel => {
+                            if risk_level__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("riskLevel"));
+                            }
+                            risk_level__ = map_.next_value()?;
+                        }
+                        GeneratedField::ToolScope => {
+                            if tool_scope__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("toolScope"));
+                            }
+                            tool_scope__ = map_.next_value()?;
+                        }
+                        GeneratedField::ConfirmationMode => {
+                            if confirmation_mode__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("confirmationMode"));
+                            }
+                            confirmation_mode__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ExpiresAt => {
+                            if expires_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("expiresAt"));
+                            }
+                            expires_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Status => {
+                            if status__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("status"));
+                            }
+                            status__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Details => {
+                            if details__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("details"));
+                            }
+                            details__ = map_.next_value()?;
+                        }
+                    }
+                }
+                Ok(LocalMcpApprovalRecord {
+                    approval_id: approval_id__.unwrap_or_default(),
+                    server_id: server_id__.unwrap_or_default(),
+                    tool_name: tool_name__.unwrap_or_default(),
+                    capability: capability__,
+                    risk_level: risk_level__,
+                    tool_scope: tool_scope__,
+                    confirmation_mode: confirmation_mode__.unwrap_or_default(),
+                    expires_at: expires_at__.unwrap_or_default(),
+                    status: status__.unwrap_or_default(),
+                    details: details__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.LocalMcpApprovalRecord",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

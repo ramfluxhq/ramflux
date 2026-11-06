@@ -1,7 +1,28 @@
 [workspace]
 resolver = "3"
 exclude = ["vendor/*"]
+# Regeneration is explicit; ordinary workspace builds keep the product-only graph.
+default-members = [
+    "crates/ramflux-core",
+    "crates/ramflux-protocol",
+    "crates/ramflux-crypto",
+    "crates/ramflux-storage",
+    "crates/ramflux-transport",
+    "crates/ramflux-sync",
+    "crates/ramflux-sdk",
+    "crates/ramflux-node-core",
+    "apps/rf",
+    "apps/ramflux-agent-host",
+    "apps/ramflux-gateway",
+    "apps/ramflux-router",
+    "apps/ramflux-notify",
+    "apps/ramflux-federation",
+    "apps/ramflux-relay",
+    "apps/ramflux-signaling",
+    "apps/ramflux-retention",
+]
 members = [
+    "tools/message-schema",
     "crates/ramflux-core",
     "crates/ramflux-protocol",
     "crates/ramflux-crypto",

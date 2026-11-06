@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskCertificate {
+    #[prost(string, tag = "1")]
+    pub conversation_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub resolution: ::core::option::Option<TaskResolve>,
+    #[prost(string, tag = "3")]
+    pub assignee: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub issuer_device: ::prost::alloc::string::String,
+    #[prost(int64, tag = "5")]
+    pub issued_at: i64,
+    #[prost(message, optional, tag = "6")]
+    pub phase: ::core::option::Option<TaskCertificatePhase>,
+    #[prost(uint64, optional, tag = "7")]
+    pub committed_version: ::core::option::Option<u64>,
+    #[prost(string, optional, tag = "8")]
+    pub carrier_hash: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, tag = "9")]
+    pub decision_key: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub evidence_hash: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub signature: ::prost::alloc::string::String,
+}
+impl serde::Serialize for TaskCertificate {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.conversation_id.is_empty() {
+            len += 1;
+        }
+        if self.resolution.is_some() {
+            len += 1;
+        }
+        if !self.assignee.is_empty() {
+            len += 1;
+        }
+        if !self.issuer_device.is_empty() {
+            len += 1;
+        }
+        if self.issued_at != 0 {
+            len += 1;
+        }
+        if self.phase.is_some() {
+            len += 1;
+        }
+        if self.committed_version.is_some() {
+            len += 1;
+        }
+        if self.carrier_hash.is_some() {
+            len += 1;
+        }
+        if !self.decision_key.is_empty() {
+            len += 1;
+        }
+        if !self.evidence_hash.is_empty() {
+            len += 1;
+        }
+        if !self.signature.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.TaskCertificate", len)?;
+        if !self.conversation_id.is_empty() {
+            struct_ser.serialize_field("conversationId", &self.conversation_id)?;
+        }
+        if let Some(v) = self.resolution.as_ref() {
+            struct_ser.serialize_field("resolution", v)?;
+        }
+        if !self.assignee.is_empty() {
+            struct_ser.serialize_field("assignee", &self.assignee)?;
+        }
+        if !self.issuer_device.is_empty() {
+            struct_ser.serialize_field("issuerDevice", &self.issuer_device)?;
+        }
+        if self.issued_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("issuedAt", ToString::to_string(&self.issued_at).as_str())?;
+        }
+        if let Some(v) = self.phase.as_ref() {
+            struct_ser.serialize_field("phase", v)?;
+        }
+        if let Some(v) = self.committed_version.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("committedVersion", ToString::to_string(&v).as_str())?;
+        }
+        if let Some(v) = self.carrier_hash.as_ref() {
+            struct_ser.serialize_field("carrierHash", v)?;
+        }
+        if !self.decision_key.is_empty() {
+            struct_ser.serialize_field("decisionKey", &self.decision_key)?;
+        }
+        if !self.evidence_hash.is_empty() {
+            struct_ser.serialize_field("evidenceHash", &self.evidence_hash)?;
+        }
+        if !self.signature.is_empty() {
+            struct_ser.serialize_field("signature", &self.signature)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for TaskCertificate {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "conversation_id",
+            "conversationId",
+            "resolution",
+            "assignee",
+            "issuer_device",
+            "issuerDevice",
+            "issued_at",
+            "issuedAt",
+            "phase",
+            "committed_version",
+            "committedVersion",
+            "carrier_hash",
+            "carrierHash",
+            "decision_key",
+            "decisionKey",
+            "evidence_hash",
+            "evidenceHash",
+            "signature",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            ConversationId,
+            Resolution,
+            Assignee,
+            IssuerDevice,
+            IssuedAt,
+            Phase,
+            CommittedVersion,
+            CarrierHash,
+            DecisionKey,
+            EvidenceHash,
+            Signature,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "conversationId" | "conversation_id" => {
+                                Ok(GeneratedField::ConversationId)
+                            }
+                            "resolution" => Ok(GeneratedField::Resolution),
+                            "assignee" => Ok(GeneratedField::Assignee),
+                            "issuerDevice" | "issuer_device" => Ok(GeneratedField::IssuerDevice),
+                            "issuedAt" | "issued_at" => Ok(GeneratedField::IssuedAt),
+                            "phase" => Ok(GeneratedField::Phase),
+                            "committedVersion" | "committed_version" => {
+                                Ok(GeneratedField::CommittedVersion)
+                            }
+                            "carrierHash" | "carrier_hash" => Ok(GeneratedField::CarrierHash),
+                            "decisionKey" | "decision_key" => Ok(GeneratedField::DecisionKey),
+                            "evidenceHash" | "evidence_hash" => Ok(GeneratedField::EvidenceHash),
+                            "signature" => Ok(GeneratedField::Signature),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = TaskCertificate;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.TaskCertificate")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<TaskCertificate, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut conversation_id__ = None;
+                let mut resolution__ = None;
+                let mut assignee__ = None;
+                let mut issuer_device__ = None;
+                let mut issued_at__ = None;
+                let mut phase__ = None;
+                let mut committed_version__ = None;
+                let mut carrier_hash__ = None;
+                let mut decision_key__ = None;
+                let mut evidence_hash__ = None;
+                let mut signature__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::ConversationId => {
+                            if conversation_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("conversationId"));
+                            }
+                            conversation_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Resolution => {
+                            if resolution__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("resolution"));
+                            }
+                            resolution__ = map_.next_value()?;
+                        }
+                        GeneratedField::Assignee => {
+                            if assignee__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("assignee"));
+                            }
+                            assignee__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::IssuerDevice => {
+                            if issuer_device__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("issuerDevice"));
+                            }
+                            issuer_device__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::IssuedAt => {
+                            if issued_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("issuedAt"));
+                            }
+                            issued_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Phase => {
+                            if phase__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("phase"));
+                            }
+                            phase__ = map_.next_value()?;
+                        }
+                        GeneratedField::CommittedVersion => {
+                            if committed_version__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("committedVersion"));
+                            }
+                            committed_version__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::CarrierHash => {
+                            if carrier_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("carrierHash"));
+                            }
+                            carrier_hash__ = map_.next_value()?;
+                        }
+                        GeneratedField::DecisionKey => {
+                            if decision_key__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("decisionKey"));
+                            }
+                            decision_key__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::EvidenceHash => {
+                            if evidence_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("evidenceHash"));
+                            }
+                            evidence_hash__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Signature => {
+                            if signature__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("signature"));
+                            }
+                            signature__ = Some(map_.next_value()?);
+                        }
+                    }
+                }
+                Ok(TaskCertificate {
+                    conversation_id: conversation_id__.unwrap_or_default(),
+                    resolution: resolution__,
+                    assignee: assignee__.unwrap_or_default(),
+                    issuer_device: issuer_device__.unwrap_or_default(),
+                    issued_at: issued_at__.unwrap_or_default(),
+                    phase: phase__,
+                    committed_version: committed_version__,
+                    carrier_hash: carrier_hash__,
+                    decision_key: decision_key__.unwrap_or_default(),
+                    evidence_hash: evidence_hash__.unwrap_or_default(),
+                    signature: signature__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.TaskCertificate",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

@@ -1,0 +1,384 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[path = "call.rs"]
+mod call_types;
+pub use call_types::*;
+#[path = "call_action.rs"]
+mod call_action_types;
+pub use call_action_types::*;
+#[path = "call_action_ack.rs"]
+mod call_action_ack_types;
+pub use call_action_ack_types::*;
+#[path = "call_action_answer.rs"]
+mod call_action_answer_types;
+pub use call_action_answer_types::*;
+#[path = "call_action_answered_elsewhere.rs"]
+mod call_action_answered_elsewhere_types;
+pub use call_action_answered_elsewhere_types::*;
+#[path = "call_action_busy.rs"]
+mod call_action_busy_types;
+pub use call_action_busy_types::*;
+#[path = "call_action_failed.rs"]
+mod call_action_failed_types;
+pub use call_action_failed_types::*;
+#[path = "call_action_hangup.rs"]
+mod call_action_hangup_types;
+pub use call_action_hangup_types::*;
+#[path = "call_action_invite.rs"]
+mod call_action_invite_types;
+pub use call_action_invite_types::*;
+#[path = "call_action_ready.rs"]
+mod call_action_ready_types;
+pub use call_action_ready_types::*;
+#[path = "call_action_reject.rs"]
+mod call_action_reject_types;
+pub use call_action_reject_types::*;
+#[path = "call_action_rekey.rs"]
+mod call_action_rekey_types;
+pub use call_action_rekey_types::*;
+#[path = "call_action_rekey_ack.rs"]
+mod call_action_rekey_ack_types;
+pub use call_action_rekey_ack_types::*;
+#[path = "call_action_ringing.rs"]
+mod call_action_ringing_types;
+pub use call_action_ringing_types::*;
+#[path = "call_action_timeout.rs"]
+mod call_action_timeout_types;
+pub use call_action_timeout_types::*;
+#[path = "call_control.rs"]
+mod call_control_types;
+pub use call_control_types::*;
+#[path = "call_endpoint.rs"]
+mod call_endpoint_types;
+pub use call_endpoint_types::*;
+#[path = "create_surface_command.rs"]
+mod create_surface_command_types;
+pub use create_surface_command_types::*;
+#[path = "delete_surface_command.rs"]
+mod delete_surface_command_types;
+pub use delete_surface_command_types::*;
+#[path = "delete_surface_reason.rs"]
+mod delete_surface_reason_types;
+pub use delete_surface_reason_types::*;
+#[path = "delete_surface_reason_cancelled.rs"]
+mod delete_surface_reason_cancelled_types;
+pub use delete_surface_reason_cancelled_types::*;
+#[path = "delete_surface_reason_completed.rs"]
+mod delete_surface_reason_completed_types;
+pub use delete_surface_reason_completed_types::*;
+#[path = "delete_surface_reason_error.rs"]
+mod delete_surface_reason_error_types;
+pub use delete_surface_reason_error_types::*;
+#[path = "delete_surface_reason_expired.rs"]
+mod delete_surface_reason_expired_types;
+pub use delete_surface_reason_expired_types::*;
+#[path = "delete_surface_reason_replaced.rs"]
+mod delete_surface_reason_replaced_types;
+pub use delete_surface_reason_replaced_types::*;
+#[path = "needs_me.rs"]
+mod needs_me_types;
+pub use needs_me_types::*;
+#[path = "needs_me_approval.rs"]
+mod needs_me_approval_types;
+pub use needs_me_approval_types::*;
+#[path = "needs_me_choice.rs"]
+mod needs_me_choice_types;
+pub use needs_me_choice_types::*;
+#[path = "needs_me_input.rs"]
+mod needs_me_input_types;
+pub use needs_me_input_types::*;
+#[path = "owned_surface_checkpoint.rs"]
+mod owned_surface_checkpoint_types;
+pub use owned_surface_checkpoint_types::*;
+#[path = "patch_surface_command.rs"]
+mod patch_surface_command_types;
+pub use patch_surface_command_types::*;
+#[path = "self_sync.rs"]
+mod self_sync_types;
+pub use self_sync_types::*;
+#[path = "stored_surface.rs"]
+mod stored_surface_types;
+pub use stored_surface_types::*;
+#[path = "stream_append_command.rs"]
+mod stream_append_command_types;
+pub use stream_append_command_types::*;
+#[path = "surface.rs"]
+mod surface_types;
+pub use surface_types::*;
+#[path = "surface_action.rs"]
+mod surface_action_types;
+pub use surface_action_types::*;
+#[path = "surface_carrier.rs"]
+mod surface_carrier_types;
+pub use surface_carrier_types::*;
+#[path = "surface_checkpoint.rs"]
+mod surface_checkpoint_types;
+pub use surface_checkpoint_types::*;
+#[path = "surface_command.rs"]
+mod surface_command_types;
+pub use surface_command_types::*;
+#[path = "surface_command_create_surface.rs"]
+mod surface_command_create_surface_types;
+pub use surface_command_create_surface_types::*;
+#[path = "surface_command_delete_surface.rs"]
+mod surface_command_delete_surface_types;
+pub use surface_command_delete_surface_types::*;
+#[path = "surface_command_patch_surface.rs"]
+mod surface_command_patch_surface_types;
+pub use surface_command_patch_surface_types::*;
+#[path = "surface_command_stream_append.rs"]
+mod surface_command_stream_append_types;
+pub use surface_command_stream_append_types::*;
+#[path = "surface_command_update_components.rs"]
+mod surface_command_update_components_types;
+pub use surface_command_update_components_types::*;
+#[path = "surface_command_update_data_model.rs"]
+mod surface_command_update_data_model_types;
+pub use surface_command_update_data_model_types::*;
+#[path = "surface_control_kind.rs"]
+mod surface_control_kind_types;
+pub use surface_control_kind_types::*;
+#[path = "surface_control_kind_own.rs"]
+mod surface_control_kind_own_types;
+pub use surface_control_kind_own_types::*;
+#[path = "surface_control_kind_peer.rs"]
+mod surface_control_kind_peer_types;
+pub use surface_control_kind_peer_types::*;
+#[path = "surface_delivery.rs"]
+mod surface_delivery_types;
+pub use surface_delivery_types::*;
+#[path = "surface_event.rs"]
+mod surface_event_types;
+pub use surface_event_types::*;
+#[path = "surface_export_metadata.rs"]
+mod surface_export_metadata_types;
+pub use surface_export_metadata_types::*;
+#[path = "surface_final_entry.rs"]
+mod surface_final_entry_types;
+pub use surface_final_entry_types::*;
+#[path = "surface_history_export.rs"]
+mod surface_history_export_types;
+pub use surface_history_export_types::*;
+#[path = "surface_patch_op.rs"]
+mod surface_patch_op_types;
+pub use surface_patch_op_types::*;
+#[path = "surface_patch_op_insert_block.rs"]
+mod surface_patch_op_insert_block_types;
+pub use surface_patch_op_insert_block_types::*;
+#[path = "surface_patch_op_remove_block.rs"]
+mod surface_patch_op_remove_block_types;
+pub use surface_patch_op_remove_block_types::*;
+#[path = "surface_patch_op_replace_block.rs"]
+mod surface_patch_op_replace_block_types;
+pub use surface_patch_op_replace_block_types::*;
+#[path = "surface_patch_op_set_actions.rs"]
+mod surface_patch_op_set_actions_types;
+pub use surface_patch_op_set_actions_types::*;
+#[path = "surface_patch_op_set_fallback_text.rs"]
+mod surface_patch_op_set_fallback_text_types;
+pub use surface_patch_op_set_fallback_text_types::*;
+#[path = "surface_resync_metadata.rs"]
+mod surface_resync_metadata_types;
+pub use surface_resync_metadata_types::*;
+#[path = "surface_resync_request.rs"]
+mod surface_resync_request_types;
+pub use surface_resync_request_types::*;
+#[path = "surface_snapshot_proof.rs"]
+mod surface_snapshot_proof_types;
+pub use surface_snapshot_proof_types::*;
+#[path = "surface_task_binding.rs"]
+mod surface_task_binding_types;
+pub use surface_task_binding_types::*;
+#[path = "surface_type.rs"]
+mod surface_type_types;
+pub use surface_type_types::*;
+#[path = "surface_type_agent_result.rs"]
+mod surface_type_agent_result_types;
+pub use surface_type_agent_result_types::*;
+#[path = "surface_type_approval_card.rs"]
+mod surface_type_approval_card_types;
+pub use surface_type_approval_card_types::*;
+#[path = "surface_type_call_card.rs"]
+mod surface_type_call_card_types;
+pub use surface_type_call_card_types::*;
+#[path = "surface_type_file_preview.rs"]
+mod surface_type_file_preview_types;
+pub use surface_type_file_preview_types::*;
+#[path = "surface_type_form_card.rs"]
+mod surface_type_form_card_types;
+pub use surface_type_form_card_types::*;
+#[path = "surface_type_message_card.rs"]
+mod surface_type_message_card_types;
+pub use surface_type_message_card_types::*;
+#[path = "surface_type_notification_card.rs"]
+mod surface_type_notification_card_types;
+pub use surface_type_notification_card_types::*;
+#[path = "surface_type_status_panel.rs"]
+mod surface_type_status_panel_types;
+pub use surface_type_status_panel_types::*;
+#[path = "surface_type_task_card.rs"]
+mod surface_type_task_card_types;
+pub use surface_type_task_card_types::*;
+#[path = "task.rs"]
+mod task_types;
+pub use task_types::*;
+#[path = "task_accept.rs"]
+mod task_accept_types;
+pub use task_accept_types::*;
+#[path = "task_accepted_event.rs"]
+mod task_accepted_event_types;
+pub use task_accepted_event_types::*;
+#[path = "task_ack.rs"]
+mod task_ack_types;
+pub use task_ack_types::*;
+#[path = "task_approval_binding.rs"]
+mod task_approval_binding_types;
+pub use task_approval_binding_types::*;
+#[path = "task_approval_packet.rs"]
+mod task_approval_packet_types;
+pub use task_approval_packet_types::*;
+#[path = "task_approval_payload.rs"]
+mod task_approval_payload_types;
+pub use task_approval_payload_types::*;
+#[path = "task_approval_payload_decision.rs"]
+mod task_approval_payload_decision_types;
+pub use task_approval_payload_decision_types::*;
+#[path = "task_approval_payload_request.rs"]
+mod task_approval_payload_request_types;
+pub use task_approval_payload_request_types::*;
+#[path = "task_approval_request.rs"]
+mod task_approval_request_types;
+pub use task_approval_request_types::*;
+#[path = "task_cancel.rs"]
+mod task_cancel_types;
+pub use task_cancel_types::*;
+#[path = "task_carrier.rs"]
+mod task_carrier_types;
+pub use task_carrier_types::*;
+#[path = "task_certificate.rs"]
+mod task_certificate_types;
+pub use task_certificate_types::*;
+#[path = "task_certificate_phase.rs"]
+mod task_certificate_phase_types;
+pub use task_certificate_phase_types::*;
+#[path = "task_certificate_phase_committed.rs"]
+mod task_certificate_phase_committed_types;
+pub use task_certificate_phase_committed_types::*;
+#[path = "task_certificate_phase_reserved.rs"]
+mod task_certificate_phase_reserved_types;
+pub use task_certificate_phase_reserved_types::*;
+#[path = "task_control.rs"]
+mod task_control_types;
+pub use task_control_types::*;
+#[path = "task_control_ack.rs"]
+mod task_control_ack_types;
+pub use task_control_ack_types::*;
+#[path = "task_control_intent.rs"]
+mod task_control_intent_types;
+pub use task_control_intent_types::*;
+#[path = "task_decision.rs"]
+mod task_decision_types;
+pub use task_decision_types::*;
+#[path = "task_decision_deny.rs"]
+mod task_decision_deny_types;
+pub use task_decision_deny_types::*;
+#[path = "task_decision_resume.rs"]
+mod task_decision_resume_types;
+pub use task_decision_resume_types::*;
+#[path = "task_decline.rs"]
+mod task_decline_types;
+pub use task_decline_types::*;
+#[path = "task_event.rs"]
+mod task_event_types;
+pub use task_event_types::*;
+#[path = "task_event_body.rs"]
+mod task_event_body_types;
+pub use task_event_body_types::*;
+#[path = "task_event_body_accept.rs"]
+mod task_event_body_accept_types;
+pub use task_event_body_accept_types::*;
+#[path = "task_event_body_cancel.rs"]
+mod task_event_body_cancel_types;
+pub use task_event_body_cancel_types::*;
+#[path = "task_event_body_decline.rs"]
+mod task_event_body_decline_types;
+pub use task_event_body_decline_types::*;
+#[path = "task_event_body_proposal.rs"]
+mod task_event_body_proposal_types;
+pub use task_event_body_proposal_types::*;
+#[path = "task_event_body_resolve.rs"]
+mod task_event_body_resolve_types;
+pub use task_event_body_resolve_types::*;
+#[path = "task_event_body_start.rs"]
+mod task_event_body_start_types;
+pub use task_event_body_start_types::*;
+#[path = "task_event_body_update.rs"]
+mod task_event_body_update_types;
+pub use task_event_body_update_types::*;
+#[path = "task_export_metadata.rs"]
+mod task_export_metadata_types;
+pub use task_export_metadata_types::*;
+#[path = "task_history.rs"]
+mod task_history_types;
+pub use task_history_types::*;
+#[path = "task_history_export.rs"]
+mod task_history_export_types;
+pub use task_history_export_types::*;
+#[path = "task_membership.rs"]
+mod task_membership_types;
+pub use task_membership_types::*;
+#[path = "task_own_packet.rs"]
+mod task_own_packet_types;
+pub use task_own_packet_types::*;
+#[path = "task_proposal.rs"]
+mod task_proposal_types;
+pub use task_proposal_types::*;
+#[path = "task_resolve.rs"]
+mod task_resolve_types;
+pub use task_resolve_types::*;
+#[path = "task_start.rs"]
+mod task_start_types;
+pub use task_start_types::*;
+#[path = "task_status.rs"]
+mod task_status_types;
+pub use task_status_types::*;
+#[path = "task_status_cancelled.rs"]
+mod task_status_cancelled_types;
+pub use task_status_cancelled_types::*;
+#[path = "task_status_done.rs"]
+mod task_status_done_types;
+pub use task_status_done_types::*;
+#[path = "task_status_failed.rs"]
+mod task_status_failed_types;
+pub use task_status_failed_types::*;
+#[path = "task_status_needs_me.rs"]
+mod task_status_needs_me_types;
+pub use task_status_needs_me_types::*;
+#[path = "task_status_proposed.rs"]
+mod task_status_proposed_types;
+pub use task_status_proposed_types::*;
+#[path = "task_status_running.rs"]
+mod task_status_running_types;
+pub use task_status_running_types::*;
+#[path = "task_step.rs"]
+mod task_step_types;
+pub use task_step_types::*;
+#[path = "task_update.rs"]
+mod task_update_types;
+pub use task_update_types::*;
+#[path = "update_components_command.rs"]
+mod update_components_command_types;
+pub use update_components_command_types::*;
+#[path = "update_data_model_command.rs"]
+mod update_data_model_command_types;
+pub use update_data_model_command_types::*;
+#[path = "voice_allocation_request.rs"]
+mod voice_allocation_request_types;
+pub use voice_allocation_request_types::*;
+#[path = "voice_lease_consent.rs"]
+mod voice_lease_consent_types;
+pub use voice_lease_consent_types::*;
+#[path = "voice_peer_allocation.rs"]
+mod voice_peer_allocation_types;
+pub use voice_peer_allocation_types::*;

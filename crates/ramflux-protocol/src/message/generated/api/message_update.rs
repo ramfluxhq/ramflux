@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MessageUpdate {
+    #[prost(string, tag = "1")]
+    pub account_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub journal_sequence: u64,
+    #[prost(message, optional, tag = "3")]
+    pub identity: ::core::option::Option<EventIdentity>,
+    #[prost(oneof = "message_update::State", tags = "4, 5, 6")]
+    pub state: ::core::option::Option<message_update::State>,
+}
+/// Nested message and enum types in `MessageUpdate`.
+pub mod message_update {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum State {
+        #[prost(message, tag = "4")]
+        Content(super::Content),
+        #[prost(message, tag = "5")]
+        Unsupported(super::UnsupportedView),
+        #[prost(message, tag = "6")]
+        Tombstone(super::Delete),
+    }
+}
+impl serde::Serialize for MessageUpdate {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.account_id.is_empty() {
+            len += 1;
+        }
+        if self.journal_sequence != 0 {
+            len += 1;
+        }
+        if self.identity.is_some() {
+            len += 1;
+        }
+        if self.state.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.MessageUpdate", len)?;
+        if !self.account_id.is_empty() {
+            struct_ser.serialize_field("accountId", &self.account_id)?;
+        }
+        if self.journal_sequence != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "journalSequence",
+                ToString::to_string(&self.journal_sequence).as_str(),
+            )?;
+        }
+        if let Some(v) = self.identity.as_ref() {
+            struct_ser.serialize_field("identity", v)?;
+        }
+        if let Some(v) = self.state.as_ref() {
+            match v {
+                message_update::State::Content(v) => {
+                    struct_ser.serialize_field("content", v)?;
+                }
+                message_update::State::Unsupported(v) => {
+                    struct_ser.serialize_field("unsupported", v)?;
+                }
+                message_update::State::Tombstone(v) => {
+                    struct_ser.serialize_field("tombstone", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for MessageUpdate {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "account_id",
+            "accountId",
+            "journal_sequence",
+            "journalSequence",
+            "identity",
+            "content",
+            "unsupported",
+            "tombstone",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            AccountId,
+            JournalSequence,
+            Identity,
+            Content,
+            Unsupported,
+            Tombstone,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "accountId" | "account_id" => Ok(GeneratedField::AccountId),
+                            "journalSequence" | "journal_sequence" => {
+                                Ok(GeneratedField::JournalSequence)
+                            }
+                            "identity" => Ok(GeneratedField::Identity),
+                            "content" => Ok(GeneratedField::Content),
+                            "unsupported" => Ok(GeneratedField::Unsupported),
+                            "tombstone" => Ok(GeneratedField::Tombstone),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = MessageUpdate;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.MessageUpdate")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<MessageUpdate, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut account_id__ = None;
+                let mut journal_sequence__ = None;
+                let mut identity__ = None;
+                let mut state__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::AccountId => {
+                            if account_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("accountId"));
+                            }
+                            account_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::JournalSequence => {
+                            if journal_sequence__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("journalSequence"));
+                            }
+                            journal_sequence__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Identity => {
+                            if identity__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("identity"));
+                            }
+                            identity__ = map_.next_value()?;
+                        }
+                        GeneratedField::Content => {
+                            if state__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("content"));
+                            }
+                            state__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(message_update::State::Content);
+                        }
+                        GeneratedField::Unsupported => {
+                            if state__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("unsupported"));
+                            }
+                            state__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(message_update::State::Unsupported);
+                        }
+                        GeneratedField::Tombstone => {
+                            if state__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("tombstone"));
+                            }
+                            state__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(message_update::State::Tombstone);
+                        }
+                    }
+                }
+                Ok(MessageUpdate {
+                    account_id: account_id__.unwrap_or_default(),
+                    journal_sequence: journal_sequence__.unwrap_or_default(),
+                    identity: identity__,
+                    state: state__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.MessageUpdate",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

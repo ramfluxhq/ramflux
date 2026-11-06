@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskMembership {
+    #[prost(string, tag = "1")]
+    pub conversation: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "2")]
+    pub group: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, optional, tag = "3")]
+    pub epoch: ::core::option::Option<u64>,
+    #[prost(int64, tag = "4")]
+    pub at: i64,
+    #[prost(string, repeated, tag = "5")]
+    pub members: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+impl serde::Serialize for TaskMembership {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.conversation.is_empty() {
+            len += 1;
+        }
+        if self.group.is_some() {
+            len += 1;
+        }
+        if self.epoch.is_some() {
+            len += 1;
+        }
+        if self.at != 0 {
+            len += 1;
+        }
+        if !self.members.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.TaskMembership", len)?;
+        if !self.conversation.is_empty() {
+            struct_ser.serialize_field("conversation", &self.conversation)?;
+        }
+        if let Some(v) = self.group.as_ref() {
+            struct_ser.serialize_field("group", v)?;
+        }
+        if let Some(v) = self.epoch.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("epoch", ToString::to_string(&v).as_str())?;
+        }
+        if self.at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("at", ToString::to_string(&self.at).as_str())?;
+        }
+        if !self.members.is_empty() {
+            struct_ser.serialize_field("members", &self.members)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for TaskMembership {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &["conversation", "group", "epoch", "at", "members"];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Conversation,
+            Group,
+            Epoch,
+            At,
+            Members,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "conversation" => Ok(GeneratedField::Conversation),
+                            "group" => Ok(GeneratedField::Group),
+                            "epoch" => Ok(GeneratedField::Epoch),
+                            "at" => Ok(GeneratedField::At),
+                            "members" => Ok(GeneratedField::Members),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = TaskMembership;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.TaskMembership")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<TaskMembership, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut conversation__ = None;
+                let mut group__ = None;
+                let mut epoch__ = None;
+                let mut at__ = None;
+                let mut members__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Conversation => {
+                            if conversation__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("conversation"));
+                            }
+                            conversation__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Group => {
+                            if group__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("group"));
+                            }
+                            group__ = map_.next_value()?;
+                        }
+                        GeneratedField::Epoch => {
+                            if epoch__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("epoch"));
+                            }
+                            epoch__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::At => {
+                            if at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("at"));
+                            }
+                            at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::Members => {
+                            if members__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("members"));
+                            }
+                            members__ = Some(map_.next_value()?);
+                        }
+                    }
+                }
+                Ok(TaskMembership {
+                    conversation: conversation__.unwrap_or_default(),
+                    group: group__,
+                    epoch: epoch__,
+                    at: at__.unwrap_or_default(),
+                    members: members__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.TaskMembership",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

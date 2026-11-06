@@ -1,0 +1,330 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TransferHead {
+    #[prost(string, tag = "1")]
+    pub proposal: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub actor: ::core::option::Option<NativeGroupActor>,
+    #[prost(string, tag = "3")]
+    pub requested_hash: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub head: ::core::option::Option<NativeGroupSnapshot>,
+    #[prost(message, optional, tag = "5")]
+    pub acceptance: ::core::option::Option<NativeGroupTransferAcceptance>,
+    #[prost(bool, tag = "6")]
+    pub requires_sync: bool,
+    #[prost(message, optional, tag = "7")]
+    pub target: ::core::option::Option<TransferDevice>,
+    #[prost(message, repeated, tag = "8")]
+    pub additional_targets: ::prost::alloc::vec::Vec<TransferDevice>,
+    #[prost(bool, tag = "9")]
+    pub cancelled: bool,
+    #[prost(bool, tag = "10")]
+    pub cancel_ack: bool,
+    #[prost(int64, tag = "11")]
+    pub issued_at: i64,
+    #[prost(int64, tag = "12")]
+    pub expires_at: i64,
+}
+impl serde::Serialize for TransferHead {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.proposal.is_empty() {
+            len += 1;
+        }
+        if self.actor.is_some() {
+            len += 1;
+        }
+        if !self.requested_hash.is_empty() {
+            len += 1;
+        }
+        if self.head.is_some() {
+            len += 1;
+        }
+        if self.acceptance.is_some() {
+            len += 1;
+        }
+        if self.requires_sync {
+            len += 1;
+        }
+        if self.target.is_some() {
+            len += 1;
+        }
+        if !self.additional_targets.is_empty() {
+            len += 1;
+        }
+        if self.cancelled {
+            len += 1;
+        }
+        if self.cancel_ack {
+            len += 1;
+        }
+        if self.issued_at != 0 {
+            len += 1;
+        }
+        if self.expires_at != 0 {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.TransferHead", len)?;
+        if !self.proposal.is_empty() {
+            struct_ser.serialize_field("proposal", &self.proposal)?;
+        }
+        if let Some(v) = self.actor.as_ref() {
+            struct_ser.serialize_field("actor", v)?;
+        }
+        if !self.requested_hash.is_empty() {
+            struct_ser.serialize_field("requestedHash", &self.requested_hash)?;
+        }
+        if let Some(v) = self.head.as_ref() {
+            struct_ser.serialize_field("head", v)?;
+        }
+        if let Some(v) = self.acceptance.as_ref() {
+            struct_ser.serialize_field("acceptance", v)?;
+        }
+        if self.requires_sync {
+            struct_ser.serialize_field("requiresSync", &self.requires_sync)?;
+        }
+        if let Some(v) = self.target.as_ref() {
+            struct_ser.serialize_field("target", v)?;
+        }
+        if !self.additional_targets.is_empty() {
+            struct_ser.serialize_field("additionalTargets", &self.additional_targets)?;
+        }
+        if self.cancelled {
+            struct_ser.serialize_field("cancelled", &self.cancelled)?;
+        }
+        if self.cancel_ack {
+            struct_ser.serialize_field("cancelAck", &self.cancel_ack)?;
+        }
+        if self.issued_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("issuedAt", ToString::to_string(&self.issued_at).as_str())?;
+        }
+        if self.expires_at != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser
+                .serialize_field("expiresAt", ToString::to_string(&self.expires_at).as_str())?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for TransferHead {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "proposal",
+            "actor",
+            "requested_hash",
+            "requestedHash",
+            "head",
+            "acceptance",
+            "requires_sync",
+            "requiresSync",
+            "target",
+            "additional_targets",
+            "additionalTargets",
+            "cancelled",
+            "cancel_ack",
+            "cancelAck",
+            "issued_at",
+            "issuedAt",
+            "expires_at",
+            "expiresAt",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Proposal,
+            Actor,
+            RequestedHash,
+            Head,
+            Acceptance,
+            RequiresSync,
+            Target,
+            AdditionalTargets,
+            Cancelled,
+            CancelAck,
+            IssuedAt,
+            ExpiresAt,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "proposal" => Ok(GeneratedField::Proposal),
+                            "actor" => Ok(GeneratedField::Actor),
+                            "requestedHash" | "requested_hash" => Ok(GeneratedField::RequestedHash),
+                            "head" => Ok(GeneratedField::Head),
+                            "acceptance" => Ok(GeneratedField::Acceptance),
+                            "requiresSync" | "requires_sync" => Ok(GeneratedField::RequiresSync),
+                            "target" => Ok(GeneratedField::Target),
+                            "additionalTargets" | "additional_targets" => {
+                                Ok(GeneratedField::AdditionalTargets)
+                            }
+                            "cancelled" => Ok(GeneratedField::Cancelled),
+                            "cancelAck" | "cancel_ack" => Ok(GeneratedField::CancelAck),
+                            "issuedAt" | "issued_at" => Ok(GeneratedField::IssuedAt),
+                            "expiresAt" | "expires_at" => Ok(GeneratedField::ExpiresAt),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = TransferHead;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.TransferHead")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<TransferHead, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut proposal__ = None;
+                let mut actor__ = None;
+                let mut requested_hash__ = None;
+                let mut head__ = None;
+                let mut acceptance__ = None;
+                let mut requires_sync__ = None;
+                let mut target__ = None;
+                let mut additional_targets__ = None;
+                let mut cancelled__ = None;
+                let mut cancel_ack__ = None;
+                let mut issued_at__ = None;
+                let mut expires_at__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Proposal => {
+                            if proposal__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("proposal"));
+                            }
+                            proposal__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Actor => {
+                            if actor__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("actor"));
+                            }
+                            actor__ = map_.next_value()?;
+                        }
+                        GeneratedField::RequestedHash => {
+                            if requested_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("requestedHash"));
+                            }
+                            requested_hash__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Head => {
+                            if head__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("head"));
+                            }
+                            head__ = map_.next_value()?;
+                        }
+                        GeneratedField::Acceptance => {
+                            if acceptance__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("acceptance"));
+                            }
+                            acceptance__ = map_.next_value()?;
+                        }
+                        GeneratedField::RequiresSync => {
+                            if requires_sync__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("requiresSync"));
+                            }
+                            requires_sync__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Target => {
+                            if target__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("target"));
+                            }
+                            target__ = map_.next_value()?;
+                        }
+                        GeneratedField::AdditionalTargets => {
+                            if additional_targets__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("additionalTargets"));
+                            }
+                            additional_targets__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Cancelled => {
+                            if cancelled__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("cancelled"));
+                            }
+                            cancelled__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::CancelAck => {
+                            if cancel_ack__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("cancelAck"));
+                            }
+                            cancel_ack__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::IssuedAt => {
+                            if issued_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("issuedAt"));
+                            }
+                            issued_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::ExpiresAt => {
+                            if expires_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("expiresAt"));
+                            }
+                            expires_at__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                    }
+                }
+                Ok(TransferHead {
+                    proposal: proposal__.unwrap_or_default(),
+                    actor: actor__,
+                    requested_hash: requested_hash__.unwrap_or_default(),
+                    head: head__,
+                    acceptance: acceptance__,
+                    requires_sync: requires_sync__.unwrap_or_default(),
+                    target: target__,
+                    additional_targets: additional_targets__.unwrap_or_default(),
+                    cancelled: cancelled__.unwrap_or_default(),
+                    cancel_ack: cancel_ack__.unwrap_or_default(),
+                    issued_at: issued_at__.unwrap_or_default(),
+                    expires_at: expires_at__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct("ramflux.message.v1.TransferHead", FIELDS, GeneratedVisitor)
+    }
+}

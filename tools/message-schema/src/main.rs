@@ -1,0 +1,323 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Locked, explicit regeneration; ordinary product builds never run this tool.
+use quote::ToTokens;
+use std::{collections::BTreeMap, error::Error, fmt::Write as _, fs, path::Path};
+
+const HEADER: &str =
+    "// SPDX-License-Identifier: BSD-3-Clause\n// Copyright (c) 2026 Span Brain\n\n";
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let check = std::env::args().any(|arg| arg == "--check");
+    generate(&root, check)?;
+    println!("message schema regeneration: OK");
+    Ok(())
+}
+
+fn category(name: &str) -> &'static str {
+    if matches!(name, "Content" | "SendMessage" | "MessageRequest" | "MessageUpdate") {
+        "api"
+    } else if name.starts_with("Surface")
+        || name.starts_with("Task")
+        || name.starts_with("Call")
+        || name.starts_with("Voice")
+        || name.starts_with("StoredSurface")
+        || name.starts_with("OwnedSurface")
+        || name.starts_with("CreateSurface")
+        || name.starts_with("UpdateComponents")
+        || name.starts_with("UpdateDataModel")
+        || name.starts_with("DeleteSurface")
+        || name.starts_with("PatchSurface")
+        || name.starts_with("StreamAppend")
+        || name == "SelfSync"
+        || name.starts_with("NeedsMe")
+    {
+        "state"
+    } else if name.starts_with("Control")
+        || name.starts_with("PairReset")
+        || name.starts_with("ContactControl")
+        || name.starts_with("GroupControl")
+        || name.starts_with("GroupStateControl")
+        || name.starts_with("GroupKey")
+        || name.starts_with("Own")
+        || name.starts_with("History")
+        || name.starts_with("Transfer")
+        || name.starts_with("Guardian")
+        || name.starts_with("RecoveryControl")
+        || name.starts_with("HomeMigration")
+        || name.starts_with("ObjectRevoke")
+        || name.starts_with("FriendControl")
+        || name.starts_with("A2i")
+        || name == "LivePresence"
+    {
+        "controls"
+    } else if matches!(
+        name,
+        "Message"
+            | "GroupSealedContent"
+            | "Service"
+            | "ServiceAction"
+            | "Edit"
+            | "Delete"
+            | "DeleteScope"
+            | "Reaction"
+            | "Receipt"
+            | "ReceiptState"
+            | "Typing"
+    ) {
+        "content"
+    } else {
+        "common"
+    }
+}
+
+fn snake(name: &str) -> String {
+    let mut result = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            result.push('_');
+        }
+        result.extend(ch.to_lowercase());
+    }
+    result
+}
+
+fn generate(root: &Path, check: bool) -> Result<(), Box<dyn Error>> {
+    use prost::Message as _;
+    let message = root.join("crates/ramflux-protocol/src/message");
+    let temporary =
+        std::env::temp_dir().join(format!("ramflux-message-schema-{}", std::process::id()));
+    fs::create_dir_all(&temporary)?;
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let descriptors =
+            protox::compile([message.join("schema/message.proto")], [message.join("schema")])?;
+        let descriptor_bytes = descriptors.encode_to_vec();
+        let mut config = prost_build::Config::new();
+        config.out_dir(&temporary).btree_map(["."]);
+        config.compile_fds(descriptors)?;
+        pbjson_build::Builder::new()
+            .out_dir(&temporary)
+            .register_descriptors(&descriptor_bytes)?
+            .build(&[".ramflux.message.v1"])?;
+        let rust = fs::read_to_string(temporary.join("ramflux.message.v1.rs"))?;
+        let serde =
+            strict_duplicates(&fs::read_to_string(temporary.join("ramflux.message.v1.serde.rs"))?)?;
+        let serde = preserve_enum_numbers(serde, &rust)?;
+        let items = partition(&rust, &serde)?;
+        let mut outputs = BTreeMap::new();
+        outputs.insert("descriptor.bin".to_string(), descriptor_bytes);
+        let mut groups = BTreeMap::<&str, String>::new();
+        for (name, body) in items {
+            let group = category(&name);
+            let file = snake(&name);
+            let body = syn::File { shebang: None, attrs: vec![], items: body };
+            let source = format!(
+                "{HEADER}#[allow(unused_imports)]\nuse super::super::*;\n\n{}",
+                prettyplease::unparse(&body)
+            );
+            outputs.insert(format!("generated/{group}/{file}.rs"), source.into_bytes());
+            write!(
+                groups.entry(group).or_default(),
+                "#[path = \"{file}.rs\"]\nmod {file}_types;\npub use {file}_types::*;\n"
+            )?;
+        }
+        let mut index = HEADER.to_string();
+        index.push_str("//! Generated schema types grouped by responsibility.\n\n");
+        for (group, body) in groups {
+            outputs.insert(
+                format!("generated/{group}/mod.rs"),
+                format!("{HEADER}{body}").into_bytes(),
+            );
+            write!(
+                index,
+                "#[path = \"{group}/mod.rs\"]\npub mod {group}_types;\npub use {group}_types::*;\n"
+            )?;
+        }
+        outputs.insert("generated/mod.rs".into(), index.into_bytes());
+        format_outputs(&mut outputs, &temporary)?;
+        check_obsolete(&message, &outputs, check)?;
+        for (name, bytes) in outputs {
+            let destination = message.join(name);
+            if check {
+                if fs::read(&destination)? != bytes {
+                    return Err(format!("stale generated file: {}", destination.display()).into());
+                }
+            } else {
+                fs::create_dir_all(destination.parent().ok_or("missing output parent")?)?;
+                fs::write(destination, bytes)?;
+            }
+        }
+        Ok(())
+    })();
+    fs::remove_dir_all(temporary)?;
+    result
+}
+
+fn partition(rust: &str, serde: &str) -> Result<BTreeMap<String, Vec<syn::Item>>, Box<dyn Error>> {
+    let ast = syn::parse_file(rust)?;
+    let mut items = BTreeMap::<String, Vec<syn::Item>>::new();
+    let mut modules = BTreeMap::new();
+    for item in ast.items {
+        let name = match &item {
+            syn::Item::Struct(item) => item.ident.to_string(),
+            syn::Item::Enum(item) => item.ident.to_string(),
+            syn::Item::Mod(item) => {
+                modules.insert(item.ident.to_string(), syn::Item::Mod(item.clone()));
+                continue;
+            }
+            syn::Item::Impl(item) => type_name(&item.self_ty)?,
+            _ => return Err("unexpected generated Rust item".into()),
+        };
+        items.entry(name).or_default().push(item);
+    }
+    for (module, item) in modules {
+        let owner = items
+            .keys()
+            .find(|name| snake(name) == module)
+            .ok_or("nested module has no owning message")?
+            .clone();
+        items.entry(owner).or_default().push(item);
+    }
+    for item in syn::parse_file(serde)?.items {
+        let syn::Item::Impl(implementation) = &item else {
+            return Err("unexpected serde item".into());
+        };
+        let owner = type_name(&implementation.self_ty)?;
+        // Nested oneof serde impls belong to their parent message module.
+        let owner = if let syn::Type::Path(path) = &*implementation.self_ty {
+            if path.path.segments.len() > 1 {
+                let module = path.path.segments.first().ok_or("missing module")?.ident.to_string();
+                items
+                    .keys()
+                    .find(|name| snake(name) == module)
+                    .ok_or("unknown serde module")?
+                    .clone()
+            } else {
+                owner
+            }
+        } else {
+            owner
+        };
+        items.entry(owner).or_default().push(item);
+    }
+    Ok(items)
+}
+
+fn type_name(ty: &syn::Type) -> Result<String, Box<dyn Error>> {
+    let syn::Type::Path(path) = ty else {
+        return Err(format!("unexpected type {}", ty.to_token_stream()).into());
+    };
+    Ok(path.path.segments.last().ok_or("empty type path")?.ident.to_string())
+}
+
+// pbjson treats null as absence. Track field discriminants independently so an
+// alias/duplicate after null is rejected too; protobuf map keys are unaffected.
+fn strict_duplicates(source: &str) -> Result<String, Box<dyn Error>> {
+    let needle = "while let Some(k) = map_.next_key()? {";
+    if !source.contains(needle) {
+        return Err("pinned pbjson visitor shape changed".into());
+    }
+    Ok(source.replace(
+        needle,
+        r#"let mut seen_fields__ = std::collections::HashSet::new();
+    while let Some(k) = map_.next_key()? {
+        if !seen_fields__.insert(std::mem::discriminant(&k)) {
+            return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+        }
+"#,
+    ))
+}
+
+fn format_outputs(
+    outputs: &mut BTreeMap<String, Vec<u8>>,
+    temporary: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut files = Vec::new();
+    for (name, bytes) in &*outputs {
+        if Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")) {
+            let path = temporary.join("formatted").join(name);
+            fs::create_dir_all(path.parent().ok_or("missing format parent")?)?;
+            fs::write(&path, bytes)?;
+            files.push(path);
+        }
+    }
+    let status = std::process::Command::new("rustfmt")
+        .args(["--edition", "2024", "--config", "skip_children=true"])
+        .args(&files)
+        .status()?;
+    if !status.success() {
+        return Err("rustfmt failed".into());
+    }
+    for file in files {
+        let name =
+            file.strip_prefix(temporary.join("formatted"))?.to_str().ok_or("non-UTF8 output")?;
+        outputs.insert(name.into(), fs::read(&file)?);
+    }
+    Ok(())
+}
+
+fn check_obsolete(
+    message: &Path,
+    outputs: &BTreeMap<String, Vec<u8>>,
+    check: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut pending = vec![message.join("generated")];
+    while let Some(directory) = pending.pop() {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let name = path.strip_prefix(message)?.to_str().ok_or("non-UTF8 output")?;
+            if !outputs.contains_key(name) {
+                if check {
+                    return Err(format!("obsolete generated file: {name}").into());
+                }
+                fs::remove_file(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preserve_enum_numbers(mut source: String, rust: &str) -> Result<String, Box<dyn Error>> {
+    for item in syn::parse_file(rust)?.items {
+        let syn::Item::Enum(enumeration) = item else {
+            continue;
+        };
+        let name = enumeration.ident;
+        let prefix = format!("let v = {name}::try_from(");
+        while let Some(start) = source.find(&prefix) {
+            let argument = start + prefix.len();
+            let argument_end =
+                argument + source[argument..].find(')').ok_or("missing enum argument")?;
+            let value = source[argument..argument_end].to_string();
+            let end = start + source[start..].find(';').ok_or("missing enum statement")?;
+            source.replace_range(
+                start..end,
+                &format!("let v = crate::message::protojson::EnumValue::<{name}>::new({value})"),
+            );
+        }
+        source = source.replace(
+            &format!("map_.next_value::<{name}>()? as i32"),
+            &format!("map_.next_value::<crate::message::protojson::EnumValue<{name}>>()?.value"),
+        );
+    }
+    Ok(source)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn schema_regeneration_is_fresh() -> Result<(), Box<dyn std::error::Error>> {
+        // Cargo and nextest set the test cwd to the package directory, including
+        // relocated nextest archives. Do not embed build-machine binary paths.
+        super::generate(&std::env::current_dir()?.join("../.."), true)
+    }
+}

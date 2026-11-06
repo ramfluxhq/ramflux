@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GroupKeyControl {
+    #[prost(string, tag = "1")]
+    pub schema: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+    #[prost(message, optional, tag = "3")]
+    pub membership_event: ::core::option::Option<NativeGroupEvent>,
+    #[prost(string, optional, tag = "4")]
+    pub actor_manifest_url: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    pub distribution: ::core::option::Option<GroupKeyDistribution>,
+}
+impl serde::Serialize for GroupKeyControl {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.schema.is_empty() {
+            len += 1;
+        }
+        if self.version != 0 {
+            len += 1;
+        }
+        if self.membership_event.is_some() {
+            len += 1;
+        }
+        if self.actor_manifest_url.is_some() {
+            len += 1;
+        }
+        if self.distribution.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.GroupKeyControl", len)?;
+        if !self.schema.is_empty() {
+            struct_ser.serialize_field("schema", &self.schema)?;
+        }
+        if self.version != 0 {
+            struct_ser.serialize_field("version", &self.version)?;
+        }
+        if let Some(v) = self.membership_event.as_ref() {
+            struct_ser.serialize_field("membershipEvent", v)?;
+        }
+        if let Some(v) = self.actor_manifest_url.as_ref() {
+            struct_ser.serialize_field("actorManifestUrl", v)?;
+        }
+        if let Some(v) = self.distribution.as_ref() {
+            struct_ser.serialize_field("distribution", v)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for GroupKeyControl {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "schema",
+            "version",
+            "membership_event",
+            "membershipEvent",
+            "actor_manifest_url",
+            "actorManifestUrl",
+            "distribution",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Schema,
+            Version,
+            MembershipEvent,
+            ActorManifestUrl,
+            Distribution,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "schema" => Ok(GeneratedField::Schema),
+                            "version" => Ok(GeneratedField::Version),
+                            "membershipEvent" | "membership_event" => {
+                                Ok(GeneratedField::MembershipEvent)
+                            }
+                            "actorManifestUrl" | "actor_manifest_url" => {
+                                Ok(GeneratedField::ActorManifestUrl)
+                            }
+                            "distribution" => Ok(GeneratedField::Distribution),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = GroupKeyControl;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.GroupKeyControl")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<GroupKeyControl, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut schema__ = None;
+                let mut version__ = None;
+                let mut membership_event__ = None;
+                let mut actor_manifest_url__ = None;
+                let mut distribution__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Schema => {
+                            if schema__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("schema"));
+                            }
+                            schema__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Version => {
+                            if version__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("version"));
+                            }
+                            version__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::MembershipEvent => {
+                            if membership_event__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("membershipEvent"));
+                            }
+                            membership_event__ = map_.next_value()?;
+                        }
+                        GeneratedField::ActorManifestUrl => {
+                            if actor_manifest_url__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("actorManifestUrl"));
+                            }
+                            actor_manifest_url__ = map_.next_value()?;
+                        }
+                        GeneratedField::Distribution => {
+                            if distribution__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("distribution"));
+                            }
+                            distribution__ = map_.next_value()?;
+                        }
+                    }
+                }
+                Ok(GroupKeyControl {
+                    schema: schema__.unwrap_or_default(),
+                    version: version__.unwrap_or_default(),
+                    membership_event: membership_event__,
+                    actor_manifest_url: actor_manifest_url__,
+                    distribution: distribution__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.GroupKeyControl",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

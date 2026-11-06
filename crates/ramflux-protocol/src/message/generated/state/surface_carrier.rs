@@ -1,0 +1,416 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SurfaceCarrier {
+    #[prost(string, tag = "1")]
+    pub schema: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub content_type: ::prost::alloc::string::String,
+    #[prost(int64, optional, tag = "3")]
+    pub posted_at: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "4")]
+    pub updated_at: ::core::option::Option<i64>,
+    #[prost(string, tag = "5")]
+    pub conversation_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub surface_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub message_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub sender_principal_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub sender_device_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub author_principal_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub signature: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "12")]
+    pub snapshot: ::core::option::Option<SurfaceSnapshotProof>,
+    #[prost(oneof = "surface_carrier::Payload", tags = "16, 17, 18")]
+    pub payload: ::core::option::Option<surface_carrier::Payload>,
+}
+/// Nested message and enum types in `SurfaceCarrier`.
+pub mod surface_carrier {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag = "16")]
+        Event(super::SurfaceEvent),
+        #[prost(message, tag = "17")]
+        Action(super::SurfaceAction),
+        #[prost(message, tag = "18")]
+        ActionReceipt(::prost::alloc::boxed::Box<super::SurfaceCarrier>),
+    }
+}
+impl serde::Serialize for SurfaceCarrier {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.schema.is_empty() {
+            len += 1;
+        }
+        if !self.content_type.is_empty() {
+            len += 1;
+        }
+        if self.posted_at.is_some() {
+            len += 1;
+        }
+        if self.updated_at.is_some() {
+            len += 1;
+        }
+        if !self.conversation_id.is_empty() {
+            len += 1;
+        }
+        if !self.surface_id.is_empty() {
+            len += 1;
+        }
+        if !self.message_id.is_empty() {
+            len += 1;
+        }
+        if !self.sender_principal_id.is_empty() {
+            len += 1;
+        }
+        if !self.sender_device_id.is_empty() {
+            len += 1;
+        }
+        if !self.author_principal_id.is_empty() {
+            len += 1;
+        }
+        if !self.signature.is_empty() {
+            len += 1;
+        }
+        if self.snapshot.is_some() {
+            len += 1;
+        }
+        if self.payload.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.SurfaceCarrier", len)?;
+        if !self.schema.is_empty() {
+            struct_ser.serialize_field("schema", &self.schema)?;
+        }
+        if !self.content_type.is_empty() {
+            struct_ser.serialize_field("contentType", &self.content_type)?;
+        }
+        if let Some(v) = self.posted_at.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("postedAt", ToString::to_string(&v).as_str())?;
+        }
+        if let Some(v) = self.updated_at.as_ref() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("updatedAt", ToString::to_string(&v).as_str())?;
+        }
+        if !self.conversation_id.is_empty() {
+            struct_ser.serialize_field("conversationId", &self.conversation_id)?;
+        }
+        if !self.surface_id.is_empty() {
+            struct_ser.serialize_field("surfaceId", &self.surface_id)?;
+        }
+        if !self.message_id.is_empty() {
+            struct_ser.serialize_field("messageId", &self.message_id)?;
+        }
+        if !self.sender_principal_id.is_empty() {
+            struct_ser.serialize_field("senderPrincipalId", &self.sender_principal_id)?;
+        }
+        if !self.sender_device_id.is_empty() {
+            struct_ser.serialize_field("senderDeviceId", &self.sender_device_id)?;
+        }
+        if !self.author_principal_id.is_empty() {
+            struct_ser.serialize_field("authorPrincipalId", &self.author_principal_id)?;
+        }
+        if !self.signature.is_empty() {
+            struct_ser.serialize_field("signature", &self.signature)?;
+        }
+        if let Some(v) = self.snapshot.as_ref() {
+            struct_ser.serialize_field("snapshot", v)?;
+        }
+        if let Some(v) = self.payload.as_ref() {
+            match v {
+                surface_carrier::Payload::Event(v) => {
+                    struct_ser.serialize_field("event", v)?;
+                }
+                surface_carrier::Payload::Action(v) => {
+                    struct_ser.serialize_field("action", v)?;
+                }
+                surface_carrier::Payload::ActionReceipt(v) => {
+                    struct_ser.serialize_field("actionReceipt", v)?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for SurfaceCarrier {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "schema",
+            "content_type",
+            "contentType",
+            "posted_at",
+            "postedAt",
+            "updated_at",
+            "updatedAt",
+            "conversation_id",
+            "conversationId",
+            "surface_id",
+            "surfaceId",
+            "message_id",
+            "messageId",
+            "sender_principal_id",
+            "senderPrincipalId",
+            "sender_device_id",
+            "senderDeviceId",
+            "author_principal_id",
+            "authorPrincipalId",
+            "signature",
+            "snapshot",
+            "event",
+            "action",
+            "action_receipt",
+            "actionReceipt",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Schema,
+            ContentType,
+            PostedAt,
+            UpdatedAt,
+            ConversationId,
+            SurfaceId,
+            MessageId,
+            SenderPrincipalId,
+            SenderDeviceId,
+            AuthorPrincipalId,
+            Signature,
+            Snapshot,
+            Event,
+            Action,
+            ActionReceipt,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "schema" => Ok(GeneratedField::Schema),
+                            "contentType" | "content_type" => Ok(GeneratedField::ContentType),
+                            "postedAt" | "posted_at" => Ok(GeneratedField::PostedAt),
+                            "updatedAt" | "updated_at" => Ok(GeneratedField::UpdatedAt),
+                            "conversationId" | "conversation_id" => {
+                                Ok(GeneratedField::ConversationId)
+                            }
+                            "surfaceId" | "surface_id" => Ok(GeneratedField::SurfaceId),
+                            "messageId" | "message_id" => Ok(GeneratedField::MessageId),
+                            "senderPrincipalId" | "sender_principal_id" => {
+                                Ok(GeneratedField::SenderPrincipalId)
+                            }
+                            "senderDeviceId" | "sender_device_id" => {
+                                Ok(GeneratedField::SenderDeviceId)
+                            }
+                            "authorPrincipalId" | "author_principal_id" => {
+                                Ok(GeneratedField::AuthorPrincipalId)
+                            }
+                            "signature" => Ok(GeneratedField::Signature),
+                            "snapshot" => Ok(GeneratedField::Snapshot),
+                            "event" => Ok(GeneratedField::Event),
+                            "action" => Ok(GeneratedField::Action),
+                            "actionReceipt" | "action_receipt" => Ok(GeneratedField::ActionReceipt),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = SurfaceCarrier;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.SurfaceCarrier")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<SurfaceCarrier, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut schema__ = None;
+                let mut content_type__ = None;
+                let mut posted_at__ = None;
+                let mut updated_at__ = None;
+                let mut conversation_id__ = None;
+                let mut surface_id__ = None;
+                let mut message_id__ = None;
+                let mut sender_principal_id__ = None;
+                let mut sender_device_id__ = None;
+                let mut author_principal_id__ = None;
+                let mut signature__ = None;
+                let mut snapshot__ = None;
+                let mut payload__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Schema => {
+                            if schema__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("schema"));
+                            }
+                            schema__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::ContentType => {
+                            if content_type__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("contentType"));
+                            }
+                            content_type__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::PostedAt => {
+                            if posted_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("postedAt"));
+                            }
+                            posted_at__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::UpdatedAt => {
+                            if updated_at__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("updatedAt"));
+                            }
+                            updated_at__ = map_
+                                .next_value::<
+                                    ::std::option::Option<
+                                        ::pbjson::private::NumberDeserialize<_>,
+                                    >,
+                                >()?
+                                .map(|x| x.0);
+                        }
+                        GeneratedField::ConversationId => {
+                            if conversation_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("conversationId"));
+                            }
+                            conversation_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::SurfaceId => {
+                            if surface_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("surfaceId"));
+                            }
+                            surface_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::MessageId => {
+                            if message_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("messageId"));
+                            }
+                            message_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::SenderPrincipalId => {
+                            if sender_principal_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("senderPrincipalId"));
+                            }
+                            sender_principal_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::SenderDeviceId => {
+                            if sender_device_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("senderDeviceId"));
+                            }
+                            sender_device_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::AuthorPrincipalId => {
+                            if author_principal_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("authorPrincipalId"));
+                            }
+                            author_principal_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Signature => {
+                            if signature__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("signature"));
+                            }
+                            signature__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Snapshot => {
+                            if snapshot__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("snapshot"));
+                            }
+                            snapshot__ = map_.next_value()?;
+                        }
+                        GeneratedField::Event => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("event"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_carrier::Payload::Event);
+                        }
+                        GeneratedField::Action => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("action"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_carrier::Payload::Action);
+                        }
+                        GeneratedField::ActionReceipt => {
+                            if payload__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("actionReceipt"));
+                            }
+                            payload__ = map_
+                                .next_value::<::std::option::Option<_>>()?
+                                .map(surface_carrier::Payload::ActionReceipt);
+                        }
+                    }
+                }
+                Ok(SurfaceCarrier {
+                    schema: schema__.unwrap_or_default(),
+                    content_type: content_type__.unwrap_or_default(),
+                    posted_at: posted_at__,
+                    updated_at: updated_at__,
+                    conversation_id: conversation_id__.unwrap_or_default(),
+                    surface_id: surface_id__.unwrap_or_default(),
+                    message_id: message_id__.unwrap_or_default(),
+                    sender_principal_id: sender_principal_id__.unwrap_or_default(),
+                    sender_device_id: sender_device_id__.unwrap_or_default(),
+                    author_principal_id: author_principal_id__.unwrap_or_default(),
+                    signature: signature__.unwrap_or_default(),
+                    snapshot: snapshot__,
+                    payload: payload__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.SurfaceCarrier",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

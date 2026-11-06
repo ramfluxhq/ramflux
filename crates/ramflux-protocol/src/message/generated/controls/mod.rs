@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[path = "a2i_control_event.rs"]
+mod a2i_control_event_types;
+pub use a2i_control_event_types::*;
+#[path = "a2i_control_event_type.rs"]
+mod a2i_control_event_type_types;
+pub use a2i_control_event_type_types::*;
+#[path = "a2i_control_event_type_control.rs"]
+mod a2i_control_event_type_control_types;
+pub use a2i_control_event_type_control_types::*;
+#[path = "contact_control.rs"]
+mod contact_control_types;
+pub use contact_control_types::*;
+#[path = "control.rs"]
+mod control_types;
+pub use control_types::*;
+#[path = "control_domain.rs"]
+mod control_domain_types;
+pub use control_domain_types::*;
+#[path = "control_domain_a2ui.rs"]
+mod control_domain_a2ui_types;
+pub use control_domain_a2ui_types::*;
+#[path = "control_domain_conversation.rs"]
+mod control_domain_conversation_types;
+pub use control_domain_conversation_types::*;
+#[path = "control_domain_mcp_tool.rs"]
+mod control_domain_mcp_tool_types;
+pub use control_domain_mcp_tool_types::*;
+#[path = "control_domain_message.rs"]
+mod control_domain_message_types;
+pub use control_domain_message_types::*;
+#[path = "control_operation.rs"]
+mod control_operation_types;
+pub use control_operation_types::*;
+#[path = "friend_control.rs"]
+mod friend_control_types;
+pub use friend_control_types::*;
+#[path = "group_control_body.rs"]
+mod group_control_body_types;
+pub use group_control_body_types::*;
+#[path = "group_control_body_device_set.rs"]
+mod group_control_body_device_set_types;
+pub use group_control_body_device_set_types::*;
+#[path = "group_control_body_request.rs"]
+mod group_control_body_request_types;
+pub use group_control_body_request_types::*;
+#[path = "group_control_body_result.rs"]
+mod group_control_body_result_types;
+pub use group_control_body_result_types::*;
+#[path = "group_control_body_transfer.rs"]
+mod group_control_body_transfer_types;
+pub use group_control_body_transfer_types::*;
+#[path = "group_key_control.rs"]
+mod group_key_control_types;
+pub use group_key_control_types::*;
+#[path = "group_key_distribution.rs"]
+mod group_key_distribution_types;
+pub use group_key_distribution_types::*;
+#[path = "group_state_control.rs"]
+mod group_state_control_types;
+pub use group_state_control_types::*;
+#[path = "guardian_accept.rs"]
+mod guardian_accept_types;
+pub use guardian_accept_types::*;
+#[path = "guardian_invite.rs"]
+mod guardian_invite_types;
+pub use guardian_invite_types::*;
+#[path = "guardian_recovery_share.rs"]
+mod guardian_recovery_share_types;
+pub use guardian_recovery_share_types::*;
+#[path = "history_item.rs"]
+mod history_item_types;
+pub use history_item_types::*;
+#[path = "history_origin_evidence.rs"]
+mod history_origin_evidence_types;
+pub use history_origin_evidence_types::*;
+#[path = "history_page.rs"]
+mod history_page_types;
+pub use history_page_types::*;
+#[path = "home_migration_control.rs"]
+mod home_migration_control_types;
+pub use home_migration_control_types::*;
+#[path = "live_presence.rs"]
+mod live_presence_types;
+pub use live_presence_types::*;
+#[path = "object_revoke_access.rs"]
+mod object_revoke_access_types;
+pub use object_revoke_access_types::*;
+#[path = "own_contact_sync.rs"]
+mod own_contact_sync_types;
+pub use own_contact_sync_types::*;
+#[path = "own_contact_tombstone.rs"]
+mod own_contact_tombstone_types;
+pub use own_contact_tombstone_types::*;
+#[path = "own_context.rs"]
+mod own_context_types;
+pub use own_context_types::*;
+#[path = "own_group_consent.rs"]
+mod own_group_consent_types;
+pub use own_group_consent_types::*;
+#[path = "own_message_copy.rs"]
+mod own_message_copy_types;
+pub use own_message_copy_types::*;
+#[path = "own_sent_message.rs"]
+mod own_sent_message_types;
+pub use own_sent_message_types::*;
+#[path = "pair_reset.rs"]
+mod pair_reset_types;
+pub use pair_reset_types::*;
+#[path = "pair_reset_ack.rs"]
+mod pair_reset_ack_types;
+pub use pair_reset_ack_types::*;
+#[path = "recovery_control.rs"]
+mod recovery_control_types;
+pub use recovery_control_types::*;
+#[path = "transfer_body.rs"]
+mod transfer_body_types;
+pub use transfer_body_types::*;
+#[path = "transfer_body_head.rs"]
+mod transfer_body_head_types;
+pub use transfer_body_head_types::*;
+#[path = "transfer_body_probe.rs"]
+mod transfer_body_probe_types;
+pub use transfer_body_probe_types::*;
+#[path = "transfer_control.rs"]
+mod transfer_control_types;
+pub use transfer_control_types::*;
+#[path = "transfer_device.rs"]
+mod transfer_device_types;
+pub use transfer_device_types::*;
+#[path = "transfer_head.rs"]
+mod transfer_head_types;
+pub use transfer_head_types::*;
+#[path = "transfer_probe.rs"]
+mod transfer_probe_types;
+pub use transfer_probe_types::*;

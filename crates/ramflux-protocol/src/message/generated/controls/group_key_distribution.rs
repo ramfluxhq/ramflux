@@ -1,0 +1,300 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GroupKeyDistribution {
+    #[prost(string, tag = "1")]
+    pub schema: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub version: u32,
+    #[prost(string, tag = "3")]
+    pub group_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub sender_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "5")]
+    pub group_key_epoch: u64,
+    #[prost(string, optional, tag = "6")]
+    pub group_state_hash: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub sender_key_seed: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, optional, tag = "8")]
+    pub sender_key_signature: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "9")]
+    pub sender_device_signing_public_key: ::core::option::Option<::prost::alloc::string::String>,
+}
+impl serde::Serialize for GroupKeyDistribution {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if !self.schema.is_empty() {
+            len += 1;
+        }
+        if self.version != 0 {
+            len += 1;
+        }
+        if !self.group_id.is_empty() {
+            len += 1;
+        }
+        if !self.sender_id.is_empty() {
+            len += 1;
+        }
+        if self.group_key_epoch != 0 {
+            len += 1;
+        }
+        if self.group_state_hash.is_some() {
+            len += 1;
+        }
+        if !self.sender_key_seed.is_empty() {
+            len += 1;
+        }
+        if self.sender_key_signature.is_some() {
+            len += 1;
+        }
+        if self.sender_device_signing_public_key.is_some() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.GroupKeyDistribution", len)?;
+        if !self.schema.is_empty() {
+            struct_ser.serialize_field("schema", &self.schema)?;
+        }
+        if self.version != 0 {
+            struct_ser.serialize_field("version", &self.version)?;
+        }
+        if !self.group_id.is_empty() {
+            struct_ser.serialize_field("groupId", &self.group_id)?;
+        }
+        if !self.sender_id.is_empty() {
+            struct_ser.serialize_field("senderId", &self.sender_id)?;
+        }
+        if self.group_key_epoch != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "groupKeyEpoch",
+                ToString::to_string(&self.group_key_epoch).as_str(),
+            )?;
+        }
+        if let Some(v) = self.group_state_hash.as_ref() {
+            struct_ser.serialize_field("groupStateHash", v)?;
+        }
+        if !self.sender_key_seed.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "senderKeySeed",
+                pbjson::private::base64::encode(&self.sender_key_seed).as_str(),
+            )?;
+        }
+        if let Some(v) = self.sender_key_signature.as_ref() {
+            struct_ser.serialize_field("senderKeySignature", v)?;
+        }
+        if let Some(v) = self.sender_device_signing_public_key.as_ref() {
+            struct_ser.serialize_field("senderDeviceSigningPublicKey", v)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for GroupKeyDistribution {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "schema",
+            "version",
+            "group_id",
+            "groupId",
+            "sender_id",
+            "senderId",
+            "group_key_epoch",
+            "groupKeyEpoch",
+            "group_state_hash",
+            "groupStateHash",
+            "sender_key_seed",
+            "senderKeySeed",
+            "sender_key_signature",
+            "senderKeySignature",
+            "sender_device_signing_public_key",
+            "senderDeviceSigningPublicKey",
+        ];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Schema,
+            Version,
+            GroupId,
+            SenderId,
+            GroupKeyEpoch,
+            GroupStateHash,
+            SenderKeySeed,
+            SenderKeySignature,
+            SenderDeviceSigningPublicKey,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "schema" => Ok(GeneratedField::Schema),
+                            "version" => Ok(GeneratedField::Version),
+                            "groupId" | "group_id" => Ok(GeneratedField::GroupId),
+                            "senderId" | "sender_id" => Ok(GeneratedField::SenderId),
+                            "groupKeyEpoch" | "group_key_epoch" => {
+                                Ok(GeneratedField::GroupKeyEpoch)
+                            }
+                            "groupStateHash" | "group_state_hash" => {
+                                Ok(GeneratedField::GroupStateHash)
+                            }
+                            "senderKeySeed" | "sender_key_seed" => {
+                                Ok(GeneratedField::SenderKeySeed)
+                            }
+                            "senderKeySignature" | "sender_key_signature" => {
+                                Ok(GeneratedField::SenderKeySignature)
+                            }
+                            "senderDeviceSigningPublicKey" | "sender_device_signing_public_key" => {
+                                Ok(GeneratedField::SenderDeviceSigningPublicKey)
+                            }
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = GroupKeyDistribution;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.GroupKeyDistribution")
+            }
+            fn visit_map<V>(
+                self,
+                mut map_: V,
+            ) -> std::result::Result<GroupKeyDistribution, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut schema__ = None;
+                let mut version__ = None;
+                let mut group_id__ = None;
+                let mut sender_id__ = None;
+                let mut group_key_epoch__ = None;
+                let mut group_state_hash__ = None;
+                let mut sender_key_seed__ = None;
+                let mut sender_key_signature__ = None;
+                let mut sender_device_signing_public_key__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Schema => {
+                            if schema__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("schema"));
+                            }
+                            schema__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Version => {
+                            if version__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("version"));
+                            }
+                            version__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::GroupId => {
+                            if group_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("groupId"));
+                            }
+                            group_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::SenderId => {
+                            if sender_id__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("senderId"));
+                            }
+                            sender_id__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::GroupKeyEpoch => {
+                            if group_key_epoch__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("groupKeyEpoch"));
+                            }
+                            group_key_epoch__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::GroupStateHash => {
+                            if group_state_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("groupStateHash"));
+                            }
+                            group_state_hash__ = map_.next_value()?;
+                        }
+                        GeneratedField::SenderKeySeed => {
+                            if sender_key_seed__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("senderKeySeed"));
+                            }
+                            sender_key_seed__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::SenderKeySignature => {
+                            if sender_key_signature__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "senderKeySignature",
+                                ));
+                            }
+                            sender_key_signature__ = map_.next_value()?;
+                        }
+                        GeneratedField::SenderDeviceSigningPublicKey => {
+                            if sender_device_signing_public_key__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "senderDeviceSigningPublicKey",
+                                ));
+                            }
+                            sender_device_signing_public_key__ = map_.next_value()?;
+                        }
+                    }
+                }
+                Ok(GroupKeyDistribution {
+                    schema: schema__.unwrap_or_default(),
+                    version: version__.unwrap_or_default(),
+                    group_id: group_id__.unwrap_or_default(),
+                    sender_id: sender_id__.unwrap_or_default(),
+                    group_key_epoch: group_key_epoch__.unwrap_or_default(),
+                    group_state_hash: group_state_hash__,
+                    sender_key_seed: sender_key_seed__.unwrap_or_default(),
+                    sender_key_signature: sender_key_signature__,
+                    sender_device_signing_public_key: sender_device_signing_public_key__,
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.GroupKeyDistribution",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}

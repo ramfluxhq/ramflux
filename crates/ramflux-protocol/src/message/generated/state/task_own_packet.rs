@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#[allow(unused_imports)]
+use super::super::*;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskOwnPacket {
+    #[prost(message, optional, tag = "1")]
+    pub context: ::core::option::Option<OwnContext>,
+    #[prost(message, optional, tag = "2")]
+    pub history: ::core::option::Option<TaskHistory>,
+    #[prost(message, repeated, tag = "3")]
+    pub manifests: ::prost::alloc::vec::Vec<NativeDeviceManifest>,
+    #[prost(message, repeated, tag = "4")]
+    pub pins: ::prost::alloc::vec::Vec<SdkOwnDeviceGroupMemberPin>,
+    #[prost(uint64, tag = "5")]
+    pub base: u64,
+    #[prost(string, tag = "6")]
+    pub prefix_hash: ::prost::alloc::string::String,
+}
+impl serde::Serialize for TaskOwnPacket {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.context.is_some() {
+            len += 1;
+        }
+        if self.history.is_some() {
+            len += 1;
+        }
+        if !self.manifests.is_empty() {
+            len += 1;
+        }
+        if !self.pins.is_empty() {
+            len += 1;
+        }
+        if self.base != 0 {
+            len += 1;
+        }
+        if !self.prefix_hash.is_empty() {
+            len += 1;
+        }
+        let mut struct_ser =
+            serializer.serialize_struct("ramflux.message.v1.TaskOwnPacket", len)?;
+        if let Some(v) = self.context.as_ref() {
+            struct_ser.serialize_field("context", v)?;
+        }
+        if let Some(v) = self.history.as_ref() {
+            struct_ser.serialize_field("history", v)?;
+        }
+        if !self.manifests.is_empty() {
+            struct_ser.serialize_field("manifests", &self.manifests)?;
+        }
+        if !self.pins.is_empty() {
+            struct_ser.serialize_field("pins", &self.pins)?;
+        }
+        if self.base != 0 {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field("base", ToString::to_string(&self.base).as_str())?;
+        }
+        if !self.prefix_hash.is_empty() {
+            struct_ser.serialize_field("prefixHash", &self.prefix_hash)?;
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for TaskOwnPacket {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] =
+            &["context", "history", "manifests", "pins", "base", "prefix_hash", "prefixHash"];
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Context,
+            History,
+            Manifests,
+            Pins,
+            Base,
+            PrefixHash,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "context" => Ok(GeneratedField::Context),
+                            "history" => Ok(GeneratedField::History),
+                            "manifests" => Ok(GeneratedField::Manifests),
+                            "pins" => Ok(GeneratedField::Pins),
+                            "base" => Ok(GeneratedField::Base),
+                            "prefixHash" | "prefix_hash" => Ok(GeneratedField::PrefixHash),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = TaskOwnPacket;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct ramflux.message.v1.TaskOwnPacket")
+            }
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<TaskOwnPacket, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut context__ = None;
+                let mut history__ = None;
+                let mut manifests__ = None;
+                let mut pins__ = None;
+                let mut base__ = None;
+                let mut prefix_hash__ = None;
+                let mut seen_fields__ = std::collections::HashSet::new();
+                while let Some(k) = map_.next_key()? {
+                    if !seen_fields__.insert(std::mem::discriminant(&k)) {
+                        return Err(serde::de::Error::custom("duplicate ProtoJSON field or alias"));
+                    }
+                    match k {
+                        GeneratedField::Context => {
+                            if context__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("context"));
+                            }
+                            context__ = map_.next_value()?;
+                        }
+                        GeneratedField::History => {
+                            if history__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("history"));
+                            }
+                            history__ = map_.next_value()?;
+                        }
+                        GeneratedField::Manifests => {
+                            if manifests__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("manifests"));
+                            }
+                            manifests__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Pins => {
+                            if pins__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("pins"));
+                            }
+                            pins__ = Some(map_.next_value()?);
+                        }
+                        GeneratedField::Base => {
+                            if base__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("base"));
+                            }
+                            base__ = Some(
+                                map_.next_value::<::pbjson::private::NumberDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::PrefixHash => {
+                            if prefix_hash__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("prefixHash"));
+                            }
+                            prefix_hash__ = Some(map_.next_value()?);
+                        }
+                    }
+                }
+                Ok(TaskOwnPacket {
+                    context: context__,
+                    history: history__,
+                    manifests: manifests__.unwrap_or_default(),
+                    pins: pins__.unwrap_or_default(),
+                    base: base__.unwrap_or_default(),
+                    prefix_hash: prefix_hash__.unwrap_or_default(),
+                })
+            }
+        }
+        deserializer.deserialize_struct(
+            "ramflux.message.v1.TaskOwnPacket",
+            FIELDS,
+            GeneratedVisitor,
+        )
+    }
+}
