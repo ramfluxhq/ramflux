@@ -173,13 +173,15 @@ async fn linux_vault_systemd_credential_roundtrip_and_mode_refusal()
     for expected in [3, 0] {
         let output = bounded(
             Command::new("strace")
-                .args(["-qq", "-f", "-e", "execve", "-o"])
+                .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/ramflux-no-bus")
+                .args(["-qq", "-f", "-e", "execve,connect", "-o"])
                 .arg(&trace)
                 .arg(rf)
                 .args(["vault", "init", "--mode", "systemd-host", "--vault-root"])
                 .arg(&root),
         )?;
         assert!(output.status.success(), "real rf bootstrap refused");
+        assert!(!std::fs::read_to_string(&trace)?.contains("ramflux-no-bus"));
         assert_eq!(
             std::fs::read_to_string(&trace)?
                 .lines()
@@ -244,5 +246,36 @@ async fn linux_vault_systemd_credential_roundtrip_and_mode_refusal()
         Err(Error::Provider)
     );
     assert!(!tpm.join("descriptor.json").exists());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "private unlocked gnome-keyring fixture"]
+async fn linux_vault_secret_service_has_no_headless_fallback()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_sdk::custody::{LinuxVaultInstallation as Vault, LinuxVaultMode};
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::path::PathBuf::from(
+        std::env::var_os("RF_LINUX_VAULT_FIXTURE_ROOT").ok_or("fixture root")?,
+    )
+    .join("ss-vault");
+    std::fs::create_dir(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    Vault::initialize(root.clone(), LinuxVaultMode::DesktopSecretService).await?;
+    Vault::status(root.clone(), LinuxVaultMode::DesktopSecretService).await?;
+    let descriptor = std::fs::read(root.join("descriptor.json"))?;
+    Vault::initialize(root.clone(), LinuxVaultMode::DesktopSecretService).await?;
+    assert_eq!(descriptor, std::fs::read(root.join("descriptor.json"))?);
+    let rf = std::env::var_os("RF_LINUX_VAULT_FIXTURE_RF")
+        .map_or_else(|| env!("CARGO_BIN_EXE_rf").into(), std::path::PathBuf::from);
+    // A child with no bus cannot fall back, and does not touch persisted state.
+    let missing = Command::new(&rf)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/ramflux-fixture")
+        .args(["vault", "status", "--mode", "desktop-secret-service", "--vault-root"])
+        .arg(&root)
+        .output()?;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8(missing.stderr)?.contains("vault_provider"));
+    assert_eq!(descriptor, std::fs::read(root.join("descriptor.json"))?);
     Ok(())
 }

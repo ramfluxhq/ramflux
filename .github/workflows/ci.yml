@@ -352,6 +352,17 @@ jobs:
           sudo --preserve-env=PATH "$NEXTEST" nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
 
 
+      - name: Real local Secret Service initialization and cleanup proofs
+        run: |
+          sudo --preserve-env=PATH cargo-nextest nextest list --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
+          sudo --preserve-env=PATH cargo-nextest nextest list --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
+          mapfile -t sdk < <(find target/debug/deps -maxdepth 1 -type f -name 'ramflux_sdk-*' -executable)
+          mapfile -t platform < <(find target/debug/deps -maxdepth 1 -type f -name 'linux_vault_platform-*' -executable)
+          test "${#sdk[@]}" -eq 1
+          test "${#platform[@]}" -eq 1
+          sudo bash scripts/linux-vault-secret-service-ci.sh "${sdk[0]}" "${platform[0]}" target/debug/rf
+
+
   # The C ABI smoke test (crates/ramflux-sdk/tests/c_abi_smoke.rs) is excluded from PR CI below:
   # it runs a nested cargo build, and nothing consumes the C ABI while mobile is frozen. It runs
   # again when mobile/ABI integration starts. The all-features clippy job still compiles c_abi.

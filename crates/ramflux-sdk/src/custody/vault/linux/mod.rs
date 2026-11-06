@@ -24,6 +24,8 @@ mod durability;
 #[cfg(target_os = "linux")]
 mod init;
 #[cfg(target_os = "linux")]
+mod secret_service;
+#[cfg(target_os = "linux")]
 mod systemd;
 #[cfg(all(target_os = "linux", test))]
 mod test_proc;
