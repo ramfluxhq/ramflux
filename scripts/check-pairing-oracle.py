@@ -98,6 +98,19 @@ def generate():
                                    send_digest=b64(run([exe],frame('ramflux.identity.custody.object_hash.v1',jcs(send)))),
                                    preimages_hex={k:v.hex() for k,v in native_preimages.items()},
                                    sha256={k:run(['openssl','dgst','-sha256','-binary'],v).hex() for k,v in native_preimages.items()})
+        # Operation discriminator and request wrapper are hashed, not just the DTO body.
+        issue=dict(schema='ramflux.pairing.Issue.v2',version=2,spec=spec)
+        create=dict(schema='ramflux.pairing.Create.v2',version=2,
+                    ticket=dict(body=ticket,signature=b64(bytes([7])*64)),spec=spec)
+        actions=dict(issue=dict(operation='pairing_issue',request=issue),
+                     create=dict(operation='pairing_create',request=create),
+                     old_open_session=dict(operation='open_session'))
+        output['native_relay']['actions']={}
+        for name, action in actions.items():
+            canonical=jcs(action)
+            raw=frame('ramflux.identity.custody_action.v1',canonical)
+            output['native_relay']['actions'][name]=dict(value=action,canonical_hex=canonical.hex(),
+                preimage_hex=raw.hex(),hash=b64(run([exe],raw)))
         controls={}
         envelope={'body':{'schema':'control.v1','version':1,'nullable':None,'nested':{'body':{'n':1},'signature':b64(bytes([13])*64)}},'signature':b64(bytes([12])*64)}
         for name, domain, value in [('object','ramflux.identity.custody.object_hash.v1',envelope),('section','ramflux.identity.custody.section_hash.v1',{'section':'profile','value':{'kind':'human'}}),('list','ramflux.identity.revoked_devices.list.v1',[])]:
