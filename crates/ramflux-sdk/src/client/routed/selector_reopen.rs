@@ -240,11 +240,60 @@ impl Case {
 }
 #[tokio::test]
 async fn e16_payload_fenced_m3_refused_without_retry() -> TestResult {
-    Case::new()?.assert_mixed(false).await
+    let mut c = Case::new()?;
+    c.fence()?;
+    c.refs = vec![c.refs[1].clone()];
+    let entry = c.entry("fresh-fenced-registration")?;
+    assert!(c.b.client.routed_seen_marker(&entry)?.is_none());
+    let delivery =
+        c.receive(&entry, false).await?.plaintext.ok_or("fenced-only message missing")?;
+    assert_eq!(
+        ramflux_protocol::decode_base64url(&delivery.plaintext_body_base64)?,
+        b"preserved text"
+    );
+    assert_eq!(delivery.attachments.len(), 0);
+    OBSERVED.with_borrow(|o| {
+        assert_eq!(o.registrations, 1, "fresh fenced input must reach registration");
+        assert_eq!(o.refused, 1, "registration must observe the typed erasure");
+        assert_eq!(o.imports, Vec::<String>::new(), "auto-fetch is disabled for this witness");
+    });
+    assert!(c.b.client.routed_seen_marker(&entry)?.is_some());
+    assert!(c.b.client.direct_message_by_id(&delivery.message_id)?.is_some_and(|m| !m.deleted));
+    assert_eq!(
+        c.b.client.account_db()?.actor_state_keys("attachment/reference/refused")?,
+        Vec::<String>::new()
+    );
+    assert_eq!(c.b.client.account_db()?.due_inbox_retries(i64::MAX)?, Vec::<Vec<u8>>::new());
+    Ok(())
 }
 #[tokio::test]
 async fn e16_routed_import_receives_only_admitted_subset() -> TestResult {
-    Case::new()?.assert_mixed(false).await
+    let mut c = Case::new()?;
+    c.fence()?;
+    let rejected = c.refs[1].clone();
+    // Rejected entries bracket the first survivor; admitted order differs from fixture order.
+    c.refs = vec![rejected.clone(), c.refs[2].clone(), rejected, c.refs[0].clone()];
+    let entry = c.entry("ordered-subset")?;
+    let delivery = c.receive(&entry, true).await?.plaintext.ok_or("subset message missing")?;
+    assert_eq!(
+        delivery.attachments.iter().map(|r| r.object_id.as_str()).collect::<Vec<_>>(),
+        ["good-two", "good-one"]
+    );
+    OBSERVED.with_borrow(|o| {
+        assert_eq!(o.registrations, 4);
+        assert_eq!(o.refused, 2);
+        assert_eq!(
+            o.imports,
+            ["good-two", "good-one"],
+            "only admitted input positions 1 and 3 may enter import"
+        );
+    });
+    assert!(c.b.client.routed_seen_marker(&entry)?.is_some());
+    assert_eq!(
+        c.b.client.account_db()?.actor_state_keys("attachment/reference/refused")?,
+        Vec::<String>::new()
+    );
+    Ok(())
 }
 #[tokio::test]
 async fn e16_routed_receive_mixed_valid_and_fenced_attachments_auto_fetch() -> TestResult {
@@ -262,7 +311,13 @@ async fn e16_m2_replay_refused_without_retry() -> TestResult {
     let id =
         c.b.client.direct_messages("conversation")?.first().ok_or("message")?.message_id.clone();
     c.b.client.account_db()?.delete_direct_message("conversation", &id, "local", "erase")?;
+    let registered = OBSERVED.with_borrow(|o| o.registrations);
+    assert_eq!(registered, 3, "original m2 must have registered its references");
     assert!(c.receive(&entry, true).await?.plaintext.is_none());
+    assert_eq!(c.b.client.account_db()?.due_inbox_retries(i64::MAX)?, Vec::<Vec<u8>>::new());
+    OBSERVED.with_borrow(|o| {
+        assert_eq!(o.registrations, registered, "deleted m2 replay must stop before registration");
+    });
     Ok(())
 }
 #[tokio::test]
