@@ -106,6 +106,7 @@ fn large_pop_nonce_is_consumed_once_across_verifiers_and_restart() {
     std::fs::remove_file(path).unwrap();
     assert_replay_budgets_and_indexed_gc_keep_unrelated_principals_live();
     super::capacity_tests::assert_default_capacity_worst_case_principals_on_disk();
+    super::capacity_tests::assert_byte_cap_binding_worst_case_principals_on_disk();
 }
 #[test]
 fn inclusive_skew_fence_and_expiry_boundaries_admit_fresh_nonces() {
