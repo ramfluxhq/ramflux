@@ -18,10 +18,18 @@ async fn retirement_before_sink_authority_refuses_dequeued_frame() -> anyhow::Re
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     *q.inner.before_write.lock().map_err(|_| anyhow::anyhow!("barrier poisoned"))? =
         Some((entered.clone(), release.clone()));
-    assert_eq!(
-        q.try_push_versioned(b"{\"frame_type\":\"old-E\"}".to_vec(), 1, Some(ID.into())),
-        Admission::Queued
-    );
+    let mut envelope = crate::session::tests::test_envelope();
+    envelope.target_delivery_id = "target".into();
+    let bytes = serde_json::to_vec(&ramflux_node_core::SessionPushServerFrame::Deliver {
+        entry: ramflux_node_core::InboxEntry {
+            target_delivery_id: "target".into(),
+            inbox_seq: 1,
+            envelope,
+        },
+        incarnation_id: ID.into(),
+        retain_until: 12345,
+    })?;
+    assert_eq!(q.try_push_versioned(bytes, 1, Some(ID.into())), Admission::Queued);
     let Next::Frame(frame) = q.next() else {
         anyhow::bail!("frame not dequeued");
     };
@@ -34,8 +42,10 @@ async fn retirement_before_sink_authority_refuses_dequeued_frame() -> anyhow::Re
     q.retire_with_sink(&send).await;
     assert!(q.is_closed());
     release.add_permits(1);
-    assert!(!tokio::time::timeout(Duration::from_secs(2), writing).await??);
-    assert!(frames.lock().map_err(|_| anyhow::anyhow!("frames poisoned"))?.is_empty());
+    let wrote = tokio::time::timeout(Duration::from_secs(2), writing).await??;
+    let wire = frames.lock().map_err(|_| anyhow::anyhow!("frames poisoned"))?;
+    assert!(wire.is_empty(), "retired incarnation reached the wire: {wire:?}");
+    assert!(!wrote);
     Ok(())
 }
 struct Held {

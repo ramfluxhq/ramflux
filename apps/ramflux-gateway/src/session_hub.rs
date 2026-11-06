@@ -228,7 +228,8 @@ impl GatewaySessionHub {
             return Outcome::NoSession;
         };
         if wire.len() > crate::push_queue::BYTE_CAP
-            || (entry.incarnation.is_some() && wire.len() > ramflux_node_core::ENTRY_FRAME_BYTE_CAP) {
+            || (entry.incarnation.is_some() && wire.len() > ramflux_node_core::ENTRY_FRAME_BYTE_CAP)
+        {
             return Outcome::NoSession;
         }
         let seq = match frame {
