@@ -32,6 +32,7 @@ mod home_node_migration;
 mod identity;
 mod identity_binding;
 mod identity_profile;
+pub mod username_directory;
 pub use identity_profile::{sign_identity_profile, verify_identity_profile};
 mod signed_device_set;
 pub use identity_binding::{
