@@ -81,3 +81,5 @@ async fn request_body<T: serde::Serialize>(
 }
 
 mod agent_export;
+
+pub(crate) mod vault;

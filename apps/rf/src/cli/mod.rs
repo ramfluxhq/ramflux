@@ -18,6 +18,8 @@ mod dm;
 mod grant;
 mod group;
 mod keychain;
+mod vault;
+pub(crate) use vault::*;
 mod mcp;
 mod node;
 mod object;
@@ -63,6 +65,7 @@ pub(crate) enum Command {
     Mcp(McpCommand),
     Grant(GrantCommand),
     Keychain(KeychainCommand),
+    Vault(VaultCommand),
     A2i(A2iCommand),
     A2ui(A2uiCommand),
     Surface(SurfaceCommand),

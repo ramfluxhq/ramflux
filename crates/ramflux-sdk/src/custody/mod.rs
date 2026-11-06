@@ -116,3 +116,6 @@ pub(crate) use capacity_backoff::{
 
 /// Dormant native DM bootstrap component adapters.
 pub mod dm_fs_v3;
+
+#[cfg(target_os = "linux")]
+pub use vault::linux::{LinuxVaultInitError, LinuxVaultInstallation};

@@ -318,7 +318,7 @@ jobs:
 
   linux-vault-platform:
     name: Linux vault platform fixture
-    needs: build-rest
+    needs: [build-rest, build-sdk]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -329,7 +329,7 @@ jobs:
       - name: Install platform fixture tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y systemd dbus dbus-x11 gnome-keyring libsecret-tools libsecret-1-dev zstd acl
+          sudo apt-get install -y systemd dbus dbus-x11 gnome-keyring libsecret-tools libsecret-1-dev zstd acl strace
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
@@ -338,10 +338,18 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: archive-rest
+      - name: Download default-feature SDK archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-sdk
       - name: Verify pinned independent libsodium C oracle
         run: python3 -B scripts/linux-vault-vectors.py --check --oracle-dir "$RUNNER_TEMP/linux-vault-oracle"
       - name: Private user, D-Bus and actual systemd credential smoke
         run: sudo --preserve-env=PATH bash scripts/linux-vault-ci.sh rest.tar.zst
+      - name: Real systemd init crash and owned-pipe cleanup proofs
+        run: |
+          sudo --preserve-env=PATH cargo-nextest nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
+
 
   # The C ABI smoke test (crates/ramflux-sdk/tests/c_abi_smoke.rs) is excluded from PR CI below:
   # it runs a nested cargo build, and nothing consumes the C ABI while mobile is frozen. It runs

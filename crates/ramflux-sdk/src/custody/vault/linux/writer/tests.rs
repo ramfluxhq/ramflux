@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use super::super::init::Slot;
 use super::super::{cleanup::Secret, codec::Plaintext};
 use super::*;
 use std::{
@@ -12,7 +13,10 @@ use std::{
     },
     path::Path,
     process::{Child, Command},
-    sync::{atomic::AtomicBool, mpsc},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
