@@ -135,7 +135,7 @@ cat > "$fixture/bus.conf" <<BUS
   <type>session</type>
   <listen>unix:path=$fixture/runtime/bus</listen>
   <auth>EXTERNAL</auth>
-  <policy context="default"><allow send_destination="*"/><allow own="*"/></policy>
+  <policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy>
 </busconfig>
 BUS
 chmod 0644 "$fixture/bus.conf"
