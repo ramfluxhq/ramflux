@@ -952,6 +952,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
     use ramflux_storage::StorageError as E;
     match error {
         E::AccountWriterBusy(_) => RamfluxErrorCode::AccountBusy,
+        E::SegmentResourceCapacity { .. } => RamfluxErrorCode::RateLimited,
         E::ObjectErased => RamfluxErrorCode::ObjectErased,
         E::ObjectIdentityConflict => RamfluxErrorCode::ObjectIdentityConflict,
         E::ObjectOwnershipUnverified { .. } => RamfluxErrorCode::ObjectOwnershipUnverified,
