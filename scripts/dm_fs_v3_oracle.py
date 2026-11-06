@@ -443,6 +443,81 @@ def check_bindings(wire, crypto, custody):
             require(v['embedded_rfs1'] == by_name[name]['bytes'], 'custody native wire binding')
 
 
+def maximum_values(name):
+    """Public size-only values: all IDs full, lists full and optionals present.
+
+    Signatures are public dummy bytes; this corpus proves codec sizes, not authority.
+    """
+    values = {}
+    for field in TYPES[name]['fields']:
+        kind = field['kind']
+        if kind == 'profile':
+            value = PROFILE
+        elif kind in ('text','code'):
+            value = ('i' if kind == 'text' else 'c') * field['max_bytes']
+        elif kind.startswith('opt@'):
+            value = maximum_values(kind[4:])
+        elif kind.startswith('@'):
+            value = maximum_values(kind[1:])
+        elif kind.startswith('list'):
+            count, child = kind[4:].split('@')
+            value = [maximum_values(child)] * int(count)
+        elif kind in ('u64','u32'):
+            value = (1 << (64 if kind == 'u64' else 32)) - 1
+        else:
+            width = 32 if kind in ('opt_id','opt_key') else field['max_bytes']
+            value = '11' * width
+        values[field['name']] = value
+    return values
+
+
+def maximum_size(name):
+    """Recompute complete canonical maxima without trusting declared ceilings."""
+    total = 8
+    for field in TYPES[name]['fields']:
+        kind = field['kind']
+        if kind == 'profile':
+            size = len(PROFILE.encode())
+        elif kind.startswith('opt@'):
+            size = 1 + maximum_size(kind[4:])
+        elif kind.startswith('@'):
+            size = maximum_size(kind[1:])
+        elif kind.startswith('list'):
+            count, child = kind[4:].split('@')
+            size = 2 + int(count) * (4 + maximum_size(child))
+        else:
+            size = field['max_bytes']
+        total += 6 + size
+    return total
+
+
+def check_size_policy(wire):
+    policy = SCHEMA['size_policy']
+    require(policy['minimum_headroom_percent'] == 2 and policy['rounding_bytes'] == 1024,
+            'decision-r7 rounding/headroom')
+    table = policy['table']
+    require(set(table) == set(TYPES), 'worst-case type coverage')
+    records = {v['type']: v for v in wire['filled_maximum']}
+    require(set(records) == set(TYPES) and len(records) == len(wire['filled_maximum']),
+            'filled-max vector coverage')
+    for name, layout in TYPES.items():
+        worst = maximum_size(name)
+        expected_ceiling = ((worst * 102 + 102399) // 102400) * 1024
+        require(table[name] == dict(worst_case_bytes=worst,ceiling=expected_ceiling),
+                'worst-case table: '+name)
+        require(layout['ceiling'] == expected_ceiling and worst <= layout['ceiling'],
+                'worst-case ceiling: '+name)
+        expected = encode(name, maximum_values(name))
+        require(len(expected) == worst, 'maximal construction size: '+name)
+        require(records[name]['byte_length'] == worst and records[name]['bytes'] == expected.hex()
+                and records[name]['base64url'] == b64(expected), 'filled-max bytes: '+name)
+        scan(name, expected)
+    for name in ('BootstrapHeader','BootstrapTranscript'):
+        field = next(f for f in TYPES[name]['fields'] if f['name'] == 'routed_ad')
+        require(field['max_bytes'] == policy['routed_ad_max_bytes'] == 4096
+                and field['max_bytes'] < TYPES['BootstrapHeader']['ceiling'], 'routed AD ceiling')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', required=True)
@@ -460,12 +535,14 @@ def main():
     for name, digest in manifest['fixture_sha256'].items():
         require(hashlib.sha256((FIXTURES/name).read_bytes()).hexdigest() == digest, 'fixture integrity: ' + name)
     wire, crypto, custody = (load(n) for n in ('wire_vectors.json','crypto_vectors.json','custody_vectors.json'))
+    check_size_policy(wire)
     check_wire(wire)
     check_crypto(crypto)
     check_custody(custody)
     check_bindings(wire, crypto, custody)
     actual_coverage = dict(wire_types=len(TYPES), positive_wire_cases=len(wire['positive']),
         negative_wire_cases=len(wire['negative']), invalid_inputs=len(wire['invalid_inputs']),
+        filled_maximum_cases=len(wire['filled_maximum']),
         deadline_cases=len(wire['deadlines']), hashes=len(crypto['hashes']),
         native_signatures=len(crypto['signatures']), custody_actions=len(custody),
         bootstrap_modes=sorted(v['mode'] for v in crypto['bootstrap']))

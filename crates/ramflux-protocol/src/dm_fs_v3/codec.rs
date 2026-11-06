@@ -126,19 +126,25 @@ impl WireType {
     #[must_use]
     pub const fn ceiling(self) -> usize {
         match self {
-            Self::QualifiedBranch => 1_024,
-            Self::SignedNativePrekeyBase => 2_048,
-            Self::SignedNativeOpk => 512,
-            Self::RetirementRef => 128,
-            Self::OwnerPrekeyUpdate | Self::PrekeyPublicationSnapshot | Self::OwnerPrekeyStatus => {
-                65_536
+            Self::QualifiedBranch
+            | Self::SignedNativeOpk
+            | Self::RetirementRef
+            | Self::OwnerStatusEntry => 1_024,
+            Self::SignedNativePrekeyBase | Self::PublicPrekeyView | Self::PrekeyLeaseIntent => {
+                2_048
             }
-            Self::PublicPrekeyView | Self::PrekeyLeaseIntent => 4_096,
-            Self::PrekeyLeaseResult | Self::NativePrekeyRequest => 8_192,
-            Self::OwnerStatusEntry => 256,
-            Self::OwnerStatusQuery | Self::NativePrekeyLease | Self::BootstrapHeader => 16_384,
-            Self::NativePrekeyPublish | Self::NativePrekeyResult => 131_072,
-            Self::NativePrekeyStatus | Self::BootstrapTranscript => 32_768,
+            Self::OwnerPrekeyUpdate => 50_176,
+            Self::PrekeyPublicationSnapshot => 81_920,
+            Self::PrekeyLeaseResult => 4_096,
+            Self::OwnerStatusQuery => 17_408,
+            Self::OwnerPrekeyStatus => 37_888,
+            Self::NativePrekeyRequest => 3_072,
+            Self::NativePrekeyLease => 5_120,
+            Self::NativePrekeyPublish => 53_248,
+            Self::NativePrekeyStatus => 19_456,
+            Self::NativePrekeyResult => 40_960,
+            Self::BootstrapHeader => 8_192,
+            Self::BootstrapTranscript => 12_288,
         }
     }
 
@@ -212,18 +218,18 @@ const OWNER_PREKEY_UPDATE_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 64, kind: Kind::Profile },
     Spec { id: 2, max: 2048, kind: Kind::Nested(WireType::SignedNativePrekeyBase) },
     Spec { id: 3, max: 8, kind: Kind::Fixed(8) },
-    Spec { id: 4, max: 65_536, kind: Kind::List(64, WireType::SignedNativeOpk) },
-    Spec { id: 5, max: 65_536, kind: Kind::List(400, WireType::RetirementRef) },
+    Spec { id: 4, max: 16386, kind: Kind::List(64, WireType::SignedNativeOpk) },
+    Spec { id: 5, max: 31202, kind: Kind::List(400, WireType::RetirementRef) },
     Spec { id: 6, max: 64, kind: Kind::Fixed(64) },
 ];
 
 const PREKEY_PUBLICATION_SNAPSHOT_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 64, kind: Kind::Profile },
-    Spec { id: 2, max: 65_536, kind: Kind::Nested(WireType::OwnerPrekeyUpdate) },
+    Spec { id: 2, max: 50176, kind: Kind::Nested(WireType::OwnerPrekeyUpdate) },
     Spec { id: 3, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 4, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 5, max: 8, kind: Kind::Fixed(8) },
-    Spec { id: 6, max: 65_536, kind: Kind::List(400, WireType::RetirementRef) },
+    Spec { id: 6, max: 31202, kind: Kind::List(400, WireType::RetirementRef) },
     Spec { id: 7, max: 32, kind: Kind::Fixed(32) },
 ];
 
@@ -248,7 +254,7 @@ const PREKEY_LEASE_INTENT_FIELDS: &[Spec] = &[
 const PREKEY_LEASE_RESULT_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 64, kind: Kind::Profile },
     Spec { id: 2, max: 2048, kind: Kind::Nested(WireType::SignedNativePrekeyBase) },
-    Spec { id: 3, max: 513, kind: Kind::OptionalNested(WireType::SignedNativeOpk) },
+    Spec { id: 3, max: 1025, kind: Kind::OptionalNested(WireType::SignedNativeOpk) },
     Spec { id: 4, max: 1024, kind: Kind::Nested(WireType::QualifiedBranch) },
     Spec { id: 5, max: 1024, kind: Kind::Nested(WireType::QualifiedBranch) },
     Spec { id: 6, max: 32, kind: Kind::Fixed(32) },
@@ -262,7 +268,7 @@ const PREKEY_LEASE_RESULT_FIELDS: &[Spec] = &[
 const OWNER_STATUS_QUERY_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 64, kind: Kind::Profile },
     Spec { id: 2, max: 1024, kind: Kind::Nested(WireType::QualifiedBranch) },
-    Spec { id: 3, max: 65_536, kind: Kind::List(200, WireType::RetirementRef) },
+    Spec { id: 3, max: 15602, kind: Kind::List(200, WireType::RetirementRef) },
 ];
 
 const OWNER_STATUS_ENTRY_FIELDS: &[Spec] = &[
@@ -283,7 +289,7 @@ const OWNER_PREKEY_STATUS_FIELDS: &[Spec] = &[
     Spec { id: 6, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 7, max: 32, kind: Kind::Fixed(32) },
     Spec { id: 8, max: 8, kind: Kind::Fixed(8) },
-    Spec { id: 9, max: 65_536, kind: Kind::List(200, WireType::OwnerStatusEntry) },
+    Spec { id: 9, max: 35202, kind: Kind::List(200, WireType::OwnerStatusEntry) },
     Spec { id: 10, max: 64, kind: Kind::Fixed(64) },
 ];
 
@@ -306,28 +312,28 @@ const NATIVE_PREKEY_REQUEST_FIELDS: &[Spec] = &[
 
 const NATIVE_PREKEY_LEASE_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 32, kind: Kind::Fixed(32) },
-    Spec { id: 2, max: 8192, kind: Kind::Nested(WireType::NativePrekeyRequest) },
-    Spec { id: 3, max: 4096, kind: Kind::Nested(WireType::PrekeyLeaseIntent) },
+    Spec { id: 2, max: 3072, kind: Kind::Nested(WireType::NativePrekeyRequest) },
+    Spec { id: 3, max: 2048, kind: Kind::Nested(WireType::PrekeyLeaseIntent) },
 ];
 
 const NATIVE_PREKEY_PUBLISH_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 32, kind: Kind::Fixed(32) },
-    Spec { id: 2, max: 8192, kind: Kind::Nested(WireType::NativePrekeyRequest) },
-    Spec { id: 3, max: 65_536, kind: Kind::Nested(WireType::OwnerPrekeyUpdate) },
+    Spec { id: 2, max: 3072, kind: Kind::Nested(WireType::NativePrekeyRequest) },
+    Spec { id: 3, max: 50176, kind: Kind::Nested(WireType::OwnerPrekeyUpdate) },
 ];
 
 const NATIVE_PREKEY_STATUS_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 32, kind: Kind::Fixed(32) },
-    Spec { id: 2, max: 8192, kind: Kind::Nested(WireType::NativePrekeyRequest) },
-    Spec { id: 3, max: 16384, kind: Kind::Nested(WireType::OwnerStatusQuery) },
+    Spec { id: 2, max: 3072, kind: Kind::Nested(WireType::NativePrekeyRequest) },
+    Spec { id: 3, max: 17408, kind: Kind::Nested(WireType::OwnerStatusQuery) },
 ];
 
 const NATIVE_PREKEY_RESULT_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 32, kind: Kind::Fixed(32) },
     Spec { id: 2, max: 32, kind: Kind::Fixed(32) },
     Spec { id: 3, max: 64, kind: Kind::Code },
-    Spec { id: 4, max: 8193, kind: Kind::OptionalNested(WireType::PrekeyLeaseResult) },
-    Spec { id: 5, max: 65_537, kind: Kind::OptionalNested(WireType::OwnerPrekeyStatus) },
+    Spec { id: 4, max: 4097, kind: Kind::OptionalNested(WireType::PrekeyLeaseResult) },
+    Spec { id: 5, max: 37889, kind: Kind::OptionalNested(WireType::OwnerPrekeyStatus) },
     Spec { id: 6, max: 64, kind: Kind::Code },
     Spec { id: 7, max: 64, kind: Kind::Code },
     Spec { id: 8, max: 4, kind: Kind::Fixed(4) },
@@ -357,15 +363,15 @@ const BOOTSTRAP_HEADER_FIELDS: &[Spec] = &[
     Spec { id: 19, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 20, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 21, max: 8, kind: Kind::Fixed(8) },
-    Spec { id: 22, max: 65_536, kind: Kind::Bytes },
+    Spec { id: 22, max: 4096, kind: Kind::Bytes },
 ];
 
 const BOOTSTRAP_TRANSCRIPT_FIELDS: &[Spec] = &[
     Spec { id: 1, max: 64, kind: Kind::Profile },
-    Spec { id: 2, max: 16_384, kind: Kind::Nested(WireType::BootstrapHeader) },
+    Spec { id: 2, max: 8192, kind: Kind::Nested(WireType::BootstrapHeader) },
     Spec { id: 3, max: 8, kind: Kind::Fixed(8) },
     Spec { id: 4, max: 8, kind: Kind::Fixed(8) },
-    Spec { id: 5, max: 65_536, kind: Kind::Bytes },
+    Spec { id: 5, max: 4096, kind: Kind::Bytes },
 ];
 
 /// An inherited custody identifier, using the private custody verifier's predicate.

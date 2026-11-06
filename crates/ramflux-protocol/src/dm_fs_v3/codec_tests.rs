@@ -372,30 +372,104 @@ mod allocation {
 
 fn maximum_collection_scans(owner: &str, field: u16, element: &str, count: u16) -> Result {
     let (schema, vectors) = json()?;
-    let positives = array(&vectors["positive"])?;
-    let owner = positives.iter().find(|v| v["type"] == owner).ok_or("owner fixture")?;
-    let child = positives.iter().find(|v| v["type"] == element).ok_or("element fixture")?;
-    let raw = bytes(string(&owner["bytes"])?)?;
-    let child = bytes(string(&child["bytes"])?)?;
-    let mut list = count.to_be_bytes().to_vec();
+    let maxima = array(&vectors["filled_maximum"])?;
+    let vector = maxima.iter().find(|v| v["type"] == owner).ok_or("owner maximum")?;
+    let raw = bytes(string(&vector["bytes"])?)?;
+    let wire_type = kind(&schema, &vector["type"])?;
+    let view = scan(wire_type, &raw)?;
+    let mut list = view.field(field).ok_or("collection field")?;
+    let observed = u16::from_be_bytes(list.get(..2).ok_or("count")?.try_into()?);
+    assert_eq!(observed, count);
+    list = &list[2..];
+    let child_type = kind(&schema, &Value::String(element.to_owned()))?;
     for _ in 0..count {
-        list.extend_from_slice(&u32::try_from(child.len())?.to_be_bytes());
-        list.extend_from_slice(&child);
+        let length =
+            usize::try_from(u32::from_be_bytes(list.get(..4).ok_or("length")?.try_into()?))?;
+        list = &list[4..];
+        scan(child_type, list.get(..length).ok_or("element")?)?;
+        list = &list[length..];
     }
-    let kind = kind(&schema, &owner["type"])?;
-    let filled = replace_field(kind, &raw, field, &list)?;
-    let view = scan(kind, &filled)?;
-    assert_eq!(view.field(field), Some(list.as_slice()));
-    if kind == WireType::OwnerStatusQuery {
-        assert!(filled.len() > 8_192 && filled.len() <= 16_384);
-        let frame = positives.iter().find(|v| v["type"] == "NativePrekeyStatus").ok_or("frame")?;
-        let framed = replace_field(
-            WireType::NativePrekeyStatus,
-            &bytes(string(&frame["bytes"])?)?,
-            3,
-            &filled,
-        )?;
-        assert!(scan(WireType::NativePrekeyStatus, &framed).is_ok());
+    assert_eq!(list, b"");
+    assert_maximum_fields(wire_type, &raw)?;
+    if wire_type == WireType::OwnerStatusQuery {
+        assert_eq!(raw.len(), 16_390);
+        let frame =
+            maxima.iter().find(|v| v["type"] == "NativePrekeyStatus").ok_or("frame maximum")?;
+        scan(WireType::NativePrekeyStatus, &bytes(string(&frame["bytes"])?)?)?;
+    }
+    Ok(())
+}
+
+fn canonical_maximum(kind: WireType) -> Result<usize> {
+    kind.specs().iter().try_fold(8usize, |total, spec| {
+        let size = match spec.kind {
+            Kind::Fixed(n) => n,
+            Kind::Profile => b"ramflux.dm.bootstrap.fs.v1".len(),
+            Kind::Text | Kind::Code | Kind::Bytes => spec.max,
+            Kind::Nested(child) => canonical_maximum(child)?,
+            Kind::OptionalFixed(n) => n.checked_add(1).ok_or("size overflow")?,
+            Kind::OptionalNested(child) => {
+                canonical_maximum(child)?.checked_add(1).ok_or("size overflow")?
+            }
+            Kind::List(count, child) => canonical_maximum(child)?
+                .checked_add(4)
+                .and_then(|n| n.checked_mul(count))
+                .and_then(|n| n.checked_add(2))
+                .ok_or("size overflow")?,
+        };
+        total.checked_add(6).and_then(|n| n.checked_add(size)).ok_or_else(|| "size overflow".into())
+    })
+}
+
+fn assert_maximum_fields(kind: WireType, raw: &[u8]) -> Result {
+    let view = scan(kind, raw)?;
+    for (field, spec) in view.fields().zip(kind.specs()) {
+        match spec.kind {
+            Kind::Text => assert_eq!(field.value.len(), 256),
+            Kind::Code | Kind::Bytes => assert_eq!(field.value.len(), spec.max),
+            Kind::Nested(child) => assert_maximum_fields(child, field.value)?,
+            Kind::OptionalNested(child) => {
+                assert_eq!(field.value.first(), Some(&1));
+                assert_maximum_fields(child, &field.value[1..])?;
+            }
+            Kind::OptionalFixed(size) => {
+                assert_eq!(field.value.first(), Some(&1));
+                assert_eq!(field.value.len(), size + 1);
+            }
+            Kind::List(count, child) => {
+                let mut rest = field.value;
+                assert_eq!(usize::from(u16::from_be_bytes(rest[..2].try_into()?)), count);
+                rest = &rest[2..];
+                for _ in 0..count {
+                    let length = usize::try_from(u32::from_be_bytes(rest[..4].try_into()?))?;
+                    rest = &rest[4..];
+                    assert_maximum_fields(child, &rest[..length])?;
+                    rest = &rest[length..];
+                }
+                assert_eq!(rest, b"");
+            }
+            Kind::Fixed(_) | Kind::Profile => {}
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn scanner_worst_case_frames_all_fit() -> Result {
+    let (schema, vectors) = json()?;
+    let maxima = array(&vectors["filled_maximum"])?;
+    assert_eq!(maxima.len(), 19);
+    for vector in maxima {
+        let kind = kind(&schema, &vector["type"])?;
+        let raw = bytes(string(&vector["bytes"])?)?;
+        let worst = canonical_maximum(kind)?;
+        let row = &schema["size_policy"]["table"][string(&vector["type"])?];
+        assert_eq!(raw.len(), worst);
+        assert_eq!(worst, number(&row["worst_case_bytes"])?);
+        let ceiling = worst.checked_mul(102).ok_or("size overflow")?.div_ceil(102_400) * 1024;
+        assert_eq!(kind.ceiling(), ceiling);
+        assert_eq!(ceiling, number(&row["ceiling"])?);
+        assert_maximum_fields(kind, &raw)?;
     }
     Ok(())
 }
