@@ -412,3 +412,180 @@ fn dm_fs_v3_recipient_signed_zero_source_rejected() -> Result {
     }
     Ok(())
 }
+
+#[derive(Clone, Copy)]
+enum DeadlineBound {
+    IssuedAt,
+    LeasedAt,
+    SpkExpiry,
+    EnvelopeTime,
+    EnvelopeTtl,
+    TtlPolicy,
+    FutureLease,
+    SpkValidity,
+}
+fn reseal_deadline(lease: &mut p::PrekeyLeaseResult, t: &mut p::BootstrapTranscript) -> Result {
+    let branch = crate::DeviceBranch {
+        principal_id: "fixture-target".into(),
+        device_id: "fixture-device".into(),
+        device_epoch: 1,
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&[14; 32]),
+    };
+    let node = crate::DeviceBranch {
+        principal_id: "fixture-node".into(),
+        device_id: "fixture-device".into(),
+        device_epoch: 1,
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&[60; 32]),
+    };
+    lease.base = sign_base(lease.base.clone(), &branch)?;
+    *lease = sign_lease_result(lease.clone(), &node)?;
+    t.header.base = lease.base.clone();
+    t.header.base_hash = base_hash(&lease.base)?;
+    t.header.bundle_hash = bundle_hash(lease)?;
+    t.header.issued_at = lease.issued_at;
+    t.header.leased_at = lease.leased_at;
+    t.header.deadline = lease.deadline;
+    Ok(())
+}
+fn deadline_negative(mode: &str, bound: DeadlineBound, error: p::DeadlineError) -> Result {
+    let all = vectors()?;
+    let v = all["bootstrap"]
+        .as_array()
+        .ok_or("bootstrap")?
+        .iter()
+        .find(|v| v["mode"] == mode)
+        .ok_or("mode")?;
+    let mut c = Case::new(v)?;
+    let (lease, t) = (&mut c.lease, &mut c.t);
+    let horizon = u64::try_from(ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS)?;
+    let start = 2_000_000;
+    lease.base.issued_at = start;
+    lease.base.expires_at = start + 2 * horizon;
+    lease.issued_at = start + 10;
+    lease.leased_at = start + 10;
+    lease.deadline = start + horizon + 1;
+    t.envelope_created_at = start + 11;
+    t.envelope_ttl = horizon;
+    let now = match bound {
+        DeadlineBound::IssuedAt => {
+            lease.issued_at = start + 2;
+            start + 10
+        }
+        DeadlineBound::LeasedAt => {
+            lease.leased_at = start + 2;
+            start + 10
+        }
+        DeadlineBound::SpkExpiry => {
+            lease.base.expires_at = start + horizon + 2;
+            lease.issued_at = start + horizon + 10;
+            lease.leased_at = lease.issued_at;
+            lease.deadline = start + 2 * horizon + 1;
+            t.envelope_created_at = lease.issued_at + 10;
+            lease.issued_at
+        }
+        DeadlineBound::EnvelopeTime => {
+            lease.deadline = start + horizon / 2 + 1;
+            t.envelope_ttl = horizon / 2;
+            start + 10
+        }
+        DeadlineBound::EnvelopeTtl => {
+            lease.deadline = start + horizon / 2 + 1;
+            t.envelope_created_at = start;
+            t.envelope_ttl = horizon / 2 + 10;
+            start + 10
+        }
+        DeadlineBound::TtlPolicy | DeadlineBound::FutureLease | DeadlineBound::SpkValidity => {
+            start + 10
+        }
+    };
+    reseal_deadline(lease, t)?;
+    let mut baseline = c.input();
+    baseline.now = now;
+    assert!(native_recipient(baseline).is_ok(), "recipient deadline baseline must pass");
+    match bound {
+        DeadlineBound::IssuedAt => c.lease.issued_at = start,
+        DeadlineBound::LeasedAt => c.lease.leased_at = start,
+        DeadlineBound::SpkExpiry => c.lease.base.expires_at = start + horizon,
+        DeadlineBound::EnvelopeTime => c.t.envelope_created_at = start,
+        DeadlineBound::EnvelopeTtl => c.t.envelope_ttl = horizon / 2,
+        DeadlineBound::TtlPolicy => c.t.envelope_ttl = horizon + 1,
+        DeadlineBound::FutureLease => {
+            c.lease.leased_at = now + ramflux_protocol::custody::CLOCK_SKEW_SECONDS + 1;
+        }
+        DeadlineBound::SpkValidity => c.lease.base.issued_at = start - 1,
+    }
+    reseal_deadline(&mut c.lease, &mut c.t)?;
+    let mut negative = c.input();
+    negative.now = now;
+    let result = native_recipient(negative);
+    assert!(result.is_err(), "recipient deadline bound must reject");
+    if let Err(actual) = result {
+        assert_eq!(actual, NativeBootstrapError::Deadline(error));
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_spk_only_start() -> Result {
+    deadline_negative("spk_only", DeadlineBound::IssuedAt, p::DeadlineError::ExceedsBound)
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_opk_start() -> Result {
+    deadline_negative("opk", DeadlineBound::LeasedAt, p::DeadlineError::ExceedsBound)
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_spk_expiry() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::SpkExpiry, p::DeadlineError::ExceedsBound)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_envelope_time() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::EnvelopeTime, p::DeadlineError::ExceedsBound)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_envelope_ttl() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::EnvelopeTtl, p::DeadlineError::ExceedsBound)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_ttl_policy() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::TtlPolicy, p::DeadlineError::Policy)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_future_lease() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::FutureLease, p::DeadlineError::FutureLease)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_spk_validity() -> Result {
+    for mode in ["opk", "spk_only"] {
+        deadline_negative(mode, DeadlineBound::SpkValidity, p::DeadlineError::Policy)?;
+    }
+    Ok(())
+}
+#[test]
+fn dm_fs_v3_recipient_deadline_accepts_d_minus_one() -> Result {
+    let all = vectors()?;
+    for v in all["bootstrap"].as_array().ok_or("bootstrap")? {
+        let c = Case::new(v)?;
+        let mut accepted = c.input();
+        accepted.now = c.t.header.deadline - 1;
+        let output = native_recipient(accepted)?;
+        assert!(
+            output.initial_sk.as_ref() == fixed(&v["kdf"]["output"])?,
+            "recipient D-1 golden mismatch"
+        );
+    }
+    Ok(())
+}

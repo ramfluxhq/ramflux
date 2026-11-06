@@ -2,13 +2,14 @@
 // Copyright (c) 2026 Span Brain
 
 //! Scoped recipient component. No provider, persistence, admission or payload decryption.
+use super::bootstrap::{NativeBootstrapSecret as Secret, checked_dh as dh};
 use super::{
     NativeBootstrapError, NativeBootstrapPublic, NativeHkdfOutput, NativePrekeyError, bundle_hash,
     native_hkdf, transcript_hash, verify_bootstrap_transcript,
 };
 use ramflux_protocol::{dm_fs_v3 as p, domain};
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::Zeroizing;
 type Result<T> = std::result::Result<T, NativeBootstrapError>;
 
 /// A named, borrowed SPK selected by the caller's current key provider.
@@ -45,32 +46,6 @@ pub struct NativeRecipientInput<'a> {
 pub struct NativeRecipientHandoff {
     pub public: NativeBootstrapPublic,
     pub initial_sk: NativeHkdfOutput<32>,
-}
-struct Secret<const N: usize> {
-    bytes: [u8; N],
-    slot: &'static str,
-}
-impl<const N: usize> Secret<N> {
-    fn new(slot: &'static str) -> Self {
-        Self { bytes: [0; N], slot }
-    }
-}
-impl<const N: usize> Drop for Secret<N> {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
-        observe(self.slot, &self.bytes);
-    }
-}
-impl<const N: usize> ZeroizeOnDrop for Secret<N> {}
-fn dh(key: &StaticSecret, peer: &[u8; 32], slot: &'static str) -> Result<Secret<32>> {
-    // Dalek's concrete secret/shared-secret owners erase their arrays at Drop.
-    let shared = key.diffie_hellman(&PublicKey::from(*peer));
-    let mut owned = Secret::new(slot);
-    owned.bytes.copy_from_slice(shared.as_bytes());
-    if !shared.was_contributory() {
-        return Err(NativeBootstrapError::NonContributory);
-    }
-    Ok(owned)
 }
 fn binding() -> NativeBootstrapError {
     NativePrekeyError::Binding.into()
@@ -110,7 +85,7 @@ fn validate(input: &NativeRecipientInput<'_>) -> Result<()> {
     {
         return Err(binding());
     }
-    if input.agreement_dh2.iter().all(|b| *b == 0) {
+    if input.agreement_dh2.iter().fold(0u8, |sum, byte| sum | byte) == 0 {
         return Err(NativeBootstrapError::NonContributory);
     }
     Ok(())
@@ -189,12 +164,6 @@ pub fn native_recipient(input: NativeRecipientInput<'_>) -> Result<NativeRecipie
         initial_sk,
     })
 }
-#[cfg(test)]
-fn observe(slot: &'static str, bytes: &[u8]) {
-    super::secret_tests::observe(slot, bytes);
-}
-#[cfg(not(test))]
-fn observe(_slot: &'static str, _bytes: &[u8]) {}
 #[cfg(test)]
 fn checkpoint(stage: &'static str) -> Result<()> {
     super::secret_tests::checkpoint(stage)
