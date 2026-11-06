@@ -10,9 +10,11 @@ pub use renewal::{
 };
 mod receipt;
 mod retirement;
+mod token;
 pub use grant::{ScopedAttachmentGrant, VerifiedScopedGrant};
 pub use receipt::AttachmentRegistrationReceipt;
 pub use retirement::{AttachmentRetirement, VerifiedAttachmentRetirement};
+pub use token::{AttachmentToken, VerifiedAttachmentToken};
 mod media;
 mod native;
 pub use media::{MediaKeySlot, MediaManifest, MediaRef, PeerMedia, QualifiedDevice, Thumbnail};
@@ -118,3 +120,6 @@ mod tests;
 
 #[cfg(test)]
 mod grant_tests;
+
+#[cfg(test)]
+mod token_tests;
