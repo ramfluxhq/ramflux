@@ -23,6 +23,12 @@ impl AsRef<[u8]> for PayloadBacking {
     fn as_ref(&self) -> &[u8] { &self.bytes }
 }
 
+struct OwnerGuard {
+    // Keep raw ownership through actual wrapper free, including connection retirement.
+    _raw_owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    _charge: AllocationCharge,
+}
+
 pub(super) fn into_bytes(
     owner: PayloadBacking,
     credit: &Arc<MetadataCredit>,
@@ -30,9 +36,13 @@ pub(super) fn into_bytes(
 ) -> Result<Bytes, ResourceExhausted> {
     // The patched Bytes constructor supplies its actual wrapper Layout before
     // allocation. Its unique AllocationCharge survives payload Drop AND Box free.
+    let raw_owner = owner._raw_owner.clone();
     let bytes = Bytes::try_from_owner_with_guard(owner, |layout| {
         credit.receive_owner_layout(layout.size());
-        credit.reserve(layout.size(), class)
+        credit.reserve(layout.size(), class).map(|charge| OwnerGuard {
+            _raw_owner: raw_owner,
+            _charge: charge,
+        })
     }).map_err(|error| match error {
         OwnerAllocationError::Reservation { error, .. } => error,
         OwnerAllocationError::Allocation { .. } => credit.fail(class),
@@ -48,10 +58,10 @@ pub(super) fn owner_layout() -> std::alloc::Layout {
     let mut observed = None;
     let refused = Bytes::try_from_owner_with_guard(
         PayloadBacking::new(Vec::new(), None, None),
-        |layout| -> Result<AllocationCharge, ()> { observed = Some(layout); Err(()) },
+        |layout| -> Result<OwnerGuard, ()> { observed = Some(layout); Err(()) },
     );
     assert!(refused.is_err());
-    observed.unwrap()
+    observed.expect("guarded Bytes constructor did not expose the production layout")
 }
 
 #[cfg(test)]
