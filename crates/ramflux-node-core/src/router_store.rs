@@ -18,7 +18,7 @@ use crate::{
     RouterWalLocalDelivery, RouterWalStore, SessionDescriptor, SessionRegistry, inbox_retain_until,
     load_snapshot, now_unix_seconds, save_snapshot,
 };
-use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -28,6 +28,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+pub(crate) type DurableIngressSnapshot = (u64, [u8; 32], u64, (u64, u64), usize);
 
 mod custody;
 mod custody_accounts;
@@ -483,6 +486,44 @@ fn record_inbox_entry_until_in_txn(
 }
 
 impl RouterRedbStore {
+    #[cfg(test)]
+    pub(crate) fn foreign_authority_row_counts(&self) -> Result<(u64, u64), NodeCoreError> {
+        const FENCES: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("router_foreign_set_fences_v1");
+        const SETS: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("router_foreign_full_sets_v1");
+        let txn = self.db.begin_read().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let fences =
+            txn.open_table(FENCES).map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let sets = txn.open_table(SETS).map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let fence_count = fences.len().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let set_count = sets.len().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        Ok((fence_count, set_count))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn durable_ingress_snapshot(&self) -> Result<DurableIngressSnapshot, NodeCoreError> {
+        let redb_contents =
+            fs::read(&self.path).map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let redb_bytes = u64::try_from(redb_contents.len())
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let redb_digest =
+            ramflux_crypto::blake3_256("ramflux.test.durable_ingress_snapshot.v1", &redb_contents);
+        let wal_bytes = self
+            .submission_wal
+            .as_ref()
+            .map(RouterWalStore::durable_ingress_byte_len)
+            .transpose()?
+            .unwrap_or(0);
+        Ok((
+            redb_bytes,
+            redb_digest,
+            wal_bytes,
+            self.foreign_authority_row_counts()?,
+            self.sender_retry_registry_size(),
+        ))
+    }
+
     pub(crate) fn migration_db(&self) -> &redb::Database {
         &self.db
     }
