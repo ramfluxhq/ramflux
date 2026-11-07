@@ -30,6 +30,7 @@ pub(crate) struct GatewaySessionHub {
     pub(crate) probe_started: std::sync::atomic::AtomicBool,
     pub(crate) probe_requests: crate::issued_probe::Requests,
     pub(crate) readiness: Arc<crate::session_push::Readiness>,
+    pub(crate) ephemeral_rates: crate::ephemeral::EphemeralRateRegistry,
 }
 
 impl GatewaySessionHub {

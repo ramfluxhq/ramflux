@@ -227,7 +227,7 @@ fn wire_result_bytes() -> TestResult {
     Ok(())
 }
 
-async fn admit_ok(
+pub(super) async fn admit_ok(
     envelope: &Envelope,
     now_ms: u64,
     rate: &EphemeralRate,
