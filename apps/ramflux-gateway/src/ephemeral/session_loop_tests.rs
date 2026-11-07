@@ -17,6 +17,11 @@ use std::sync::{Arc, Mutex};
 
 /// Serialized persisted (reloaded from the store) and in-memory gateway state after an
 /// ordinary durable save, which is what any later durable request does.
+/// Independent literal of P03's live refusal frame (not derived from `durable_mode`).
+fn p03_nack() -> serde_json::Value {
+    json!({"frame_type":"nack","reason":"delivery_mode_refused"})
+}
+
 fn persisted(context: &crate::GatewayQuicContext) -> TestResult<Vec<u8>> {
     {
         let state = crate::gateway_state(&context.state)?;
@@ -101,18 +106,16 @@ async fn ephemeral_session_loop_persists_nothing() -> TestResult {
     })?;
     let written =
         run_loop(&mut fixture, &runtime, vec![frame_bytes(&submit_frame(bad_mode))?], None).await?;
-    anyhow::ensure!(written == vec![dropped("loop-mode", "invalid")], "{written:?}");
+    // Controller ruling: an unknown mode string is P03's live refusal even when negotiated.
+    anyhow::ensure!(written == vec![p03_nack()], "{written:?}");
     anyhow::ensure!(persisted(&context)? == baseline, "invalid-mode submit changed state");
 
     NEGOTIATED_FOR_TEST.with(|negotiated| negotiated.set(false));
     let off = submit(&runtime, "loop-unsupported", 5, |_| {})?;
     let written =
         run_loop(&mut fixture, &runtime, vec![frame_bytes(&submit_frame(off))?], None).await?;
-    anyhow::ensure!(
-        written == vec![json!({"frame_type":"nack","reason":"unsupported"})],
-        "{written:?}"
-    );
-    anyhow::ensure!(persisted(&context)? == baseline, "unsupported ephemeral changed state");
+    anyhow::ensure!(written == vec![p03_nack()], "{written:?}");
+    anyhow::ensure!(persisted(&context)? == baseline, "not-negotiated ephemeral changed state");
 
     // Control: an ordinary durable-class request through the same loop does change it.
     let heartbeat = ramflux_node_core::GatewayClientFrame::Heartbeat { now: 1 };
