@@ -28,6 +28,9 @@ pub const MAX_REVOKED_LIST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RANGE: u64 = (1 << 21) - 1;
 pub const MAX_REVISION: u64 = (1 << 32) - 1;
 pub const MAX_BRANCH_LEASE_SECONDS: u64 = 2_592_000;
+pub const MAX_MESSAGE_LAYER: u32 = 2;
+pub const MESSAGE_LAYER_FLOOR: u32 = 2;
+pub const MAX_LAYER_DECLARATION_VALIDITY_SECONDS: u64 = 86_400;
 pub const CLOCK_SKEW_SECONDS: u64 = 300;
 pub const MASTER_SCOPES: [&str; 5] =
     ["branch_certify", "contact_consent", "delegate", "device_set", "profile"];

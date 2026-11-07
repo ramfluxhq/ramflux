@@ -34,6 +34,7 @@ fn native_manifest(
             device_ref: reference,
             target_delivery_id: identity.storage_key().into(),
             prekey_bundle: serde_json::to_value(bundle)?,
+            message_layer: None,
         }],
     })
 }

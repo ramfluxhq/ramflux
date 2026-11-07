@@ -86,7 +86,27 @@ pub struct Device {
     pub status: DeviceSetStatus,
     pub revoked_at: Option<u64>,
     pub branch_certificate: Option<Envelope<BranchCertificate>>,
+    /// Optional, branch-signed message-layer capability; absence grants only the floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_layer: Option<SignedLayerDeclaration>,
     pub migration_state: MigrationState,
+}
+/// The declaration body signed by the device's current branch key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerDeclaration {
+    pub device: DeviceRef,
+    pub max_layer: u32,
+    pub declaration_sequence: u64,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
+/// A branch signature over one exact declaration; the enclosing device-set publication endorses it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedLayerDeclaration {
+    pub declaration: LayerDeclaration,
+    pub branch_signature: String,
 }
 /// Profile authority is the enclosing v3 record, never a separate v1 signature.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

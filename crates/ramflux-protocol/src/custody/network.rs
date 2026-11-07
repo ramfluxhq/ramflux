@@ -266,6 +266,9 @@ pub struct CustodyManifestDevice {
     pub device_ref: DeviceRef,
     pub target_delivery_id: String,
     pub prekey_bundle: Value,
+    /// The same signed declaration endorsed by the attached custody publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_layer: Option<super::SignedLayerDeclaration>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]

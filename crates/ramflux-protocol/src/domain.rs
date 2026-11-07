@@ -77,6 +77,7 @@ pub const TASK_EVENT: &str = "ramflux.task_event.v1";
 pub const CUSTODY_MASTER_CERTIFICATE: &str = "ramflux.identity.master_certificate.v1";
 pub const SIGNED_DEVICE_SET_V3: &str = "ramflux.identity.signed_device_set.v3";
 pub const CUSTODY_BRANCH_CERTIFICATE: &str = "ramflux.identity.branch_certificate.v1";
+pub const CUSTODY_MESSAGE_LAYER_DECLARATION: &str = "ramflux.identity.message_layer_declaration.v1";
 pub const BRANCH_PROOF_V3: &str = "ramflux.identity.branch_proof.v3";
 pub const CUSTODY_DELEGATION: &str = "ramflux.identity.delegation.v1";
 pub const CUSTODY_GROUP_DELEGATION: &str = "ramflux.identity.group_delegation.v1";
@@ -181,7 +182,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 154] = [
+pub const ALL: [&str; 155] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -251,6 +252,7 @@ pub const ALL: [&str; 154] = [
     CUSTODY_MASTER_CERTIFICATE,
     SIGNED_DEVICE_SET_V3,
     CUSTODY_BRANCH_CERTIFICATE,
+    CUSTODY_MESSAGE_LAYER_DECLARATION,
     BRANCH_PROOF_V3,
     CUSTODY_DELEGATION,
     CUSTODY_GROUP_DELEGATION,
