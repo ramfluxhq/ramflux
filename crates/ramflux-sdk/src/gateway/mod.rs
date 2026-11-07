@@ -10,6 +10,7 @@ pub mod helpers;
 pub(crate) mod host_frames;
 pub mod protocol;
 pub mod push_route;
+pub(crate) mod push_submit;
 pub(crate) mod session_push;
 
 pub use engine::*;

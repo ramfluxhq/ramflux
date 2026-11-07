@@ -67,7 +67,7 @@ pub(super) fn scripted(mode: SessionMode, frames: Vec<Value>) -> GatewaySessionE
         ca_cert: "test-ca.pem".into(),
         principal_id: "route-principal".into(),
         device_id: "route-device".into(),
-        target_delivery_id: "route-target".into(),
+        target_delivery_id: "target-route".into(),
         prekey_http_url: None,
     });
     let script: Vec<Vec<u8>> =

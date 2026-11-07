@@ -404,6 +404,9 @@ impl GatewaySessionEngine {
         let expected_target_delivery_id = submit.envelope.target_delivery_id.clone();
         let submitted_envelope = submit.envelope.clone();
         self.write_frame(&GatewayClientFrame::Submit { submit }).await?;
+        if matches!(self.mode, super::session_push::SessionMode::Push { .. }) {
+            return self.read_push_submit_reply(submitted_envelope).await;
+        }
         loop {
             match self.read_submit_reply(&expected_envelope_id).await? {
                 GatewayServerFrame::Deliver { entry }
