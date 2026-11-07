@@ -118,6 +118,71 @@ fn stage_work(db: &crate::AccountDb, payload: &str, now: i64) -> Result<(), Stor
     Ok(())
 }
 
+/// A tuple expected as a tombstone: its family name, exact selector and exact expiry.
+struct Want {
+    kind: &'static str,
+    selector: String,
+    expires_at: i64,
+}
+
+/// Messages of the extra families: class (A) binding, a quarantined committed receipt and the
+/// a2i control receipt (an absence cell: it holds no inbound envelope).
+const EXTRA_MESSAGES: [&str; 3] = ["B-bind", "B-legacy", "B-a2i"];
+
+/// Seeds the three extra families on `db` and returns the tombstones they must leave.
+fn seed_extra(db: &AccountDb, derive: &AccountDb, now: i64) -> Result<Vec<Want>, StorageError> {
+    let mut wanted = Vec::new();
+    // (A) the `erased-input:` binding itself carries its selector.
+    let (bundle, selector) = current(db, "ip", "id", "p-bind")?;
+    db.connection.execute(
+        "INSERT INTO message_copy_binding VALUES(?1,'B-bind')",
+        params![format!("erased-input:{bundle}:{selector}:{}", now + 600)],
+    )?;
+    wanted.push(Want { kind: "erased_input_binding", selector, expires_at: now + 600 });
+    // `legacy/replay/committed` is reached through the real quarantine sequence: the receipt
+    // is rewritten under the quarantine key, then the original key is removed.
+    db.connection.execute(
+        "INSERT INTO message_copy_binding VALUES('payload:p-legacy-committed','B-legacy')",
+        [],
+    )?;
+    let receipt = json!({"routing":{"message_id":"B-legacy"},"entry":{"envelope":full("ip","id","p-legacy-committed",now,3600)}});
+    let old = "routed/committed/old-legacy";
+    db.persist_actor_state(old, &receipt)?;
+    db.persist_actor_state(
+        &format!("legacy/replay/committed/{}", ramflux_protocol::encode_base64url(old.as_bytes())),
+        &receipt,
+    )?;
+    db.remove_actor_state(old)?;
+    // Merge derives selectors with the merging account's own bundles.
+    let (_, selector) = current(derive, "ip", "id", "p-legacy-committed")?;
+    wanted.push(Want { kind: "legacy_replay_committed", selector, expires_at: now + 3_900 });
+    // `legacy/replay/a2i` holds an a2i control event, never an inbound envelope: no tombstone.
+    db.connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:p-a2i','B-a2i')", [])?;
+    db.persist_actor_state(
+        &format!("legacy/replay/a2i/{}", ramflux_protocol::encode_base64url(b"a2i/old")),
+        &json!({"event_id":"e","source_device_id":"d","action":"request_approval"}),
+    )?;
+    Ok(wanted)
+}
+
+/// Every `SOURCE_KINDS` family is covered by a seeded family, an archived family or a declared
+/// exclusion; a new kind makes this fail.
+fn assert_covers_source_kinds(seeded: &[&str], declared_exclusions: &[&str]) {
+    let mut covered: Vec<&str> = seeded.to_vec();
+    covered.extend(["archived_actor", "archived_event"]);
+    covered.extend(declared_exclusions);
+    covered.sort_unstable();
+    let mut registry: Vec<&str> =
+        super::erased_capture::SOURCE_KINDS.iter().map(|k| k.kind).collect();
+    registry.sort_unstable();
+    assert_eq!(covered, registry, "the inventory covers exactly SOURCE_KINDS");
+}
+
+fn tombstone_count(db: &rusqlite::Connection) -> rusqlite::Result<i64> {
+    db.query_row("SELECT count(*) FROM receive_erased_input", [], |r| r.get(0))
+}
+
 #[test]
 fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     let now = crate::unix_now();
@@ -132,12 +197,18 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         "contact_message_request",
         "receive_work",
     ];
+    assert_covers_source_kinds(&kinds, &[]);
     let p = pair("erased-inventory-local")?;
     let families: Vec<Family> = kinds.iter().map(|k| Family::new(k)).collect();
     for f in &families {
         p.local.send_direct_message("thread", &f.message, "peer", b"x")?;
         p.source.send_direct_message("thread", &f.message, "peer", b"x")?;
     }
+    for id in EXTRA_MESSAGES {
+        p.local.send_direct_message("thread", id, "peer", b"x")?;
+        p.source.send_direct_message("thread", id, "peer", b"x")?;
+    }
+    let extra = seed_extra(&p.local, &p.local, now)?;
     for (n, f) in (1_i64..).zip(&families) {
         seed_local(&p.local, f, n, now)?;
     }
@@ -185,15 +256,18 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     want.sort();
     sources.sort();
     assert_eq!(sources, want, "the earlier merge archived the group-transfer row twice");
-    let kinds: Vec<String> = merged
+    // The earlier merge also imported the event as a live row; remove it so the archived copy
+    // is the only source of that tuple.
+    merged.db.execute("DELETE FROM local_event_log WHERE event_id='ev-archived'", [])?;
+    let footprint_kinds: Vec<String> = merged
         .db
         .prepare("SELECT DISTINCT kind FROM message_footprint WHERE message_id='A' ORDER BY 1")?
         .query_map([], |r| r.get(0))?
         .collect::<Result<_, _>>()?;
     assert_eq!(
-        kinds,
-        vec!["archived_actor".to_owned(), "archived_event".to_owned(), "event".to_owned()],
-        "the earlier merge registered footprints for the archived copies and the imported event"
+        footprint_kinds,
+        vec!["archived_actor".to_owned(), "archived_event".to_owned()],
+        "only the archived copies carry the tuples of A"
     );
     // A held contact request is seeded after the earlier merge: the generic merge drops a held
     // request whose message already exists in the conversation, so it cannot survive a merge.
@@ -207,24 +281,49 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         p.source.delete_direct_message("thread", &f.message, "local", &format!("d-{}", f.kind))?;
     }
     p.source.delete_direct_message("thread", "A", "local", "d-a")?;
+    for id in EXTRA_MESSAGES {
+        p.source.delete_direct_message("thread", id, "local", &format!("d-{id}"))?;
+    }
     let second = p.root.join("incoming-2.db");
     let second_snapshot = p.source.write_backup_snapshot(&second)?;
     merged.merge_backup(&second, &second_snapshot.key, || Ok(()))?;
-    let mut expected: Vec<(String, String)> = families
-        .iter()
-        .map(|f| Ok((f.kind.to_owned(), f.payload.clone())))
-        .collect::<Result<_, StorageError>>()?;
-    expected.push(("archived_actor".to_owned(), "p-archived".to_owned()));
-    expected.push(("archived_event".to_owned(), "p-archived-event".to_owned()));
+    let mut expected: Vec<Want> = Vec::new();
+    for f in &families {
+        let (_, selector) = current_in(&p, &f.payload)?;
+        expected.push(Want { kind: f.kind, selector, expires_at: now + 3_900 });
+    }
+    for (kind, payload) in
+        [("archived_actor", "p-archived"), ("archived_event", "p-archived-event")]
+    {
+        let (_, selector) = current_in(&p, payload)?;
+        expected.push(Want { kind, selector, expires_at: now + 3_900 });
+    }
+    // The source deleted A itself, which captured the two archived-family tuples under the
+    // source's own bundle; the merge unions those tombstones in as well.
+    for (kind, payload) in [
+        ("source_capture_group_transfer", "p-archived"),
+        ("source_capture_event", "p-archived-event"),
+    ] {
+        let (_, selector) = current(&p.source, "ip", "id", payload)?;
+        expected.push(Want { kind, selector, expires_at: now + 3_900 });
+    }
+    expected.extend(extra);
     let verify = |db: &rusqlite::Connection| -> Result<(), StorageError> {
         let mut wrong = Vec::new();
-        for (kind, payload) in &expected {
-            let (_, selector) = current_in(&p, payload)?;
-            if expiry(db, &selector)? != Some(now + 3_900) {
-                wrong.push(kind.as_str());
+        for w in &expected {
+            if expiry(db, &w.selector)? != Some(w.expires_at) {
+                wrong.push(w.kind);
             }
         }
         assert_eq!(wrong, Vec::<&str>::new(), "families without their exact selector");
+        // Exactly the expected tuples: the a2i receipt left nothing behind.
+        assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
+        let archived: i64 = db.query_row(
+            "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='group-transfer/p-archived'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(archived, 0, "both archived group-transfer copies are erased");
         Ok(())
     };
     verify(&merged.db)?;
@@ -258,6 +357,7 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         "group_pending_undecrypted",
         "contact_message_request",
     ];
+    assert_covers_source_kinds(&kinds, &["receive_work"]);
     // `receive_work` is absent on purpose: installing the receive ledger stamps schema version
     // 15 on the incoming account, which a merge refuses as too new (`AccountSchemaTooNew`), and
     // backups are to strip the ledger tables (P03b). An incoming snapshot cannot carry it yet.
@@ -266,6 +366,7 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     // The local account holds every message and deletes it: it has no source of its own.
     let mut messages: Vec<String> = families.iter().map(|f| f.message.clone()).collect();
     messages.extend(["A".to_owned(), "L".to_owned()]);
+    messages.extend(EXTRA_MESSAGES.map(str::to_owned));
     for id in &messages {
         p.local.send_direct_message("thread", id, "peer", b"x")?;
         p.local.delete_direct_message("thread", id, "local", &format!("d-{id}"))?;
@@ -311,9 +412,16 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
             params![format!("payload:{payload}")],
         )?;
     }
+    // The earlier merge also imported the event as a live row; remove it so the archived copy
+    // is the only source of that tuple.
+    carrier.connection.execute("DELETE FROM local_event_log WHERE event_id='ev-archived'", [])?;
     for f in &families {
         carrier.send_direct_message("thread", &f.message, "peer", b"x")?;
     }
+    for id in EXTRA_MESSAGES {
+        carrier.send_direct_message("thread", id, "peer", b"x")?;
+    }
+    let extra = seed_extra(&carrier, &p.local, now)?;
     for (n, f) in (1_i64..).zip(&families) {
         seed_local(&carrier, f, n, now)?;
     }
@@ -348,20 +456,29 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     let target = p.local.write_backup_snapshot(&path)?;
     let mut merged = BackupDatabase::open(&path, &target.key)?;
     merged.merge_backup(&incoming, &incoming_snapshot.key, || Ok(()))?;
-    let mut expected: Vec<(String, String)> =
-        families.iter().map(|f| (f.kind.to_owned(), f.payload.clone())).collect();
-    expected.push(("archived_actor".to_owned(), "p-archived".to_owned()));
-    expected.push(("archived_event".to_owned(), "p-archived-event".to_owned()));
-    expected.push(("legacy_replay_rule_c".to_owned(), "p-legacy".to_owned()));
+    let mut expected: Vec<Want> = Vec::new();
+    for f in &families {
+        let (_, selector) = current(&p.local, "ip", "id", &f.payload)?;
+        expected.push(Want { kind: f.kind, selector, expires_at: now + 3_900 });
+    }
+    for (kind, payload) in [
+        ("archived_actor", "p-archived"),
+        ("archived_event", "p-archived-event"),
+        ("legacy_replay_rule_c", "p-legacy"),
+    ] {
+        let (_, selector) = current(&p.local, "ip", "id", payload)?;
+        expected.push(Want { kind, selector, expires_at: now + 3_900 });
+    }
+    expected.extend(extra);
     let verify = |db: &rusqlite::Connection| -> Result<(), StorageError> {
         let mut wrong = Vec::new();
-        for (kind, payload) in &expected {
-            let (_, selector) = current(&p.local, "ip", "id", payload)?;
-            if expiry(db, &selector)? != Some(now + 3_900) {
-                wrong.push(kind.as_str());
+        for w in &expected {
+            if expiry(db, &w.selector)? != Some(w.expires_at) {
+                wrong.push(w.kind);
             }
         }
         assert_eq!(wrong, Vec::<&str>::new(), "families without their exact selector");
+        assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
         Ok(())
     };
     verify(&merged.db)?;
