@@ -19,6 +19,7 @@ mod mesh_quic;
 mod mesh_quic_admission;
 #[cfg(test)]
 mod mesh_quic_handshake_tests;
+mod mesh_quic_limited;
 mod mesh_request_deadline;
 mod mesh_tls;
 mod perf_metrics;
@@ -60,6 +61,10 @@ pub use mesh_quic::{
     mesh_quic_get_json_with_peer_ca_pems, mesh_quic_get_json_with_peer_ca_pems_async,
     mesh_quic_post_json_with_peer_ca_pems, mesh_quic_post_json_with_peer_ca_pems_async,
     mesh_quic_post_postcard_with_peer_ca_pems_async, mesh_quic_post_raw_with_peer_ca_pems_async,
+};
+pub use mesh_quic_limited::{
+    LIMITED_ENVELOPE_SLACK, MeshQuicLimitedIngress, MeshQuicLimitedRequest,
+    MeshQuicLimitedResponder,
 };
 pub use mesh_request_deadline::{MeshRequestDeadline, mesh_request_deadline};
 pub use mesh_tls::{

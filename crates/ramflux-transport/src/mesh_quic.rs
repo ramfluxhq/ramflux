@@ -1491,6 +1491,9 @@ fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, TransportError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::MeshQuicLimitedIngress;
+    use crate::tls_config::mesh_quic_client_config_with_pem_roots;
+    use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{
@@ -2271,5 +2274,203 @@ mod tests {
 
     fn test_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
         message.into().into()
+    }
+
+    // ---- bounded ingress (mesh_quic_limited) ----
+
+    struct LimitedRig {
+        server: MeshQuicServer,
+        client_tls: MeshTlsConfig,
+        ca_pem: String,
+        endpoint: quinn::Endpoint,
+        addr: SocketAddr,
+    }
+
+    fn limited_rig(name: &str) -> Result<LimitedRig, Box<dyn std::error::Error>> {
+        let root = temp_cert_root(name)?;
+        let ca = issue_test_ca(&root)?;
+        let server_certs = issue_test_service_cert(&ca, "node-a", "ramflux-relay")?;
+        let client = issue_test_service_cert(&ca, "node-a", "ramflux-router")?;
+        let ca_pem = client.ca_pem.clone();
+        let roots_pem = ca_pem.clone();
+        let roots = Arc::new(move || Ok(vec![roots_pem.clone()]));
+        let server =
+            MeshQuicServer::bind_with_pem_roots_provider("127.0.0.1:0", &server_certs.tls, roots)?;
+        let addr = server.local_addr()?;
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+        endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(
+            &client.tls,
+            std::slice::from_ref(&ca_pem),
+        )?);
+        Ok(LimitedRig { server, client_tls: client.tls, ca_pem, endpoint, addr })
+    }
+
+    fn frame_of(body: &str) -> Vec<u8> {
+        let json = format!(r#"{{"method":"POST","path":"/p","body":{body}}}"#);
+        let mut out = u32::try_from(json.len()).unwrap_or(0).to_be_bytes().to_vec();
+        out.extend(json.as_bytes());
+        out
+    }
+
+    async fn limited_accept(
+        rig: &LimitedRig,
+        max: usize,
+        budget: Duration,
+    ) -> Result<MeshQuicLimitedIngress, TransportError> {
+        let connection = rig.server.accept_connection().await?;
+        MeshQuicServer::accept_limited_request(&connection, max, Instant::now() + budget).await
+    }
+
+    async fn dial(
+        rig: &LimitedRig,
+    ) -> Result<
+        (quinn::SendStream, (quinn::RecvStream, quinn::Connection)),
+        Box<dyn std::error::Error>,
+    > {
+        let connection = rig.endpoint.connect(rig.addr, "ramflux-relay")?.await?;
+        let (send, recv) = connection.open_bi().await?;
+        // The receive side stays open: dropping it would send STOP_SENDING.
+        Ok((send, (recv, connection)))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limited_ingress_bounds_raw_received_bytes_exactly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const MAX: usize = 16384;
+        let rig = limited_rig("limited_exact")?;
+        let _keep = (&rig.client_tls, &rig.ca_pem);
+        // A body of exactly MAX raw bytes is accepted as received; MAX + 1 is refused.
+        let pad = |n: usize| format!("\"{}\"", "a".repeat(n - 2));
+        // Whitespace padding inside the value counts: it is not normalized away.
+        let spaced = |n: usize| format!("{{\"a\":1{}}}", " ".repeat(n - 7));
+        let cases: Vec<(&str, String, bool)> = vec![
+            ("string at cap", pad(MAX), true),
+            ("string over cap", pad(MAX + 1), false),
+            ("padded valid object at cap", spaced(MAX), true),
+            ("padded valid object over cap", spaced(MAX + 1), false),
+        ];
+        for (name, body, accepted) in cases {
+            let server = limited_accept(&rig, MAX, Duration::from_secs(10));
+            let client = async {
+                let (mut send, connection) = dial(&rig).await?;
+                send.write_all(&frame_of(&body)).await?;
+                Ok::<_, Box<dyn std::error::Error>>((send, connection))
+            };
+            let (ingress, held) = tokio::join!(server, client);
+            let _held = held?;
+            match (ingress?, accepted) {
+                (MeshQuicLimitedIngress::Request(request), true) => {
+                    assert_eq!(request.body.len(), body.len(), "{name}");
+                    assert_eq!(request.body, body.as_bytes(), "{name}");
+                }
+                (MeshQuicLimitedIngress::TooLarge(_), false) => {}
+                _ => return Err(test_error(format!("wrong outcome for {name}"))),
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limited_ingress_refuses_an_oversized_frame_before_reading_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rig = limited_rig("limited_prefix")?;
+        let server = limited_accept(&rig, 16384, Duration::from_secs(10));
+        let client = async {
+            let (mut send, connection) = dial(&rig).await?;
+            // Only the length prefix of a 1 MiB frame is ever sent.
+            send.write_all(&1_048_576_u32.to_be_bytes()).await?;
+            Ok::<_, Box<dyn std::error::Error>>((send, connection))
+        };
+        let (ingress, held) = tokio::join!(server, client);
+        let _held = held?;
+        assert!(matches!(ingress?, MeshQuicLimitedIngress::TooLarge(_)));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limited_ingress_gives_up_on_a_stalled_read_within_the_original_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rig = limited_rig("limited_held_read")?;
+        let started = Instant::now();
+        let server = limited_accept(&rig, 16384, Duration::from_millis(300));
+        let client = async {
+            let (mut send, connection) = dial(&rig).await?;
+            // Promise 100 bytes, send 10, then hold the stream open.
+            let mut partial = 100_u32.to_be_bytes().to_vec();
+            partial.extend([b'x'; 10]);
+            send.write_all(&partial).await?;
+            Ok::<_, Box<dyn std::error::Error>>((send, connection))
+        };
+        let guarded =
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(server, client) });
+        let (ingress, held) = guarded.await.map_err(|_| test_error("hang guard"))?;
+        let _held = held?;
+        assert!(matches!(ingress, Err(TransportError::Quic(ref m)) if m.contains("deadline")));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn limited_response_does_not_wait_for_the_peer_to_finish_sending()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rig = limited_rig("limited_held_fin")?;
+        let server = async {
+            let MeshQuicLimitedIngress::Request(request) =
+                limited_accept(&rig, 16384, Duration::from_secs(10)).await?
+            else {
+                return Err(test_error("expected a request"));
+            };
+            let started = Instant::now();
+            request
+                .responder
+                .respond(
+                    200,
+                    &serde_json::json!({"ok": true}),
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await?;
+            Ok::<_, Box<dyn std::error::Error>>(started.elapsed())
+        };
+        let client = async {
+            let (mut send, connection) = dial(&rig).await?;
+            // The request is complete, but the send side is never finished and the
+            // response is never read.
+            send.write_all(&frame_of("1")).await?;
+            Ok::<_, Box<dyn std::error::Error>>((send, connection))
+        };
+        let guarded =
+            tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(server, client) });
+        let (elapsed, held) = guarded.await.map_err(|_| test_error("hang guard"))?;
+        let _held = held?;
+        // The old drain would have waited out its 30 s timeout here.
+        assert!(elapsed? < Duration::from_secs(5));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expired_deadline_stops_a_response_write_immediately()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rig = limited_rig("limited_expired_write")?;
+        let server = async {
+            let MeshQuicLimitedIngress::Request(request) =
+                limited_accept(&rig, 16384, Duration::from_secs(10)).await?
+            else {
+                return Err(test_error("expected a request"));
+            };
+            let past = Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .ok_or_else(|| test_error("clock"))?;
+            Ok(request.responder.respond(200, &serde_json::json!({}), past).await)
+        };
+        let client = async {
+            let (mut send, connection) = dial(&rig).await?;
+            send.write_all(&frame_of("1")).await?;
+            Ok::<_, Box<dyn std::error::Error>>((send, connection))
+        };
+        let (result, held) = tokio::join!(server, client);
+        let _held = held?;
+        let result: Result<(), TransportError> = result?;
+        assert!(matches!(result, Err(TransportError::Quic(ref m)) if m.contains("deadline")));
+        Ok(())
     }
 }

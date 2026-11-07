@@ -5,8 +5,8 @@
 use super::*;
 use crate::attachment_authority::{
     listener::{
-        AuthorityListenerConfig, CHALLENGE_PATH, ChallengeMintRequest, ChallengeReply, RENEW_PATH,
-        RequesterWire,
+        AuthorityListenerConfig, CHALLENGE_PATH, ChallengeMintRequest, ChallengeReply,
+        MAX_WIRE_BODY, RENEW_PATH, RequesterWire,
     },
     quic::AuthorityQuicServer,
 };
@@ -131,6 +131,7 @@ fn start(e: &Env, pki: &Pki) -> AuthorityQuicServer {
         vec![pki.ca_pem.clone()],
         issuer,
         Arc::new(move || now),
+        std::time::Duration::from_secs(10),
     )
     .unwrap()
     .expect("a configured listener binds")
@@ -147,6 +148,7 @@ fn unconfigured_listener_binds_nothing() {
         vec![pki.ca_pem.clone()],
         issuer,
         Arc::new(|| 0),
+        std::time::Duration::from_secs(10),
     )
     .unwrap();
     assert!(out.is_none());
@@ -161,14 +163,18 @@ fn router_identity_is_admitted_over_real_quic_and_other_services_are_refused() {
     let body = serde_json::to_value(wire(&e)).unwrap();
 
     // Gateway and federation hold valid mesh certificates but are the wrong services:
-    // each is refused with 403 before the body is read, and nothing is consumed.
+    // the connection is closed with code 403 before any stream is read, so even a body
+    // over the cap is refused the same way (it never reaches size checks or decoding).
+    let oversized = serde_json::Value::String("a".repeat(MAX_WIRE_BODY));
     for client in [&pki.gateway, &pki.federation] {
         for path in [CHALLENGE_PATH, RENEW_PATH] {
-            let out = post(&addr, &pki, client, path, &body);
-            assert!(
-                matches!(out, Err(TransportError::HttpStatus { status: 403, .. })),
-                "{path}: {out:?}"
-            );
+            for payload in [&body, &oversized] {
+                let out = post(&addr, &pki, client, path, payload);
+                assert!(
+                    matches!(&out, Err(TransportError::Quic(m)) if m.contains("error_code: 403")),
+                    "{path}: {out:?}"
+                );
+            }
         }
     }
 
@@ -191,5 +197,32 @@ fn router_identity_is_admitted_over_real_quic_and_other_services_are_refused() {
         serde_json::from_value::<RenewAdmitResponse>(replay).unwrap(),
         RenewAdmitResponse::Refused { code: RenewalRefusal::Replay }
     ));
+    server.stop();
+}
+
+/// A JSON string body whose compact serialization is exactly `n` raw bytes.
+fn body_of(n: usize) -> serde_json::Value {
+    serde_json::Value::String("a".repeat(n - 2))
+}
+
+#[test]
+fn the_sixteen_kib_cap_is_exact_on_received_bytes_through_real_quic() {
+    let e = Env::new("quic-cap");
+    let pki = pki("quic-cap");
+    let server = start(&e, &pki);
+    let addr = server.local_addr().to_string();
+    assert_eq!(MAX_WIRE_BODY, 16384);
+    for path in [CHALLENGE_PATH, RENEW_PATH] {
+        // 16384 bytes reach the handler (a bare string is malformed, not oversized).
+        let at_cap = post(&addr, &pki, &pki.router, path, &body_of(MAX_WIRE_BODY)).unwrap();
+        // It was served by the handler as a typed refusal frame, not an HTTP-level error.
+        assert!(at_cap.to_string().contains("Refused"), "{path}: {at_cap}");
+        // 16385 bytes are refused as received, with a 413 and no decoding.
+        let over = post(&addr, &pki, &pki.router, path, &body_of(MAX_WIRE_BODY + 1));
+        assert!(
+            matches!(over, Err(TransportError::HttpStatus { status: 413, .. })),
+            "{path}: {over:?}"
+        );
+    }
     server.stop();
 }

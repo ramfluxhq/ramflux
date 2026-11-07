@@ -46,6 +46,16 @@ fn refusal_storage(_: NodeCoreError) -> RenewalRefusal {
     RenewalRefusal::Storage
 }
 
+// Every writer of the attachment floor, derived with
+// `git grep -n "FLOOR\b\|record_head_in_tx\|floor_commit"`:
+// - `floor_commit`: the single store-level writer behind `observe_attachment_home`,
+//   `admit_attachment_home`, `observe_attachment_head`, `observe_attachment_evidence`
+//   and the resolver hook `observe_attachment_resolved`. It bumps the cache generation
+//   and evicts the anchor under the cache lock, in the same critical section as the write.
+// - `record_head_in_tx`: runs inside `save_head`'s transaction (genesis, destination
+//   prepare/activate, source commit). It cannot reach the cache, so publication is
+//   ordered against it instead: publication takes the redb write lock, re-reads the
+//   floor row inside it, and cache hits are revalidated against the durable floor.
 /// One floor write: the evidence, the clock, and the two policy knobs.
 #[derive(Clone, Copy)]
 pub(super) struct FloorWrite<'a> {
@@ -322,6 +332,22 @@ impl RouterRedbStore {
             #[cfg(test)]
             self.verdict_hook("before_publish");
             let mut cache = self.attachment_verdicts.lock().map_err(|_| RenewalRefusal::Storage)?;
+            // Publication holds the redb write lock, so no floor writer of any kind (this
+            // module's `floor_commit`, or `record_head_in_tx` inside a head save) can commit
+            // between this check and the insert. Every writer is therefore ordered against
+            // publication by the same lock, with no per-writer cooperation needed.
+            let tx = self.begin_write().map_err(refusal_storage)?;
+            let floor: Option<HomeFloor> = tx
+                .open_table(FLOOR)
+                .map_err(|e| refusal_storage(storage(e)))?
+                .get(anchor)
+                .map_err(|e| refusal_storage(storage(e)))?
+                .map(|v| decode(v.value()))
+                .transpose()
+                .map_err(refusal_storage)?;
+            if floor.is_some_and(|f| f.epoch != record.epoch() || f.record_hash != hash) {
+                return Err(RenewalRefusal::HomeMismatch);
+            }
             if cache.generation != generation {
                 continue;
             }
@@ -335,6 +361,7 @@ impl RouterRedbStore {
                 cache.entries.remove(&oldest);
             }
             cache.entries.insert((anchor.to_owned(), verdict.home_epoch, hash), verdict.clone());
+            drop(tx);
             return Ok(verdict);
         }
         Err(RenewalRefusal::HomeTrustUnavailable)
@@ -416,6 +443,7 @@ impl HomeMigrationService {
         anchor: &str,
         peer_node: &str,
         now: u64,
+        deadline: std::time::Instant,
     ) -> Result<HomeVerdict, RenewalRefusal> {
         store.attachment_home_verdict(anchor, now, || {
             let payload = ResolvePayload {
@@ -424,7 +452,6 @@ impl HomeMigrationService {
                 limit: MAX_CHAIN_RECORDS as u64,
                 old_node_hint: Some(peer_node.to_owned()),
             };
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             self.latest_migration_home_at(store, now, deadline, &payload, "attachment-verdict")
                 .map_err(|e| match e {
                     NodeCoreError::HomeMigration(_) => RenewalRefusal::HomeTrustUnavailable,
