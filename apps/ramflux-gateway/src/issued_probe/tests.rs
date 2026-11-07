@@ -441,11 +441,14 @@ async fn probe_wire_attempts_are_bounded_and_deferred() -> anyhow::Result<()> {
     let reset = fixture.next().await?;
     drop(reset);
     assert!(tokio::time::timeout(Duration::from_secs(10), task).await??, "failed batch reported");
-    // The request count for the round is exactly ceil(3/1024) = 1: no re-send, no fallback.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(800), fixture.requests.recv()).await.is_err(),
-        "a reset batch was sent again within the round"
-    );
+    // The round returned only after the transport work terminated (permit released, work
+    // dropped). A re-send would have reached the server before the client gave up, so the
+    // server-side queue must hold nothing beyond the one request already taken.
+    let mut extra_sends = 0;
+    while fixture.requests.try_recv().is_ok() {
+        extra_sends += 1;
+    }
+    assert_eq!(extra_sends, 0, "a reset batch was sent again within the round");
     assert_eq!(fixture.context.hub.probe_requests.0.available_permits(), 4);
     // Round 3 delivers the deferred batch.
     let task = run(&fixture);
