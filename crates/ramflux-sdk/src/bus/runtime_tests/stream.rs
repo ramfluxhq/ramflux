@@ -217,20 +217,22 @@ async fn unlock_restarts_driver_with_persisted_journal_sequence() -> Result<(), 
             )
             .await?;
             assert!(supervisor.account_actor("bob").is_some_and(|actor| actor.is_open()));
+            // The restarted driver samples 250 ms after unlock and journals the sample once.
+            // A live-only subscription made after that moment (any slow host) never sees it and
+            // the unchanged later samples add no event, so subscribe from the pre-lock head and
+            // let replay deliver the event whichever side of the subscription it lands on.
+            let head = before["bounds"]["head_seq"].as_u64().ok_or_else(|| failure("head"))?;
             bus.request(
                 Some("bob".to_owned()),
                 "stream",
                 "bus.subscribe",
-                serde_json::json!({"topics":["sync.status"]}),
+                serde_json::json!({"topics":["sync.status"],"since_seq":head}),
             )
             .await?;
             let event = tokio::time::timeout(HANG * 2, bus.next_event())
                 .await
                 .map_err(|_| failure("driver did not resume"))??;
-            assert!(
-                event.seq.ok_or_else(|| failure("seq"))?
-                    > before["bounds"]["head_seq"].as_u64().ok_or_else(|| failure("head"))?
-            );
+            assert!(event.seq.ok_or_else(|| failure("seq"))? > head);
             supervisor.shutdown().await?;
             drop(bus);
             server.abort();
