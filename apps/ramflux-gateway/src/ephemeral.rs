@@ -214,7 +214,7 @@ thread_local! {
     pub(crate) static NEGOTIATED_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn negotiated() -> bool {
+pub(crate) fn negotiated() -> bool {
     #[cfg(test)]
     if NEGOTIATED_FOR_TEST.with(std::cell::Cell::get) {
         return true;

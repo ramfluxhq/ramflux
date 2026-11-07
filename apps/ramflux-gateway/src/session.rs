@@ -1300,7 +1300,7 @@ pub(crate) async fn handle_gateway_submit(
     use ramflux_protocol::ephemeral::{DeliveryMode, classify_delivery_mode};
     match classify_delivery_mode(&submit.envelope) {
         DeliveryMode::Durable => {}
-        DeliveryMode::Ephemeral if runtime.ephemeral_negotiated() => {
+        DeliveryMode::Ephemeral if crate::ephemeral::negotiated() => {
             return crate::ephemeral::handle_submit(send, context, runtime, submit).await;
         }
         _ => {
