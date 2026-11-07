@@ -217,7 +217,7 @@ pub(super) fn seal(
 ) -> Result<Vec<u8>, Error> {
     seal_random(binding, key, input, |nonce| getrandom::fill(nonce).map_err(|_| Error::Random))
 }
-fn seal_random(
+pub(super) fn seal_random(
     binding: Binding<'_>,
     key: &Secret<32>,
     input: &Plaintext,

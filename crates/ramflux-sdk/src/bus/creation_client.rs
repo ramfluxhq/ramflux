@@ -359,6 +359,22 @@ mod reason_tests {
         assert!(matches!(decode_error("CustodySetupInvalid", None), SdkError::CustodySetupInvalid));
         Ok(())
     }
+
+    #[test]
+    fn mismatched_code_reason_pairs_fall_back_to_the_top_level_code() {
+        assert!(matches!(
+            decode_error("CustodyVaultUnavailable", Some("vault_mode_mismatch")),
+            SdkError::CustodyVaultUnavailable
+        ));
+        assert!(matches!(
+            decode_error("CustodySetupInvalid", Some("vault_busy")),
+            SdkError::CustodySetupInvalid
+        ));
+        assert!(matches!(
+            decode_error("CustodyExpired", Some("vault_missing")),
+            SdkError::CustodyExpired
+        ));
+    }
 }
 
 #[cfg(test)]

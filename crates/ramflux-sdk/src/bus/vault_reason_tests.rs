@@ -89,3 +89,31 @@ fn custody_vault_reason_decoding_rejects_unknown_and_mismatched_wire_values() {
         Some(R::ModeMismatch)
     );
 }
+
+#[test]
+fn custody_vault_reason_stop_class_only_excludes_busy() {
+    use crate::bus::task_courier_queue::stop_class;
+    for (reason, text, ..) in ROWS {
+        assert_eq!(stop_class(&SdkError::CustodyVault(reason)), reason != R::Busy, "{text}");
+    }
+    assert!(stop_class(&SdkError::CustodyVaultUnavailable), "unit variant");
+}
+
+#[test]
+fn custody_vault_error_body_literal_bytes() {
+    let busy = serde_json::to_string(&local_bus_error_body(&SdkError::CustodyVault(R::Busy)));
+    assert_eq!(
+        busy.as_deref().ok(),
+        Some(
+            r#"{"details":{"retryable":true},"reason_code":"vault_busy","code":"CustodyVaultUnavailable","message":"vault_busy","retry_after_ms":1000}"#
+        )
+    );
+    let pending =
+        serde_json::to_string(&local_bus_error_body(&SdkError::CustodyVault(R::InitPending)));
+    assert_eq!(
+        pending.as_deref().ok(),
+        Some(
+            r#"{"details":{"remedy":"rf_vault_init","retryable":false},"reason_code":"vault_init_pending","code":"CustodyVaultUnavailable","message":"vault_init_pending","retry_after_ms":null}"#
+        )
+    );
+}
