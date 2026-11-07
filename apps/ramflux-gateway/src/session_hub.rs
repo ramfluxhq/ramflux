@@ -439,6 +439,11 @@ impl GatewaySessionHub {
         if registration_target != forward_target || forward_target != envelope_target {
             return crate::ephemeral_forward::finish_without_wake(Outcome::RecipientUnsupported);
         }
+        // Final admission: the hub lookup above is awaited, so re-read the injected clock here.
+        // A forward validated at D-1 that resumes at D is refused without charging occupancy.
+        if entry.queue.clock_ms() >= expires_at_ms {
+            return crate::ephemeral_forward::finish_without_wake(Outcome::Expired);
+        }
         let admission = entry.queue.try_push_transient(bytes, expires_at_ms);
         let outcome = match admission {
             crate::push_queue::TransientAdmission::Queued => Outcome::Queued,
