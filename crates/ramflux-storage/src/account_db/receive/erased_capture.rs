@@ -517,6 +517,8 @@ pub(crate) fn reconcile_merge_capture(db: &Connection, now: i64) -> Result<(), S
     db.execute_batch(
         "DELETE FROM temp.backup_erased_capture; DELETE FROM temp.backup_erased_capture_message;",
     )?;
+    // S1: reconcile is a tombstone write, so it also reclaims a bounded batch of expired rows.
+    db.execute(super::erased_input::S1_SWEEP_SQL, params![now, super::erased_input::SWEEP])?;
     Ok(())
 }
 

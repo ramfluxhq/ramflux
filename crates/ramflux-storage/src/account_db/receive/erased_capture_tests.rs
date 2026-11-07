@@ -838,3 +838,35 @@ fn erased_input_binding_validator_rejects_each_predicate_in_isolation() -> Resul
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn erased_input_reconcile_sweeps_expired_rows_up_to_the_bound() -> Result<(), StorageError> {
+    let now = crate::unix_now();
+    let (root, db) = crate::tests::test_db("erased-capture-reconcile-sweep")?;
+    attach(&db)?;
+    let (bundle, selector) = current(&db, "p", "d", "psweep")?;
+    message(&db, "incoming", "MB", false)?;
+    message(&db, "main", "MB", true)?;
+    bind(&db, "incoming", binding_id(&bundle, &selector, now + 700), "MB")?;
+    for n in 0..100 {
+        db.connection.execute(
+            "INSERT INTO receive_erased_input VALUES(?1,?2,1)",
+            params![format!("expired-{n:03}"), &bundle],
+        )?;
+    }
+    on(&db, move |raw| {
+        stage_merge_capture(raw, Side::Local, now)?;
+        stage_merge_capture(raw, Side::Incoming, now)?;
+        reconcile_merge_capture(raw, now)
+    })?;
+    assert_eq!(tombstone(&db, &selector)?, Some(now + 700));
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM receive_erased_input WHERE expires_at<=1")?,
+        36,
+        "one reconcile reclaims at most 64 expired rows"
+    );
+    assert_eq!(count(&db, "SELECT count(*) FROM receive_erased_input")?, 37);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
