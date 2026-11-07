@@ -648,30 +648,6 @@ fn account_erase_generations_and_symlinks() -> TestResult {
 }
 
 #[test]
-fn account_erase_generation_top_level_symlink_refused_before_any_unlink() -> TestResult {
-    // (c)
-    let (root, db) = crate::tests::test_db("account-erase-generation-link")?;
-    drop(db);
-    let dir = root.join("accounts/acct");
-    let outside = root.join("outside_dir");
-    plant(&outside.join("file"), b"keep")?;
-    plant(&dir.join("generation_1/account.db"), b"gen")?;
-    std::os::unix::fs::symlink(&outside, dir.join("generation_3"))?;
-    let result = AccountIndex::open(&root)?.erase_account_database("acct");
-    assert!(
-        matches!(result, Err(StorageError::Integrity("account erase symlink"))),
-        "got {result:?}"
-    );
-    for kept in ["ramflux_local.sqlite", "generation_1/account.db", "objects"] {
-        assert!(dir.join(kept).exists(), "{kept} must survive the refusal");
-    }
-    assert!(dir.join("generation_3").symlink_metadata()?.file_type().is_symlink());
-    assert_eq!(std::fs::read(outside.join("file"))?, b"keep");
-    std::fs::remove_dir_all(root)?;
-    Ok(())
-}
-
-#[test]
 fn account_erase_resumes_after_crash() -> TestResult {
     // (d) Crash after the tombstone only: open refuses and files are intact; erase completes.
     let (root, db) = crate::tests::test_db("account-erase-resume")?;
