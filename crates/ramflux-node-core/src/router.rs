@@ -65,6 +65,7 @@ pub struct RouterCore {
     local_home_node_id: Mutex<Option<String>>,
     publication: std::sync::OnceLock<Arc<crate::router_store::publication::PublicationCore>>,
     pub(crate) ephemeral_capability: Mutex<crate::ephemeral::EphemeralCapabilityState>,
+    pub(crate) ephemeral_replay: Mutex<crate::ephemeral::EphemeralReplaySet>,
     pub(crate) router_boot_id: String,
 }
 
@@ -1461,6 +1462,7 @@ impl RouterCore {
             node_service_signer: Mutex::new(None),
             local_home_node_id: Mutex::new(None),
             ephemeral_capability: Mutex::new(crate::ephemeral::EphemeralCapabilityState::default()),
+            ephemeral_replay: Mutex::new(crate::ephemeral::EphemeralReplaySet::default()),
             router_boot_id: crate::ephemeral::new_router_boot_id(),
         };
         for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {
@@ -1934,6 +1936,10 @@ impl Clone for RouterCore {
         {
             let source = lock_unpoisoned(&self.ephemeral_capability);
             *lock_unpoisoned(&cloned.ephemeral_capability) = source.clone();
+        }
+        {
+            let source = lock_unpoisoned(&self.ephemeral_replay);
+            *lock_unpoisoned(&cloned.ephemeral_replay) = source.clone();
         }
         cloned.router_boot_id.clone_from(&self.router_boot_id);
         cloned
