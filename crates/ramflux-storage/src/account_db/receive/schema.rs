@@ -70,6 +70,8 @@ impl AccountDb {
                 "INSERT INTO schema_migration VALUES(?1,?2,'receive-ledger',?3,'dormant receive ledger writer floor')",
                 params![VERSION, crate::unix_now(), CHECKSUM],
             )?;
+            // The footprint triggers for the new table install in the same transaction.
+            self.connection.call(|db| super::super::message_footprint::install(db))?;
             Ok(())
         })
     }
