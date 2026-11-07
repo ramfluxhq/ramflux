@@ -23,13 +23,13 @@ pub(super) fn route(
     peer: &str,
 ) -> anyhow::Result<Option<MeshResponse>> {
     if (method, path) == ("POST", "/mvp0/nack-bound") {
-        return bound_nack(serde_json::from_slice(body)?, router, peer).map(Some);
+        return bound_nack(ramflux_protocol::parse_i_json(body)?, router, peer).map(Some);
     }
     let capable_page = path.starts_with("/mvp1/inbox/")
         && path.split('?').nth(1).is_some_and(|q| q.split('&').any(|p| p == "session_push=1"));
     let entry = path.starts_with("/mvp1/inbox-entry/");
     let establishment = path == "/s1/session"
-        && serde_json::from_slice::<serde_json::Value>(body)
+        && ramflux_protocol::parse_i_json::<serde_json::Value>(body)
             .is_ok_and(|v| v["session_push"] == true);
     let handled = establishment
         || path == "/mvp0/ack-bound-batch"
@@ -193,7 +193,7 @@ fn bound_ack(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
-    let value: serde_json::Value = serde_json::from_slice(body)?;
+    let value: serde_json::Value = ramflux_protocol::parse_i_json(body)?;
     let request: ramflux_node_core::TargetAckRequest = serde_json::from_value(value.clone())?;
     let status = router.state().session_push_status(&request.target_delivery_id);
     let seq = request.ack.ext.ext.get("inbox_seq").and_then(serde_json::Value::as_u64);

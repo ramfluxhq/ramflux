@@ -64,7 +64,7 @@ fn invalid_seq_terminal() -> anyhow::Result<()> {
     let id = response["incarnation_id"].as_str().ok_or_else(|| anyhow::anyhow!("E"))?;
     let before = router.state().resume("target", 0, 10);
     for target in ["target", "unknown"] {
-        for seq in [0, 2, u64::MAX] {
+        for seq in [0, 2, ramflux_protocol::MAX_SAFE_JSON_INTEGER] {
             let batch = call(
                 &router,
                 "POST",
@@ -361,7 +361,7 @@ fn capable_nack_is_incarnation_fenced_and_durable() -> anyhow::Result<()> {
         &router,
         "POST",
         "/mvp0/nack-bound",
-        json!({"target_delivery_id":"target","incarnation_id":"ffffffffffffffffffffffffffffffff","nack":nack(u64::MAX)}),
+        json!({"target_delivery_id":"target","incarnation_id":"ffffffffffffffffffffffffffffffff","nack":nack(ramflux_protocol::MAX_SAFE_JSON_INTEGER)}),
     )?;
     assert_eq!(stale["reason"], "incarnation_mismatch");
     for seq in [0, 2] {
