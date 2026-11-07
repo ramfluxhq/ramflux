@@ -11,6 +11,9 @@ impl BackupDatabase {
         &self,
         key: &AccountDbKey,
     ) -> Result<(), StorageError> {
+        // Tombstones are unioned here, inside the merge transaction, after the MAC bundle set
+        // has been merged and before publication; the generic row merge skips the table.
+        super::receive::erased_input::merge_from(&self.db, "incoming")?;
         let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='message_footprint')",[],|r|r.get(0))?;
         if !exists {
             return Ok(super::message_footprint::migration::register_imported(&self.db)?);
