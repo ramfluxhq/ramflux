@@ -8,7 +8,7 @@ use crate::{AccountDb, StorageError};
 use rusqlite::params;
 use stage::{ReceiveStage, ReceiveStageResult as R};
 
-fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+pub(super) fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
     let (root, db) = crate::tests::test_db(name)?;
     db.install_receive_ledger_schema()?;
     db.connection.execute(
@@ -17,14 +17,14 @@ fn setup(name: &str) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
     )?;
     Ok((root, db))
 }
-fn bytes(seq: u64) -> Vec<u8> {
+pub(super) fn bytes(seq: u64) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({"inbox_seq":seq,"target_delivery_id":"t","envelope":{
         "schema":"test","version":1,"domain":"test","signing_key_id":"key","signature_alg":"ed25519","signature":"sig",
         "envelope_id":"env","source_principal_id":"source","source_device_id":"device","target_delivery_id":"t",
         "delivery_class":"opaque_event","priority":"normal","ttl":60,"created_at":1,"encrypted_payload":"cipher","payload_hash":"hash"
     }})).expect("entry fixture")
 }
-fn input(bytes: &[u8], sequence: u64) -> ReceiveStage<'_> {
+pub(super) fn input(bytes: &[u8], sequence: u64) -> ReceiveStage<'_> {
     ReceiveStage {
         target: "t",
         incarnation: "e",
@@ -35,7 +35,7 @@ fn input(bytes: &[u8], sequence: u64) -> ReceiveStage<'_> {
         first_seen: 1,
     }
 }
-fn run(db: &AccountDb, input: ReceiveStage<'_>) -> Result<R, StorageError> {
+pub(super) fn run(db: &AccountDb, input: ReceiveStage<'_>) -> Result<R, StorageError> {
     db.receive_transaction(
         ReceiveExpectation {
             target: "t",
@@ -320,7 +320,7 @@ fn stage_failure_rolls_back_reservation_even_if_caught() -> Result<(), StorageEr
     Ok(())
 }
 
-fn entry(sequence: u64, hash: &str, ext: Option<serde_json::Value>) -> Vec<u8> {
+pub(super) fn entry(sequence: u64, hash: &str, ext: Option<serde_json::Value>) -> Vec<u8> {
     let mut value: serde_json::Value =
         serde_json::from_slice(&bytes(sequence)).expect("entry fixture");
     value["envelope"]["payload_hash"] = serde_json::json!(hash);
@@ -329,7 +329,7 @@ fn entry(sequence: u64, hash: &str, ext: Option<serde_json::Value>) -> Vec<u8> {
     }
     serde_json::to_vec(&value).expect("entry encoding")
 }
-fn footprints(db: &AccountDb) -> Result<Vec<(String, String)>, StorageError> {
+pub(super) fn footprints(db: &AccountDb) -> Result<Vec<(String, String)>, StorageError> {
     let mut query = db.connection.prepare(
         "SELECT message_id,locator FROM message_footprint WHERE kind='receive_work' \
          ORDER BY message_id,locator",
@@ -337,10 +337,10 @@ fn footprints(db: &AccountDb) -> Result<Vec<(String, String)>, StorageError> {
     let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
-fn locator(sequence: u64) -> String {
+pub(super) fn locator(sequence: u64) -> String {
     format!("[\"t\",\"e\",\"{sequence:016X}\"]")
 }
-fn work_rows(db: &AccountDb) -> Result<i64, StorageError> {
+pub(super) fn work_rows(db: &AccountDb) -> Result<i64, StorageError> {
     Ok(db.connection.query_row("SELECT count(*) FROM gateway_receive_work", [], |r| r.get(0))?)
 }
 
@@ -428,7 +428,7 @@ fn receive_work_footprint_registered_atomically() -> Result<(), StorageError> {
     Ok(())
 }
 
-fn receipt_state(db: &AccountDb, sequence: u64) -> Result<Option<String>, StorageError> {
+pub(super) fn receipt_state(db: &AccountDb, sequence: u64) -> Result<Option<String>, StorageError> {
     use rusqlite::OptionalExtension;
     Ok(db
         .connection
@@ -439,7 +439,7 @@ fn receipt_state(db: &AccountDb, sequence: u64) -> Result<Option<String>, Storag
         )
         .optional()?)
 }
-fn work_for(db: &AccountDb, sequence: u64) -> Result<i64, StorageError> {
+pub(super) fn work_for(db: &AccountDb, sequence: u64) -> Result<i64, StorageError> {
     Ok(db.connection.query_row(
         "SELECT count(*) FROM gateway_receive_work WHERE inbox_seq=?1",
         params![sequence.to_be_bytes().as_slice()],

@@ -139,6 +139,16 @@ impl ReceiveTransaction<'_> {
                 length
             ],
         )?;
+        // A payload owner that already resolves to a deleted message re-fires erasure from the
+        // work-insert trigger, in this transaction. Deletion authority is only that exact
+        // coordinate or owner: envelope-id markers and `routed/seen` never drop an input.
+        let after: Option<String> = self.db.connection.query_row(
+            "SELECT disposition FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+            params![input.target, input.incarnation, seq.as_slice()], |r| r.get(0),
+        ).optional()?;
+        if after.as_deref() == Some("erased") {
+            return Ok(ReceiveStageResult::Erased);
+        }
         Ok(ReceiveStageResult::Staged)
     }
 
