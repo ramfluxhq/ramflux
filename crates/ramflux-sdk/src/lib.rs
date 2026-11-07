@@ -51,6 +51,7 @@ pub use contact_card::{
 };
 pub use contact_identity::{ContactRootChange, ContactRootSource};
 mod dm;
+mod ephemeral;
 mod error;
 mod error_policy;
 mod federation;
@@ -134,6 +135,10 @@ pub use constants::*;
 pub use dm::{
     SdkDmAttachmentImportResult, SdkDmX3dhHeader, SdkFrankingEvidenceKind,
     SdkSelectedFrankingEvidence,
+};
+pub use ephemeral::{
+    HoldLease, ReceiverClock, ReceiverDropReason, ReceiverHandoff, ReceiverLifetime,
+    admit_authenticated_ciphertext, ttl_seconds,
 };
 pub use error::{GroupOperation, SdkError};
 mod surface_refusal;
