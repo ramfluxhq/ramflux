@@ -9,6 +9,7 @@ use crate::ProtocolError;
 use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
@@ -27,6 +28,21 @@ pub fn parse_i_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolErro
         let Strict(value) = Strict::deserialize(&mut decoder)?;
         decoder.end()?;
         serde_json::from_value(value)
+    })();
+    validated.map_err(ProtocolError::IJson)
+}
+
+/// Validate original JSON bytes as I-JSON without constructing an intermediate value.
+/// Use this before decoding fields such as `RawValue` whose exact wire representation matters.
+/// # Errors
+/// Rejects invalid JSON/Unicode, noncharacters, duplicate names, unsafe exact integers,
+/// non-finite/out-of-range numbers, or trailing input.
+pub fn validate_i_json_bytes(bytes: &[u8]) -> Result<(), ProtocolError> {
+    let validated = (|| -> Result<(), serde_json::Error> {
+        numbers(bytes)?;
+        let mut decoder = serde_json::Deserializer::from_slice(bytes);
+        Validate::deserialize(&mut decoder)?;
+        decoder.end()
     })();
     validated.map_err(ProtocolError::IJson)
 }
@@ -165,6 +181,77 @@ impl<'de> Deserialize<'de> for Strict {
         decoder.deserialize_any(StrictVisitor)
     }
 }
+
+struct Validate;
+impl<'de> Deserialize<'de> for Validate {
+    fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        decoder.deserialize_any(ValidateVisitor)
+    }
+}
+
+struct ValidateVisitor;
+impl<'de> Visitor<'de> for ValidateVisitor {
+    type Value = Validate;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an I-JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Validate, E> {
+        Ok(Validate)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Validate, E> {
+        Ok(Validate)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Validate, E> {
+        if value.unsigned_abs() > MAX_SAFE_JSON_INTEGER {
+            return Err(E::custom("unsafe exact JSON integer"));
+        }
+        Ok(Validate)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Validate, E> {
+        if value > MAX_SAFE_JSON_INTEGER {
+            return Err(E::custom("unsafe exact JSON integer"));
+        }
+        Ok(Validate)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Validate, E> {
+        if !value.is_finite() {
+            return Err(E::custom("non-finite JSON number"));
+        }
+        Ok(Validate)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Validate, E> {
+        unicode(value).map_err(E::custom)?;
+        Ok(Validate)
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Validate, E> {
+        self.visit_str(&value)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Validate, A::Error> {
+        while seq.next_element::<Validate>()?.is_some() {}
+        Ok(Validate)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Validate, A::Error> {
+        let mut names = HashSet::new();
+        while let Some(name) = map.next_key::<String>()? {
+            unicode(&name).map_err(serde::de::Error::custom)?;
+            if !names.insert(name) {
+                return Err(serde::de::Error::custom("duplicate I-JSON member"));
+            }
+            map.next_value::<Validate>()?;
+        }
+        Ok(Validate)
+    }
+}
 struct StrictVisitor;
 impl<'de> Visitor<'de> for StrictVisitor {
     type Value = Strict;
@@ -227,6 +314,7 @@ mod tests {
     use super::{
         I_JSON_REJECTED, decode_signed_ack_ijson, decode_signed_envelope_ijson,
         decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection,
+        validate_i_json_bytes,
     };
     use crate::{
         Ack, DeliveryClass, Envelope, Ext, Nack, NackReason, Priority, ProtocolError, SignatureAlg,
@@ -319,6 +407,15 @@ mod tests {
 
     fn assert_i_json_error<T>(result: Result<T, ProtocolError>) {
         assert_eq!(result.err().map(|error| matches!(error, ProtocolError::IJson(_))), Some(true));
+    }
+
+    #[test]
+    fn validator_only_checks_original_bytes() {
+        assert!(validate_i_json_bytes(br#"{"body":{"x":1,   "y":2}}  "#).is_ok());
+        assert_i_json_error(validate_i_json_bytes(br#"{"x":1,"x":1}"#));
+        assert_i_json_error(validate_i_json_bytes(br#"{"x":9007199254740992}"#));
+        assert_i_json_error(validate_i_json_bytes(br#"{"x":"\ud800"}"#));
+        assert_i_json_error(validate_i_json_bytes(br"{} {}"));
     }
 
     #[derive(Debug)]

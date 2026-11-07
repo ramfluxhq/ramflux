@@ -54,7 +54,7 @@ pub(crate) fn post(
     io_runtime()?.handle().block_on(deadline("total", total, async {
         let addresses = resolve(host);
         let response = exchange(host, path, &body, addresses).await?;
-        serde_json::from_slice(&response).map_err(http_error)
+        ramflux_protocol::parse_i_json(&response).map_err(http_error)
     }))
 }
 

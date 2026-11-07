@@ -38,6 +38,13 @@ use tokio::sync::{Mutex, Notify};
 
 /// Paths under this prefix keep their request body bytes exactly as received.
 pub const RAW_BODY_PATH_PREFIX: &str = "/s9/attachments/";
+
+fn raw_attachment_body(frame: &[u8]) -> Result<Vec<u8>, ramflux_protocol::ProtocolError> {
+    ramflux_protocol::validate_i_json_bytes(frame)?;
+    let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(frame)
+        .map_err(ramflux_protocol::ProtocolError::IJson)?;
+    Ok(raw.body.get().as_bytes().to_vec())
+}
 const MESH_QUIC_CONNECT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(3);
 const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT: Duration = Duration::from_secs(5);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -633,9 +640,10 @@ impl MeshQuicServer {
             }
         };
         let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX) {
-            let raw = match ramflux_protocol::parse_i_json::<crate::mesh_quic_limited::RawBodyOnly>(
-                &frame,
-            ) {
+            let raw = match ramflux_protocol::validate_i_json_bytes(&frame).and_then(|()| {
+                serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)
+                    .map_err(ramflux_protocol::ProtocolError::IJson)
+            }) {
                 Ok(raw) => raw,
                 Err(error) => {
                     let error = TransportError::Protocol(error);
@@ -714,9 +722,11 @@ impl MeshQuicServer {
             })?;
         record_mesh_server_quic_stream_accepted(stream_accept_started.elapsed());
         let request_read_started = std::time::Instant::now();
-        let request = match read_quic_json_frame(&mut recv).await {
+        let frame = read_quic_raw_frame(&mut recv).await?;
+        let request = match ramflux_protocol::parse_i_json::<GatewayQuicRequest>(&frame) {
             Ok(request) => request,
             Err(error) => {
+                let error = TransportError::Protocol(error);
                 tracing::error!(%remote_address, %error, "mesh QUIC request frame decode failed");
                 if ramflux_protocol::is_i_json_rejection(&error) {
                     reject_i_json(
@@ -730,7 +740,24 @@ impl MeshQuicServer {
             }
         };
         record_mesh_server_quic_request_read(request_read_started.elapsed());
-        Ok(MeshQuicAcceptedRequest { request, raw_body: None, send, recv })
+        let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX) {
+            match raw_attachment_body(&frame) {
+                Ok(body) => Some(body),
+                Err(error) => {
+                    let error = TransportError::Protocol(error);
+                    reject_i_json(
+                        send,
+                        recv,
+                        reject_deadline
+                            .unwrap_or_else(|| Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                    );
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        Ok(MeshQuicAcceptedRequest { request, raw_body, send, recv })
     }
 }
 
@@ -1035,7 +1062,7 @@ where
     )
     .await?;
     if (200..300).contains(&response.status) {
-        Ok(serde_json::from_slice(&response.body)?)
+        Ok(ramflux_protocol::parse_i_json(&response.body)?)
     } else {
         Err(TransportError::Http(format!(
             "HTTP {}: {}",
@@ -2494,22 +2521,81 @@ mod tests {
         frame
     }
 
-    fn duplicate_body_request_frame(trailing: bool) -> Vec<u8> {
-        json_quic_frame(
-            br#"{"method":"POST","path":"/p","body":{"x_probe":null,"x_probe":null}}"#,
-            trailing,
-        )
-    }
-
     fn valid_request_frame() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Ok(json_quic_frame(
             &serde_json::to_vec(&GatewayQuicRequest {
                 method: "GET".to_owned(),
                 path: "/p".to_owned(),
-                body: serde_json::Value::Null,
+                body: serde_json::json!({"created_at": 9_007_199_254_740_991_i64}),
             })?,
             false,
         ))
+    }
+
+    fn i_json_request_frame(body: &str, trailing: bool) -> Vec<u8> {
+        json_quic_frame(
+            format!(r#"{{"method":"POST","path":"/p","body":{body}}}"#).as_bytes(),
+            trailing,
+        )
+    }
+
+    fn padded_attachment_frame() -> (Vec<u8>, Vec<u8>) {
+        const MAX_BODY: usize = 16 * 1024;
+        let body = format!("{{\"a\":1{}}}", " ".repeat(MAX_BODY + 1 - 7));
+        let frame =
+            format!(r#"{{"method":"POST","path":"/s9/attachments/renew/source","body":{body}}}"#);
+        (json_quic_frame(frame.as_bytes(), false), body.into_bytes())
+    }
+
+    async fn assert_attachment_cap_body_preserved(
+        server_connection: &super::MeshQuicConnection,
+        client_connection: &quinn::Connection,
+        wire_api: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (frame, expected_body) = padded_attachment_frame();
+        let (mut send, mut recv) = client_connection.open_bi().await?;
+        send.write_all(&frame).await?;
+        send.finish()?;
+        let raw_body = if wire_api {
+            let accepted =
+                MeshQuicServer::accept_json_or_postcard_request_on_connection(server_connection)
+                    .await?;
+            let MeshQuicAcceptedWireRequest::Json(accepted) = accepted else {
+                return Err(test_error("attachment request was not accepted as JSON"));
+            };
+            let raw = accepted
+                .raw_body
+                .as_deref()
+                .ok_or_else(|| test_error("attachment request lost its raw body"))?;
+            assert_eq!(raw, expected_body);
+            assert!(raw.len() > 16 * 1024, "wire bytes must exceed the attachment cap");
+            let preserved = raw.to_vec();
+            accepted.write_json_response(413, &"body").await?;
+            preserved
+        } else {
+            let accepted = MeshQuicServer::accept_request_on_connection(server_connection).await?;
+            let raw = accepted
+                .raw_body
+                .as_deref()
+                .ok_or_else(|| test_error("attachment request lost its raw body"))?;
+            assert_eq!(raw, expected_body);
+            assert!(raw.len() > 16 * 1024, "wire bytes must exceed the attachment cap");
+            let preserved = raw.to_vec();
+            accepted.write_json_response(413, &"body").await?;
+            preserved
+        };
+        assert_eq!(raw_body, expected_body);
+        let response =
+            tokio::time::timeout(Duration::from_secs(10), super::read_quic_raw_frame(&mut recv))
+                .await??;
+        assert_eq!(
+            response,
+            serde_json::to_vec(&GatewayQuicResponse {
+                status: 413,
+                body: serde_json::json!("body")
+            })?
+        );
+        Ok(())
     }
 
     async fn assert_i_json_rejection_response(
@@ -2518,7 +2604,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if reset_expected {
             let result =
-                tokio::time::timeout(Duration::from_secs(5), recv.read_chunk(4, true)).await?;
+                tokio::time::timeout(Duration::from_secs(10), recv.read_chunk(4, true)).await?;
             match result {
                 Err(quinn::ReadError::Reset(code))
                     if code.into_inner() == u64::from(super::MESH_I_JSON_REJECTED_CODE) => {}
@@ -2530,17 +2616,14 @@ mod tests {
             }
             return Ok(());
         }
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            super::read_quic_json_frame::<GatewayQuicResponse>(recv),
-        )
-        .await??;
-        assert_eq!(response.status, 400);
-        assert_eq!(
-            response.body,
-            ramflux_protocol::i_json_rejection_body(),
-            "I-JSON rejection body must be exact"
-        );
+        let response =
+            tokio::time::timeout(Duration::from_secs(10), super::read_quic_raw_frame(recv))
+                .await??;
+        let expected = serde_json::to_vec(&GatewayQuicResponse {
+            status: 400,
+            body: ramflux_protocol::i_json_rejection_body(),
+        })?;
+        assert_eq!(response, expected, "I-JSON rejection response must be byte-exact");
         Ok(())
     }
 
@@ -2549,6 +2632,11 @@ mod tests {
         client_connection: &quinn::Connection,
         wire_api: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut invalid_send, mut invalid_recv) = client_connection.open_bi().await?;
+        invalid_send
+            .write_all(&i_json_request_frame(r#"{"x_probe":null,"x_probe":null}"#, false))
+            .await?;
+        invalid_send.finish()?;
         let (mut send, mut recv) = client_connection.open_bi().await?;
         send.write_all(&valid_request_frame()?).await?;
         send.finish()?;
@@ -2559,34 +2647,49 @@ mod tests {
             let MeshQuicAcceptedWireRequest::Json(accepted) = accepted else {
                 return Err(test_error("valid JSON request was not accepted as JSON"));
             };
+            assert_eq!(
+                accepted.request.body["created_at"].as_i64(),
+                Some(9_007_199_254_740_991_i64),
+                "safe integer endpoint must reach the request handler"
+            );
             accepted.write_json_response(200, &serde_json::json!({"ok": true})).await?;
         } else {
             let accepted = MeshQuicServer::accept_request_on_connection(server_connection).await?;
+            assert_eq!(
+                accepted.request.body["created_at"].as_i64(),
+                Some(9_007_199_254_740_991_i64),
+                "safe integer endpoint must reach the request handler"
+            );
             accepted.write_json_response(200, &serde_json::json!({"ok": true})).await?;
         }
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            super::read_quic_json_frame::<GatewayQuicResponse>(&mut recv),
-        )
-        .await??;
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, serde_json::json!({"ok": true}));
+        assert_i_json_rejection_response(&mut invalid_recv, false).await?;
+        let response =
+            tokio::time::timeout(Duration::from_secs(10), super::read_quic_raw_frame(&mut recv))
+                .await??;
+        assert_eq!(
+            response,
+            serde_json::to_vec(&GatewayQuicResponse {
+                status: 200,
+                body: serde_json::json!({"ok": true})
+            })?
+        );
         Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mesh_frame_ijson_rejected_on_stream() -> Result<(), Box<dyn std::error::Error>> {
-        for (row, trailing, expired) in [
-            ("plain", false, false),
-            ("trailing-withheld-fin", true, false),
-            ("expired-deadline", false, true),
+        for (row, body, trailing, expired) in [
+            ("plain", r#"{"x_probe":null,"x_probe":null}"#, false, false),
+            ("unsafe-integer", r#"{"created_at":9007199254740992}"#, false, false),
+            ("trailing-withheld-fin", r#"{"x_probe":null,"x_probe":null}"#, true, false),
+            ("expired-deadline", r#"{"x_probe":null,"x_probe":null}"#, false, true),
         ] {
             let rig = mesh_ijson_rig(&format!("mesh_ijson_{row}"))?;
             let (server_connection_result, client_result) =
                 tokio::join!(rig.server.accept_connection(), async {
                     let connection = rig.endpoint.connect(rig.addr, "ramflux-relay")?.await?;
                     let (mut send, recv) = connection.open_bi().await?;
-                    send.write_all(&duplicate_body_request_frame(trailing)).await?;
+                    send.write_all(&i_json_request_frame(body, trailing)).await?;
                     if !trailing {
                         send.finish()?;
                     }
@@ -2596,27 +2699,20 @@ mod tests {
             let (client_connection, _first_send, mut first_recv) = client_result?;
 
             for wire_api in [false, true] {
+                let deadline = if expired {
+                    Instant::now()
+                        .checked_sub(Duration::from_millis(1))
+                        .ok_or_else(|| test_error("clock"))?
+                } else {
+                    Instant::now() + Duration::from_secs(2)
+                };
                 let rejected = if wire_api {
                     let stream =
                         MeshQuicServer::accept_bi_on_connection(&server_connection).await?;
-                    let deadline = if expired {
-                        Instant::now()
-                            .checked_sub(Duration::from_millis(1))
-                            .ok_or_else(|| test_error("clock"))?
-                    } else {
-                        Instant::now() + Duration::from_secs(2)
-                    };
                     MeshQuicServer::read_wire_request_from_bi_with_deadline(stream, Some(deadline))
                         .await
                         .map(|_| ())
                 } else {
-                    let deadline = if expired {
-                        Instant::now()
-                            .checked_sub(Duration::from_millis(1))
-                            .ok_or_else(|| test_error("clock"))?
-                    } else {
-                        Instant::now() + Duration::from_secs(2)
-                    };
                     MeshQuicServer::accept_request_on_connection_once(
                         &server_connection,
                         Some(deadline),
@@ -2638,11 +2734,19 @@ mod tests {
                 }
                 // Reopen a receive half for the wire API's independent rejection row.
                 let (mut send, recv) = client_connection.open_bi().await?;
-                send.write_all(&duplicate_body_request_frame(trailing)).await?;
+                send.write_all(&i_json_request_frame(body, trailing)).await?;
                 if !trailing {
                     send.finish()?;
                 }
                 first_recv = recv;
+            }
+            for wire_api in [false, true] {
+                assert_attachment_cap_body_preserved(
+                    &server_connection,
+                    &client_connection,
+                    wire_api,
+                )
+                .await?;
             }
         }
         Ok(())

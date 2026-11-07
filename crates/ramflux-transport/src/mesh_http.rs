@@ -334,7 +334,7 @@ impl MeshHttpClient {
             resolver: None,
             resolver_pool: None,
         })?;
-        Ok(serde_json::from_slice(&response)?)
+        Ok(ramflux_protocol::parse_i_json(&response)?)
     }
 
     /// # Errors
@@ -361,7 +361,7 @@ impl MeshHttpClient {
             resolver: None,
             resolver_pool: None,
         })?;
-        Ok(serde_json::from_slice(&response)?)
+        Ok(ramflux_protocol::parse_i_json(&response)?)
     }
 
     /// # Errors
@@ -394,7 +394,7 @@ impl MeshHttpClient {
             resolver: None,
             resolver_pool: None,
         })?;
-        Ok(serde_json::from_slice(&response)?)
+        Ok(ramflux_protocol::parse_i_json(&response)?)
     }
 
     /// Same as [`Self::post_json`], but every connect, handshake, read, write and retry is
@@ -430,7 +430,7 @@ impl MeshHttpClient {
             resolver: None,
             resolver_pool: None,
         })?;
-        Ok(serde_json::from_slice(&response)?)
+        Ok(ramflux_protocol::parse_i_json(&response)?)
     }
 
     fn json_request(&self, request: MeshHttpClientRequest<'_>) -> Result<Vec<u8>, TransportError> {
@@ -689,7 +689,7 @@ where
 {
     let body = serde_json::to_vec(value)?;
     let response = mesh_http_json_request("POST", endpoint, path, tls, server_name, Some(&body))?;
-    Ok(serde_json::from_slice(&response)?)
+    Ok(ramflux_protocol::parse_i_json(&response)?)
 }
 
 /// POST JSON and return the HTTP status code plus the raw response body.
@@ -751,7 +751,7 @@ where
         resolver: None,
         resolver_pool: None,
     })?;
-    Ok(serde_json::from_slice(&response)?)
+    Ok(ramflux_protocol::parse_i_json(&response)?)
 }
 
 fn endpoint_host_port(endpoint: &str) -> Result<(&str, u16), TransportError> {
@@ -896,7 +896,7 @@ where
     R: serde::de::DeserializeOwned,
 {
     let response = mesh_http_json_request("GET", endpoint, path, tls, server_name, None)?;
-    Ok(serde_json::from_slice(&response)?)
+    Ok(ramflux_protocol::parse_i_json(&response)?)
 }
 
 /// # Errors

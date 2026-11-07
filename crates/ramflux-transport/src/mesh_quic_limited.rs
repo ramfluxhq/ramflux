@@ -168,5 +168,5 @@ pub async fn mesh_quic_exchange_raw_frame(
     let response = tokio::time::timeout_at(at, crate::quic_gateway::read_quic_raw_frame(&mut recv))
         .await
         .map_err(|_| expired())??;
-    Ok(serde_json::from_slice(&response)?)
+    Ok(ramflux_protocol::parse_i_json(&response)?)
 }

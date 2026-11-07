@@ -519,5 +519,5 @@ async fn h2_submit_envelope(
     while let Some(chunk) = body.data().await {
         bytes.extend_from_slice(&chunk.map_err(|error| TransportError::Http(error.to_string()))?);
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(ramflux_protocol::parse_i_json(&bytes)?)
 }

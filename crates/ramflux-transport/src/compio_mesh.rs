@@ -18,6 +18,13 @@ const COMP_IO_MESH_POSTCARD_MAGIC: &[u8] = b"ramflux.mesh.postcard.v1\0";
 const MESH_I_JSON_REJECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const MESH_I_JSON_REJECTED_CODE: u32 = 0x4A53;
 
+fn raw_attachment_body(frame: &[u8]) -> Result<Vec<u8>, ramflux_protocol::ProtocolError> {
+    ramflux_protocol::validate_i_json_bytes(frame)?;
+    let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(frame)
+        .map_err(ramflux_protocol::ProtocolError::IJson)?;
+    Ok(raw.body.get().as_bytes().to_vec())
+}
+
 pub struct CompioMeshQuicServer {
     endpoint: compio_quic::Endpoint,
 }
@@ -152,9 +159,11 @@ impl CompioMeshQuicServer {
             .await
             .map_err(|error| TransportError::Quic(error.to_string()))?;
         tracing::trace!("compio mesh accepted bidirectional stream; reading request frame");
-        let request: GatewayQuicRequest = match compio_read_json_frame(&mut recv).await {
+        let frame = compio_read_raw_frame(&mut recv).await?;
+        let request: GatewayQuicRequest = match ramflux_protocol::parse_i_json(&frame) {
             Ok(request) => request,
             Err(error) => {
+                let error = TransportError::Protocol(error);
                 if ramflux_protocol::is_i_json_rejection(&error) {
                     reject_i_json(
                         send,
@@ -172,9 +181,27 @@ impl CompioMeshQuicServer {
             path = %request.path,
             "compio mesh request frame decoded"
         );
+        let raw_body = if request.path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
+            match raw_attachment_body(&frame) {
+                Ok(body) => Some(body),
+                Err(error) => {
+                    let error = TransportError::Protocol(error);
+                    reject_i_json(
+                        send,
+                        recv,
+                        reject_deadline.unwrap_or_else(|| {
+                            std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
+                        }),
+                    );
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         Ok(CompioMeshQuicAcceptedRequest {
             request,
-            raw_body: None,
+            raw_body,
             peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
             send,
             recv,
@@ -245,9 +272,10 @@ impl CompioMeshQuicServer {
             "compio mesh JSON request frame decoded"
         );
         let raw_body = if request.path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
-            let raw = match ramflux_protocol::parse_i_json::<crate::mesh_quic_limited::RawBodyOnly>(
-                &frame,
-            ) {
+            let raw = match ramflux_protocol::validate_i_json_bytes(&frame).and_then(|()| {
+                serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)
+                    .map_err(ramflux_protocol::ProtocolError::IJson)
+            }) {
                 Ok(raw) => raw,
                 Err(error) => {
                     let error = TransportError::Protocol(error);
@@ -986,9 +1014,12 @@ mod tests {
         event_tx: &tokio::sync::mpsc::UnboundedSender<String>,
         acknowledgements: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     ) -> Result<(), String> {
-        for (row, expired) in
-            [("plain", false), ("trailing-withheld-fin", false), ("expired-deadline", true)]
-        {
+        for (row, body, expired) in [
+            ("plain", r#"{"x_probe":null,"x_probe":null}"#, false),
+            ("unsafe-integer", r#"{"created_at":9007199254740992}"#, false),
+            ("trailing-withheld-fin", r#"{"x_probe":null,"x_probe":null}"#, false),
+            ("expired-deadline", r#"{"x_probe":null,"x_probe":null}"#, true),
+        ] {
             for wire_api in [false, true] {
                 let deadline = if expired {
                     std::time::Instant::now()
@@ -1019,9 +1050,8 @@ mod tests {
                 event_tx.send(format!("{prefix}:rejected")).map_err(|e| e.to_string())?;
                 event_tx.send(format!("{prefix}:ready")).map_err(|e| e.to_string())?;
                 let accepted = if wire_api {
-                    match CompioMeshQuicServer::accept_json_or_postcard_request_on_connection_once(
+                    match CompioMeshQuicServer::accept_json_or_postcard_request_on_connection(
                         connection,
-                        Some(std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
                     )
                     .await
                     .map_err(|e| e.to_string())?
@@ -1032,13 +1062,15 @@ mod tests {
                         }
                     }
                 } else {
-                    CompioMeshQuicServer::accept_request_on_connection_once(
-                        connection,
-                        Some(std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?
+                    CompioMeshQuicServer::accept_request_on_connection(connection)
+                        .await
+                        .map_err(|e| e.to_string())?
                 };
+                if accepted.request.body["created_at"].as_i64() != Some(9_007_199_254_740_991_i64) {
+                    return Err(
+                        "safe integer endpoint did not reach the request handler".to_owned()
+                    );
+                }
                 accepted
                     .write_json_response(200, &json!({"ok": true}))
                     .await
@@ -1052,6 +1084,38 @@ mod tests {
                     return Err(format!("unexpected client acknowledgement: {acknowledgement}"));
                 }
             }
+        }
+        for wire_api in [false, true] {
+            const MAX_BODY: usize = 16 * 1024;
+            let raw_body = format!("{{\"a\":1{}}}", " ".repeat(MAX_BODY + 1 - 7));
+            let accepted = if wire_api {
+                match CompioMeshQuicServer::accept_json_or_postcard_request_on_connection(
+                    connection,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                {
+                    CompioMeshQuicAcceptedWireRequest::Json(accepted) => accepted,
+                    CompioMeshQuicAcceptedWireRequest::Postcard(_) => {
+                        return Err("attachment request accepted as postcard".to_owned());
+                    }
+                }
+            } else {
+                CompioMeshQuicServer::accept_request_on_connection(connection)
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
+            let preserved = accepted
+                .raw_body
+                .as_deref()
+                .ok_or_else(|| "attachment request lost its raw body".to_owned())?;
+            if preserved != raw_body.as_bytes() || preserved.len() <= MAX_BODY {
+                return Err(
+                    "padded attachment body did not preserve over-cap wire bytes".to_owned()
+                );
+            }
+            accepted.write_json_response(413, &"body").await.map_err(|error| error.to_string())?;
+            event_tx.send(format!("cap:{wire_api}:served")).map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -1112,15 +1176,16 @@ mod tests {
             &[server_ca_pem],
         )?);
         let connection = client_endpoint.connect(endpoint.parse()?, "ramflux-federation")?.await?;
-        for (row, trailing, expired) in [
-            ("plain", false, false),
-            ("trailing-withheld-fin", true, false),
-            ("expired-deadline", false, true),
+        for (row, body, trailing, expired) in [
+            ("plain", r#"{"x_probe":null,"x_probe":null}"#, false, false),
+            ("unsafe-integer", r#"{"created_at":9007199254740992}"#, false, false),
+            ("trailing-withheld-fin", r#"{"x_probe":null,"x_probe":null}"#, true, false),
+            ("expired-deadline", r#"{"x_probe":null,"x_probe":null}"#, false, true),
         ] {
             for wire_api in [false, true] {
                 let prefix = format!("{row}:{wire_api}");
                 let invalid = compio_ijson_frame(
-                    br#"{"method":"POST","path":"/p","body":{"x_probe":null,"x_probe":null}}"#,
+                    format!(r#"{{"method":"POST","path":"/p","body":{body}}}"#).as_bytes(),
                     trailing,
                 )?;
                 let (mut send, mut recv) = connection.open_bi().await?;
@@ -1131,7 +1196,7 @@ mod tests {
                 receive_compio_ijson_event(&mut events, &format!("{prefix}:rejected")).await?;
                 if expired {
                     let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
+                        std::time::Duration::from_secs(10),
                         recv.read_chunk(4, true),
                     )
                     .await
@@ -1144,31 +1209,86 @@ mod tests {
                     );
                 } else {
                     let response = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        crate::read_quic_json_frame::<GatewayQuicResponse>(&mut recv),
+                        std::time::Duration::from_secs(10),
+                        crate::read_quic_raw_frame(&mut recv),
                     )
                     .await??;
-                    assert_eq!(response.status, 400);
-                    assert_eq!(response.body, ramflux_protocol::i_json_rejection_body());
+                    assert_eq!(
+                        response,
+                        serde_json::to_vec(&GatewayQuicResponse {
+                            status: 400,
+                            body: ramflux_protocol::i_json_rejection_body(),
+                        })?,
+                        "I-JSON rejection response must be byte-exact"
+                    );
                 }
                 receive_compio_ijson_event(&mut events, &format!("{prefix}:ready")).await?;
-                let valid = serde_json::to_vec(&json!({"method":"GET", "path":"/p", "body":null}))?;
+                let invalid = compio_ijson_frame(
+                    br#"{"method":"POST","path":"/p","body":{"x_probe":null,"x_probe":null}}"#,
+                    false,
+                )?;
+                let (mut invalid_send, mut invalid_recv) = connection.open_bi().await?;
+                invalid_send.write_all(&invalid).await?;
+                invalid_send.finish()?;
+                let valid = serde_json::to_vec(&json!({
+                    "method":"GET",
+                    "path":"/p",
+                    "body":{"created_at": 9_007_199_254_740_991_i64}
+                }))?;
                 let frame = compio_ijson_frame(&valid, false)?;
                 let (mut send, mut recv) = connection.open_bi().await?;
                 send.write_all(&frame).await?;
                 send.finish()?;
-                let response = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    crate::read_quic_json_frame::<GatewayQuicResponse>(&mut recv),
+                let rejection = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    crate::read_quic_raw_frame(&mut invalid_recv),
                 )
                 .await??;
-                assert_eq!(response.status, 200);
-                assert_eq!(response.body, json!({"ok": true}));
+                assert_eq!(
+                    rejection,
+                    serde_json::to_vec(&GatewayQuicResponse {
+                        status: 400,
+                        body: ramflux_protocol::i_json_rejection_body(),
+                    })?
+                );
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    crate::read_quic_raw_frame(&mut recv),
+                )
+                .await??;
+                assert_eq!(
+                    response,
+                    serde_json::to_vec(&GatewayQuicResponse {
+                        status: 200,
+                        body: json!({"ok": true}),
+                    })?
+                );
                 receive_compio_ijson_event(&mut events, &format!("{prefix}:served")).await?;
                 acknowledgements
                     .send(format!("{prefix}:received"))
                     .map_err(|_| test_error("compio I-JSON acknowledgement channel closed"))?;
             }
+        }
+        for wire_api in [false, true] {
+            const MAX_BODY: usize = 16 * 1024;
+            let raw_body = format!("{{\"a\":1{}}}", " ".repeat(MAX_BODY + 1 - 7));
+            let request = format!(
+                r#"{{"method":"POST","path":"/s9/attachments/renew/source","body":{raw_body}}}"#
+            );
+            let frame = compio_ijson_frame(request.as_bytes(), false)?;
+            let (mut send, mut recv) = connection.open_bi().await?;
+            send.write_all(&frame).await?;
+            send.finish()?;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::read_quic_raw_frame(&mut recv),
+            )
+            .await??;
+            assert_eq!(
+                response,
+                serde_json::to_vec(&GatewayQuicResponse { status: 413, body: json!("body") })?
+            );
+            receive_compio_ijson_event(&mut events, &format!("cap:{wire_api}:served")).await?;
         }
         Ok(())
     }
