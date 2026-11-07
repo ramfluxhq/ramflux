@@ -20,7 +20,8 @@ fn account_erase_removes_real_segment_layout() {
     drop(store);
     drop(db);
     let dir = root.join("accounts/acct");
-    let tree = dir.join("ramflux_local.segments");
+    // The store canonicalizes its root (`/private/var` on macOS), so compare canonical forms.
+    let tree = dir.join("ramflux_local.segments").canonicalize().unwrap();
     // Nested transfer/generation layout: segments/<hash>/<generation>/<index>.segment.
     assert!(segment.is_file() && std::fs::metadata(&segment).unwrap().len() > 0);
     assert_eq!(segment.strip_prefix(&tree).unwrap().components().count(), 3);
