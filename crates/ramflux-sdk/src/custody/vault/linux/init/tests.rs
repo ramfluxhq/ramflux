@@ -329,6 +329,58 @@ fn init_root_and_credential_metadata_predicates_are_exact() -> TestResult {
     Ok(())
 }
 
+/// Foreign ownership against P04's own UID predicates (`verify` for the root and installation
+/// files, and the credential reader): each object is otherwise valid, so the owner check is the
+/// only failing predicate. Needs root to `chown`; same-owner controls come first.
+#[test]
+#[ignore = "needs root to chown; run in the privileged fixture"]
+fn linux_vault_init_refuses_foreign_owned_objects() -> TestResult {
+    assert_eq!(rustix::process::geteuid().as_raw(), 0, "run as root");
+    let foreign = |path: &Path| -> TestResult {
+        let nobody = rustix::process::Uid::from_raw(65534);
+        Ok(fs::chown(path, Some(nobody), None)?)
+    };
+    let base = private_dir()?;
+    // Installation root (0700 directory).
+    let own_root = base.path().join("own-root");
+    let other_root = base.path().join("other-root");
+    for dir in [&own_root, &other_root] {
+        std::fs::create_dir(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    assert!(root_fd(&own_root).is_ok(), "same-owner root control");
+    foreign(&other_root)?;
+    assert!(matches!(root_fd(&other_root), Err(Error::Metadata)), "foreign-owned 0700 root");
+    // Installation files (0600): descriptor and lock opened through the verified directory.
+    let fd = root_fd(&own_root)?;
+    put(&own_root, "descriptor.json", b"{}", 0o600)?;
+    assert_eq!(read(&fd, "descriptor.json", 4096)?, b"{}", "same-owner file control");
+    foreign(&own_root.join("descriptor.json"))?;
+    assert_eq!(read(&fd, "descriptor.json", 4096), Err(Error::Metadata), "foreign 0600 file");
+    put(&own_root, ".init.lock", b"", 0o600)?;
+    assert!(open(&fd, ".init.lock", OFlags::RDWR).is_ok(), "same-owner lock control");
+    foreign(&own_root.join(".init.lock"))?;
+    assert!(
+        matches!(open(&fd, ".init.lock", OFlags::RDWR), Err(Error::Metadata)),
+        "foreign installation lock"
+    );
+    // Injected credential (0400, exactly 32 bytes).
+    put(base.path(), "own-key", &[7; 32], 0o400)?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.path().join("own-key")),
+        Ok(()),
+        "same-owner credential control"
+    );
+    put(base.path(), "other-key", &[7; 32], 0o400)?;
+    foreign(&base.path().join("other-key"))?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.path().join("other-key")),
+        Err(Error::Metadata),
+        "foreign-owned 0400 credential"
+    );
+    Ok(())
+}
+
 /// Durability operation oracle: publication and intent removal perform the real fsync, rename
 /// and unlink steps in order, on the expected objects, and injected syscall failures surface as
 /// errors without a durable success.
