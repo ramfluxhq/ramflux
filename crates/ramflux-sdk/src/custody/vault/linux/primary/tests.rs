@@ -21,6 +21,81 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
 fn linux_vault_primary_delete_reconciles_absence_durably() -> TestResult {
     run_in_child(&format!("{BODY}delete_reconcile_body"))
 }
+#[derive(Clone, Copy, Debug)]
+enum Want {
+    Corrupt,
+    Unit,
+    Random,
+}
+fn matches_want(error: &SdkError, want: Want) -> bool {
+    match want {
+        Want::Corrupt => matches!(error, SdkError::CustodyVault(CustodyVaultReason::Corrupt)),
+        Want::Unit => matches!(error, SdkError::CustodyVaultUnavailable),
+        Want::Random => matches!(error, SdkError::CustodyRandomUnavailable),
+    }
+}
+/// Independent literal table: (variant, wanted at Insert, Read, `HandleOpen`). A new codec variant
+/// breaks `variant_index` (exhaustive) and the count assertion, forcing a row here.
+#[test]
+fn linux_vault_codec_reasons_cover_every_context() {
+    use Want::{Corrupt, Random, Unit};
+    use codec::Error as E;
+    const TABLE: [(E, Want, Want, Want); 12] = [
+        (E::RecordSize, Unit, Corrupt, Unit),
+        (E::Magic, Unit, Corrupt, Unit),
+        (E::Version, Unit, Corrupt, Unit),
+        (E::Realm, Unit, Corrupt, Unit),
+        (E::Kind, Unit, Corrupt, Unit),
+        (E::Combination, Unit, Corrupt, Unit),
+        (E::Generation, Unit, Corrupt, Unit),
+        (E::Length, Unit, Corrupt, Unit),
+        (E::Account, Unit, Corrupt, Unit),
+        (E::Reference, Unit, Corrupt, Unit),
+        (E::Authentication, Unit, Corrupt, Unit),
+        (E::Random, Random, Random, Random),
+    ];
+    fn variant_index(error: E) -> usize {
+        match error {
+            E::RecordSize => 0,
+            E::Magic => 1,
+            E::Version => 2,
+            E::Realm => 3,
+            E::Kind => 4,
+            E::Combination => 5,
+            E::Generation => 6,
+            E::Length => 7,
+            E::Account => 8,
+            E::Reference => 9,
+            E::Authentication => 10,
+            E::Random => 11,
+        }
+    }
+    assert_eq!(TABLE.len(), 12, "codec::Error has 12 variants");
+    let mut seen = [false; 12];
+    for (error, insert, read, open) in TABLE {
+        seen[variant_index(error)] = true;
+        for (context, want) in [
+            (CodecContext::Insert, insert),
+            (CodecContext::Read, read),
+            (CodecContext::HandleOpen, open),
+        ] {
+            let got = codec_error(context, error);
+            assert!(matches_want(&got, want), "{error:?} in {context:?}: {got:?}, want {want:?}");
+        }
+        // Record(v) delegates to the Read column.
+        let record = files_error(files::Error::Record(error));
+        assert!(matches_want(&record, read), "Record({error:?}): {record:?}, want {read:?}");
+    }
+    assert!(seen.iter().all(|s| *s), "every codec variant has a row");
+}
+#[test]
+fn linux_vault_insert_randomness_failure_is_random_unavailable() -> TestResult {
+    run_in_child(&format!("{BODY}insert_random_body"))
+}
+#[test]
+fn linux_vault_flipped_tag_reads_as_corrupt() -> TestResult {
+    run_in_child(&format!("{BODY}flipped_tag_body"))
+}
 /// Every internal source maps to its own bounded reason; each row is isolated.
 #[test]
 fn linux_vault_errors_map_to_bounded_reasons() {
@@ -48,6 +123,11 @@ fn linux_vault_errors_map_to_bounded_reasons() {
     assert_eq!(init(I::Realm), Some(R::Corrupt), "init Realm");
     assert_eq!(file(F::Generation), Some(R::Corrupt), "files Generation");
     assert_eq!(file(F::Record(codec::Error::Authentication)), Some(R::Corrupt), "files Record");
+    #[cfg(test)]
+    assert!(
+        matches!(files_error(F::Replacement), SdkError::CustodyVaultUnavailable),
+        "Replacement"
+    );
     assert_eq!(init(I::Metadata), Some(R::Permission), "init Metadata");
     assert_eq!(file(F::Path), Some(R::Permission), "files Path");
     assert_eq!(file(F::Metadata), Some(R::Permission), "files Metadata");
@@ -240,5 +320,50 @@ fn owned_buffers_body() -> TestResult {
     for observation in observations {
         assert!(observation.bytes.iter().all(|b| *b == 0), "P06 uncleared {}", observation.label);
     }
+    Ok(())
+}
+
+#[test]
+fn insert_random_body() -> TestResult {
+    if !in_child() {
+        return Ok(());
+    }
+    let root = private_root()?;
+    let reference = ramflux_protocol::encode_base64url([7; 32]);
+    let provider = provider_in(root.path(), &reference)?;
+    let realm = provider.realms[0].as_ref().ok_or("primary realm")?;
+    // The nonce RNG fails inside the real insert path.
+    let outcome = realm.insert_with(&reference, 1, &[5; 32], |binding, key, input| {
+        codec::seal_random(binding, key, input, |_| Err(codec::Error::Random))
+    });
+    assert!(matches!(outcome, Err(SdkError::CustodyRandomUnavailable)), "{outcome:?}");
+    assert!(!root.path().join("account/1").join(&reference).exists(), "nothing was written");
+    // Control: the real RNG inserts, and a second insert is the unit collision.
+    realm.insert(&reference, 1, &[5; 32])?;
+    assert!(matches!(
+        realm.insert(&reference, 1, &[5; 32]),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    Ok(())
+}
+#[test]
+fn flipped_tag_body() -> TestResult {
+    if !in_child() {
+        return Ok(());
+    }
+    let root = private_root()?;
+    let reference = ramflux_protocol::encode_base64url([7; 32]);
+    let provider = provider_in(root.path(), &reference)?;
+    let key = ramflux_crypto::custody::SelfSigningKey::from_vault_seed(&Zeroizing::new([3; 32]));
+    provider.store_new(&reference, &key)?;
+    let entry = root.path().join("account/1").join(&reference);
+    let mut record = std::fs::read(&entry)?;
+    let last = record.len() - 1;
+    record[last] ^= 1;
+    std::fs::write(&entry, &record)?;
+    assert!(matches!(
+        provider.load_primary(&reference),
+        Err(SdkError::CustodyVault(CustodyVaultReason::Corrupt))
+    ));
     Ok(())
 }

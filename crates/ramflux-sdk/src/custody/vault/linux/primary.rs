@@ -47,15 +47,44 @@ pub(super) fn files_error(error: files::Error) -> SdkError {
         E::Missing => reason(CustodyVaultReason::Missing),
         E::Path | E::Metadata => reason(CustodyVaultReason::Permission),
         E::Busy => reason(CustodyVaultReason::Busy),
-        E::Generation | E::Record(_) => reason(CustodyVaultReason::Corrupt),
+        E::Generation => reason(CustodyVaultReason::Corrupt),
+        E::Record(error) => codec_error(CodecContext::Read, error),
         E::Io | E::Exists | E::Full => SdkError::CustodyVaultUnavailable,
         #[cfg(test)]
         E::Replacement => SdkError::CustodyVaultUnavailable,
     }
 }
-/// A record that fails to open (authentication, binding, size) is corrupt, not unavailable.
-fn corrupt(_: codec::Error) -> SdkError {
-    reason(CustodyVaultReason::Corrupt)
+/// Where a codec failure arose; the same variant maps differently per context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CodecContext {
+    /// Sealing a new record (input length, binding, nonce randomness).
+    Insert,
+    /// Opening a stored record: any structural or authentication failure is corruption.
+    Read,
+    /// Validating the account/reference binding before lookup.
+    HandleOpen,
+}
+/// The one codec-to-SDK mapping. It is exhaustive on purpose (no wildcard arm): a new
+/// `codec::Error` variant must be classified here. A randomness failure is never corruption.
+pub(super) fn codec_error(context: CodecContext, error: codec::Error) -> SdkError {
+    use codec::Error as E;
+    match error {
+        E::Random => SdkError::CustodyRandomUnavailable,
+        E::RecordSize
+        | E::Magic
+        | E::Version
+        | E::Realm
+        | E::Kind
+        | E::Combination
+        | E::Generation
+        | E::Length
+        | E::Account
+        | E::Reference
+        | E::Authentication => match context {
+            CodecContext::Read => reason(CustodyVaultReason::Corrupt),
+            CodecContext::Insert | CodecContext::HandleOpen => SdkError::CustodyVaultUnavailable,
+        },
+    }
 }
 pub(super) struct Realm {
     store: files::Store,
@@ -68,13 +97,29 @@ impl Realm {
             .store
             .apply(Operation::Read { reference: reference.into(), kind, generation: 1 }, |_| {})
             .map_err(files_error)?;
-        codec::open(self.store.binding(kind, reference, 1), &self.key, &record).map_err(corrupt)
+        codec::open(self.store.binding(kind, reference, 1), &self.key, &record)
+            .map_err(|error| codec_error(CodecContext::Read, error))
     }
     pub(super) fn insert(&self, reference: &str, kind: u8, secret: &[u8]) -> Result<(), SdkError> {
+        self.insert_with(reference, kind, secret, codec::seal)
+    }
+    /// `seal` is the test seam for nonce-randomness failure; production passes `codec::seal`.
+    pub(super) fn insert_with(
+        &self,
+        reference: &str,
+        kind: u8,
+        secret: &[u8],
+        seal: impl FnOnce(
+            codec::Binding<'_>,
+            &Secret<32>,
+            &codec::Plaintext,
+        ) -> Result<Vec<u8>, codec::Error>,
+    ) -> Result<(), SdkError> {
         let _slot = init::Slot::acquire().map_err(init_error)?;
-        let input = codec::Plaintext::new(secret).map_err(unavailable)?;
-        let record = codec::seal(self.store.binding(kind, reference, 1), &self.key, &input)
-            .map_err(unavailable)?;
+        let input = codec::Plaintext::new(secret)
+            .map_err(|error| codec_error(CodecContext::Insert, error))?;
+        let record = seal(self.store.binding(kind, reference, 1), &self.key, &input)
+            .map_err(|error| codec_error(CodecContext::Insert, error))?;
         self.store
             .apply(Operation::Insert { reference: reference.into(), kind, record }, |_| {})
             .map(drop)
@@ -167,7 +212,7 @@ impl LinuxPrimaryVault {
             reference: &reference,
         }
         .validate_name()
-        .map_err(unavailable)?;
+        .map_err(|error| codec_error(CodecContext::HandleOpen, error))?;
         let material = init::material(root.clone(), config.clone()).await.map_err(init_error)?;
         let realms = build_realms(root, account, material).await?;
         Ok(Self { realms, reference, class: config.mode().strength_class(), role: config.role() })
