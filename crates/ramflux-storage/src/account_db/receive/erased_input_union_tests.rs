@@ -78,7 +78,7 @@ fn state(db: &rusqlite::Connection) -> rusqlite::Result<State> {
 /// Runs a merge that must fail with the exact `Integrity` text. The incoming snapshot carries a
 /// message and its own MAC bundle that a successful merge would import; none of it may remain,
 /// immediately or after reopen.
-fn assert_refused(p: &Pair, expected: &'static str) -> Result<(), StorageError> {
+pub(super) fn assert_refused(p: &Pair, expected: &'static str) -> Result<(), StorageError> {
     p.source.send_direct_message("thread", "incoming-only", "peer", b"payload")?;
     let incoming = p.root.join("incoming.db");
     let snapshot = p.source.write_backup_snapshot(&incoming)?;

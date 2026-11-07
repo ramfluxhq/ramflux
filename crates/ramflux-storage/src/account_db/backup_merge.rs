@@ -339,6 +339,12 @@ impl BackupDatabase {
             super::receive::erased_capture::Side::Local,
             crate::unix_now(),
         )?;
+        // Incoming sources are read-only here and become bindings or tombstones at reconcile.
+        super::receive::erased_capture::stage_merge_capture(
+            &self.db,
+            super::receive::erased_capture::Side::Incoming,
+            crate::unix_now(),
+        )?;
         if candidate {
             super::backup_selector_admission::prepare(&self.db)?;
             after_capture(&self.db)?;

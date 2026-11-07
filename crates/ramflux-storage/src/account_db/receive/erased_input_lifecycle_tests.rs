@@ -5,8 +5,8 @@
 //! The exact selector must exist after the merge and after reopen even though the merge deletes
 //! the only local source (cell viii is the absence oracle).
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
-use super::erased_capture_tests::{current, full, lifetime};
-use super::erased_input_union_tests::{Pair, expiry, merge, pair};
+use super::erased_capture_tests::{current, full};
+use super::erased_input_union_tests::{Pair, assert_refused, expiry, merge, pair};
 use super::stage_tests::{bytes, input, run};
 use crate::{AccountDb, BackupDatabase, StorageError};
 use rusqlite::params;
@@ -65,7 +65,7 @@ fn seed_routed(p: &Pair, payload: &str, now: i64) -> Result<Expect, StorageError
         &json!({"routing":{"message_id":"M"},"entry":{"envelope":full("rp","rd",payload,now,3600)}}),
     )?;
     let (_, selector) = current(&p.local, "rp", "rd", payload)?;
-    Ok(Expect { selector, expires_at: lifetime(now, 3600, now) })
+    Ok(Expect { selector, expires_at: now + 3_900 })
 }
 
 /// Live staged work (source iii) owned through its payload binding.
@@ -78,7 +78,7 @@ fn seed_work(p: &Pair, payload: &str, now: i64) -> Result<Expect, StorageError> 
         params![format!("payload:{payload}")],
     )?;
     let (_, selector) = current(&p.local, "wp", "wd", payload)?;
-    Ok(Expect { selector, expires_at: lifetime(now, 3600, now) })
+    Ok(Expect { selector, expires_at: now + 3_900 })
 }
 
 fn delete_incoming(p: &Pair) -> Result<(), StorageError> {
@@ -198,5 +198,130 @@ fn erased_input_restore_union_lifecycle_candidate_preservation() -> Result<(), S
     p.local.connection.execute("INSERT INTO object_erasure_fence VALUES('commitment-ix')", [])?;
     delete_incoming(&p)?;
     check_with(&p, &[ix], true, true, merge_candidate)?;
+    Ok(())
+}
+
+/// Incoming binding (i) on a source message, selector derived with the source's own bundle.
+fn source_binding(p: &Pair, payload: &str, expires_at: i64) -> Result<Expect, StorageError> {
+    let (bundle, selector) = current(&p.source, "sp", "sd", payload)?;
+    p.source.connection.execute(
+        "INSERT INTO message_copy_binding VALUES(?1,'M')",
+        params![format!("erased-input:{bundle}:{selector}:{expires_at}")],
+    )?;
+    Ok(Expect { selector, expires_at })
+}
+
+/// Local deletion of M with nothing to capture: M is deleted and has no tuple source.
+fn delete_local(p: &Pair) -> Result<(), StorageError> {
+    p.local.delete_direct_message("thread", "M", "local", "delete-local")?;
+    Ok(())
+}
+
+#[test]
+fn erased_input_restore_union_lifecycle_incoming_sources() -> Result<(), StorageError> {
+    let now = crate::unix_now();
+    // (iii) Incoming live with a binding, local deleted: the binding converts to a tombstone.
+    let p = pair("erased-life-iii")?;
+    both_have_message(&p)?;
+    delete_local(&p)?;
+    let iii = source_binding(&p, "piii", now + 600)?;
+    check(&p, &[iii], true, true)?;
+    // (iv-b) The same direction with two incoming variants of one tuple: the maximum wins.
+    let p = pair("erased-life-ivb")?;
+    both_have_message(&p)?;
+    delete_local(&p)?;
+    let (bundle, selector) = current(&p.source, "sp", "sd", "pivb")?;
+    for at in [now + 300, now + 900] {
+        p.source.connection.execute(
+            "INSERT INTO message_copy_binding VALUES(?1,'M')",
+            params![format!("erased-input:{bundle}:{selector}:{at}")],
+        )?;
+    }
+    check(&p, &[Expect { selector, expires_at: now + 900 }], true, true)?;
+    // (x) Incoming-only legacy source: the only tuple is a routed/committed copy on the
+    // incoming side. Selectors use the local bundle.
+    let p = pair("erased-life-x")?;
+    both_have_message(&p)?;
+    delete_local(&p)?;
+    p.source.connection.execute("INSERT INTO message_copy_binding VALUES('payload:px','M')", [])?;
+    p.source.persist_actor_state(
+        "routed/committed/px",
+        &json!({"routing":{"message_id":"M"},"entry":{"envelope":full("xp","xd","px",now,3600)}}),
+    )?;
+    let (_, selector) = current(&p.local, "xp", "xd", "px")?;
+    check(&p, &[Expect { selector, expires_at: now + 3_900 }], true, true)?;
+    Ok(())
+}
+
+#[test]
+fn erased_input_restore_union_lifecycle_imported_binding_then_local_delete()
+-> Result<(), StorageError> {
+    let now = crate::unix_now();
+    // (i) A live M with binding (i) is imported; deleting it afterwards leaves the tombstone.
+    let p = pair("erased-life-i")?;
+    p.source.send_direct_message("thread", "M", "peer", b"x")?;
+    let i = source_binding(&p, "pi", now + 600)?;
+    let (merged, path, key) = merge(&p)?;
+    assert!(!deleted(&merged.db)?);
+    assert_eq!(expiry(&merged.db, &i.selector)?, None, "a live target only keeps the binding");
+    let binding: String = merged.db.query_row(
+        "SELECT copy_id FROM message_copy_binding WHERE message_id='M' AND copy_id GLOB 'erased-input:*'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(binding.ends_with(&format!(":{}", i.expires_at)), "{binding}");
+    drop(merged);
+    let installed = p.root.join("installed");
+    let index = crate::AccountIndex::open(&installed)?;
+    let account = index.create_account("account", "root")?;
+    let target = installed.join(account.db_relative_path);
+    std::fs::create_dir_all(target.parent().ok_or(StorageError::AuthorizationRejected)?)?;
+    BackupDatabase::open(&path, &key)?.copy_to(&target, &key)?;
+    let restored = AccountDb::open(&index, "account", &key)?;
+    restored.delete_direct_message("thread", "M", "local", "delete-after-restore")?;
+    assert_eq!(
+        restored.connection.query_row(
+            "SELECT expires_at FROM receive_erased_input WHERE selector=?1",
+            params![i.selector],
+            |r| r.get::<_, i64>(0),
+        )?,
+        i.expires_at
+    );
+    drop(restored);
+    let again = AccountDb::open(&index, "account", &key)?;
+    assert_eq!(
+        again.connection.query_row(
+            "SELECT expires_at FROM receive_erased_input WHERE selector=?1",
+            params![i.selector],
+            |r| r.get::<_, i64>(0),
+        )?,
+        i.expires_at,
+        "after reopen"
+    );
+    Ok(())
+}
+
+#[test]
+fn erased_input_restore_union_lifecycle_refuses_bad_incoming_bindings() -> Result<(), StorageError>
+{
+    let now = crate::unix_now();
+    // (v) A malformed binding refuses the merge at staging, with zero changes.
+    let p = pair("erased-life-v-malformed")?;
+    p.source.send_direct_message("thread", "M", "peer", b"x")?;
+    p.source.connection.execute(
+        "INSERT INTO message_copy_binding VALUES('erased-input:not-base64:also-bad:123','M')",
+        [],
+    )?;
+    assert_refused(&p, "malformed erased-input binding")?;
+    // (v) A well-formed binding whose bundle the merged set does not know refuses at reconcile.
+    let p = pair("erased-life-v-unknown")?;
+    p.source.send_direct_message("thread", "M", "peer", b"x")?;
+    let (_, selector) = current(&p.source, "sp", "sd", "pv")?;
+    let foreign = ramflux_protocol::encode_base64url([9_u8; 32]);
+    p.source.connection.execute(
+        "INSERT INTO message_copy_binding VALUES(?1,'M')",
+        params![format!("erased-input:{foreign}:{selector}:{}", now + 600)],
+    )?;
+    assert_refused(&p, "erased-input bundle unknown to the merged set")?;
     Ok(())
 }
