@@ -122,7 +122,9 @@ impl Fixture {
     }
     async fn erase(&mut self, supervisor: &crate::bus::supervisor::Supervisor) -> TestResult {
         if let Some(hold) = self.hold.take() {
-            hold.release()?;
+            // Release on the account actor: the hold shares the actor's SQLite connection.
+            let actor = supervisor.account_actor("account").ok_or("actor")?;
+            actor.release_pre_send_hold(hold).await?;
             assert!(matches!(
                 self.reader.check_object_identity(&self.wire, &self.manifest),
                 Err(ramflux_storage::StorageError::ObjectErased)
