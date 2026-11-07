@@ -20,8 +20,12 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod destination;
+pub use attachment_floor::{
+    AttachmentHomeVerdicts, FloorObservation, HomeFloor, MAX_CACHED_VERDICTS, MAX_FLOOR_ANCHORS,
+};
 pub use destination::{MigrationAdmission, PrepareMigration};
 pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationPeer};
+mod attachment_floor;
 mod authority_evidence;
 mod courier;
 pub(crate) use courier::MigrationCourierClaim;
