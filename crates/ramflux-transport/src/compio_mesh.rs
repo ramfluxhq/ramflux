@@ -1020,6 +1020,10 @@ mod tests {
             ("trailing-withheld-fin", r#"{"x_probe":null,"x_probe":null}"#, false),
             ("expired-deadline", r#"{"x_probe":null,"x_probe":null}"#, true),
         ] {
+            assert!(
+                ramflux_protocol::validate_i_json_bytes(body.as_bytes()).is_err(),
+                "{row} fixture must be rejected as I-JSON: {body}"
+            );
             for wire_api in [false, true] {
                 let deadline = if expired {
                     std::time::Instant::now()
@@ -1085,6 +1089,15 @@ mod tests {
                 }
             }
         }
+        serve_compio_ijson_cap_rows(connection, event_tx, acknowledgements).await?;
+        Ok(())
+    }
+
+    async fn serve_compio_ijson_cap_rows(
+        connection: &super::CompioMeshQuicConnection,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+        acknowledgements: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Result<(), String> {
         for wire_api in [false, true] {
             const MAX_BODY: usize = 16 * 1024;
             let raw_body = format!("{{\"a\":1{}}}", " ".repeat(MAX_BODY + 1 - 7));
@@ -1116,6 +1129,13 @@ mod tests {
             }
             accepted.write_json_response(413, &"body").await.map_err(|error| error.to_string())?;
             event_tx.send(format!("cap:{wire_api}:served")).map_err(|error| error.to_string())?;
+            let acknowledgement = acknowledgements
+                .recv()
+                .await
+                .ok_or_else(|| "client cap acknowledgement channel closed".to_owned())?;
+            if acknowledgement != format!("cap:{wire_api}:received") {
+                return Err(format!("unexpected cap acknowledgement: {acknowledgement}"));
+            }
         }
         Ok(())
     }
@@ -1152,12 +1172,27 @@ mod tests {
         Ok(frame)
     }
 
+    async fn read_quinn_raw_frame(
+        recv: &mut quinn::RecvStream,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut len_bytes = [0_u8; 4];
+        recv.read_exact(&mut len_bytes).await?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        if len > super::COMP_IO_MESH_FRAME_MAX_BYTES {
+            return Err(test_error(format!("QUIC response frame too large: {len}")));
+        }
+        let mut body = vec![0_u8; len];
+        recv.read_exact(&mut body).await?;
+        Ok(body)
+    }
+
     async fn receive_compio_ijson_event(
         events: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
         expected: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let received = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
-            .await?
+            .await
+            .map_err(|_| test_error(format!("timed out waiting for {expected}")))?
             .ok_or_else(|| test_error("compio I-JSON event channel closed"))?;
         assert_eq!(received, expected);
         Ok(())
@@ -1176,6 +1211,16 @@ mod tests {
             &[server_ca_pem],
         )?);
         let connection = client_endpoint.connect(endpoint.parse()?, "ramflux-federation")?.await?;
+        exercise_compio_ijson_rejection_rows(&connection, &mut events, &acknowledgements).await?;
+        exercise_compio_ijson_cap_rows(&connection, &mut events, &acknowledgements).await?;
+        Ok(())
+    }
+
+    async fn exercise_compio_ijson_rejection_rows(
+        connection: &quinn::Connection,
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        acknowledgements: &tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for (row, body, trailing, expired) in [
             ("plain", r#"{"x_probe":null,"x_probe":null}"#, false, false),
             ("unsafe-integer", r#"{"created_at":9007199254740992}"#, false, false),
@@ -1193,7 +1238,7 @@ mod tests {
                 if !trailing {
                     send.finish()?;
                 }
-                receive_compio_ijson_event(&mut events, &format!("{prefix}:rejected")).await?;
+                receive_compio_ijson_event(events, &format!("{prefix}:rejected")).await?;
                 if expired {
                     let result = tokio::time::timeout(
                         std::time::Duration::from_secs(10),
@@ -1210,7 +1255,7 @@ mod tests {
                 } else {
                     let response = tokio::time::timeout(
                         std::time::Duration::from_secs(10),
-                        crate::read_quic_raw_frame(&mut recv),
+                        read_quinn_raw_frame(&mut recv),
                     )
                     .await??;
                     assert_eq!(
@@ -1222,7 +1267,7 @@ mod tests {
                         "I-JSON rejection response must be byte-exact"
                     );
                 }
-                receive_compio_ijson_event(&mut events, &format!("{prefix}:ready")).await?;
+                receive_compio_ijson_event(events, &format!("{prefix}:ready")).await?;
                 let invalid = compio_ijson_frame(
                     br#"{"method":"POST","path":"/p","body":{"x_probe":null,"x_probe":null}}"#,
                     false,
@@ -1241,7 +1286,7 @@ mod tests {
                 send.finish()?;
                 let rejection = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    crate::read_quic_raw_frame(&mut invalid_recv),
+                    read_quinn_raw_frame(&mut invalid_recv),
                 )
                 .await??;
                 assert_eq!(
@@ -1253,7 +1298,7 @@ mod tests {
                 );
                 let response = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    crate::read_quic_raw_frame(&mut recv),
+                    read_quinn_raw_frame(&mut recv),
                 )
                 .await??;
                 assert_eq!(
@@ -1263,12 +1308,20 @@ mod tests {
                         body: json!({"ok": true}),
                     })?
                 );
-                receive_compio_ijson_event(&mut events, &format!("{prefix}:served")).await?;
+                receive_compio_ijson_event(events, &format!("{prefix}:served")).await?;
                 acknowledgements
                     .send(format!("{prefix}:received"))
                     .map_err(|_| test_error("compio I-JSON acknowledgement channel closed"))?;
             }
         }
+        Ok(())
+    }
+
+    async fn exercise_compio_ijson_cap_rows(
+        connection: &quinn::Connection,
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        acknowledgements: &tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for wire_api in [false, true] {
             const MAX_BODY: usize = 16 * 1024;
             let raw_body = format!("{{\"a\":1{}}}", " ".repeat(MAX_BODY + 1 - 7));
@@ -1279,16 +1332,20 @@ mod tests {
             let (mut send, mut recv) = connection.open_bi().await?;
             send.write_all(&frame).await?;
             send.finish()?;
+            receive_compio_ijson_event(events, &format!("cap:{wire_api}:served")).await?;
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                crate::read_quic_raw_frame(&mut recv),
+                read_quinn_raw_frame(&mut recv),
             )
-            .await??;
+            .await
+            .map_err(|_| test_error(format!("timed out reading cap response for {wire_api}")))??;
             assert_eq!(
                 response,
                 serde_json::to_vec(&GatewayQuicResponse { status: 413, body: json!("body") })?
             );
-            receive_compio_ijson_event(&mut events, &format!("cap:{wire_api}:served")).await?;
+            acknowledgements
+                .send(format!("cap:{wire_api}:received"))
+                .map_err(|_| test_error("compio I-JSON cap acknowledgement channel closed"))?;
         }
         Ok(())
     }
