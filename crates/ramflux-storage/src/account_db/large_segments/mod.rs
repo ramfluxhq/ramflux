@@ -11,6 +11,8 @@ pub use retirement::{SegmentCleanupPage, SegmentReference};
 mod orphan;
 pub use orphan::SegmentOrphanSweep;
 #[cfg(test)]
+mod erase_tests;
+#[cfg(test)]
 mod retirement_tests;
 #[cfg(test)]
 mod review_tests;
