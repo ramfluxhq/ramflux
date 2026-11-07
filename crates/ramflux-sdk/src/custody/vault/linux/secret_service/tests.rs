@@ -447,8 +447,29 @@ fn linux_vault_secret_service_lost_create_reply_is_adopted_exactly_once() -> Tes
     Ok(())
 }
 
+/// Per-realm item identity and secret bytes, so refusals are proven to leave every realm intact.
+type RealmSnapshot = Vec<(usize, Vec<(String, Vec<u8>)>)>;
+
+fn snapshot(
+    collection: &dbus_secret_service::Collection<'_>,
+    vault: &str,
+    keys: &[String],
+) -> Result<RealmSnapshot, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for (realm, key) in keys.iter().enumerate() {
+        let mut items = Vec::new();
+        for item in find(collection, vault, key, realm)? {
+            items.push((item.path.to_string(), read(&item)?.bytes().to_vec()));
+        }
+        out.push((realm, items));
+    }
+    Ok(out)
+}
+
 /// Corrupt progress with every provider item present and consistent: only the malformed record
-/// can cause the refusal. Valid bytes are the control.
+/// can cause the refusal. The retained state marks all three realms complete (`ssp1:111`), so a
+/// malformed flag cannot hide behind an absent realm. Each malformed form starts from that same
+/// valid state; the valid record is the control.
 #[test]
 #[ignore = "private unlocked gnome-keyring fixture"]
 fn linux_vault_secret_service_corrupt_progress_is_refused_with_valid_provider_state() -> TestResult
@@ -457,7 +478,10 @@ fn linux_vault_secret_service_corrupt_progress_is_refused_with_valid_provider_st
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let dir = root()?;
     let mode = LinuxVaultMode::DesktopSecretService;
+    // Cancel once the third realm's progress is durable: the post-loop check stops before the
+    // descriptor is published, so the intent and all three realm items are retained.
     let (signal, mut stopping) = watch::channel(false);
+    let recorded = std::sync::atomic::AtomicUsize::new(0);
     let stopped = rt.block_on(super::super::init::attempt(
         dir.path(),
         mode,
@@ -465,32 +489,39 @@ fn linux_vault_secret_service_corrupt_progress_is_refused_with_valid_provider_st
         &mut stopping,
         Instant::now() + Duration::from_secs(30),
         &|event| {
-            if event == "ss-progress" {
+            if event == "ss-progress"
+                && recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == 3
+            {
                 let _ = signal.send(true);
             }
         },
     ));
     assert_eq!(stopped, Err(Error::Cancelled));
+    assert_eq!(std::fs::read(dir.path().join("init.progress"))?, b"ssp1:111");
+    assert!(!dir.path().join("descriptor.json").exists(), "not committed");
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("init.pending"))?)?;
     let vault = manifest["vault_id"].as_str().ok_or("vault id")?.to_owned();
-    let key = manifest["key_ids"][0].as_str().ok_or("key id")?.to_owned();
     let keys: Vec<String> = manifest["key_ids"]
         .as_array()
         .ok_or("key ids")?
         .iter()
         .map(|k| k.as_str().unwrap_or_default().to_owned())
         .collect();
+    assert_eq!(keys.len(), 3, "three realms");
     let ss = service()?;
     let collection = collection(&ss)?;
-    assert_eq!(find(&collection, &vault, &key, 0)?.len(), 1, "realm 0 item present");
+    for (realm, key) in keys.iter().enumerate() {
+        assert_eq!(find(&collection, &vault, key, realm)?.len(), 1, "realm {realm} present");
+    }
+    let baseline = snapshot(&collection, &vault, &keys)?;
     let progress = dir.path().join("init.progress");
     for (what, bytes) in [
-        ("wrong prefix", &b"xsp1:100"[..]),
-        ("truncated", b"ssp1:10"),
-        ("extra flag", b"ssp1:1000"),
-        ("invalid flag", b"ssp1:1x0"),
-        ("no prefix", b"100"),
+        ("wrong prefix", &b"xsp1:111"[..]),
+        ("truncated", b"ssp1:11"),
+        ("extra flag", b"ssp1:1110"),
+        ("invalid flag", b"ssp1:1x1"),
+        ("no prefix", b"111"),
     ] {
         let _ = std::fs::remove_file(&progress);
         std::fs::write(&progress, bytes)?;
@@ -500,11 +531,15 @@ fn linux_vault_secret_service_corrupt_progress_is_refused_with_valid_provider_st
             Err(Error::Corrupt),
             "{what}"
         );
-        assert_eq!(find(&collection, &vault, &key, 0)?.len(), 1, "{what}: nothing created");
+        assert_eq!(
+            snapshot(&collection, &vault, &keys)?,
+            baseline,
+            "{what}: paths, keys and item counts unchanged for realms 0..3"
+        );
     }
-    // Control: the same state with a valid record completes.
+    // Control: the same retained state with a valid record completes.
     let _ = std::fs::remove_file(&progress);
-    std::fs::write(&progress, b"ssp1:100")?;
+    std::fs::write(&progress, b"ssp1:111")?;
     std::fs::set_permissions(&progress, std::fs::Permissions::from_mode(0o600))?;
     rt.block_on(Vault::initialize(dir.path().into(), mode))?;
     rt.block_on(Vault::status(dir.path().into(), mode))?;
