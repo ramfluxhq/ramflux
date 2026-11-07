@@ -45,7 +45,11 @@ mod surfaces;
 pub mod tasks;
 pub mod text_safety;
 pub use a2ui_state::*;
-pub use i_json::{MAX_SAFE_JSON_INTEGER, parse_i_json, validate_i_json_value};
+pub use i_json::{
+    I_JSON_REJECTED, MAX_SAFE_JSON_INTEGER, decode_signed_ack_ijson, decode_signed_envelope_ijson,
+    decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection, parse_i_json,
+    validate_i_json_value,
+};
 pub use tasks::*;
 
 pub use canonical_json::{

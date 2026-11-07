@@ -9,9 +9,12 @@ use crate::ProtocolError;
 use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use std::error::Error;
 use std::fmt;
 
 pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+/// Stable public reason code for an I-JSON ingress refusal.
+pub const I_JSON_REJECTED: &str = "i_json_rejected";
 
 /// Parse original UTF-8 JSON, detecting duplicate decoded names at every depth.
 /// # Errors
@@ -26,6 +29,49 @@ pub fn parse_i_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolErro
         serde_json::from_value(value)
     })();
     validated.map_err(ProtocolError::IJson)
+}
+
+/// Decode a signed envelope from its original JSON bytes using the I-JSON predicate.
+/// # Errors
+/// Returns [`ProtocolError::IJson`] when the bytes are not valid I-JSON or do not match the schema.
+pub fn decode_signed_envelope_ijson(bytes: &[u8]) -> Result<crate::Envelope, ProtocolError> {
+    parse_i_json(bytes)
+}
+
+/// Decode a signed acknowledgement from its original JSON bytes using the I-JSON predicate.
+/// # Errors
+/// Returns [`ProtocolError::IJson`] when the bytes are not valid I-JSON or do not match the schema.
+pub fn decode_signed_ack_ijson(bytes: &[u8]) -> Result<crate::Ack, ProtocolError> {
+    parse_i_json(bytes)
+}
+
+/// Decode a signed negative acknowledgement from its original JSON bytes using the I-JSON predicate.
+/// # Errors
+/// Returns [`ProtocolError::IJson`] when the bytes are not valid I-JSON or do not match the schema.
+pub fn decode_signed_nack_ijson(bytes: &[u8]) -> Result<crate::Nack, ProtocolError> {
+    parse_i_json(bytes)
+}
+
+/// Build the stable JSON body returned for an I-JSON ingress refusal.
+#[must_use]
+pub fn i_json_rejection_body() -> Value {
+    serde_json::json!({"error": I_JSON_REJECTED, "reason_code": I_JSON_REJECTED})
+}
+
+/// Detect an I-JSON refusal through standard error-source chains.
+#[must_use]
+pub fn is_i_json_rejection(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error
+            .downcast_ref::<ProtocolError>()
+            .is_some_and(|error| matches!(error, ProtocolError::IJson(_)))
+        {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 fn invalid(message: &'static str) -> serde_json::Error {
@@ -173,5 +219,253 @@ impl<'de> Visitor<'de> for StrictVisitor {
             values.insert(key, value);
         }
         Ok(Strict(Value::Object(values)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        I_JSON_REJECTED, decode_signed_ack_ijson, decode_signed_envelope_ijson,
+        decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection,
+    };
+    use crate::{
+        Ack, DeliveryClass, Envelope, Ext, Nack, NackReason, Priority, ProtocolError, SignatureAlg,
+        SignedFields,
+    };
+    use serde::Serialize;
+    use std::error::Error;
+
+    const SAFE: i64 = 9_007_199_254_740_991;
+    const UNSAFE: i64 = 9_007_199_254_740_992;
+
+    fn signed() -> SignedFields {
+        SignedFields {
+            signing_key_id: "key".into(),
+            signature_alg: SignatureAlg::Ed25519,
+            signature: "sig".into(),
+        }
+    }
+
+    fn envelope() -> Envelope {
+        Envelope {
+            schema: "envelope.v1".into(),
+            version: 1,
+            domain: "envelope".into(),
+            ext: Ext::default(),
+            signed: signed(),
+            envelope_id: "envelope-id".into(),
+            source_principal_id: "source".into(),
+            source_device_id: "device".into(),
+            target_delivery_id: "target".into(),
+            routing_set_id: None,
+            delivery_class: DeliveryClass::OpaqueEvent,
+            priority: Priority::Normal,
+            ttl: 60,
+            created_at: 0,
+            encrypted_payload: "MARKER".into(),
+            payload_hash: "hash".into(),
+        }
+    }
+
+    fn ack() -> Ack {
+        Ack {
+            schema: "ack.v1".into(),
+            version: 1,
+            domain: "ack".into(),
+            ext: Ext::default(),
+            signed: signed(),
+            ack_id: "ack-id".into(),
+            envelope_id: "envelope-id".into(),
+            receiver_device_id: "MARKER".into(),
+            received_at: 0,
+            cursor_after: None,
+        }
+    }
+
+    fn nack() -> Nack {
+        Nack {
+            schema: "nack.v1".into(),
+            version: 1,
+            domain: "nack".into(),
+            ext: Ext::default(),
+            signed: signed(),
+            nack_id: "nack-id".into(),
+            envelope_id: "envelope-id".into(),
+            receiver_device_id: "MARKER".into(),
+            reason: NackReason::Expired,
+            received_at: 0,
+            retry_after: None,
+            proof_hash: None,
+            new_home_node_hint: None,
+        }
+    }
+
+    fn bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(value)
+    }
+
+    fn patched(original: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+        let start =
+            original.windows(needle.len()).position(|window| window == needle).unwrap_or_default();
+        assert_eq!(
+            original.windows(needle.len()).filter(|window| *window == needle).count(),
+            1,
+            "fixture marker is unique"
+        );
+        let mut result = original.to_vec();
+        result.splice(start..start + needle.len(), replacement.iter().copied());
+        result
+    }
+
+    fn assert_i_json_error<T>(result: Result<T, ProtocolError>) {
+        assert_eq!(result.err().map(|error| matches!(error, ProtocolError::IJson(_))), Some(true));
+    }
+
+    #[derive(Debug)]
+    struct ErrorContext(ProtocolError);
+
+    impl std::fmt::Display for ErrorContext {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Display::fmt(&self.0, formatter)
+        }
+    }
+
+    impl Error for ErrorContext {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn signed_envelope_ijson_predicates() -> Result<(), Box<dyn Error>> {
+        let envelope_bytes = bytes(&envelope())?;
+        for timestamp in [SAFE, -SAFE] {
+            let fixture = patched(
+                &envelope_bytes,
+                b"\"created_at\":0",
+                format!("\"created_at\":{timestamp}").as_bytes(),
+            );
+            let mut expected = envelope();
+            expected.created_at = timestamp;
+            assert_eq!(decode_signed_envelope_ijson(&fixture)?, expected);
+        }
+        for timestamp in [UNSAFE, -UNSAFE] {
+            let fixture = patched(
+                &envelope_bytes,
+                b"\"created_at\":0",
+                format!("\"created_at\":{timestamp}").as_bytes(),
+            );
+            assert_i_json_error(decode_signed_envelope_ijson(&fixture));
+        }
+        assert_eq!(decode_signed_envelope_ijson(&envelope_bytes)?, envelope());
+
+        let ttl_duplicate = patched(&envelope_bytes, b"\"ttl\":60", b"\"ttl\":60,\"ttl\":60");
+        assert_i_json_error(decode_signed_envelope_ijson(&ttl_duplicate));
+        let envelope_ext = envelope_with_ext();
+        let envelope_ext_bytes = bytes(&envelope_ext)?;
+        let nested_duplicate = patched(
+            &envelope_ext_bytes,
+            b"\"x_probe\":\"MARKER\"",
+            b"\"x_probe\":\"v\",\"x_probe\":\"v\"",
+        );
+        assert_i_json_error(decode_signed_envelope_ijson(&nested_duplicate));
+
+        let lone_surrogate = patched(&envelope_bytes, b"MARKER", b"\\ud800");
+        assert_i_json_error(decode_signed_envelope_ijson(&lone_surrogate));
+        let invalid_utf8 = patched(&envelope_bytes, b"MARKER", &[0xff]);
+        assert_i_json_error(decode_signed_envelope_ijson(&invalid_utf8));
+        let fdd0 = patched(&envelope_bytes, b"MARKER", &[0xef, 0xb7, 0x90]);
+        assert_i_json_error(decode_signed_envelope_ijson(&fdd0));
+        let fffe = patched(&envelope_bytes, b"MARKER", &[0xef, 0xbf, 0xbe]);
+        assert_i_json_error(decode_signed_envelope_ijson(&fffe));
+
+        let ack_bytes = bytes(&ack())?;
+        for timestamp in [SAFE, -SAFE] {
+            let fixture = patched(
+                &ack_bytes,
+                b"\"received_at\":0",
+                format!("\"received_at\":{timestamp}").as_bytes(),
+            );
+            let mut expected = ack();
+            expected.received_at = timestamp;
+            assert_eq!(decode_signed_ack_ijson(&fixture)?, expected);
+        }
+        for timestamp in [UNSAFE, -UNSAFE] {
+            let fixture = patched(
+                &ack_bytes,
+                b"\"received_at\":0",
+                format!("\"received_at\":{timestamp}").as_bytes(),
+            );
+            assert_i_json_error(decode_signed_ack_ijson(&fixture));
+        }
+        assert_eq!(decode_signed_ack_ijson(&ack_bytes)?, ack());
+        let ack_ext_bytes = bytes(&ack_with_ext())?;
+        let ack_duplicate = patched(
+            &ack_ext_bytes,
+            b"\"x_probe\":\"MARKER\"",
+            b"\"x_probe\":\"v\",\"x_probe\":\"v\"",
+        );
+        assert_i_json_error(decode_signed_ack_ijson(&ack_duplicate));
+
+        let nack_bytes = bytes(&nack())?;
+        for timestamp in [SAFE, -SAFE] {
+            let fixture = patched(
+                &nack_bytes,
+                b"\"received_at\":0",
+                format!("\"received_at\":{timestamp}").as_bytes(),
+            );
+            let mut expected = nack();
+            expected.received_at = timestamp;
+            assert_eq!(decode_signed_nack_ijson(&fixture)?, expected);
+        }
+        for timestamp in [UNSAFE, -UNSAFE] {
+            let fixture = patched(
+                &nack_bytes,
+                b"\"received_at\":0",
+                format!("\"received_at\":{timestamp}").as_bytes(),
+            );
+            assert_i_json_error(decode_signed_nack_ijson(&fixture));
+        }
+        assert_eq!(decode_signed_nack_ijson(&nack_bytes)?, nack());
+        let nack_ext_bytes = bytes(&nack_with_ext())?;
+        let nack_duplicate = patched(
+            &nack_ext_bytes,
+            b"\"x_probe\":\"MARKER\"",
+            b"\"x_probe\":\"v\",\"x_probe\":\"v\"",
+        );
+        assert_i_json_error(decode_signed_nack_ijson(&nack_duplicate));
+
+        assert_eq!(
+            i_json_rejection_body(),
+            serde_json::json!({"error": I_JSON_REJECTED, "reason_code": I_JSON_REJECTED})
+        );
+        let unsafe_fixture =
+            patched(&envelope_bytes, b"\"created_at\":0", b"\"created_at\":9007199254740992");
+        let Err(rejection) = decode_signed_envelope_ijson(&unsafe_fixture) else {
+            return Err("unsafe integer was accepted".into());
+        };
+        assert!(is_i_json_rejection(&rejection));
+        let wrapped = ErrorContext(rejection);
+        assert!(is_i_json_rejection(&wrapped));
+        Ok(())
+    }
+
+    fn envelope_with_ext() -> Envelope {
+        let mut value = envelope();
+        value.ext.ext.insert("x_probe".into(), serde_json::json!("MARKER"));
+        value
+    }
+
+    fn ack_with_ext() -> Ack {
+        let mut value = ack();
+        value.ext.ext.insert("x_probe".into(), serde_json::json!("MARKER"));
+        value
+    }
+
+    fn nack_with_ext() -> Nack {
+        let mut value = nack();
+        value.ext.ext.insert("x_probe".into(), serde_json::json!("MARKER"));
+        value
     }
 }
