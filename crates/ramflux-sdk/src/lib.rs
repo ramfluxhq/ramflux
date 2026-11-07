@@ -137,8 +137,8 @@ pub use dm::{
     SdkSelectedFrankingEvidence,
 };
 pub use ephemeral::{
-    HoldLease, ReceiverClock, ReceiverDropReason, ReceiverHandoff, ReceiverLifetime,
-    admit_authenticated_ciphertext, ttl_seconds,
+    AuthenticatedCiphertext, HoldLease, ReceiverClock, ReceiverDropReason, ReceiverHandoff,
+    ReceiverLifetime, admit_authenticated_ciphertext, authenticate, ttl_seconds,
 };
 pub use error::{GroupOperation, SdkError};
 mod surface_refusal;
