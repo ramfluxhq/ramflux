@@ -261,6 +261,33 @@ fn view_of(
     PeerView { advertised, admitted, negotiated }
 }
 
+/// The pin answer for the local router. It is empty unless this node advertises the
+/// capability, and the book rechecks admission and negotiation on every lookup.
+pub(crate) fn pin_answer(
+    context: &crate::FederationAdminHttpContext,
+    node_id: &str,
+) -> Result<ramflux_node_core::PinAnswer, NodeCoreError> {
+    pin_answer_for(
+        &context.state,
+        &context.store,
+        context.discovery.attachment_authority.is_some(),
+        node_id,
+    )
+}
+
+fn pin_answer_for(
+    state: &crate::SharedFederationTrustState,
+    store: &ramflux_node_core::FederationRedbStore,
+    advertised: bool,
+    node_id: &str,
+) -> Result<ramflux_node_core::PinAnswer, NodeCoreError> {
+    if !advertised {
+        return Ok(ramflux_node_core::PinAnswer::Unavailable);
+    }
+    let snapshot = state.snapshot()?;
+    Ok(state.attachment_authority().answer(store, &snapshot, node_id, crate::now_unix_seconds()?))
+}
+
 /// `/s9/attachments/renew/peer` on the mesh listener.
 pub(crate) fn serve_peer(
     peer_spiffe_uri: Option<&str>,

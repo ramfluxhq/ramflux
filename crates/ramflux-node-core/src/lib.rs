@@ -113,8 +113,9 @@ pub(crate) use federation_crypto::{
 };
 pub use federation_state::{BadNodeAdvisory, FederationTrustState};
 pub use federation_store::{
-    FederationInboundForwardSeenRecord, FederationInboundForwardSeenState,
+    AuthorityHistory, FederationInboundForwardSeenRecord, FederationInboundForwardSeenState,
     FederationOutboundDeadLetter, FederationOutboundSpoolEntry, FederationRedbStore,
+    MAX_AUTHORITY_NODES,
 };
 pub use federation_types::*;
 pub use franking::*;

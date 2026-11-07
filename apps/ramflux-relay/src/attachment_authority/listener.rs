@@ -35,24 +35,15 @@ impl AuthorityListenerConfig {
     }
 }
 
-/// Requester identity on the wire (`QualifiedOwner` itself is not a wire type).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequesterWire {
-    pub account_anchor: String,
-    pub device_id: String,
-    pub device_epoch: u64,
-    pub signing_public_key: [u8; 32],
-    pub home_node_id: String,
-}
-impl From<&RequesterWire> for QualifiedOwner {
-    fn from(w: &RequesterWire) -> Self {
-        Self {
-            account_anchor: w.account_anchor.clone(),
-            device_id: w.device_id.clone(),
-            device_epoch: w.device_epoch,
-            signing_public_key: w.signing_public_key,
-            home_node_id: w.home_node_id.clone(),
-        }
+pub use ramflux_node_core::attachment::RequesterWire;
+
+fn owner_of(w: &RequesterWire) -> QualifiedOwner {
+    QualifiedOwner {
+        account_anchor: w.account_anchor.clone(),
+        device_id: w.device_id.clone(),
+        device_epoch: w.device_epoch,
+        signing_public_key: w.signing_public_key,
+        home_node_id: w.home_node_id.clone(),
     }
 }
 
@@ -164,7 +155,7 @@ impl<'a> AuthorityListener<'a> {
         let Some(verdict) = request.home_verdict.as_ref() else {
             return refused(RenewalRefusal::HomeTrustUnavailable);
         };
-        let requester = QualifiedOwner::from(&request.requester);
+        let requester = owner_of(&request.requester);
         match self.issuer.challenge_until(
             &ChallengeMint {
                 capability: &request.capability,

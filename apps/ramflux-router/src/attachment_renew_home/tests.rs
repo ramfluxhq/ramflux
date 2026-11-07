@@ -3,16 +3,72 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 use super::*;
 use ed25519_dalek::{Signer, SigningKey};
+use ramflux_node_core::attachment::{ChallengeEnvelope, ForwardedRenewal, RequesterWire};
 use ramflux_protocol::large_attachment::{ScopedAttachmentGrant, VerifiedScopedGrant};
 use serde_json::json;
 use std::cell::RefCell;
 
 const SOURCE: &str = "node-owner";
 
+fn renewal_vectors() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../crates/ramflux-protocol/tests/fixtures/large_attachment_renewal_v1.json"
+    ))
+    .unwrap()
+}
+/// The frozen renewal case: the grant every real envelope below is built around.
+fn renewal_grant() -> VerifiedScopedGrant {
+    let j = renewal_vectors();
+    let c = &j["case"];
+    let g = unhex(c["grant_unsigned_hex"].as_str().unwrap());
+    let mut signed = b"RFC1".to_vec();
+    signed.extend(u32::try_from(g.len()).unwrap().to_be_bytes());
+    signed.extend(&g);
+    signed.extend(64_u32.to_be_bytes());
+    signed.extend(unhex(c["grant_signature_hex"].as_str().unwrap()));
+    ScopedAttachmentGrant::decode_signed(&signed).unwrap()
+}
+fn hex_field(path: &[&str]) -> Vec<u8> {
+    let j = renewal_vectors();
+    let mut cur = &j["renewal"];
+    for p in path {
+        cur = &cur[*p];
+    }
+    unhex(cur.as_str().unwrap())
+}
+/// A complete, real forwarded renewal: all seven byte fields come from the frozen vectors.
+fn forwarded(cap: &[u8]) -> ForwardedRenewal {
+    ForwardedRenewal {
+        operation: hex_field(&["renewal_operation_hex"]),
+        body: hex_field(&["renewal_body_hex"]),
+        attestation: hex_field(&["home", "bytes_hex"]),
+        home_signature: hex_field(&["home", "signature_hex"]),
+        proof: hex_field(&["renewal_pop", "bytes_hex"]),
+        requester_signature: hex_field(&["renewal_pop", "signature_hex"]),
+        grant: cap.to_vec(),
+    }
+}
+/// A complete, real challenge request for the same grant.
+fn challenge_request(cap: &[u8], g: &VerifiedScopedGrant) -> ChallengeEnvelope {
+    let r = &g.grant().grantee;
+    ChallengeEnvelope {
+        capability: cap.to_vec(),
+        target_operation: hex_field(&["target_operation_hex"]),
+        requester: RequesterWire {
+            account_anchor: r.account_anchor.clone(),
+            device_id: r.device_id.clone(),
+            device_epoch: r.device_epoch,
+            signing_public_key: r.signing_public_key,
+            home_node_id: r.home_node_id.clone(),
+        },
+        home_node: r.home_node_id.clone(),
+    }
+}
+
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
-fn grant(case: usize) -> VerifiedScopedGrant {
+fn other_grant(case: usize) -> VerifiedScopedGrant {
     let j: Value = serde_json::from_str(include_str!(
         "../../../../crates/ramflux-protocol/tests/fixtures/large_attachment_v1.json"
     ))
@@ -105,16 +161,10 @@ fn pin_of(signer: &SigningKey, generation: u64) -> AuthorityPin {
 }
 fn envelope(kind: Kind, cap: &[u8]) -> (&'static str, Vec<u8>) {
     match kind {
-        Kind::Challenge => (
-            CHALLENGE_PATH,
-            serde_json::to_vec(
-                &json!({"capability": cap, "target_operation": [1], "home_node": "node-b"}),
-            )
-            .unwrap(),
-        ),
-        Kind::Forward => {
-            (FORWARD_PATH, serde_json::to_vec(&json!({"grant": cap, "operation": [1]})).unwrap())
+        Kind::Challenge => {
+            (CHALLENGE_PATH, serde_json::to_vec(&challenge_request(cap, &renewal_grant())).unwrap())
         }
+        Kind::Forward => (FORWARD_PATH, serde_json::to_vec(&forwarded(cap)).unwrap()),
     }
 }
 fn code(reply: &HomeReply) -> Value {
@@ -126,33 +176,49 @@ fn refusal(name: &str) -> Value {
 }
 const KINDS: [Kind; 2] = [Kind::Challenge, Kind::Forward];
 
+/// Positive: the receipt names the source, the pin verifies it, only that peer is called,
+/// and the complete real envelope reaches the federation unchanged.
+fn assert_routed(kind: Kind, good: &[u8], signer: &SigningKey, now: u64) {
+    // Positive: the receipt names the source, the pin verifies it, only that peer is called.
+    let backend = Fake::new(Ok(pin_of(signer, 3)), now);
+    let (path, body) = envelope(kind, good);
+    let reply = route(GATEWAY_SERVICE_ID, path, &body, Some(&backend), far());
+    assert_eq!(reply.body, b"{\"routed\":true}".to_vec(), "{kind:?}");
+    assert_eq!(
+        *backend.calls.borrow(),
+        vec![format!("pin:{SOURCE}"), format!("federation:{SOURCE}:{kind:?}")]
+    );
+    // The request reaches the federation byte-for-byte as parsed from the envelope.
+    assert_eq!(backend.forwarded.borrow()[0], serde_json::from_slice::<Value>(&body).unwrap());
+    // And as a complete real envelope, every field intact.
+    let sent = backend.forwarded.borrow()[0].clone();
+    match kind {
+        Kind::Forward => {
+            assert_eq!(serde_json::from_value::<ForwardedRenewal>(sent).unwrap(), forwarded(good));
+        }
+        Kind::Challenge => assert_eq!(
+            serde_json::from_value::<ChallengeEnvelope>(sent).unwrap(),
+            challenge_request(good, &renewal_grant())
+        ),
+    }
+}
+
 #[test]
 fn large_home_router_routes_only_by_verified_receipt() {
-    let g = grant(0);
+    let g = renewal_grant();
     let signer = key(0x60);
     let issued = g.grant().issued_at;
     let now = issued + 1;
     assert!(g.grant().expires_at > issued + 20);
     let good = capability(&g, 3, g.grant().expires_at, &signer);
-    let other = grant(1);
+    let other = other_grant(2);
     let other_cap = capability(&other, 3, other.grant().expires_at, &signer);
     let substituted = [&good[..prefix_len(&good)], &other_cap[prefix_len(&other_cap)..]].concat();
     let short_lived = capability(&g, 3, issued + 10, &signer);
     let foreign_signer = capability(&g, 3, g.grant().expires_at, &key(0x61));
 
     for kind in KINDS {
-        // Positive: the receipt names the source, the pin verifies it, only that peer is called.
-        let backend = Fake::new(Ok(pin_of(&signer, 3)), now);
-        let (path, body) = envelope(kind, &good);
-        let reply = route(GATEWAY_SERVICE_ID, path, &body, Some(&backend), far());
-        assert_eq!(reply.body, b"{\"routed\":true}".to_vec(), "{kind:?}");
-        assert_eq!(
-            *backend.calls.borrow(),
-            vec![format!("pin:{SOURCE}"), format!("federation:{SOURCE}:{kind:?}")]
-        );
-        // The request reaches the federation byte-for-byte as parsed from the envelope.
-        assert_eq!(backend.forwarded.borrow()[0], serde_json::from_slice::<Value>(&body).unwrap());
-
+        assert_routed(kind, &good, &signer, now);
         // Each negative is one defect from the valid state, with the exact refusal, and
         // never a federation call (the trait has no gateway-peer, mint or store method).
         let grant_only = g.signed_bytes().unwrap();
@@ -228,7 +294,7 @@ fn large_home_router_routes_only_by_verified_receipt() {
 
 #[test]
 fn expiry_is_decided_only_by_the_receipt_at_its_inclusive_boundary() {
-    let g = grant(0);
+    let g = renewal_grant();
     let signer = key(0x60);
     let cap = capability(&g, 3, g.grant().issued_at + 10, &signer);
     for (now, routed) in [(g.grant().issued_at + 9, true), (g.grant().issued_at + 10, false)] {
@@ -244,7 +310,7 @@ fn expiry_is_decided_only_by_the_receipt_at_its_inclusive_boundary() {
 
 #[test]
 fn envelope_fields_peer_path_size_and_budget_are_refused_in_isolation() {
-    let g = grant(0);
+    let g = renewal_grant();
     let signer = key(0x60);
     let good = capability(&g, 3, g.grant().expires_at, &signer);
     let now = g.grant().issued_at + 1;
@@ -307,7 +373,7 @@ fn envelope_fields_peer_path_size_and_budget_are_refused_in_isolation() {
 
 #[test]
 fn the_route_budget_reaches_both_hops_and_an_elapsed_budget_is_busy() {
-    let g = grant(0);
+    let g = renewal_grant();
     let signer = key(0x60);
     let good = capability(&g, 3, g.grant().expires_at, &signer);
     let now = g.grant().issued_at + 1;

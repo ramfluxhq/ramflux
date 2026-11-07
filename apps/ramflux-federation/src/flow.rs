@@ -49,19 +49,11 @@ pub(crate) fn handle_s12_discovery_resolve(
         )
     })?;
     if let Some(record) = record.as_ref() {
-        // Availability follows the durable pin history; a refusal only makes the pin
-        // unavailable and never fails discovery.
-        let negotiated = result
-            .node_capabilities
-            .iter()
-            .any(|cap| cap == ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY);
-        if let Err(error) = state.attachment_authority().adopt(
-            store,
-            &result.node_id,
-            record.attachment_authority.as_ref(),
-            negotiated,
-            now,
-        ) {
+        // Availability follows the durable pin history and the *negotiated* capability set;
+        // a refusal only makes the pin unavailable and never fails discovery.
+        let snapshot = state.snapshot()?;
+        if let Err(error) = state.attachment_authority().adopt_record(store, &snapshot, record, now)
+        {
             tracing::warn!(node_id = %result.node_id, %error, "attachment authority pin unavailable");
         }
     }

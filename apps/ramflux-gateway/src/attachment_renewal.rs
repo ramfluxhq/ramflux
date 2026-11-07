@@ -3,9 +3,10 @@
 //! Dormant home forwarding. No session frame or source ingress is activated here.
 use crate::state::{GatewayQuicContext, GatewaySessionRuntime};
 use ed25519_dalek::Signer;
+use ramflux_node_core::attachment::{ChallengeEnvelope, ForwardedRenewal, RequesterWire};
 use ramflux_protocol::large_attachment::{
-    FormatError, ForwardAttestation, QualifiedOwner, RenewalRequest, RequesterPop,
-    VerifiedScopedGrant,
+    AttachmentOperation, FormatError, ForwardAttestation, QualifiedOwner, RenewalRequest,
+    RequesterPop, ScopedAttachmentGrant, VerifiedScopedGrant,
 };
 
 /// Trusted source routing and home signing material. Activation must obtain these
@@ -130,17 +131,6 @@ fn check_current(
     }
     Ok(())
 }
-/// JSON carries byte arrays only; signed native bytes are never reserialized.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ForwardedRenewal {
-    pub(crate) operation: Vec<u8>,
-    pub(crate) body: Vec<u8>,
-    pub(crate) attestation: Vec<u8>,
-    pub(crate) home_signature: Vec<u8>,
-    pub(crate) proof: Vec<u8>,
-    pub(crate) requester_signature: Vec<u8>,
-    pub(crate) grant: Vec<u8>,
-}
 fn forward_bytes(
     requester: &QualifiedOwner,
     config: &HomeRenewalConfig,
@@ -193,24 +183,67 @@ fn checked_capability(attempt: &HomeRenewalAttempt<'_>) -> Result<Vec<u8>, Forma
     Ok(attempt.capability.to_vec())
 }
 
-/// Requester identity on the wire, taken only from the authenticated session.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RequesterWire {
-    pub(crate) account_anchor: String,
-    pub(crate) device_id: String,
-    pub(crate) device_epoch: u64,
-    pub(crate) signing_public_key: [u8; 32],
-    pub(crate) home_node_id: String,
+/// Splits `RFC1 || LP(G) || LP(sig) || LP(receipt)` and verifies the signed grant prefix.
+/// A capability without a receipt is refused here, before any routing.
+fn grant_of_capability(capability: &[u8]) -> Result<VerifiedScopedGrant, FormatError> {
+    let declared = capability
+        .get(4..8)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map(u32::from_be_bytes)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(FormatError("capability grant"))?;
+    let prefix = declared.checked_add(8 + 4 + 64).ok_or(FormatError("capability grant"))?;
+    if capability.len() < prefix {
+        return Err(FormatError("capability grant"));
+    }
+    let grant = ScopedAttachmentGrant::decode_signed(&capability[..prefix])?;
+    if capability.len() == prefix {
+        return Err(FormatError("capability receipt"));
+    }
+    Ok(grant)
 }
-/// Challenge request for the home router. `grant_id` is derived from the capability at the
-/// source, not sent; `home_node` is this node, never a client field.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ChallengeEnvelope {
-    pub(crate) capability: Vec<u8>,
-    pub(crate) target_operation: Vec<u8>,
-    pub(crate) requester: RequesterWire,
-    pub(crate) home_node: String,
+
+/// Validates the challenge request against its own grant before egress. Each refusal comes
+/// from exactly one predicate and posts nothing.
+fn preflight_challenge(
+    requester: &QualifiedOwner,
+    config: &HomeRenewalConfig,
+    capability: &[u8],
+    target_operation: &[u8],
+    now: u64,
+) -> Result<(), FormatError> {
+    let grant = grant_of_capability(capability)?;
+    let g = grant.grant();
+    let target = AttachmentOperation::decode(target_operation)?;
+    if &g.grantee != requester {
+        return Err(FormatError("renewal requester"));
+    }
+    if target.audience != config.relay_audience {
+        return Err(FormatError("renewal audience"));
+    }
+    if target.object_id != g.object_id
+        || target.manifest_hash != g.manifest_hash
+        || target.grant_id != g.grant_id
+        || target.grant_epoch != g.epoch
+    {
+        return Err(FormatError("renewal grant binding"));
+    }
+    if target.authority_generation != config.authority_generation {
+        return Err(FormatError("renewal source generation"));
+    }
+    if !(1..=5).contains(&target.op) {
+        return Err(FormatError("renewal target"));
+    }
+    let right = 1 << (target.op - 1);
+    if g.rights & (8 | right) != (8 | right) {
+        return Err(FormatError("renewal rights"));
+    }
+    if now < g.issued_at || now >= g.expires_at {
+        return Err(FormatError("renewal grant time"));
+    }
+    Ok(())
 }
+
 fn challenge_envelope(
     runtime: &GatewaySessionRuntime,
     home: &str,
@@ -249,10 +282,15 @@ const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 pub(crate) async fn challenge_current_session(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
+    config: &HomeRenewalConfig,
     capability: &[u8],
     target_operation: &[u8],
     now: u64,
 ) -> anyhow::Result<Vec<u8>> {
+    // Section 2, step 1: nothing leaves this node unless the signed grant prefix, the
+    // target and the session requester already agree.
+    let requester = session_requester(runtime, &context.node_id)?;
+    preflight_challenge(&requester, config, capability, target_operation, now)?;
     refresh_current(context, runtime, now).await?;
     let envelope = challenge_envelope(runtime, &context.node_id, capability, target_operation)?;
     post_home(context, CHALLENGE_PATH, &envelope).await

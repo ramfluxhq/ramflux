@@ -43,7 +43,7 @@ workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-ramflux-node-core = { workspace = true, features = ["durability-test-hooks"] }
+ramflux-node-core = { workspace = true, features = ["durability-test-hooks", "test-support"] }
 ramflux-sdk = { workspace = true }
 rcgen = { workspace = true }
 redb = { workspace = true }

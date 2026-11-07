@@ -218,3 +218,71 @@ fn local_hop_requires_the_admin_token_and_an_admitted_negotiated_peer() -> Resul
     assert_eq!(failing.posted.borrow().len(), 1);
     Ok(())
 }
+
+#[test]
+fn pin_lookup_is_empty_unless_advertised_and_unadmitted_nodes_are_source_unknown()
+-> Result<(), NodeCoreError> {
+    let state =
+        crate::SharedFederationTrustState::new(ramflux_node_core::FederationTrustState::new());
+    let path = std::env::temp_dir().join(format!(
+        "rf-fed-pin-answer-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    let store = ramflux_node_core::FederationRedbStore::open(&path)?;
+    // Not advertised: nothing is exposed, whatever the peer is.
+    assert_eq!(
+        pin_answer_for(&state, &store, false, "node-a")?,
+        ramflux_node_core::PinAnswer::Unavailable
+    );
+    // Advertised, but this node has never admitted the peer.
+    assert_eq!(
+        pin_answer_for(&state, &store, true, "node-a")?,
+        ramflux_node_core::PinAnswer::SourceUnknown
+    );
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn the_listener_cap_is_16_kib_on_the_declared_length_over_a_real_socket() -> std::io::Result<()> {
+    use std::io::Write;
+    let cap = crate::mesh::mesh_body_cap("POST", PEER_PATH);
+    assert_eq!(cap, MAX_BODY);
+    assert_eq!(MAX_BODY, 16384);
+    assert!(crate::mesh::mesh_body_cap("POST", "/v3/home-migration/peer") > MAX_BODY);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let head = |n: usize| format!("POST {PEER_PATH} HTTP/1.1\r\nContent-Length: {n}\r\n\r\n");
+    // 16384: the full body is read as received.
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut s = std::net::TcpStream::connect(addr)?;
+        s.write_all(head(16384).as_bytes())?;
+        s.write_all(&vec![b' '; 16384])?;
+        s.shutdown(std::net::Shutdown::Write)
+    });
+    let (mut stream, _) = listener.accept()?;
+    let ok = ramflux_transport::read_bounded_mesh_http_request_by_path(
+        &mut stream,
+        &crate::mesh::mesh_body_cap,
+    );
+    writer.join().map_err(|_| std::io::Error::other("writer panicked"))??;
+    assert_eq!(ok.map(|r| r.map(|r| r.body.len())).ok().flatten(), Some(16384));
+    // 16385 is refused on the declared length; the client never sends a body byte.
+    let writer = std::thread::spawn(move || -> std::io::Result<std::net::TcpStream> {
+        let mut s = std::net::TcpStream::connect(addr)?;
+        s.write_all(head(16385).as_bytes())?;
+        Ok(s)
+    });
+    let (mut stream, _) = listener.accept()?;
+    let refused = ramflux_transport::read_bounded_mesh_http_request_by_path(
+        &mut stream,
+        &crate::mesh::mesh_body_cap,
+    );
+    let _held = writer.join().map_err(|_| std::io::Error::other("writer panicked"))??;
+    assert!(
+        matches!(&refused, Err(ramflux_transport::TransportError::Http(m)) if m == "mesh body exceeds budget"),
+        "{refused:?}"
+    );
+    Ok(())
+}

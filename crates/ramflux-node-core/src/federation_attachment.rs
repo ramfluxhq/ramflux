@@ -101,12 +101,17 @@ pub enum AuthorityAdoption {
     Unavailable(Withdrawn),
 }
 
-/// In-memory availability, recomputed from every freshly verified record.
+#[cfg(test)]
+pub(crate) type HistoryHook = std::sync::Arc<dyn Fn(&AttachmentAuthorityBook) + Send + Sync>;
+
+/// In-memory availability, recomputed from every freshly verified record. The lock is
+/// held across the durable history write *and* the publication, so a lower generation
+/// can never overwrite a higher one that was published in between.
 #[derive(Default)]
 pub struct AttachmentAuthorityBook {
-    available: Mutex<BTreeMap<String, AuthorityPin>>,
-    /// Nodes the history had no room for; the router maps them to `SourceUnknown`.
-    no_slot: Mutex<std::collections::BTreeSet<String>>,
+    pub(crate) available: Mutex<BTreeMap<String, AuthorityPin>>,
+    #[cfg(test)]
+    pub(crate) after_history_write: Mutex<Option<HistoryHook>>,
 }
 impl AttachmentAuthorityBook {
     #[must_use]
@@ -114,11 +119,27 @@ impl AttachmentAuthorityBook {
         Self::default()
     }
 
-    /// Adopt one verified record. Availability follows the durable history decision.
+    /// Adopt one freshly signed server record. The signature and freshness are verified
+    /// here, and negotiation is read from the node's actual negotiated capability set
+    /// (an advertisement alone is not enough).
     /// # Errors
-    /// `AttachmentAuthorityHistoryCapacity` when the node has no history slot (the pin
-    /// is made unavailable first); other store failures.
-    pub fn adopt(
+    /// The record's verification failure; `AttachmentAuthorityHistoryCapacity` when the
+    /// node has no history slot (its pin is made unavailable first); store failures.
+    pub fn adopt_record(
+        &self,
+        store: &FederationRedbStore,
+        state: &crate::FederationTrustState,
+        record: &crate::FederationServerRecord,
+        now: u64,
+    ) -> Result<AuthorityAdoption, NodeCoreError> {
+        crate::verify_federation_server_record(record, now)?;
+        let negotiated = state
+            .negotiated_capabilities(&record.node_id)
+            .is_some_and(|caps| caps.contains(ATTACHMENT_RENEWAL_CAPABILITY));
+        self.adopt(store, &record.node_id, record.attachment_authority.as_ref(), negotiated, now)
+    }
+
+    pub(crate) fn adopt(
         &self,
         store: &FederationRedbStore,
         node_id: &str,
@@ -126,18 +147,18 @@ impl AttachmentAuthorityBook {
         negotiated: bool,
         now: u64,
     ) -> Result<AuthorityAdoption, NodeCoreError> {
-        let outcome = store.adopt_attachment_authority(node_id, authority, negotiated, now);
-        if let Ok(mut no_slot) = self.no_slot.lock() {
-            if matches!(outcome, Err(NodeCoreError::AttachmentAuthorityHistoryCapacity)) {
-                no_slot.insert(node_id.to_owned());
-            } else {
-                no_slot.remove(node_id);
-            }
-        }
         let mut available = self
             .available
             .lock()
             .map_err(|_| NodeCoreError::Redb("attachment authority book poisoned".into()))?;
+        let outcome = store.adopt_attachment_authority(node_id, authority, negotiated, now);
+        #[cfg(test)]
+        {
+            let hook = self.after_history_write.lock().ok().and_then(|h| h.clone());
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
         match &outcome {
             Ok(AuthorityAdoption::Available(pin)) => {
                 available.insert(node_id.to_owned(), *pin);
@@ -149,16 +170,34 @@ impl AttachmentAuthorityBook {
         outcome
     }
 
-    /// The answer for B's router. A peer that was never adopted is unavailable.
+    /// The answer for B's router, rechecked against live state at every lookup: an
+    /// unadmitted node is `SourceUnknown`, a peer that did not negotiate the capability is
+    /// unavailable whatever it advertised, and a node the history had no room for is
+    /// `SourceUnknown` too (derived from the durable counter, not cached).
     #[must_use]
-    pub fn answer(&self, node_id: &str) -> PinAnswer {
-        if self.no_slot.lock().is_ok_and(|n| n.contains(node_id)) {
+    pub fn answer(
+        &self,
+        store: &FederationRedbStore,
+        state: &crate::FederationTrustState,
+        node_id: &str,
+        now: u64,
+    ) -> PinAnswer {
+        if !state.can_deliver_to(node_id, now) {
             return PinAnswer::SourceUnknown;
         }
-        match self.available.lock().ok().and_then(|a| a.get(node_id).copied()) {
-            Some(pin) => PinAnswer::Available { pin },
-            None => PinAnswer::Unavailable,
+        let negotiated = state
+            .negotiated_capabilities(node_id)
+            .is_some_and(|caps| caps.contains(ATTACHMENT_RENEWAL_CAPABILITY));
+        if !negotiated {
+            return PinAnswer::Unavailable;
         }
+        if let Some(pin) = self.available.lock().ok().and_then(|a| a.get(node_id).copied()) {
+            return PinAnswer::Available { pin };
+        }
+        let no_row = store.attachment_authority_history(node_id).is_ok_and(|h| h.is_none());
+        let full =
+            store.attachment_authority_nodes().is_ok_and(|n| n >= crate::MAX_AUTHORITY_NODES);
+        if no_row && full { PinAnswer::SourceUnknown } else { PinAnswer::Unavailable }
     }
 }
 

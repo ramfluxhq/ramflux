@@ -7,10 +7,12 @@ pub mod fixture;
 mod renewal;
 mod replay;
 mod retirement;
+mod wire;
 pub use renewal::{
     ChallengeMint, HomeVerdict, RenewalAdmission, RenewalChallenge, RenewalPolicy, RenewalRefusal,
 };
 pub use replay::{AttachmentReplayError, AttachmentReplayProof};
+pub use wire::{ChallengeEnvelope, ForwardedRenewal, RequesterWire};
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
 use super::{

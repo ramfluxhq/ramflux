@@ -36,7 +36,9 @@ mod types;
 
 pub use backend::{GrpcH2Backend, HttpsJsonBackend, QuicQuinnBackend};
 pub use bounded_http::{BoundedHttpPost, BoundedHttpTls, bounded_http_post};
-pub use bounded_mesh_request::read_bounded_mesh_http_request;
+pub use bounded_mesh_request::{
+    read_bounded_mesh_http_request, read_bounded_mesh_http_request_by_path,
+};
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 pub use compio_gateway::{
     CompioGatewayBidiStream, CompioGatewayQuicConnection, CompioGatewayQuicServer,
