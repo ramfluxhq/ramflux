@@ -103,8 +103,9 @@ impl GatewaySessionEngine {
     pub(crate) async fn idle_read(&mut self) -> Result<(), SdkError> {
         let bytes = self.stream.recv_idle_frame().await?;
         self.last_frame_bytes = bytes.len();
-        let frame = serde_json::from_slice(&bytes)?;
-        self.dispatch_frame(&frame, None)?;
+        if let Some(frame) = self.route_bytes(&bytes, false)? {
+            self.dispatch_frame(&frame, None)?;
+        }
         Ok(())
     }
 
@@ -177,27 +178,64 @@ impl GatewaySessionEngine {
         &mut self,
         operation: &'static str,
     ) -> Result<GatewayServerFrame, SdkError> {
-        let result = super::engine::frame_timeout(self.frame_timeout, operation, async {
-            self.stream.recv_frame().await.map_err(SdkError::from)
-        })
-        .await;
-        let bytes = match result {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.terminal_reason =
-                    Some(if matches!(error, SdkError::GatewaySessionRejected(_)) {
-                        DisconnectReason::CallTimeout
-                    } else {
-                        DisconnectReason::Transport
-                    });
-                return Err(error);
+        loop {
+            let result = super::engine::frame_timeout(self.frame_timeout, operation, async {
+                self.stream.recv_frame().await.map_err(SdkError::from)
+            })
+            .await;
+            let bytes = match result {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.terminal_reason =
+                        Some(if matches!(error, SdkError::GatewaySessionRejected(_)) {
+                            DisconnectReason::CallTimeout
+                        } else {
+                            DisconnectReason::Transport
+                        });
+                    return Err(error);
+                }
+            };
+            self.last_frame_bytes = bytes.len();
+            // `None` means a capable event was queued; keep waiting for the caller's frame.
+            if let Some(frame) = self.route_bytes(&bytes, true)? {
+                return Ok(frame);
             }
-        };
-        self.last_frame_bytes = bytes.len();
-        serde_json::from_slice(&bytes).map_err(|error| {
-            self.terminal_reason = Some(DisconnectReason::Transport);
-            SdkError::from(error)
-        })
+        }
+    }
+
+    /// Routes one raw frame. `Some` is a legacy frame for the caller; `None` means a capable
+    /// event was queued. Every other outcome retires the session.
+    fn route_bytes(
+        &mut self,
+        bytes: &[u8],
+        transport_on_decode_error: bool,
+    ) -> Result<Option<GatewayServerFrame>, SdkError> {
+        use super::session_push::{RouteError, Routed, route};
+        match route(bytes, &self.mode) {
+            Ok(Routed::Legacy(frame)) => Ok(Some(*frame)),
+            Ok(Routed::Capable(event)) if event.is_event() => {
+                if self.capable_events.len() >= SESSION_BUFFER {
+                    return Err(self.retire("capable event queue full"));
+                }
+                self.capable_events.push_back(*event);
+                Ok(None)
+            }
+            Ok(Routed::Capable(_)) => Err(self.retire("capable reply outside a capable wait")),
+            Err(RouteError::Retire(why)) => Err(self.retire(why)),
+            Err(RouteError::Capable(_)) => Err(self.retire("malformed capable frame")),
+            Err(RouteError::Legacy(error)) => {
+                if transport_on_decode_error {
+                    self.terminal_reason = Some(DisconnectReason::Transport);
+                }
+                Err(SdkError::from(error))
+            }
+        }
+    }
+
+    fn retire(&mut self, why: &str) -> SdkError {
+        self.terminal_reason = Some(DisconnectReason::UnexpectedReply);
+        tracing::warn!(%why, "unexpected gateway frame; retiring session");
+        SdkError::GatewaySessionRejected(format!("unexpected gateway frame: {why}"))
     }
 }
 
