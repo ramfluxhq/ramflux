@@ -3,8 +3,13 @@
 
 //! Static guard: new ephemeral modules must not name durable-sink symbols.
 //!
-//! Production items are scanned. `#[cfg(test)]` items and `tests.rs` /
-//! `*_tests.rs` files are ignored so absence proofs may open a store.
+//! Production modules are discovered by walking `crates/*/src` and
+//! `apps/*/src` for `.rs` files whose path contains `ephemeral` or
+//! `transient`. Test-only files are excluded. Before matching, each file is
+//! normalised: comments and string literals are stripped, whitespace around
+//! `::` is collapsed, and `use` / `pub use` groups are expanded into full
+//! paths. Alias bindings are rewritten to their full paths. `#[cfg(test)]`
+//! items are ignored, so absence proofs may open a store.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -33,18 +38,33 @@ const FORBIDDEN_SYMBOLS: &[&str] = &[
     "append_journal",
 ];
 
-/// Module dirs (and in-flight sibling files) under node-core, gateway, router, sdk.
-/// `read_dir` discovers `.rs` files; a missing path is skipped, not an error.
-const CANDIDATE_MODULE_ROOTS: &[&str] = &[
-    "crates/ramflux-node-core/src/ephemeral",
-    "apps/ramflux-router/src/ephemeral",
-    "apps/ramflux-router/src/ephemeral_route.rs",
-    "apps/ramflux-gateway/src/ephemeral",
-    "apps/ramflux-gateway/src/ephemeral.rs",
-    "apps/ramflux-gateway/src/ephemeral_queue",
-    "crates/ramflux-sdk/src/ephemeral",
-    "crates/ramflux-sdk/src/ephemeral.rs",
-    "crates/ramflux-sdk/src/transient",
+/// Top-level directories whose `src/` trees are walked for module discovery.
+const DISCOVERY_ROOTS: &[&str] = &["crates", "apps"];
+
+/// Path fragments that select a production module.
+const DISCOVERY_NEEDLES: &[&str] = &["ephemeral", "transient"];
+
+/// This guard. It also lives under `tests/`, so the directory rule already
+/// excludes it; the explicit entry keeps the exclusion visible.
+const GUARD_REL: &str = "crates/ramflux-node-core/src/tests/ephemeral_durable_sinks.rs";
+
+/// Files that match the discovery needles but are test-only. Each entry names
+/// the declaring file and line, and `declared_cfg_test` re-checks the
+/// declaration so that a stale entry fails the test.
+const TEST_ONLY_MODULES: &[(&str, &str)] = &[
+    // Declared `#[cfg(test)] mod ephemeral_reassertion;` at
+    // apps/ramflux-router/src/handlers/session_push.rs:266-267.
+    (
+        "apps/ramflux-router/src/handlers/session_push/ephemeral_reassertion.rs",
+        "apps/ramflux-router/src/handlers/session_push.rs",
+    ),
+];
+
+/// Modules the discovery must always find.
+const REQUIRED_MODULES: &[&str] = &[
+    "crates/ramflux-node-core/src/ephemeral/mod.rs",
+    "crates/ramflux-node-core/src/ephemeral/capability.rs",
+    "crates/ramflux-protocol/src/ephemeral.rs",
 ];
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -67,27 +87,8 @@ fn is_scanned_rs(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "rs") && !is_test_filename(path)
 }
 
-fn collect_rs_files(path: &Path) -> io::Result<Vec<PathBuf>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    if path.is_file() {
-        if is_scanned_rs(path) {
-            return Ok(vec![path.to_path_buf()]);
-        }
-        return Ok(Vec::new());
-    }
-    if !path.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut files = Vec::new();
-    collect_rs_dir(path, &mut files)?;
-    files.sort();
-    Ok(files)
-}
-
 fn collect_rs_dir(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs_read_dir(dir)? {
+    for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let file_type = entry.file_type()?;
@@ -100,24 +101,54 @@ fn collect_rs_dir(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-fn fs_read_dir(dir: &Path) -> io::Result<std::fs::ReadDir> {
-    std::fs::read_dir(dir)
-}
-
-fn collect_ephemeral_sources(workspace: &Path) -> io::Result<(Vec<PathBuf>, Vec<&'static str>)> {
-    let mut files = Vec::new();
-    let mut skipped = Vec::new();
-    for rel in CANDIDATE_MODULE_ROOTS {
-        let path = workspace.join(rel);
-        if path.exists() {
-            files.extend(collect_rs_files(&path)?);
-        } else {
-            skipped.push(*rel);
+/// Walks `<root>/{crates,apps}/*/src` and returns the production modules whose
+/// workspace-relative path contains a discovery needle. Sorted, deduplicated.
+fn discover_ephemeral_modules(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut all = Vec::new();
+    for top in DISCOVERY_ROOTS {
+        let top_dir = root.join(top);
+        if !top_dir.is_dir() {
+            continue;
+        }
+        let mut members = std::fs::read_dir(&top_dir)?.collect::<io::Result<Vec<_>>>()?;
+        members.sort_by_key(std::fs::DirEntry::path);
+        for member in members {
+            let src = member.path().join("src");
+            if src.is_dir() {
+                collect_rs_dir(&src, &mut all)?;
+            }
         }
     }
-    files.sort();
-    files.dedup();
-    Ok((files, skipped))
+    let mut selected = Vec::new();
+    for path in all {
+        let rel = rel_path(root, &path);
+        if !DISCOVERY_NEEDLES.iter().any(|needle| rel.contains(needle)) {
+            continue;
+        }
+        if is_excluded(&rel) {
+            continue;
+        }
+        selected.push(path);
+    }
+    selected.sort();
+    selected.dedup();
+    Ok(selected)
+}
+
+fn is_excluded(rel: &str) -> bool {
+    rel == GUARD_REL
+        || TEST_ONLY_MODULES.iter().any(|(excluded, _)| *excluded == rel)
+        || Path::new(rel).components().any(|c| c.as_os_str() == "tests")
+}
+
+fn rel_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+}
+
+/// True when `decl_src` declares `mod <stem>;` directly after `#[cfg(test)]`.
+fn declared_cfg_test(decl_src: &str, stem: &str) -> bool {
+    let decl = format!("mod {stem};");
+    decl_src.match_indices(&decl).any(|(at, _)| decl_src[..at].trim_end().ends_with("#[cfg(test)]"))
 }
 
 fn has_symbol(src: &str, symbol: &str) -> bool {
@@ -151,8 +182,13 @@ fn forbidden_hits(src: &str) -> Vec<&'static str> {
     FORBIDDEN_SYMBOLS.iter().copied().filter(|symbol| has_symbol(src, symbol)).collect()
 }
 
+/// Normalised text used for matching: comments and string literals stripped,
+/// `#[cfg(test)]` items removed, whitespace collapsed, and use-group aliases
+/// expanded. Both the raw text and the expanded paths are included.
 fn production_source(src: &str) -> String {
-    strip_cfg_test_items(&strip_comments(src))
+    let stripped = strip_cfg_test_items(&strip_comments(src));
+    let collapsed = collapse_path_ws(&stripped);
+    expand_detection_text(&collapsed)
 }
 
 fn strip_comments(src: &str) -> String {
@@ -160,7 +196,7 @@ fn strip_comments(src: &str) -> String {
     let mut i = 0;
     while i < src.len() {
         if let Some(end) = skip_raw_string(src, i) {
-            out.push_str(&src[i..end]);
+            out.push_str("\"\"");
             i = end;
             continue;
         }
@@ -176,9 +212,8 @@ fn strip_comments(src: &str) -> String {
             continue;
         }
         if rest.starts_with('"') {
-            let end = skip_string(src, i);
-            out.push_str(&src[i..end]);
-            i = end;
+            i = skip_string(src, i);
+            out.push_str("\"\"");
             continue;
         }
         if rest.starts_with('\'') {
@@ -418,6 +453,128 @@ fn strip_cfg_test_items(src: &str) -> String {
     out
 }
 
+/// Collapses runs of whitespace to one space and removes spaces around `::`,
+/// so `std :: fs :: write` becomes `std::fs::write`.
+fn collapse_path_ws(src: &str) -> String {
+    src.split_whitespace().collect::<Vec<_>>().join(" ").replace(" ::", "::").replace(":: ", "::")
+}
+
+/// Appends the expanded paths of every `use` item and the alias-rewritten text.
+fn expand_detection_text(collapsed: &str) -> String {
+    let mut bindings: Vec<(String, String)> = Vec::new();
+    for body in use_bodies(collapsed) {
+        expand_use_tree("", body, &mut bindings);
+    }
+    let mut rewritten = collapsed.to_string();
+    for (full, alias) in &bindings {
+        if alias != "*" && alias != "_" {
+            rewritten = rewrite_alias(&rewritten, alias, full);
+        }
+    }
+    let mut out = String::with_capacity(collapsed.len() * 2);
+    out.push_str(collapsed);
+    out.push('\n');
+    for (full, _) in &bindings {
+        out.push_str(full);
+        out.push('\n');
+    }
+    out.push_str(&rewritten);
+    out
+}
+
+/// Bodies of `use` / `pub use` items, without the leading keyword or the `;`.
+fn use_bodies(text: &str) -> Vec<&str> {
+    let mut bodies = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find("use ") {
+        let at = from + rel;
+        let body_start = at + 4;
+        let boundary = text[..at].chars().next_back().is_none_or(|c| !is_ident_char(c) && c != ':');
+        let found = if boundary { text[body_start..].find(';') } else { None };
+        match found {
+            Some(end_rel) => {
+                let end = body_start + end_rel;
+                bodies.push(&text[body_start..end]);
+                from = end + 1;
+            }
+            None => from = body_start,
+        }
+    }
+    bodies
+}
+
+fn join_path(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() { path.to_string() } else { format!("{prefix}::{path}") }
+}
+
+/// Splits on commas that sit outside braces.
+fn split_top_level(tree: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in tree.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&tree[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&tree[start..]);
+    parts
+}
+
+/// Expands a use tree into `(full path, bound alias)` pairs. Nested groups,
+/// `self`, `as` renames and globs are handled. Unsupported shapes are skipped.
+fn expand_use_tree(prefix: &str, tree: &str, out: &mut Vec<(String, String)>) {
+    for part in split_top_level(tree) {
+        let item = part.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if let Some(open) = item.find('{') {
+            let close = item.rfind('}').unwrap_or(item.len());
+            let head = item[..open].trim().trim_end_matches("::");
+            let next = join_path(prefix, head);
+            expand_use_tree(&next, &item[open + 1..close], out);
+            continue;
+        }
+        let words: Vec<&str> = item.split_whitespace().collect();
+        let (path, alias) = match words.as_slice() {
+            [path] => (*path, None),
+            [path, "as", alias] => (*path, Some(*alias)),
+            _ => continue,
+        };
+        let full = if path == "self" { prefix.to_string() } else { join_path(prefix, path) };
+        let alias = alias.map_or_else(
+            || full.rsplit("::").next().unwrap_or_default().to_string(),
+            str::to_string,
+        );
+        out.push((full, alias));
+    }
+}
+
+/// Rewrites `alias::x` to `full::x` wherever `alias` is a whole path segment.
+fn rewrite_alias(text: &str, alias: &str, full: &str) -> String {
+    let needle = format!("{alias}::");
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (at, _) in text.match_indices(&needle) {
+        let boundary = text[..at].chars().next_back().is_none_or(|c| !is_ident_char(c) && c != ':');
+        if boundary {
+            out.push_str(&text[last..at]);
+            out.push_str(full);
+            out.push_str("::");
+            last = at + needle.len();
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 fn planted_spellings(symbol: &str) -> [(&'static str, String); 3] {
     [
         ("bare", format!("fn sink() {{ {symbol}(); }}\n")),
@@ -431,28 +588,22 @@ fn planted_spellings(symbol: &str) -> [(&'static str, String); 3] {
     ]
 }
 
-fn display_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .map_or_else(|_| path.display().to_string(), |rel| rel.display().to_string())
+fn detect(src: &str) -> Vec<&'static str> {
+    forbidden_hits(&production_source(src))
 }
 
 #[test]
 fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
     let root = workspace_root()?;
-    let node_core = root.join("crates/ramflux-node-core/src/ephemeral");
-    if !node_core.is_dir() {
-        return Err(io::Error::other("node-core ephemeral module dir is missing").into());
-    }
-    let (files, _skipped) = collect_ephemeral_sources(&root)?;
+    let files = discover_ephemeral_modules(&root)?;
     if files.is_empty() {
         return Err(io::Error::other("ephemeral module scan produced zero files").into());
     }
     let mut violations = String::new();
     for path in &files {
         let source = std::fs::read_to_string(path)?;
-        let hits = forbidden_hits(&production_source(&source));
-        for symbol in hits {
-            violations.push_str(&display_path(&root, path));
+        for symbol in detect(&source) {
+            violations.push_str(&rel_path(&root, path));
             violations.push_str(": ");
             violations.push_str(symbol);
             violations.push('\n');
@@ -468,10 +619,74 @@ fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
 }
 
 #[test]
+fn ephemeral_inventory_discovery() -> TestResult {
+    let root = workspace_root()?;
+    let files = discover_ephemeral_modules(&root)?;
+    let rels: Vec<String> = files.iter().map(|path| rel_path(&root, path)).collect();
+    assert!(!rels.is_empty(), "discovery must find at least one module");
+    for required in REQUIRED_MODULES {
+        assert!(
+            rels.iter().any(|rel| rel.as_str() == *required),
+            "discovery must include {required}, got {rels:?}"
+        );
+    }
+    for (excluded, declaring) in TEST_ONLY_MODULES {
+        let stem = Path::new(excluded).file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let decl_src = std::fs::read_to_string(root.join(declaring))?;
+        assert!(
+            declared_cfg_test(&decl_src, stem),
+            "exclusion {excluded} must still be declared #[cfg(test)] in {declaring}"
+        );
+        assert!(!rels.iter().any(|rel| rel.as_str() == *excluded), "{excluded} must stay excluded");
+    }
+    assert!(
+        !rels.iter().any(|rel| rel.as_str() == GUARD_REL || rel.contains("/tests/")),
+        "guard and tests/ files must be excluded, got {rels:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn normaliser_grouped_alias_is_detected() {
+    let src = "use std::{fs as disk}; fn f() { disk::write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect(src), vec!["std::fs"]);
+}
+
+#[test]
+fn normaliser_pub_use_reexport_is_detected() {
+    let src = "pub use std::{fs as disk};\n";
+    assert_eq!(detect(src), vec!["std::fs"]);
+}
+
+#[test]
+fn normaliser_nested_group_is_detected() {
+    let src = "use std::{io::{self, Write}, fs as disk};\nfn f() { let _ = disk::read(\"x\"); }\n";
+    assert_eq!(detect(src), vec!["std::fs"]);
+}
+
+#[test]
+fn normaliser_whitespace_separated_path_is_detected() {
+    let src = "fn f() { std :: fs :: write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect(src), vec!["std::fs"]);
+}
+
+#[test]
+fn normaliser_direct_call_is_detected() {
+    let src = "fn f() { std::fs::write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect(src), vec!["std::fs"]);
+}
+
+#[test]
+fn normaliser_comment_and_string_are_not_detected() {
+    let src = "// std::fs begin_write\nfn f() { let _ = \"std::fs OpenOptions\"; }\n";
+    assert_eq!(detect(src), Vec::<&'static str>::new());
+}
+
+#[test]
 fn planted_forbidden_symbols_are_caught() {
     for symbol in FORBIDDEN_SYMBOLS {
         for (kind, source) in planted_spellings(symbol) {
-            let hits = forbidden_hits(&production_source(&source));
+            let hits = detect(&source);
             assert!(
                 hits.iter().any(|hit| hit == symbol),
                 "symbol {symbol} spelling {kind} must be caught in {source:?}, hits={hits:?}"
@@ -483,33 +698,8 @@ fn planted_forbidden_symbols_are_caught() {
 #[test]
 fn planted_near_miss_identifiers_are_not_caught() {
     let src = "fn sink() { begin_write_txn(); std::fmt::write(); open_options(); }\n";
-    let hits = forbidden_hits(&production_source(src));
+    let hits = detect(src);
     assert!(hits.is_empty(), "near-miss identifiers must not match, hits={hits:?}");
-}
-
-#[test]
-fn ephemeral_sink_guard_skips_missing_module_roots() -> TestResult {
-    let root = workspace_root()?;
-    let missing = root.join("this_path_is_not_an_ephemeral_module");
-    let files = collect_rs_files(&missing)?;
-    assert!(files.is_empty(), "missing path must yield zero files, not an error");
-    let (_files, skipped) = collect_ephemeral_sources(&root)?;
-    assert!(!skipped.is_empty(), "in-flight module roots absent on this tree must be skipped");
-    Ok(())
-}
-
-#[test]
-fn ephemeral_sink_guard_inclusive_scan_bounds() -> TestResult {
-    let root = workspace_root()?;
-    let zero_path = root.join("apps/ramflux-router/src/ephemeral");
-    let zero = collect_rs_files(&zero_path)?;
-    if !zero_path.exists() {
-        assert!(zero.is_empty(), "absent dir must yield zero scanned files");
-    }
-    let n_path = root.join("crates/ramflux-node-core/src/ephemeral");
-    let n = collect_rs_files(&n_path)?;
-    assert!(!n.is_empty(), "existing ephemeral module dir must yield scanned files");
-    Ok(())
 }
 
 #[test]
@@ -526,17 +716,17 @@ fn ephemeral_sink_guard_ignores_cfg_test_items() {
             }
         }
     "#;
-    let hits = forbidden_hits(&production_source(src));
+    let hits = detect(src);
     assert!(hits.is_empty(), "cfg(test) fixtures must not count, hits={hits:?}");
 
     let src = "fn production() { begin_write(); }\n#[cfg(test)]\nmod tests {}\n";
-    let hits = forbidden_hits(&production_source(src));
+    let hits = detect(src);
     assert!(hits.contains(&"begin_write"), "production hits must remain visible, hits={hits:?}");
 }
 
 #[test]
 fn comments_naming_forbidden_symbols_are_not_hits() {
     let src = "// begin_write RouterRedbStore std::fs\nfn f() {}\n";
-    let hits = forbidden_hits(&production_source(src));
+    let hits = detect(src);
     assert!(hits.is_empty(), "comments must not count, hits={hits:?}");
 }
