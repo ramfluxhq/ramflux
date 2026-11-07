@@ -242,50 +242,126 @@ fn the_sixteen_kib_wire_cap_is_exact_on_both_routes() {
     ));
 }
 
+/// Waits (with a ten-second panic guard) until `condition` holds; never an elapsed-time check.
+fn wait_until(what: &str, condition: impl Fn() -> bool) {
+    let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !condition() {
+        assert!(std::time::Instant::now() < give_up, "hang guard: {what}");
+        std::thread::yield_now();
+    }
+}
+fn far() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(3_600)
+}
+fn elapsed() -> std::time::Instant {
+    std::time::Instant::now().checked_sub(std::time::Duration::from_millis(1)).unwrap()
+}
+
 #[test]
-fn a_held_ledger_writer_makes_mint_and_renew_busy_at_the_deadline_without_consuming() {
-    let e = Env::new("listener-held");
-    let body = serde_json::to_vec(&wire(&e)).unwrap();
-    let challenge = challenge_of(call(&e, Some(ROUTER), CHALLENGE_PATH, &body).0.unwrap());
-    let renew = serde_json::to_vec(&e.build(e.g(), &e.cap, &e.target(), challenge, 7)).unwrap();
-    let with_deadline = |path: &str, payload: &[u8], budget_ms: u64| {
-        let listener = AuthorityListener::new(&e.issuer);
-        let mut sink = VecSink::default();
-        let now = e.now;
-        let out = listener
-            .handle(
-                &Incoming {
-                    peer_spiffe_uri: Some(ROUTER),
-                    method: "POST",
-                    path,
-                    body: payload,
-                    deadline: Some(
-                        std::time::Instant::now() + std::time::Duration::from_millis(budget_ms),
-                    ),
-                },
-                &|| now,
-                &mut sink,
-                &IssueHooks::none(),
-            )
-            .unwrap();
-        (out, sink)
+fn a_held_ledger_writer_makes_mint_and_renew_busy_when_the_deadline_event_fires() {
+    use ramflux_node_core::attachment::{WriteDeadline, parked_writer_waiters};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
     };
+    let e = Env::new("listener-held");
+    let t = e.target();
+    let challenge = e.mint(e.g(), &e.cap, &t);
+    let renew = e.build(e.g(), &e.cap, &t, challenge, 7);
     let holder = e.f.hold_ledger_writer();
-    let started = std::time::Instant::now();
-    let (mint, _) = with_deadline(CHALLENGE_PATH, &body, 200);
-    assert_eq!(mint, Handled::Challenge(ChallengeReply::Refused { code: RenewalRefusal::Busy }));
-    let (busy, sink) = with_deadline(RENEW_PATH, &renew, 200);
-    assert_eq!(busy, Handled::Renew(Outcome::Refused(RenewalRefusal::Busy)));
-    assert!(matches!(
-        serde_json::from_slice::<RenewAdmitResponse>(&sink.bytes).unwrap(),
-        RenewAdmitResponse::Refused { code: RenewalRefusal::Busy }
-    ));
-    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    // Mint: the deadline "passes" only when the test raises the flag, and only after the
+    // mint is provably blocked on the ledger writer.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let before = parked_writer_waiters();
+    let op = t.canonical_bytes().unwrap();
+    let verdict = e.verdict();
+    let mint = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            e.issuer.challenge_until(
+                &ChallengeMint {
+                    capability: &e.cap,
+                    target_operation: &op,
+                    requester: &e.g().grantee,
+                    home_node: &e.g().grantee.home_node_id,
+                    peer_node: &e.g().grantee.home_node_id,
+                    verdict: &verdict,
+                },
+                e.now,
+                Some(WriteDeadline::controlled(far(), Arc::clone(&cancel))),
+            )
+        });
+        wait_until("mint reaches the writer wait", || parked_writer_waiters() > before);
+        cancel.store(true, Ordering::Release);
+        waiting.join().unwrap()
+    });
+    assert_eq!(mint.err(), Some(RenewalRefusal::Busy));
+    // Renew: the same event, through the issuing entrypoint.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let before = parked_writer_waiters();
+    let deadline = WriteDeadline::controlled(far(), Arc::clone(&cancel));
+    let busy = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            let hooks = IssueHooks { deadline: Some(deadline.clone()), ..IssueHooks::none() };
+            let mut sink = VecSink::default();
+            let out = e.issuer.renew(&renew, &|| e.now, &mut sink, &hooks);
+            (out, sink.bytes.len())
+        });
+        wait_until("renew reaches the writer wait", || parked_writer_waiters() > before);
+        cancel.store(true, Ordering::Release);
+        waiting.join().unwrap()
+    });
+    assert_eq!(busy, (Err(IssueError::Refused(RenewalRefusal::Busy)), 0));
     // An already elapsed deadline refuses without waiting at all.
-    let (late, _) = with_deadline(CHALLENGE_PATH, &body, 0);
-    assert_eq!(late, Handled::Challenge(ChallengeReply::Refused { code: RenewalRefusal::Busy }));
+    let hooks = IssueHooks { deadline: Some(WriteDeadline::at(elapsed())), ..IssueHooks::none() };
+    let mut sink = VecSink::default();
+    assert_eq!(
+        e.issuer.renew(&renew, &|| e.now, &mut sink, &hooks),
+        Err(IssueError::Refused(RenewalRefusal::Busy))
+    );
     drop(holder);
     // Nothing was consumed: the very same renewal is still issued.
-    let (issued, _) = with_deadline(RENEW_PATH, &renew, 5_000);
-    assert_eq!(issued, Handled::Renew(Outcome::Issued));
+    assert!(e.run(&renew).is_ok());
+}
+
+#[test]
+fn a_retirement_holding_the_lease_mutex_cannot_stall_a_renewal_past_its_deadline() {
+    use ramflux_node_core::attachment::{WriteDeadline, lease_waits};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let e = Env::new("listener-interleave");
+    let t = e.target();
+    let challenge = e.mint(e.g(), &e.cap, &t);
+    let renew = e.build(e.g(), &e.cap, &t, challenge, 9);
+    let holder = e.f.hold_ledger_writer();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let deadline = WriteDeadline::controlled(far(), Arc::clone(&cancel));
+    std::thread::scope(|scope| {
+        // The retirement takes the lease mutex, then blocks on the held ledger writer.
+        let retirement = scope.spawn(|| retire(&e.f));
+        wait_until("retirement owns the lease mutex", || e.f.lease_mutex_held());
+        let waits = lease_waits();
+        let renewing = scope.spawn(|| {
+            let hooks = IssueHooks { deadline: Some(deadline.clone()), ..IssueHooks::none() };
+            let mut sink = VecSink::default();
+            e.issuer.renew(&renew, &|| e.now, &mut sink, &hooks)
+        });
+        wait_until("renewal is waiting on the lease mutex", || lease_waits() > waits);
+        // Both the writer and the retirement are still held when the deadline event fires.
+        cancel.store(true, Ordering::Release);
+        assert_eq!(renewing.join().unwrap(), Err(IssueError::Refused(RenewalRefusal::Busy)));
+        assert!(!retirement.is_finished(), "the retirement is still blocked on the writer");
+        drop(holder);
+        assert_eq!(
+            retirement.join().unwrap(),
+            ramflux_node_core::attachment::RetirementOutcome::Retired
+        );
+    });
+    // The refused renewal did not consume its nonce: replay would be `Replay`, not this.
+    let mut sink = VecSink::default();
+    assert_eq!(
+        e.issuer.renew(&renew, &|| e.now, &mut sink, &IssueHooks::none()),
+        Err(IssueError::Refused(RenewalRefusal::GrantNotActive))
+    );
 }

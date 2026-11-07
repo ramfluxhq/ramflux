@@ -9,7 +9,7 @@
 use super::{
     IssueError, IssueHooks, Outcome, RenewAdmitRequest, RenewAdmitResponse, SourceIssuer, TokenSink,
 };
-use ramflux_node_core::attachment::{ChallengeMint, HomeVerdict, RenewalRefusal};
+use ramflux_node_core::attachment::{ChallengeMint, HomeVerdict, RenewalRefusal, WriteDeadline};
 use ramflux_protocol::large_attachment::QualifiedOwner;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
@@ -146,7 +146,7 @@ impl<'a> AuthorityListener<'a> {
             before_admission: hooks.before_admission,
             after_commit: hooks.after_commit,
             before_final_token_check: hooks.before_final_token_check,
-            deadline: deadline.or(hooks.deadline),
+            deadline: deadline.map(WriteDeadline::at).or_else(|| hooks.deadline.clone()),
         };
         self.renew(body, clock, sink, &bounded)
     }
@@ -175,7 +175,7 @@ impl<'a> AuthorityListener<'a> {
                 verdict,
             },
             now,
-            deadline,
+            deadline.map(WriteDeadline::at),
         ) {
             Ok(c) => ChallengeReply::Minted {
                 challenge: c.challenge,

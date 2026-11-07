@@ -27,6 +27,8 @@ pub struct CompioMeshQuicConnection {
 
 pub struct CompioMeshQuicAcceptedRequest {
     pub request: GatewayQuicRequest,
+    /// The body exactly as received for `RAW_BODY_PATH_PREFIX` routes (see the tokio ingress).
+    pub raw_body: Option<Vec<u8>>,
     peer_spiffe_uri: Option<String>,
     send: compio_quic::SendStream,
     recv: compio_quic::RecvStream,
@@ -144,6 +146,7 @@ impl CompioMeshQuicServer {
         );
         Ok(CompioMeshQuicAcceptedRequest {
             request,
+            raw_body: None,
             peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
             send,
             recv,
@@ -186,8 +189,15 @@ impl CompioMeshQuicServer {
             path = %request.path,
             "compio mesh JSON request frame decoded"
         );
+        let raw_body = if request.path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
+            let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)?;
+            Some(raw.body.get().as_bytes().to_vec())
+        } else {
+            None
+        };
         Ok(CompioMeshQuicAcceptedWireRequest::Json(CompioMeshQuicAcceptedRequest {
             request,
+            raw_body,
             peer_spiffe_uri: connection.peer_spiffe_uri.clone(),
             send,
             recv,

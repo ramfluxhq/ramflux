@@ -23,9 +23,49 @@ const REQUESTS: TableDefinition<&[u8], &[u8]> =
 type Leases = BTreeMap<[u8; 32], Vec<Weak<AtomicBool>>>;
 #[derive(Default)]
 pub(super) struct LeaseOwner(Mutex<Leases>);
+/// Bounded lease-mutex acquisitions that had to wait (test observation only).
+static LEASE_WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How many bounded lease-mutex acquisitions have waited so far.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn lease_waits() -> usize {
+    LEASE_WAITS.load(Ordering::Acquire)
+}
 impl LeaseOwner {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn is_locked(&self) -> bool {
+        self.0.try_lock().is_err()
+    }
     pub(super) fn lock(&self) -> Result<MutexGuard<'_, Leases>, AttachmentLedgerError> {
         self.0.lock().map_err(|_| AttachmentLedgerError::State)
+    }
+    /// The same mutex, but a request with a deadline gives up on it (typed `Capacity`, which
+    /// callers map to `Busy`) instead of queueing behind a holder that is itself blocked on
+    /// the ledger writer.
+    pub(super) fn lock_until(
+        &self,
+        deadline: Option<&super::super::WriteDeadline>,
+    ) -> Result<MutexGuard<'_, Leases>, AttachmentLedgerError> {
+        let Some(deadline) = deadline else { return self.lock() };
+        let mut waited = false;
+        loop {
+            match self.0.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(AttachmentLedgerError::State);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if !waited {
+                        waited = true;
+                        LEASE_WAITS.fetch_add(1, Ordering::AcqRel);
+                    }
+                    if deadline.expired() {
+                        return Err(AttachmentLedgerError::Capacity);
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_millis(1));
+                }
+            }
+        }
     }
 }
 pub(super) fn owner(db: &Arc<redb::Database>) -> Result<Arc<LeaseOwner>, AttachmentLedgerError> {
@@ -180,7 +220,7 @@ impl ScopedGrantRegistry {
         if !matches!(right, 1 | 2 | 4 | 8 | 16) || grant.grant().rights & right == 0 {
             return Err(map(AttachmentLedgerError::Conflict));
         }
-        let mut leases = self.leases.lock().map_err(&map)?;
+        let mut leases = self.leases.lock_until(self.deadline.as_ref()).map_err(&map)?;
         leases.retain(|_, v| {
             v.retain(|w| w.strong_count() > 0);
             !v.is_empty()
@@ -190,7 +230,7 @@ impl ScopedGrantRegistry {
         }
         self.current(grant, now).map_err(&map)?;
         // Fence clock rollback durably, sharing the registration clock owner.
-        let tx = self.ledger.begin_write_until(self.deadline).map_err(|e| {
+        let tx = self.ledger.begin_write_until(self.deadline.as_ref()).map_err(|e| {
             map(match e {
                 super::super::BeginError::Busy => AttachmentLedgerError::Capacity,
                 super::super::BeginError::Store(m) => AttachmentLedgerError::Store(m),
