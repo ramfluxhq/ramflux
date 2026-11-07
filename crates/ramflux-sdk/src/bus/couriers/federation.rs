@@ -6,6 +6,7 @@
 use super::pair_material;
 use crate::bus::connection_manager::SessionContext;
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
+use crate::gateway::session_push::SubmitRefusal;
 use crate::prelude::*;
 
 pub(crate) async fn manifest(
@@ -72,11 +73,30 @@ pub(crate) async fn material(
     };
     Ok(SendMaterial { manifest, bundle })
 }
+/// Maps a certain gateway refusal back to the error the unclassified callers always saw.
+fn unclassified(outcome: Result<Result<(), SubmitRefusal>, SdkError>) -> Result<(), SdkError> {
+    match outcome? {
+        Ok(()) => Ok(()),
+        Err(refusal) => Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned())),
+    }
+}
+
 pub(crate) async fn submit(
     context: &SessionContext,
     envelope: ramflux_protocol::Envelope,
     route: Option<LocalBusFederationRoute>,
 ) -> Result<(), SdkError> {
+    unclassified(submit_classified(context, envelope, route).await)
+}
+
+/// Like [`submit`], but a gateway refusal that is certain to be a refusal (decoded from a
+/// legacy `nack` with an exact outcome reason) is returned in the inner `Err`. Every other
+/// failure, including all federation-routed failures, is uncertain and stays in the outer one.
+pub(crate) async fn submit_classified(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+    route: Option<LocalBusFederationRoute>,
+) -> Result<Result<(), SubmitRefusal>, SdkError> {
     let deadline = if route.is_some() {
         tokio::time::Instant::now() + context.network_wait()
     } else {
@@ -92,7 +112,7 @@ pub(crate) async fn submit_until(
     deadline: tokio::time::Instant,
     priority: bool,
 ) -> Result<(), SdkError> {
-    submit_inner(context, envelope, route, deadline, priority, !priority).await
+    unclassified(submit_inner(context, envelope, route, deadline, priority, !priority).await)
 }
 
 #[cfg(test)]
@@ -105,7 +125,7 @@ async fn submit_inner(
     deadline: tokio::time::Instant,
     priority: bool,
     task_forward: bool,
-) -> Result<(), SdkError> {
+) -> Result<Result<(), SubmitRefusal>, SdkError> {
     let deadline_error = || if task_forward { SdkError::TaskDeliveryTimeout } else { stopped() };
     if let Some(route) = route {
         if deadline <= tokio::time::Instant::now() {
@@ -144,12 +164,14 @@ async fn submit_inner(
                 "group state federation submission refused".into(),
             ));
         }
-        Ok(())
+        Ok(Ok(()))
     } else if priority {
         context
             .priority_call(
                 move |engine| {
-                    Box::pin(async move { engine.submit_envelope(envelope).await.map(|_| ()) })
+                    Box::pin(async move {
+                        engine.submit_envelope_classified(envelope).await.map(|r| r.map(|_| ()))
+                    })
                 },
                 deadline.saturating_duration_since(tokio::time::Instant::now()),
             )
@@ -158,7 +180,9 @@ async fn submit_inner(
         context
             .call(
                 move |engine| {
-                    Box::pin(async move { engine.submit_envelope(envelope).await.map(|_| ()) })
+                    Box::pin(async move {
+                        engine.submit_envelope_classified(envelope).await.map(|r| r.map(|_| ()))
+                    })
                 },
                 deadline,
             )

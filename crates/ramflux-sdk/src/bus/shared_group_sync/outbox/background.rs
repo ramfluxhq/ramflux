@@ -14,6 +14,7 @@ use crate::bus::{
     couriers::{federation, writer::Writer},
 };
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
+use crate::gateway::session_push::SubmitRefusal;
 use recipients::{complete_root, journal_failure, selected_devices};
 
 #[derive(Clone)]
@@ -126,6 +127,29 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
     writer.apply(move |account| finish_round(account, plan, continuing)).await?;
     Ok(true)
 }
+/// The terminal branch of a delivery intent: journal why, then either keep a terminal boundary
+/// alive for a later round or drop the intent.
+fn exhaust(
+    client: &crate::RamfluxClient,
+    intent: &mut Intent,
+    id: &str,
+    now: i64,
+    reason: &str,
+) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    db.append_group_journal(&format!("{id}/{now}"),"group.state.delivery_failed",&serde_json::json!({"group_id":intent.snapshot.group_id,"epoch":intent.snapshot.epoch,"reason":reason}),now,id)?;
+    if intent.terminal.iter().any(|boundary| boundary.expires_at > now) {
+        intent.attempt = 0;
+        intent.round_active = false;
+        intent.next_at = now.saturating_add(300);
+        intent.expires_at =
+            intent.terminal.iter().map(|boundary| boundary.expires_at).max().unwrap_or(now);
+        persist_intent(client, intent)?;
+    } else {
+        db.remove_actor_state(id)?;
+    }
+    Ok(())
+}
 fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let client = &account.client;
     let db = client.account_db()?;
@@ -140,17 +164,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
         return Ok(None);
     }
     if now >= intent.expires_at || (!intent.round_active && intent.attempt >= 8) {
-        db.append_group_journal(&format!("{id}/{now}"),"group.state.delivery_failed",&serde_json::json!({"group_id":intent.snapshot.group_id,"epoch":intent.snapshot.epoch,"reason":"retry_budget_exhausted"}),now,&id)?;
-        if intent.terminal.iter().any(|boundary| boundary.expires_at > now) {
-            intent.attempt = 0;
-            intent.round_active = false;
-            intent.next_at = now.saturating_add(300);
-            intent.expires_at =
-                intent.terminal.iter().map(|boundary| boundary.expires_at).max().unwrap_or(now);
-            persist_intent(client, &intent)?;
-        } else {
-            db.remove_actor_state(&id)?;
-        }
+        exhaust(client, &mut intent, &id, now, "retry_budget_exhausted")?;
         return Ok(None);
     }
     if !intent.round_active {
@@ -344,7 +358,7 @@ fn failed_target(
 fn complete(
     account: &LocalBusAccountState,
     attempt: Attempt,
-    outcome: Result<(), SdkError>,
+    outcome: Result<Result<(), SubmitRefusal>, SdkError>,
 ) -> Result<Option<Plan>, SdkError> {
     let Attempt { mut plan, root, device, route, .. } = attempt;
     if !current(account, &plan)? {
@@ -356,9 +370,35 @@ fn complete(
     {
         return Ok(None);
     }
-    if let Err(error) = outcome {
-        tracing::debug!(%error,"group state submission deferred");
-        return failed_target(account, plan, &root, &device);
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(SubmitRefusal::Conflict)) => {
+            // The gateway already holds this envelope id with different content: the staged
+            // envelope is never resubmitted and the intent takes its terminal branch now.
+            tracing::debug!("group state submission conflicted; entering the terminal branch");
+            plan.intent.active = None;
+            let id = key(&plan.intent.snapshot.group_id);
+            exhaust(
+                &account.client,
+                &mut plan.intent,
+                &id,
+                now_unix_timestamp(),
+                "submit_conflict",
+            )?;
+            return Ok(None);
+        }
+        Ok(Err(refusal)) => {
+            if let SubmitRefusal::CapacityRetryAfter { retry_after_ms } = refusal {
+                plan.intent.min_defer_secs =
+                    i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX);
+            }
+            tracing::debug!(reason = refusal.reason(), "group state submission deferred");
+            return failed_target(account, plan, &root, &device);
+        }
+        Err(error) => {
+            tracing::debug!(%error,"group state submission deferred");
+            return failed_target(account, plan, &root, &device);
+        }
     }
     plan.intent.delivered.insert((root.clone(), device.clone()));
     account.client.account_db()?.persist_actor_state(
@@ -424,8 +464,12 @@ async fn deliver_target(
 
     match sealed {
         Ok(Some(attempt)) => {
-            let outcome =
-                federation::submit(context, attempt.envelope.clone(), attempt.route.clone()).await;
+            let outcome = federation::submit_classified(
+                context,
+                attempt.envelope.clone(),
+                attempt.route.clone(),
+            )
+            .await;
             writer.apply(move |account| complete(account, attempt, outcome)).await
         }
         Ok(None) => Ok(None),

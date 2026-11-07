@@ -15,6 +15,10 @@ pub(in crate::bus) struct RecordingGateway {
     pub inbox: Vec<GatewayInboxEntry>,
     pub fail_after: Option<usize>,
     pub fail_target: Option<String>,
+    /// Nacks every submit with this exact reason (the envelope is recorded as attempted).
+    pub nack_reason: Option<String>,
+    /// Every submitted envelope, whatever the gateway answered.
+    pub attempted: Arc<Mutex<Vec<ramflux_protocol::Envelope>>>,
     pub fail_own_ack: bool,
     pub fail_own_target: Option<String>,
     pub fail_ack: bool,
@@ -82,6 +86,8 @@ impl RecordingGateway {
             inbox: Vec::new(),
             fail_after: None,
             fail_target: None,
+            nack_reason: None,
+            attempted: Arc::default(),
             fail_own_ack: false,
             fail_own_target: None,
             fail_ack: false,
@@ -125,9 +131,15 @@ impl GatewaySessionFrameSink for RecordingGateway {
             {
                 return Err(TransportError::Quic("injected lost inbox ACK".into()));
             }
-            self.last = Some(
-                serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?,
-            );
+            let frame: GatewayClientFrame =
+                serde_json::from_slice(bytes).map_err(|e| TransportError::Quic(e.to_string()))?;
+            if let GatewayClientFrame::Submit { submit } = &frame {
+                self.attempted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(submit.envelope.clone());
+            }
+            self.last = Some(frame);
             Ok(())
         })
     }
@@ -149,6 +161,11 @@ impl GatewaySessionFrameSource for RecordingGateway {
                     .map_err(|e| TransportError::Quic(e.to_string()));
             }
             let response = match self.last.take() {
+                Some(GatewayClientFrame::Submit { .. }) if self.nack_reason.is_some() => {
+                    GatewayServerFrame::Nack {
+                        reason: self.nack_reason.clone().unwrap_or_default(),
+                    }
+                }
                 Some(GatewayClientFrame::Submit { submit })
                     if self.fail_target.as_ref() == Some(&submit.envelope.target_delivery_id) =>
                 {
