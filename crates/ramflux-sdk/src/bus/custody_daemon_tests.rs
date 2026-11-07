@@ -104,26 +104,68 @@ async fn custody_inconsistent_and_invalidly_named_markers_leave_other_accounts_a
     Ok(())
 }
 
-#[tokio::test]
+/// Supervisor responder (the live daemon). The listener is bound before the client connects,
+/// so no retry is needed; the whole flow is bounded.
+#[tokio::test(flavor = "current_thread")]
 async fn daemon_status_reports_schema_generation() -> Result {
     let root = Root::new()?;
     let socket = root.0.join("bus.sock");
-    let config = LocalBusConfig::new(&socket, &root.0);
+    let listener = tokio::net::UnixListener::bind(&socket)?;
+    let uid = std::fs::metadata(&socket)?.uid();
+    let supervisor =
+        crate::bus::supervisor::Supervisor::new(LocalBusConfig::new(&socket, &root.0))?;
     let (stop, receiver) = watch::channel(false);
+    let accept_loop = super::connection::accept(listener, uid, supervisor, receiver);
     let flow = async {
-        let _stop = Shutdown(stop.clone());
-        let _ceremony = connect(&socket).await?;
         let mut bus = LocalBusClient::connect(&socket).await?;
-        let status = bus.request(None, "daemon", "daemon.status", serde_json::json!({})).await?;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            bus.request(None, "daemon", "daemon.status", serde_json::json!({})),
+        )
+        .await
+        .map_err(|_| "daemon.status request deadline")??;
         assert_eq!(
             status["schema_generation"],
             ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
             "schema_generation equals ACTIVE_STORAGE_GENERATION"
         );
+        stop.send(true)?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
-    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
-    server?;
-    flow?;
+    let local = tokio::task::LocalSet::new();
+    let whole = local.run_until(async { tokio::join!(accept_loop, flow) });
+    let (accepted, driven) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), Box::pin(whole))
+            .await
+            .map_err(|_| "daemon_status_reports_schema_generation whole-flow timeout")?;
+    accepted?;
+    driven
+}
+
+/// Embedded dispatch responder (`dispatch/daemon.rs`); no socket involved.
+#[tokio::test(flavor = "current_thread")]
+async fn embedded_daemon_status_reports_schema_generation() -> Result {
+    let root = Root::new()?;
+    let state = crate::bus::state::LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::default(),
+        config: LocalBusConfig::new(root.0.join("bus.sock"), &root.0),
+        accounts: std::collections::BTreeMap::new(),
+        active_account_id: None,
+        attended_accounts: std::collections::BTreeSet::new(),
+        subscribers: std::collections::BTreeMap::new(),
+    };
+    let request =
+        LocalBusFrame::request("req_1", None, "daemon", "daemon.status", serde_json::json!({}));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        super::dispatch::daemon::dispatch_daemon_bus_request(&request, &state)
+    })
+    .await
+    .map_err(|_| "embedded_daemon_status_reports_schema_generation timeout")??;
+    assert_eq!(
+        result.response_body["schema_generation"],
+        ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
+        "embedded schema_generation equals ACTIVE_STORAGE_GENERATION"
+    );
     Ok(())
 }
