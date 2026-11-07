@@ -86,6 +86,10 @@ pub struct RouterRedbStore {
     custody_new_principals_per_minute: u64,
     #[cfg(test)]
     pub(crate) fail_next_migration_commit: std::sync::atomic::AtomicBool,
+    pub(crate) attachment_verdicts: std::sync::Mutex<crate::home_migration_store::VerdictCache>,
+    #[cfg(test)]
+    pub(crate) attachment_verdict_hook:
+        std::sync::Mutex<Option<crate::home_migration_store::VerdictHook>>,
 }
 
 impl Drop for RouterRedbStore {
@@ -606,6 +610,9 @@ impl RouterRedbStore {
             custody_new_principals_per_minute,
             #[cfg(test)]
             fail_next_migration_commit: std::sync::atomic::AtomicBool::new(false),
+            attachment_verdicts: std::sync::Mutex::default(),
+            #[cfg(test)]
+            attachment_verdict_hook: std::sync::Mutex::default(),
         })
     }
 

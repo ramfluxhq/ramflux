@@ -4,7 +4,7 @@
 use super::*;
 use crate::attachment_authority::listener::{
     AuthorityListener, AuthorityListenerConfig, CHALLENGE_PATH, ChallengeMintRequest,
-    ChallengeReply, Handled, Incoming, RENEW_PATH, RequesterWire,
+    ChallengeReply, Handled, Incoming, MAX_WIRE_BODY, RENEW_PATH, RequesterWire,
 };
 
 const ROUTER: &str = "spiffe://node-a/ramflux-router";
@@ -185,41 +185,59 @@ fn peer_node_other_than_the_home_node_is_refused() {
     assert_eq!(out.unwrap(), Handled::Renew(Outcome::Refused(RenewalRefusal::HomeMismatch)));
 }
 
-#[test]
-fn unknown_routes_and_oversized_bodies_are_refused() {
-    let e = Env::new("listener-routes");
-    let (out, _) = call(&e, Some(ROUTER), "/s9/attachment-authority/other", b"{}");
-    assert_eq!(
-        out.unwrap(),
-        Handled::Rejected { status: "404 Not Found", reason: "unknown route" }
-    );
+fn get(e: &Env, path: &str, method: &str) -> Handled {
     let listener = AuthorityListener::new(&e.issuer);
     let mut sink = VecSink::default();
-    let get = listener.handle(
-        &Incoming {
-            peer_spiffe_uri: Some(ROUTER),
-            method: "GET",
-            path: CHALLENGE_PATH,
-            body: b"{}",
-        },
-        &|| e.now,
-        &mut sink,
-        &IssueHooks::none(),
-    );
-    assert_eq!(
-        get.unwrap(),
-        Handled::Rejected { status: "404 Not Found", reason: "unknown route" }
-    );
-    let limit = 80 * 1024;
-    let at_limit = vec![b' '; limit];
-    let over = vec![b' '; limit + 1];
-    // At the cap the body is parsed (and fails as malformed); one byte over is refused.
+    let now = e.now;
+    listener
+        .handle(
+            &Incoming { peer_spiffe_uri: Some(ROUTER), method, path, body: b"{}" },
+            &|| now,
+            &mut sink,
+            &IssueHooks::none(),
+        )
+        .unwrap()
+}
+
+#[test]
+fn method_and_path_predicates_are_each_refused_in_isolation() {
+    let e = Env::new("listener-routes");
+    let not_found = Handled::Rejected { status: "404 Not Found", reason: "unknown route" };
+    // Right path, wrong method (both routes).
+    assert_eq!(get(&e, CHALLENGE_PATH, "GET"), not_found);
+    assert_eq!(get(&e, RENEW_PATH, "GET"), not_found);
+    // Right method, wrong path.
+    assert_eq!(get(&e, "/s9/attachment-authority/other", "POST"), not_found);
+    assert_eq!(get(&e, "", "POST"), not_found);
+}
+
+#[test]
+fn the_sixteen_kib_wire_cap_is_exact_on_both_routes() {
+    let e = Env::new("listener-cap");
+    // 16384 bytes is parsed (a blank body is malformed, not oversized); 16385 is refused.
+    let at_cap = vec![b' '; MAX_WIRE_BODY];
+    let over = vec![b' '; MAX_WIRE_BODY + 1];
+    assert_eq!(MAX_WIRE_BODY, 16384);
     assert!(matches!(
-        call(&e, Some(ROUTER), CHALLENGE_PATH, &at_limit).0.unwrap(),
+        call(&e, Some(ROUTER), CHALLENGE_PATH, &at_cap).0.unwrap(),
         Handled::Challenge(ChallengeReply::Refused { code: RenewalRefusal::Invalid })
     ));
     assert_eq!(
-        call(&e, Some(ROUTER), CHALLENGE_PATH, &over).0.unwrap(),
-        Handled::Rejected { status: "413 Payload Too Large", reason: "body" }
+        call(&e, Some(ROUTER), RENEW_PATH, &at_cap).0.unwrap(),
+        Handled::Renew(Outcome::Refused(RenewalRefusal::Invalid))
     );
+    for path in [CHALLENGE_PATH, RENEW_PATH] {
+        assert_eq!(
+            call(&e, Some(ROUTER), path, &over).0.unwrap(),
+            Handled::Rejected { status: "413 Payload Too Large", reason: "body" }
+        );
+    }
+    // A real request padded to exactly 16384 bytes is served, not merely parsed.
+    let mut body = serde_json::to_vec(&wire(&e)).unwrap();
+    assert!(body.len() <= MAX_WIRE_BODY);
+    body.resize(MAX_WIRE_BODY, b' ');
+    assert!(matches!(
+        call(&e, Some(ROUTER), CHALLENGE_PATH, &body).0.unwrap(),
+        Handled::Challenge(ChallengeReply::Minted { .. })
+    ));
 }

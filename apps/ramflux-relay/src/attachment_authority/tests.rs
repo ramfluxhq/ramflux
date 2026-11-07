@@ -23,6 +23,7 @@ use ramflux_protocol::large_attachment::{ScopedAttachmentGrant, body_digest};
 use std::cell::Cell;
 
 mod listener;
+mod quic;
 mod rows;
 
 const RELAY: &str = "https://relay.example";

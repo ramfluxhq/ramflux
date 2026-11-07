@@ -5,13 +5,19 @@ use super::*;
 use ramflux_protocol::large_attachment::{ForwardAttestation, QualifiedOwner};
 use serde_json::json;
 use std::cell::RefCell;
+use std::time::Instant;
 
 const NOW: u64 = 1_700_000_000;
+
+fn far() -> Instant {
+    Instant::now() + ROUTE_BUDGET
+}
 
 struct Fake {
     verdict: Result<HomeVerdict, RenewalRefusal>,
     relayed: RefCell<Vec<(String, Value)>>,
     verdicts: RefCell<Vec<(String, String)>>,
+    deadlines: RefCell<Vec<Instant>>,
 }
 impl Fake {
     fn new(node: &str) -> Self {
@@ -19,6 +25,7 @@ impl Fake {
             verdict: Ok(verdict(node)),
             relayed: RefCell::default(),
             verdicts: RefCell::default(),
+            deadlines: RefCell::default(),
         }
     }
     fn untouched(&self) -> bool {
@@ -29,11 +36,24 @@ impl SourceBackend for Fake {
     fn now(&self) -> u64 {
         NOW
     }
-    fn verdict(&self, anchor: &str, peer: &str, _: u64) -> Result<HomeVerdict, RenewalRefusal> {
+    fn verdict(
+        &self,
+        anchor: &str,
+        peer: &str,
+        _: u64,
+        deadline: Instant,
+    ) -> Result<HomeVerdict, RenewalRefusal> {
+        self.deadlines.borrow_mut().push(deadline);
         self.verdicts.borrow_mut().push((anchor.into(), peer.into()));
         self.verdict.clone()
     }
-    fn relay(&self, path: &str, body: Vec<u8>) -> Result<Vec<u8>, RenewalRefusal> {
+    fn relay(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, RenewalRefusal> {
+        self.deadlines.borrow_mut().push(deadline);
         self.relayed.borrow_mut().push((path.into(), serde_json::from_slice(&body).unwrap()));
         Ok(b"{\"relayed\":true}".to_vec())
     }
@@ -105,7 +125,7 @@ fn source_route_admits_federation_peer_only() {
         "ramflux-router",
         "",
     ] {
-        let reply = route(peer, &body, Some(&backend));
+        let reply = route(peer, &body, Some(&backend), far());
         assert_eq!(
             reply,
             text("403 Forbidden", "attachment source requires federation identity"),
@@ -113,22 +133,22 @@ fn source_route_admits_federation_peer_only() {
         );
     }
     assert!(backend.untouched());
-    let ok = route(FEDERATION_SERVICE_ID, &body, Some(&backend));
+    let ok = route(FEDERATION_SERVICE_ID, &body, Some(&backend), far());
     assert_eq!(ok, SourceReply { status: "200 OK", body: b"{\"relayed\":true}".to_vec() });
 }
 
 #[test]
 fn dormant_without_a_backend() {
-    let reply = route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), None);
+    let reply = route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), None, far());
     assert_eq!(reply, text("503 Service Unavailable", "attachment source is not configured"));
     // The peer check still comes first.
-    assert_eq!(route("ramflux-gateway", b"{}", None).status, "403 Forbidden");
+    assert_eq!(route("ramflux-gateway", b"{}", None, far()).status, "403 Forbidden");
 }
 
 #[test]
 fn challenge_gets_the_stamped_peer_and_the_router_verdict() {
     let backend = Fake::new("node-b");
-    route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), Some(&backend));
+    route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), Some(&backend), far());
     assert_eq!(*backend.verdicts.borrow(), vec![("anchor-1".to_owned(), "node-b".to_owned())]);
     let relayed = backend.relayed.borrow();
     assert_eq!(relayed.len(), 1);
@@ -143,59 +163,148 @@ fn challenge_gets_the_stamped_peer_and_the_router_verdict() {
 #[test]
 fn forward_reads_the_requester_from_w_and_stamps_peer_and_verdict() {
     let backend = Fake::new("node-b");
-    route(FEDERATION_SERVICE_ID, &forward("node-b", "node-b"), Some(&backend));
+    route(FEDERATION_SERVICE_ID, &forward("node-b", "node-b"), Some(&backend), far());
     let relayed = backend.relayed.borrow();
     assert_eq!(relayed[0].0, RELAY_RENEW_PATH);
     assert_eq!(relayed[0].1["peer_node"], "node-b");
     assert_eq!(relayed[0].1["home_verdict"], serde_json::to_value(verdict("node-b")).unwrap());
 }
 
+fn mismatch() -> Value {
+    json!({"Refused": {"code": "home_mismatch"}})
+}
+fn invalid() -> Value {
+    json!({"Refused": {"code": "invalid"}})
+}
+fn run(backend: &Fake, body: &[u8]) -> SourceReply {
+    route(FEDERATION_SERVICE_ID, body, Some(backend), far())
+}
+fn verdict_for(node: &str, anchor: &str) -> Fake {
+    let mut f = Fake::new(node);
+    f.verdict = Ok(HomeVerdict { account_anchor: anchor.into(), ..verdict(node) });
+    f
+}
+
+/// One equality violated per row, for both envelope kinds. The three equalities are
+/// verdict.home == peer, peer == requester home, and verdict.anchor == requester anchor.
 #[test]
 fn every_home_equality_is_refused_in_isolation_without_a_relay_call() {
-    // peer_node differs from the requester's home node.
-    let backend = Fake::new("node-b");
-    let reply = route(FEDERATION_SERVICE_ID, &challenge("node-c", "node-b"), Some(&backend));
-    assert_eq!(refusal(&reply), json!({"Refused": {"code": "home_mismatch"}}));
-    assert!(backend.relayed.borrow().is_empty());
-    // The verdict names another home than peer_node.
-    let backend = Fake::new("node-d");
-    let reply = route(FEDERATION_SERVICE_ID, &forward("node-b", "node-b"), Some(&backend));
-    assert_eq!(refusal(&reply), json!({"Refused": {"code": "home_mismatch"}}));
-    assert!(backend.relayed.borrow().is_empty());
-    // The verdict is for another anchor.
-    let mut backend = Fake::new("node-b");
-    backend.verdict = Ok(HomeVerdict { account_anchor: "anchor-2".into(), ..verdict("node-b") });
-    let reply = route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), Some(&backend));
-    assert_eq!(refusal(&reply), json!({"Refused": {"code": "home_mismatch"}}));
-    assert!(backend.relayed.borrow().is_empty());
+    type Build = fn(&str, &str) -> Vec<u8>;
+    for (kind, build) in [("challenge", challenge as Build), ("forward", forward as Build)] {
+        // verdict names C; peer = requester home = B.
+        let backend = verdict_for("node-c", "anchor-1");
+        assert_eq!(refusal(&run(&backend, &build("node-b", "node-b"))), mismatch(), "{kind}");
+        assert!(backend.relayed.borrow().is_empty());
+        // verdict = peer = C; requester home = B (the other half of the same pair).
+        let backend = verdict_for("node-c", "anchor-1");
+        assert_eq!(refusal(&run(&backend, &build("node-c", "node-b"))), mismatch(), "{kind}");
+        assert!(backend.relayed.borrow().is_empty());
+        // verdict = requester home = B; peer = C.
+        let backend = verdict_for("node-b", "anchor-1");
+        assert_eq!(refusal(&run(&backend, &build("node-c", "node-b"))), mismatch(), "{kind}");
+        assert!(backend.relayed.borrow().is_empty());
+        // Only the anchor differs.
+        let backend = verdict_for("node-b", "anchor-2");
+        assert_eq!(refusal(&run(&backend, &build("node-b", "node-b"))), mismatch(), "{kind}");
+        assert!(backend.relayed.borrow().is_empty());
+        // All equal: relayed exactly once.
+        let backend = verdict_for("node-b", "anchor-1");
+        run(&backend, &build("node-b", "node-b"));
+        assert_eq!(backend.relayed.borrow().len(), 1, "{kind}");
+    }
 }
 
 #[test]
 fn verdict_refusals_and_malformed_bodies_are_typed() {
     let mut backend = Fake::new("node-b");
     backend.verdict = Err(RenewalRefusal::HomeTrustUnavailable);
-    let reply = route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), Some(&backend));
+    let reply = run(&backend, &challenge("node-b", "node-b"));
     assert_eq!(refusal(&reply), json!({"Refused": {"code": "home_trust_unavailable"}}));
     assert!(backend.relayed.borrow().is_empty());
     let backend = Fake::new("node-b");
-    for body in [
-        &b"not json"[..],
-        br#"{"kind":"other"}"#,
-        br#"{"kind":"challenge","peer_node":"x","request":{}}"#,
-    ] {
-        let reply = route(FEDERATION_SERVICE_ID, body, Some(&backend));
-        assert_eq!(refusal(&reply), json!({"Refused": {"code": "invalid"}}));
+    let bad: Vec<(&str, Vec<u8>)> = vec![
+        ("not json", b"not json".to_vec()),
+        ("unknown kind", br#"{"kind":"other"}"#.to_vec()),
+        ("no requester", br#"{"kind":"challenge","peer_node":"x","request":{}}"#.to_vec()),
+        (
+            "no anchor",
+            br#"{"kind":"challenge","peer_node":"x","request":{"requester":{"home_node_id":"x"}}}"#
+                .to_vec(),
+        ),
+        (
+            "no home",
+            br#"{"kind":"challenge","peer_node":"x","request":{"requester":{"account_anchor":"a"}}}"#
+                .to_vec(),
+        ),
+        ("request not an object", br#"{"kind":"challenge","peer_node":"x","request":[]}"#.to_vec()),
+        ("forward without W", br#"{"kind":"forward","peer_node":"x","request":{}}"#.to_vec()),
+        (
+            "W not bytes",
+            br#"{"kind":"forward","peer_node":"x","request":{"attestation":"abc"}}"#.to_vec(),
+        ),
+        (
+            "W undecodable",
+            br#"{"kind":"forward","peer_node":"x","request":{"attestation":[1,2,3]}}"#.to_vec(),
+        ),
+    ];
+    for (name, body) in &bad {
+        assert_eq!(refusal(&run(&backend, body)), invalid(), "{name}");
     }
     assert!(backend.untouched());
-    // Inclusive size bound: the cap itself is parsed, one byte more is refused.
-    let at_cap = vec![b' '; MAX_BODY];
-    let over = vec![b' '; MAX_BODY + 1];
-    assert_eq!(
-        refusal(&route(FEDERATION_SERVICE_ID, &at_cap, Some(&backend))),
-        json!({"Refused": {"code": "invalid"}})
-    );
-    assert_eq!(
-        route(FEDERATION_SERVICE_ID, &over, Some(&backend)),
-        text("413 Payload Too Large", "body")
-    );
+}
+
+fn padded(mut body: Vec<u8>, total: usize) -> Vec<u8> {
+    assert!(body.len() <= total);
+    body.resize(total, b' ');
+    body
+}
+
+#[test]
+fn sixteen_kib_wire_cap_is_exact_at_the_router_gate() {
+    let backend = Fake::new("node-b");
+    let base = challenge("node-b", "node-b");
+    let at_cap = padded(base.clone(), MAX_BODY);
+    assert_eq!(at_cap.len(), 16384);
+    let ok = run(&backend, &at_cap);
+    assert_eq!(ok.body, b"{\"relayed\":true}".to_vec());
+    let over = padded(base, MAX_BODY + 1);
+    assert_eq!(run(&backend, &over), text("413 Payload Too Large", "body"));
+    assert_eq!(backend.relayed.borrow().len(), 1);
+}
+
+#[test]
+fn an_outgoing_body_over_the_cap_is_refused_without_a_relay_call() {
+    let backend = Fake::new("node-b");
+    // The largest challenge that still passes the inbound gate: the stamped verdict then
+    // pushes the forwarded body past 16 KiB.
+    let mut n = 1;
+    let body = loop {
+        let mut v: Value = serde_json::from_slice(&challenge("node-b", "node-b")).unwrap();
+        v["request"]["capability"] = json!(vec![1u8; n]);
+        let b = serde_json::to_vec(&v).unwrap();
+        if b.len() + 2 > MAX_BODY {
+            break b;
+        }
+        n += 1;
+    };
+    assert!(body.len() <= MAX_BODY && body.len() + 2 > MAX_BODY);
+    assert_eq!(refusal(&run(&backend, &body)), invalid());
+    assert!(backend.relayed.borrow().is_empty());
+}
+
+#[test]
+fn the_shared_route_budget_reaches_every_backend_call_and_expiry_is_busy() {
+    // An elapsed budget stops the route before any backend call.
+    let backend = Fake::new("node-b");
+    let past = Instant::now().checked_sub(std::time::Duration::from_millis(1)).unwrap();
+    let reply = route(FEDERATION_SERVICE_ID, &challenge("node-b", "node-b"), Some(&backend), past);
+    assert_eq!(refusal(&reply), json!({"Refused": {"code": "busy"}}));
+    assert!(backend.untouched());
+    // A live budget is the very deadline each hop receives, verdict first, relay second.
+    let backend = Fake::new("node-b");
+    let deadline = far();
+    route(FEDERATION_SERVICE_ID, &forward("node-b", "node-b"), Some(&backend), deadline);
+    assert_eq!(*backend.deadlines.borrow(), vec![deadline, deadline]);
+    // The whole route budget is the protocol's ten seconds.
+    assert_eq!(ROUTE_BUDGET, std::time::Duration::from_secs(10));
 }
