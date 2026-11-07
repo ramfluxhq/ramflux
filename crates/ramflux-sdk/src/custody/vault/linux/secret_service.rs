@@ -12,7 +12,32 @@ use tokio::{sync::watch, time::Instant};
 use zeroize::Zeroize;
 
 pub(super) const COLLECTION: &str = "ramflux-local-vault";
-const SERVICE: &str = "ramflux.identity.linux_vault.kek.v1";
+/// Pre-contract identity written by earlier dormant builds. Its presence is refused, never
+/// adopted, rewritten or deleted: the operator must inspect it.
+const LEGACY_SERVICE: &str = "ramflux.identity.linux_vault.kek.v1";
+
+/// D5a item identity: service `ramflux.linux-vault.<vault_id>.<realm>`, user `<key_id>`; realm is
+/// the 1-based codec realm (primary 1, device 2, data 3).
+pub(super) struct Identity<'a> {
+    pub(super) vault_id: &'a str,
+    pub(super) key_id: &'a str,
+    pub(super) realm: usize,
+}
+fn is_id(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn attributes_of(service: &str, user: &str) -> Result<HashMap<String, String>, Error> {
+    let credential = keyring::secret_service::default_credential_builder()
+        .build(Some(COLLECTION), service, user)
+        .map_err(|_| Error::Provider)?;
+    let identity = credential
+        .as_any()
+        .downcast_ref::<keyring::secret_service::SsCredential>()
+        .ok_or(Error::Provider)?;
+    let mut attributes: HashMap<String, String> = identity.attributes.clone();
+    attributes.remove("application");
+    Ok(attributes)
+}
 
 struct Response(Vec<u8>);
 impl Drop for Response {
@@ -65,11 +90,11 @@ fn local_collection<'a>(
     selected.ok_or(Error::Missing)
 }
 
-/// Caller owns the permanent installation lock across missing/set/readback and
-/// descriptor publication. All calls run inside its bounded blocking worker.
+/// Caller owns the permanent installation lock across missing/set/readback, durable realm
+/// progress and descriptor publication. All calls run inside its bounded blocking worker.
+/// `create` is false once the realm is known complete: a missing item is then `Corrupt`.
 pub(super) fn ensure(
-    id: &str,
-    realm: usize,
+    id: &Identity<'_>,
     create: bool,
     cancel: &watch::Receiver<bool>,
     deadline: Instant,
@@ -77,23 +102,20 @@ pub(super) fn ensure(
 ) -> Result<(), Error> {
     let deadline = deadline.min(Instant::now() + std::time::Duration::from_secs(30));
     check(cancel, deadline)?;
-    if realm >= 3 {
+    if id.realm >= 3 {
         return Err(Error::Realm);
     }
-    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if !is_id(id.vault_id) || !is_id(id.key_id) {
         return Err(Error::Corrupt);
     }
-    let user = format!("{}:{id}", super::systemd::NAMES[realm]);
-    let credential = keyring::secret_service::default_credential_builder()
-        .build(Some(COLLECTION), SERVICE, &user)
-        .map_err(|_| Error::Provider)?;
-    let identity = credential
-        .as_any()
-        .downcast_ref::<keyring::secret_service::SsCredential>()
-        .ok_or(Error::Provider)?;
-    let mut attributes: HashMap<&str, &str> =
-        identity.attributes.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    attributes.remove("application");
+    let service_name = format!("ramflux.linux-vault.{}.{}", id.vault_id, id.realm + 1);
+    let owned = attributes_of(&service_name, id.key_id)?;
+    let attributes: HashMap<&str, &str> =
+        owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let legacy_user = format!("{}:{}", super::systemd::NAMES[id.realm], id.key_id);
+    let legacy_owned = attributes_of(LEGACY_SERVICE, &legacy_user)?;
+    let legacy: HashMap<&str, &str> =
+        legacy_owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     // Each underlying D-Bus RPC is bounded to 2 seconds. Never request Unlock;
     // any provider creation prompt has a zero-second wait budget.
     let service = SecretService::connect_with_max_prompt_timeout(EncryptionType::Dh, 0)
@@ -102,6 +124,11 @@ pub(super) fn ensure(
     let collection = local_collection(&service, cancel, deadline)?;
     if collection.is_locked().map_err(|_| Error::Provider)? {
         return Err(Error::Provider);
+    }
+    let old = service.search_items(legacy).map_err(|_| Error::Provider)?;
+    if !old.unlocked.is_empty() || !old.locked.is_empty() {
+        // A non-contract item for this key id: never adopt, overwrite or delete it.
+        return Err(Error::Corrupt);
     }
     let matches = service.search_items(attributes.clone()).map_err(|_| Error::Provider)?;
     if matches.unlocked.len() + matches.locked.len() > 1 {
