@@ -1685,7 +1685,7 @@ impl RouterCore {
         .cloned()
     }
 
-    fn effective_home_node_migration_for_target(
+    pub(crate) fn effective_home_node_migration_for_target(
         &self,
         target_delivery_id: &str,
         now_unix_seconds: i64,

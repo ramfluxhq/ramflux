@@ -36,6 +36,7 @@ pub(super) fn route(
         || path == "/mvp0/issued-seqs"
         || path == "/mvp1/session-push-capabilities"
         || path == "/mvp0/ephemeral-registrations"
+        || path == "/mvp0/envelope-ephemeral"
         || capable_page
         || entry
         || path == "/mvp0/ack-bound";
@@ -73,6 +74,7 @@ pub(super) fn route(
             })
         }
         ("POST", "/mvp0/ephemeral-registrations") => reassert(body, router),
+        ("POST", "/mvp0/envelope-ephemeral") => envelope_ephemeral(body, router),
         ("POST", "/mvp0/ack-bound-batch") => {
             match serde_json::from_slice::<ramflux_node_core::SessionAckBatchRequest>(body) {
                 Ok(request) => match router.state().session_ack_batch(router.store(), &request) {
@@ -113,6 +115,21 @@ fn bound_nack(
         Ok(cursor) => reply(&serde_json::json!({"incarnation_id":id,"cursor":cursor})),
         Err(error) => Ok(MeshResponse::json("400 Bad Request", serde_json::to_vec(&error)?)),
     }
+}
+
+fn envelope_ephemeral(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<MeshResponse> {
+    let Ok(request) = serde_json::from_slice::<ramflux_node_core::EphemeralRouteRequest>(body)
+    else {
+        return reply(&ramflux_node_core::EphemeralRouteResponse::Dropped {
+            reason: ramflux_node_core::EphemeralDropReason::Invalid,
+        });
+    };
+    let now_ms = ramflux_node_core::now_unix_seconds().saturating_mul(1_000);
+    let result = router.state().route_ephemeral(&request.envelope, request.expires_at_ms, now_ms);
+    reply(&result.into_response())
 }
 
 fn reassert(
@@ -265,5 +282,7 @@ fn point(path: &str, router: &crate::router_runtime::RouterHandle) -> anyhow::Re
 mod capability_binding;
 #[cfg(test)]
 mod ephemeral_reassertion;
+#[cfg(test)]
+mod ephemeral_route;
 #[cfg(test)]
 mod tests;

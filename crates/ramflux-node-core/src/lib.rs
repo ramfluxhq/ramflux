@@ -238,9 +238,12 @@ mod session_push;
 pub use session_push::*;
 
 mod ephemeral;
+#[cfg(any(test, feature = "test-support"))]
+pub use ephemeral::EphemeralDurableSnapshot;
 pub use ephemeral::{
-    EPHEMERAL_CAPABILITY_BOUND, EPHEMERAL_REASSERTION_ITEM_BOUND, EphemeralReassertionError,
-    EphemeralRouteGate,
+    EPHEMERAL_CAPABILITY_BOUND, EPHEMERAL_REASSERTION_ITEM_BOUND, EphemeralDropReason,
+    EphemeralReassertionError, EphemeralRouteGate, EphemeralRouteRequest, EphemeralRouteResponse,
+    EphemeralRouteResult,
 };
 
 mod session_push_frames;
