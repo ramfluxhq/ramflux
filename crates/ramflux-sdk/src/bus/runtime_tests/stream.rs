@@ -217,22 +217,42 @@ async fn unlock_restarts_driver_with_persisted_journal_sequence() -> Result<(), 
             )
             .await?;
             assert!(supervisor.account_actor("bob").is_some_and(|actor| actor.is_open()));
-            // The restarted driver samples 250 ms after unlock and journals the sample once.
-            // A live-only subscription made after that moment (any slow host) never sees it and
-            // the unchanged later samples add no event, so subscribe from the pre-lock head and
-            // let replay deliver the event whichever side of the subscription it lands on.
-            let head = before["bounds"]["head_seq"].as_u64().ok_or_else(|| failure("head"))?;
-            bus.request(
-                Some("bob".to_owned()),
-                "stream",
-                "bus.subscribe",
-                serde_json::json!({"topics":["sync.status"],"since_seq":head}),
-            )
-            .await?;
-            let event = tokio::time::timeout(HANG * 2, bus.next_event())
-                .await
-                .map_err(|_| failure("driver did not resume"))??;
-            assert!(event.seq.ok_or_else(|| failure("seq"))? > head);
+            // Change-only journaling hides a repeated sample, and a pre-lock driver tick can
+            // leave a journal row and an identical persisted sample behind, so neither an event
+            // nor a seq bound proves the restart. `last_run` is rewritten on every pass: wait for
+            // it to pass a second that began after the unlock, which only the restarted driver
+            // can produce (a pre-lock pass is stamped no later than the lock).
+            let unlocked_at = now_unix_timestamp();
+            let resumed = tokio::time::timeout(HANG, async {
+                loop {
+                    let status = bus
+                        .request_frame(request(
+                            "status",
+                            "bob",
+                            "sync.status.get",
+                            serde_json::json!({}),
+                        ))
+                        .await?;
+                    if status["last_run"].as_i64().is_some_and(|at| at > unlocked_at) {
+                        return Ok::<_, SdkError>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            assert!(resumed.is_ok(), "restarted driver did not advance last_run");
+            resumed.map_err(|_| failure("driver did not resume"))??;
+            // The journal sequence survives the restart.
+            let after = supervisor
+                .account_actor("bob")
+                .ok_or_else(|| failure("actor"))?
+                .reader_pool()?
+                .request(request("head", "bob", "stream.read", serde_json::json!({})))
+                .await?;
+            assert!(
+                after["bounds"]["head_seq"].as_u64().ok_or_else(|| failure("head"))?
+                    >= before["bounds"]["head_seq"].as_u64().ok_or_else(|| failure("head"))?
+            );
             supervisor.shutdown().await?;
             drop(bus);
             server.abort();
