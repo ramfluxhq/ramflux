@@ -270,17 +270,17 @@ async fn conflict_rows() -> Case {
         done.account.client.account_db()?.load_actor_state(&done.key)?.ok_or("job")?;
     assert_eq!(again.attempts, 0);
     assert_eq!(serde_json::to_value(&again.packet)?, serde_json::to_value(&job.packet)?);
+    // The retry state survives a real reopen: the job is eligible again and the receipt is
+    // `pending` with no reason.
     reopen(&mut done.account)?;
-    let account = std::mem::replace(&mut done.account, placeholder()?);
-    let watched = done.key.clone();
-    done.account = drive(
-        account,
-        &done.root,
-        Some(Box::new(move |db| Ok(!db.actor_state_exists(&watched)?))),
-        "manual retry delivery",
-    )
-    .await?;
-    assert_eq!(done.gateway.lock().map_err(|_| "gateway")?.attempts.len(), 2);
+    let db = done.account.client.account_db()?;
+    let again: approval::Job = db.load_actor_state(&done.key)?.ok_or("job")?;
+    assert_eq!(again.attempts, 0);
+    assert!(again.next_at <= now_unix_timestamp());
+    let rows = done.account.client.task_approval_decision_rows()?;
+    assert_eq!(rows[0]["delivery_state"], "pending");
+    assert_eq!(rows[0]["reason_code"], serde_json::Value::Null);
+    assert_eq!(done.gateway.lock().map_err(|_| "gateway")?.attempts.len(), 1);
     // (a3d) the opposite choice is refused as consumed.
     let refused = done.account.client.decide_task_approval(&format!("task_approval_{id}"), true);
     assert!(refused.is_err());
