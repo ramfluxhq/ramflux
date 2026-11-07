@@ -66,3 +66,41 @@ pub(crate) fn run_output(command: &mut Command, deadline: Duration) -> TestResul
     let status = run_bounded(command, deadline)?;
     Ok(Output { status, stdout: std::fs::read(&out)?, stderr: std::fs::read(&err)? })
 }
+
+/// Set in the child that runs a lock-holding test body.
+pub(crate) const BODY_ENV: &str = "RF_VAULT_TEST_BODY";
+/// True inside a process started by [`run_in_child`].
+pub(crate) fn in_child() -> bool {
+    std::env::var_os(BODY_ENV).is_some()
+}
+/// Runs a lock-holding test body in its own process (re-exec of this test binary).
+///
+/// `flock` locks belong to the open file description, which a forked child shares with its
+/// parent until it execs. A fixture spawned by another test thread would therefore keep a copy of
+/// a lock held at that instant, and the holder's next lock attempt would see `Busy`. CLOEXEC
+/// cannot close the fork-to-exec window. Bodies that take the realm lock run here, so no other
+/// test's fork can ever see their descriptors, and no timing window or gate is needed. The wait
+/// is bounded, the child is killed and reaped on every path, and its output is propagated.
+pub(crate) fn run_in_child(full_name: &str) -> TestResult {
+    run_child(full_name, DEADLINE, &mut 0)
+}
+pub(crate) fn run_child(full_name: &str, deadline: Duration, pid: &mut u32) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("child.log");
+    let out = std::fs::File::create(&log)?;
+    let status = run_bounded_pid(
+        Command::new(std::env::current_exe()?)
+            .args(["--exact", full_name])
+            .arg("--nocapture")
+            .env(BODY_ENV, "1")
+            .stdout(out.try_clone()?)
+            .stderr(out),
+        deadline,
+        pid,
+    )?;
+    if !status.success() {
+        let output = std::fs::read_to_string(&log).unwrap_or_default();
+        return Err(format!("{full_name} failed ({status}):\n{output}").into());
+    }
+    Ok(())
+}

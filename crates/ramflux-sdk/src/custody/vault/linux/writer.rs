@@ -75,7 +75,16 @@ impl Store {
                 return self.read(&reference, kind, generation);
             }
             Operation::Delete { reference, kind, generation } => {
-                self.read(&reference, kind, generation)?;
+                match self.read(&reference, kind, generation) {
+                    Ok(_) => {}
+                    Err(Error::Missing) => {
+                        // Absence may follow an unlink whose parent fsync failed: reconcile it
+                        // durably under the writer lock before reporting it.
+                        ops.fsync_dir(&self.realm_dir)?;
+                        return Err(Error::Missing);
+                    }
+                    Err(e) => return Err(e),
+                }
                 cut("before_delete")?;
                 ops.unlink(&self.realm_dir, &reference)?;
                 cut("after_delete")?;

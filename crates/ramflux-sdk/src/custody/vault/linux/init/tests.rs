@@ -340,15 +340,11 @@ fn linux_vault_init_refuses_foreign_owned_objects() -> TestResult {
     );
     // Injected credential (0400, exactly 32 bytes).
     put(base.path(), "own-key", &[7; 32], 0o400)?;
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.path().join("own-key")),
-        Ok(()),
-        "same-owner credential control"
-    );
+    assert_eq!(credential(&base.path().join("own-key")), Ok(()), "same-owner credential control");
     put(base.path(), "other-key", &[7; 32], 0o400)?;
     foreign(&base.path().join("other-key"))?;
     assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.path().join("other-key")),
+        credential(&base.path().join("other-key")),
         Err(Error::Metadata),
         "foreign-owned 0400 credential"
     );
