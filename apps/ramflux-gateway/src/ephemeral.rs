@@ -84,23 +84,47 @@ pub(crate) type EphemeralRate = tokio::sync::Mutex<EphemeralRateLimiter>;
 
 /// Volatile buckets keyed by session ID, so a same-session resume keeps its spent tokens.
 ///
-/// Expiry is explicit and exact: a bucket idle for [`EPHEMERAL_RATE_FULL_REFILL_MS`] (40 tokens
-/// x 50 ms) would be full again, so it is dropped on the next lookup and a fresh full bucket
-/// is indistinguishable from the refilled one. Nothing here is ever persisted (I-NP).
+/// An entry is removed only when BOTH hold: no live runtime owns it (the registry's `Arc` is
+/// the only one, so a resume can no longer need its spent state through anyone else) and the
+/// bucket is fully refilled at `now` (idle for [`EPHEMERAL_RATE_FULL_REFILL_MS`], 40 tokens
+/// x 50 ms), so a fresh bucket is indistinguishable from it. An entry with an owner is never
+/// touched, however idle: its owner may spend through it at any time. The map is therefore
+/// bounded by live sessions plus orphans that are still refilling, swept on every
+/// establishment and when a session ends. Nothing here is ever persisted (I-NP).
 #[derive(Default)]
 pub(crate) struct EphemeralRateRegistry {
     buckets: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<EphemeralRate>>>,
 }
 
 impl EphemeralRateRegistry {
-    /// The live bucket for `session_id`, created when absent or expired as of `now_ms`.
+    /// The bucket for `session_id`: the existing one (possibly spent) or a new full one.
     pub(crate) fn bucket(&self, session_id: &str, now_ms: u64) -> std::sync::Arc<EphemeralRate> {
         let mut buckets = self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A bucket that is locked right now is in use, so it is not idle.
-        buckets.retain(|_, bucket| {
-            bucket.try_lock().map_or(true, |limiter| !limiter.idle_expired(now_ms))
-        });
+        Self::prune(&mut buckets, now_ms);
         std::sync::Arc::clone(buckets.entry(session_id.to_owned()).or_default())
+    }
+
+    /// Remove orphaned, fully refilled entries; never an entry that still has an owner.
+    pub(crate) fn sweep(&self, now_ms: u64) {
+        let mut buckets = self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::prune(&mut buckets, now_ms);
+    }
+
+    fn prune(
+        buckets: &mut std::collections::BTreeMap<String, std::sync::Arc<EphemeralRate>>,
+        now_ms: u64,
+    ) {
+        buckets.retain(|_, bucket| {
+            // Count first: while the registry lock is held no new owner can appear, so a count
+            // of one stays one and `try_lock` cannot contend.
+            std::sync::Arc::strong_count(bucket) > 1
+                || bucket.try_lock().map_or(true, |limiter| !limiter.idle_expired(now_ms))
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 }
 

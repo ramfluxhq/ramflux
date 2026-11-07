@@ -428,6 +428,8 @@ async fn run_registered_gateway_session(
     )
     .await;
     context.hub.unregister(&target_delivery_id, registration.token).await;
+    // The loop consumed this session's runtime, so its bucket may now be an orphan.
+    context.hub.ephemeral_rates.sweep(crate::ephemeral::now_ms());
     result
 }
 
