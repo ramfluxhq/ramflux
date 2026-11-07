@@ -117,7 +117,23 @@ impl BundleBytes {
     const ACCOUNT_KEY: &'static [u8] = br#"{"account_id":""#;
     const PASSPHRASE_KEY: &'static [u8] = br#"","data_passphrase":""#;
     const END: &'static [u8] = br#""}"#;
-    pub(super) fn serialize(bundle: &AgentProvisioningBundle) -> Self {
+    pub(super) fn serialize(bundle: &AgentProvisioningBundle) -> Result<Self, SdkError> {
+        Self::write(bundle, None)
+    }
+    /// Test seam: fail once `after` passphrase bytes have entered the buffer.
+    #[cfg(test)]
+    pub(super) fn serialize_failing(
+        bundle: &AgentProvisioningBundle,
+        after: usize,
+    ) -> Result<Self, SdkError> {
+        Self::write(bundle, Some(after))
+    }
+    /// Every error path drops `buffer`, which wipes the whole allocation. A capacity change
+    /// (an escaped-length miscount that reallocated) fails closed instead of continuing.
+    fn write(
+        bundle: &AgentProvisioningBundle,
+        fail_after: Option<usize>,
+    ) -> Result<Self, SdkError> {
         let (account, passphrase) = (&bundle.account_id, &bundle.data_passphrase);
         let length = Self::ACCOUNT_KEY.len()
             + escaped_len(account)
@@ -125,13 +141,16 @@ impl BundleBytes {
             + escaped_len(passphrase)
             + Self::END.len();
         let mut buffer = Self(Vec::with_capacity(length));
+        let capacity = buffer.0.capacity();
         buffer.0.extend_from_slice(Self::ACCOUNT_KEY);
-        escape_into(&mut buffer.0, account);
+        escape_into(&mut buffer.0, account, None)?;
         buffer.0.extend_from_slice(Self::PASSPHRASE_KEY);
-        escape_into(&mut buffer.0, passphrase);
+        escape_into(&mut buffer.0, passphrase, fail_after)?;
         buffer.0.extend_from_slice(Self::END);
-        debug_assert_eq!(buffer.0.len(), length);
-        buffer
+        if buffer.0.len() != length || buffer.0.capacity() != capacity {
+            return Err(invalid());
+        }
+        Ok(buffer)
     }
     #[cfg(test)]
     pub(super) fn as_slice(&self) -> &[u8] {
@@ -154,8 +173,9 @@ fn escaped_len(text: &str) -> usize {
         })
         .sum()
 }
-fn escape_into(out: &mut Vec<u8>, text: &str) {
+fn escape_into(out: &mut Vec<u8>, text: &str, fail_after: Option<usize>) -> Result<(), SdkError> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    let start = out.len();
     for character in text.chars() {
         match character {
             '"' => out.extend_from_slice(b"\\\""),
@@ -176,7 +196,11 @@ fn escape_into(out: &mut Vec<u8>, text: &str) {
                 out.extend_from_slice(other.encode_utf8(&mut utf8).as_bytes());
             }
         }
+        if fail_after.is_some_and(|limit| out.len() - start >= limit) {
+            return Err(invalid());
+        }
     }
+    Ok(())
 }
 /// An authenticated local account, with no legacy root signer or active session.
 #[derive(Clone, Debug)]
@@ -826,7 +850,7 @@ pub(crate) fn export_agent_credentials(
     };
     let bundle =
         AgentProvisioningBundle { account_id: account_id.to_owned(), data_passphrase: passphrase };
-    let bytes = BundleBytes::serialize(&bundle);
+    let bytes = BundleBytes::serialize(&bundle)?;
     let mut created = false;
     let result = (|| {
         let mut file =

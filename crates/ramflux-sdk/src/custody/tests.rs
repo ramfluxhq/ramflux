@@ -532,11 +532,38 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
     }
     Ok(())
 }
+/// A serializer failure after N passphrase bytes still wipes the complete allocation.
+#[test]
+fn custody_agent_bundle_serializer_wipes_on_partial_write_failure() -> Result {
+    let passphrase = "partial-write-secret";
+    for after in [1, passphrase.len() / 2, passphrase.len()] {
+        let bundle = super::store::AgentProvisioningBundle {
+            account_id: "agent-partial".into(),
+            data_passphrase: passphrase.into(),
+        };
+        let expected = ramflux_protocol::canonical_json_bytes(&bundle)?.len();
+        let _session = super::observer::begin(&["p07-export-serializer"]);
+        let outcome = super::store::BundleBytes::serialize_failing(&bundle, after);
+        assert!(matches!(outcome, Err(crate::SdkError::CustodySetupInvalid)), "after {after}");
+        let observed = super::observer::take();
+        let seen = observed
+            .iter()
+            // Other tests may drop same-label buffers meanwhile; ours has the exact capacity.
+            .find(|item| item.label == "p07-export-serializer" && item.capacity == expected)
+            .ok_or_else(|| format!("after {after}: missing p07-export-serializer"))?;
+        assert_eq!(seen.capacity, expected, "after {after}: full capacity");
+        assert!(seen.capacity >= after, "after {after}");
+        assert_eq!(seen.bytes.len(), seen.capacity, "after {after}: partial slice");
+        assert!(seen.bytes.iter().all(|b| *b == 0), "after {after}: uncleared partial write");
+    }
+    Ok(())
+}
 /// The guarded writer must be byte-identical to the canonical JSON encoder for every escape class.
 #[test]
 fn custody_agent_bundle_bytes_match_canonical_json() -> Result {
+    let _session = super::observer::begin(&["p07-export-serializer"]);
     let long = "x".repeat(8192);
-    let fixtures: [(&str, String); 16] = [
+    let fixtures: [(&str, String); 17] = [
         ("len1", "a".into()),
         ("len8192", long),
         ("quote", "a\"b".into()),
@@ -552,7 +579,8 @@ fn custody_agent_bundle_bytes_match_canonical_json() -> Result {
         ("ls", "a\u{2028}b".into()),
         ("astral", "a\u{1F600}b".into()),
         ("mixed", "\"\\\u{1}\u{1F600}\u{2029}é".into()),
-        ("empty-ish", "\u{20}".into()),
+        ("space", "\u{20}".into()),
+        ("empty", String::new()),
     ];
     for (name, passphrase) in fixtures {
         let bundle = super::store::AgentProvisioningBundle {
@@ -560,7 +588,7 @@ fn custody_agent_bundle_bytes_match_canonical_json() -> Result {
             data_passphrase: passphrase,
         };
         let expected = ramflux_protocol::canonical_json_bytes(&bundle)?;
-        let written = super::store::BundleBytes::serialize(&bundle);
+        let written = super::store::BundleBytes::serialize(&bundle)?;
         assert_eq!(written.as_slice(), expected.as_slice(), "{name}");
     }
     Ok(())
