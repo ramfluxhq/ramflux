@@ -92,6 +92,7 @@ pub fn recover_primary(
             device.migration_state = MigrationState::Revoked;
             device.revoked_at = Some(input.issued_at);
             device.branch_certificate = None;
+            device.message_layer = None;
         }
     }
     body.devices.push(Device {

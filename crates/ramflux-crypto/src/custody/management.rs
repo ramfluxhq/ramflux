@@ -36,6 +36,7 @@ impl SelfSigningKey {
         device.migration_state = MigrationState::Revoked;
         device.revoked_at = Some(now);
         device.branch_certificate = None;
+        device.message_layer = None;
         self.sign_record(body)
     }
     /// Enroll an explicitly certified new id, preserving 64 roster slots for safety headroom.

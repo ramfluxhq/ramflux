@@ -318,3 +318,86 @@ fn compacted_checkpoint_preserves_removed_device_denial_and_pins() -> Result {
     pins.require_current(&compacted)?;
     Ok(())
 }
+
+fn declared_record(
+    primary: &SelfSigningKey,
+    genesis: &Envelope<DeviceSet>,
+) -> Result<Envelope<DeviceSet>> {
+    let now = genesis.body.issued_at;
+    let branch = crate::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let declaration = LayerDeclaration {
+        device: DeviceRef {
+            account_anchor: genesis.body.account_anchor.clone(),
+            device_id: "primary".into(),
+            device_epoch: 1,
+        },
+        max_layer: MESSAGE_LAYER_FLOOR,
+        declaration_sequence: 1,
+        issued_at: now,
+        expires_at: now + MAX_LAYER_DECLARATION_VALIDITY_SECONDS,
+    };
+    let bytes = signing_bytes(domain::CUSTODY_MESSAGE_LAYER_DECLARATION, &declaration)?;
+    let mut body = genesis.body.clone();
+    body.devices[0].message_layer = Some(SignedLayerDeclaration {
+        branch_signature: crate::sign_canonical_bytes_with_device_branch(&bytes, &branch),
+        declaration,
+    });
+    let declared = primary.sign_record(body)?;
+    verify_record(&declared, now, None, None)?;
+    Ok(declared)
+}
+
+#[test]
+fn revocation_clears_the_device_declaration_and_the_record_still_validates() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let declared = declared_record(&primary, &genesis)?;
+    let current = verify_record(&declared, now, None, None)?;
+    let revoked = primary.revoke_device(&current, "primary", now + 1)?;
+    assert!(revoked.body.devices[0].message_layer.is_none());
+    let verified = verify_record(&revoked, now + 1, None, None)?;
+    assert!(verified.revoked_ids().contains("primary"));
+    Ok(())
+}
+
+#[test]
+fn recovery_clears_device_declarations_on_superseded_devices() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let declared = declared_record(&primary, &genesis)?;
+    let verified = verify_record(&declared, now, None, None)?;
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[0; 32])?)?;
+    let replacement = SelfSigningKey::generate()?;
+    let branch =
+        crate::create_device_branch(&declared.body.principal_id, "replacement", 1, [19; 32]);
+    let next = recover_primary(
+        &master,
+        &replacement,
+        &branch,
+        &crate::X25519KeyPair::from_seed([20; 32]),
+        &verified,
+        RecoveryInput {
+            highest_observed_range: 8,
+            issued_at: now + 1,
+            master_cert_id: encode_base64url([21; 32]),
+            branch_cert_id: encode_base64url([22; 32]),
+        },
+    )?;
+    assert!(next.body.devices.iter().all(|d| d.message_layer.is_none()));
+    let recovered = verify_record(&next, now + 1, None, None)?;
+    assert!(recovered.revoked_ids().contains("primary"));
+    Ok(())
+}
+
+#[test]
+fn validate_refuses_a_revoked_device_that_keeps_its_declaration() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let declared = declared_record(&primary, &genesis)?;
+    let current = verify_record(&declared, now, None, None)?;
+    let revoked = primary.revoke_device(&current, "primary", now + 1)?;
+    let mut body = revoked.body.clone();
+    body.devices[0].message_layer = declared.body.devices[0].message_layer.clone();
+    assert_authority_error(&primary.sign_record(body), "invalid native custody device state");
+    Ok(())
+}
