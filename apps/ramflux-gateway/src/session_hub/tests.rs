@@ -113,6 +113,22 @@ async fn restore_rotation_stopped_gateway_captures_new_incarnation() -> anyhow::
 }
 
 #[tokio::test]
+async fn transient_entry_point_follows_live_registration() -> anyhow::Result<()> {
+    let hub = Arc::new(GatewaySessionHub::default());
+    let (send, _) = sink();
+    assert_eq!(
+        hub.try_push_transient("target", vec![1], u64::MAX).await,
+        crate::push_queue::TransientAdmission::Closed
+    );
+    hub.register_session("target".into(), "session".into(), send, Some(ID.into())).await?;
+    assert_eq!(
+        hub.try_push_transient("target", br#"{"frame_type":"ephemeral"}"#.to_vec(), u64::MAX).await,
+        crate::push_queue::TransientAdmission::Queued
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn lookup_releases_hub_before_final_admission() -> anyhow::Result<()> {
     let hub = Arc::new(GatewaySessionHub::default());
     let (send, _) = sink();
