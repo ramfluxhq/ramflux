@@ -224,7 +224,7 @@ async fn unlock_restarts_driver_with_persisted_journal_sequence() -> Result<(), 
                 serde_json::json!({"topics":["sync.status"]}),
             )
             .await?;
-            let event = tokio::time::timeout(Duration::from_secs(25), bus.next_event())
+            let event = tokio::time::timeout(HANG * 2, bus.next_event())
                 .await
                 .map_err(|_| failure("driver did not resume"))??;
             assert!(
