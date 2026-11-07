@@ -14,7 +14,11 @@ const MAX_CLOCK_SKEW: i64 = 120;
 const MAX_ENVELOPE_TTL: i64 = 604_800;
 const SLACK: i64 = 300;
 /// Expired rows removed by each write.
-const SWEEP: i64 = 64;
+pub(crate) const SWEEP: i64 = 64;
+/// Sweep S1: bounded, indexed removal of expired rows; bind `(now, SWEEP)`. Every write path
+/// (the recorder and the live deletion capture) runs it in the writing transaction.
+pub(crate) const S1_SWEEP_SQL: &str = "DELETE FROM receive_erased_input WHERE selector IN \
+     (SELECT selector FROM receive_erased_input WHERE expires_at<=?1 ORDER BY expires_at LIMIT ?2)";
 
 /// The exact authenticated tuple that identifies one admitted envelope.
 pub(crate) struct ErasedTuple<'a> {
@@ -91,12 +95,7 @@ impl AccountDb {
                     params![selector, bundle, expires_at],
                 )?;
             }
-            self.connection.execute(
-                "DELETE FROM receive_erased_input WHERE selector IN \
-                 (SELECT selector FROM receive_erased_input WHERE expires_at<=?1 \
-                  ORDER BY expires_at LIMIT ?2)",
-                params![now, SWEEP],
-            )?;
+            self.connection.execute(S1_SWEEP_SQL, params![now, SWEEP])?;
             Ok(())
         })
     }

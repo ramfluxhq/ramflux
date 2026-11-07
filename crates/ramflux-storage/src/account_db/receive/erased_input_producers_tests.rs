@@ -150,3 +150,37 @@ fn erased_input_conversation_delete_converts_the_sum_of_envelopes() -> Result<()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn erased_input_live_capture_sweeps_expired_rows_up_to_the_bound() -> Result<(), StorageError> {
+    let now = crate::unix_now();
+    let expiry = lifetime(now, 3600, now);
+    let (root, db) = setup("erased-producers-sweep")?;
+    db.send_direct_message("thread", "S", "peer", b"x")?;
+    let wire = work(1, "ps", "ps-p", "ps-d", now);
+    assert_eq!(run(&db, input(&wire, 1))?, super::stage::ReceiveStageResult::Staged);
+    assert_eq!(bind(&db, 1, "S")?, super::privacy::ReceiveBind::Bound);
+    for n in 0..100 {
+        db.connection.execute(
+            "INSERT INTO receive_erased_input VALUES(?1,'old-bundle',1)",
+            params![format!("expired-{n:03}")],
+        )?;
+    }
+    db.connection.execute(
+        "INSERT INTO receive_erased_input VALUES('live-existing','live-bundle',?1)",
+        params![now + 5_000],
+    )?;
+    db.delete_direct_message("thread", "S", "local", "delete-s")?;
+    let (_, selector) = current(&db, "ps-p", "ps-d", "ps")?;
+    assert_eq!(tombstone(&db, &selector)?, Some(expiry), "the captured tuple is recorded");
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM receive_erased_input WHERE expires_at<=1")?,
+        36,
+        "one write reclaims at most 64 expired rows"
+    );
+    assert_eq!(tombstone(&db, "live-existing")?, Some(now + 5_000));
+    assert_eq!(tombstones(&db)?, 38);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
