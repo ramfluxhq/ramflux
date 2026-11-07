@@ -242,6 +242,16 @@ fn initialize_inner(
     Ok(())
 }
 
+/// Every retained bundle's id with its MAC of one value, current bundle first.
+#[allow(dead_code)] // used by the dormant erased-input store until its producers land
+pub(super) fn bundle_macs(
+    db: &Connection,
+    label: &[u8],
+    value: &[u8],
+) -> Result<Vec<(String, String)>, StorageError> {
+    merge::load_set(db, "main")?.iter().map(|b| Ok((b.id.clone(), b.mac(label, value)?))).collect()
+}
+
 pub(super) fn current_mac(
     db: &Connection,
     label: &[u8],
