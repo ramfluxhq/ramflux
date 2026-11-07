@@ -19,12 +19,24 @@ pub struct CustodyBusClient {
 #[derive(Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum Response {
-    Prepared { account_anchor: String },
-    Phrase { phrase: Zeroizing<String> },
-    Challenge { positions: [u8; 3] },
-    NetworkingPending { account: serde_json::Value },
+    Prepared {
+        account_anchor: String,
+    },
+    Phrase {
+        phrase: Zeroizing<String>,
+    },
+    Challenge {
+        positions: [u8; 3],
+    },
+    NetworkingPending {
+        account: serde_json::Value,
+    },
     Cancelled,
-    Error { code: String },
+    Error {
+        code: String,
+        #[serde(default)]
+        reason_code: Option<String>,
+    },
 }
 #[derive(Deserialize)]
 struct Reply {
@@ -145,16 +157,60 @@ impl CustodyBusClient {
         if reply.protocol != "ramflux.local_bus.custody.v1" || reply.request_id != request_id {
             return Err(SdkError::CustodySetupInvalid);
         }
-        if let Response::Error { code } = &reply.result {
-            return Err(match code.as_str() {
-                "CustodyExpired" => SdkError::CustodyExpired,
-                "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
-                "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
-                "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
-                "NetworkingPending" => SdkError::NetworkingPending,
-                _ => SdkError::CustodySetupInvalid,
-            });
+        if let Response::Error { code, reason_code } = &reply.result {
+            return Err(decode_error(code, reason_code.as_deref()));
         }
         Ok(reply.result)
+    }
+}
+
+fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
+    if let Some(reason) = super::CustodyVaultReason::from_wire(code, reason_code) {
+        return SdkError::CustodyVault(reason);
+    }
+    match code {
+        "CustodyExpired" => SdkError::CustodyExpired,
+        "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
+        "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
+        "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
+        "NetworkingPending" => SdkError::NetworkingPending,
+        _ => SdkError::CustodySetupInvalid,
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+    use crate::bus::vault_reason_tests::ROWS;
+
+    #[test]
+    fn custody_frame_error_decodes_vault_reasons() -> Result<(), serde_json::Error> {
+        for (reason, text, code, ..) in ROWS {
+            let json = serde_json::json!({"state":"error","code":code,"reason_code":text});
+            let Response::Error { code, reason_code } = serde_json::from_value(json)? else {
+                return Err(serde::de::Error::custom("not an error frame"));
+            };
+            assert!(
+                matches!(decode_error(&code, reason_code.as_deref()), SdkError::CustodyVault(r) if r == reason),
+                "{text}"
+            );
+        }
+        // An older peer sends no reason; an unknown reason keeps the unit error.
+        assert!(matches!(
+            serde_json::from_value(
+                serde_json::json!({"state":"error","code":"CustodyVaultUnavailable"})
+            ),
+            Ok(Response::Error { reason_code: None, .. })
+        ));
+        assert!(matches!(
+            decode_error("CustodyVaultUnavailable", Some("vault_future")),
+            SdkError::CustodyVaultUnavailable
+        ));
+        assert!(matches!(
+            decode_error("CustodyVaultUnavailable", None),
+            SdkError::CustodyVaultUnavailable
+        ));
+        assert!(matches!(decode_error("CustodySetupInvalid", None), SdkError::CustodySetupInvalid));
+        Ok(())
     }
 }

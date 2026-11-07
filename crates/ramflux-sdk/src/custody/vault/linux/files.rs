@@ -41,6 +41,7 @@ impl From<rustix::io::Errno> for Error {
             rustix::io::Errno::NOENT => Self::Missing,
             rustix::io::Errno::EXIST => Self::Exists,
             rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => Self::Path,
+            rustix::io::Errno::ACCESS | rustix::io::Errno::PERM => Self::Metadata,
             _ => Self::Io,
         }
     }

@@ -405,8 +405,8 @@ async fn primary_contract(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ramflux_sdk::SdkError;
     use ramflux_sdk::custody::{
-        LinuxDataCredentials, LinuxPrimaryVault, LinuxVaultConfig, LinuxVaultRole as Role,
-        PrimaryVault,
+        CustodyVaultReason, LinuxDataCredentials, LinuxPrimaryVault, LinuxVaultConfig,
+        LinuxVaultRole as Role, PrimaryVault,
     };
     use zeroize::Zeroizing;
     let mode_name = if mode == ramflux_sdk::custody::LinuxVaultMode::DesktopSecretService {
@@ -465,8 +465,14 @@ async fn primary_contract(
     )
     .await?;
     drop(service.load_branch(&branch, "principal", &device)?);
-    assert!(matches!(service.load_primary(&reference), Err(SdkError::CustodyVaultUnavailable)));
-    assert!(matches!(service.store_new(&reference, &key), Err(SdkError::CustodyVaultUnavailable)));
+    assert!(matches!(
+        service.load_primary(&reference),
+        Err(SdkError::CustodyVault(CustodyVaultReason::PrimaryUnavailable))
+    ));
+    assert!(matches!(
+        service.store_new(&reference, &key),
+        Err(SdkError::CustodyVault(CustodyVaultReason::PrimaryUnavailable))
+    ));
     let mut data_paths = paths;
     data_paths.primary = None;
     data_paths.device = None;
@@ -483,7 +489,7 @@ async fn primary_contract(
     primary.delete(&branch)?;
     assert!(matches!(
         service.load_branch(&branch, "principal", &device),
-        Err(SdkError::CustodyVaultUnavailable)
+        Err(SdkError::CustodyVault(CustodyVaultReason::Missing))
     ));
     Ok(())
 }

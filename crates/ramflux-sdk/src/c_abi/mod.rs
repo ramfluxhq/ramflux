@@ -894,6 +894,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         }
         SdkError::Io(_) => RamfluxErrorCode::Internal,
         SdkError::CustodyVaultUnavailable
+        | SdkError::CustodyVault(_)
         | SdkError::AttachmentDeleted
         | SdkError::Sync(_)
         | SdkError::CapabilityDenied(_)

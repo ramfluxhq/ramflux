@@ -261,6 +261,7 @@ pub(super) fn stop_class(error: &SdkError) -> bool {
         | SdkError::AccountNotOpen(_)
         | SdkError::IdentityRootMissing
         | SdkError::CustodyVaultUnavailable => true,
+        SdkError::CustodyVault(reason) => !reason.retryable(),
         SdkError::Storage(error) => error.is_account_unusable(),
         _ => false,
     }

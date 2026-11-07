@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{
     SdkError,
-    custody::{BranchCredentials, PrimaryVault},
+    custody::{BranchCredentials, CustodyVaultReason, PrimaryVault},
 };
 use ramflux_crypto::custody::SelfSigningKey;
 use ramflux_protocol::custody::DeviceRef;
@@ -22,28 +22,63 @@ use zeroize::Zeroizing;
 pub(super) fn unavailable<T>(_: T) -> SdkError {
     SdkError::CustodyVaultUnavailable
 }
+fn reason(reason: CustodyVaultReason) -> SdkError {
+    SdkError::CustodyVault(reason)
+}
+/// Installation and provider failures with a bounded reason; I/O and cancellation stay unit.
+pub(super) fn init_error(error: init::LinuxVaultInitError) -> SdkError {
+    use init::LinuxVaultInitError as E;
+    match error {
+        E::Mode => reason(CustodyVaultReason::ModeMismatch),
+        E::Metadata => reason(CustodyVaultReason::Permission),
+        E::Missing => reason(CustodyVaultReason::Missing),
+        E::Pending => reason(CustodyVaultReason::InitPending),
+        E::Corrupt | E::Length | E::Realm => reason(CustodyVaultReason::Corrupt),
+        E::Busy => reason(CustodyVaultReason::Busy),
+        E::Provider | E::Timeout => reason(CustodyVaultReason::Locked),
+        E::Random => SdkError::CustodyRandomUnavailable,
+        E::Io | E::Cancelled => SdkError::CustodyVaultUnavailable,
+    }
+}
+/// File-store failures with a bounded reason; I/O, collisions and capacity stay unit.
+pub(super) fn files_error(error: files::Error) -> SdkError {
+    use files::Error as E;
+    match error {
+        E::Missing => reason(CustodyVaultReason::Missing),
+        E::Path | E::Metadata => reason(CustodyVaultReason::Permission),
+        E::Busy => reason(CustodyVaultReason::Busy),
+        E::Generation | E::Record(_) => reason(CustodyVaultReason::Corrupt),
+        E::Io | E::Exists | E::Full => SdkError::CustodyVaultUnavailable,
+        #[cfg(test)]
+        E::Replacement => SdkError::CustodyVaultUnavailable,
+    }
+}
+/// A record that fails to open (authentication, binding, size) is corrupt, not unavailable.
+fn corrupt(_: codec::Error) -> SdkError {
+    reason(CustodyVaultReason::Corrupt)
+}
 pub(super) struct Realm {
     store: files::Store,
     key: Secret<32>,
 }
 impl Realm {
     pub(super) fn read(&self, reference: &str, kind: u8) -> Result<codec::Plaintext, SdkError> {
-        let _slot = init::Slot::acquire().map_err(unavailable)?;
+        let _slot = init::Slot::acquire().map_err(init_error)?;
         let record = self
             .store
             .apply(Operation::Read { reference: reference.into(), kind, generation: 1 }, |_| {})
-            .map_err(unavailable)?;
-        codec::open(self.store.binding(kind, reference, 1), &self.key, &record).map_err(unavailable)
+            .map_err(files_error)?;
+        codec::open(self.store.binding(kind, reference, 1), &self.key, &record).map_err(corrupt)
     }
     pub(super) fn insert(&self, reference: &str, kind: u8, secret: &[u8]) -> Result<(), SdkError> {
-        let _slot = init::Slot::acquire().map_err(unavailable)?;
+        let _slot = init::Slot::acquire().map_err(init_error)?;
         let input = codec::Plaintext::new(secret).map_err(unavailable)?;
         let record = codec::seal(self.store.binding(kind, reference, 1), &self.key, &input)
             .map_err(unavailable)?;
         self.store
             .apply(Operation::Insert { reference: reference.into(), kind, record }, |_| {})
             .map(drop)
-            .map_err(unavailable)
+            .map_err(files_error)
     }
     pub(super) fn delete(&self, reference: &str, kind: u8) -> Result<(), SdkError> {
         self.delete_with(reference, kind, &RealDurabilityOps)
@@ -56,14 +91,14 @@ impl Realm {
         kind: u8,
         ops: &dyn DurabilityOps,
     ) -> Result<(), SdkError> {
-        let _slot = init::Slot::acquire().map_err(unavailable)?;
+        let _slot = init::Slot::acquire().map_err(init_error)?;
         match self.store.publish(
             Operation::Delete { reference: reference.into(), kind, generation: 1 },
             ops,
             &|_| Ok(()),
         ) {
             Ok(_) | Err(files::Error::Missing) => Ok(()),
-            Err(e) => Err(unavailable(e)),
+            Err(e) => Err(files_error(e)),
         }
     }
 }
@@ -75,7 +110,7 @@ async fn build_realms(
     account: String,
     mut material: init::Material,
 ) -> Result<[Option<Realm>; 3], SdkError> {
-    let slot = init::Slot::acquire().map_err(unavailable)?;
+    let slot = init::Slot::acquire().map_err(init_error)?;
     tokio::task::spawn_blocking(move || {
         let _slot = slot;
         #[cfg(test)]
@@ -91,7 +126,7 @@ async fn build_realms(
                         material.vault_id,
                         material.key_ids[i],
                     )
-                    .map_err(unavailable)?,
+                    .map_err(files_error)?,
                     key,
                 });
             }
@@ -133,17 +168,18 @@ impl LinuxPrimaryVault {
         }
         .validate_name()
         .map_err(unavailable)?;
-        let material = init::material(root.clone(), config.clone()).await.map_err(unavailable)?;
+        let material = init::material(root.clone(), config.clone()).await.map_err(init_error)?;
         let realms = build_realms(root, account, material).await?;
         Ok(Self { realms, reference, class: config.mode().strength_class(), role: config.role() })
     }
     fn realm(&self, i: usize) -> Result<&Realm, SdkError> {
-        self.realms[i].as_ref().ok_or(SdkError::CustodyVaultUnavailable)
+        self.realms[i].as_ref().ok_or(reason(CustodyVaultReason::PrimaryUnavailable))
     }
     fn bound(&self, reference: &str, prefix: &str) -> Result<(), SdkError> {
-        if self.role == LinuxVaultRole::DataOnly
-            || reference.strip_prefix(prefix) != Some(self.reference.as_str())
-        {
+        if self.role == LinuxVaultRole::DataOnly {
+            return Err(reason(CustodyVaultReason::PrimaryUnavailable));
+        }
+        if reference.strip_prefix(prefix) != Some(self.reference.as_str()) {
             return Err(SdkError::CustodyVaultUnavailable);
         }
         Ok(())

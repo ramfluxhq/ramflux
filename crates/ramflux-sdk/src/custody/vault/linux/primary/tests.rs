@@ -21,6 +21,56 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
 fn linux_vault_primary_delete_reconciles_absence_durably() -> TestResult {
     run_in_child(&format!("{BODY}delete_reconcile_body"))
 }
+/// Every internal source maps to its own bounded reason; each row is isolated.
+#[test]
+fn linux_vault_errors_map_to_bounded_reasons() {
+    use super::super::init::LinuxVaultInitError as I;
+    use files::Error as F;
+    use rustix::io::Errno;
+    fn reason_of(error: &SdkError) -> Option<CustodyVaultReason> {
+        match error {
+            SdkError::CustodyVault(reason) => Some(*reason),
+            _ => None,
+        }
+    }
+    fn init(error: I) -> Option<CustodyVaultReason> {
+        reason_of(&init_error(error))
+    }
+    fn file(error: F) -> Option<CustodyVaultReason> {
+        reason_of(&files_error(error))
+    }
+    use CustodyVaultReason as R;
+    assert_eq!(init(I::Missing), Some(R::Missing), "init Missing");
+    assert_eq!(file(F::Missing), Some(R::Missing), "files Missing");
+    assert_eq!(init(I::Pending), Some(R::InitPending), "init Pending");
+    assert_eq!(init(I::Corrupt), Some(R::Corrupt), "init Corrupt");
+    assert_eq!(init(I::Length), Some(R::Corrupt), "init Length");
+    assert_eq!(init(I::Realm), Some(R::Corrupt), "init Realm");
+    assert_eq!(file(F::Generation), Some(R::Corrupt), "files Generation");
+    assert_eq!(file(F::Record(codec::Error::Authentication)), Some(R::Corrupt), "files Record");
+    assert_eq!(init(I::Metadata), Some(R::Permission), "init Metadata");
+    assert_eq!(file(F::Path), Some(R::Permission), "files Path");
+    assert_eq!(file(F::Metadata), Some(R::Permission), "files Metadata");
+    assert_eq!(init(I::from(Errno::ACCESS)), Some(R::Permission), "init EACCES");
+    assert_eq!(init(I::from(Errno::PERM)), Some(R::Permission), "init EPERM");
+    assert_eq!(file(F::from(Errno::ACCESS)), Some(R::Permission), "files EACCES");
+    assert_eq!(file(F::from(Errno::PERM)), Some(R::Permission), "files EPERM");
+    assert_eq!(init(I::Provider), Some(R::Locked), "init Provider");
+    assert_eq!(init(I::Timeout), Some(R::Locked), "init Timeout");
+    assert_eq!(init(I::Busy), Some(R::Busy), "init Busy");
+    assert_eq!(file(F::Busy), Some(R::Busy), "files Busy");
+    assert_eq!(init(I::Mode), Some(R::ModeMismatch), "init Mode");
+    // Unchanged unit variant and the existing randomness error.
+    assert!(matches!(init_error(I::Io), SdkError::CustodyVaultUnavailable), "init Io");
+    assert!(
+        matches!(init_error(I::Cancelled), SdkError::CustodyVaultUnavailable),
+        "init Cancelled"
+    );
+    assert!(matches!(files_error(F::Io), SdkError::CustodyVaultUnavailable), "files Io");
+    assert!(matches!(files_error(F::Exists), SdkError::CustodyVaultUnavailable), "files Exists");
+    assert!(matches!(files_error(F::Full), SdkError::CustodyVaultUnavailable), "files Full");
+    assert!(matches!(init_error(I::Random), SdkError::CustodyRandomUnavailable), "init Random");
+}
 #[test]
 fn linux_vault_primary_open_builds_stores_in_a_slot_owning_worker() -> TestResult {
     run_in_child(&format!("{BODY}open_worker_body"))
@@ -119,7 +169,7 @@ fn open_worker_body() -> TestResult {
     };
     assert!(matches!(
         runtime.block_on(build_realms(refused.path().into(), "account".into(), again)),
-        Err(SdkError::CustodyVaultUnavailable)
+        Err(SdkError::CustodyVault(CustodyVaultReason::Busy))
     ));
     drop(held);
     Ok(())
@@ -170,13 +220,16 @@ fn owned_buffers_body() -> TestResult {
     assert!(matches!(provider.store_new(&reference, &key), Err(SdkError::CustodyVaultUnavailable)));
     // Authentication failure after actual readback allocation.
     provider.realms[0].as_mut().ok_or("primary realm")?.key.bytes_mut().fill(8);
-    assert!(matches!(provider.load_primary(&reference), Err(SdkError::CustodyVaultUnavailable)));
+    assert!(matches!(
+        provider.load_primary(&reference),
+        Err(SdkError::CustodyVault(CustodyVaultReason::Corrupt))
+    ));
     let pending = format!("agent-provisioning:{reference}");
     provider.store_provisioning_secret(&pending, b"data-secret")?;
     provider.role = LinuxVaultRole::DataOnly;
     assert!(matches!(
         provider.load_provisioning_secret(&pending),
-        Err(SdkError::CustodyVaultUnavailable)
+        Err(SdkError::CustodyVault(CustodyVaultReason::PrimaryUnavailable))
     ));
     // Synchronous adapters have no suspension point; releasing the handle clears retained KEKs.
     drop(provider);

@@ -1684,6 +1684,14 @@ mod tests {
             (SdkError::NetworkingPending, "NetworkingPending"),
             (SdkError::CustodyVaultUnavailable, "CustodyVaultUnavailable"),
             (
+                SdkError::CustodyVault(crate::custody::CustodyVaultReason::Locked),
+                "CustodyVaultUnavailable",
+            ),
+            (
+                SdkError::CustodyVault(crate::custody::CustodyVaultReason::ModeMismatch),
+                "CustodySetupInvalid",
+            ),
+            (
                 SdkError::Protocol(ramflux_protocol::ProtocolError::GroupTransferRequiresSync),
                 "transfer_requires_sync",
             ),

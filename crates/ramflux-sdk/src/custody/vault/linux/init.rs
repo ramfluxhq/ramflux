@@ -69,7 +69,10 @@ impl From<rustix::io::Errno> for Error {
         match e {
             rustix::io::Errno::NOENT => Self::Missing,
             rustix::io::Errno::EXIST => Self::Corrupt,
-            rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => Self::Metadata,
+            rustix::io::Errno::LOOP
+            | rustix::io::Errno::NOTDIR
+            | rustix::io::Errno::ACCESS
+            | rustix::io::Errno::PERM => Self::Metadata,
             _ => Self::Io,
         }
     }

@@ -121,6 +121,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
             SdkError::CustodyCapacity { capacity } => {
                 Some(Box::new(serde_json::json!({"capacity": capacity})))
             }
+            SdkError::CustodyVault(reason) => Some(Box::new(vault_reason_details(*reason))),
             SdkError::ContactConfirmationRequired(change) => {
                 Some(Box::new(serde_json::json!(change)))
             }
@@ -129,6 +130,7 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
         reason_code: match error {
             SdkError::Storage(StorageError::AccountWriterBusy(_)) => Some("account_busy".into()),
             SdkError::ContactInput(reason) => Some(reason.to_string()),
+            SdkError::CustodyVault(reason) => Some(reason.as_str().into()),
             SdkError::ContactConfirmationRequired(_) => {
                 Some("root_replacement_confirmation_required".into())
             }
@@ -160,10 +162,19 @@ pub(crate) fn local_bus_error_body(error: &SdkError) -> LocalBusErrorBody {
                 Some(crate::custody::CAPACITY_RETRY_AFTER_MS)
             }
             SdkError::ContactInput(crate::ContactReason::LookupRateLimited) => Some(60_000),
+            SdkError::CustodyVault(reason) => reason.retry_after_ms(),
             _ => None,
         },
         cause,
     }
+}
+
+fn vault_reason_details(reason: crate::custody::CustodyVaultReason) -> serde_json::Value {
+    let mut details = serde_json::json!({"retryable": reason.retryable()});
+    if let Some(remedy) = reason.remedy() {
+        details["remedy"] = remedy.into();
+    }
+    details
 }
 
 pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
@@ -213,6 +224,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::CustodyAccountConflict => "CustodyAccountConflict",
         SdkError::CustodyConfirmationFailed => "CustodyConfirmationFailed",
         SdkError::CustodyVaultUnavailable => "CustodyVaultUnavailable",
+        SdkError::CustodyVault(reason) => reason.wire_code(),
         SdkError::CustodyRandomUnavailable => "CustodyRandomUnavailable",
         SdkError::AccountNotOpen(_) => "AccountNotOpen",
         SdkError::ReplayMismatch => "ReplayMismatch",
