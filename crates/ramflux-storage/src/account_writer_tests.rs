@@ -308,6 +308,29 @@ fn wrapped_key() -> crate::WrappedAccountDbKey {
     }
 }
 
+/// Relative path to (length, bytes) for every regular file under `dir`, sidecars included.
+fn file_set(dir: &Path) -> std::io::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    fn walk(
+        base: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(base, &path, out)?;
+            } else {
+                let name = path.strip_prefix(base).map_err(std::io::Error::other)?;
+                out.insert(name.to_string_lossy().into_owned(), std::fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(dir, dir, &mut out)?;
+    Ok(out)
+}
+
 fn expect_busy<T>(result: &Result<T, StorageError>, id: &str) {
     assert!(
         matches!(&result, Err(StorageError::AccountWriterBusy(busy)) if busy == id),
@@ -330,12 +353,15 @@ fn removed_account_never_reopens_empty() -> TestResult {
     let (root, db) = crate::tests::test_db("removed-account-reopen")?;
     let index = AccountIndex::open(&root)?;
     index.store_wrapped_db_key("acct", &wrapped_key())?;
-    let db_file = root.join("accounts/acct/ramflux_local.sqlite");
-    let before = std::fs::read(&db_file)?;
+    let account_dir = root.join("accounts/acct");
+    // The storage layer has no background threads; open's maintenance has completed, so the
+    // file set is stable while the handle stays idle.
+    let before = file_set(&account_dir)?;
+    assert!(before.contains_key("ramflux_local.sqlite"));
     expect_busy(&index.erase_account_database("acct"), "acct");
     assert_eq!(index.account("acct")?.account_state, "active");
-    assert!(index.load_wrapped_db_key("acct")?.is_some());
-    assert_eq!(std::fs::read(&db_file)?, before);
+    assert_eq!(index.load_wrapped_db_key("acct")?, Some(wrapped_key()));
+    assert_eq!(file_set(&account_dir)?, before);
     // (d) shared holder refuses exclusive; (f) the refused erase left the account usable.
     drop(db);
     let shared = index.acquire_account_writer("acct")?;
@@ -352,13 +378,14 @@ fn removed_account_never_reopens_empty() -> TestResult {
     );
     drop(exclusive);
     // (b) Closed materialized account: erase is Ok, key cleared, files untouched.
-    let before = std::fs::read(&db_file)?;
+    let before = file_set(&account_dir)?;
+    assert_eq!(index.load_wrapped_db_key("acct")?, Some(wrapped_key()));
     index.erase_account_database("acct")?;
     assert_eq!(index.account("acct")?.account_state, "removed");
     assert!(index.load_wrapped_db_key("acct")?.is_none());
-    assert_eq!(std::fs::read(&db_file)?, before);
+    assert_eq!(file_set(&account_dir)?, before, "4a tombstoning removes no file");
     expect_not_found(&open(&root).map(drop), "acct");
-    assert_eq!(std::fs::read(&db_file)?, before);
+    assert_eq!(file_set(&account_dir)?, before, "a refused reopen touches no file");
     index.erase_account_database("acct")?;
     // (e) Bad and unknown ids.
     for bad in ["", "..", "a/b", "/abs"] {
@@ -369,6 +396,69 @@ fn removed_account_never_reopens_empty() -> TestResult {
     }
     expect_not_found(&index.erase_account_database("unknown"), "unknown");
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+struct OpenHookReset;
+impl Drop for OpenHookReset {
+    fn drop(&mut self) {
+        crate::account_erase::set_open_race_hook(None);
+    }
+}
+
+struct UpgradeHookReset;
+impl Drop for UpgradeHookReset {
+    fn drop(&mut self) {
+        crate::account_writer::set_upgrade_hook(None);
+    }
+}
+
+#[test]
+fn busy_never_drops_the_last_owner_under_the_registry_lock() -> TestResult {
+    // The upgraded Arc becomes the last one when the original holder drops between the
+    // upgrade and the Busy decision. Both ownership modes must return Busy, not deadlock.
+    for (holder_exclusive, requester_exclusive) in [(false, true), (true, false)] {
+        let (root, db) = crate::tests::test_db("busy-last-owner")?;
+        drop(db);
+        let index = AccountIndex::open(&root)?;
+        let canonical = root.join("accounts/acct/.writer.lock").canonicalize()?;
+        let holder = if holder_exclusive {
+            crate::account_writer::AccountWriter::acquire_exclusive(&root, "acct")?
+        } else {
+            crate::account_writer::AccountWriter::acquire(&root, "acct")?
+        };
+        let (upgraded_tx, upgraded_rx) = mpsc::sync_channel(1);
+        let (go_tx, go_rx) = mpsc::sync_channel(1);
+        let go_rx = Mutex::new(go_rx);
+        let _reset = UpgradeHookReset;
+        crate::account_writer::set_upgrade_hook(Some(Arc::new(move |path| {
+            if path == canonical {
+                let _ = upgraded_tx.send(());
+                if let Ok(receiver) = go_rx.lock() {
+                    let _ = receiver.recv_timeout(Duration::from_secs(10));
+                }
+            }
+        })));
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let root_for_request = root.clone();
+        std::thread::spawn(move || {
+            let result = if requester_exclusive {
+                crate::account_writer::AccountWriter::acquire_exclusive(&root_for_request, "acct")
+            } else {
+                crate::account_writer::AccountWriter::acquire(&root_for_request, "acct")
+            };
+            let _ = done_tx.send(result.map(drop));
+        });
+        upgraded_rx.recv_timeout(Duration::from_secs(10))?;
+        drop(holder);
+        go_tx.send(())?;
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "Busy deadlocked: the last owner was dropped under the registry lock")?;
+        expect_busy(&result, "acct");
+        drop(index);
+        std::fs::remove_dir_all(root)?;
+    }
     Ok(())
 }
 
@@ -383,12 +473,20 @@ fn removed_account_open_barrier_on_unmaterialized_account() -> TestResult {
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let release_rx = Mutex::new(release_rx);
+    let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_timed_out = Arc::clone(&timed_out);
+    let _reset = OpenHookReset;
     crate::account_erase::set_open_race_hook(Some(Arc::new(move |account| {
-        if account == "ghost" {
-            let _ = entered_tx.send(());
-            if let Ok(receiver) = release_rx.lock() {
-                let _ = receiver.recv_timeout(Duration::from_secs(10));
-            }
+        if account != "ghost" {
+            return;
+        }
+        let _ = entered_tx.send(());
+        let released = release_rx
+            .lock()
+            .map_err(|_| ())
+            .and_then(|receiver| receiver.recv_timeout(Duration::from_secs(10)).map_err(|_| ()));
+        if released.is_err() {
+            hook_timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     })));
     let root_for_open = root.clone();
@@ -402,7 +500,10 @@ fn removed_account_open_barrier_on_unmaterialized_account() -> TestResult {
     index.erase_account_database("ghost")?;
     release_tx.send(())?;
     let result = opener.join().map_err(|_| "opener thread panicked")?;
-    crate::account_erase::set_open_race_hook(None);
+    assert!(
+        !timed_out.load(std::sync::atomic::Ordering::SeqCst),
+        "barrier release was not delivered; the opener resumed without the erase ordering"
+    );
     expect_not_found(&result, "ghost");
     assert!(!db_file.exists(), "open must not create the DB path of a removed account");
     std::fs::remove_dir_all(root)?;

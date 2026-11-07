@@ -79,6 +79,26 @@ pub(crate) fn set_drop_hook(hook: Option<DropHook>) -> Result<(), StorageError> 
     Ok(())
 }
 
+#[cfg(test)]
+static UPGRADE_HOOK: OnceLock<Mutex<Option<DropHook>>> = OnceLock::new();
+
+/// Runs right after a registry owner was upgraded, with the registry mutex held.
+#[cfg(test)]
+fn upgrade_hook(path: &Path) {
+    let hook = UPGRADE_HOOK.get_or_init(|| Mutex::new(None)).lock().ok().and_then(|h| h.clone());
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_upgrade_hook(hook: Option<DropHook>) {
+    *UPGRADE_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("account writer lock failed at {}: {source}", path.display())]
 struct WriterLockIo {
@@ -116,7 +136,13 @@ impl AccountWriter {
             registry.owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while let Some(owner) = registered.get(&path) {
             if let Some(owner) = owner.upgrade() {
+                #[cfg(test)]
+                upgrade_hook(&path);
                 if exclusive || owner.exclusive {
+                    // The upgraded Arc may be the last one. Its Drop locks the registry, so
+                    // the guard must be released first.
+                    drop(registered);
+                    drop(owner);
                     return Err(StorageError::AccountWriterBusy(account.to_owned()));
                 }
                 return Ok(owner);
