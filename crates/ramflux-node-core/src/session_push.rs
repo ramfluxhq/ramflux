@@ -22,6 +22,8 @@ pub enum SessionPushReason {
     Busy,
     #[error("internal_error")]
     InternalError,
+    #[error("boot_mismatch")]
+    BootMismatch,
 }
 #[derive(Debug, Serialize, thiserror::Error)]
 #[error("{reason}")]
@@ -81,6 +83,21 @@ pub struct IssuedSeqsResponse {
 #[derive(Debug, Serialize)]
 pub struct SessionPushCapabilities {
     pub capabilities: Vec<String>,
+    pub router_boot_id: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EphemeralRegistrationItem {
+    pub target: String,
+    pub session_id: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EphemeralRegistrationsRequest {
+    pub router_boot_id: String,
+    pub items: Vec<EphemeralRegistrationItem>,
+}
+#[derive(Debug, Serialize)]
+pub struct EphemeralRegistrationsResponse {
+    pub applied: usize,
 }
 #[derive(Debug, Serialize)]
 pub struct SessionPushSubmitResponse {
