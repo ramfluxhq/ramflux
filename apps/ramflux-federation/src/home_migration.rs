@@ -57,10 +57,29 @@ pub(crate) fn local(
     received: Instant,
 ) -> Result<LocalMigrationReply, NodeCoreError> {
     crate::admin_http::require_admin_token(context.admin_token.as_deref(), &request.admin_token)?;
+    if let LocalMigrationAction::AttachmentAuthorityPin { node_id } = request.action {
+        // Not a migration action: it is gated by the attachment capability, not by
+        // home migration being enabled.
+        let admitted = crate::now_unix_seconds().is_ok_and(|now| {
+            context.state.snapshot().is_ok_and(|state| state.can_deliver_to(&node_id, now))
+        });
+        // An unadmitted node is not a source at all; an admitted one is available or not.
+        let answer = if !admitted {
+            ramflux_node_core::PinAnswer::SourceUnknown
+        } else if context.discovery.attachment_authority.is_some() {
+            context.state.attachment_authority().answer(&node_id)
+        } else {
+            ramflux_node_core::PinAnswer::Unavailable
+        };
+        return Ok(LocalMigrationReply::AttachmentAuthorityPin { node_id, answer });
+    }
     let result = (|| {
         enabled(&context.discovery)?;
         let deadline = migration_hop_deadline(request.budget_ms, received)?;
         match request.action {
+            LocalMigrationAction::AttachmentAuthorityPin { .. } => {
+                Err(failure(Refusal::PeeringUnavailable))
+            }
             LocalMigrationAction::PeerKey { node_id } => {
                 let peer = admitted(&context.state, &node_id)?;
                 migration_hop_budget(deadline)?;

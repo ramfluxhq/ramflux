@@ -543,6 +543,7 @@ pub(super) fn federation_server_record(node_id: &str, endpoint: &str) -> Federat
         node_policy_hash: "node_policy_hash".to_owned(),
         updated_at: 1_760_000_000,
         expires_at: 1_760_086_400,
+        attachment_authority: None,
         signature: String::new(),
     }
 }

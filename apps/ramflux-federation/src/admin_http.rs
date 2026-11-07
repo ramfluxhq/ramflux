@@ -195,6 +195,11 @@ fn admin_response(
             let reply = crate::home_migration::local(local, context, accepted_at)?;
             HttpResponse::json(&reply)?
         }
+        ("POST", crate::attachment_renewal::LOCAL_PATH) => {
+            let reply =
+                crate::attachment_renewal::serve_local(&request.body, context, accepted_at)?;
+            HttpResponse::raw_json(reply.status, reply.body)
+        }
         ("POST", "/internal/home-node-migration/forward") => {
             handle_home_node_forward_request(&request, context, admin_token)?
         }

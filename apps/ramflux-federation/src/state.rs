@@ -7,11 +7,21 @@ use std::sync::{Arc, Mutex, RwLock};
 pub(crate) struct SharedFederationTrustState {
     current: RwLock<Arc<ramflux_node_core::FederationTrustState>>,
     write_gate: Mutex<()>,
+    attachment_authority: ramflux_node_core::AttachmentAuthorityBook,
 }
 
 impl SharedFederationTrustState {
     pub(crate) fn new(initial: ramflux_node_core::FederationTrustState) -> Self {
-        Self { current: RwLock::new(Arc::new(initial)), write_gate: Mutex::new(()) }
+        Self {
+            current: RwLock::new(Arc::new(initial)),
+            write_gate: Mutex::new(()),
+            attachment_authority: ramflux_node_core::AttachmentAuthorityBook::new(),
+        }
+    }
+
+    /// Availability of peers' attachment authority pins (P25 N6a).
+    pub(crate) fn attachment_authority(&self) -> &ramflux_node_core::AttachmentAuthorityBook {
+        &self.attachment_authority
     }
 
     pub(crate) fn snapshot(
@@ -80,6 +90,8 @@ pub(crate) struct FederationDiscoverySurface {
     pub(crate) protocol_versions: Vec<String>,
     pub(crate) transport_backends: Vec<String>,
     pub(crate) node_capabilities: Vec<String>,
+    /// Set only when the attachment authority is configured (N6a).
+    pub(crate) attachment_authority: Option<ramflux_node_core::FederationAttachmentAuthority>,
 }
 
 #[derive(Clone, Copy)]

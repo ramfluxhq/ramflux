@@ -5,6 +5,20 @@
 use crate::helpers::non_empty_env;
 use crate::{FederationDiscoverySurface, now_unix_seconds};
 
+/// Both settings must be present and canonical; otherwise nothing is configured, so the
+/// capability and the pin are not advertised.
+pub(crate) fn attachment_authority_from(
+    generation: Option<&str>,
+    public_key: Option<&str>,
+) -> Option<ramflux_node_core::FederationAttachmentAuthority> {
+    let authority = ramflux_node_core::FederationAttachmentAuthority {
+        generation: generation?.trim().parse().ok()?,
+        signing_public_key: public_key?.trim().to_owned(),
+    };
+    authority.validate().ok()?;
+    Some(authority)
+}
+
 pub(crate) fn federation_discovery_surface(
     config: &ramflux_node_core::NodeServiceConfig,
     node_signing_seed: [u8; 32],
@@ -25,7 +39,19 @@ pub(crate) fn federation_discovery_surface(
             "federation_relay".to_owned(),
             "friend_request".to_owned(),
         ],
+        attachment_authority: None,
     };
+    surface.attachment_authority = attachment_authority_from(
+        ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ATTACHMENT_AUTHORITY_GENERATION")
+            .ok()
+            .as_deref(),
+        ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ATTACHMENT_AUTHORITY_PUBLIC_KEY")
+            .ok()
+            .as_deref(),
+    );
+    if surface.attachment_authority.is_some() {
+        surface.node_capabilities.push(ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY.into());
+    }
     if ramflux_node_core::home_migration_enabled().unwrap_or(false) {
         surface.node_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
     }
@@ -124,8 +150,10 @@ impl FederationDiscoverySurface {
                 .node_capabilities
                 .iter()
                 .filter(|cap| {
-                    ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
-                        || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY
+                    (ramflux_node_core::HOME_MIGRATION_RELEASE_GATE
+                        || cap.as_str() != ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+                        && (self.attachment_authority.is_some()
+                            || cap.as_str() != ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY)
                 })
                 .cloned()
                 .collect(),
@@ -135,6 +163,7 @@ impl FederationDiscoverySurface {
             ),
             updated_at: now,
             expires_at: now.saturating_add(86_400),
+            attachment_authority: self.attachment_authority.clone(),
             signature: String::new(),
         };
         ramflux_node_core::sign_federation_server_record_with_seed(
@@ -166,6 +195,7 @@ mod tests {
                 "opaque_delivery".to_owned(),
                 ramflux_node_core::HOME_MIGRATION_CAPABILITY.into(),
             ],
+            attachment_authority: None,
         };
 
         let client = surface.client_record()?;
@@ -243,5 +273,67 @@ mod migration_capability_tests {
             &client.node_public_key,
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod attachment_capability_tests {
+    use super::*;
+
+    fn surface(
+        authority: Option<ramflux_node_core::FederationAttachmentAuthority>,
+    ) -> FederationDiscoverySurface {
+        FederationDiscoverySurface {
+            node_id: "A".into(),
+            public_endpoint: "https://a.example".into(),
+            node_public_key: ramflux_crypto::public_key_base64url_from_seed([8; 32]),
+            node_ca_cert_pem: "test-ca".into(),
+            node_signing_seed: [8; 32],
+            protocol_versions: vec!["v1".into()],
+            transport_backends: vec!["https_json".into()],
+            node_capabilities: vec![
+                "opaque_delivery".into(),
+                ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY.into(),
+            ],
+            attachment_authority: authority,
+        }
+    }
+    fn key() -> String {
+        ramflux_protocol::encode_base64url([6; 32])
+    }
+
+    #[test]
+    fn capability_and_pin_are_advertised_only_when_the_authority_is_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let has = |r: &ramflux_node_core::FederationServerRecord| {
+            r.node_capabilities
+                .iter()
+                .any(|c| c == ramflux_node_core::ATTACHMENT_RENEWAL_CAPABILITY)
+        };
+        // Not configured: neither the capability nor the field, and no `null`.
+        let off = surface(None).well_known_record()?;
+        assert!(!has(&off) && off.attachment_authority.is_none());
+        assert!(!serde_json::to_string(&off)?.contains("attachment_authority"));
+        // Configured: both, signed, and the record verifies.
+        let authority = ramflux_node_core::FederationAttachmentAuthority {
+            generation: 3,
+            signing_public_key: key(),
+        };
+        let on = surface(Some(authority.clone())).well_known_record()?;
+        assert!(has(&on));
+        assert_eq!(on.attachment_authority, Some(authority));
+        ramflux_node_core::verify_federation_server_record(&on, on.updated_at)?;
+        Ok(())
+    }
+
+    #[test]
+    fn configuration_requires_both_settings_in_canonical_form() {
+        let k = key();
+        assert!(attachment_authority_from(Some("3"), Some(&k)).is_some());
+        assert!(attachment_authority_from(None, Some(&k)).is_none());
+        assert!(attachment_authority_from(Some("3"), None).is_none());
+        assert!(attachment_authority_from(Some("0"), Some(&k)).is_none());
+        assert!(attachment_authority_from(Some("x"), Some(&k)).is_none());
+        assert!(attachment_authority_from(Some("3"), Some(&k[..42])).is_none());
     }
 }

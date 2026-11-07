@@ -18,13 +18,22 @@ pub struct LocalMigrationRequest {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalMigrationAction {
-    PeerKey { node_id: String },
-    Exchange { call: Box<MigrationPeerCall> },
+    PeerKey {
+        node_id: String,
+    },
+    /// Attachment authority pin of an admitted peer (P25 N6a).
+    AttachmentAuthorityPin {
+        node_id: String,
+    },
+    Exchange {
+        call: Box<MigrationPeerCall>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalMigrationReply {
     PeerKey { node_id: String, public_key: String },
+    AttachmentAuthorityPin { node_id: String, answer: crate::PinAnswer },
     Peer { reply: Box<MigrationPeerReply> },
     Refused { reason: Refusal },
 }

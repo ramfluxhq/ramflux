@@ -67,7 +67,8 @@ impl HomeMigrationMesh for LocalFederation {
         {
             LocalMigrationReply::Peer { reply } => Ok(*reply),
             LocalMigrationReply::Refused { reason } => Err(NodeCoreError::HomeMigration(reason)),
-            LocalMigrationReply::PeerKey { .. } => Err(failure()),
+            LocalMigrationReply::PeerKey { .. }
+            | LocalMigrationReply::AttachmentAuthorityPin { .. } => Err(failure()),
         }
     }
 }

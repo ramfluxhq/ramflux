@@ -21,6 +21,11 @@ impl HttpResponse {
             body: serde_json::to_vec(value).map_err(|e| NodeCoreError::ItestJson(e.to_string()))?,
         })
     }
+    pub(crate) fn raw_json(status: &'static str, body: Vec<u8>) -> Self {
+        let content_type =
+            if status == "200 OK" { "application/json" } else { "text/plain; charset=utf-8" };
+        Self { status, content_type, body }
+    }
     pub(crate) fn text(status: &'static str, body: &str) -> Self {
         Self { status, content_type: "text/plain; charset=utf-8", body: body.as_bytes().to_vec() }
     }
