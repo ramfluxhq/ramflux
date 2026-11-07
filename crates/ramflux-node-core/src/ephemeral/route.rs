@@ -10,6 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Inclusive bound: 65,536 live authenticated digests (32 B digest + 8 B D each).
 pub const EPHEMERAL_REPLAY_BOUND: usize = 65_536;
 
+/// Bytes of one stored `(digest, D)` tuple. The set stores this once per live marker.
+pub const EPHEMERAL_REPLAY_ENTRY_BYTES: usize = 32 + 8;
+
+/// Inclusive retained-tuple budget at [`EPHEMERAL_REPLAY_BOUND`] (fixed costs included).
+pub const EPHEMERAL_REPLAY_BUDGET_BYTES: usize =
+    EPHEMERAL_REPLAY_BOUND * EPHEMERAL_REPLAY_ENTRY_BYTES;
+
 static SATURATION_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Outcome of inserting one authenticated ephemeral digest until exclusive deadline `D`.
@@ -22,7 +29,8 @@ pub enum EphemeralReplayAdmit {
     Replayed,
     /// The set holds 65,536 live markers; this new digest is refused and no live marker is evicted.
     RateLimited,
-    /// `now_ms >= D * 1000`; the digest is not recorded and any stored copy is dropped.
+    /// Incoming `D` is not live (`now_ms >= D * 1000`); the digest is not recorded.
+    /// A stored live marker for the same digest is left in place.
     Expired,
 }
 
@@ -50,31 +58,30 @@ fn marker_is_live(now_ms: u64, deadline_unix: u64) -> bool {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EphemeralReplaySet {
+    /// Sole `(digest, D)` store: 65,536 × 40 B = 2,621,440 B tuple payload at the bound.
     by_digest: HashMap<[u8; 32], u64>,
-    by_deadline: BTreeSet<(u64, [u8; 32])>,
+    /// Compact expiry index keyed by stored `D` (no second digest copy).
+    by_deadline: BTreeSet<u64>,
 }
 
 impl EphemeralReplaySet {
     fn expire_due(&mut self, now_ms: u64) {
-        while let Some(&(deadline_unix, digest)) = self.by_deadline.first() {
+        let mut dropped_any = false;
+        while let Some(&deadline_unix) = self.by_deadline.first() {
             if marker_is_live(now_ms, deadline_unix) {
                 break;
             }
             self.by_deadline.pop_first();
-            self.by_digest.remove(&digest);
+            dropped_any = true;
         }
-    }
-
-    fn drop_digest(&mut self, digest: &[u8; 32]) {
-        if let Some(stored) = self.by_digest.remove(digest) {
-            self.by_deadline.remove(&(stored, *digest));
+        if dropped_any {
+            self.by_digest.retain(|_, stored| marker_is_live(now_ms, *stored));
         }
     }
 
     fn admit(&mut self, digest: [u8; 32], deadline_unix: u64, now_ms: u64) -> EphemeralReplayAdmit {
         self.expire_due(now_ms);
         if !marker_is_live(now_ms, deadline_unix) {
-            self.drop_digest(&digest);
             return EphemeralReplayAdmit::Expired;
         }
         if self.by_digest.contains_key(&digest) {
@@ -86,7 +93,7 @@ impl EphemeralReplaySet {
             return EphemeralReplayAdmit::RateLimited;
         }
         self.by_digest.insert(digest, deadline_unix);
-        self.by_deadline.insert((deadline_unix, digest));
+        self.by_deadline.insert(deadline_unix);
         EphemeralReplayAdmit::Fresh
     }
 
@@ -128,7 +135,8 @@ pub(crate) fn saturation_total() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        EPHEMERAL_REPLAY_BOUND, EphemeralReplayAdmit, ephemeral_replay_digest, saturation_total,
+        EPHEMERAL_REPLAY_BOUND, EPHEMERAL_REPLAY_BUDGET_BYTES, EPHEMERAL_REPLAY_ENTRY_BYTES,
+        EphemeralReplayAdmit, ephemeral_replay_digest, saturation_total,
     };
     use crate::{RouterCore, RouterRedbStore};
     use redb::{ReadableDatabase, ReadableTable, TableHandle};
@@ -243,6 +251,40 @@ mod tests {
         );
     }
 
+    fn row_expired_incoming_preserves_live_marker() {
+        let router = RouterCore::new();
+        let x = digest(11);
+        assert_eq!(
+            router.admit_ephemeral_replay(x, 1005, NOW_LIVE_MS),
+            EphemeralReplayAdmit::Fresh
+        );
+        assert_eq!(router.ephemeral_replay_len(), 1);
+        assert_eq!(
+            router.admit_ephemeral_replay(x, 1000, NOW_LIVE_MS),
+            EphemeralReplayAdmit::Expired
+        );
+        assert_eq!(router.ephemeral_replay_len(), 1);
+        assert!(router.ephemeral_replay_contains_live(&x, NOW_LIVE_MS));
+        assert_eq!(
+            router.admit_ephemeral_replay(x, 1005, NOW_LIVE_MS),
+            EphemeralReplayAdmit::Replayed
+        );
+        assert_eq!(router.ephemeral_replay_len(), 1);
+    }
+
+    fn row_stored_expired_cleanup_still_works() {
+        let router = RouterCore::new();
+        let x = digest(12);
+        assert_eq!(router.admit_ephemeral_replay(x, 1000, 999_000), EphemeralReplayAdmit::Fresh);
+        assert_eq!(router.ephemeral_replay_len(), 1);
+        assert_eq!(
+            router.admit_ephemeral_replay(x, 1000, 1_000_000),
+            EphemeralReplayAdmit::Expired
+        );
+        assert!(!router.ephemeral_replay_contains_live(&x, 1_000_000));
+        assert_eq!(router.ephemeral_replay_len(), 0);
+    }
+
     fn row_expired_at_d_drops_marker() {
         let router = RouterCore::new();
         assert_eq!(
@@ -266,6 +308,21 @@ mod tests {
             EphemeralReplayAdmit::Expired
         );
         assert_eq!(router.ephemeral_replay_len(), 0);
+    }
+
+    fn row_retained_bytes_fit_budget() -> TestResult {
+        assert_eq!(EPHEMERAL_REPLAY_ENTRY_BYTES, 32 + 8);
+        assert_eq!(
+            EPHEMERAL_REPLAY_BOUND * EPHEMERAL_REPLAY_ENTRY_BYTES,
+            EPHEMERAL_REPLAY_BUDGET_BYTES
+        );
+        assert_eq!(EPHEMERAL_REPLAY_BUDGET_BYTES, 2_621_440);
+        let router = RouterCore::new();
+        fill(&router, EPHEMERAL_REPLAY_BOUND, NOW_LIVE_MS)?;
+        let retained = router.ephemeral_replay_len() * EPHEMERAL_REPLAY_ENTRY_BYTES;
+        assert_eq!(retained, EPHEMERAL_REPLAY_BUDGET_BYTES);
+        assert!(retained <= EPHEMERAL_REPLAY_BUDGET_BYTES);
+        Ok(())
     }
 
     fn row_expiry_frees_slot() -> TestResult {
@@ -395,6 +452,7 @@ mod tests {
         row_next_refused_without_eviction()?;
         row_duplicate_replayed_from_valid();
         row_expiry_frees_slot()?;
+        row_retained_bytes_fit_budget()?;
         Ok(())
     }
 
@@ -402,6 +460,8 @@ mod tests {
     fn ephemeral_restart_window() -> TestResult {
         row_live_at_exclusive_lower_ms();
         row_expired_at_d_drops_marker();
+        row_expired_incoming_preserves_live_marker();
+        row_stored_expired_cleanup_still_works();
         row_deadline_mul_overflow_expired();
         row_restart_empties_then_duplicate_before_d();
         row_repeated_restarts_duplicate_only_before_d();

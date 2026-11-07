@@ -242,8 +242,9 @@ mod ephemeral;
 pub use ephemeral::EphemeralDurableSnapshot;
 pub use ephemeral::{
     EPHEMERAL_CAPABILITY_BOUND, EPHEMERAL_REASSERTION_ITEM_BOUND, EPHEMERAL_REPLAY_BOUND,
-    EphemeralDropReason, EphemeralReassertionError, EphemeralReplayAdmit, EphemeralRouteGate,
-    EphemeralRouteRequest, EphemeralRouteResponse, EphemeralRouteResult, ephemeral_replay_digest,
+    EPHEMERAL_REPLAY_BUDGET_BYTES, EPHEMERAL_REPLAY_ENTRY_BYTES, EphemeralDropReason,
+    EphemeralReassertionError, EphemeralReplayAdmit, EphemeralRouteGate, EphemeralRouteRequest,
+    EphemeralRouteResponse, EphemeralRouteResult, ephemeral_replay_digest,
 };
 
 mod session_push_frames;
