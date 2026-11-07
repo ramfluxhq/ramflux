@@ -21,8 +21,18 @@ impl HomeMigrationService {
         payload: &ResolvePayload,
         id: &str,
     ) -> Result<ResolveResult, NodeCoreError> {
-        let store = scope.store;
-        let now = scope.now;
+        self.latest_migration_home_at(scope.store, scope.now, scope.deadline, payload, id)
+    }
+    /// Resolution needs only the store, the clock and a deadline, so the attachment
+    /// verdict can call it without an authenticated custody caller.
+    pub(crate) fn latest_migration_home_at(
+        &self,
+        store: &crate::RouterRedbStore,
+        now: u64,
+        deadline: std::time::Instant,
+        payload: &ResolvePayload,
+        id: &str,
+    ) -> Result<ResolveResult, NodeCoreError> {
         if payload.limit == 0 || payload.limit > MAX_CHAIN_RECORDS as u64 {
             return Err(failure(Refusal::HomeCheckpointRequired));
         }
@@ -45,7 +55,7 @@ impl HomeMigrationService {
         if peer == self.node.node_id() {
             return Err(failure(Refusal::HomeGenesisRequired));
         }
-        let pin = self.mesh.peer_key(peer, scope.deadline)?;
+        let pin = self.mesh.peer_key(peer, deadline)?;
         if known.as_ref().is_some_and(|k| k.record.home().1 != pin) {
             return Err(failure(Refusal::PinMismatch));
         }
@@ -60,7 +70,7 @@ impl HomeMigrationService {
             old_node_hint: None,
         };
         let call = self.node.peer_resolve_call(peer, remote, id, now)?;
-        let suffix = match self.mesh.exchange(peer, &call, scope.deadline)? {
+        let suffix = match self.mesh.exchange(peer, &call, deadline)? {
             MigrationPeerReply::Resolved(result) => *result,
             MigrationPeerReply::Refused(reason) => return Err(failure(reason)),
             _ => return Err(failure(Refusal::EvidenceRequired)),
