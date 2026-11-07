@@ -2,38 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded blocking operations and serialized, durable ciphertext publication.
+use super::durability::{DurabilityOps, RealDurabilityOps};
 use super::{
     codec,
     files::{Error, Store, open_file},
 };
-use rustix::fs::{self, AtFlags, FlockOperation, OFlags, RenameFlags};
-use std::{fs::File, io::Write, os::fd::OwnedFd, sync::Arc};
-
-/// FD-scoped durability operations. The writer performs every fsync, rename and unlink only
-/// through this trait, so an oracle that implements it observes (and can fail) the real calls.
-pub(super) trait DurabilityOps {
-    fn fsync_file(&self, file: &File) -> Result<(), Error>;
-    fn fsync_dir(&self, dir: &OwnedFd) -> Result<(), Error>;
-    fn rename(&self, dir: &OwnedFd, from: &str, to: &str, flags: RenameFlags) -> Result<(), Error>;
-    fn unlink(&self, dir: &OwnedFd, name: &str) -> Result<(), Error>;
-}
-
-/// Production implementation: the real syscalls and nothing else.
-pub(super) struct RealDurabilityOps;
-impl DurabilityOps for RealDurabilityOps {
-    fn fsync_file(&self, file: &File) -> Result<(), Error> {
-        file.sync_all().map_err(|_| Error::Io)
-    }
-    fn fsync_dir(&self, dir: &OwnedFd) -> Result<(), Error> {
-        fs::fsync(dir).map_err(Error::from)
-    }
-    fn rename(&self, dir: &OwnedFd, from: &str, to: &str, flags: RenameFlags) -> Result<(), Error> {
-        fs::renameat_with(dir, from, dir, to, flags).map_err(Error::from)
-    }
-    fn unlink(&self, dir: &OwnedFd, name: &str) -> Result<(), Error> {
-        fs::unlinkat(dir, name, AtFlags::empty()).map_err(Error::from)
-    }
-}
+use rustix::fs::{self, FlockOperation, OFlags, RenameFlags};
+use std::{fs::File, io::Write, sync::Arc};
 
 /// Test cut point; the crash harness parks or kills the process here.
 type Cut<'a> = &'a dyn Fn(&'static str) -> Result<(), Error>;
@@ -146,8 +121,8 @@ impl Store {
         if result.is_err() {
             match ops.unlink(&self.realm_dir, &temp) {
                 Ok(()) => ops.fsync_dir(&self.realm_dir)?,
-                Err(Error::Missing) => {}
-                Err(e) => return Err(e),
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(e) => return Err(e.into()),
             }
         }
         result

@@ -20,8 +20,12 @@ mod files;
 mod writer;
 
 #[cfg(target_os = "linux")]
+mod durability;
+#[cfg(target_os = "linux")]
 mod init;
 #[cfg(target_os = "linux")]
 mod systemd;
+#[cfg(all(target_os = "linux", test))]
+mod test_proc;
 #[cfg(target_os = "linux")]
 pub use init::{LinuxVaultInitError, LinuxVaultInstallation};

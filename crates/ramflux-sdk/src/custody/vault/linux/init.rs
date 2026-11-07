@@ -2,8 +2,13 @@
 // Copyright (c) 2026 Span Brain
 
 //! Installation-wide, resumable, insert-only systemd initialization. Dormant SDK API.
-use super::{LinuxVaultMode, cleanup::Secret, systemd};
-use rustix::fs::{self, AtFlags, FlockOperation, Mode, OFlags, RenameFlags};
+use super::{
+    LinuxVaultMode,
+    cleanup::Secret,
+    durability::{DurabilityOps, RealDurabilityOps},
+    systemd,
+};
+use rustix::fs::{self, FlockOperation, Mode, OFlags, RenameFlags};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -222,29 +227,51 @@ fn optional(dir: &OwnedFd, name: &str, cap: usize) -> Result<Option<Vec<u8>>, Er
         Err(e) => Err(e),
     }
 }
-fn remove(dir: &OwnedFd, name: &str) -> Result<(), Error> {
+/// Removes unpublished staging; a missing name is already removed.
+fn remove(dir: &OwnedFd, name: &str, ops: &dyn DurabilityOps) -> Result<(), Error> {
     match open(dir, name, OFlags::RDONLY) {
-        Ok(_) => fs::unlinkat(dir, name, AtFlags::empty())?,
+        Ok(_) => ops.unlink(dir, name)?,
         Err(Error::Missing) => return Ok(()),
         Err(e) => return Err(e),
     }
-    fs::fsync(dir)?;
+    ops.fsync_dir(dir)?;
     Ok(())
 }
-fn publish(dir: &OwnedFd, name: &str, bytes: &[u8], cut: &impl Fn(&str)) -> Result<(), Error> {
+/// Durable insert-only publication: file fsync, NOREPLACE rename, parent fsync.
+fn publish(
+    dir: &OwnedFd,
+    name: &str,
+    bytes: &[u8],
+    ops: &dyn DurabilityOps,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
     let temp = format!(".{name}.staging");
     // Only unpublished staging is removed, after caller established destination absence.
-    remove(dir, &temp)?;
+    remove(dir, &temp, ops)?;
     let fd = open(dir, &temp, OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL)?;
     let mut file = File::from(fd);
     file.write_all(bytes).map_err(|_| Error::Io)?;
     cut("before-file-sync");
-    file.sync_all().map_err(|_| Error::Io)?;
+    ops.fsync_file(&file)?;
     cut("after-file-sync");
-    fs::renameat_with(dir, &temp, dir, name, RenameFlags::NOREPLACE)?;
+    ops.rename(dir, &temp, name, RenameFlags::NOREPLACE)?;
     cut("after-publish");
-    fs::fsync(dir)?;
+    ops.fsync_dir(dir)?;
     cut("after-parent-sync");
+    Ok(())
+}
+/// Removes the init intent: unlink, then parent fsync. A missing intent still gets the parent
+/// fsync, which reconciles a process killed after the unlink but before that fsync.
+fn retire_intent(dir: &OwnedFd, ops: &dyn DurabilityOps, cut: &impl Fn(&str)) -> Result<(), Error> {
+    match open(dir, "init.pending", OFlags::RDONLY) {
+        Ok(_) => {
+            ops.unlink(dir, "init.pending")?;
+            cut("intent-unlinked");
+        }
+        Err(Error::Missing) => {}
+        Err(e) => return Err(e),
+    }
+    ops.fsync_dir(dir)?;
     Ok(())
 }
 fn parse(bytes: &[u8], root: &Path, mode: LinuxVaultMode) -> Result<Manifest, Error> {
@@ -357,6 +384,23 @@ async fn attempt(
     deadline: Instant,
     cut: &impl Fn(&str),
 ) -> Result<(), Error> {
+    let plan = Plan { root, mode, initialize, deadline, ops: &RealDurabilityOps };
+    attempt_with(&plan, cancel, cut).await
+}
+/// Inputs of one initialization attempt; `ops` performs every durability operation.
+struct Plan<'a> {
+    root: &'a Path,
+    mode: LinuxVaultMode,
+    initialize: bool,
+    deadline: Instant,
+    ops: &'a dyn DurabilityOps,
+}
+async fn attempt_with(
+    plan: &Plan<'_>,
+    cancel: &mut watch::Receiver<bool>,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
+    let Plan { root, mode, initialize, deadline, ops } = *plan;
     systemd::probe(cancel, deadline).await?;
     let dir = root_fd(root)?;
     let lock = open(
@@ -365,7 +409,7 @@ async fn attempt(
         if initialize { OFlags::RDWR | OFlags::CREATE } else { OFlags::RDWR },
     )?;
     fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Busy)?;
-    fs::fsync(&dir)?;
+    ops.fsync_dir(&dir)?;
     let pending = optional(&dir, "init.pending", 4096)?;
     let descriptor = optional(&dir, "descriptor.json", 4096)?;
     if !initialize && pending.is_some() {
@@ -396,7 +440,7 @@ async fn attempt(
             if bytes.len() > 4096 {
                 return Err(Error::Length);
             }
-            publish(&dir, "init.pending", &bytes, cut)?;
+            publish(&dir, "init.pending", &bytes, ops, cut)?;
             cut("intent-durable");
             (m, false)
         }
@@ -430,7 +474,7 @@ async fn attempt(
             return Err(Error::Corrupt);
         }
         cut("readback");
-        publish(&dir, &name, &blob.bytes()[..len], cut)?;
+        publish(&dir, &name, &blob.bytes()[..len], ops, cut)?;
         cut("realm-durable");
     }
     if *cancel.borrow() {
@@ -441,15 +485,13 @@ async fn attempt(
     }
     if !committed {
         let bytes = serde_json::to_vec(&manifest).map_err(|_| Error::Corrupt)?;
-        publish(&dir, "descriptor.json", &bytes, cut)?;
+        publish(&dir, "descriptor.json", &bytes, ops, cut)?;
         cut("descriptor-durable");
     }
     if initialize {
         cut("before-intent-remove");
-        remove(&dir, "init.pending")?;
+        retire_intent(&dir, ops, cut)?;
         cut("intent-removed");
-        // Reconcile a process killed after unlink but before parent fsync.
-        fs::fsync(&dir)?;
     }
     Ok(())
 }

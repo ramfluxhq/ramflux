@@ -3,9 +3,12 @@
 
 use super::super::init::Slot;
 use super::super::{cleanup::Secret, codec::Plaintext};
+use super::super::{
+    durability::recording::{Op, RecordingOps},
+    test_proc::{run_bounded, run_bounded_pid},
+};
 use super::*;
 use std::{
-    cell::RefCell,
     io::ErrorKind,
     os::unix::{
         fs::{PermissionsExt, symlink},
@@ -80,43 +83,6 @@ fn read(name: &str, kind: u8, generation: u64) -> Operation {
 }
 fn remove(name: &str, kind: u8, generation: u64) -> Operation {
     Operation::Delete { reference: name.into(), kind, generation }
-}
-/// One durability operation as invoked by the writer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op {
-    FileSync,
-    Rename,
-    Unlink,
-    DirSync,
-}
-/// Records each operation when it is invoked, then either performs the real syscall or, for the
-/// injected operation, returns an error instead of performing it.
-struct RecordingOps {
-    log: RefCell<Vec<Op>>,
-    fail: Option<Op>,
-}
-impl RecordingOps {
-    fn new(fail: Option<Op>) -> Self {
-        Self { log: RefCell::new(Vec::new()), fail }
-    }
-    fn step(&self, op: Op, real: impl FnOnce() -> Result<(), Error>) -> Result<(), Error> {
-        self.log.borrow_mut().push(op);
-        if self.fail == Some(op) { Err(Error::Io) } else { real() }
-    }
-}
-impl DurabilityOps for RecordingOps {
-    fn fsync_file(&self, file: &File) -> Result<(), Error> {
-        self.step(Op::FileSync, || RealDurabilityOps.fsync_file(file))
-    }
-    fn fsync_dir(&self, dir: &OwnedFd) -> Result<(), Error> {
-        self.step(Op::DirSync, || RealDurabilityOps.fsync_dir(dir))
-    }
-    fn rename(&self, dir: &OwnedFd, from: &str, to: &str, flags: RenameFlags) -> Result<(), Error> {
-        self.step(Op::Rename, || RealDurabilityOps.rename(dir, from, to, flags))
-    }
-    fn unlink(&self, dir: &OwnedFd, name: &str) -> Result<(), Error> {
-        self.step(Op::Unlink, || RealDurabilityOps.unlink(dir, name))
-    }
 }
 /// Runs one operation and returns its result with the ordered durability operations invoked.
 fn observed(
@@ -356,42 +322,6 @@ fn stalled_child_is_killed_and_its_group_is_gone() -> TestResult {
             }
             _ => std::thread::sleep(Duration::from_millis(10)),
         }
-    }
-}
-/// Kills the whole process group of a traced run on every exit path and reaps the leader.
-struct GroupReaper(Child);
-impl Drop for GroupReaper {
-    fn drop(&mut self) {
-        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id().cast_signed()) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-/// Runs `command` in its own process group with a fail-loud deadline; tracer and tracee are
-/// killed and reaped when this returns, however it returns.
-fn run_bounded(command: &mut Command, deadline: Duration) -> TestResult<std::process::ExitStatus> {
-    run_bounded_pid(command, deadline, &mut 0)
-}
-/// Like `run_bounded`, and records the child's pid (also its process-group id) in `pid`.
-fn run_bounded_pid(
-    command: &mut Command,
-    deadline: Duration,
-    pid: &mut u32,
-) -> TestResult<std::process::ExitStatus> {
-    use std::os::unix::process::CommandExt;
-    let mut child = GroupReaper(command.process_group(0).spawn()?);
-    *pid = child.0.id();
-    let end = Instant::now() + deadline;
-    loop {
-        if let Some(status) = child.0.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= end {
-            return Err(format!("traced run timed out after {deadline:?}").into());
-        }
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 #[test]

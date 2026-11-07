@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use super::super::cleanup::observer;
+use super::super::{
+    cleanup::observer,
+    durability::recording::{Op, RecordingOps},
+    test_proc::{DEADLINE, run_output},
+};
 use super::*;
-use std::{os::unix::fs::PermissionsExt, process::Command};
+use std::{
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    process::Command,
+};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[tokio::test]
@@ -128,17 +135,271 @@ fn manifest_bounds_and_cross_fields() -> TestResult {
     Ok(())
 }
 
+fn private_dir() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir)
+}
+fn put(dir: &Path, name: &str, bytes: &[u8], mode: u32) -> TestResult {
+    let path = dir.join(name);
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, bytes)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+/// Received-byte parser matrix: each predicate is isolated (one field differs from a valid
+/// manifest), exact error asserted, with inclusive positive controls.
+#[test]
+fn init_manifest_refusal_matrix_is_isolated_and_exact() -> TestResult {
+    let mode = LinuxVaultMode::SystemdHost;
+    let root = Path::new("/private/vault");
+    let good = Manifest::new(root, mode)?;
+    let encode = |m: &Manifest| serde_json::to_vec(m);
+    let (a, b, c) = ("a".repeat(32), "b".repeat(32), "c".repeat(32));
+    let mut cases: Vec<(&str, Manifest)> = Vec::new();
+    let mut m = good.clone();
+    (m.key_ids[0], m.key_ids[1], m.key_ids[2]) = (a.clone(), a.clone(), c.clone());
+    cases.push(("key ids (0,1) equal", m));
+    let mut m = good.clone();
+    (m.key_ids[0], m.key_ids[1], m.key_ids[2]) = (a.clone(), b.clone(), b.clone());
+    cases.push(("key ids (1,2) equal", m));
+    let mut m = good.clone();
+    (m.key_ids[0], m.key_ids[1], m.key_ids[2]) = (a.clone(), b.clone(), a.clone());
+    cases.push(("key ids (0,2) equal", m));
+    for (what, id) in [
+        ("vault id 31 bytes", "a".repeat(31)),
+        ("vault id 33 bytes", "a".repeat(33)),
+        ("vault id empty", String::new()),
+        ("vault id uppercase", "A".repeat(32)),
+        ("vault id non-hex letter", "g".repeat(32)),
+        ("vault id non-ascii 32 bytes", "\u{e9}".repeat(16)),
+    ] {
+        let mut m = good.clone();
+        m.vault_id = id;
+        cases.push((what, m));
+    }
+    for index in 0..3 {
+        for (what, id) in [
+            ("key id 31 bytes", "a".repeat(31)),
+            ("key id 33 bytes", "a".repeat(33)),
+            ("key id uppercase", "F".repeat(32)),
+            ("key id punctuation", "-".repeat(32)),
+            ("key id non-ascii 32 bytes", "\u{e9}".repeat(16)),
+        ] {
+            let mut m = good.clone();
+            m.key_ids[index] = id;
+            cases.push((what, m));
+        }
+    }
+    for (what, manifest) in cases {
+        assert_eq!(parse(&encode(&manifest)?, root, mode), Err(Error::Corrupt), "{what}");
+    }
+    // Inclusive controls: all-zero and all-f identifiers are valid when distinct.
+    let mut edge = good.clone();
+    (edge.vault_id, edge.key_ids) = ("0".repeat(32), ["0".repeat(32), "f".repeat(32), c]);
+    assert_eq!(parse(&encode(&edge)?, root, mode), Ok(edge));
+    // Unknown field and non-canonical spacing are received-byte refusals too.
+    let mut value: serde_json::Value = serde_json::from_slice(&encode(&good)?)?;
+    value["extra"] = serde_json::Value::Null;
+    assert_eq!(parse(&serde_json::to_vec(&value)?, root, mode), Err(Error::Corrupt));
+    assert_eq!(parse(&serde_json::to_vec_pretty(&good)?, root, mode), Err(Error::Corrupt));
+    Ok(())
+}
+
+/// Real file reader: inclusive 4096/16384 limits and every filesystem metadata predicate.
+#[test]
+fn init_reader_limits_and_metadata_predicates_are_exact() -> TestResult {
+    let dir = private_dir()?;
+    let fd = root_fd(dir.path())?;
+    assert_eq!(systemd::CAP, 16384);
+    for cap in [4096, systemd::CAP] {
+        put(dir.path(), "edge", &vec![0x78; cap], 0o600)?;
+        assert_eq!(read(&fd, "edge", cap)?.len(), cap, "{cap} accepted");
+        put(dir.path(), "edge", &vec![0x78; cap + 1], 0o600)?;
+        assert_eq!(read(&fd, "edge", cap), Err(Error::Length), "{} refused", cap + 1);
+        put(dir.path(), "edge", &[], 0o600)?;
+        assert_eq!(read(&fd, "edge", cap), Err(Error::Length), "empty refused");
+    }
+    assert_eq!(read(&fd, "absent", 4096), Err(Error::Missing));
+    assert_eq!(optional(&fd, "absent", 4096), Ok(None));
+    // One predicate at a time against an otherwise valid 0600 single-link regular file.
+    put(dir.path(), "ok", b"x", 0o600)?;
+    assert_eq!(read(&fd, "ok", 4096)?, b"x");
+    for bad in [0o640, 0o644, 0o400, 0o700, 0o604] {
+        put(dir.path(), "mode", b"x", bad)?;
+        assert_eq!(read(&fd, "mode", 4096), Err(Error::Metadata), "mode {bad:o}");
+    }
+    std::fs::hard_link(dir.path().join("ok"), dir.path().join("second-link"))?;
+    assert_eq!(read(&fd, "ok", 4096), Err(Error::Metadata), "link count 2");
+    std::fs::remove_file(dir.path().join("second-link"))?;
+    std::os::unix::fs::symlink("ok", dir.path().join("link"))?;
+    assert_eq!(read(&fd, "link", 4096), Err(Error::Metadata), "symlink");
+    fs::mknodat(&fd, "fifo", fs::FileType::Fifo, Mode::RUSR | Mode::WUSR, 0)?;
+    assert_eq!(read(&fd, "fifo", 4096), Err(Error::Metadata), "fifo");
+    std::fs::create_dir(dir.path().join("subdir"))?;
+    std::fs::set_permissions(dir.path().join("subdir"), std::fs::Permissions::from_mode(0o600))?;
+    assert_eq!(read(&fd, "subdir", 4096), Err(Error::Metadata), "directory as file");
+    Ok(())
+}
+
+/// Root and injected-credential path predicates, one at a time.
+#[test]
+fn init_root_and_credential_metadata_predicates_are_exact() -> TestResult {
+    let dir = private_dir()?;
+    let base = dir.path();
+    assert!(root_fd(base).is_ok());
+    for bad in [0o750, 0o755, 0o500, 0o701] {
+        let sub = base.join(format!("root-{bad:o}"));
+        std::fs::create_dir(&sub)?;
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(bad))?;
+        assert!(matches!(root_fd(&sub), Err(Error::Metadata)), "root mode {bad:o}");
+    }
+    std::os::unix::fs::symlink(base, base.join("root-link"))?;
+    assert!(matches!(root_fd(&base.join("root-link")), Err(Error::Metadata)), "symlink root");
+    put(base, "plain", b"x", 0o600)?;
+    assert!(matches!(root_fd(&base.join("plain")), Err(Error::Metadata)), "file as root");
+    std::fs::create_dir(base.join("sub"))?;
+    assert!(matches!(root_fd(&base.join("sub/../plain")), Err(Error::Metadata)), "dot-dot");
+    assert!(matches!(root_fd(&base.join("nothing")), Err(Error::Missing)), "missing root");
+    assert!(matches!(root_fd(Path::new("relative")), Err(Error::Metadata)));
+    assert!(matches!(root_fd(Path::new("/")), Err(Error::Metadata)));
+    // Credential reader: exactly one regular 0400 single-link 32-byte file.
+    put(base, "key", &[7; 32], 0o400)?;
+    assert_eq!(LinuxVaultInstallation::read_credential(&base.join("key")), Ok(()));
+    for len in [0, 31, 33, 4096] {
+        put(base, "len", &vec![7; len], 0o400)?;
+        assert_eq!(
+            LinuxVaultInstallation::read_credential(&base.join("len")),
+            Err(Error::Length),
+            "length {len}"
+        );
+    }
+    for bad in [0o600, 0o440, 0o444] {
+        put(base, "perm", &[7; 32], bad)?;
+        assert_eq!(
+            LinuxVaultInstallation::read_credential(&base.join("perm")),
+            Err(Error::Metadata),
+            "credential mode {bad:o}"
+        );
+    }
+    // A credential the process cannot even open is an I/O refusal, not a metadata one.
+    put(base, "unreadable", &[7; 32], 0o200)?;
+    assert_eq!(LinuxVaultInstallation::read_credential(&base.join("unreadable")), Err(Error::Io));
+    std::fs::hard_link(base.join("key"), base.join("key-twin"))?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.join("key")),
+        Err(Error::Metadata),
+        "link count 2"
+    );
+    std::os::unix::fs::symlink("key", base.join("key-link"))?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.join("key-link")),
+        Err(Error::Metadata),
+        "symlink credential"
+    );
+    std::os::unix::fs::symlink(base, base.join("dir-link"))?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.join("dir-link/key")),
+        Err(Error::Metadata),
+        "symlink directory component"
+    );
+    let fd = root_fd(base)?;
+    fs::mknodat(&fd, "fifo-key", fs::FileType::Fifo, Mode::RUSR, 0)?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.join("fifo-key")),
+        Err(Error::Metadata),
+        "fifo credential"
+    );
+    std::fs::create_dir(base.join("dir-key"))?;
+    std::fs::set_permissions(base.join("dir-key"), std::fs::Permissions::from_mode(0o400))?;
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.join("dir-key")),
+        Err(Error::Metadata),
+        "directory credential"
+    );
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(&base.join("missing-key")),
+        Err(Error::Missing)
+    );
+    assert_eq!(
+        LinuxVaultInstallation::read_credential(Path::new("relative")),
+        Err(Error::Metadata)
+    );
+    Ok(())
+}
+
+/// Durability operation oracle: publication and intent removal perform the real fsync, rename
+/// and unlink steps in order, on the expected objects, and injected syscall failures surface as
+/// errors without a durable success.
+#[test]
+fn init_publication_and_intent_removal_follow_the_durable_order() -> TestResult {
+    let dir = private_dir()?;
+    let fd = root_fd(dir.path())?;
+    let root_ino = format!("dir:ino{}", std::fs::metadata(dir.path())?.ino());
+    let ops = RecordingOps::new(None);
+    publish(&fd, "descriptor.json", b"payload", &ops, &|_| {})?;
+    assert_eq!(*ops.log.borrow(), [Op::FileSync, Op::Rename, Op::DirSync]);
+    let published = std::fs::metadata(dir.path().join("descriptor.json"))?.ino();
+    assert_eq!(
+        *ops.identity.borrow(),
+        [
+            format!("file:ino{published}"),
+            ".descriptor.json.staging->descriptor.json".to_owned(),
+            root_ino.clone()
+        ],
+        "the fsynced file is the one that was published; the parent is the realm directory"
+    );
+    assert_eq!(std::fs::read(dir.path().join("descriptor.json"))?, b"payload");
+    put(dir.path(), "init.pending", b"intent", 0o600)?;
+    let ops = RecordingOps::new(None);
+    retire_intent(&fd, &ops, &|_| {})?;
+    assert_eq!(*ops.log.borrow(), [Op::Unlink, Op::DirSync], "unlink before parent fsync");
+    assert_eq!(*ops.identity.borrow(), ["init.pending".to_owned(), root_ino.clone()]);
+    assert!(!dir.path().join("init.pending").exists());
+    let ops = RecordingOps::new(None);
+    retire_intent(&fd, &ops, &|_| {})?;
+    assert_eq!(*ops.log.borrow(), [Op::DirSync], "a missing intent still gets the parent fsync");
+    // Injected failures replace the syscall; each is an exact error to the caller.
+    for (fail, expect_log, destination) in [
+        (Op::FileSync, vec![Op::FileSync], false),
+        (Op::Rename, vec![Op::FileSync, Op::Rename], false),
+        (Op::DirSync, vec![Op::FileSync, Op::Rename, Op::DirSync], true),
+    ] {
+        let case = private_dir()?;
+        let case_fd = root_fd(case.path())?;
+        let ops = RecordingOps::new(Some(fail));
+        assert_eq!(publish(&case_fd, "slot", b"x", &ops, &|_| {}), Err(Error::Io), "{fail:?}");
+        assert_eq!(*ops.log.borrow(), expect_log, "{fail:?}");
+        assert_eq!(case.path().join("slot").exists(), destination, "{fail:?}");
+    }
+    for (fail, expect_log, intent_left) in
+        [(Op::Unlink, vec![Op::Unlink], true), (Op::DirSync, vec![Op::Unlink, Op::DirSync], false)]
+    {
+        let case = private_dir()?;
+        put(case.path(), "init.pending", b"intent", 0o600)?;
+        let case_fd = root_fd(case.path())?;
+        let ops = RecordingOps::new(Some(fail));
+        assert_eq!(retire_intent(&case_fd, &ops, &|_| {}), Err(Error::Io), "{fail:?}");
+        assert_eq!(*ops.log.borrow(), expect_log, "{fail:?}");
+        assert_eq!(case.path().join("init.pending").exists(), intent_left, "{fail:?}");
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "actual systemd provider and process crash fixture"]
 fn linux_vault_installation_init_is_serial_and_crash_safe() -> TestResult {
-    for cut in 1..=36 {
+    for cut in 1..=37 {
         let dir = tempfile::tempdir()?;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
-        let result = Command::new(std::env::current_exe()?)
-            .args(["--ignored", "--exact", "custody::vault::linux::init::tests::init_child"])
-            .env("RF_INIT_CHILD", dir.path())
-            .env("RF_INIT_CUT", cut.to_string())
-            .output()?;
+        let result = run_output(
+            Command::new(std::env::current_exe()?)
+                .args(["--ignored", "--exact", "custody::vault::linux::init::tests::init_child"])
+                .env("RF_INIT_CHILD", dir.path())
+                .env("RF_INIT_CUT", cut.to_string()),
+            DEADLINE,
+        )?;
         assert_eq!(
             result.status.code(),
             Some(93),
@@ -161,13 +422,19 @@ fn linux_vault_installation_init_is_serial_and_crash_safe() -> TestResult {
                     .await,
                 Err(Error::Busy)
             );
-            let contender = Command::new(std::env::current_exe().map_err(|_| Error::Io)?)
-                .args(["--ignored", "--exact", "custody::vault::linux::init::tests::init_child"])
-                .env("RF_INIT_CHILD", dir.path())
-                .env("RF_INIT_CUT", "0")
-                .env("RF_INIT_EXPECT_BUSY", "1")
-                .output()
-                .map_err(|_| Error::Io)?;
+            let contender = run_output(
+                Command::new(std::env::current_exe().map_err(|_| Error::Io)?)
+                    .args([
+                        "--ignored",
+                        "--exact",
+                        "custody::vault::linux::init::tests::init_child",
+                    ])
+                    .env("RF_INIT_CHILD", dir.path())
+                    .env("RF_INIT_CUT", "0")
+                    .env("RF_INIT_EXPECT_BUSY", "1"),
+                DEADLINE,
+            )
+            .map_err(|_| Error::Io)?;
             assert!(contender.status.success(), "second process must get exact Busy");
             drop(lock);
             if dir.path().join("init.pending").exists() {
