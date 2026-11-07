@@ -255,77 +255,89 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
     let vectors = vectors()?;
     let base = vectors.vectors.first().ok_or("base")?;
     let binding = base.binding()?;
-    observer::begin();
     {
-        let key = base.kek()?;
-        let input = Plaintext::new(&[33; 32])?;
-        let record = seal(binding, &key, &input)?;
-        let opened = open(binding, &key, &record)?;
-        assert_eq!(opened.bytes(), input.bytes());
-    }
-    observed("P02 success", &["p02-kek", "p02-input", "p02-nonce", "p02-aead", "p02-readback"]);
-    observer::begin();
-    {
-        let key = base.kek()?;
-        let mut record = hex(&base.record)?;
-        record[80] ^= 1;
-        assert_error(binding, &key, &record, Error::Authentication);
-    }
-    observed("P02 failed decrypt", &["p02-kek", "p02-readback"]);
-    observer::begin();
-    {
-        let key = base.kek()?;
-        let input = Plaintext::new(&[44; 32])?;
-        let result = seal_random(binding, &key, &input, |nonce| {
-            nonce.fill(55);
-            Err(Error::Random)
-        });
-        assert_eq!(result, Err(Error::Random));
-    }
-    observed("P02 partial RNG failure", &["p02-kek", "p02-input", "p02-nonce"]);
-    observer::begin();
-    {
-        let key = base.kek()?;
-        let input = Plaintext::new(&[66; 32])?;
-        assert_eq!(
-            seal(Binding { generation: 0, ..binding }, &key, &input),
-            Err(Error::Generation)
-        );
-        assert!(matches!(Plaintext::new(&[]), Err(Error::Length)));
-        assert!(matches!(Plaintext::new(&[0; MAX_PLAINTEXT + 1]), Err(Error::Length)));
-    }
-    observed("P02 format rejection", &["p02-kek", "p02-input"]);
-    observer::begin();
-    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
-        let (ready, wait) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(async move {
-            let mut key = Secret::<32>::new("p02-kek");
-            key.bytes_mut().fill(77);
-            let input = Plaintext::new(&[88; 32])?;
-            let binding = Binding {
-                realm: 3,
-                kind: 3,
-                vault_id: [1; 16],
-                generation: 1,
-                key_id: [2; 16],
-                account: "account_a",
-                reference: "agent-provisioning:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            };
+        let _session =
+            observer::begin(&["p02-kek", "p02-input", "p02-nonce", "p02-aead", "p02-readback"]);
+        {
+            let key = base.kek()?;
+            let input = Plaintext::new(&[33; 32])?;
             let record = seal(binding, &key, &input)?;
-            let readback = open(binding, &key, &record)?;
-            let _held = (key, input, readback);
-            assert!(ready.send(()).is_ok());
-            std::future::pending::<Result<(), Error>>().await
-        });
-        wait.await?;
-        handle.abort();
-        assert!(handle.await.is_err_and(|error| error.is_cancelled()));
-        Ok::<(), Box<dyn std::error::Error>>(())
-    })?;
-    observed(
-        "P02 cancelled owner",
-        &["p02-kek", "p02-input", "p02-nonce", "p02-aead", "p02-readback"],
-    );
+            let opened = open(binding, &key, &record)?;
+            assert_eq!(opened.bytes(), input.bytes());
+        }
+        observed("P02 success", &["p02-kek", "p02-input", "p02-nonce", "p02-aead", "p02-readback"]);
+    }
+    {
+        let _session = observer::begin(&["p02-kek", "p02-readback"]);
+        {
+            let key = base.kek()?;
+            let mut record = hex(&base.record)?;
+            record[80] ^= 1;
+            assert_error(binding, &key, &record, Error::Authentication);
+        }
+        observed("P02 failed decrypt", &["p02-kek", "p02-readback"]);
+    }
+    {
+        let _session = observer::begin(&["p02-kek", "p02-input", "p02-nonce"]);
+        {
+            let key = base.kek()?;
+            let input = Plaintext::new(&[44; 32])?;
+            let result = seal_random(binding, &key, &input, |nonce| {
+                nonce.fill(55);
+                Err(Error::Random)
+            });
+            assert_eq!(result, Err(Error::Random));
+        }
+        observed("P02 partial RNG failure", &["p02-kek", "p02-input", "p02-nonce"]);
+    }
+    {
+        let _session = observer::begin(&["p02-kek", "p02-input"]);
+        {
+            let key = base.kek()?;
+            let input = Plaintext::new(&[66; 32])?;
+            assert_eq!(
+                seal(Binding { generation: 0, ..binding }, &key, &input),
+                Err(Error::Generation)
+            );
+            assert!(matches!(Plaintext::new(&[]), Err(Error::Length)));
+            assert!(matches!(Plaintext::new(&[0; MAX_PLAINTEXT + 1]), Err(Error::Length)));
+        }
+        observed("P02 format rejection", &["p02-kek", "p02-input"]);
+    }
+    {
+        let _session =
+            observer::begin(&["p02-kek", "p02-input", "p02-nonce", "p02-aead", "p02-readback"]);
+        tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+            let (ready, wait) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                let mut key = Secret::<32>::new("p02-kek");
+                key.bytes_mut().fill(77);
+                let input = Plaintext::new(&[88; 32])?;
+                let binding = Binding {
+                    realm: 3,
+                    kind: 3,
+                    vault_id: [1; 16],
+                    generation: 1,
+                    key_id: [2; 16],
+                    account: "account_a",
+                    reference: "agent-provisioning:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                };
+                let record = seal(binding, &key, &input)?;
+                let readback = open(binding, &key, &record)?;
+                let _held = (key, input, readback);
+                assert!(ready.send(()).is_ok());
+                std::future::pending::<Result<(), Error>>().await
+            });
+            wait.await?;
+            handle.abort();
+            assert!(handle.await.is_err_and(|error| error.is_cancelled()));
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+        observed(
+            "P02 cancelled owner",
+            &["p02-kek", "p02-input", "p02-nonce", "p02-aead", "p02-readback"],
+        );
+    }
     Ok(())
 }
 

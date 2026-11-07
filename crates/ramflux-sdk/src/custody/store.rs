@@ -76,12 +76,24 @@ impl std::fmt::Debug for AgentProvisioningBundle {
 }
 impl Drop for AgentProvisioningBundle {
     fn drop(&mut self) {
-        self.data_passphrase.zeroize();
-        #[cfg(test)]
-        export_observer::inspect("p07-export-passphrase", self.data_passphrase.as_bytes());
+        // The String's bytes are wiped over their whole allocation, not just their length.
+        let mut bytes = std::mem::take(&mut self.data_passphrase).into_bytes();
+        wipe_allocation(&mut bytes, "p07-export-passphrase");
     }
 }
-/// Owned copy of the provisioning secret used for UTF-8 validation. It is cleared on every exit,
+/// Wipes and (in tests) observes the complete owned allocation: spare capacity is initialized
+/// without reallocating, the whole slice is zeroized, and only then is the length dropped.
+fn wipe_allocation(buffer: &mut Vec<u8>, label: &'static str) {
+    let capacity = buffer.capacity();
+    buffer.resize(capacity, 0);
+    buffer.as_mut_slice().zeroize();
+    #[cfg(test)]
+    super::observer::inspect_capacity(label, capacity, buffer);
+    #[cfg(not(test))]
+    let _ = label;
+    buffer.clear();
+}
+/// Owned copy of the provisioning secret used for UTF-8 validation. It is wiped on every exit,
 /// including the invalid-UTF-8 error: validation borrows from this guard (`str::from_utf8`), so no
 /// unguarded `Vec`/`FromUtf8Error` buffer exists on any path.
 struct ExportSource(Vec<u8>);
@@ -92,31 +104,7 @@ impl ExportSource {
 }
 impl Drop for ExportSource {
     fn drop(&mut self) {
-        self.0.zeroize();
-        #[cfg(test)]
-        export_observer::inspect("p07-export-utf8", &self.0);
-    }
-}
-/// Test-only observer of the export conversion buffers after cleanup (see D6, P07).
-#[cfg(test)]
-pub(crate) mod export_observer {
-    use std::cell::RefCell;
-    pub(crate) type Seen = Vec<(&'static str, Vec<u8>)>;
-    thread_local! {
-        static SEEN: RefCell<Option<Seen>> = const { RefCell::new(None) };
-    }
-    pub(crate) fn begin() {
-        SEEN.with(|seen| *seen.borrow_mut() = Some(Vec::new()));
-    }
-    pub(super) fn inspect(label: &'static str, bytes: &[u8]) {
-        SEEN.with(|seen| {
-            if let Some(seen) = seen.borrow_mut().as_mut() {
-                seen.push((label, bytes.to_vec()));
-            }
-        });
-    }
-    pub(crate) fn take() -> Seen {
-        SEEN.with(|seen| seen.borrow_mut().take().unwrap_or_default())
+        wipe_allocation(&mut self.0, "p07-export-utf8");
     }
 }
 /// An authenticated local account, with no legacy root signer or active session.
