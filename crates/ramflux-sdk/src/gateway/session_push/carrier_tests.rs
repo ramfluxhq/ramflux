@@ -219,23 +219,36 @@ async fn capable_events_survive_buffer_and_subscription() {
         }
     }
 
-    // (r4) every event carries the stamp of the hub that published it, so a consumer holding
-    // the newer generation can ignore an event of the older one (the metadata child pattern).
+    // (r4) a generation-checking consumer (the metadata child pattern) ignores an event of an
+    // earlier session and acts only on the current one.
     let old = SessionHub::new(GENERATION);
     let new = SessionHub::new(GENERATION + 1);
     let mut from_old = old.subscribe([FrameKind::Resync]);
     let mut from_new = new.subscribe([FrameKind::Resync]);
-    old.publish_capable(resync_event());
-    new.publish_capable(resync_event());
-    let (
-        SessionEvent::Capable { generation: stale, .. },
-        SessionEvent::Capable { generation: current, .. },
-    ) = (recv(&mut from_old).await, recv(&mut from_new).await)
-    else {
-        panic!("both hubs must publish capable events");
+    let resync_at = |after_inbox_seq| CapableEvent::Resync {
+        incarnation_id: id(),
+        target_delivery_id: "target-route".into(),
+        after_inbox_seq,
+        reason: ResyncReason::NotPushed,
     };
-    assert_eq!((stale, current), (GENERATION, GENERATION + 1));
-    assert_ne!(stale, current, "the stale event is distinguishable");
+    old.publish_capable(resync_at(11));
+    new.publish_capable(resync_at(22));
+    let current_generation = GENERATION + 1;
+    let mut acted_on = Vec::new();
+    for subscription in [&mut from_old, &mut from_new] {
+        match recv(subscription).await {
+            SessionEvent::Capable { event, generation } => {
+                if generation != current_generation {
+                    continue;
+                }
+                if let CapableEvent::Resync { after_inbox_seq, .. } = &*event {
+                    acted_on.push(*after_inbox_seq);
+                }
+            }
+            other => panic!("not a capable event: {other:?}"),
+        }
+    }
+    assert_eq!(acted_on, [22], "only the current-generation event changes the consumer");
 
     // (r5) a subscriber to other kinds receives no capable event: the next event it sees is
     // the heartbeat published after them.

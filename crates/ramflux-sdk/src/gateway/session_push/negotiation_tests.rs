@@ -29,6 +29,8 @@ const E: &str = "0123456789abcdef0123456789abcdef";
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
 type Sent = Arc<Mutex<Vec<Value>>>;
+/// Breaks one field of a push establishment.
+type MalformEcho = fn(&mut Value);
 
 /// Serves one establishment frame, records every client frame, then idles.
 struct Gateway {
@@ -103,6 +105,23 @@ fn config(advertise: bool, scope: &[&str]) -> GatewaySessionConfig {
     .with_session_push_advertise(advertise);
     config.capability_scope = scope.iter().map(|s| (*s).to_owned()).collect();
     config
+}
+
+/// An unmodified constructor: nothing sets the advertise switch.
+fn default_config() -> GatewaySessionConfig {
+    let root = ramflux_crypto::create_identity_root("neg-principal", [0x51; 32]);
+    GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+        bind_addr: "0.0.0.0:0".parse().unwrap(),
+        gateway_addr: "127.0.0.1:443".parse().unwrap(),
+        server_name: "localhost".into(),
+        ca_cert: "test-ca.pem".into(),
+        principal_id: "neg-principal".into(),
+        device_id: "neg-device".into(),
+        target_delivery_id: "neg-target".into(),
+        prekey_http_url: None,
+    })
+    .with_owned_device(&root, branch())
+    .unwrap()
 }
 
 fn session() -> n::GatewaySessionEstablishedFrame {
@@ -263,10 +282,59 @@ async fn capable_negotiation_requires_signed_advertisement_and_echo() {
     refusal(result, "echo names a capability that was not advertised");
 
     // (r8) tampering the scope after signing makes the proof fail verification.
-    let (result, sent, _) = connect(config(true, &["gateway.session"]), vec![echo_ok]).await;
+    let (result, sent, _) =
+        connect(config(true, &["gateway.session"]), vec![echo_ok.clone()]).await;
     result.unwrap();
     let mut tampered = proof(&sent);
     assert!(verifies(&tampered));
     tampered.capability_scope.push("gateway.ephemeral.v1".into());
     assert!(!verifies(&tampered));
+    // Default-off is pinned: an unmodified constructor does not advertise, negotiates Legacy
+    // and keeps the capability out of the signed scope.
+    let unmodified = default_config();
+    assert!(!unmodified.session_push_advertise);
+    let (result, sent, _) = connect(unmodified, vec![bytes(&legacy_frame())]).await;
+    assert_eq!(result.unwrap().mode, SessionMode::Legacy);
+    let signed = proof(&sent);
+    assert_eq!(count(&signed.capability_scope, PUSH), 0);
+    assert!(verifies(&signed));
+
+    // The establishment in node-core struct order (producer order i), not only the sorted
+    // `Value` order: Push when advertised, Compat for the legacy typed frame.
+    let typed_push = serde_json::to_vec(&n::SessionPushServerFrame::SessionEstablished {
+        session: n::SessionPushEstablishedFrame {
+            session: session(),
+            capabilities: vec![PUSH.into()],
+            inbox_incarnation_id: E.into(),
+        },
+    })
+    .unwrap();
+    assert_ne!(typed_push, echo_ok, "the two producer orders differ on the wire");
+    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_push]).await;
+    assert_eq!(result.unwrap().mode, SessionMode::Push { incarnation: id(E) });
+    let typed_legacy =
+        serde_json::to_vec(&n::GatewayServerFrame::SessionEstablished { session: session() })
+            .unwrap();
+    let (result, _, _) = connect(config(true, &["gateway.session"]), vec![typed_legacy]).await;
+    assert_eq!(result.unwrap().mode, SessionMode::Compat);
+
+    // Malformed echo, one wrong JSON type per row: the capability container, a capability
+    // element and the incarnation. Each is the same exact refusal.
+    let malformed: [(&str, MalformEcho); 3] = [
+        ("capabilities is a string", |v| v["session"]["capabilities"] = json!("x")),
+        ("a capability element is a number", |v| v["session"]["capabilities"] = json!([1])),
+        ("the incarnation is a number", |v| v["session"]["inbox_incarnation_id"] = json!(5)),
+    ];
+    for (row, mutate) in malformed {
+        let mut frame = push_frame(vec![PUSH.into()], E);
+        mutate(&mut frame);
+        let (result, _, _) = connect(config(true, &["gateway.session"]), vec![bytes(&frame)]).await;
+        match result {
+            Err(SdkError::GatewaySessionRejected(message)) => {
+                assert_eq!(message, "session push negotiation refused: echo is malformed", "{row}");
+            }
+            Err(other) => panic!("{row}: {other:?}"),
+            Ok(engine) => panic!("{row}: accepted as {:?}", engine.mode),
+        }
+    }
 }

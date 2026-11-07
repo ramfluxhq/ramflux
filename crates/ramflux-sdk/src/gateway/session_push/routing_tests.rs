@@ -60,6 +60,12 @@ pub(super) fn push() -> SessionMode {
 }
 
 pub(super) fn scripted(mode: SessionMode, frames: Vec<Value>) -> GatewaySessionEngine {
+    let script = frames.into_iter().map(|f| serde_json::to_vec(&f).unwrap()).collect();
+    scripted_raw(mode, script)
+}
+
+/// Like [`scripted`], but the frames are exact wire bytes (for producer-order fixtures).
+pub(super) fn scripted_raw(mode: SessionMode, script: Vec<Vec<u8>>) -> GatewaySessionEngine {
     let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
         bind_addr: "0.0.0.0:0".parse().unwrap(),
         gateway_addr: "127.0.0.1:443".parse().unwrap(),
@@ -70,8 +76,6 @@ pub(super) fn scripted(mode: SessionMode, frames: Vec<Value>) -> GatewaySessionE
         target_delivery_id: "target-route".into(),
         prekey_http_url: None,
     });
-    let script: Vec<Vec<u8>> =
-        frames.into_iter().map(|f| serde_json::to_vec(&f).unwrap()).collect();
     let stream: Box<dyn GatewaySessionTransport + Send> = Box::new(Script(script.into()));
     let mut engine = GatewaySessionEngine::with_test_transport(config, stream);
     engine.mode = mode;
@@ -221,6 +225,75 @@ async fn push_reader_routes_shared_and_capable_frames() {
             other @ CapableEvent::Deliver { .. } => panic!("not a resync: {other:?}"),
         },
         other => panic!("not a capable event: {other:?}"),
+    }
+
+    // (p11b)/(p12b) the same carriage from the node-core struct-order bytes (producer order i),
+    // not the sorted `Value` order.
+    let typed_deliver = serde_json::to_vec(&n::SessionPushServerFrame::Deliver {
+        entry: node_entry(),
+        incarnation_id: E.into(),
+        retain_until: 7_777,
+    })
+    .unwrap();
+    let typed_resync = serde_json::to_vec(&n::SessionPushServerFrame::Resync {
+        incarnation_id: E.into(),
+        target_delivery_id: "target-route".into(),
+        after_inbox_seq: 72,
+        reason: n::SessionPushResyncReason::QueueFull,
+    })
+    .unwrap();
+    assert_ne!(typed_deliver, serde_json::to_vec(&capable_deliver()).unwrap(), "two orders");
+    let beat = serde_json::to_vec(&heartbeat()).unwrap();
+    let mut engine =
+        super::routing_tests::scripted_raw(push(), vec![typed_deliver, typed_resync, beat]);
+    let (hub, _) = super::carrier_tests::attach_host(&mut engine);
+    let mut resyncs = hub.subscribe([FrameKind::Resync]);
+    assert_eq!(read(&mut engine).await.unwrap(), GatewayServerFrame::Heartbeat { now: 5 });
+    let pending = engine.take_pending_capable();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1, Some(PushMeta { incarnation_id: id(), retain_until: 7_777 }));
+    assert!(matches!(
+        resyncs.recv().await,
+        Some(SessionEvent::Capable { event, .. })
+            if matches!(&*event, CapableEvent::Resync { after_inbox_seq: 72, .. })
+    ));
+
+    // (p13b) frozen legacy submit vectors (the `gateway::submit_tests` shapes) as literal
+    // bytes: node-core produces exactly these bytes, every mode routes them legacy, and the
+    // decoded frame re-encodes byte for byte.
+    let migrated = ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON;
+    let frozen: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (
+            br#"{"frame_type":"forward_ack","ack":{"envelope_id":"forwarded-envelope","target_delivery_id":"remote-target","inbox_seq":7}}"#.to_vec(),
+            serde_json::to_vec(&n::GatewayServerFrame::ForwardAck {
+                ack: n::GatewayForwardAck {
+                    envelope_id: "forwarded-envelope".into(),
+                    target_delivery_id: "remote-target".into(),
+                    inbox_seq: Some(7),
+                },
+            })
+            .unwrap(),
+        ),
+        (
+            br#"{"frame_type":"nack","reason":"rejected_security"}"#.to_vec(),
+            serde_json::to_vec(&n::GatewayServerFrame::Nack { reason: "rejected_security".into() })
+                .unwrap(),
+        ),
+        (
+            format!(r#"{{"frame_type":"nack","reason":"{migrated}"}}"#).into_bytes(),
+            serde_json::to_vec(&n::GatewayServerFrame::Nack { reason: migrated.into() }).unwrap(),
+        ),
+    ];
+    for (literal, node_bytes) in frozen {
+        assert_eq!(literal, node_bytes, "node-core still produces the frozen bytes");
+        for mode in [SessionMode::Legacy, SessionMode::Compat, push()] {
+            match route(&literal, &mode).unwrap() {
+                Routed::Legacy(frame) => {
+                    assert_eq!(serde_json::to_vec(&*frame).unwrap(), literal);
+                }
+                Routed::Capable(other) => panic!("not legacy: {other:?}"),
+            }
+        }
     }
 
     // (p13) Legacy mode: every legacy vector decodes byte-for-byte as before routing.
