@@ -20,6 +20,8 @@ mod client_tests;
 #[cfg(test)]
 mod negotiation_tests;
 #[cfg(test)]
+mod outcome_tests;
+#[cfg(test)]
 mod point_tests;
 #[cfg(test)]
 mod resume_tests;
