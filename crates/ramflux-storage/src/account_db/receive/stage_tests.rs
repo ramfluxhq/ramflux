@@ -319,3 +319,111 @@ fn stage_failure_rolls_back_reservation_even_if_caught() -> Result<(), StorageEr
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn entry(sequence: u64, hash: &str, ext: Option<serde_json::Value>) -> Vec<u8> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes(sequence)).expect("entry fixture");
+    value["envelope"]["payload_hash"] = serde_json::json!(hash);
+    if let Some(ext) = ext {
+        value["envelope"]["ext"] = ext;
+    }
+    serde_json::to_vec(&value).expect("entry encoding")
+}
+fn footprints(db: &AccountDb) -> Result<Vec<(String, String)>, StorageError> {
+    let mut query = db.connection.prepare(
+        "SELECT message_id,locator FROM message_footprint WHERE kind='receive_work' \
+         ORDER BY message_id,locator",
+    )?;
+    let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+fn locator(sequence: u64) -> String {
+    format!("[\"t\",\"e\",\"{sequence:016X}\"]")
+}
+fn work_rows(db: &AccountDb) -> Result<i64, StorageError> {
+    Ok(db.connection.query_row("SELECT count(*) FROM gateway_receive_work", [], |r| r.get(0))?)
+}
+
+#[test]
+fn receive_work_footprint_registered_atomically() -> Result<(), StorageError> {
+    let (root, db) = setup("w0-footprint")?;
+    for owner in ["bound-owner", "V", "V2"] {
+        db.send_direct_message("thread", owner, "peer", b"secret")?;
+    }
+    // (a) One row with the JSON (T,E,s) locator, owned by the provisional payload alias.
+    let first = entry(1, "hash", None);
+    assert_eq!(run(&db, input(&first, 1))?, R::Staged);
+    assert_eq!(footprints(&db)?, vec![("copy:payload:hash".to_owned(), locator(1))]);
+    // (b) A payload already bound to M is owned by M directly.
+    db.connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:bound','bound-owner')", [])?;
+    let bound = entry(2, "bound", None);
+    assert_eq!(run(&db, input(&bound, 2))?, R::Staged);
+    assert!(footprints(&db)?.contains(&("bound-owner".to_owned(), locator(2))));
+    // Binding the provisional alias later adopts the existing row.
+    db.connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:hash','bound-owner')", [])?;
+    assert!(footprints(&db)?.contains(&("bound-owner".to_owned(), locator(1))));
+    // (c) Extension values never confer ownership.
+    let injected = entry(
+        3,
+        "real",
+        Some(serde_json::json!({
+            "message_id":"V","payload_hash":"X","object_id":"O","message":{"id":"V2"}
+        })),
+    );
+    assert_eq!(run(&db, input(&injected, 3))?, R::Staged);
+    let owners: Vec<String> = footprints(&db)?
+        .into_iter()
+        .filter(|(_, at)| *at == locator(3))
+        .map(|(owner, _)| owner)
+        .collect();
+    assert_eq!(owners, vec!["copy:payload:real".to_owned()]);
+    db.delete_direct_message("thread", "V", "local", "delete-v")?;
+    assert_eq!(work_rows(&db)?, 3, "deleting V must not remove unrelated work");
+    // (d) A failing closure leaves neither work nor footprint.
+    let doomed = entry(4, "doomed", None);
+    let failed = db.receive_transaction(
+        ReceiveExpectation {
+            target: "t",
+            incarnation: "e",
+            cursor: 0,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        1,
+        |tx| {
+            tx.stage(input(&doomed, 4))?;
+            Err::<(), StorageError>(StorageError::AuthorizationRejected)
+        },
+    );
+    assert!(matches!(failed, Err(StorageError::AuthorizationRejected)));
+    assert_eq!(work_rows(&db)?, 3);
+    assert!(!footprints(&db)?.iter().any(|(_, at)| *at == locator(4)));
+    // (e) Removing the work removes its row.
+    db.connection.execute(
+        "DELETE FROM gateway_receive_work WHERE inbox_seq=?1",
+        params![2u64.to_be_bytes().as_slice()],
+    )?;
+    assert!(!footprints(&db)?.iter().any(|(_, at)| *at == locator(2)));
+    // (f) After reopen new work is still registered.
+    drop(db);
+    let db = AccountDb::open(
+        &crate::AccountIndex::open(&root)?,
+        "acct",
+        &crate::AccountDbKey::derive("acct", b"storage-test-secret"),
+    )?;
+    let after = entry(5, "after", None);
+    assert_eq!(run(&db, input(&after, 5))?, R::Staged);
+    assert!(footprints(&db)?.contains(&("copy:payload:after".to_owned(), locator(5))));
+    // (g) The ledger checksum is the unchanged label.
+    let checksum: String = db.connection.query_row(
+        "SELECT checksum FROM schema_migration WHERE schema_version=15",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(checksum, "2026-11-06-receive-ledger-v1");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -67,6 +67,7 @@ fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
         json_copy(db, CopyStore { table, kind, locator: key, column, guard, extra })?;
     }
     journal_copy(db)?;
+    receive_work_copy(db)?;
     for (table, column) in [
         ("runtime_message_content", "message_id"),
         ("rejected_inbox_projection", "message_id"),
@@ -277,6 +278,38 @@ END;
 "))?;
     }
     Ok(())
+}
+
+const NEW_LOCATOR: &str =
+    "json_array(NEW.target_delivery_id,NEW.incarnation_id,hex(NEW.inbox_seq))";
+
+/// Receive work is owned only by its payload hash at `$.envelope.payload_hash`. The generic
+/// recursive scan is never used: `Envelope.ext` carries arbitrary values and must not confer
+/// ownership of unrelated messages. The locator is the ledger key (T,E,s).
+fn receive_work_copy(db: &Connection) -> rusqlite::Result<()> {
+    if !exists(db, "gateway_receive_work")? {
+        return Ok(());
+    }
+    db.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS main.footprint_gateway_receive_work_INSERT;
+         DROP TRIGGER IF EXISTS main.footprint_gateway_receive_work_removed;
+         CREATE TRIGGER footprint_gateway_receive_work_INSERT AFTER INSERT ON gateway_receive_work
+         WHEN json_valid(CAST(NEW.entry_json AS TEXT))
+          AND json_type(CAST(NEW.entry_json AS TEXT),'$.envelope.payload_hash')='text' BEGIN
+          INSERT INTO message_footprint
+          SELECT COALESCE(b.message_id,'copy:payload:'||p.hash),'receive_work',{NEW_LOCATOR}
+          FROM (SELECT json_extract(CAST(NEW.entry_json AS TEXT),'$.envelope.payload_hash') AS hash) p
+          LEFT JOIN message_copy_binding b ON b.copy_id='payload:'||p.hash
+          ON CONFLICT DO NOTHING;
+          UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN
+           (SELECT message_id FROM message_footprint
+            WHERE kind='receive_work' AND locator={NEW_LOCATOR});
+         END;
+         CREATE TRIGGER footprint_gateway_receive_work_removed AFTER DELETE ON gateway_receive_work BEGIN
+          DELETE FROM message_footprint WHERE kind='receive_work'
+           AND locator=json_array(OLD.target_delivery_id,OLD.incarnation_id,hex(OLD.inbox_seq));
+         END;"
+    ))
 }
 
 fn journal_copy(db: &Connection) -> rusqlite::Result<()> {
