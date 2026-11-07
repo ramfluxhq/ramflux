@@ -278,6 +278,16 @@ pub enum GatewayServerFrame {
         target_delivery_id: String,
         delivery_class: ramflux_protocol::DeliveryClass,
     },
+    Ephemeral {
+        envelope: ramflux_protocol::Envelope,
+        expires_at_ms: u64,
+    },
+    EphemeralResult {
+        envelope_id: String,
+        outcome: ramflux_protocol::ephemeral::EphemeralSubmitOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<ramflux_protocol::ephemeral::EphemeralDropReason>,
+    },
     Close {
         reason: String,
     },

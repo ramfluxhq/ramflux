@@ -22,7 +22,6 @@ pub(crate) const BYTE_CAP: usize = 4 * 1024 * 1024;
 /// Per-session transient frame occupancy, including the in-flight write.
 pub(crate) const TRANSIENT_FRAME_CAP: usize = 64;
 /// Per-session transient byte occupancy, including the in-flight write.
-#[cfg(test)]
 pub(crate) const TRANSIENT_BYTE_CAP: usize = 262_144;
 const EMPTY: u64 = u64::MAX;
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
@@ -52,7 +51,6 @@ pub(crate) enum Admission {
     Closed,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransientAdmission {
     Queued,
@@ -85,7 +83,6 @@ impl State {
     fn occupancy(&self) -> (usize, usize) {
         (self.frames, self.bytes)
     }
-    #[cfg(test)]
     fn transient_occupancy(&self) -> (usize, usize) {
         (self.transient_frames, self.transient_bytes)
     }
@@ -259,8 +256,6 @@ impl PushQueue {
         self.inner.wake.notify_one();
         Admission::Queued
     }
-    // Test-only until the P09 gateway ephemeral ingress gives it a production caller.
-    #[cfg(test)]
     pub(crate) fn try_push_transient(
         &self,
         bytes: Vec<u8>,

@@ -76,6 +76,15 @@ pub(crate) struct GatewaySessionRuntime {
     pub(crate) supports_forward_ack: bool,
 }
 
+impl GatewaySessionRuntime {
+    /// P10 reads the establishment echo of `gateway.ephemeral.v1` from this session.
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn ephemeral_negotiated(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayPeerDirectory {
     tls: ramflux_transport::MeshTlsConfig,
