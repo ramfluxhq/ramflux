@@ -4,6 +4,7 @@
 //! Signed delivery-mode and lifetime rules for ephemeral envelopes.
 
 use crate::{Envelope, Priority};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Name of the signed extension that selects an envelope's delivery mode.
@@ -50,6 +51,30 @@ pub enum EphemeralModeError {
     CreatedAtTooFarInFuture,
     #[error("ephemeral envelope has expired")]
     Expired,
+}
+
+/// Drop reason on a G→C `ephemeral_result` (`reason` present iff outcome is dropped).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EphemeralDropReason {
+    Offline,
+    QueueFull,
+    Expired,
+    RateLimited,
+    NotLocal,
+    TargetRefused,
+    RecipientUnsupported,
+    Invalid,
+    Unsupported,
+    Replayed,
+}
+
+/// Outcome on a G→C `ephemeral_result`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EphemeralSubmitOutcome {
+    Accepted,
+    Dropped,
 }
 
 /// Classify `ext.delivery_mode`: absent and `durable` are durable, while an

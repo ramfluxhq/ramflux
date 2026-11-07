@@ -29,6 +29,8 @@ pub(crate) enum FrameKind {
     Heartbeat,
     Drain,
     InBandWake,
+    Ephemeral,
+    EphemeralResult,
     Close,
     /// A capable `resync` event (negotiated sessions only).
     Resync,
@@ -70,6 +72,8 @@ impl FrameKind {
             GatewayServerFrame::Heartbeat { .. } => Self::Heartbeat,
             GatewayServerFrame::Drain { .. } => Self::Drain,
             GatewayServerFrame::InBandWake { .. } => Self::InBandWake,
+            GatewayServerFrame::Ephemeral { .. } => Self::Ephemeral,
+            GatewayServerFrame::EphemeralResult { .. } => Self::EphemeralResult,
             GatewayServerFrame::Close { .. } => Self::Close,
         }
     }
@@ -87,7 +91,7 @@ impl FrameKind {
             Self::PushRouteRegistered | Self::PushRouteRefused | Self::PushRouteDeregistered => {
                 FrameClass::PushRoute
             }
-            Self::Deliver | Self::InBandWake | Self::Resync => FrameClass::Event,
+            Self::Deliver | Self::InBandWake | Self::Resync | Self::Ephemeral => FrameClass::Event,
             Self::Drain | Self::Close => FrameClass::Terminal,
             Self::SessionEstablished => FrameClass::Unexpected,
             Self::VoiceLease
@@ -104,7 +108,8 @@ impl FrameKind {
             | Self::Cursor
             | Self::Resume
             | Self::Nack
-            | Self::Heartbeat => FrameClass::Reply,
+            | Self::Heartbeat
+            | Self::EphemeralResult => FrameClass::Reply,
         }
     }
 }

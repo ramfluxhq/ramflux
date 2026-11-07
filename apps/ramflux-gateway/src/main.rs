@@ -9,6 +9,7 @@ mod custody;
 #[cfg(test)]
 mod durable_ingress_registry;
 mod durable_mode;
+mod ephemeral;
 mod hub_index;
 mod ingress;
 mod issued_probe;

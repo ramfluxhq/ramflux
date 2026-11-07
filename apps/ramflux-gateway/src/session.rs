@@ -1266,9 +1266,16 @@ pub(crate) async fn handle_gateway_submit(
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> anyhow::Result<()> {
-    if ramflux_protocol::ephemeral::require_durable(&submit.envelope).is_err() {
-        write_gateway_handle(send, &crate::durable_mode::nack_frame()).await?;
-        return Ok(());
+    use ramflux_protocol::ephemeral::{DeliveryMode, classify_delivery_mode};
+    match classify_delivery_mode(&submit.envelope) {
+        DeliveryMode::Durable => {}
+        DeliveryMode::Ephemeral if runtime.ephemeral_negotiated() => {
+            return crate::ephemeral::handle_submit(send, context, runtime, submit).await;
+        }
+        _ => {
+            write_gateway_handle(send, &crate::durable_mode::nack_frame()).await?;
+            return Ok(());
+        }
     }
     let validated = (|| -> anyhow::Result<ramflux_protocol::Envelope> {
         let envelope = crate::submit_source::bind_source(runtime, &submit.envelope)?;
