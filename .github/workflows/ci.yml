@@ -24,6 +24,60 @@ permissions:
   contents: read
 
 jobs:
+  # Path filter for the heavy jobs below. A pull request runs only the jobs whose inputs it touches.
+  # Push to main and workflow_dispatch run everything; a failed diff also runs everything.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sdk: ${{ steps.filter.outputs.sdk }}
+      vault: ${{ steps.filter.outputs.vault }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compute path filters
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          sdk=false vault=false gateway=false ci=false
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            sdk=true vault=true gateway=true ci=true
+          elif ! files="$(git diff --name-only "origin/$BASE_REF...HEAD")"; then
+            echo "::warning::git diff against origin/$BASE_REF failed; running every heavy job"
+            sdk=true vault=true gateway=true ci=true
+          else
+            while IFS= read -r path; do
+              case "$path" in
+                crates/ramflux-sdk/*|crates/ramflux-protocol/*|crates/ramflux-crypto/*|crates/ramflux-storage/*|Cargo.lock|Cargo.toml) sdk=true ;;
+              esac
+              case "$path" in
+                crates/ramflux-sdk/src/custody/vault/*|apps/rf/tests/linux_vault_platform.rs|scripts/linux-vault-*) vault=true ;;
+              esac
+              case "$path" in
+                apps/ramflux-gateway/*) gateway=true ;;
+              esac
+              case "$path" in
+                .github/*|scripts/*) ci=true ;;
+              esac
+            done <<< "$files"
+          fi
+          {
+            echo "sdk=$sdk"
+            echo "vault=$vault"
+            echo "gateway=$gateway"
+            echo "ci=$ci"
+          } >> "$GITHUB_OUTPUT"
+
   provenance:
     name: Provenance gate
     runs-on: ubuntu-latest
@@ -232,6 +286,8 @@ jobs:
 
   build-sdk:
     name: Build test archive (sdk)
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true' || needs.changes.outputs.vault == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -324,7 +380,8 @@ jobs:
 
   linux-vault-platform:
     name: Linux vault platform fixture
-    needs: [build-rest, build-sdk]
+    needs: [changes, build-rest, build-sdk]
+    if: needs.changes.outputs.vault == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -375,7 +432,8 @@ jobs:
   # again when mobile/ABI integration starts. The all-features clippy job still compiles c_abi.
   test-sdk:
     name: Tests (sdk ${{ matrix.shard }}/2)
-    needs: build-sdk
+    needs: [changes, build-sdk]
+    if: needs.changes.outputs.sdk == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     strategy:
@@ -509,6 +567,8 @@ jobs:
 
   v-sdk-a:
     name: "SDK variant: memory vault and production absence"
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -591,6 +651,8 @@ jobs:
 
   v-sdk-b:
     name: "SDK variant: legacy accounts and gateway local-mint"
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true' || needs.changes.outputs.sdk == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -637,6 +699,7 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Test (legacy accounts)
+        if: needs.changes.outputs.sdk == 'true' || needs.changes.outputs.ci == 'true'
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
           RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
@@ -765,6 +828,8 @@ jobs:
 
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true' || needs.changes.outputs.sdk == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
