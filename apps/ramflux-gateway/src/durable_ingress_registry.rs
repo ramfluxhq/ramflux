@@ -166,8 +166,8 @@ async fn drive_control_gateway_edge(
             let context = crate::session::tests::test_gateway_context()?;
             let (send, frames) = frame_sink();
             match crate::session::handle_gateway_submit(&send, &context, runtime, control).await {
-                Ok(()) => assert_frames_not_mode_refused(entry, &frames)?,
-                Err(error) => assert_control_error(entry, &error),
+                Ok(()) => assert_eq!(nack_reason(&frames)?, CONTROL_SUBMIT_ERR, "{entry}"),
+                Err(error) => assert_eq!(error.to_string(), CONTROL_SUBMIT_ERR, "{entry}"),
             }
         }
         "session.rs:handle_gateway_own_device_fanout" => {
@@ -179,8 +179,8 @@ async fn drive_control_gateway_edge(
             )
             .await
             {
-                Ok(()) => assert_frames_not_mode_refused(entry, &frames)?,
-                Err(error) => assert_control_error(entry, &error),
+                Ok(()) => assert_eq!(nack_reason(&frames)?, CONTROL_FANOUT_NACK, "{entry}"),
+                Err(error) => assert_eq!(error.to_string(), CONTROL_FANOUT_NACK, "{entry}"),
             }
         }
         "quic_dispatch.rs:forward_quic_envelope" => {
@@ -191,12 +191,10 @@ async fn drive_control_gateway_edge(
             )
             .await
             {
-                Ok(response) => assert_ne!(
-                    response.get("outcome").and_then(serde_json::Value::as_str),
-                    Some("rejected_security:delivery_mode_refused"),
-                    "control refused at mode for {entry}: {response}"
-                ),
-                Err(error) => assert_control_error(entry, &error),
+                Ok(response) => {
+                    return Err(format!("control {entry} admitted: {response}").into());
+                }
+                Err(error) => assert_eq!(error.to_string(), CONTROL_QUIC_ERR, "{entry}"),
             }
         }
         "itest_http.rs:dispatch_protected_itest_request" => {
@@ -283,27 +281,27 @@ fn fanout_frame(
     }
 }
 
-fn assert_frames_not_mode_refused(
-    entry: &str,
-    frames: &Mutex<Vec<GatewayServerFrame>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let frames = frames.lock().map_err(|error| error.to_string())?.clone();
-    for frame in &frames {
-        if let GatewayServerFrame::Nack { reason } = frame {
-            assert_ne!(
-                reason,
-                crate::durable_mode::NACK_REASON,
-                "control refused at mode for {entry}: {frames:?}"
-            );
-        }
-    }
-    Ok(())
-}
+#[cfg(target_os = "macos")]
+const CONTROL_CONNECT: &str = "I/O error: Connection refused (os error 61)";
+#[cfg(not(target_os = "macos"))]
+const CONTROL_CONNECT: &str = "I/O error: Connection refused (os error 111)";
+#[cfg(target_os = "macos")]
+const CONTROL_FANOUT_NACK: &str =
+    "own-device fanout rejected: I/O error: Connection refused (os error 61)";
+#[cfg(not(target_os = "macos"))]
+const CONTROL_FANOUT_NACK: &str =
+    "own-device fanout rejected: I/O error: Connection refused (os error 111)";
+const CONTROL_SUBMIT_ERR: &str = CONTROL_CONNECT;
+const CONTROL_QUIC_ERR: &str = CONTROL_CONNECT;
 
-fn assert_control_error(entry: &str, error: &anyhow::Error) {
-    let text = error.to_string();
-    assert_ne!(text, crate::durable_mode::NACK_REASON, "control refused at mode for {entry}");
-    assert!(!text.contains("delivery_mode_refused"), "control refused at mode for {entry}: {text}");
+fn nack_reason(
+    frames: &Mutex<Vec<GatewayServerFrame>>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let frames = frames.lock().map_err(|error| error.to_string())?.clone();
+    match frames.as_slice() {
+        [GatewayServerFrame::Nack { reason }] => Ok(reason.clone()),
+        other => Err(format!("expected one nack, got {other:?}").into()),
+    }
 }
 
 #[cfg(feature = "itest-http")]
@@ -324,12 +322,9 @@ fn drive_itest_http_control(
             let mut response = Vec::new();
             client.read_to_end(&mut response)?;
             let text = String::from_utf8_lossy(&response);
-            assert!(
-                !text.contains("rejected_security:delivery_mode_refused"),
-                "control refused at mode for {entry}: {text}"
-            );
+            return Err(format!("control {entry} admitted: {text}").into());
         }
-        Err(error) => assert_control_error(entry, &error),
+        Err(error) => assert_eq!(error.to_string(), CONTROL_SUBMIT_ERR, "{entry}"),
     }
     Ok(())
 }
@@ -355,9 +350,16 @@ fn drive_itest_http_marked(
     drop(server);
     let mut response = Vec::new();
     client.read_to_end(&mut response)?;
-    let text = String::from_utf8_lossy(&response);
-    assert!(text.contains("200"), "{entry}: {text}");
-    assert!(text.contains("rejected_security:delivery_mode_refused"), "{entry}: {text}");
+    let text = std::str::from_utf8(&response)?;
+    let (head, body) = text.split_once("\r\n\r\n").ok_or("missing HTTP header terminator")?;
+    let status = head.lines().next().ok_or("missing HTTP status line")?;
+    assert_eq!(status, "HTTP/1.1 200 OK", "{entry}: {text}");
+    let value: serde_json::Value = serde_json::from_str(body.trim_end())?;
+    assert_eq!(
+        value.get("outcome").and_then(serde_json::Value::as_str),
+        Some("rejected_security:delivery_mode_refused"),
+        "{entry}: {value}"
+    );
     Ok(())
 }
 
