@@ -231,7 +231,10 @@ mod session_push;
 pub use session_push::*;
 
 mod ephemeral;
-pub use ephemeral::{EPHEMERAL_CAPABILITY_BOUND, EphemeralRouteGate};
+pub use ephemeral::{
+    EPHEMERAL_CAPABILITY_BOUND, EPHEMERAL_REASSERTION_ITEM_BOUND, EphemeralReassertionError,
+    EphemeralRouteGate,
+};
 
 mod session_push_frames;
 pub use session_push_frames::*;

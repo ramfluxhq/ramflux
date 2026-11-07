@@ -35,6 +35,7 @@ pub(super) fn route(
         || path == "/mvp0/ack-bound-batch"
         || path == "/mvp0/issued-seqs"
         || path == "/mvp1/session-push-capabilities"
+        || path == "/mvp0/ephemeral-registrations"
         || capable_page
         || entry
         || path == "/mvp0/ack-bound";
@@ -68,8 +69,10 @@ pub(super) fn route(
         ("GET", "/mvp1/session-push-capabilities") => {
             reply(&ramflux_node_core::SessionPushCapabilities {
                 capabilities: vec![ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into()],
+                router_boot_id: router.state().router_boot_id().to_owned(),
             })
         }
+        ("POST", "/mvp0/ephemeral-registrations") => reassert(body, router),
         ("POST", "/mvp0/ack-bound-batch") => {
             match serde_json::from_slice::<ramflux_node_core::SessionAckBatchRequest>(body) {
                 Ok(request) => match router.state().session_ack_batch(router.store(), &request) {
@@ -109,6 +112,26 @@ fn bound_nack(
     match router.state().session_nack(router.store(), &request, id) {
         Ok(cursor) => reply(&serde_json::json!({"incarnation_id":id,"cursor":cursor})),
         Err(error) => Ok(MeshResponse::json("400 Bad Request", serde_json::to_vec(&error)?)),
+    }
+}
+
+fn reassert(
+    body: &[u8],
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<MeshResponse> {
+    let Ok(request) =
+        serde_json::from_slice::<ramflux_node_core::EphemeralRegistrationsRequest>(body)
+    else {
+        return refused(SessionPushReason::InvalidSeq, None);
+    };
+    match router.state().reassert_ephemeral_registrations(&request.router_boot_id, &request.items) {
+        Ok(applied) => reply(&ramflux_node_core::EphemeralRegistrationsResponse { applied }),
+        Err(ramflux_node_core::EphemeralReassertionError::BootMismatch) => {
+            refused(SessionPushReason::BootMismatch, None)
+        }
+        Err(ramflux_node_core::EphemeralReassertionError::TooManyItems) => {
+            refused(SessionPushReason::InvalidSeq, None)
+        }
     }
 }
 
@@ -235,5 +258,7 @@ fn point(path: &str, router: &crate::router_runtime::RouterHandle) -> anyhow::Re
     super::entry_fetch::reply(path, router.state())
 }
 
+#[cfg(test)]
+mod ephemeral_reassertion;
 #[cfg(test)]
 mod tests;

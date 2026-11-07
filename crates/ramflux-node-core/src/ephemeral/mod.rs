@@ -5,5 +5,8 @@
 
 mod capability;
 
-pub(crate) use capability::EphemeralCapabilityState;
-pub use capability::{EPHEMERAL_CAPABILITY_BOUND, EphemeralRouteGate};
+pub use capability::{
+    EPHEMERAL_CAPABILITY_BOUND, EPHEMERAL_REASSERTION_ITEM_BOUND, EphemeralReassertionError,
+    EphemeralRouteGate,
+};
+pub(crate) use capability::{EphemeralCapabilityState, new_router_boot_id};
