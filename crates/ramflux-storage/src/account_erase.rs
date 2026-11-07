@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Account erase: exclusive lease, then a `removed` tombstone that open refuses.
+//! Account erase: exclusive lease, `removed` tombstone, then root payload removal.
 
-use crate::{AccountIndex, StorageError};
+use crate::{ACCOUNT_DB_FILE, AccountIndex, BACKUP_GENERATION_MARKER, StorageError};
 use rusqlite::params;
 use std::path::Path;
 
@@ -62,6 +62,56 @@ impl AccountIndex {
               WHERE local_account_id = ?1",
             params![local_account_id, REMOVED],
         )?;
-        Ok(())
+        remove_root_payload(&self.root().join("accounts").join(local_account_id))
     }
+}
+
+/// Every per-account root path this part owns (class inventory). `.writer.lock` is kept on
+/// purpose, and `generation_*` trees belong to P03a-4c.
+fn root_files() -> [String; 5] {
+    [
+        ACCOUNT_DB_FILE.to_owned(),
+        format!("{ACCOUNT_DB_FILE}-wal"),
+        format!("{ACCOUNT_DB_FILE}-shm"),
+        format!("{ACCOUNT_DB_FILE}-journal"),
+        BACKUP_GENERATION_MARKER.to_owned(),
+    ]
+}
+
+fn root_trees() -> [String; 2] {
+    // `AccountDb::segment_store` derives the segment root with `with_extension`.
+    let segments = Path::new(ACCOUNT_DB_FILE).with_extension("segments");
+    [segments.to_string_lossy().into_owned(), "objects".to_owned()]
+}
+
+fn ignore_not_found(result: std::io::Result<()>) -> Result<(), StorageError> {
+    match result {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Refuses any symlink before the first unlink, then removes the owned root payload.
+fn remove_root_payload(dir: &Path) -> Result<(), StorageError> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Err(StorageError::Integrity("account erase symlink"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    for entry in std::fs::read_dir(dir)? {
+        if entry?.file_type()?.is_symlink() {
+            return Err(StorageError::Integrity("account erase symlink"));
+        }
+    }
+    for name in root_files() {
+        ignore_not_found(std::fs::remove_file(dir.join(name)))?;
+    }
+    for name in root_trees() {
+        ignore_not_found(std::fs::remove_dir_all(dir.join(name)))?;
+    }
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(())
 }
