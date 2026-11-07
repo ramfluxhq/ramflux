@@ -591,6 +591,8 @@ mod tests {
             return Err("missing HTTP/2 request".to_owned());
         };
         let (request, mut respond) = request.map_err(|error| error.to_string())?;
+        let connection_driver =
+            tokio::spawn(async move { while connection.accept().await.is_some() {} });
         let mut request_body = request.into_body();
         while let Some(chunk) = request_body.data().await {
             let _ = chunk.map_err(|error| error.to_string())?;
@@ -599,7 +601,9 @@ mod tests {
             http::Response::builder().status(200).body(()).map_err(|error| error.to_string())?;
         let mut body = respond.send_response(response, false).map_err(|error| error.to_string())?;
         body.send_data(Bytes::from(response_body), true).map_err(|error| error.to_string())?;
-        while connection.accept().await.is_some() {}
+        connection_driver
+            .await
+            .map_err(|error| format!("HTTP/2 connection driver failed: {error}"))?;
         Ok(())
     }
 
@@ -615,7 +619,17 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let endpoint = listener.local_addr()?;
             let server = tokio::spawn(serve_h2_response(listener, body));
-            let result = h2_submit_envelope(endpoint, "/submit", &request).await;
+            let timed_result = tokio::time::timeout(
+                Duration::from_secs(10),
+                h2_submit_envelope(endpoint, "/submit", &request),
+            )
+            .await;
+            assert!(
+                timed_result.is_ok(),
+                "HTTP/2 fixture request/response timed out after 10 seconds"
+            );
+            let result = timed_result
+                .map_err(|_| "HTTP/2 fixture request/response timed out after 10 seconds")?;
             server
                 .await
                 .map_err(|error| format!("HTTP/2 server task failed: {error}"))?

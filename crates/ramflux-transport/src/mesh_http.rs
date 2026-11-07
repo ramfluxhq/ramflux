@@ -997,25 +997,37 @@ mod tests {
             let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
             let endpoint = server.local_addr()?.to_string();
             let response_body = body.as_bytes().to_vec();
+            let (server_done_tx, server_done_rx) = std::sync::mpsc::channel();
             let server_thread = thread::spawn(move || -> Result<(), String> {
-                let mut accepted =
-                    server.accept_authenticated().map_err(|error| error.to_string())?.stream;
-                read_mesh_http_request(&mut accepted)
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "missing HTTP request".to_owned())?;
-                write!(
-                    accepted,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response_body.len()
-                )
-                .map_err(|error| error.to_string())?;
-                accepted.write_all(&response_body).map_err(|error| error.to_string())?;
-                accepted.flush().map_err(|error| error.to_string())
+                let result = (|| {
+                    let mut accepted =
+                        server.accept_authenticated().map_err(|error| error.to_string())?.stream;
+                    accepted
+                        .sock
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .map_err(|error| error.to_string())?;
+                    accepted
+                        .sock
+                        .set_write_timeout(Some(Duration::from_secs(10)))
+                        .map_err(|error| error.to_string())?;
+                    read_mesh_http_request(&mut accepted)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "missing HTTP request".to_owned())?;
+                    write!(
+                        accepted,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response_body.len()
+                    )
+                    .map_err(|error| error.to_string())?;
+                    accepted.write_all(&response_body).map_err(|error| error.to_string())?;
+                    accepted.flush().map_err(|error| error.to_string())
+                })();
+                let _ = server_done_tx.send(result.clone());
+                result
             });
             let client_tls = test_mesh_tls_config("gateway")?;
             let peer_roots = [std::fs::read_to_string(&server_tls.ca_cert)?];
             let result = reader(&endpoint, &client_tls, "ramflux-router", &peer_roots);
-            server_thread.join().map_err(|_| "mesh response server panicked")??;
             match rejected_reason {
                 Some(reason) => match result {
                     Err(crate::TransportError::Protocol(ProtocolError::IJson(source))) => {
@@ -1028,6 +1040,13 @@ mod tests {
                     serde_json::json!({"created_at": 9_007_199_254_740_991_i64})
                 ),
             }
+            server_done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|error| {
+                    format!("mesh response fixture did not finish within 10 seconds: {error}")
+                })?
+                .map_err(|error| format!("mesh response fixture failed: {error}"))?;
+            server_thread.join().map_err(|_| "mesh response server panicked")??;
         }
         Ok(())
     }
@@ -1064,7 +1083,7 @@ mod tests {
                 tls,
                 server_name,
                 &serde_json::json!({}),
-                Instant::now() + Duration::from_secs(5),
+                Instant::now() + Duration::from_secs(10),
             )
         })?;
         assert_mesh_http_reader_rows(|endpoint, tls, server_name, _| {
