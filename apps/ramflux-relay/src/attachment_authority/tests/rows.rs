@@ -280,13 +280,14 @@ fn w_expiry_is_bounded_by_the_grant_and_the_source_key_is_pinned() {
     let c1 = e.mint(short.grant(), &cap, &t);
     let beyond = e.forge(short.grant(), &cap, &request, c1, 1, &Tweak::none());
     assert_eq!(e.refused(&beyond), RenewalRefusal::Expired);
-    // Equality is accepted: W and Prenew expiring exactly at the grant expiry, same challenge.
+    // Equality is accepted: W and Prenew expiring exactly at the grant expiry, same challenge
+    // AND the same nonce as the refused request (so the refusal burned neither).
     let at_expiry = Tweak {
         w: &|w| w.expires_at = w.issued_at + 20,
         p: &|p| p.expires_at = p.issued_at + 20,
         ..Tweak::none()
     };
-    let equal = e.forge(short.grant(), &cap, &request, c1, 2, &at_expiry);
+    let equal = e.forge(short.grant(), &cap, &request, c1, 1, &at_expiry);
     let token = e.run(&equal).unwrap();
     let key = e.f.source_signer().verifying_key().to_bytes();
     let verified = AttachmentToken::decode_signed(&token, &key).unwrap();
