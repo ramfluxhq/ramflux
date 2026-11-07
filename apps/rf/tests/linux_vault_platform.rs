@@ -360,28 +360,42 @@ fn start_keyring() -> Result<(), BoxError> {
     }
     result
 }
+/// One connect-and-open-default-collection probe.
+fn probe_secret_service() -> Result<(), String> {
+    let ss = dbus_secret_service::SecretService::connect_with_max_prompt_timeout(
+        dbus_secret_service::EncryptionType::Dh,
+        0,
+    )
+    .map_err(|e| e.to_string())?;
+    ss.get_default_collection().map(drop).map_err(|e| e.to_string())
+}
 /// The daemon registers `org.freedesktop.secrets` on the private bus after its launcher exits, so
 /// a connection attempt right away can see `ServiceUnknown`. Poll until the service answers and
-/// its default collection is usable, bounded by the fixture deadline; fail loud with the last error.
+/// its default collection is usable. Each blocking D-Bus attempt runs on its own thread and is
+/// waited for at most 5 s (and never past the deadline), so a stalled service cannot stretch the
+/// total beyond the fixture deadline; the last error is reported loudly.
 fn wait_for_secret_service() -> Result<dbus_secret_service::SecretService, BoxError> {
     let end = Instant::now() + DEADLINE;
     loop {
-        let attempt = dbus_secret_service::SecretService::connect_with_max_prompt_timeout(
-            dbus_secret_service::EncryptionType::Dh,
-            0,
-        )
-        .map_err(|e| e.to_string())
-        .and_then(|ss| {
-            ss.get_default_collection().map(drop).map_err(|e| e.to_string())?;
-            Ok(ss)
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(probe_secret_service());
         });
-        match attempt {
-            Ok(ss) => return Ok(ss),
-            Err(last) if Instant::now() >= end => {
-                return Err(format!("Secret Service not ready after {DEADLINE:?}: {last}").into());
+        let remaining = end.saturating_duration_since(Instant::now());
+        let last = match receiver.recv_timeout(remaining.min(Duration::from_secs(5))) {
+            Ok(Ok(())) => {
+                return Ok(dbus_secret_service::SecretService::connect_with_max_prompt_timeout(
+                    dbus_secret_service::EncryptionType::Dh,
+                    0,
+                )?);
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(Err(last)) => last,
+            Err(_) => "attempt stalled".to_owned(),
+        };
+        if Instant::now() >= end {
+            return Err(format!("Secret Service not ready after {DEADLINE:?}: {last}").into());
         }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -518,7 +532,10 @@ async fn reference_binding_contract(
     assert!(refused(
         primary.store_provisioning_secret(&format!("agent-provisioning:{unseeded}"), b"x")
     ));
-    assert!(other.load_primary(&unseeded).is_err(), "the refused store created nothing");
+    assert!(
+        matches!(other.load_primary(&unseeded), Err(SdkError::CustodyVaultUnavailable)),
+        "the refused store created nothing"
+    );
     // Controls: every seeded entry is intact and readable through its own binding.
     assert_eq!(other.load_primary(&foreign)?.public_key(), key.public_key());
     drop(other.load_branch(&foreign_branch, "principal", device)?);
