@@ -106,6 +106,14 @@ impl<'a> AuthorityListener<'a> {
         Self { issuer, router_only: BTreeSet::from([ROUTER_SERVICE_ID.to_owned()]) }
     }
 
+    /// Whether `peer_spiffe_uri` is the router. Transports call this before reading a
+    /// single byte of the request; [`Self::handle`] repeats it.
+    #[must_use]
+    pub fn authorize(&self, peer_spiffe_uri: Option<&str>) -> bool {
+        ramflux_node_core::authorize_mesh_peer(RELAY_SERVICE_ID, &self.router_only, peer_spiffe_uri)
+            .is_ok()
+    }
+
     /// Routes one request. `peer_spiffe_uri` is the verified TLS SAN, never a header.
     /// # Errors
     /// Only the renew path can fail after authorization: see [`SourceIssuer::respond`].
@@ -117,13 +125,7 @@ impl<'a> AuthorityListener<'a> {
         hooks: &IssueHooks<'_>,
     ) -> Result<Handled, IssueError> {
         let Incoming { peer_spiffe_uri, method, path, body } = *incoming;
-        if ramflux_node_core::authorize_mesh_peer(
-            RELAY_SERVICE_ID,
-            &self.router_only,
-            peer_spiffe_uri,
-        )
-        .is_err()
-        {
+        if !self.authorize(peer_spiffe_uri) {
             return Ok(Handled::Rejected {
                 status: "403 Forbidden",
                 reason: "attachment authority requires the router identity",

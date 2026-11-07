@@ -9,6 +9,7 @@ use crate::relay::attachment::RenewalRefusal;
 use std::sync::Arc;
 
 const T: u64 = 1_700_000_200;
+type Advance = fn(&RouterRedbStore, &RecordEvidence);
 
 fn evidence(epoch: u64, key_seed: u8) -> TestResult<RecordEvidence> {
     let mut ev: RecordEvidence = serde_json::from_value(fixture()?["genesis"].clone())?;
@@ -329,5 +330,56 @@ fn verdict_cache_is_bounded_and_expires_after_sixty_seconds() -> TestResult {
     let other = evidence(9, 13)?;
     store.attachment_home_verdict(&anchor, T + 150, resolved(&other))?;
     assert_eq!(store.attachment_cached_verdicts(), MAX_CACHED_VERDICTS);
+    Ok(())
+}
+
+#[test]
+fn every_floor_writer_is_ordered_against_publication() -> TestResult {
+    let old = evidence(5, 11)?;
+    let new = evidence(6, 12)?;
+    let anchor = anchor(&old);
+    // One row per writer: the head-save transaction (no handle on the cache), the
+    // resolver hook, and the store-level observe/admit paths.
+    let writers: Vec<(&str, Advance)> = vec![
+        ("save_head", |store, ev| {
+            let tx = store.begin_write().unwrap();
+            save_head(&tx, ev).unwrap();
+            commit_transition(store, tx).unwrap();
+        }),
+        ("resolver hook", |store, ev| {
+            let result = ResolveResult { home: ev.clone(), predecessors: vec![] };
+            store.observe_attachment_resolved(&result, T).unwrap();
+        }),
+        ("observe_attachment_evidence", |store, ev| {
+            store.observe_attachment_evidence(ev, T).unwrap();
+        }),
+        ("admit_attachment_home", |store, ev| {
+            let hash = record_hash(&ev.record).unwrap();
+            store
+                .admit_attachment_home(ev.record.account_anchor(), ev.record.epoch(), &hash, T)
+                .unwrap();
+        }),
+    ];
+    for (name, advance) in writers {
+        let a = TestNode::new("A", 8, true)?;
+        let store = a.store()?;
+        let successor = new.clone();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let once = Arc::clone(&fired);
+        set_hook(store, move |store, point| {
+            if point == "before_publish" && !once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                advance(store, &successor);
+            }
+        });
+        // The writer commits after admit and before publication: epoch 5 must not be
+        // returned or cached.
+        assert_eq!(
+            store.attachment_home_verdict(&anchor, T, resolved(&old)),
+            Err(RenewalRefusal::HomeMismatch),
+            "{name}"
+        );
+        assert_eq!(store.attachment_cached_verdicts(), 0, "{name}");
+        assert_eq!(store.attachment_home_floor(&anchor)?.map(|f| f.epoch), Some(6), "{name}");
+    }
     Ok(())
 }

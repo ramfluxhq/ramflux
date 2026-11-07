@@ -8,14 +8,24 @@
 //! the stream. No production caller starts it yet.
 use super::{
     IssueHooks, SourceIssuer, TokenSink,
-    listener::{AuthorityListener, AuthorityListenerConfig, Handled, Incoming},
+    listener::{AuthorityListener, AuthorityListenerConfig, Handled, Incoming, MAX_WIRE_BODY},
 };
-use ramflux_transport::{MeshQuicAcceptedRequest, MeshQuicServer, MeshTlsConfig};
-use std::{io, net::SocketAddr, sync::Arc, thread::JoinHandle, time::Duration};
+use ramflux_transport::{
+    MeshQuicLimitedIngress, MeshQuicLimitedResponder, MeshQuicServer, MeshTlsConfig,
+};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::Arc,
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 use tokio::{runtime::Runtime, sync::Notify};
 
-/// Per-request hang guard for reading the request frame.
-const READ_BUDGET: Duration = Duration::from_secs(10);
+/// One original budget per connection: ingress read, handling and every response write.
+pub const REQUEST_BUDGET: Duration = Duration::from_secs(10);
+/// Close code for a peer that is not the router; no byte of its request is read.
+const UNAUTHORIZED_CLOSE: u32 = 403;
 
 /// A running listener. Dropping it without [`Self::stop`] leaves the thread running.
 pub struct AuthorityQuicServer {
@@ -35,6 +45,7 @@ impl AuthorityQuicServer {
         client_ca_pems: Vec<String>,
         issuer: SourceIssuer,
         clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+        budget: Duration,
     ) -> anyhow::Result<Option<Self>> {
         let Some(bind) = config.bind_addr.clone() else { return Ok(None) };
         let tls = tls.clone();
@@ -69,7 +80,7 @@ impl AuthorityQuicServer {
                         return;
                     }
                 };
-                serve(&runtime, &server, &stop_thread, &issuer, clock.as_ref());
+                serve(&runtime, &server, &stop_thread, &issuer, clock.as_ref(), budget);
             })?;
         let addr = ready_rx
             .recv()
@@ -98,6 +109,7 @@ fn serve(
     stop: &Notify,
     issuer: &SourceIssuer,
     clock: &(dyn Fn() -> u64 + Send + Sync),
+    budget: Duration,
 ) {
     let listener = AuthorityListener::new(issuer);
     loop {
@@ -108,6 +120,8 @@ fn serve(
             }
         });
         let Some(accepted) = accepted else { return };
+        // The one original deadline starts when the handshake completes.
+        let deadline = Instant::now() + budget;
         let connection = match accepted {
             Ok(connection) => connection,
             Err(error) => {
@@ -116,71 +130,91 @@ fn serve(
             }
         };
         let peer = connection.peer_spiffe_uri().map(str::to_owned);
-        let request = runtime.block_on(async {
-            tokio::time::timeout(
-                READ_BUDGET,
-                MeshQuicServer::accept_request_on_connection(&connection),
-            )
-            .await
-        });
-        let Ok(Ok(request)) = request else {
-            tracing::warn!("authority QUIC request not received");
+        // Authenticate before reading a byte: other services never reach decoding.
+        if !listener.authorize(peer.as_deref()) {
+            connection.close(UNAUTHORIZED_CLOSE, b"router identity required");
             continue;
+        }
+        let ingress = runtime.block_on(MeshQuicServer::accept_limited_request(
+            &connection,
+            MAX_WIRE_BODY,
+            deadline,
+        ));
+        let request = match ingress {
+            Ok(MeshQuicLimitedIngress::Request(request)) => request,
+            Ok(MeshQuicLimitedIngress::TooLarge(responder)) => {
+                write_text(runtime, responder, 413, "body", deadline);
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "authority QUIC request not received in budget");
+                continue;
+            }
         };
-        let method = request.request.method.clone();
-        let path = request.request.path.clone();
-        let Ok(body) = serde_json::to_vec(&request.request.body) else { continue };
-        let mut sink = QuicSink { runtime, request: Some(request) };
+        let mut sink = QuicSink { runtime, responder: Some(request.responder), deadline };
         let handled = listener.handle(
             &Incoming {
                 peer_spiffe_uri: peer.as_deref(),
-                method: &method,
-                path: &path,
-                body: &body,
+                method: &request.method,
+                path: &request.path,
+                body: &request.body,
             },
             clock,
             &mut sink,
             &IssueHooks::none(),
         );
-        let Some(request) = sink.request.take() else { continue };
-        let written = match handled {
+        let Some(responder) = sink.responder.take() else { continue };
+        match handled {
             Ok(Handled::Rejected { status, reason }) => {
                 let code = status.split(' ').next().and_then(|c| c.parse().ok()).unwrap_or(500);
-                runtime.block_on(request.write_text_response(code, reason))
+                write_text(runtime, responder, code, reason, deadline);
             }
             Ok(Handled::Challenge(reply)) => {
-                runtime.block_on(request.write_json_response(200, &reply))
+                if let Err(error) = runtime.block_on(responder.respond(200, &reply, deadline)) {
+                    tracing::warn!(%error, "authority QUIC challenge write failed");
+                }
             }
-            // The renew frame is written through the sink, or the stream is reset.
-            Ok(Handled::Renew(_)) | Err(_) => Ok(()),
-        };
-        if let Err(error) = written {
-            tracing::warn!(%error, "authority QUIC response write failed");
+            // The renew frame was written through the sink, or the stream is reset.
+            Ok(Handled::Renew(_)) | Err(_) => {}
         }
     }
 }
 
+fn write_text(
+    runtime: &Runtime,
+    responder: MeshQuicLimitedResponder,
+    code: u16,
+    reason: &str,
+    deadline: Instant,
+) {
+    if let Err(error) =
+        runtime.block_on(responder.respond(code, &serde_json::json!({ "error": reason }), deadline))
+    {
+        tracing::warn!(%error, "authority QUIC response write failed");
+    }
+}
+
 /// Writes the renew frame to the QUIC stream from inside the lease-holding writer, so the
-/// publication lease outlives the transport write.
+/// publication lease outlives the transport write, bounded by the original deadline.
 struct QuicSink<'a> {
     runtime: &'a Runtime,
-    request: Option<MeshQuicAcceptedRequest>,
+    responder: Option<MeshQuicLimitedResponder>,
+    deadline: Instant,
 }
 impl TokenSink for QuicSink<'_> {
     fn write_token(&mut self, bytes: &[u8], deadline: Duration) -> io::Result<()> {
-        let request =
-            self.request.take().ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        let responder =
+            self.responder.take().ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;
         let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        // Never later than the original deadline, nor than the writer's own bound.
+        let bound = self.deadline.min(Instant::now() + deadline);
         self.runtime
-            .block_on(async {
-                tokio::time::timeout(deadline, request.write_json_response(200, &value)).await
-            })
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+            .block_on(responder.respond(200, &value, bound))
             .map_err(|error| io::Error::other(error.to_string()))
     }
     fn reset(&mut self) {
-        // Dropping the request resets the stream without a token byte.
-        self.request = None;
+        // Dropping the responder resets the stream without a token byte.
+        self.responder = None;
     }
 }
