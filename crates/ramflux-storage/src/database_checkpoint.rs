@@ -57,6 +57,12 @@ impl BackgroundCheckpoint {
         self.enabled.store(true, Ordering::Release);
     }
 
+    /// Stops background checkpoints so a test observes the WAL without a racing worker.
+    #[cfg(test)]
+    pub(crate) fn disable_for_test(&self) {
+        self.enabled.store(false, Ordering::Release);
+    }
+
     pub(crate) fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
     }
