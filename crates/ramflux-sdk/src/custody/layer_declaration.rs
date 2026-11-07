@@ -8,7 +8,7 @@ use ramflux_protocol::custody::{
     MESSAGE_LAYER_FLOOR, SignedLayerDeclaration,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn invalid() -> SdkError {
     SdkError::CustodySetupInvalid
@@ -84,6 +84,10 @@ pub(crate) struct DeclarationPins {
 }
 
 impl DeclarationPins {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.devices.is_empty()
+    }
+
     pub(crate) fn observe_roster(
         &mut self,
         account_anchor: &str,
@@ -193,6 +197,35 @@ impl DeclarationPins {
     }
 }
 
+pub(crate) fn sequence_high_water(
+    account_anchor: &str,
+    devices: &[Device],
+) -> Result<BTreeMap<String, u64>, SdkError> {
+    let mut sequences = BTreeMap::new();
+    remember_sequences(&mut sequences, account_anchor, devices)?;
+    Ok(sequences)
+}
+
+pub(crate) fn remember_sequences(
+    sequences: &mut BTreeMap<String, u64>,
+    account_anchor: &str,
+    devices: &[Device],
+) -> Result<(), SdkError> {
+    for device in devices {
+        if let Some(declaration) = &device.message_layer {
+            let reference =
+                ramflux_protocol::qualified_device_id(account_anchor, &device.device_id)?;
+            sequences
+                .entry(reference)
+                .and_modify(|high| {
+                    *high = (*high).max(declaration.declaration.declaration_sequence);
+                })
+                .or_insert(declaration.declaration.declaration_sequence);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_update_rejects_rollback() -> Result<(), Box<dyn std::error::Error>> {
+    fn declaration_pin_rejects_rollback() -> Result<(), Box<dyn std::error::Error>> {
         let mut pins = DeclarationPins::default();
         pins.observe("anchor", &device(4, 2, 86_500), 11, "head-11")?;
         let saved = serde_json::to_vec(&pins)?;

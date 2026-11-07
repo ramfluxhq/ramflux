@@ -54,14 +54,31 @@ async fn candidate_layer_publication_is_endorsed_and_renews_without_auto_publish
     next.publication = first;
     assert_eq!(accept_publication(root, &id, &next, now + 2)?, PinOutcome::Advanced);
 
-    let renewed = load_account(root, &id, now + 2)?;
-    let (_, branch) = renewed.credentials(fixture.vault.as_ref(), "primary", now + 2)?;
+    let mut withdrawal = authority(&fixture)?;
+    let mut withdrawn_body = next.publication.record.body.clone();
+    withdrawn_body.previous_record_hash =
+        Some(ramflux_protocol::custody::object_hash(&next.publication.record)?);
+    withdrawn_body.device_set_epoch += 1;
+    withdrawn_body.issued_at = now + 4;
+    withdrawn_body.devices[0].message_layer = None;
+    withdrawal.publication.record = primary.sign_record(withdrawn_body)?;
+    assert_eq!(accept_publication(root, &id, &withdrawal, now + 5)?, PinOutcome::Advanced);
+
+    // Reload after withdrawal: the retained per-device high-water mark must outlive the head.
+    let renewed = load_account(root, &id, now + 5)?;
+    let authority: serde_json::Value = serde_json::from_slice(&fs::read(
+        root.join("custody_accounts").join(&id).join("authority.json"),
+    )?)?;
+    let sequence_key =
+        ramflux_protocol::qualified_device_id(&renewed.record().body.account_anchor, "primary")?;
+    assert_eq!(authority["message_layer_sequences"][sequence_key], 1);
+    let (_, branch) = renewed.credentials(fixture.vault.as_ref(), "primary", now + 5)?;
     let second = renewed.candidate_message_layer_publication(
         root,
         &branch,
         &primary,
         ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
-        crate::custody::DeclarationValidity { issued_at: now + 3, expires_at: now + 7200 },
+        crate::custody::DeclarationValidity { issued_at: now + 6, expires_at: now + 7200 },
     )?;
     assert_eq!(
         second.record.body.devices[0]
@@ -72,15 +89,7 @@ async fn candidate_layer_publication_is_endorsed_and_renews_without_auto_publish
             .declaration_sequence,
         2
     );
-    assert_eq!(
-        renewed.record().body.devices[0]
-            .message_layer
-            .as_ref()
-            .ok_or("stored declaration")?
-            .declaration
-            .declaration_sequence,
-        1
-    );
+    assert!(renewed.record().body.devices[0].message_layer.is_none());
     Ok(())
 }
 

@@ -92,6 +92,51 @@ fn ordinary_directory_accepts_native_provenance_and_rejects_metadata_or_key_subs
     client.require_current_device_authorization(&identity)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn native_message_layer_projection_must_match_endorsed_roster() -> TestResult {
+    let fixture = crate::client::native_test_support::Fixture::new("layer-projection").await?;
+    let now = crate::custody::network_now()?;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let account = crate::custody::load_account(&fixture.root.0, &id, now)?;
+    let mut native = (**fixture.manifest.custody.as_ref().ok_or("native manifest")?).clone();
+    let device = native.devices[0].device_ref.clone();
+    let (_, branch) = account.credentials(fixture.vault.as_ref(), &device.device_id, now)?;
+    let primary = fixture.vault.primary_for_public_key(
+        &account.record().body.master_certificate.body.self_signing_public_key,
+    )?;
+    let declaration = account.candidate_message_layer_publication(
+        &fixture.root.0,
+        &branch,
+        &primary,
+        ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+        crate::custody::DeclarationValidity { issued_at: now + 1, expires_at: now + 60 },
+    )?;
+    native.publication = declaration.clone();
+    native.devices[0].message_layer = declaration.record.body.devices[0].message_layer.clone();
+
+    // Transport bytes carry a substituted projection while the signed roster remains unchanged.
+    let mut wire = serde_json::to_value(&native)?;
+    let projection = &mut wire["devices"][0]["message_layer"]["declaration"]["expires_at"];
+    *projection = serde_json::json!(projection.as_u64().ok_or("projection expiry")? + 1);
+    let bytes = ramflux_protocol::canonical_json_bytes(&wire)?;
+    let received: CustodyManifest = ramflux_protocol::custody::decode(
+        &bytes,
+        ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+    )?;
+    let anchor = received.publication.record.body.account_anchor.clone();
+    let client = receiver(&fixture.root, fixture.vault.as_ref(), now)?;
+    let Err(error) = client.observe_custody_manifest(&received, &anchor, now + 2) else {
+        return Err("substituted message-layer projection was accepted".into());
+    };
+    assert!(matches!(
+        error,
+        SdkError::InboundRejected(message)
+            if message == "identity authority: custody message-layer projection differs from signed roster"
+    ));
+    Ok(())
+}
+
 #[test]
 fn authenticated_native_head_is_retained_when_prekey_signature_is_bad() -> TestResult {
     let root = Root::new()?;

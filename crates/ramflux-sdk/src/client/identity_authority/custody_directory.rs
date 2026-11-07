@@ -426,6 +426,14 @@ pub(super) fn verify_native_material(
     let verified = verify_native_authority(manifest, expected, now)?;
     let mut seen = std::collections::BTreeSet::new();
     for device in &manifest.devices {
+        let endorsed = verified.envelope().body.devices.iter().find(|entry| {
+            entry.device_id == device.device_ref.device_id
+                && entry.device_epoch == device.device_ref.device_epoch
+        });
+        if endorsed.and_then(|entry| entry.message_layer.as_ref()) != device.message_layer.as_ref()
+        {
+            return Err(invalid("custody message-layer projection differs from signed roster"));
+        }
         let identity =
             RootQualifiedDeviceRef::from_custody_record(&verified, &device.device_ref.device_id)?;
         let cert = verified.authorize(&device.device_ref, "message", now)?;
