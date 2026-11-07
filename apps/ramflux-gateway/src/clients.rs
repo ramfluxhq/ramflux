@@ -1,9 +1,24 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{NotifyHttpClient, NotifyMeshClient, RouterAsyncMeshClient, RouterMeshClient};
+
+#[cfg(test)]
+static NOTIFY_WAKE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn notify_wake_count() -> u64 {
+    NOTIFY_WAKE_CALLS.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_notify_wake_count() {
+    NOTIFY_WAKE_CALLS.store(0, Ordering::SeqCst);
+}
 
 const ROUTER_ASYNC_ENDPOINT_ENV: &str = "RAMFLUX_ROUTER_ASYNC_ENDPOINT";
 const ROUTER_ASYNC_SERVER_NAME_ENV: &str = "RAMFLUX_ROUTER_ASYNC_SERVER_NAME";
@@ -477,6 +492,8 @@ pub(crate) fn notify_offline_wake(
     target_delivery_id: &str,
     envelope: &ramflux_protocol::Envelope,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    NOTIFY_WAKE_CALLS.fetch_add(1, Ordering::SeqCst);
     let encrypted_hint = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::NOTIFICATION_WAKE,
         envelope.encrypted_payload.as_bytes(),
@@ -589,6 +606,22 @@ pub(crate) mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    pub(crate) fn durable_notify_wake_once(
+        envelope: &ramflux_protocol::Envelope,
+        target_delivery_id: &str,
+    ) -> anyhow::Result<()> {
+        let (endpoint, received) =
+            spawn_notify_http_echo_server().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let client = NotifyHttpClient {
+            endpoint: format!("http://{endpoint}"),
+            signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x51; 32]),
+            mesh: None,
+        };
+        notify_offline_wake(&client, target_delivery_id, envelope)?;
+        let _ = received.recv_timeout(Duration::from_secs(5));
+        Ok(())
+    }
 
     #[test]
     fn mesh_endpoint_defaults_keep_router_and_notify_quic_with_opt_out() {

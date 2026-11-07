@@ -24,6 +24,13 @@ pub(crate) const TRANSIENT_FRAME_CAP: usize = 64;
 /// Per-session transient byte occupancy, including the in-flight write.
 pub(crate) const TRANSIENT_BYTE_CAP: usize = 262_144;
 const EMPTY: u64 = u64::MAX;
+#[cfg(test)]
+static BYPASS_TRANSIENT_BOUND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) fn set_bypass_transient_bound(bypass: bool) {
+    BYPASS_TRANSIENT_BOUND.store(bypass, std::sync::atomic::Ordering::SeqCst);
+}
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
 // Sink admission is queue waiting, with its own bound; only the I/O consumes 15s.
 const SINK_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
@@ -256,6 +263,9 @@ impl PushQueue {
         self.inner.wake.notify_one();
         Admission::Queued
     }
+    /// Enqueue a deadline-aware ephemeral frame on the registration-owned
+    /// transient FIFO. Occupancy includes the in-flight write. Transients never
+    /// touch durable occupancy, the Resync slot, or coverage.
     pub(crate) fn try_push_transient(
         &self,
         bytes: Vec<u8>,
@@ -272,7 +282,14 @@ impl PushQueue {
             return TransientAdmission::Closed;
         }
         let (frames, used) = state.transient_occupancy();
-        if frames >= TRANSIENT_FRAME_CAP || bytes.len() > TRANSIENT_BYTE_CAP.saturating_sub(used) {
+        #[cfg(test)]
+        let bypass = BYPASS_TRANSIENT_BOUND.load(Ordering::SeqCst);
+        #[cfg(not(test))]
+        let bypass = false;
+        if !bypass
+            && (frames >= TRANSIENT_FRAME_CAP
+                || bytes.len() > TRANSIENT_BYTE_CAP.saturating_sub(used))
+        {
             return TransientAdmission::QueueFull;
         }
         state.transient_frames = state.transient_frames.saturating_add(1);
@@ -282,20 +299,9 @@ impl PushQueue {
         self.inner.wake.notify_one();
         TransientAdmission::Queued
     }
-    /// Enqueue an ephemeral frame on the registration-owned transient deque. It shares the
-    /// transient occupancy caps and the per-frame deadline with `try_push_transient`, so the
-    /// occupancy counters stay exact. Transients never touch durable occupancy, the Resync
-    /// slot, or coverage.
-    pub(crate) fn try_push_ephemeral(&self, bytes: Vec<u8>, expires_at_ms: u64) -> Admission {
-        match self.try_push_transient(bytes, expires_at_ms) {
-            TransientAdmission::Queued => Admission::Queued,
-            TransientAdmission::QueueFull => Admission::Overflowed,
-            TransientAdmission::Closed => Admission::Closed,
-        }
-    }
     #[cfg(test)]
     pub(crate) fn ephemeral_len(&self) -> usize {
-        self.inner.state.lock().map_or(0, |state| state.transient.len())
+        self.inner.state.lock().map_or(0, |state| state.transient_occupancy().0)
     }
     fn overflow(&self, seq: u64) -> Admission {
         self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);

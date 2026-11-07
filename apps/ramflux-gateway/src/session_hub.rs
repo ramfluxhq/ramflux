@@ -426,6 +426,7 @@ impl GatewaySessionHub {
         expires_at_ms: u64,
     ) -> crate::ephemeral_forward::EphemeralEnqueueOutcome {
         use crate::ephemeral_forward::EphemeralEnqueueOutcome as Outcome;
+        crate::ephemeral_forward::await_enqueue_hold().await;
         let Some(entry) = self.snapshot().await.get(registration_target).cloned() else {
             return crate::ephemeral_forward::finish_without_wake(Outcome::Offline);
         };
@@ -438,17 +439,23 @@ impl GatewaySessionHub {
         if registration_target != forward_target || forward_target != envelope_target {
             return crate::ephemeral_forward::finish_without_wake(Outcome::RecipientUnsupported);
         }
-        let admission = entry.queue.try_push_ephemeral(bytes, expires_at_ms);
+        let admission = entry.queue.try_push_transient(bytes, expires_at_ms);
         let outcome = match admission {
-            crate::push_queue::Admission::Queued => Outcome::Queued,
-            crate::push_queue::Admission::Overflowed => Outcome::QueueFull,
-            crate::push_queue::Admission::Closed => Outcome::Offline,
+            crate::push_queue::TransientAdmission::Queued => Outcome::Queued,
+            crate::push_queue::TransientAdmission::QueueFull => Outcome::QueueFull,
+            crate::push_queue::TransientAdmission::Closed => Outcome::Offline,
         };
         crate::ephemeral_forward::finish_without_wake(outcome)
     }
     #[cfg(test)]
     pub(crate) async fn ephemeral_queued(&self, target: &str) -> usize {
         self.snapshot().await.get(target).map_or(0, |entry| entry.queue.ephemeral_len())
+    }
+    #[cfg(test)]
+    pub(crate) async fn set_queue_clock(&self, target: &str, now_ms: u64) {
+        if let Some(entry) = self.snapshot().await.get(target) {
+            entry.queue.set_clock_ms(now_ms);
+        }
     }
 }
 
