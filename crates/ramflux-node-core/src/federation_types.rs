@@ -49,6 +49,14 @@ pub struct FederationServerRecord {
     pub node_policy_hash: String,
     pub updated_at: u64,
     pub expires_at: u64,
+    /// Present only when the attachment authority is configured. Absent keeps the
+    /// pre-existing canonical bytes: the key is omitted, never emitted as `null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::federation_attachment::authority_not_null"
+    )]
+    pub attachment_authority: Option<crate::federation_attachment::FederationAttachmentAuthority>,
     pub signature: String,
 }
 

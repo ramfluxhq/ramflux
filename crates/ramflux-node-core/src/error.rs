@@ -3,6 +3,8 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("attachment authority history is full")]
+    AttachmentAuthorityHistoryCapacity,
     #[error("payload_too_large")]
     PayloadTooLarge,
     #[error("invalid ACK batch: {0}")]

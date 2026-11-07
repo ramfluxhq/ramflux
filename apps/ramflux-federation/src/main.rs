@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 mod admin_http;
+mod attachment_renewal;
 mod discovery;
 mod flow;
 mod helpers;

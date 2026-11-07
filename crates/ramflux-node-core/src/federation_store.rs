@@ -22,6 +22,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS: u64 = 20;
 
+mod attachment_authority;
+pub use attachment_authority::{AuthorityHistory, MAX_AUTHORITY_NODES};
 mod dead_letters;
 mod retention;
 pub use dead_letters::FederationOutboundDeadLetter;
@@ -102,6 +104,7 @@ impl FederationRedbStore {
         )?;
         let store = Self { db, foreign_authority_writes: std::sync::atomic::AtomicU64::new(0) };
         store.initialize_dead_letters()?;
+        store.initialize_attachment_authority()?;
         Ok(store)
     }
 

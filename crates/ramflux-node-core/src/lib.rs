@@ -16,9 +16,14 @@ pub mod username_directory;
 pub use authority_refusal::*;
 pub use ramflux_core::environment;
 mod error;
+mod federation_attachment;
 mod federation_crypto;
 mod federation_delivery;
 mod federation_state;
+pub use federation_attachment::{
+    ATTACHMENT_RENEWAL_CAPABILITY, AttachmentAuthorityBook, AuthorityAdoption, AuthorityPin,
+    FederationAttachmentAuthority, PeerRenewalFacts, PinAnswer, Withdrawn, admit_peer_renewal,
+};
 mod federation_store;
 mod federation_types;
 mod foreign_device_heads;

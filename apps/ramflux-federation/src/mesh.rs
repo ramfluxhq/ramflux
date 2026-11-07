@@ -298,6 +298,7 @@ pub(crate) fn serve_mesh_mtls(
                         &mut stream,
                         context,
                         peer_service_id.as_deref(),
+                        accepted.peer_spiffe_uri.as_deref(),
                         connection,
                     ) {
                         Ok(true) => {}
@@ -328,6 +329,7 @@ pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     context: &MeshServerContext,
     peer_service_id: Option<&str>,
+    peer_spiffe_uri: Option<&str>,
     connection: &ramflux_node_core::ConnectionGuard,
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let received = std::time::Instant::now();
@@ -350,14 +352,7 @@ pub(crate) fn handle_mesh_request(
     };
     #[cfg(feature = "itest-http")]
     ramflux_node_core::shutdown_request_test_delay();
-
-    if peer_service_id == Some("ramflux-retention") && request.path != RETENTION_GC_SWEEP_PATH {
-        ramflux_transport::write_mesh_text_response(
-            stream,
-            "403 Forbidden",
-            "retention peer is only authorized for gc_sweep",
-        )
-        .map_err(|error| mesh_transport_error(&error))?;
+    if refuse_retention_peer(stream, peer_service_id, &request.path)? {
         return Ok(true);
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -385,6 +380,9 @@ pub(crate) fn handle_mesh_request(
                 &request.body,
                 received,
             )?;
+        }
+        ("POST", crate::attachment_renewal::PEER_PATH) => {
+            serve_attachment_peer(stream, context, peer_spiffe_uri, &request.body, received)?;
         }
         ("POST", "/s8/federation/envelope") => {
             context.observability.record_inbound_s8_envelope(MeshInboundTransport::Tcp);
@@ -776,6 +774,53 @@ fn response_error_text(body: &serde_json::Value) -> &str {
     body.get("error").and_then(serde_json::Value::as_str).unwrap_or("mesh request failed")
 }
 
+/// The retention peer may only call `gc_sweep`; anything else is refused here.
+fn refuse_retention_peer(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    peer_service_id: Option<&str>,
+    path: &str,
+) -> Result<bool, ramflux_node_core::NodeCoreError> {
+    if peer_service_id != Some("ramflux-retention") || path == RETENTION_GC_SWEEP_PATH {
+        return Ok(false);
+    }
+    ramflux_transport::write_mesh_text_response(
+        stream,
+        "403 Forbidden",
+        "retention peer is only authorized for gc_sweep",
+    )
+    .map_err(|error| mesh_transport_error(&error))?;
+    Ok(true)
+}
+
+fn serve_attachment_peer(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    context: &MeshServerContext,
+    peer_spiffe_uri: Option<&str>,
+    body: &[u8],
+    received: std::time::Instant,
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let reply = crate::attachment_renewal::serve_peer(
+        peer_spiffe_uri,
+        body,
+        &context.state,
+        &context.router,
+        &context.discovery,
+        received,
+    );
+    if reply.status == "200 OK" {
+        let value: serde_json::Value =
+            serde_json::from_slice(&reply.body).unwrap_or(serde_json::Value::Null);
+        ramflux_transport::write_mesh_json_response(stream, reply.status, &value)
+    } else {
+        ramflux_transport::write_mesh_text_response(
+            stream,
+            reply.status,
+            &String::from_utf8_lossy(&reply.body),
+        )
+    }
+    .map_err(|error| mesh_transport_error(&error))
+}
+
 fn handle_migration_peer_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     context: &MeshServerContext,
@@ -978,6 +1023,7 @@ mod tests {
                     protocol_versions: vec!["s8".to_owned()],
                     transport_backends: vec!["quic".to_owned()],
                     node_capabilities: vec!["mesh".to_owned()],
+                    attachment_authority: None,
                 },
                 observability: Arc::new(crate::FederationMeshObservability::default()),
             })
@@ -1088,6 +1134,7 @@ mod tests {
                 protocol_versions: vec!["s8".to_owned()],
                 transport_backends: vec!["quic".to_owned()],
                 node_capabilities: vec!["mesh".to_owned()],
+                attachment_authority: None,
             },
         };
         Ok((context, store_path))
