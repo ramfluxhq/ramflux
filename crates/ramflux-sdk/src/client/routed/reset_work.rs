@@ -5,6 +5,8 @@
 use super::reset_policy::{MAX_RESET_LIFETIME, ResetWork};
 use super::{GatewaySessionAccess, Kind, Opened, PairControlKind, RamfluxClient, Route, SdkError};
 use crate::client::identity_authority::HeadUse;
+use crate::gateway::session_push::SubmitRefusal;
+use crate::time::now_unix_timestamp;
 impl RamfluxClient {
     pub(super) async fn send_pair_reset(
         &self,
@@ -39,6 +41,47 @@ impl RamfluxClient {
         }
         Ok(remote.device_id().to_owned())
     }
+    /// The policy for a certain gateway refusal of a pair control submit. A Conflict on a reset
+    /// takes the existing lifetime-expiry terminal (manual recovery) and journals the refusal in
+    /// the `pair-reset-refused` form; a capacity refusal pushes the next attempt to the gateway's
+    /// floor; `RetrySafe` keeps the existing schedule. Acknowledgements have no durable work.
+    pub(crate) fn pair_control_refused(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+        kind: PairControlKind,
+        refusal: SubmitRefusal,
+    ) -> Result<SdkError, SdkError> {
+        let at = now_unix_timestamp();
+        if kind == PairControlKind::Reset {
+            let db = self.account_db()?;
+            match refusal {
+                SubmitRefusal::Conflict => {
+                    let pair = RamfluxClient::pair_key(local, remote)?;
+                    db.write_transaction(|| -> Result<(), SdkError> {
+                        db.append_journal(
+                            &format!("pair-reset-refused:{pair}:{at}"),
+                            "session.reset",
+                            &serde_json::json!({"device_id":remote.storage_key(),"state":"refused","reason":"submit_conflict"}),
+                            at,
+                            None,
+                        )?;
+                        self.mark_pair_manual(local, remote, at)
+                    })?;
+                }
+                SubmitRefusal::CapacityRetryAfter { retry_after_ms } => {
+                    let floor = i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX);
+                    let key = Self::reset_work_key(local, remote)?;
+                    if let Some(mut work) = db.load_actor_state::<ResetWork>(&key)? {
+                        work.next_at = work.next_at.max(at.saturating_add(floor));
+                        db.persist_actor_state(&key, &work)?;
+                    }
+                }
+                SubmitRefusal::RetrySafe => {}
+            }
+        }
+        Ok(SdkError::GatewaySessionRejected(refusal.reason().to_owned()))
+    }
     async fn send_pair_control(
         &self,
         engine: &mut impl GatewaySessionAccess,
@@ -55,7 +98,10 @@ impl RamfluxClient {
             self.seal_routed_as(engine, &draft.message, &draft.body, Route::control()).await?;
         if self.pair_control_draft_current(&draft)? {
             let envelope = self.finish_pair_control_draft(engine.config(), draft, &sealed)?;
-            engine.submit_envelope(envelope).await?;
+            if let Err(refusal) = engine.submit_classified(envelope).await? {
+                let local = self.local_device_identity(&engine.config().device_id)?;
+                return Err(self.pair_control_refused(&local, remote, kind, refusal)?);
+            }
         }
         // Submission is transport acceptance, not peer confirmation. Work remains durable.
         Ok(())

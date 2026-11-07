@@ -89,6 +89,7 @@ async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
             None
         };
     let config = plan.session.config().clone();
+    let (remote, kind) = (plan.draft.remote().clone(), plan.draft.kind());
     let draft = plan.draft;
     let envelope = writer
         .apply(move |account| {
@@ -100,7 +101,16 @@ async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
         })
         .await?;
     if let Some(envelope) = envelope {
-        plan.session.submit_envelope(envelope).await?;
+        // A certain gateway refusal is applied by the actor; anything else stays uncertain.
+        if let Err(refusal) = plan.session.submit_envelope_classified(envelope).await? {
+            let config = plan.session.config().clone();
+            return Err(writer
+                .apply(move |account| {
+                    let local = account.client.local_device_identity(&config.device_id)?;
+                    account.client.pair_control_refused(&local, &remote, kind, refusal)
+                })
+                .await?);
+        }
     }
     Ok(())
 }

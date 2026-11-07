@@ -9,8 +9,41 @@ use std::{future::Future, pin::Pin};
 /// One bounded session exchange, whose storage effects remain owned by its caller.
 pub type GatewayCallFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SdkError>> + Send + 'a>>;
 
+mod sealed {
+    use super::{GatewayCallFuture, GatewayInboxEntry};
+    use crate::gateway::session_push::SubmitRefusal;
+
+    /// Submit that separates a certain gateway refusal (inner `Err`) from every uncertain failure
+    /// (outer `Err`). Sealed: only the engine and the account's session client implement it.
+    // The refusal type is crate-private; the trait is sealed and unreachable outside the crate.
+    #[allow(private_interfaces)]
+    pub trait ClassifiedSubmit: Send {
+        /// # Errors
+        /// Returns an error when the exchange fails after or while writing (uncertain).
+        fn submit_classified(
+            &mut self,
+            envelope: ramflux_protocol::Envelope,
+        ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, SubmitRefusal>>;
+    }
+}
+pub(crate) use sealed::ClassifiedSubmit;
+
+#[allow(private_interfaces)]
+impl ClassifiedSubmit for GatewaySessionEngine {
+    fn submit_classified(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        Box::pin(self.submit_envelope_classified(envelope))
+    }
+}
+
 /// Gateway capabilities usable with a direct engine or an account's resident session host.
-pub trait GatewaySessionAccess: Send {
+// The sealed `ClassifiedSubmit` supertrait is crate-private by design: every implementor is
+// already classified, so callers that need it add no bound of their own.
+#[allow(private_bounds)]
+pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     /// Returns the caller's immutable connection coordinates and signing context.
     fn config(&self) -> &GatewaySessionConfig;
     /// Returns the authenticated session metadata captured for this caller's generation.

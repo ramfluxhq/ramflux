@@ -24,6 +24,14 @@ impl PairControlKind {
         }
     }
 }
+impl PairControlDraft {
+    pub(crate) fn remote(&self) -> &RootQualifiedDeviceRef {
+        &self.remote
+    }
+    pub(crate) fn kind(&self) -> PairControlKind {
+        self.kind
+    }
+}
 pub(crate) struct PairControlDraft {
     pub(super) message: GatewayDirectMessage,
     pub(super) body: Vec<u8>,

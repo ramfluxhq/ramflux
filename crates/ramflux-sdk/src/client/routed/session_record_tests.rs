@@ -14,6 +14,8 @@ pub(super) struct Wire {
     responses: VecDeque<Vec<u8>>,
     sent: Sent,
     on_accept: Option<AcceptanceHook>,
+    /// Answers every submit with a `nack` of exactly this reason (the submit is still recorded).
+    nack: Option<String>,
 }
 impl Wire {
     pub(super) fn engine(
@@ -27,6 +29,21 @@ impl Wire {
         remote: &Fixture,
         on_accept: Option<AcceptanceHook>,
     ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
+        Self::scripted(local, remote, on_accept, None)
+    }
+    pub(super) fn engine_nacking(
+        local: &Fixture,
+        remote: &Fixture,
+        reason: &str,
+    ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
+        Self::scripted(local, remote, None, Some(reason.to_owned()))
+    }
+    fn scripted(
+        local: &Fixture,
+        remote: &Fixture,
+        on_accept: Option<AcceptanceHook>,
+        nack: Option<String>,
+    ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
         let sent = Arc::new(Mutex::new(Vec::new()));
         Ok((
             GatewaySessionEngine::with_test_transport(
@@ -39,6 +56,7 @@ impl Wire {
                     responses: VecDeque::new(),
                     sent: sent.clone(),
                     on_accept,
+                    nack,
                 }),
             ),
             sent,
@@ -80,7 +98,10 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                     if let Some(hook) = &self.on_accept {
                         hook().map_err(ramflux_transport::TransportError::Quic)?;
                     }
-                    GatewayServerFrame::Deliver { entry }
+                    match &self.nack {
+                        Some(reason) => GatewayServerFrame::Nack { reason: reason.clone() },
+                        None => GatewayServerFrame::Deliver { entry },
+                    }
                 }
                 GatewayClientFrame::RelayTokenV3Issue { request } => {
                     GatewayServerFrame::RelayTokenV3Issued {

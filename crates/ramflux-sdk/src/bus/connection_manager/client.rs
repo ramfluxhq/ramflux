@@ -55,8 +55,7 @@ impl SessionClient {
         Ok(())
     }
     /// Submits through the host and separates a certain gateway refusal (inner `Err`) from
-    /// every uncertain failure (outer `Err`). The first callers arrive with the sender sites.
-    #[allow(dead_code)]
+    /// every uncertain failure (outer `Err`).
     pub(crate) fn submit_envelope_classified(
         &mut self,
         envelope: ramflux_protocol::Envelope,
@@ -72,6 +71,16 @@ impl SessionClient {
     }
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+}
+
+impl crate::gateway::access::ClassifiedSubmit for SessionClient {
+    fn submit_classified(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        self.submit_envelope_classified(envelope)
     }
 }
 

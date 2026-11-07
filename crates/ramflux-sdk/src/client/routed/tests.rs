@@ -710,6 +710,9 @@ mod recovery_policy;
 #[path = "device_revocation_tests.rs"]
 mod device_revocation;
 
+#[path = "reset_refusal_tests.rs"]
+mod reset_refusal;
+
 #[path = "retirement_guard_tests.rs"]
 mod retirement_guard;
 
