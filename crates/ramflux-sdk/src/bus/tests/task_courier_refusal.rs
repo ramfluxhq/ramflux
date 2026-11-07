@@ -98,6 +98,10 @@ async fn scenario(row: Row, nack: Option<&str>, nack_after: usize, conflict: boo
         Row::Ack => ack(&fixture.source, key, &healthy)?,
         Row::Forward => forward(&fixture.source, key, &healthy)?,
         Row::Request | Row::Decision => {
+            // The approval needs the projected task: project it through a forward job, then
+            // drop that job so only the approval row is under test.
+            forward(&fixture.source, "task/forward/seed", &healthy)?;
+            fixture.source.client.account_db()?.delete_task_state("task/forward/seed")?;
             intervention(&fixture.source, &fixture.peer)?;
             let request = approval_request(&fixture.source)?;
             let payload = if row == Row::Request {
