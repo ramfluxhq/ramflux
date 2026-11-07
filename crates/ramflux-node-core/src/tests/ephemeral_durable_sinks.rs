@@ -68,6 +68,12 @@ const TEST_ONLY_MODULES: &[(&str, &str)] = &[
         "apps/ramflux-router/src/handlers/session_push/ephemeral_reassertion.rs",
         "apps/ramflux-router/src/handlers/session_push.rs",
     ),
+    // Declared `#[cfg(test)] mod ephemeral_route;` at
+    // apps/ramflux-router/src/handlers/session_push.rs:285-286 on origin/main.
+    (
+        "apps/ramflux-router/src/handlers/session_push/ephemeral_route.rs",
+        "apps/ramflux-router/src/handlers/session_push.rs",
+    ),
 ];
 
 /// Modules the discovery must always find.
