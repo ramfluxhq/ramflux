@@ -7,15 +7,16 @@ use crate::lock_unpoisoned;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Inclusive bound: 65,536 live authenticated digests (32 B digest + 8 B D each).
+/// Inclusive bound: 65,536 live authenticated digests.
 pub const EPHEMERAL_REPLAY_BOUND: usize = 65_536;
 
-/// Bytes of one stored `(digest, D)` tuple. The set stores this once per live marker.
+/// Bytes of one stored `(digest, D)` tuple payload (32 B digest + 8 B D).
 pub const EPHEMERAL_REPLAY_ENTRY_BYTES: usize = 32 + 8;
 
-/// Inclusive retained-tuple budget at [`EPHEMERAL_REPLAY_BOUND`] (fixed costs included).
-pub const EPHEMERAL_REPLAY_BUDGET_BYTES: usize =
-    EPHEMERAL_REPLAY_BOUND * EPHEMERAL_REPLAY_ENTRY_BYTES;
+/// Inclusive heap budget for the replay set (map + deadline index) at the entry cap.
+/// Hash-table spare buckets, control bytes and the expiry index count against this
+/// figure. It is measured by a counting allocator, not `len() × ENTRY_BYTES`.
+pub const EPHEMERAL_REPLAY_BUDGET_BYTES: usize = 8_388_608;
 
 static SATURATION_TOTAL: AtomicU64 = AtomicU64::new(0);
 
@@ -58,7 +59,7 @@ fn marker_is_live(now_ms: u64, deadline_unix: u64) -> bool {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EphemeralReplaySet {
-    /// Sole `(digest, D)` store: 65,536 × 40 B = 2,621,440 B tuple payload at the bound.
+    /// Sole `(digest, D)` store. Layout overhead counts toward [`EPHEMERAL_REPLAY_BUDGET_BYTES`].
     by_digest: HashMap<[u8; 32], u64>,
     /// Compact expiry index keyed by stored `D` (no second digest copy).
     by_deadline: BTreeSet<u64>,
@@ -135,8 +136,7 @@ pub(crate) fn saturation_total() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        EPHEMERAL_REPLAY_BOUND, EPHEMERAL_REPLAY_BUDGET_BYTES, EPHEMERAL_REPLAY_ENTRY_BYTES,
-        EphemeralReplayAdmit, ephemeral_replay_digest, saturation_total,
+        EPHEMERAL_REPLAY_BOUND, EphemeralReplayAdmit, ephemeral_replay_digest, saturation_total,
     };
     use crate::{RouterCore, RouterRedbStore};
     use redb::{ReadableDatabase, ReadableTable, TableHandle};
@@ -310,21 +310,6 @@ mod tests {
         assert_eq!(router.ephemeral_replay_len(), 0);
     }
 
-    fn row_retained_bytes_fit_budget() -> TestResult {
-        assert_eq!(EPHEMERAL_REPLAY_ENTRY_BYTES, 32 + 8);
-        assert_eq!(
-            EPHEMERAL_REPLAY_BOUND * EPHEMERAL_REPLAY_ENTRY_BYTES,
-            EPHEMERAL_REPLAY_BUDGET_BYTES
-        );
-        assert_eq!(EPHEMERAL_REPLAY_BUDGET_BYTES, 2_621_440);
-        let router = RouterCore::new();
-        fill(&router, EPHEMERAL_REPLAY_BOUND, NOW_LIVE_MS)?;
-        let retained = router.ephemeral_replay_len() * EPHEMERAL_REPLAY_ENTRY_BYTES;
-        assert_eq!(retained, EPHEMERAL_REPLAY_BUDGET_BYTES);
-        assert!(retained <= EPHEMERAL_REPLAY_BUDGET_BYTES);
-        Ok(())
-    }
-
     fn row_expiry_frees_slot() -> TestResult {
         let router = RouterCore::new();
         fill(&router, EPHEMERAL_REPLAY_BOUND, NOW_LIVE_MS)?;
@@ -452,7 +437,6 @@ mod tests {
         row_next_refused_without_eviction()?;
         row_duplicate_replayed_from_valid();
         row_expiry_frees_slot()?;
-        row_retained_bytes_fit_budget()?;
         Ok(())
     }
 
