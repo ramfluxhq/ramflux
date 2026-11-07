@@ -42,6 +42,8 @@ pub(super) enum Failure {
     Preparation,
     Deadline,
     Application,
+    /// The gateway refused the envelope id as already used with different content.
+    SubmitConflict,
 }
 
 #[derive(Debug)]

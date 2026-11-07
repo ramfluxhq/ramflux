@@ -11,6 +11,59 @@ use super::task_courier_queue::{self as queue, JobRow};
 use crate::prelude::*;
 use serde_json::json;
 
+/// The per-item diagnostic both `charge` and `conflict_terminal` write, pruned to 128.
+fn diagnose(
+    db: &AccountDb,
+    item: &Item,
+    reason: Failure,
+    attempts: u32,
+    now: i64,
+) -> Result<(), SdkError> {
+    let id =
+        ramflux_protocol::hash_base64url("ramflux.task.courier.failure.v1", item.key.as_bytes());
+    db.persist_actor_state(
+        &format!("task/courier_failure/{id}"),
+        &json!({"id":item.key,"reason":reason,"attempts":attempts,"start":now}),
+    )?;
+    db.prune_task_diagnostics("task/courier_failure/", 128)?;
+    Ok(())
+}
+
+/// A gateway idempotency conflict on a sent envelope: the item takes its terminal transition
+/// at once and is never resubmitted. Ack, Forward and Approval Request rows go to the existing
+/// quarantine. An Approval Decision keeps its signed packet under the same key, made
+/// ineligible (`attempts = 8`, the existing exhaustion), and its receipt becomes
+/// `failed / submit_conflict`, so an explicit `grant.approve` can still re-enqueue it once.
+fn conflict_terminal(account: &LocalBusAccountState, item: &Item) -> Result<(), SdkError> {
+    use crate::client::task::approval::Payload;
+    use crate::client::task::approval_retention::{DeliveryReason, DeliveryState};
+    let Some((mut job, revision)) = queue::load(account, &item.key)? else {
+        return Ok(());
+    };
+    if revision != item.revision {
+        return Ok(());
+    }
+    match &mut job {
+        JobRow::Approval(job) if matches!(job.packet.payload, Payload::Decision { .. }) => {
+            let now = now_unix_timestamp();
+            let db = account.client.account_db()?;
+            db.write_transaction(|| {
+                job.attempts = 8;
+                db.persist_actor_state(&item.key, &**job)?;
+                account.client.record_task_approval_delivery(
+                    &job.packet,
+                    DeliveryState::Failed,
+                    Some(DeliveryReason::SubmitConflict),
+                )?;
+                diagnose(db, item, Failure::SubmitConflict, 8, now)
+            })?;
+            tracing::warn!(item_id = item.key, "task courier decision retired on conflict");
+            Ok(())
+        }
+        _ => queue::quarantine(account, &item.key, Failure::SubmitConflict),
+    }
+}
+
 fn charge(account: &LocalBusAccountState, item: &Item, reason: Failure) -> Result<(), SdkError> {
     let Some((mut job, revision)) = queue::load(account, &item.key)? else {
         return Ok(());
@@ -38,15 +91,7 @@ fn charge(account: &LocalBusAccountState, item: &Item, reason: Failure) -> Resul
                 db.persist_actor_state(&item.key, job)?;
             }
         }
-        let id = ramflux_protocol::hash_base64url(
-            "ramflux.task.courier.failure.v1",
-            item.key.as_bytes(),
-        );
-        db.persist_actor_state(
-            &format!("task/courier_failure/{id}"),
-            &json!({"id":item.key,"reason":reason,"attempts":attempts,"start":now}),
-        )?;
-        db.prune_task_diagnostics("task/courier_failure/", 128)?;
+        diagnose(db, item, reason, attempts, now)?;
         Ok::<_, SdkError>(())
     })?;
     tracing::warn!(item_id = item.key, "task courier item charged");

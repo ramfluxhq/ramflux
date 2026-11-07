@@ -3,13 +3,17 @@
 
 //! Bounded independent task sends after manifest preparation; every commit returns to the writer.
 
-use super::{Failure, Item, JobRow, Preparation, charge, manifest_request_keys, queue, stop_class};
+use super::{
+    Failure, Item, JobRow, Preparation, charge, conflict_terminal, manifest_request_keys, queue,
+    stop_class,
+};
 use crate::bus::dispatch::task_transport::prepared::Draft;
 use crate::bus::{
     connection_manager::{AccountWork, SessionContext},
     couriers::{federation, writer::Writer},
     dispatch::{task_approval, task_approval_transport, task_transport},
 };
+use crate::gateway::session_push::SubmitRefusal;
 use crate::prelude::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -116,9 +120,22 @@ async fn pass(
         }
     };
     let result = send(context, writer, plan).await;
+    if matches!(result, Ok(Sent::Conflict)) {
+        // A conflict is certain: the item takes its terminal transition, not a retry.
+        return writer
+            .apply(move |account| conflict_terminal(account, &failure_item))
+            .await
+            .map(|()| false);
+    }
     writer
-        .apply(move |account| super::apply_result(account, &failure_item, result.map(|()| true)))
+        .apply(move |account| super::apply_result(account, &failure_item, result.map(|_| true)))
         .await
+}
+/// How the sends of one plan ended, apart from errors.
+enum Sent {
+    Done,
+    /// The gateway refused an envelope id as a conflict; the rest of the plan is not sent.
+    Conflict,
 }
 fn valid(
     account: &LocalBusAccountState,
@@ -232,7 +249,7 @@ fn prepare(
     account.task_prepared_only = false;
     result
 }
-async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
+async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Result<Sent, SdkError> {
     let preparation_deadline = tokio::time::Instant::now() + context.network_wait();
     let material = async {
         let mut sealed = Vec::new();
@@ -270,13 +287,23 @@ async fn send(context: &SessionContext, writer: &Writer, mut plan: Plan) -> Resu
         .await
         .map_err(|_| SdkError::InboundPending("task courier preparation deferred".into()))??
     else {
-        return Ok(());
+        return Ok(Sent::Done);
     };
     let deadline = context.task_deadline(plan.approval);
     for (envelope, route) in sealed {
-        federation::submit_until(context, envelope, route, deadline, false).await?;
+        match federation::submit_classified_until(context, envelope, route, deadline, false).await?
+        {
+            Ok(()) => {}
+            Err(SubmitRefusal::Conflict) => return Ok(Sent::Conflict),
+            // Retry-safe and capacity refusals keep today's charged retry (its first backoff
+            // is 2 s, above the gateway's 1000 ms floor).
+            Err(refusal) => {
+                return Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()));
+            }
+        }
     }
-    writer.apply(move |account| complete(account, &plan)).await
+    writer.apply(move |account| complete(account, &plan)).await?;
+    Ok(Sent::Done)
 }
 fn complete(account: &LocalBusAccountState, plan: &Plan) -> Result<(), SdkError> {
     if !valid(account, &plan.item, &plan.conversation, &plan.routing)? {

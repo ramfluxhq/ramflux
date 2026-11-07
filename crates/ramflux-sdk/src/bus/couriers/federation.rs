@@ -114,7 +114,18 @@ pub(crate) async fn submit_until(
     deadline: tokio::time::Instant,
     priority: bool,
 ) -> Result<(), SdkError> {
-    unclassified(submit_inner(context, envelope, route, deadline, priority, !priority).await)
+    unclassified(submit_classified_until(context, envelope, route, deadline, priority).await)
+}
+
+/// Like [`submit_until`], with a certain gateway refusal in the inner `Err`.
+pub(crate) async fn submit_classified_until(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+    route: Option<LocalBusFederationRoute>,
+    deadline: tokio::time::Instant,
+    priority: bool,
+) -> Result<Result<(), SubmitRefusal>, SdkError> {
+    submit_inner(context, envelope, route, deadline, priority, !priority).await
 }
 
 #[cfg(test)]

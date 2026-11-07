@@ -168,8 +168,10 @@ locally derived.
 Decision rows in the approval list and `task.get.approval_decisions` expose
 `delivery_state` (`pending`, `submitted`, `applied`, `rejected`, `failed`) and
 an optional typed `reason_code` (`transport_unavailable`, `retry_exhausted`,
-`intervention_closed`, `invalid_decision`). After eight failed transport attempts,
-the row becomes `failed`, rather than remaining pending. Calling the same
+`intervention_closed`, `invalid_decision`, `submit_conflict`). After eight failed
+transport attempts, the row becomes `failed`, rather than remaining pending. A gateway
+idempotency conflict marks the row `failed` with `submit_conflict` immediately, with no
+automatic retries. Calling the same
 `grant.approve` or `grant.deny` again retries that signed decision unchanged;
 a conflicting choice is refused. Successful transport acknowledgement retires
 the outgoing full row. Decisions are sent before new requests; request admission

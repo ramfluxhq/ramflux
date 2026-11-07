@@ -27,6 +27,7 @@ pub(crate) enum DeliveryReason {
     TransportUnavailable,
     InterventionClosed,
     InvalidDecision,
+    SubmitConflict,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Receipt {

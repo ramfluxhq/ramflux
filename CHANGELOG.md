@@ -1,5 +1,9 @@
 # Changelog
 
+- Task courier rows and group-sync couriers stop on a gateway idempotency conflict instead of
+  resubmitting: task rows are retired with a `submit_conflict` record, and a conflicted
+  approval decision becomes `failed / submit_conflict` (calling `grant.approve` again re-enqueues
+  it once).
 - SDK content envelopes now default to seven days of offline retention, configurable
   per account through the SDK and local bus (3600–604800 seconds).
 

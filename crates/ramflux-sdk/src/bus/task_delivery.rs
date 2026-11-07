@@ -73,10 +73,20 @@ async fn submit(
             }
             Err(error) => Err(error),
         }
-    } else if let Ok(result) =
-        tokio::time::timeout_at(deadline, engine.submit_envelope(delivery.envelope.clone())).await
+    } else if let Ok(result) = tokio::time::timeout_at(
+        deadline,
+        engine.submit_envelope_classified(delivery.envelope.clone()),
+    )
+    .await
     {
-        result.map(|_| ())
+        // Interactive path with no durable job: every refusal, a conflict included, is
+        // returned to the caller, which takes its existing terminal branch
+        // (`failed / task_transport_error`). Nothing here resubmits.
+        match result {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(refusal)) => Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned())),
+            Err(error) => Err(error),
+        }
     } else {
         account.retire_session(&engine)?;
         return Err(SdkError::InboundPending("task delivery tick budget exhausted".into()));
