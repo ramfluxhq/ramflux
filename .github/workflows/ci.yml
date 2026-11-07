@@ -7,12 +7,18 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      mutants_base:
+        description: "Git base the advisory mutants run diffs against (mutants job only)"
+        required: true
+        default: "origin/main~20"
+        type: string
 
-# One group per ref: a newer push to a feature branch cancels the older run.
-# Main runs get a per-commit group so they are never cancelled or superseded.
+# One group per ref: a newer run on the same ref (feature branch or main) cancels the older one,
+# so superseded main runs stop queueing for runner slots. Only the newest main commit is verified.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'dispatch-' || '' }}${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -356,14 +362,14 @@ jobs:
   # it runs a nested cargo build, and nothing consumes the C ABI while mobile is frozen. It runs
   # again when mobile/ABI integration starts. The all-features clippy job still compiles c_abi.
   test-sdk:
-    name: Tests (sdk ${{ matrix.shard }}/6)
+    name: Tests (sdk ${{ matrix.shard }}/2)
     needs: build-sdk
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -406,7 +412,7 @@ jobs:
           name: archive-sdk
       - name: Run shard
         run: |
-          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/6
+          ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --profile ci -E 'not binary(c_abi_smoke)' --partition hash:${{ matrix.shard }}/2
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -489,8 +495,8 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
-  v-memory-vault:
-    name: "SDK variant: memory vault (custody + approve_once)"
+  v-sdk-a:
+    name: "SDK variant: memory vault and production absence"
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -529,85 +535,34 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v0-rust-${{ runner.environment }}
-          shared-key: v-memory-vault
+          shared-key: v-sdk-a
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
           tool: nextest@0.9.150
 
-      - name: Test
+      - name: Test (memory vault)
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
           RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
 
-      - name: Clean private test temp directory
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          case "${RF_TEST_TMPDIR:-}" in "${RF_CI_TMPBASE:-$RUNNER_TEMP}"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-
-      - name: Upload JUnit
+      - name: Keep JUnit (memory vault)
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: junit-v-memory-vault
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-
-
-  v-production:
-    name: "SDK variant: migration fixture absent from production"
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          missing=0
-          for tool in cc c++ make cmake pkg-config perl python3 git; do
-            if ! command -v "$tool" >/dev/null; then
-              echo "::error::missing build prerequisite: $tool"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then exit 1; fi
-          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
-          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-memory-vault.xml; fi
 
-      - name: Use tmpfs for /tmp
-        if: runner.environment == 'github-hosted'
-        # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
-        run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
-
-      - name: Create private test temp directory
-        if: runner.environment == 'self-hosted'
-        run: |
-          job_tmp="$(mktemp -d "${RF_CI_TMPBASE:-$RUNNER_TEMP}/rf-tests.XXXXXX")"
-          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-
-      - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          prefix-key: v0-rust-${{ runner.environment }}
-          shared-key: v-production
-
-      - name: Install nextest
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
-        with:
-          tool: nextest@0.9.150
-
-      - name: Test
+      - name: Test (production absence)
+        if: ${{ !cancelled() }}
         run: |
           RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
           RAMFLUX_PRODUCTION_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
 
+      - name: Keep JUnit (production absence)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-production-absence.xml; fi
+
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
         run: |
@@ -618,13 +573,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: junit-v-production
-          path: target/nextest/ci/junit.xml
+          name: junit-v-sdk-a
+          path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
-
-  v-legacy:
-    name: "SDK variant: legacy accounts fixture"
+  v-sdk-b:
+    name: "SDK variant: legacy accounts and gateway local-mint"
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -663,86 +617,36 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           prefix-key: v0-rust-${{ runner.environment }}
-          shared-key: v-legacy
+          shared-key: v-sdk-b
 
       - name: Install nextest
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
           tool: nextest@0.9.150
 
-      - name: Test
+      - name: Test (legacy accounts)
         run: |
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
           RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
 
-      - name: Clean private test temp directory
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          case "${RF_TEST_TMPDIR:-}" in "${RF_CI_TMPBASE:-$RUNNER_TEMP}"/rf-tests.*) rm -rf -- "$RF_TEST_TMPDIR" ;; esac
-          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-
-      - name: Upload JUnit
+      - name: Keep JUnit (legacy accounts)
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: junit-v-legacy
-          path: target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-
-
-  v-local-mint:
-    name: Gateway local-mint regression tests
-    runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain and check build prerequisites
         run: |
-          missing=0
-          for tool in cc c++ make cmake pkg-config perl python3 git; do
-            if ! command -v "$tool" >/dev/null; then
-              echo "::error::missing build prerequisite: $tool"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then exit 1; fi
-          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
-          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-legacy-accounts.xml; fi
 
-      - name: Use tmpfs for /tmp
-        if: runner.environment == 'github-hosted'
-        # SQLite-heavy tests are fsync bound on the runner disk; their scratch roots live in /tmp.
-        run: sudo mount -t tmpfs -o size=5g tmpfs /tmp
-
-      - name: Create private test temp directory
-        if: runner.environment == 'self-hosted'
-        run: |
-          job_tmp="$(mktemp -d "${RF_CI_TMPBASE:-$RUNNER_TEMP}/rf-tests.XXXXXX")"
-          echo "TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-          echo "RF_TEST_TMPDIR=$job_tmp" >> "$GITHUB_ENV"
-
-      - name: Cache
-        uses: Swatinem/rust-cache@baf1a810e98b6a3001d0d7234864ed75a17c42fb
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          prefix-key: v0-rust-${{ runner.environment }}
-          shared-key: v-local-mint
-
-      - name: Install nextest
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
-        with:
-          tool: nextest@0.9.150
-
-      - name: Test
+      - name: Test (gateway local-mint)
+        if: ${{ !cancelled() }}
         run: |
           cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
           ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
 
+      - name: Keep JUnit (gateway local-mint)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-local-mint.xml; fi
+
       - name: Build same-tree router for the session push real-router gate
+        if: ${{ !cancelled() }}
         run: |
           cargo build -p ramflux-router --bin ramflux-router
           router="$GITHUB_WORKSPACE/target/debug/ramflux-router"
@@ -750,8 +654,14 @@ jobs:
           echo "RAMFLUX_P17_ROUTER_BINARY=$router" >> "$GITHUB_ENV"
 
       - name: Session push real-router gate (explicit, ignored by default)
+        if: ${{ !cancelled() }}
         run: |
           ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
+
+      - name: Keep JUnit (real-router gate)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-local-mint-gate.xml; fi
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -763,14 +673,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: junit-v-local-mint
-          path: target/nextest/ci/junit.xml
+          name: junit-v-sdk-b
+          path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
 
   mutants:
     name: Mutants (advisory, diff only)
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 10
     continue-on-error: true
@@ -796,8 +706,14 @@ jobs:
 
       - name: Rust diff
         id: diff
+        env:
+          MUTANTS_BASE: ${{ inputs.mutants_base }}
         run: |
-          git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
+          if [ -z "$MUTANTS_BASE" ]; then echo "::error::mutants_base is empty"; exit 1; fi
+          if ! git rev-parse --verify --quiet "$MUTANTS_BASE^{commit}" >/dev/null; then
+            echo "::error::mutants_base is not a commit: $MUTANTS_BASE"; exit 1
+          fi
+          git diff "$MUTANTS_BASE...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
           if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; fi
 
       - name: Cache
