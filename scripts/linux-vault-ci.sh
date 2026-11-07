@@ -114,7 +114,7 @@ else
   chown "$fixture_user:$fixture_group" "$fixture/rest.tar.zst" "$fixture/cargo-nextest"
   archive="$fixture/rest.tar.zst"
   nextest="$fixture/cargo-nextest"
-  filter='binary(linux_vault_platform) & not test(linux_vault_systemd_credential_roundtrip_and_mode_refusal)'
+  filter='binary(linux_vault_platform) & not test(linux_vault_systemd_credential_roundtrip_and_mode_refusal) & not test(linux_vault_secret_service_has_no_headless_fallback)'
   "$nextest" nextest list --archive-file "$archive" --workspace-remap . \
     --extract-to . --extract-overwrite --message-format json > "$fixture/list.json"
   python3 - "$fixture/list.json" <<'PY'

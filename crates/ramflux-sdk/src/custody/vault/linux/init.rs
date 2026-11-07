@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Installation-wide, resumable, insert-only systemd initialization. Dormant SDK API.
+//! Installation-wide, resumable, insert-only credential initialization. Dormant SDK API.
 use super::{
     LinuxVaultMode,
     cleanup::Secret,
     durability::{DurabilityOps, RealDurabilityOps},
-    systemd,
+    secret_service, systemd,
 };
 use rustix::fs::{self, FlockOperation, Mode, OFlags, RenameFlags};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use tokio::{sync::watch, time::Instant};
 /// Static refusal codes never include paths, provider output or secrets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum LinuxVaultInitError {
-    /// Only explicit systemd modes are supported by this initializer.
+    /// An unsupported provider operation was requested.
     #[error("vault_mode")]
     Mode,
     /// Unsafe path, owner, permissions, link count or file type.
@@ -44,7 +44,7 @@ pub enum LinuxVaultInitError {
     /// Filesystem operation failed.
     #[error("vault_io")]
     Io,
-    /// systemd refused the requested operation or mode.
+    /// The selected provider refused the requested operation or mode.
     #[error("vault_provider")]
     Provider,
     /// Key or provider pipe exceeded its exact bounds.
@@ -125,7 +125,7 @@ impl Manifest {
         Ok(Self {
             version: 1,
             root: root.to_owned(),
-            mode: mode_name(mode)?.into(),
+            mode: mode_name(mode).into(),
             class: mode.strength_class().into(),
             vault_id: hex(&ids[..16]),
             key_ids: std::array::from_fn(|i| hex(&ids[16 + i * 16..32 + i * 16])),
@@ -138,7 +138,7 @@ impl Manifest {
         };
         if self.version != 1
             || self.root != root
-            || self.mode != mode_name(mode)?
+            || self.mode != mode_name(mode)
             || self.class != mode.strength_class()
             || self.names != systemd::NAMES.map(str::to_owned)
             || !id_ok(&self.vault_id)
@@ -155,11 +155,11 @@ impl Manifest {
         format!("{}.{}.cred", self.names[i], self.key_ids[i])
     }
 }
-fn mode_name(mode: LinuxVaultMode) -> Result<&'static str, Error> {
+fn mode_name(mode: LinuxVaultMode) -> &'static str {
     match mode {
-        LinuxVaultMode::SystemdHost => Ok("systemd-host"),
-        LinuxVaultMode::SystemdTpm2 => Ok("systemd-tpm2"),
-        LinuxVaultMode::DesktopSecretService => Err(Error::Mode),
+        LinuxVaultMode::SystemdHost => "systemd-host",
+        LinuxVaultMode::SystemdTpm2 => "systemd-tpm2",
+        LinuxVaultMode::DesktopSecretService => "desktop-secret-service",
     }
 }
 fn verify(fd: &OwnedFd, directory: bool) -> Result<(), Error> {
@@ -245,6 +245,16 @@ fn publish(
     ops: &dyn DurabilityOps,
     cut: &impl Fn(&str),
 ) -> Result<(), Error> {
+    publish_with(dir, name, bytes, RenameFlags::NOREPLACE, ops, cut)
+}
+fn publish_with(
+    dir: &OwnedFd,
+    name: &str,
+    bytes: &[u8],
+    flags: RenameFlags,
+    ops: &dyn DurabilityOps,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
     let temp = format!(".{name}.staging");
     // Only unpublished staging is removed, after caller established destination absence.
     remove(dir, &temp, ops)?;
@@ -254,11 +264,63 @@ fn publish(
     cut("before-file-sync");
     ops.fsync_file(&file)?;
     cut("after-file-sync");
-    ops.rename(dir, &temp, name, RenameFlags::NOREPLACE)?;
+    ops.rename(dir, &temp, name, flags)?;
     cut("after-publish");
     ops.fsync_dir(dir)?;
     cut("after-parent-sync");
     Ok(())
+}
+/// Secret Service leg of one attempt: item ensure plus the durable per-realm progress record.
+struct SecretServiceRun<'a> {
+    dir: &'a OwnedFd,
+    manifest: &'a Manifest,
+    committed: bool,
+    progress: [bool; 3],
+}
+impl SecretServiceRun<'_> {
+    fn step(
+        &mut self,
+        realm: usize,
+        plan: &Plan<'_>,
+        cancel: &watch::Receiver<bool>,
+        cut: &impl Fn(&str),
+    ) -> Result<(), Error> {
+        let identity = secret_service::Identity {
+            vault_id: &self.manifest.vault_id,
+            key_id: &self.manifest.key_ids[realm],
+            realm,
+        };
+        let fresh = !self.committed && !self.progress[realm];
+        // A realm already recorded complete never creates again: a vanished item refuses.
+        secret_service::ensure(&identity, fresh, cancel, plan.deadline, cut)?;
+        if fresh {
+            self.progress[realm] = true;
+            write_progress(self.dir, self.progress, plan.ops, cut)?;
+            cut("ss-progress");
+        }
+        Ok(())
+    }
+}
+const PROGRESS: &str = "init.progress";
+/// Per-realm completion record of the Secret Service leg: `ssp1:` plus one `0`/`1` per realm.
+/// Written (durable replace) only after an item was created or adopted and read back.
+fn read_progress(dir: &OwnedFd) -> Result<[bool; 3], Error> {
+    let Some(bytes) = optional(dir, PROGRESS, 16)? else { return Ok([false; 3]) };
+    let Some(flags) = bytes.strip_prefix(b"ssp1:") else { return Err(Error::Corrupt) };
+    if flags.len() != 3 || !flags.iter().all(|b| matches!(b, b'0' | b'1')) {
+        return Err(Error::Corrupt);
+    }
+    Ok(std::array::from_fn(|i| flags[i] == b'1'))
+}
+fn write_progress(
+    dir: &OwnedFd,
+    done: [bool; 3],
+    ops: &dyn DurabilityOps,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
+    let mut bytes = b"ssp1:".to_vec();
+    bytes.extend(done.iter().map(|d| if *d { b'1' } else { b'0' }));
+    publish_with(dir, PROGRESS, &bytes, RenameFlags::empty(), ops, cut)
 }
 /// Removes the init intent: unlink, then parent fsync. A missing intent still gets the parent
 /// fsync, which reconciles a process killed after the unlink but before that fsync.
@@ -361,7 +423,6 @@ impl LinuxVaultInstallation {
         Self::run(root, mode, false).await
     }
     async fn run(root: PathBuf, mode: LinuxVaultMode, initialize: bool) -> Result<(), Error> {
-        mode_name(mode)?;
         let slot = Slot::acquire()?;
         let (sender, mut cancel) = watch::channel(false);
         let _cancel = Cancel(sender);
@@ -376,7 +437,7 @@ impl LinuxVaultInstallation {
     }
 }
 
-async fn attempt(
+pub(super) async fn attempt(
     root: &Path,
     mode: LinuxVaultMode,
     initialize: bool,
@@ -401,7 +462,9 @@ async fn attempt_with(
     cut: &impl Fn(&str),
 ) -> Result<(), Error> {
     let Plan { root, mode, initialize, deadline, ops } = *plan;
-    systemd::probe(cancel, deadline).await?;
+    if mode != LinuxVaultMode::DesktopSecretService {
+        systemd::probe(cancel, deadline).await?;
+    }
     let dir = root_fd(root)?;
     let lock = open(
         &dir,
@@ -445,12 +508,26 @@ async fn attempt_with(
             (m, false)
         }
     };
+    let mut ss = SecretServiceRun {
+        dir: &dir,
+        manifest: &manifest,
+        committed,
+        progress: if mode == LinuxVaultMode::DesktopSecretService && !committed {
+            read_progress(&dir)?
+        } else {
+            [false; 3]
+        },
+    };
     for realm in 0..3 {
         if *cancel.borrow() {
             return Err(Error::Cancelled);
         }
         if Instant::now() >= deadline {
             return Err(Error::Timeout);
+        }
+        if mode == LinuxVaultMode::DesktopSecretService {
+            ss.step(realm, plan, cancel, cut)?;
+            continue;
         }
         let name = manifest.slot(realm);
         if let Some(blob) = optional(&dir, &name, systemd::CAP)? {
@@ -461,21 +538,7 @@ async fn attempt_with(
         if committed {
             return Err(Error::Corrupt);
         }
-        let mut key = Secret::<32>::new("p04-generated-key");
-        getrandom::fill(key.bytes_mut()).map_err(|_| Error::Random)?;
-        cut("generated");
-        let (blob, len) =
-            systemd::pipe::<{ systemd::CAP + 1 }>(mode, realm, true, key.bytes(), cancel, deadline)
-                .await?;
-        cut("encrypted");
-        let readback =
-            systemd::decrypt(mode, realm, &blob.bytes()[..len], cancel, deadline).await?;
-        if &readback.bytes()[..32] != key.bytes() {
-            return Err(Error::Corrupt);
-        }
-        cut("readback");
-        publish(&dir, &name, &blob.bytes()[..len], ops, cut)?;
-        cut("realm-durable");
+        create_systemd_key(&dir, &name, realm, plan, cancel, cut).await?;
     }
     if *cancel.borrow() {
         return Err(Error::Cancelled);
@@ -490,6 +553,9 @@ async fn attempt_with(
     }
     if initialize {
         cut("before-intent-remove");
+        // Realm progress is only meaningful before the descriptor commit.
+        remove(&dir, PROGRESS, ops)?;
+        remove(&dir, ".init.progress.staging", ops)?;
         retire_intent(&dir, ops, cut)?;
         cut("intent-removed");
     }
@@ -498,3 +564,29 @@ async fn attempt_with(
 
 #[cfg(test)]
 mod tests;
+
+async fn create_systemd_key(
+    dir: &OwnedFd,
+    name: &str,
+    realm: usize,
+    plan: &Plan<'_>,
+    cancel: &mut watch::Receiver<bool>,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
+    let (mode, deadline) = (plan.mode, plan.deadline);
+    let mut key = Secret::<32>::new("p04-generated-key");
+    getrandom::fill(key.bytes_mut()).map_err(|_| Error::Random)?;
+    cut("generated");
+    let (blob, len) =
+        systemd::pipe::<{ systemd::CAP + 1 }>(mode, realm, true, key.bytes(), cancel, deadline)
+            .await?;
+    cut("encrypted");
+    let readback = systemd::decrypt(mode, realm, &blob.bytes()[..len], cancel, deadline).await?;
+    if &readback.bytes()[..32] != key.bytes() {
+        return Err(Error::Corrupt);
+    }
+    cut("readback");
+    publish(dir, name, &blob.bytes()[..len], plan.ops, cut)?;
+    cut("realm-durable");
+    Ok(())
+}

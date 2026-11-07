@@ -13,7 +13,6 @@
     "cancelled owner"
   ],
   "later_owners": [
-    "P05 Secret Service",
     "P06 seed adapters",
     "P07 runtime and export",
     "P08 CLI",
@@ -47,6 +46,23 @@
         "systemd-creds process heap",
         "kernel pipes and credential delivery",
         "host credential key"
+      ]
+    },
+    {
+      "introduced_in": "P05",
+      "consumer": "explicit Secret Service KEK responses and readback",
+      "test": "linux_vault_owned_buffers_clear_on_all_exits",
+      "observer": "exact returned Vec allocation after zeroize before release",
+      "cases": [
+        "real create and existing readback",
+        "invalid response lengths 0 31 33",
+        "duplicate item refusal",
+        "expired deadline and cancellation"
+      ],
+      "residuals": [
+        "libdbus message and DH session allocations",
+        "gnome-keyring daemon heap and persistence",
+        "dependency decrypt intermediate copies"
       ]
     }
   ]
