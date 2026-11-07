@@ -15,6 +15,8 @@ use crate::{GatewayQuicRequest, GatewayQuicResponse, MeshTlsConfig, TransportErr
 
 const COMP_IO_MESH_FRAME_MAX_BYTES: usize = 1024 * 1024;
 const COMP_IO_MESH_POSTCARD_MAGIC: &[u8] = b"ramflux.mesh.postcard.v1\0";
+const MESH_I_JSON_REJECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const MESH_I_JSON_REJECTED_CODE: u32 = 0x4A53;
 
 pub struct CompioMeshQuicServer {
     endpoint: compio_quic::Endpoint,
@@ -132,13 +134,39 @@ impl CompioMeshQuicServer {
     pub async fn accept_request_on_connection(
         connection: &CompioMeshQuicConnection,
     ) -> Result<CompioMeshQuicAcceptedRequest, TransportError> {
+        loop {
+            match Self::accept_request_on_connection_once(connection, None).await {
+                Err(error) if ramflux_protocol::is_i_json_rejection(&error) => {}
+                result => return result,
+            }
+        }
+    }
+
+    async fn accept_request_on_connection_once(
+        connection: &CompioMeshQuicConnection,
+        reject_deadline: Option<std::time::Instant>,
+    ) -> Result<CompioMeshQuicAcceptedRequest, TransportError> {
         let (send, mut recv) = connection
             .connection
             .accept_bi()
             .await
             .map_err(|error| TransportError::Quic(error.to_string()))?;
         tracing::trace!("compio mesh accepted bidirectional stream; reading request frame");
-        let request: GatewayQuicRequest = compio_read_json_frame(&mut recv).await?;
+        let request: GatewayQuicRequest = match compio_read_json_frame(&mut recv).await {
+            Ok(request) => request,
+            Err(error) => {
+                if ramflux_protocol::is_i_json_rejection(&error) {
+                    reject_i_json(
+                        send,
+                        recv,
+                        reject_deadline.unwrap_or_else(|| {
+                            std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
+                        }),
+                    );
+                }
+                return Err(error);
+            }
+        };
         tracing::trace!(
             method = %request.method,
             path = %request.path,
@@ -157,6 +185,18 @@ impl CompioMeshQuicServer {
     /// Returns an error when stream accept or request decoding fails.
     pub async fn accept_json_or_postcard_request_on_connection(
         connection: &CompioMeshQuicConnection,
+    ) -> Result<CompioMeshQuicAcceptedWireRequest, TransportError> {
+        loop {
+            match Self::accept_json_or_postcard_request_on_connection_once(connection, None).await {
+                Err(error) if ramflux_protocol::is_i_json_rejection(&error) => {}
+                result => return result,
+            }
+        }
+    }
+
+    async fn accept_json_or_postcard_request_on_connection_once(
+        connection: &CompioMeshQuicConnection,
+        reject_deadline: Option<std::time::Instant>,
     ) -> Result<CompioMeshQuicAcceptedWireRequest, TransportError> {
         let (send, mut recv) = connection
             .connection
@@ -183,14 +223,46 @@ impl CompioMeshQuicServer {
                 },
             ));
         }
-        let request: GatewayQuicRequest = serde_json::from_slice(&frame)?;
+        let request: GatewayQuicRequest = match ramflux_protocol::parse_i_json(&frame) {
+            Ok(request) => request,
+            Err(error) => {
+                let error = TransportError::Protocol(error);
+                if ramflux_protocol::is_i_json_rejection(&error) {
+                    reject_i_json(
+                        send,
+                        recv,
+                        reject_deadline.unwrap_or_else(|| {
+                            std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
+                        }),
+                    );
+                }
+                return Err(error);
+            }
+        };
         tracing::trace!(
             method = %request.method,
             path = %request.path,
             "compio mesh JSON request frame decoded"
         );
         let raw_body = if request.path.starts_with(crate::mesh_quic::RAW_BODY_PATH_PREFIX) {
-            let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)?;
+            let raw = match ramflux_protocol::parse_i_json::<crate::mesh_quic_limited::RawBodyOnly>(
+                &frame,
+            ) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    let error = TransportError::Protocol(error);
+                    if ramflux_protocol::is_i_json_rejection(&error) {
+                        reject_i_json(
+                            send,
+                            recv,
+                            reject_deadline.unwrap_or_else(|| {
+                                std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
+                            }),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
             Some(raw.body.get().as_bytes().to_vec())
         } else {
             None
@@ -203,6 +275,52 @@ impl CompioMeshQuicServer {
             recv,
         }))
     }
+}
+
+fn reject_i_json(
+    mut send: compio_quic::SendStream,
+    mut recv: compio_quic::RecvStream,
+    deadline: std::time::Instant,
+) {
+    let code = compio_quic::VarInt::from_u32(MESH_I_JSON_REJECTED_CODE);
+    if let Err(error) = recv.stop(code) {
+        tracing::debug!(%error, "failed to stop compio I-JSON request stream");
+    }
+    compio::runtime::spawn(async move {
+        if std::time::Instant::now() >= deadline {
+            tracing::debug!("compio I-JSON rejection response deadline expired");
+            if let Err(error) = send.reset(code) {
+                tracing::debug!(%error, "failed to reset rejected compio I-JSON response stream");
+            }
+            return;
+        }
+        let response = GatewayQuicResponse {
+            status: 400,
+            body: ramflux_protocol::i_json_rejection_body(),
+        };
+        let write = async {
+            compio_write_json_message(&mut send, &response).await?;
+            compio_finish_send_stream(&mut send)
+        };
+        match compio::time::timeout(deadline.saturating_duration_since(std::time::Instant::now()), write)
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "failed to write compio I-JSON rejection response");
+                if let Err(reset_error) = send.reset(code) {
+                    tracing::debug!(%reset_error, "failed to reset rejected compio I-JSON response stream");
+                }
+            }
+            Err(_elapsed) => {
+                tracing::debug!("compio I-JSON rejection response deadline expired");
+                if let Err(error) = send.reset(code) {
+                    tracing::debug!(%error, "failed to reset rejected compio I-JSON response stream");
+                }
+            }
+        }
+    })
+    .detach();
 }
 
 impl CompioMeshQuicConnection {
@@ -404,7 +522,7 @@ async fn compio_read_json_frame<T: DeserializeOwned>(
     tracing::trace!(len, "compio mesh reading JSON frame body");
     let mut body = vec![0_u8; len];
     compio_read_exact(recv, &mut body).await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(ramflux_protocol::parse_i_json(&body)?)
 }
 
 async fn compio_write_raw_frame(
@@ -535,9 +653,15 @@ mod tests {
     use serde_json::json;
     use tracing_subscriber::EnvFilter;
 
-    use crate::{MeshQuicServer, MeshTlsConfig, mesh_quic_post_json_with_peer_ca_pems};
+    use crate::tls_config::mesh_quic_client_config_with_pem_roots;
+    use crate::{
+        GatewayQuicResponse, MeshQuicServer, MeshTlsConfig, mesh_quic_post_json_with_peer_ca_pems,
+    };
 
-    use super::{CompioMeshQuicServer, compio_mesh_quic_post_json_with_peer_ca_pems};
+    use super::{
+        CompioMeshQuicAcceptedWireRequest, CompioMeshQuicServer, MESH_I_JSON_REJECT_DEADLINE,
+        MESH_I_JSON_REJECTED_CODE, compio_mesh_quic_post_json_with_peer_ca_pems,
+    };
 
     #[test]
     fn compio_server_accepts_tokio_quinn_client_mesh_frame()
@@ -854,6 +978,254 @@ mod tests {
             .map_err(test_error)?;
         assert!(server_rejected);
         diag("bad-ca test done");
+        Ok(())
+    }
+
+    async fn serve_compio_ijson_rows(
+        connection: &super::CompioMeshQuicConnection,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+        acknowledgements: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Result<(), String> {
+        for (row, expired) in
+            [("plain", false), ("trailing-withheld-fin", false), ("expired-deadline", true)]
+        {
+            for wire_api in [false, true] {
+                let deadline = if expired {
+                    std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_millis(1))
+                        .ok_or_else(|| "clock error".to_owned())?
+                } else {
+                    std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE
+                };
+                let rejected = if wire_api {
+                    CompioMeshQuicServer::accept_json_or_postcard_request_on_connection_once(
+                        connection,
+                        Some(deadline),
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    CompioMeshQuicServer::accept_request_on_connection_once(
+                        connection,
+                        Some(deadline),
+                    )
+                    .await
+                    .map(|_| ())
+                };
+                if !rejected.is_err_and(|error| ramflux_protocol::is_i_json_rejection(&error)) {
+                    return Err(format!("{row}, wire_api={wire_api}: expected I-JSON refusal"));
+                }
+                let prefix = format!("{row}:{wire_api}");
+                event_tx.send(format!("{prefix}:rejected")).map_err(|e| e.to_string())?;
+                event_tx.send(format!("{prefix}:ready")).map_err(|e| e.to_string())?;
+                let accepted = if wire_api {
+                    match CompioMeshQuicServer::accept_json_or_postcard_request_on_connection_once(
+                        connection,
+                        Some(std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                    {
+                        CompioMeshQuicAcceptedWireRequest::Json(accepted) => accepted,
+                        CompioMeshQuicAcceptedWireRequest::Postcard(_) => {
+                            return Err("valid JSON request accepted as postcard".to_owned());
+                        }
+                    }
+                } else {
+                    CompioMeshQuicServer::accept_request_on_connection_once(
+                        connection,
+                        Some(std::time::Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                };
+                accepted
+                    .write_json_response(200, &json!({"ok": true}))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                event_tx.send(format!("{prefix}:served")).map_err(|e| e.to_string())?;
+                let acknowledgement = acknowledgements
+                    .recv()
+                    .await
+                    .ok_or_else(|| "client acknowledgement channel closed".to_owned())?;
+                if acknowledgement != format!("{prefix}:received") {
+                    return Err(format!("unexpected client acknowledgement: {acknowledgement}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_compio_ijson_server(
+        server_tls: MeshTlsConfig,
+        trusted_client_ca: String,
+        endpoint_tx: mpsc::Sender<Result<String, String>>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        mut acknowledgements: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Result<(), String> {
+        let roots = Arc::new(move || Ok(vec![trusted_client_ca.clone()]));
+        let server =
+            CompioMeshQuicServer::bind_with_pem_roots_provider("127.0.0.1:0", &server_tls, roots)
+                .await
+                .map_err(|e| e.to_string())?;
+        endpoint_tx
+            .send(server.local_addr().map(|addr| addr.to_string()).map_err(|e| e.to_string()))
+            .map_err(|e| e.to_string())?;
+        let connection = server.accept_connection().await.map_err(|e| e.to_string())?;
+        serve_compio_ijson_rows(&connection, &event_tx, &mut acknowledgements).await
+    }
+
+    fn compio_ijson_frame(
+        body: &[u8],
+        trailing: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let len = u32::try_from(body.len())?;
+        let mut frame = len.to_be_bytes().to_vec();
+        frame.extend_from_slice(body);
+        if trailing {
+            frame.extend_from_slice(b"trailing");
+        }
+        Ok(frame)
+    }
+
+    async fn receive_compio_ijson_event(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+        expected: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let received = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+            .await?
+            .ok_or_else(|| test_error("compio I-JSON event channel closed"))?;
+        assert_eq!(received, expected);
+        Ok(())
+    }
+
+    async fn exercise_compio_ijson_client(
+        endpoint: String,
+        client_tls: MeshTlsConfig,
+        server_ca_pem: String,
+        mut events: tokio::sync::mpsc::UnboundedReceiver<String>,
+        acknowledgements: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+        client_endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(
+            &client_tls,
+            &[server_ca_pem],
+        )?);
+        let connection = client_endpoint.connect(endpoint.parse()?, "ramflux-federation")?.await?;
+        for (row, trailing, expired) in [
+            ("plain", false, false),
+            ("trailing-withheld-fin", true, false),
+            ("expired-deadline", false, true),
+        ] {
+            for wire_api in [false, true] {
+                let prefix = format!("{row}:{wire_api}");
+                let invalid = compio_ijson_frame(
+                    br#"{"method":"POST","path":"/p","body":{"x_probe":null,"x_probe":null}}"#,
+                    trailing,
+                )?;
+                let (mut send, mut recv) = connection.open_bi().await?;
+                send.write_all(&invalid).await?;
+                if !trailing {
+                    send.finish()?;
+                }
+                receive_compio_ijson_event(&mut events, &format!("{prefix}:rejected")).await?;
+                if expired {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        recv.read_chunk(4, true),
+                    )
+                    .await
+                    .map_err(|_| {
+                        test_error(format!("expired rejection row {row}:{wire_api} did not reset"))
+                    })?;
+                    assert!(
+                        matches!(result, Err(quinn::ReadError::Reset(code)) if code.into_inner() == u64::from(MESH_I_JSON_REJECTED_CODE)),
+                        "expired deadline must reset the response stream with code 0x4A53"
+                    );
+                } else {
+                    let response = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        crate::read_quic_json_frame::<GatewayQuicResponse>(&mut recv),
+                    )
+                    .await??;
+                    assert_eq!(response.status, 400);
+                    assert_eq!(response.body, ramflux_protocol::i_json_rejection_body());
+                }
+                receive_compio_ijson_event(&mut events, &format!("{prefix}:ready")).await?;
+                let valid = serde_json::to_vec(&json!({"method":"GET", "path":"/p", "body":null}))?;
+                let frame = compio_ijson_frame(&valid, false)?;
+                let (mut send, mut recv) = connection.open_bi().await?;
+                send.write_all(&frame).await?;
+                send.finish()?;
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    crate::read_quic_json_frame::<GatewayQuicResponse>(&mut recv),
+                )
+                .await??;
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, json!({"ok": true}));
+                receive_compio_ijson_event(&mut events, &format!("{prefix}:served")).await?;
+                acknowledgements
+                    .send(format!("{prefix}:received"))
+                    .map_err(|_| test_error("compio I-JSON acknowledgement channel closed"))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_frame_ijson_rejected_on_stream() -> Result<(), Box<dyn std::error::Error>> {
+        init_test_tracing();
+        let root = temp_cert_root("mesh_frame_ijson_rejected_on_stream")?;
+        let client = issue_test_ca_and_service_cert(&root, "ijson-client")?;
+        let server_peer = issue_test_ca_and_service_cert(&root, "ijson-server")?;
+        let client_tls = client.tls.clone();
+        let server_tls = server_peer.tls.clone();
+        let trusted_client_ca = client.ca_pem.clone();
+        let server_ca_pem = server_peer.ca_pem.clone();
+        let (endpoint_tx, endpoint_rx) = mpsc::channel::<Result<String, String>>();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (acknowledgement_tx, acknowledgement_rx) =
+            tokio::sync::mpsc::unbounded_channel::<String>();
+        let server_thread = thread::spawn(move || -> Result<(), String> {
+            let error_tx = endpoint_tx.clone();
+            let runtime = match compio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = error_tx.send(Err(message.clone()));
+                    return Err(message);
+                }
+            };
+            let result = runtime.block_on(run_compio_ijson_server(
+                server_tls,
+                trusted_client_ca,
+                endpoint_tx,
+                event_tx,
+                acknowledgement_rx,
+            ));
+            if let Err(error) = &result {
+                let _ = error_tx.send(Err(error.clone()));
+            }
+            result
+        });
+        let endpoint = endpoint_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|error| test_error(error.to_string()))?
+            .map_err(test_error)?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        runtime.block_on(exercise_compio_ijson_client(
+            endpoint,
+            client_tls,
+            server_ca_pem,
+            event_rx,
+            acknowledgement_tx,
+        ))?;
+        server_thread
+            .join()
+            .map_err(|_| test_error("compio I-JSON server thread panicked"))?
+            .map_err(test_error)?;
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

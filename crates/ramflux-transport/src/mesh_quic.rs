@@ -42,6 +42,8 @@ const MESH_QUIC_CONNECT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(3);
 const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT: Duration = Duration::from_secs(5);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MESH_QUIC_CACHED_CONNECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const MESH_I_JSON_REJECT_DEADLINE: Duration = Duration::from_secs(2);
+const MESH_I_JSON_REJECTED_CODE: u32 = 0x4A53;
 // Backstop poll interval for the pool-acquire wait: even if a wakeup is ever missed,
 // re-check pool state at least this often instead of blocking forever.
 const MESH_QUIC_ACQUIRE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -591,6 +593,13 @@ impl MeshQuicServer {
     pub async fn read_wire_request_from_bi(
         stream: MeshQuicAcceptedBiStream,
     ) -> Result<MeshQuicAcceptedWireRequest, TransportError> {
+        Self::read_wire_request_from_bi_with_deadline(stream, None).await
+    }
+
+    async fn read_wire_request_from_bi_with_deadline(
+        stream: MeshQuicAcceptedBiStream,
+        reject_deadline: Option<Instant>,
+    ) -> Result<MeshQuicAcceptedWireRequest, TransportError> {
         let MeshQuicAcceptedBiStream { send, mut recv, remote_address } = stream;
         let request_read_started = std::time::Instant::now();
         let frame = read_quic_raw_frame(&mut recv).await.map_err(|error| {
@@ -608,9 +617,39 @@ impl MeshQuicServer {
                 recv,
             }));
         }
-        let request = serde_json::from_slice::<GatewayQuicRequest>(&frame)?;
+        let request = match ramflux_protocol::parse_i_json::<GatewayQuicRequest>(&frame) {
+            Ok(request) => request,
+            Err(error) => {
+                let error = TransportError::Protocol(error);
+                if ramflux_protocol::is_i_json_rejection(&error) {
+                    reject_i_json(
+                        send,
+                        recv,
+                        reject_deadline
+                            .unwrap_or_else(|| Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                    );
+                }
+                return Err(error);
+            }
+        };
         let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX) {
-            let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)?;
+            let raw = match ramflux_protocol::parse_i_json::<crate::mesh_quic_limited::RawBodyOnly>(
+                &frame,
+            ) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    let error = TransportError::Protocol(error);
+                    if ramflux_protocol::is_i_json_rejection(&error) {
+                        reject_i_json(
+                            send,
+                            recv,
+                            reject_deadline
+                                .unwrap_or_else(|| Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
             Some(raw.body.get().as_bytes().to_vec())
         } else {
             None
@@ -628,8 +667,13 @@ impl MeshQuicServer {
     pub async fn accept_json_or_postcard_request_on_connection(
         connection: &MeshQuicConnection,
     ) -> Result<MeshQuicAcceptedWireRequest, TransportError> {
-        let stream = Self::accept_bi_on_connection(connection).await?;
-        Self::read_wire_request_from_bi(stream).await
+        loop {
+            let stream = Self::accept_bi_on_connection(connection).await?;
+            match Self::read_wire_request_from_bi(stream).await {
+                Err(error) if ramflux_protocol::is_i_json_rejection(&error) => {}
+                result => return result,
+            }
+        }
     }
 
     /// # Errors
@@ -643,6 +687,18 @@ impl MeshQuicServer {
     /// Returns an error when stream accept or request decoding fails.
     pub async fn accept_request_on_connection(
         connection: &MeshQuicConnection,
+    ) -> Result<MeshQuicAcceptedRequest, TransportError> {
+        loop {
+            match Self::accept_request_on_connection_once(connection, None).await {
+                Err(error) if ramflux_protocol::is_i_json_rejection(&error) => {}
+                result => return result,
+            }
+        }
+    }
+
+    async fn accept_request_on_connection_once(
+        connection: &MeshQuicConnection,
+        reject_deadline: Option<Instant>,
     ) -> Result<MeshQuicAcceptedRequest, TransportError> {
         let remote_address = connection.remote_address();
         let stream_accept_started = std::time::Instant::now();
@@ -658,13 +714,62 @@ impl MeshQuicServer {
             })?;
         record_mesh_server_quic_stream_accepted(stream_accept_started.elapsed());
         let request_read_started = std::time::Instant::now();
-        let request = read_quic_json_frame(&mut recv).await.map_err(|error| {
-            tracing::error!(%remote_address, %error, "mesh QUIC request frame decode failed");
-            error
-        })?;
+        let request = match read_quic_json_frame(&mut recv).await {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::error!(%remote_address, %error, "mesh QUIC request frame decode failed");
+                if ramflux_protocol::is_i_json_rejection(&error) {
+                    reject_i_json(
+                        send,
+                        recv,
+                        reject_deadline
+                            .unwrap_or_else(|| Instant::now() + MESH_I_JSON_REJECT_DEADLINE),
+                    );
+                }
+                return Err(error);
+            }
+        };
         record_mesh_server_quic_request_read(request_read_started.elapsed());
         Ok(MeshQuicAcceptedRequest { request, raw_body: None, send, recv })
     }
+}
+
+fn reject_i_json(mut send: quinn::SendStream, mut recv: quinn::RecvStream, deadline: Instant) {
+    let code = quinn::VarInt::from_u32(MESH_I_JSON_REJECTED_CODE);
+    if let Err(error) = recv.stop(code) {
+        tracing::debug!(%error, "failed to stop I-JSON request stream");
+    }
+    tokio::spawn(async move {
+        if Instant::now() >= deadline {
+            tracing::debug!("I-JSON rejection response deadline expired");
+            if let Err(error) = send.reset(code) {
+                tracing::debug!(%error, "failed to reset rejected I-JSON response stream");
+            }
+            return;
+        }
+        let response =
+            GatewayQuicResponse { status: 400, body: ramflux_protocol::i_json_rejection_body() };
+        let write = async {
+            write_quic_json_message(&mut send, &response).await?;
+            send.finish().map_err(|error| TransportError::Quic(error.to_string()))
+        };
+        match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), write).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "failed to write I-JSON rejection response");
+                if let Err(reset_error) = send.reset(code) {
+                    tracing::debug!(%reset_error, "failed to reset rejected I-JSON response stream");
+                }
+            }
+            Err(_elapsed) => {
+                tracing::debug!("I-JSON rejection response deadline expired");
+                if let Err(error) = send.reset(code) {
+                    tracing::debug!(%error, "failed to reset rejected I-JSON response stream");
+                }
+            }
+        }
+    });
 }
 
 impl MeshQuicConnection {
@@ -2321,6 +2426,49 @@ mod tests {
         Ok(LimitedRig { server, client_tls: client.tls, ca_pem, endpoint, addr })
     }
 
+    fn mesh_ijson_rig(name: &str) -> Result<LimitedRig, Box<dyn std::error::Error>> {
+        let root = temp_cert_root(name)?;
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, rcgen::KeyPair::generate()?)?;
+        let ca_pem = ca.pem();
+        let ca_path = root.join("ca.pem");
+        std::fs::write(&ca_path, &ca_pem)?;
+        let make_peer = |name: &str, dns_name: &str, uri: &str| {
+            let key = rcgen::KeyPair::generate()?;
+            let mut params = rcgen::CertificateParams::new(vec![dns_name.to_owned()])?;
+            params.subject_alt_names.push(rcgen::SanType::URI(uri.try_into()?));
+            params.extended_key_usages = vec![
+                rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+                rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            let cert = params.signed_by(&key, &ca)?;
+            let cert_path = root.join(format!("{name}.pem"));
+            let key_path = root.join(format!("{name}.key"));
+            std::fs::write(&cert_path, cert.pem())?;
+            std::fs::write(&key_path, key.serialize_pem())?;
+            Ok::<_, Box<dyn std::error::Error>>(MeshTlsConfig {
+                ca_cert: ca_path.clone(),
+                service_cert: cert_path,
+                service_key: key_path,
+            })
+        };
+        let server_tls = make_peer("server", "ramflux-relay", "spiffe://node/ramflux-relay")?;
+        let client_tls = make_peer("client", "ramflux-router", "spiffe://node/ramflux-router")?;
+        let trusted_ca = ca_pem.clone();
+        let roots = Arc::new(move || Ok(vec![trusted_ca.clone()]));
+        let server =
+            MeshQuicServer::bind_with_pem_roots_provider("127.0.0.1:0", &server_tls, roots)?;
+        let addr = server.local_addr()?;
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+        endpoint.set_default_client_config(mesh_quic_client_config_with_pem_roots(
+            &client_tls,
+            std::slice::from_ref(&ca_pem),
+        )?);
+        Ok(LimitedRig { server, client_tls, ca_pem, endpoint, addr })
+    }
+
     fn frame_of(body: &str) -> Vec<u8> {
         let json = format!(r#"{{"method":"POST","path":"/p","body":{body}}}"#);
         let mut out = u32::try_from(json.len()).unwrap_or(0).to_be_bytes().to_vec();
@@ -2335,6 +2483,169 @@ mod tests {
     ) -> Result<MeshQuicLimitedIngress, TransportError> {
         let connection = rig.server.accept_connection().await?;
         MeshQuicServer::accept_limited_request(&connection, max, Instant::now() + budget).await
+    }
+
+    fn json_quic_frame(json: &[u8], trailing: bool) -> Vec<u8> {
+        let mut frame = u32::try_from(json.len()).unwrap_or(0).to_be_bytes().to_vec();
+        frame.extend_from_slice(json);
+        if trailing {
+            frame.extend_from_slice(b"trailing");
+        }
+        frame
+    }
+
+    fn duplicate_body_request_frame(trailing: bool) -> Vec<u8> {
+        json_quic_frame(
+            br#"{"method":"POST","path":"/p","body":{"x_probe":null,"x_probe":null}}"#,
+            trailing,
+        )
+    }
+
+    fn valid_request_frame() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(json_quic_frame(
+            &serde_json::to_vec(&GatewayQuicRequest {
+                method: "GET".to_owned(),
+                path: "/p".to_owned(),
+                body: serde_json::Value::Null,
+            })?,
+            false,
+        ))
+    }
+
+    async fn assert_i_json_rejection_response(
+        recv: &mut quinn::RecvStream,
+        reset_expected: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if reset_expected {
+            let result =
+                tokio::time::timeout(Duration::from_secs(5), recv.read_chunk(4, true)).await?;
+            match result {
+                Err(quinn::ReadError::Reset(code))
+                    if code.into_inner() == u64::from(super::MESH_I_JSON_REJECTED_CODE) => {}
+                other => {
+                    return Err(test_error(format!(
+                        "expired I-JSON rejection deadline must reset stream with code 0x4A53, got {other:?}"
+                    )));
+                }
+            }
+            return Ok(());
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::read_quic_json_frame::<GatewayQuicResponse>(recv),
+        )
+        .await??;
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.body,
+            ramflux_protocol::i_json_rejection_body(),
+            "I-JSON rejection body must be exact"
+        );
+        Ok(())
+    }
+
+    async fn assert_second_stream_served(
+        server_connection: &super::MeshQuicConnection,
+        client_connection: &quinn::Connection,
+        wire_api: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut send, mut recv) = client_connection.open_bi().await?;
+        send.write_all(&valid_request_frame()?).await?;
+        send.finish()?;
+        if wire_api {
+            let accepted =
+                MeshQuicServer::accept_json_or_postcard_request_on_connection(server_connection)
+                    .await?;
+            let MeshQuicAcceptedWireRequest::Json(accepted) = accepted else {
+                return Err(test_error("valid JSON request was not accepted as JSON"));
+            };
+            accepted.write_json_response(200, &serde_json::json!({"ok": true})).await?;
+        } else {
+            let accepted = MeshQuicServer::accept_request_on_connection(server_connection).await?;
+            accepted.write_json_response(200, &serde_json::json!({"ok": true})).await?;
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            super::read_quic_json_frame::<GatewayQuicResponse>(&mut recv),
+        )
+        .await??;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, serde_json::json!({"ok": true}));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mesh_frame_ijson_rejected_on_stream() -> Result<(), Box<dyn std::error::Error>> {
+        for (row, trailing, expired) in [
+            ("plain", false, false),
+            ("trailing-withheld-fin", true, false),
+            ("expired-deadline", false, true),
+        ] {
+            let rig = mesh_ijson_rig(&format!("mesh_ijson_{row}"))?;
+            let (server_connection_result, client_result) =
+                tokio::join!(rig.server.accept_connection(), async {
+                    let connection = rig.endpoint.connect(rig.addr, "ramflux-relay")?.await?;
+                    let (mut send, recv) = connection.open_bi().await?;
+                    send.write_all(&duplicate_body_request_frame(trailing)).await?;
+                    if !trailing {
+                        send.finish()?;
+                    }
+                    Ok::<_, Box<dyn std::error::Error>>((connection, send, recv))
+                });
+            let server_connection = server_connection_result?;
+            let (client_connection, _first_send, mut first_recv) = client_result?;
+
+            for wire_api in [false, true] {
+                let rejected = if wire_api {
+                    let stream =
+                        MeshQuicServer::accept_bi_on_connection(&server_connection).await?;
+                    let deadline = if expired {
+                        Instant::now()
+                            .checked_sub(Duration::from_millis(1))
+                            .ok_or_else(|| test_error("clock"))?
+                    } else {
+                        Instant::now() + Duration::from_secs(2)
+                    };
+                    MeshQuicServer::read_wire_request_from_bi_with_deadline(stream, Some(deadline))
+                        .await
+                        .map(|_| ())
+                } else {
+                    let deadline = if expired {
+                        Instant::now()
+                            .checked_sub(Duration::from_millis(1))
+                            .ok_or_else(|| test_error("clock"))?
+                    } else {
+                        Instant::now() + Duration::from_secs(2)
+                    };
+                    MeshQuicServer::accept_request_on_connection_once(
+                        &server_connection,
+                        Some(deadline),
+                    )
+                    .await
+                    .map(|_| ())
+                };
+                assert!(
+                    rejected
+                        .as_ref()
+                        .is_err_and(|error| ramflux_protocol::is_i_json_rejection(error)),
+                    "{row}, wire_api={wire_api}: expected I-JSON refusal, got {rejected:?}"
+                );
+                assert_i_json_rejection_response(&mut first_recv, expired).await?;
+                assert_second_stream_served(&server_connection, &client_connection, wire_api)
+                    .await?;
+                if wire_api {
+                    break;
+                }
+                // Reopen a receive half for the wire API's independent rejection row.
+                let (mut send, recv) = client_connection.open_bi().await?;
+                send.write_all(&duplicate_body_request_frame(trailing)).await?;
+                if !trailing {
+                    send.finish()?;
+                }
+                first_recv = recv;
+            }
+        }
+        Ok(())
     }
 
     async fn dial(

@@ -27,6 +27,7 @@ compio-mesh = [
     "dep:compio-net",
     "dep:compio-quic",
     "dep:compio-tls",
+    "compio/time",
 ]
 
 [target.'cfg(target_os = "linux")'.dependencies]
