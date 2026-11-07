@@ -356,7 +356,7 @@ async fn sender_outcome_call_deadline_after_the_write_is_uncertain() -> Case {
                 error.to_string(),
                 "transport error: I/O error: session call deadline expired"
             ),
-            Ok(inner) => panic!("expected an outer error, got {inner:?}"),
+            Ok(inner) => return Err(format!("expected an outer error, got {inner:?}").into()),
         }
         handle.stop().await;
         Ok(())
