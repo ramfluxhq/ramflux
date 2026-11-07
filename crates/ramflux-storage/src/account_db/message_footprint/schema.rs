@@ -150,7 +150,7 @@ fn remove_outbox_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
 
 pub(super) const ACTOR_PREFIX_GUARD: &str = "NEW.state_kind NOT GLOB 'routed/seen/*' AND (NEW.state_kind GLOB 'routed/*' OR NEW.state_kind GLOB 'directory/message/*' OR NEW.state_kind GLOB 'directory/object/*' OR NEW.state_kind GLOB 'message/origin/*' OR NEW.state_kind GLOB 'delivery-receipt/*' OR NEW.state_kind GLOB 'attachment/*' OR NEW.state_kind GLOB 'sync/attachment/*' OR NEW.state_kind GLOB 'surface/origin/*' OR NEW.state_kind GLOB 'surface/message/*' OR NEW.state_kind GLOB 'surface/pending/*' OR NEW.state_kind GLOB 'surface/history/*' OR NEW.state_kind GLOB 'directory/surface_error/*' OR NEW.state_kind GLOB 'task/message/*' OR NEW.state_kind GLOB 'group-message/alias/*' OR NEW.state_kind GLOB 'own-copy/*' OR NEW.state_kind GLOB 'own-device/*' OR NEW.state_kind GLOB 'inbox/*' OR NEW.state_kind GLOB 'backup/staging/*' OR NEW.state_kind GLOB 'legacy/replay/*')";
 /// SQL twin of `value_holds_envelope`: six typed fields at `$`, `$.envelope` or `$.entry.envelope`.
-fn envelope_sql(column: &str) -> String {
+pub(super) fn envelope_sql(column: &str) -> String {
     let body = format!("CAST(NEW.{column} AS TEXT)");
     let paths = ["$", "$.envelope", "$.entry.envelope"].map(|path| {
         let at = |field: &str| {
