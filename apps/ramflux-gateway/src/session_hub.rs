@@ -412,6 +412,44 @@ impl GatewaySessionHub {
         };
         entry.queue.try_push_transient(bytes, expires_at_ms)
     }
+    /// C4: recheck the live hub entry at final enqueue.
+    ///
+    /// The registration at `registration_target` must exist with an open token and
+    /// `ephemeral == true`, and that key must equal `forward_target`, which must
+    /// equal `envelope_target`. Capability replacement is refused here, not at C1.
+    pub(crate) async fn try_enqueue_ephemeral(
+        &self,
+        registration_target: &str,
+        forward_target: &str,
+        envelope_target: &str,
+        bytes: Vec<u8>,
+        expires_at_ms: u64,
+    ) -> crate::ephemeral_forward::EphemeralEnqueueOutcome {
+        use crate::ephemeral_forward::EphemeralEnqueueOutcome as Outcome;
+        let Some(entry) = self.snapshot().await.get(registration_target).cloned() else {
+            return crate::ephemeral_forward::finish_without_wake(Outcome::Offline);
+        };
+        if entry.queue.is_closed() {
+            return crate::ephemeral_forward::finish_without_wake(Outcome::Offline);
+        }
+        if !entry.ephemeral {
+            return crate::ephemeral_forward::finish_without_wake(Outcome::RecipientUnsupported);
+        }
+        if registration_target != forward_target || forward_target != envelope_target {
+            return crate::ephemeral_forward::finish_without_wake(Outcome::RecipientUnsupported);
+        }
+        let admission = entry.queue.try_push_ephemeral(bytes, expires_at_ms);
+        let outcome = match admission {
+            crate::push_queue::Admission::Queued => Outcome::Queued,
+            crate::push_queue::Admission::Overflowed => Outcome::QueueFull,
+            crate::push_queue::Admission::Closed => Outcome::Offline,
+        };
+        crate::ephemeral_forward::finish_without_wake(outcome)
+    }
+    #[cfg(test)]
+    pub(crate) async fn ephemeral_queued(&self, target: &str) -> usize {
+        self.snapshot().await.get(target).map_or(0, |entry| entry.queue.ephemeral_len())
+    }
 }
 
 impl Drop for GatewaySessionHub {

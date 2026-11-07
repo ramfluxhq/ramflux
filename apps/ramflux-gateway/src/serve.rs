@@ -524,7 +524,15 @@ async fn handle_gateway_forward_request(
     request: &ramflux_transport::GatewayQuicRequest,
     context: &GatewayListenerContext,
 ) -> anyhow::Result<GatewayForwardDeliverResponse> {
-    if request.method != "POST" || request.path != GatewayPeerDirectory::forward_path() {
+    if request.method != "POST" {
+        return Err(anyhow::anyhow!("not found"));
+    }
+    if request.path == crate::ephemeral_forward::PATH {
+        let forward: crate::ephemeral_forward::GatewayForwardEphemeralRequest =
+            serde_json::from_value(request.body.clone())?;
+        return crate::ephemeral_forward::handle(&context.hub, forward).await;
+    }
+    if request.path != GatewayPeerDirectory::forward_path() {
         return Err(anyhow::anyhow!("not found"));
     }
     let forward: GatewayForwardDeliverRequest = serde_json::from_value(request.body.clone())?;

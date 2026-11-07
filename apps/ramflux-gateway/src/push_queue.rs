@@ -282,6 +282,21 @@ impl PushQueue {
         self.inner.wake.notify_one();
         TransientAdmission::Queued
     }
+    /// Enqueue an ephemeral frame on the registration-owned transient deque. It shares the
+    /// transient occupancy caps and the per-frame deadline with `try_push_transient`, so the
+    /// occupancy counters stay exact. Transients never touch durable occupancy, the Resync
+    /// slot, or coverage.
+    pub(crate) fn try_push_ephemeral(&self, bytes: Vec<u8>, expires_at_ms: u64) -> Admission {
+        match self.try_push_transient(bytes, expires_at_ms) {
+            TransientAdmission::Queued => Admission::Queued,
+            TransientAdmission::QueueFull => Admission::Overflowed,
+            TransientAdmission::Closed => Admission::Closed,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn ephemeral_len(&self) -> usize {
+        self.inner.state.lock().map_or(0, |state| state.transient.len())
+    }
     fn overflow(&self, seq: u64) -> Admission {
         self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);
         self.inner.slot.fetch_min(seq.saturating_sub(1), Ordering::AcqRel);
