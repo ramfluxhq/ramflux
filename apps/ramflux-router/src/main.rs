@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+mod attachment_renew_home;
 mod attachment_source;
 mod custody_listener;
 #[cfg(test)]

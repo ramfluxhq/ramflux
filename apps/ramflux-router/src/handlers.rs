@@ -410,6 +410,20 @@ fn handle_mesh_request_inner(
         return Ok(MeshResponse::text("403 Forbidden", "own-device fanout requires gateway peer"));
     }
 
+    if method == "POST"
+        && (path == crate::attachment_renew_home::CHALLENGE_PATH
+            || path == crate::attachment_renew_home::FORWARD_PATH)
+    {
+        // Dormant: no backend is configured until the P20/S10a activation card.
+        let reply = crate::attachment_renew_home::route(
+            peer_service_id,
+            &path,
+            &body,
+            None,
+            std::time::Instant::now() + crate::attachment_renew_home::ROUTE_BUDGET,
+        );
+        return Ok(MeshResponse::json(reply.status, reply.body));
+    }
     if method == "POST" && path == crate::attachment_source::SOURCE_PATH {
         // Dormant: no backend is configured until the P20/S10a activation card.
         let reply = crate::attachment_source::route(
