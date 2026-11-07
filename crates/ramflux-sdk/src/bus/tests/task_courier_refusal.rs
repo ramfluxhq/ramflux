@@ -71,7 +71,11 @@ async fn drive(
         if let Some(done) = done {
             let mut waited = 0;
             while !done(&reader)? {
-                assert!(waited < 300, "{what}: the courier never reached the expected state");
+                if waited >= 300 {
+                    let rows =
+                        reader.task_record_page::<serde_json::Value>("task/", "task/", 40)?;
+                    panic!("{what}: the courier never reached the expected state: {rows:?}");
+                }
                 waited += 1;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
