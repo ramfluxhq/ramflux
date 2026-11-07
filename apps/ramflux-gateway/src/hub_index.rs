@@ -38,6 +38,10 @@ impl<V> Index<V> {
     pub(crate) fn get(&self, key: &str) -> Option<&V> {
         self.locate(key).ok().map(|at| &self.rows[at].1)
     }
+    pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+        let at = self.locate(key).ok()?;
+        Some(&mut self.rows[at].1)
+    }
     pub(crate) fn insert(&mut self, key: String, value: V) -> Option<V> {
         match self.locate(&key) {
             Ok(at) => Some(std::mem::replace(&mut self.rows[at].1, value)),

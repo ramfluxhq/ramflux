@@ -139,6 +139,17 @@ impl Readiness {
     pub(crate) fn supports_ephemeral(&self) -> bool {
         self.ephemeral.load(Ordering::Acquire)
     }
+    #[cfg(test)]
+    pub(crate) async fn reassert_boot(
+        self: &Arc<Self>,
+        router: &RouterMeshClient,
+        hub: &Arc<GatewaySessionHub>,
+        gateway_id: &str,
+        boot: &str,
+    ) {
+        reassert_if_boot_changed(self, router, Some(&Arc::downgrade(hub)), Some(gateway_id), boot)
+            .await;
+    }
 }
 fn parse_capability_echo(value: &Value) -> Option<CapabilityEcho> {
     let caps = value.get("capabilities")?.as_array()?;
@@ -167,21 +178,17 @@ async fn reassert_if_boot_changed(
     gateway_id: Option<&str>,
     boot: &str,
 ) {
-    let already = state.asserted_boot.lock().is_ok_and(|guard| guard.as_deref() == Some(boot));
-    if already {
-        return;
-    }
     let Some(hub) = hub.and_then(Weak::upgrade) else {
         return;
     };
     let Some(gateway_id) = gateway_id else {
         return;
     };
-    let items = hub.ephemeral_registrations(gateway_id).await;
+    let items = hub.ephemeral_registrations(gateway_id, boot).await;
     if items.is_empty() {
         return;
     }
-    let mut ok = true;
+    let mut posted = 0_usize;
     for chunk in items.chunks(ramflux_node_core::EPHEMERAL_REASSERTION_ITEM_BOUND) {
         let body = json!({"router_boot_id": boot, "items": chunk});
         let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
@@ -199,12 +206,17 @@ async fn reassert_if_boot_changed(
         .and_then(Result::ok)
         .is_none()
         {
-            ok = false;
             break;
         }
+        posted = posted.saturating_add(chunk.len());
     }
-    if ok && let Ok(mut asserted) = state.asserted_boot.lock() {
-        *asserted = Some(boot.to_owned());
+    if posted > 0 {
+        hub.stamp_ephemeral_boot(boot, &items[..posted]).await;
+        if let Ok(mut asserted) = state.asserted_boot.lock()
+            && asserted.as_deref() != Some(boot)
+        {
+            *asserted = Some(boot.to_owned());
+        }
     }
 }
 #[derive(Debug)]

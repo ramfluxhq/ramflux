@@ -30,6 +30,8 @@ pub(crate) struct GatewayHubEntry {
     pub(crate) queue: crate::push_queue::PushQueue,
     pub(crate) incarnation: Option<String>,
     pub(crate) ephemeral: bool,
+    /// Boot id this live ephemeral entry was last re-asserted against.
+    asserted_boot: Option<String>,
     sender: GatewaySendHandle,
 }
 
@@ -54,17 +56,42 @@ impl GatewaySessionHub {
     pub(crate) async fn ephemeral_registrations(
         &self,
         gateway_id: &str,
+        boot: &str,
     ) -> Vec<ramflux_node_core::EphemeralRegistrationItem> {
         self.snapshot()
             .await
             .iter()
-            .filter(|(_, entry)| entry.ephemeral && !entry.queue.is_closed())
+            .filter(|(_, entry)| {
+                entry.ephemeral
+                    && !entry.queue.is_closed()
+                    && entry.asserted_boot.as_deref() != Some(boot)
+            })
             .map(|(target, entry)| ramflux_node_core::EphemeralRegistrationItem {
                 target: target.to_owned(),
                 session_id: entry.session_id.clone(),
                 gateway_id: gateway_id.to_owned(),
             })
             .collect()
+    }
+    pub(crate) async fn stamp_ephemeral_boot(
+        &self,
+        boot: &str,
+        items: &[ramflux_node_core::EphemeralRegistrationItem],
+    ) {
+        let _ = self
+            .update(|index| {
+                for item in items {
+                    if let Some(entry) = index.get_mut(&item.target)
+                        && entry.ephemeral
+                        && entry.session_id == item.session_id
+                        && !entry.queue.is_closed()
+                    {
+                        entry.asserted_boot = Some(boot.to_owned());
+                    }
+                }
+                None
+            })
+            .await;
     }
     #[cfg(test)]
     pub(crate) async fn ephemeral_flag(&self, target: &str) -> Option<bool> {
@@ -194,6 +221,7 @@ impl GatewaySessionHub {
                         queue: queue.clone(),
                         incarnation: incarnation.clone(),
                         ephemeral,
+                        asserted_boot: None,
                         sender: sender.clone(),
                     },
                 )
@@ -225,6 +253,7 @@ impl GatewaySessionHub {
                     queue: crate::push_queue::PushQueue::new(16, closed),
                     incarnation: Some(id.into()),
                     ephemeral: false,
+                    asserted_boot: None,
                     sender: sender.clone(),
                 },
             );
