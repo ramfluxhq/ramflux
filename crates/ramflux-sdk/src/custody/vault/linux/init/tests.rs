@@ -381,6 +381,38 @@ fn linux_vault_init_refuses_foreign_owned_objects() -> TestResult {
     Ok(())
 }
 
+/// Progress record parsing through the real file reader: every flag combination round-trips,
+/// and each malformed byte string is refused with its exact error.
+#[test]
+fn init_progress_record_parsing_is_exact() -> TestResult {
+    let dir = private_dir()?;
+    let fd = root_fd(dir.path())?;
+    for n in 0..8_u8 {
+        let flags = [n & 1 != 0, n & 2 != 0, n & 4 != 0];
+        let ops = RecordingOps::new(None);
+        write_progress(&fd, flags, &ops, &|_| {})?;
+        assert_eq!(read_progress(&fd)?, flags, "round trip {n}");
+        let mut expected = b"ssp1:".to_vec();
+        expected.extend(flags.iter().map(|f| if *f { b'1' } else { b'0' }));
+        assert_eq!(std::fs::read(dir.path().join(PROGRESS))?, expected);
+    }
+    assert_eq!(read_progress(&root_fd(private_dir()?.path())?)?, [false; 3], "absent is empty");
+    for (what, bytes, error) in [
+        ("wrong prefix", &b"xsp1:100"[..], Error::Corrupt),
+        ("truncated", b"ssp1:10", Error::Corrupt),
+        ("extra flag", b"ssp1:1000", Error::Corrupt),
+        ("invalid flag", b"ssp1:1x0", Error::Corrupt),
+        ("uppercase prefix", b"SSP1:100", Error::Corrupt),
+        ("no flags", b"ssp1:", Error::Corrupt),
+        ("oversize", &[b'1'; 17], Error::Length),
+        ("empty", b"", Error::Length),
+    ] {
+        put(dir.path(), PROGRESS, bytes, 0o600)?;
+        assert_eq!(read_progress(&fd), Err(error), "{what}");
+    }
+    Ok(())
+}
+
 /// Durability operation oracle: publication and intent removal perform the real fsync, rename
 /// and unlink steps in order, on the expected objects, and injected syscall failures surface as
 /// errors without a durable success.
