@@ -99,6 +99,20 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("std::future::Future", "async trait (no I/O)"),
     ("tokio::sync::Mutex", "async mutex (no I/O)"),
     ("anyhow::Result", "error result alias (no I/O)"),
+    (
+        "ramflux_node_core::SessionPushForwardOutcome",
+        "forward outcome enum from node-core (type; no I/O)",
+    ),
+    (
+        "ramflux_node_core::SessionPushForwardResponse",
+        "forward response type from node-core (type only)",
+    ),
+    ("std::fmt::Display", "formatting trait (no I/O)"),
+    ("std::fmt::Formatter", "formatter type for Display (no I/O)"),
+    ("std::fmt::Result", "formatting result alias (no I/O)"),
+    ("std::future::ready", "immediately-ready future constructor (no I/O)"),
+    ("anyhow::ensure", "error-check macro (no I/O)"),
+    ("anyhow::anyhow", "error-construction macro (no I/O)"),
 ];
 
 /// Primitive type names. Their associated functions (`i64::try_from`) cannot

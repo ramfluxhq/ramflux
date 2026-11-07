@@ -233,14 +233,16 @@ async fn row_expired_while_waiting_for_sink_not_written() -> TestResult {
     let writer = queue.clone();
     let sink = send.clone();
     let task = tokio::spawn(async move {
-        writer.write(&sink, &frame.bytes, Some(ID), Some(frame.expires_at_ms)).await
+        let wrote = writer.write(&sink, &frame.bytes, Some(ID), Some(frame.expires_at_ms)).await;
+        writer.complete_transient(&frame);
+        wrote
     });
     queue.set_clock_ms(deadline);
     drop(held);
     let wrote = guard_10s("expired writer task", task).await?;
     assert!(wrote, "expiry is a silent drop, not a sink failure");
     assert!(frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.is_empty());
-    assert_eq!(occupancy(&queue), (1, transient_bytes(1)?.len()));
+    assert_eq!(occupancy(&queue), (0, 0));
     Ok(())
 }
 
