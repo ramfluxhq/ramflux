@@ -85,6 +85,7 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<RouterSubmitOutcome, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         self.prepare_forwarded_envelope(store, node, request, now)?.published_blocking()?
     }
 
@@ -102,6 +103,7 @@ impl RouterCore {
         crate::publication::PublishedOperation<Result<RouterSubmitOutcome, NodeCoreError>>,
         NodeCoreError,
     > {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         crate::router_store::publication::capture(|| {
             self.submit_forwarded_envelope_inner(store, node, request, now)
                 .map(|result| result.outcome)
@@ -121,6 +123,7 @@ impl RouterCore {
         crate::publication::PublishedOperation<Result<ForwardedSubmission, NodeCoreError>>,
         NodeCoreError,
     > {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         crate::router_store::publication::capture(|| {
             self.submit_forwarded_envelope_inner(store, node, request, now)
         })
@@ -169,6 +172,7 @@ impl RouterCore {
         request: ForwardedEnvelopeRequest,
         now: u64,
     ) -> Result<ForwardedSubmission, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let pin_admission =
             FOREIGN_PIN_ADMISSION.lock().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let ForwardedEnvelopeRequest { envelope, migration_evidence, peer_node_id } = request;

@@ -123,6 +123,9 @@ impl Drop for RouterForwardReservation {
 
 #[derive(Clone, Debug)]
 pub struct ReplayAcceptedEnvelope {
+    #[cfg(test)]
+    pub(crate) envelope: ramflux_protocol::Envelope,
+    #[cfg(not(test))]
     envelope: ramflux_protocol::Envelope,
 }
 
@@ -212,6 +215,19 @@ pub(crate) struct RouterCoreSnapshot {
 }
 
 impl RouterCore {
+    #[cfg(test)]
+    pub(crate) fn durable_ingress_ephemeral_snapshot(&self) -> (usize, usize) {
+        let replay_entries = self
+            .replay_guard_shards
+            .iter()
+            .map(|shard| lock_unpoisoned(shard).accepted_entries().count())
+            .sum();
+        let control = lock_unpoisoned(&self.control);
+        let foreign_rows =
+            control.foreign_device_heads.records.len() + control.foreign_device_heads.fences.len();
+        (replay_entries, foreign_rows)
+    }
+
     pub(crate) fn publication_is_bound(&self) -> bool {
         self.publication.get().is_some()
     }
@@ -638,6 +654,7 @@ impl RouterCore {
         &self,
         request: ItestMvp10OwnDeviceFanoutRequest,
     ) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         self.mvp10_own_device_fanout_at(request, server_now())
     }
 
@@ -649,6 +666,7 @@ impl RouterCore {
         request: ItestMvp10OwnDeviceFanoutRequest,
         now: i64,
     ) -> Result<ItestMvp10OwnDeviceFanoutResponse, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let plan = self.accept_own_device_fanout_replay(request, now)?;
         let delivered = plan
             .deliveries
@@ -670,6 +688,7 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedEnvelope, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&envelope)?;
         crate::check_entry_bound(&envelope)?;
         self.check_envelope_replay_once(source, &envelope, now_unix_seconds)?;
         Ok(ReplayAcceptedEnvelope { envelope })
@@ -681,6 +700,12 @@ impl RouterCore {
         accepted: ReplayAcceptedEnvelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&accepted.envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: accepted.envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            };
+        }
         self.submit_envelope_after_replay_check(accepted.envelope, now_unix_seconds)
     }
 
@@ -692,6 +717,7 @@ impl RouterCore {
         request: ItestMvp10OwnDeviceFanoutRequest,
         now_unix_seconds: i64,
     ) -> Result<ReplayAcceptedFanoutPlan, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let targets = self.mvp10_own_device_targets(&request)?;
         let source = self.authenticated_envelope_source(&request.envelope)?;
         let deliveries = self.prepare_fanout_deliveries(&request, &targets)?;
@@ -707,6 +733,7 @@ impl RouterCore {
         store: &crate::RouterRedbStore,
         now: i64,
     ) -> Result<(ReplayAcceptedFanoutPlan, Vec<crate::SubmissionLease>), NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let targets = self.mvp10_own_device_targets(&request)?;
         let deliveries = self.prepare_fanout_deliveries(&request, &targets)?;
         for (_, target) in &targets {
@@ -897,6 +924,12 @@ impl RouterCore {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         envelope: ramflux_protocol::Envelope,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            };
+        }
         self.submit_envelope_at(source, envelope, server_now())
     }
 
@@ -906,6 +939,12 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            };
+        }
         if let Err(error) = crate::check_entry_bound(&envelope) {
             return RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
@@ -944,6 +983,12 @@ impl RouterCore {
             &HomeNodeMigrationForwardPlan,
         ) -> Result<FederatedEnvelopeForwardResponse, NodeCoreError>,
     {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            };
+        }
         match self.prepare_envelope_with_home_node_forward_at(
             source,
             envelope,
@@ -973,6 +1018,12 @@ impl RouterCore {
         origin: RouterEnvelopeOrigin,
         lease_seconds: u64,
     ) -> RouterForwardPreparation {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
+            return complete_forward_preparation(RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            });
+        }
         if let Err(error) = crate::check_entry_bound(&envelope) {
             return complete_forward_preparation(RouterSubmitOutcome::RejectedSecurity {
                 target_delivery_id: envelope.target_delivery_id,
@@ -1122,6 +1173,12 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            };
+        }
         if let Some(migration) = self.effective_home_node_migration_for_target(
             &envelope.target_delivery_id,
             now_unix_seconds,
@@ -1141,6 +1198,12 @@ impl RouterCore {
         envelope: ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> RouterSubmitOutcome {
+        if let Err(error) = ramflux_protocol::ephemeral::require_durable(&envelope) {
+            return RouterSubmitOutcome::RejectedSecurity {
+                target_delivery_id: envelope.target_delivery_id,
+                reason: NodeCoreError::from(error).to_string(),
+            };
+        }
         let mut shard = self.target_shard(&envelope.target_delivery_id);
         if shard.deleted_delivery_targets.contains(&envelope.target_delivery_id) {
             return RouterSubmitOutcome::RejectedDeleted {
@@ -1477,6 +1540,7 @@ impl RouterCore {
         &self,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         self.authenticated_envelope_source_from(envelope, None, RouterEnvelopeOrigin::Gateway)
     }
 
@@ -1488,6 +1552,7 @@ impl RouterCore {
         envelope: &ramflux_protocol::Envelope,
         store: &crate::RouterRedbStore,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         self.authenticated_envelope_source_from(
             envelope,
             Some(store),
@@ -1504,6 +1569,7 @@ impl RouterCore {
         store: Option<&crate::RouterRedbStore>,
         origin: RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         let reject = || NodeCoreError::ItestHttp("envelope root authority mismatch".into());
         let root = envelope
             .ext
@@ -1598,6 +1664,7 @@ impl RouterCore {
         envelope: &ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<(), NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
         let replay_key = envelope_replay_tuple_key(source, envelope);
@@ -1622,6 +1689,7 @@ impl RouterCore {
         envelope: &ramflux_protocol::Envelope,
         now_unix_seconds: i64,
     ) -> Result<bool, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         crate::record_router_replay_guard_check();
         let replay_check_started = Instant::now();
         let replay_key = envelope_replay_tuple_key(source, envelope);

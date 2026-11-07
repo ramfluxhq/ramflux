@@ -23,6 +23,8 @@ pub(crate) fn submit(
     envelope: ramflux_protocol::Envelope,
     now: u64,
 ) -> Result<CustodyServerFrame, CustodyRefusal> {
+    ramflux_protocol::ephemeral::require_durable(&envelope)
+        .map_err(|_| CustodyRefusal::InvalidInput)?;
     let DeliveryAuthority { source, .. } = credentials;
     verify_sender(credentials, &envelope, now)?;
     let lease = acquire_submission(router, store, &envelope, now)?;

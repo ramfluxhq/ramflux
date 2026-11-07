@@ -102,4 +102,25 @@ pub enum NodeCoreError {
     /// The caller is verifiably not the device bound as the push routes' owner.
     #[error("push route owner mismatch")]
     PushRouteOwnerMismatch,
+    #[error("delivery_mode_refused")]
+    DeliveryModeRefused,
+}
+
+impl From<ramflux_protocol::ephemeral::EphemeralModeError> for NodeCoreError {
+    fn from(error: ramflux_protocol::ephemeral::EphemeralModeError) -> Self {
+        use ramflux_protocol::ephemeral::EphemeralModeError as ModeError;
+        match error {
+            ModeError::EphemeralAtDurableSink
+            | ModeError::InvalidDeliveryMode
+            | ModeError::NotEphemeral
+            | ModeError::InvalidPriority
+            | ModeError::InvalidTtl
+            | ModeError::CreatedAtTtlOverflow
+            | ModeError::NegativeDeadline
+            | ModeError::DeadlineMillisecondsOverflow
+            | ModeError::ClockToleranceOverflow
+            | ModeError::CreatedAtTooFarInFuture
+            | ModeError::Expired => Self::DeliveryModeRefused,
+        }
+    }
 }

@@ -594,6 +594,29 @@ pub struct RouterWalStore {
 }
 
 impl RouterWalStore {
+    #[cfg(test)]
+    pub(crate) fn durable_ingress_byte_len(&self) -> Result<u64, NodeCoreError> {
+        fn directory_bytes(path: &Path) -> Result<u64, NodeCoreError> {
+            let mut total = 0_u64;
+            for entry in
+                fs::read_dir(path).map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            {
+                let path = entry.map_err(|error| NodeCoreError::Redb(error.to_string()))?.path();
+                let metadata =
+                    fs::metadata(&path).map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+                total = total.saturating_add(if metadata.is_dir() {
+                    directory_bytes(&path)?
+                } else if metadata.is_file() {
+                    metadata.len()
+                } else {
+                    0
+                });
+            }
+            Ok(total)
+        }
+        directory_bytes(&self.root)
+    }
+
     /// # Errors
     /// Returns an error when the WAL directory cannot be created, recovered, or opened.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, NodeCoreError> {

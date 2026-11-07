@@ -249,6 +249,7 @@ impl RouterRedbStore {
         envelope: &ramflux_protocol::Envelope,
         now: i64,
     ) -> Result<RetryAdmission, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         let permit = Arc::clone(&self.submission_admission).try_acquire_owned().map_err(|_| {
             NodeCoreError::Publication(crate::publication::PublicationRefusal::CapacityRetryAfter {
                 retry_after_ms: 1000,

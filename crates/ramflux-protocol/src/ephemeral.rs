@@ -270,23 +270,43 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn ephemeral_mode_and_lifetime_matrix() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(GATEWAY_EPHEMERAL_CAPABILITY, "gateway.ephemeral.v1");
         assert_eq!(MIN_EPHEMERAL_TTL_SECONDS, 1);
         assert_eq!(MAX_EPHEMERAL_TTL_SECONDS, 5);
         assert_eq!(EPHEMERAL_FUTURE_TOLERANCE_MS, 2_000);
 
+        let controls = control_cases();
+        let classifier_refusals = classifier_refusal_cases();
+        let durable_mode_refusals = durable_mode_refusal_cases();
+        let priority_ttl_refusals = priority_ttl_refusal_cases();
+        let lifetime_refusals = lifetime_refusal_cases()?;
+        for row in controls
+            .iter()
+            .chain(classifier_refusals.iter())
+            .chain(durable_mode_refusals.iter())
+            .chain(priority_ttl_refusals.iter())
+            .chain(lifetime_refusals.iter())
+        {
+            run(row)?;
+        }
+        assert_eq!(controls.len(), 8, "control rows");
+        assert_eq!(
+            classifier_refusals.len()
+                + durable_mode_refusals.len()
+                + priority_ttl_refusals.len()
+                + lifetime_refusals.len(),
+            24,
+            "refusal rows (one per predicate/arm/alternative)"
+        );
+        Ok(())
+    }
+
+    fn control_cases() -> [Case; 8] {
         let ephemeral_ok = Ok(1_005_000);
         let not_ephemeral = Err(EphemeralModeError::NotEphemeral);
-        let invalid_mode: Result<(), EphemeralModeError> =
-            Err(EphemeralModeError::InvalidDeliveryMode);
-        let invalid_deadline: Result<u64, EphemeralModeError> =
-            Err(EphemeralModeError::InvalidDeliveryMode);
         let at_durable_sink = Err(EphemeralModeError::EphemeralAtDurableSink);
-
-        // Controls (positive): each is an otherwise-valid vector that must be accepted.
-        let controls = [
+        [
             case(
                 "control: ephemeral, low, ttl 5, now = created_at",
                 &valid_envelope(),
@@ -359,12 +379,15 @@ mod tests {
                 at_durable_sink,
                 Err(EphemeralModeError::Expired),
             ),
-        ];
+        ]
+    }
 
-        // Refusals: one row per predicate/arm/alternative; each is one isolated mutation of
-        // the valid vector (or of its delivery_mode), except the classifier rows, which are
-        // refused at mode classification and therefore refuse at both refusal APIs.
-        let refusals = [
+    fn classifier_refusal_cases() -> [Case; 9] {
+        let invalid_mode: Result<(), EphemeralModeError> =
+            Err(EphemeralModeError::InvalidDeliveryMode);
+        let invalid_deadline: Result<u64, EphemeralModeError> =
+            Err(EphemeralModeError::InvalidDeliveryMode);
+        [
             case(
                 "mode: \"Ephemeral\" casing (catch-all)",
                 &with_mode(Value::String("Ephemeral".to_owned())),
@@ -437,6 +460,14 @@ mod tests {
                 invalid_mode,
                 invalid_deadline,
             ),
+        ]
+    }
+
+    fn durable_mode_refusal_cases() -> [Case; 3] {
+        let at_durable_sink = Err(EphemeralModeError::EphemeralAtDurableSink);
+        let not_ephemeral = Err(EphemeralModeError::NotEphemeral);
+        let ephemeral_ok = Ok(1_005_000);
+        [
             case(
                 "deadline Durable arm: absent mode",
                 &mutated(|e| {
@@ -463,6 +494,12 @@ mod tests {
                 at_durable_sink,
                 ephemeral_ok,
             ),
+        ]
+    }
+
+    fn priority_ttl_refusal_cases() -> [Case; 6] {
+        let at_durable_sink = Err(EphemeralModeError::EphemeralAtDurableSink);
+        [
             case(
                 "priority normal",
                 &mutated(|e| e.priority = Priority::Normal),
@@ -511,6 +548,12 @@ mod tests {
                 at_durable_sink,
                 Err(EphemeralModeError::InvalidTtl),
             ),
+        ]
+    }
+
+    fn lifetime_refusal_cases() -> Result<[Case; 6], Box<dyn std::error::Error>> {
+        let at_durable_sink = Err(EphemeralModeError::EphemeralAtDurableSink);
+        Ok([
             raw_case(
                 "created_at + ttl overflows i64",
                 &mutated(|e| {
@@ -574,13 +617,6 @@ mod tests {
                 at_durable_sink,
                 Err(EphemeralModeError::Expired),
             ),
-        ];
-
-        for row in controls.iter().chain(refusals.iter()) {
-            run(row)?;
-        }
-        assert_eq!(controls.len(), 8, "control rows");
-        assert_eq!(refusals.len(), 24, "refusal rows (one per predicate/arm/alternative)");
-        Ok(())
+        ])
     }
 }
