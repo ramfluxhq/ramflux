@@ -203,7 +203,7 @@ fn erased_input_lifetime_boundaries_are_exact() -> Result<(), StorageError> {
     assert_eq!(count(&db, "SELECT count(*) FROM receive_erased_input")?, 0);
     db.record_erased_input_at(&tuple_of(&e), now - 299, 0, now)?;
     assert_eq!(only_expiry(&db)?, now + 1);
-    // Matching treats expires_at == now as expired and now - 1 as live.
+    // The stored row expires at now + 1: it matches at now and is expired at now + 1.
     assert!(db.erased_input_matches_at(&e, now)?);
     assert!(!db.erased_input_matches_at(&e, now + 1)?);
     drop(db);

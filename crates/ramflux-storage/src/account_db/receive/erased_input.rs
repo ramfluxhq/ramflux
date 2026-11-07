@@ -34,7 +34,7 @@ impl<'a> ErasedTuple<'a> {
         }
     }
 
-    fn canonical(&self) -> Result<Vec<u8>, StorageError> {
+    pub(crate) fn canonical(&self) -> Result<Vec<u8>, StorageError> {
         Ok(ramflux_protocol::canonical_json_bytes(&[
             "erased-input/v1",
             self.principal,
@@ -185,6 +185,12 @@ pub(crate) fn merge_from_at(
             params![now],
         )?;
     }
+    // S2: the only full sweep also drops every expired local `erased-input:` binding.
     db.execute("DELETE FROM main.receive_erased_input WHERE expires_at<=?1", params![now])?;
+    db.execute(
+        "DELETE FROM main.message_copy_binding WHERE copy_id GLOB 'erased-input:*' \
+         AND CAST(substr(copy_id,length(rtrim(copy_id,'0123456789'))+1) AS INTEGER)<=?1",
+        params![now],
+    )?;
     Ok(())
 }
