@@ -361,6 +361,11 @@ fn exercise_router_control(
                 .load(std::sync::atomic::Ordering::SeqCst)
                 .saturating_sub(before);
             assert_eq!(
+                outcome,
+                ramflux_node_core::MigrationDrainOutcome::Held,
+                "{entry} unmarked drain has no reachable peer and must hold"
+            );
+            assert_eq!(
                 passed, 1,
                 "{entry} unmarked drain must pass the mode guard, outcome={outcome:?}"
             );
@@ -656,7 +661,7 @@ fn refuse_mesh_json_edge(
         peer,
     )?;
     assert_eq!(response.status, "200 OK", "{entry}");
-    assert_refused_bytes(&response.body, &d2_submit(&envelope_from_body(body)?)?, entry)?;
+    assert_refused_bytes(&response.body, &d2_submit(&envelope_from_body(body)?), entry)?;
     Ok(())
 }
 
@@ -758,20 +763,41 @@ fn drain_row(envelope: &ramflux_protocol::Envelope) -> ramflux_node_core::Migrat
     }
 }
 
-fn d2_submit(
-    envelope: &ramflux_protocol::Envelope,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    Ok(serde_json::to_value(crate::durable_mode::rejected_security(envelope))?)
+// Literal expected D2 bodies. They must not call the handler helpers under test,
+// so a change to `rejected_security*` or `refused_quic` fails these pins.
+
+/// Direct submit routes: `EnvelopeSubmitResponse` with `migration_refusal` and `nack` skipped.
+fn d2_submit(envelope: &ramflux_protocol::Envelope) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "rejected_security:delivery_mode_refused",
+        "target_delivery_id": envelope.target_delivery_id,
+        "inbox_seq": null,
+        "cursor": null,
+    })
 }
 
-fn d2_mesh(
-    envelope: &ramflux_protocol::Envelope,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    Ok(serde_json::to_value(crate::durable_mode::rejected_security_mesh(envelope))?)
+/// Mesh/TLS/QUIC envelope routes: `SessionPushSubmitResponse` flattens the submit body and adds session fields.
+fn d2_mesh(envelope: &ramflux_protocol::Envelope) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "rejected_security:delivery_mode_refused",
+        "target_delivery_id": envelope.target_delivery_id,
+        "inbox_seq": null,
+        "cursor": null,
+        "incarnation_id": null,
+        "retain_until": null,
+    })
 }
 
+/// QUIC fanout route: the `refused_quic` body with every field written out.
 fn d2_quic(envelope: &ramflux_protocol::Envelope) -> serde_json::Value {
-    crate::durable_mode::refused_quic(envelope).body
+    serde_json::json!({
+        "migration_refusal": null,
+        "outcome": "rejected_security:delivery_mode_refused",
+        "target_delivery_id": envelope.target_delivery_id,
+        "inbox_seq": null,
+        "cursor": null,
+        "nack": null,
+    })
 }
 
 fn assert_refused_bytes(
@@ -799,7 +825,7 @@ fn assert_refused_http(
     let status = head.lines().next().ok_or("missing HTTP status line")?;
     assert_eq!(status, "HTTP/1.1 200 OK", "{entry}: {text}");
     let value: serde_json::Value = serde_json::from_str(body.trim_end())?;
-    assert_d2_body(&value, &d2_submit(envelope)?, entry);
+    assert_d2_body(&value, &d2_submit(envelope), entry);
     Ok(())
 }
 
@@ -840,18 +866,18 @@ fn assert_http_families(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (status, body) = post_itest_http(handle, "/mvp0/envelope", &serde_json::to_vec(envelope)?)?;
     assert_eq!(status, "HTTP/1.1 200 OK", "http envelope: {status}");
-    assert_d2_body(&body, &d2_submit(envelope)?, "http envelope");
+    assert_d2_body(&body, &d2_submit(envelope), "http envelope");
     let (status, body) = post_itest_http(
         handle,
         "/mvp10/own-devices/fanout",
         &serde_json::to_vec(&fanout_request(envelope))?,
     )?;
     assert_eq!(status, "HTTP/1.1 200 OK", "http fanout: {status}");
-    assert_d2_body(&body, &d2_submit(envelope)?, "http fanout");
+    assert_d2_body(&body, &d2_submit(envelope), "http fanout");
     let (status, body) =
         post_itest_http(handle, "/mvp1/envelope-authority", &serde_json::to_vec(envelope)?)?;
     assert_eq!(status, "HTTP/1.1 200 OK", "http authority: {status}");
-    assert_d2_body(&body, &d2_submit(envelope)?, "http authority");
+    assert_d2_body(&body, &d2_submit(envelope), "http authority");
     Ok(())
 }
 
@@ -898,7 +924,7 @@ fn assert_tls_families(
     let (status, envelope_body) =
         tls_marked_post(handle, pki, "/mvp0/envelope", "ramflux-gateway", envelope, &pki.gateway)?;
     assert_eq!(status, 200, "tls envelope");
-    assert_d2_body(&envelope_body, &d2_mesh(envelope)?, "tls envelope");
+    assert_d2_body(&envelope_body, &d2_mesh(envelope), "tls envelope");
     let (status, fanout_body) = tls_marked_post(
         handle,
         pki,
@@ -908,7 +934,7 @@ fn assert_tls_families(
         &pki.gateway,
     )?;
     assert_eq!(status, 200, "tls fanout");
-    assert_d2_body(&fanout_body, &d2_submit(envelope)?, "tls fanout");
+    assert_d2_body(&fanout_body, &d2_submit(envelope), "tls fanout");
     let (status, authority_body) = tls_marked_post(
         handle,
         pki,
@@ -918,7 +944,7 @@ fn assert_tls_families(
         &pki.federation,
     )?;
     assert_eq!(status, 200, "tls authority");
-    assert_d2_body(&authority_body, &d2_submit(envelope)?, "tls authority");
+    assert_d2_body(&authority_body, &d2_submit(envelope), "tls authority");
     Ok(())
 }
 
@@ -969,7 +995,7 @@ fn assert_quic_families(
         "ramflux-gateway",
     ))?;
     assert_eq!(submit.status, 200, "quic envelope");
-    assert_d2_body(&submit.body, &d2_mesh(envelope)?, "quic envelope");
+    assert_d2_body(&submit.body, &d2_mesh(envelope), "quic envelope");
     let fanout = runtime.block_on(crate::handlers::handle_mesh_quic_request_value(
         &ramflux_transport::GatewayQuicRequest {
             method: "POST".into(),
@@ -991,7 +1017,7 @@ fn assert_quic_families(
         "ramflux-federation",
     ))?;
     assert_eq!(authority.status, 200, "quic authority");
-    assert_d2_body(&authority.body, &d2_submit(envelope)?, "quic authority");
+    assert_d2_body(&authority.body, &d2_submit(envelope), "quic authority");
     Ok(())
 }
 
