@@ -103,9 +103,13 @@ impl AccountDb {
         key: &AccountDbKey,
     ) -> Result<Self, StorageError> {
         // Preserve AccountNotFound, then select the generation under ownership.
-        index.account(local_account_id)?;
+        crate::account_erase::refuse_removed(&index.account(local_account_id)?)?;
+        #[cfg(test)]
+        crate::account_erase::open_race_hook(local_account_id);
         let writer = crate::account_writer::AccountWriter::acquire(index.root(), local_account_id)?;
+        // A concurrent erase may have tombstoned the account since the first read.
         let account = index.account(local_account_id)?;
+        crate::account_erase::refuse_removed(&account)?;
         let path = index.root().join(account.db_relative_path);
         let connection = Connection::open_account_writer(&path, writer)?;
         apply_key(&connection, key)?;
