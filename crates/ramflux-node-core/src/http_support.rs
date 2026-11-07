@@ -500,7 +500,7 @@ fn parse_json_response<R: serde::de::DeserializeOwned>(
             response.status_line
         )));
     }
-    serde_json::from_slice(&response.body)
+    ramflux_protocol::parse_i_json(&response.body)
         .map_err(|source| NodeCoreError::ItestJson(source.to_string()))
 }
 
