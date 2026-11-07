@@ -9,6 +9,7 @@ pub use account_db::backup_database::{
     BackupAttachmentVerification, BackupDatabase, BackupInputObservation, BackupOpenMode,
 };
 pub use account_db::backup_merge::BackupMergeReport;
+mod account_erase;
 mod account_index;
 mod account_writer;
 pub use account_writer::AccountWriterLease;

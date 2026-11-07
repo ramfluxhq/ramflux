@@ -15,7 +15,7 @@ mod operations;
 #[derive(Clone)]
 pub struct AccountIndex {
     root: PathBuf,
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 impl AccountIndex {

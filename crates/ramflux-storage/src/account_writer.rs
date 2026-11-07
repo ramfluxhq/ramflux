@@ -46,6 +46,8 @@ pub(crate) struct AccountWriter {
     // Never unlink this inode or use file age to break ownership.
     file: Option<File>,
     path: PathBuf,
+    // An exclusive owner is never shared with, and refuses, any other in-process holder.
+    exclusive: bool,
 }
 
 type Owners = BTreeMap<PathBuf, Weak<AccountWriter>>;
@@ -94,6 +96,19 @@ fn lock_io(path: &Path, source: std::io::Error) -> StorageError {
 
 impl AccountWriter {
     pub(crate) fn acquire(root: &Path, account: &str) -> Result<Arc<Self>, StorageError> {
+        Self::acquire_mode(root, account, false)
+    }
+
+    /// Acquires ownership that no other holder in this or another process may share.
+    pub(crate) fn acquire_exclusive(root: &Path, account: &str) -> Result<Arc<Self>, StorageError> {
+        Self::acquire_mode(root, account, true)
+    }
+
+    fn acquire_mode(
+        root: &Path,
+        account: &str,
+        exclusive: bool,
+    ) -> Result<Arc<Self>, StorageError> {
         let directory = root.join("accounts").join(account).canonicalize()?;
         let path = directory.join(".writer.lock");
         let registry = owners();
@@ -101,6 +116,9 @@ impl AccountWriter {
             registry.owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         while let Some(owner) = registered.get(&path) {
             if let Some(owner) = owner.upgrade() {
+                if exclusive || owner.exclusive {
+                    return Err(StorageError::AccountWriterBusy(account.to_owned()));
+                }
                 return Ok(owner);
             }
             // The final Arc is already running Drop and will remove the entry
@@ -130,7 +148,7 @@ impl AccountWriter {
                 return Err(lock_io(&path, error));
             }
         }
-        let owner = Arc::new(Self { file: Some(file), path: path.clone() });
+        let owner = Arc::new(Self { file: Some(file), path: path.clone(), exclusive });
         registered.insert(path, Arc::downgrade(&owner));
         Ok(owner)
     }

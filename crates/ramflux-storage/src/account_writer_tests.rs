@@ -298,3 +298,113 @@ fn writer_lock_filesystem_error_names_the_real_lock_path() -> TestResult {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn wrapped_key() -> crate::WrappedAccountDbKey {
+    crate::WrappedAccountDbKey {
+        key_wrapping_provider: "platform-local-vault".to_owned(),
+        key_wrapping_ref: "platform-local-vault:acct".to_owned(),
+        nonce: [7; 12],
+        wrapped_key: vec![9; 48],
+    }
+}
+
+fn expect_busy<T>(result: &Result<T, StorageError>, id: &str) {
+    assert!(
+        matches!(&result, Err(StorageError::AccountWriterBusy(busy)) if busy == id),
+        "expected AccountWriterBusy({id}), got {:?}",
+        result.as_ref().err()
+    );
+}
+
+fn expect_not_found<T>(result: &Result<T, StorageError>, id: &str) {
+    assert!(
+        matches!(&result, Err(StorageError::AccountNotFound(missing)) if missing == id),
+        "expected AccountNotFound({id}), got {:?}",
+        result.as_ref().err()
+    );
+}
+
+#[test]
+fn removed_account_never_reopens_empty() -> TestResult {
+    // (a) Erase while open: Busy; state, wrapped key and DB bytes unchanged.
+    let (root, db) = crate::tests::test_db("removed-account-reopen")?;
+    let index = AccountIndex::open(&root)?;
+    index.store_wrapped_db_key("acct", &wrapped_key())?;
+    let db_file = root.join("accounts/acct/ramflux_local.sqlite");
+    let before = std::fs::read(&db_file)?;
+    expect_busy(&index.erase_account_database("acct"), "acct");
+    assert_eq!(index.account("acct")?.account_state, "active");
+    assert!(index.load_wrapped_db_key("acct")?.is_some());
+    assert_eq!(std::fs::read(&db_file)?, before);
+    // (d) shared holder refuses exclusive; (f) the refused erase left the account usable.
+    drop(db);
+    let shared = index.acquire_account_writer("acct")?;
+    expect_busy(&index.erase_account_database("acct"), "acct");
+    drop(shared);
+    drop(open(&root)?);
+    // (d) exclusive holder refuses shared, open and a second exclusive.
+    let exclusive = crate::account_writer::AccountWriter::acquire_exclusive(&root, "acct")?;
+    expect_busy(&index.acquire_account_writer("acct").map(drop), "acct");
+    expect_busy(&open(&root).map(drop), "acct");
+    expect_busy(
+        &crate::account_writer::AccountWriter::acquire_exclusive(&root, "acct").map(drop),
+        "acct",
+    );
+    drop(exclusive);
+    // (b) Closed materialized account: erase is Ok, key cleared, files untouched.
+    let before = std::fs::read(&db_file)?;
+    index.erase_account_database("acct")?;
+    assert_eq!(index.account("acct")?.account_state, "removed");
+    assert!(index.load_wrapped_db_key("acct")?.is_none());
+    assert_eq!(std::fs::read(&db_file)?, before);
+    expect_not_found(&open(&root).map(drop), "acct");
+    assert_eq!(std::fs::read(&db_file)?, before);
+    index.erase_account_database("acct")?;
+    // (e) Bad and unknown ids.
+    for bad in ["", "..", "a/b", "/abs"] {
+        assert!(
+            matches!(index.erase_account_database(bad), Err(StorageError::AuthorizationRejected)),
+            "bad id {bad:?}"
+        );
+    }
+    expect_not_found(&index.erase_account_database("unknown"), "unknown");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn removed_account_open_barrier_on_unmaterialized_account() -> TestResult {
+    // (c) Erase lands between open's first read and its writer lease.
+    let root = crate::tests::temp_root("removed-account-barrier");
+    let index = AccountIndex::open(&root)?;
+    index.create_account("ghost", "principal")?;
+    let db_file = root.join("accounts/ghost/ramflux_local.sqlite");
+    assert!(!db_file.exists());
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Mutex::new(release_rx);
+    crate::account_erase::set_open_race_hook(Some(Arc::new(move |account| {
+        if account == "ghost" {
+            let _ = entered_tx.send(());
+            if let Ok(receiver) = release_rx.lock() {
+                let _ = receiver.recv_timeout(Duration::from_secs(10));
+            }
+        }
+    })));
+    let root_for_open = root.clone();
+    let opener = std::thread::spawn(move || {
+        AccountIndex::open(&root_for_open).and_then(|index| {
+            AccountDb::open(&index, "ghost", &AccountDbKey::derive("ghost", b"storage-test-secret"))
+                .map(drop)
+        })
+    });
+    entered_rx.recv_timeout(Duration::from_secs(10))?;
+    index.erase_account_database("ghost")?;
+    release_tx.send(())?;
+    let result = opener.join().map_err(|_| "opener thread panicked")?;
+    crate::account_erase::set_open_race_hook(None);
+    expect_not_found(&result, "ghost");
+    assert!(!db_file.exists(), "open must not create the DB path of a removed account");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
