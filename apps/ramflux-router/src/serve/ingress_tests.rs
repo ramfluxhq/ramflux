@@ -693,6 +693,32 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
             }
         }
     }
+    let bridge = super::RouterSubmitBridge {
+        router: Arc::clone(&router),
+        tokio: tokio::runtime::Handle::current(),
+    };
+    for (created_at, duplicate_extension) in [(Some(9_007_199_254_740_992), false), (None, true)] {
+        let body = serde_json::to_vec(&EnvelopeWire {
+            envelope: &envelope,
+            created_at,
+            duplicate_extension,
+        })?;
+        let Err(error) = bridge
+            .submit_raw_envelope(
+                body,
+                Instant::now(),
+                ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+            )
+            .await
+        else {
+            return Err("postcard submit bridge accepted an I-JSON refusal row".into());
+        };
+        assert!(error.chain().any(ramflux_protocol::is_i_json_rejection));
+        assert_eq!(
+            serde_json::to_vec(&ramflux_protocol::i_json_rejection_body())?,
+            EXPECTED_BODY.as_bytes()
+        );
+    }
 
     let endpoint_bodies = [
         ("/mvp0/envelope", false),
