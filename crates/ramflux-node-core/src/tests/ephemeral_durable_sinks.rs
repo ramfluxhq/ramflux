@@ -717,6 +717,9 @@ struct AliasTable {
     bindings: Vec<(String, String)>,
     modules: BTreeSet<String>,
     items: BTreeMap<String, BTreeSet<String>>,
+    /// Module -> external glob bases (`std::fs` for `pub use std::fs::*;`). A
+    /// `crate::` path that a module cannot resolve may come through one of these.
+    external_globs: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl AliasTable {
@@ -765,6 +768,8 @@ fn build_alias_table(files: &[(&str, &str)]) -> Result<AliasTable, String> {
                     let target = normalise_target(&module, base, &table.modules)?;
                     if table.modules.contains(&target) {
                         globs.push((module.clone(), target));
+                    } else {
+                        table.external_globs.entry(module.clone()).or_default().insert(target);
                     }
                     continue;
                 }
@@ -836,6 +841,12 @@ fn merge_glob(table: &mut AliasTable, into: &str, from: &str) -> bool {
             changed |= slot.insert(name);
         }
     }
+    if let Some(bases) = table.external_globs.get(from).cloned() {
+        let slot = table.external_globs.entry(into.to_string()).or_default();
+        for base in bases {
+            changed |= slot.insert(base);
+        }
+    }
     changed
 }
 
@@ -873,26 +884,35 @@ fn normalise_target(
     Ok(base)
 }
 
-/// Fail-closed: a `crate::` path is concrete only when it walks known modules
-/// and then names a declared item. Anything else is unresolved.
-fn check_reachable(path: &str, table: &AliasTable) -> Result<(), String> {
-    let mut segments = path.split("::");
-    if segments.next() != Some("crate") {
-        return Ok(());
+/// Fail-closed: a `crate::` path is concrete when it walks known modules and
+/// then names a declared item. A segment that is neither is looked up through
+/// the external globs of the module reached so far, and each candidate
+/// (`std::fs::write`) is returned so the forbidden-symbol match sees it.
+/// Anything else is unresolved.
+fn check_reachable(path: &str, table: &AliasTable) -> Result<String, String> {
+    let segments: Vec<&str> = path.split("::").collect();
+    if segments.first() != Some(&"crate") {
+        return Ok(path.to_string());
     }
     let mut current = "crate".to_string();
-    for segment in segments {
+    for (index, segment) in segments.iter().enumerate().skip(1) {
         let child = join_module(&current, segment);
         if table.modules.contains(&child) {
             current = child;
             continue;
         }
-        if table.items.get(&current).is_some_and(|names| names.contains(segment)) {
-            return Ok(());
+        if table.items.get(&current).is_some_and(|names| names.contains(*segment)) {
+            return Ok(path.to_string());
+        }
+        if let Some(bases) = table.external_globs.get(&current) {
+            let rest = segments[index..].join("::");
+            let candidates: Vec<String> =
+                bases.iter().map(|base| format!("{base}::{rest}")).collect();
+            return Ok(candidates.join(" "));
         }
         return Err("no binding, module, or item".to_string());
     }
-    Ok(())
+    Ok(path.to_string())
 }
 
 /// Resolves `token` (an absolute, `self::` or `super::` path) through the
@@ -912,8 +932,7 @@ fn resolve_path(token: &str, module: &str, table: &AliasTable) -> Result<String,
         }
         current = next;
     }
-    check_reachable(&current, table)?;
-    Ok(current)
+    check_reachable(&current, table)
 }
 
 /// Rewrites every `crate::`, `self::` and `super::` path in `text` to its
@@ -952,8 +971,9 @@ fn resolve_crate_paths(
     Ok(out)
 }
 
-/// Fail-closed for the scanned file itself: a glob import must name a crate
-/// module, since the names it brings in can only be resolved through one.
+/// Policy: an ephemeral module may not glob-import (`use …::*`, `pub use …::*`).
+/// Every name it uses is then named explicitly, so no name can arrive from a
+/// glob the guard has not expanded.
 fn check_ephemeral_globs(
     text: &str,
     label: &str,
@@ -965,18 +985,11 @@ fn check_ephemeral_globs(
         let module = module_at(file_module, &spans, at);
         let mut raw = Vec::new();
         expand_use_tree("", body, &mut raw);
-        for (full, alias) in raw {
-            if alias != "*" {
-                continue;
-            }
-            let base = full.strip_suffix("::*").unwrap_or(&full);
+        if let Some((full, _)) = raw.iter().find(|(_, alias)| alias == "*") {
+            let base = full.strip_suffix("::*").unwrap_or(full);
             let target = normalise_target(&module, base, &table.modules)
                 .map_err(|reason| format!("unresolved path {full} in {label}: {reason}"))?;
-            if !table.modules.contains(&target) {
-                return Err(format!(
-                    "unresolved path {full} in {label}: glob import of a non-crate module"
-                ));
-            }
+            return Err(format!("glob import {target} not allowed in ephemeral module {label}"));
         }
     }
     Ok(())
@@ -1316,10 +1329,33 @@ fn glob_import_of_non_crate_module_fails_closed() -> TestResult {
     let Err(err) = detect(src) else {
         return Err("a glob of a non-crate module must fail the guard".into());
     };
-    assert_eq!(
-        err,
-        "unresolved path std::fs::* in src/ephemeral.rs: glob import of a non-crate module"
-    );
+    assert_eq!(err, "glob import std::fs not allowed in ephemeral module src/ephemeral.rs");
+    Ok(())
+}
+
+/// Policy (r4 reviewer fixture): an ephemeral module may not glob-import, so
+/// `use crate::io::*;` where `io` re-exports `std::fs::*` is refused at the import.
+#[test]
+fn ephemeral_glob_through_external_reexport_is_refused() -> TestResult {
+    let table = build_alias_table(&[(
+        "crate",
+        "pub mod io {\n    pub use std::fs::*;\n}\npub mod ephemeral;\n",
+    )])?;
+    let src = "use crate::io::*;\npub fn sink() { let _ = write(\"x\", b\"x\"); }\n";
+    let Err(err) = detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table) else {
+        return Err("an ephemeral glob import must fail the guard".into());
+    };
+    assert_eq!(err, "glob import crate::io not allowed in ephemeral module src/ephemeral.rs");
+    Ok(())
+}
+
+/// An explicit path through an external glob is detected as the external path
+/// it names, `std::fs::write`.
+#[test]
+fn explicit_path_through_external_glob_is_detected() -> TestResult {
+    let table = build_alias_table(&[("crate", "pub mod io {\n    pub use std::fs::*;\n}\n")])?;
+    let src = "use crate::io::write;\npub fn sink() { let _ = write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?, vec!["std::fs"]);
     Ok(())
 }
 
