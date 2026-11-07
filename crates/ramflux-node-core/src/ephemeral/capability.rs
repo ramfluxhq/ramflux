@@ -11,6 +11,28 @@ use std::sync::{Arc, Mutex};
 
 /// Inclusive bound for the capability map and for `established_in_boot`.
 pub const EPHEMERAL_CAPABILITY_BOUND: usize = 262_144;
+/// Inclusive maximum number of items in one re-assertion request.
+pub const EPHEMERAL_REASSERTION_ITEM_BOUND: usize = 1_024;
+
+/// Whole-request refusals for `POST /mvp0/ephemeral-registrations`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum EphemeralReassertionError {
+    /// `router_boot_id` does not match this process.
+    #[error("boot_mismatch")]
+    BootMismatch,
+    /// `items` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`].
+    #[error("too_many_items")]
+    TooManyItems,
+}
+
+pub(crate) fn new_router_boot_id() -> String {
+    crate::router_store::incarnation::new_id().unwrap_or_else(|_| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("{now:032x}")
+    })
+}
 
 static MAP_FULL_TOTAL: AtomicU64 = AtomicU64::new(0);
 
@@ -111,6 +133,61 @@ impl crate::RouterCore {
                 "ephemeral capability map full; flag not recorded"
             );
         }
+    }
+
+    /// Process-local boot identifier advertised on the capabilities reply.
+    #[must_use]
+    pub fn router_boot_id(&self) -> &str {
+        &self.router_boot_id
+    }
+
+    /// Restore map entries after a restart. Retries are idempotent.
+    ///
+    /// # Errors
+    /// Returns [`EphemeralReassertionError::BootMismatch`] when `boot_id` does not
+    /// match this process, or [`EphemeralReassertionError::TooManyItems`] when
+    /// `items.len()` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`].
+    pub fn reassert_ephemeral_registrations(
+        &self,
+        boot_id: &str,
+        items: &[crate::EphemeralRegistrationItem],
+    ) -> Result<usize, EphemeralReassertionError> {
+        if boot_id != self.router_boot_id {
+            return Err(EphemeralReassertionError::BootMismatch);
+        }
+        if items.len() > EPHEMERAL_REASSERTION_ITEM_BOUND {
+            return Err(EphemeralReassertionError::TooManyItems);
+        }
+        let mut applied: usize = 0;
+        for item in items {
+            if self.reassert_item(&item.target, &item.session_id) {
+                applied = applied.saturating_add(1);
+            }
+        }
+        Ok(applied)
+    }
+
+    fn reassert_item(&self, target: &str, session_id: &str) -> bool {
+        if target.is_empty() || session_id.is_empty() {
+            return false;
+        }
+        let descriptor = self.session(target);
+        let mut state = lock_unpoisoned(&self.ephemeral_capability);
+        if state.established_in_boot.len() >= EPHEMERAL_CAPABILITY_BOUND
+            || state.established_in_boot.contains(target)
+        {
+            return false;
+        }
+        let Some(descriptor) = descriptor else {
+            return false;
+        };
+        if descriptor.lifecycle != SessionLifecycle::Live || descriptor.session_id != session_id {
+            return false;
+        }
+        state.bind(target, &descriptor.gateway_id, &descriptor.session_id);
+        state.map.get(target).is_some_and(|entry| {
+            entry.0 == descriptor.gateway_id && entry.1 == descriptor.session_id
+        })
     }
 
     /// C1: capability-gated route for `T`. Lazily drops a stale map entry.
