@@ -47,6 +47,33 @@ fn known_account(root: &Path, vault: &TestVault) -> TestResult<(BornAccount, Zer
     )?;
     Ok((account, phrase.display_words()))
 }
+fn declaration_publication(
+    root: &Path,
+    account: &BornAccount,
+    vault: &TestVault,
+    issued_at: u64,
+) -> TestResult<ramflux_protocol::custody::Publication> {
+    let device_id = account.local_device_id()?.to_owned();
+    let (_, branch) = account.credentials(vault, &device_id, issued_at)?;
+    let primary = account.group_primary(vault)?;
+    let publication = account.candidate_message_layer_publication(
+        root,
+        &branch,
+        &primary,
+        ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+        crate::custody::DeclarationValidity { issued_at, expires_at: issued_at + 120 },
+    )?;
+    crate::custody::accept_publication(
+        root,
+        account.local_account_id(),
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: publication.clone(),
+            custodian_publication: None,
+        },
+        issued_at,
+    )?;
+    Ok(publication)
+}
 fn master_seed() -> TestResult<Zeroizing<Vec<u8>>> {
     let vector: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -228,5 +255,119 @@ fn custody_recovery_journal_allows_connection_metadata_but_rejects_credential_ch
     account.mark_live(&root.0)?;
     finish_recovery(&root.0, "recoverable", &vault, now)?;
     assert!(journal(&root.0, "recoverable")?.is_none());
+    Ok(())
+}
+
+#[test]
+fn declaration_bearing_backup_restore_refuses_history_and_accepts_forward_refresh() -> TestResult {
+    let source = Root::new()?;
+    let source_vault = TestVault::default();
+    let (source_account, _) = known_account(&source.0, &source_vault)?;
+    let original = source_account.publication();
+    let issued_at = crate::custody::network_now()? + 1;
+    let backed_up = declaration_publication(&source.0, &source_account, &source_vault, issued_at)?;
+    assert_eq!(
+        backed_up.record.body.devices[0]
+            .message_layer
+            .as_ref()
+            .ok_or("backup declaration")?
+            .declaration
+            .declaration_sequence,
+        1
+    );
+
+    // Import the declaration-bearing backup through the same pending-restore path used by
+    // account.restore.install, not by replaying a peer observation.
+    let restored_root = Root::new()?;
+    let restored_vault = TestVault::default();
+    let authority = ramflux_protocol::custody::CustodyAuthority {
+        publication: backed_up.clone(),
+        custodian_publication: None,
+    };
+    let restored = pending_restore(
+        &restored_root.0,
+        "restored",
+        &authority,
+        &restored_vault,
+        b"restore data secret",
+        issued_at,
+    )?;
+    let device_key = ramflux_protocol::qualified_device_id(
+        &backed_up.record.body.account_anchor,
+        &backed_up.record.body.devices[0].device_id,
+    )?;
+    assert_eq!(restored.stored.message_layer_sequences.get(&device_key), Some(&1));
+    assert_eq!(restored.record(), &backed_up.record);
+
+    let authority_path = directory(&restored_root.0, "restored")?.join("authority.json");
+    let before_rollback = fs::read(&authority_path)?;
+    assert!(
+        crate::custody::accept_publication(
+            &restored_root.0,
+            "restored",
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: original,
+                custodian_publication: None,
+            },
+            issued_at + 1,
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(&authority_path)?, before_rollback);
+
+    let primary = source_vault.primary_for_public_key(
+        &backed_up.record.body.master_certificate.body.self_signing_public_key,
+    )?;
+    let mut body = backed_up.record.body.clone();
+    body.previous_record_hash = Some(ramflux_protocol::custody::object_hash(&backed_up.record)?);
+    let (range, revision) = ramflux_protocol::custody::decode_epoch(body.device_set_epoch)?;
+    body.device_set_epoch = ramflux_protocol::custody::encode_epoch(
+        range,
+        revision.checked_add(1).ok_or("native revision overflow")?,
+    )?;
+    body.issued_at = issued_at + 2;
+    let refreshed = ramflux_protocol::custody::Publication {
+        record: primary.sign_record(body)?,
+        compacted_ids: None,
+    };
+    assert_eq!(
+        crate::custody::accept_publication(
+            &restored_root.0,
+            "restored",
+            &ramflux_protocol::custody::CustodyAuthority {
+                publication: refreshed.clone(),
+                custodian_publication: None,
+            },
+            issued_at + 2,
+        )?,
+        ramflux_crypto::custody::PinOutcome::Advanced
+    );
+    let refreshed_account = load_data_account(&restored_root.0, "restored", issued_at + 2)?;
+    assert_eq!(refreshed_account.record(), &refreshed.record);
+    assert_eq!(refreshed_account.stored.message_layer_sequences.get(&device_key), Some(&1));
+    assert!(refreshed_account.stored.pins.require_current(refreshed_account.verified()).is_ok());
+    Ok(())
+}
+
+#[test]
+fn declaration_sequence_high_water_survives_phrase_recovery() -> TestResult {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let (account, phrase) = known_account(&root.0, &vault)?;
+    let issued_at = crate::custody::network_now()? + 1;
+    declaration_publication(&root.0, &account, &vault, issued_at)?;
+    let key = ramflux_protocol::qualified_device_id(
+        &account.record().body.account_anchor,
+        account.local_device_id()?,
+    )?;
+    let prior = load_data_account(&root.0, "recoverable", issued_at)?;
+    assert_eq!(prior.stored.message_layer_sequences.get(&key), Some(&1));
+
+    let recovery = RecoveryCeremony::begin(&root.0, "recoverable", issued_at)?;
+    let anchor = recovery.account_anchor().to_owned();
+    let recovered = recovery.confirm(&phrase, &anchor, &vault, issued_at)?;
+    assert_eq!(recovered.stored.message_layer_sequences.get(&key), Some(&1));
+    let reopened = load_data_account(&root.0, "recoverable", issued_at)?;
+    assert_eq!(reopened.stored.message_layer_sequences.get(&key), Some(&1));
     Ok(())
 }

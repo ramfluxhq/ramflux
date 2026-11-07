@@ -145,10 +145,17 @@ impl NodePins {
         now: u64,
     ) -> Result<(), SdkError> {
         let verified = verify_authority(publication, custodian, now)?;
-        if let Some(human) = custodian {
-            let human = verify_authority(human, None, now)?;
-            self.observe_authority(&human)?;
-        }
+        // Verified native forks are security evidence in their own right. Attempt to persist both
+        // native fences before checking device authorization or accompanying bundle material,
+        // all of which may independently reject this publication.
+        let authority_result = self.observe_authority(&verified);
+        let custodian_result = custodian
+            .map(|human| {
+                verify_authority(human, None, now).and_then(|human| self.observe_authority(&human))
+            })
+            .transpose();
+        authority_result?;
+        custodian_result?;
         let cert = verified.authorize(device, "message", now)?;
         let bytes = ramflux_protocol::canonical_json_bytes(bundle)?;
         let bundle: ramflux_crypto::PrekeyBundle =
@@ -167,7 +174,6 @@ impl NodePins {
             &ramflux_crypto::verifying_key_from_base64url(&cert.branch_signing_public_key)?,
             &bundle,
         )?;
-        self.observe_authority(&verified)?;
         Ok(())
     }
 }
@@ -456,6 +462,87 @@ mod tests {
             Err(SdkError::CustodyForkFenced)
         ));
         assert_eq!(fs::read(&path)?, fenced_bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verified_peer_fork_is_fenced_before_each_material_rejection() -> TestResult {
+        let fixture = Fixture::new("layer-pin-fork-before-material").await?;
+        let now = crate::custody::network_now()?;
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        let account = load_account(&fixture.root.0, &id, now)?;
+        let native = fixture.manifest.custody.as_ref().ok_or("native manifest")?;
+        let device = native.devices[0].device_ref.clone();
+        let bundle = native.devices[0].prekey_bundle.clone();
+        let primary = fixture.vault.primary_for_public_key(
+            &account.record().body.master_certificate.body.self_signing_public_key,
+        )?;
+        let (_, branch) = account.credentials(fixture.vault.as_ref(), &device.device_id, now)?;
+        let issued_at = now + 10;
+        let declaration =
+            signed_declaration(&branch, device.clone(), 2, issued_at, issued_at + 120)?;
+        let accepted = successor(&native.publication, &primary, Some(declaration), issued_at)?;
+
+        for cause in
+            ["bad-prekey-signature", "bad-bundle", "unauthorized-device", "bad-declaration"]
+        {
+            let pins = NodePins::new(&fixture.root.0, &format!("fork-{cause}"), "unused")?;
+            pins.observe_peer(&accepted, &device, &bundle, None, issued_at)?;
+            let path = peer_path(&pins, &device.account_anchor);
+
+            let mut fork_body = accepted.record.body.clone();
+            fork_body.profile.display_name.push_str(cause);
+            if cause == "bad-declaration" {
+                fork_body.devices[0].message_layer = Some(signed_declaration(
+                    &branch,
+                    device.clone(),
+                    1,
+                    issued_at,
+                    issued_at + 120,
+                )?);
+            }
+            let fork = Publication { record: primary.sign_record(fork_body)?, compacted_ids: None };
+            let mut rejected_device = device.clone();
+            let mut rejected_bundle = bundle.clone();
+            match cause {
+                "bad-prekey-signature" => {
+                    rejected_bundle["signature_by_device_identity"] =
+                        serde_json::json!(ramflux_protocol::encode_base64url([0; 64]));
+                }
+                "bad-bundle" => rejected_bundle = serde_json::json!({"unexpected": true}),
+                "unauthorized-device" => rejected_device.device_id.push_str("-unauthorized"),
+                "bad-declaration" => {}
+                _ => unreachable!(),
+            }
+
+            assert!(
+                matches!(
+                    pins.observe_peer(
+                        &fork,
+                        &rejected_device,
+                        &rejected_bundle,
+                        None,
+                        issued_at + 1
+                    ),
+                    Err(SdkError::CustodyForkFenced)
+                ),
+                "verified fork was not fenced before {cause} could return"
+            );
+            let durable: PeerPins = read(&path, 8 * 1024 * 1024)?;
+            let range = decode_epoch(accepted.record.body.device_set_epoch)?.0;
+            assert!(durable.pins.conflict_evidence(&device.account_anchor, range).is_some());
+            let fenced_bytes = fs::read(&path)?;
+
+            let reopened = NodePins::new(&fixture.root.0, &format!("fork-{cause}"), "unused")?;
+            assert!(
+                matches!(
+                    reopened.observe_peer(&accepted, &device, &bundle, None, issued_at + 1),
+                    Err(SdkError::CustodyForkFenced)
+                ),
+                "replay after {cause} did not retain the durable fence"
+            );
+            assert_eq!(fs::read(&path)?, fenced_bytes);
+        }
         Ok(())
     }
 }
