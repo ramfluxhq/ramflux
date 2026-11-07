@@ -172,7 +172,7 @@ async fn establish(
     let cursor = fixture.next().await?;
     anyhow::ensure!(cursor.path == "/mvp0/cursor/target", "{}", cursor.path);
     cursor.respond.send((200, Value::Null)).map_err(|_| anyhow::anyhow!("router gone"))?;
-    Ok(guard_10s("establish", task).await??)
+    guard_10s("establish", task).await?
 }
 
 async fn admit_n(
@@ -185,7 +185,11 @@ async fn admit_n(
     let mut enqueue = EnqueueRecorder::default();
     let mut frames = Vec::new();
     for n in 0..count {
-        let envelope = mutated(|e| e.envelope_id = format!("resume-{}", first_id + n));
+        let envelope = mutated(|e| {
+            e.envelope_id = format!("resume-{}", first_id + n);
+            // Created at the controlled instant so admission sees a live five-second lifetime.
+            e.created_at = i64::try_from(at_ms / 1_000).unwrap_or(i64::MAX);
+        });
         frames.push(admit_ok(&envelope, at_ms, &runtime.ephemeral_rate, route, &mut enqueue).await);
     }
     Ok(frames)
