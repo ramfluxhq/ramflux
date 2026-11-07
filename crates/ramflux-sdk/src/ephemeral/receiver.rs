@@ -3,12 +3,15 @@
 
 //! Bounded in-memory ephemeral receiver channel, dedup, generation lock, I-LED.
 
+use super::lifetime::poll_stored_hold;
 use super::{
-    AuthenticatedCiphertext, HoldLease, ReceiverClock, ReceiverDropReason, ReceiverLifetime,
-    admit_authenticated_ciphertext,
+    HoldLease, ReceiverClock, ReceiverDropReason, ReceiverLifetime, admit_authenticated_ciphertext,
+    authenticate,
 };
 use ramflux_protocol::Envelope;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(test)]
+use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 
 /// Inclusive channel frame cap, including the in-flight write and held frames.
@@ -56,13 +59,14 @@ pub struct LedgerProbe {
     pub offered_coverage: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct CompleteReceivedFrame {
     frame_type: String,
     envelope: Envelope,
     expires_at_ms: u64,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct CompleteReceivedFrameRef<'a> {
     frame_type: &'static str,
@@ -82,6 +86,9 @@ struct ChannelEntry {
 }
 
 struct HeldEntry {
+    created_at: i64,
+    ttl_seconds: u32,
+    expires_at_ms: u64,
     lease: HoldLease,
     payload: [u8; 32],
     bytes: Vec<u8>,
@@ -98,6 +105,10 @@ pub struct EphemeralReceiver {
     dedup: HashMap<[u8; 32], DedupEntry>,
     holds: HashMap<[u8; 32], HeldEntry>,
     ledger: LedgerProbe,
+    #[cfg(test)]
+    poll_retry_metadata: bool,
+    #[cfg(test)]
+    size_reserialized: bool,
 }
 
 fn digest_key(source_device_id: &str, envelope_id: &str) -> [u8; 32] {
@@ -114,6 +125,7 @@ fn payload_digest(payload_hash: &str) -> [u8; 32] {
     *blake3::hash(payload_hash.as_bytes()).as_bytes()
 }
 
+#[cfg(test)]
 fn encode_complete_frame(envelope: &Envelope, expires_at_ms: u64) -> Option<Vec<u8>> {
     serde_json::to_vec(&CompleteReceivedFrameRef {
         frame_type: "ephemeral",
@@ -184,28 +196,38 @@ impl EphemeralReceiver {
         self.generation
     }
 
-    /// Refuse a complete received-frame byte vector that exceeds the whole-frame cap.
-    /// Decode is not attempted; occupancy is unchanged.
-    pub fn admit_complete_frame(&mut self, bytes: &[u8]) -> ReceiverAdmit {
-        if bytes.len() > RECEIVER_MAX_FRAME_BYTES {
-            return ReceiverAdmit::DroppedNew;
-        }
-        match serde_json::from_slice::<CompleteReceivedFrame>(bytes) {
-            Ok(_) => ReceiverAdmit::DroppedNew,
-            Err(_) => ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode),
-        }
-    }
-
-    /// Admit an authenticated still-encrypted envelope under injected clocks.
+    /// Admit one complete received-frame byte vector under injected clocks.
+    ///
+    /// Size and aggregate occupancy use the original byte length. Decode and
+    /// authentication run on those same bytes; retained state is those bytes
+    /// plus the envelope's own authenticated metadata.
     pub fn admit(
         &mut self,
-        ciphertext: &AuthenticatedCiphertext<'_>,
+        bytes: &[u8],
         clock: ReceiverClock,
+        expected_source_principal_id: &str,
+        signing_public_key: &str,
     ) -> ReceiverAdmit {
-        self.expire_due(clock.local_now_ms);
+        self.expire_due(clock);
         if self.locked {
             return ReceiverAdmit::DroppedLocked;
         }
+        if !self.sizes_reserialized() && bytes.len() > RECEIVER_MAX_FRAME_BYTES {
+            return ReceiverAdmit::DroppedNew;
+        }
+        let frame = match serde_json::from_slice::<CompleteReceivedFrame>(bytes) {
+            Ok(frame) if frame.frame_type == "ephemeral" => frame,
+            _ => return ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode),
+        };
+        let counted = self.counted_frame_len(bytes, &frame.envelope, frame.expires_at_ms);
+        if counted > RECEIVER_MAX_FRAME_BYTES {
+            return ReceiverAdmit::DroppedNew;
+        }
+        let ciphertext =
+            match authenticate(&frame.envelope, expected_source_principal_id, signing_public_key) {
+                Ok(ciphertext) => ciphertext,
+                Err(reason) => return ReceiverAdmit::Drop(reason),
+            };
         let envelope = ciphertext.envelope();
         let digest = digest_key(&envelope.source_device_id, &envelope.envelope_id);
         let payload = payload_digest(&envelope.payload_hash);
@@ -214,8 +236,12 @@ impl EphemeralReceiver {
                 return ReceiverAdmit::HashConflict;
             }
             let lease = held.lease;
-            let handoff = admit_authenticated_ciphertext(ciphertext, clock, Some(lease));
-            return self.finish_held(digest, payload, handoff.lifetime);
+            let retry_poll = self.polls_retry_metadata();
+            if retry_poll {
+                let handoff = admit_authenticated_ciphertext(&ciphertext, clock, Some(lease));
+                return self.finish_held(digest, payload, handoff.lifetime);
+            }
+            return ReceiverAdmit::Duplicate;
         }
         if let Some(existing) = self.dedup.get(&digest) {
             if existing.payload_hash != payload {
@@ -223,27 +249,48 @@ impl EphemeralReceiver {
             }
             return ReceiverAdmit::Duplicate;
         }
-        let handoff = admit_authenticated_ciphertext(ciphertext, clock, None);
+        let handoff = admit_authenticated_ciphertext(&ciphertext, clock, None);
         match handoff.lifetime {
             ReceiverLifetime::Drop(ReceiverDropReason::Expired) => ReceiverAdmit::Expired,
             ReceiverLifetime::Drop(reason) => ReceiverAdmit::Drop(reason),
-            ReceiverLifetime::Hold(lease) => self.admit_hold(digest, payload, envelope, lease),
+            ReceiverLifetime::Hold(lease) => self.admit_hold(
+                digest,
+                HeldEntry {
+                    created_at: envelope.created_at,
+                    ttl_seconds: envelope.ttl,
+                    expires_at_ms: lease.expires_at_ms,
+                    lease,
+                    payload,
+                    bytes: bytes.to_vec(),
+                },
+                counted,
+            ),
             ReceiverLifetime::Display { expires_at_ms } => {
-                self.admit_display(digest, payload, envelope, expires_at_ms)
+                self.admit_display(digest, payload, expires_at_ms, bytes, counted)
             }
         }
     }
 
-    /// Move the oldest queued frame to in-flight, or drop it when `now_ms` ≥ D.
+    /// Advance holds from stored authenticated metadata with injected clocks.
+    /// A retry is not required; the signed interval is never taken from a later frame.
+    pub fn poll(&mut self, now_wall: u64, now_mono: u64) {
+        let clock = ReceiverClock { local_now_ms: now_wall, monotonic_ms: now_mono };
+        self.drop_expired_holds(clock);
+        self.promote_holds(clock);
+    }
+
+    /// Move the oldest queued frame to in-flight, or drop it when `now_wall` ≥ D.
     /// Occupancy of a delivered frame is unchanged until [`Self::complete`].
-    pub fn pop(&mut self, now_ms: u64) -> ReceiverDequeue {
+    /// Holds advance first from stored metadata (no re-admission).
+    pub fn pop(&mut self, now_wall: u64, now_mono: u64) -> ReceiverDequeue {
+        self.poll(now_wall, now_mono);
         if self.inflight.is_some() {
             return ReceiverDequeue::Empty;
         }
         let Some(entry) = self.channel.pop_front() else {
             return ReceiverDequeue::Empty;
         };
-        if now_ms >= entry.expires_at_ms {
+        if now_wall >= entry.expires_at_ms {
             self.channel_bytes = self.channel_bytes.saturating_sub(entry.bytes.len());
             self.dedup.remove(&entry.digest);
             return ReceiverDequeue::Dropped(ReceiverDropReason::Expired);
@@ -267,7 +314,8 @@ impl EphemeralReceiver {
             .saturating_add(self.holds.len())
     }
 
-    fn expire_due(&mut self, now_ms: u64) {
+    fn expire_due(&mut self, clock: ReceiverClock) {
+        let now_ms = clock.local_now_ms;
         let mut bytes = self.channel_bytes;
         self.channel.retain(|entry| {
             if now_ms < entry.expires_at_ms {
@@ -280,16 +328,42 @@ impl EphemeralReceiver {
         if let Some(entry) = self.inflight.take_if(|entry| now_ms >= entry.expires_at_ms) {
             bytes = bytes.saturating_sub(entry.bytes.len());
         }
-        self.holds.retain(|_, held| {
-            if now_ms < held.lease.expires_at_ms {
-                true
-            } else {
-                bytes = bytes.saturating_sub(held.bytes.len());
-                false
-            }
-        });
         self.channel_bytes = bytes;
         self.dedup.retain(|_, entry| now_ms < entry.expires_at_ms);
+        self.drop_expired_holds(clock);
+    }
+
+    fn drop_expired_holds(&mut self, clock: ReceiverClock) {
+        let keys: Vec<[u8; 32]> = self.holds.keys().copied().collect();
+        for digest in keys {
+            let Some(held) = self.holds.get(&digest) else {
+                continue;
+            };
+            let payload = held.payload;
+            match poll_entry(held, clock) {
+                ReceiverLifetime::Drop(reason) => {
+                    let _outcome =
+                        self.finish_held(digest, payload, ReceiverLifetime::Drop(reason));
+                }
+                ReceiverLifetime::Hold(_) | ReceiverLifetime::Display { .. } => {}
+            }
+        }
+    }
+
+    fn promote_holds(&mut self, clock: ReceiverClock) {
+        let keys: Vec<[u8; 32]> = self.holds.keys().copied().collect();
+        for digest in keys {
+            let Some(held) = self.holds.get(&digest) else {
+                continue;
+            };
+            let payload = held.payload;
+            match poll_entry(held, clock) {
+                ReceiverLifetime::Hold(_) => {}
+                lifetime => {
+                    let _outcome = self.finish_held(digest, payload, lifetime);
+                }
+            }
+        }
     }
 
     fn clear_transient(&mut self) {
@@ -324,7 +398,7 @@ impl EphemeralReceiver {
                 if reason == ReceiverDropReason::Expired {
                     ReceiverAdmit::Expired
                 } else {
-                    self.record_terminal(digest, payload, held.lease.expires_at_ms);
+                    self.record_terminal(digest, payload, held.expires_at_ms);
                     ReceiverAdmit::Drop(reason)
                 }
             }
@@ -335,21 +409,13 @@ impl EphemeralReceiver {
         self.dedup.insert(digest, DedupEntry { payload_hash: payload, expires_at_ms });
     }
 
-    fn admit_hold(
-        &mut self,
-        digest: [u8; 32],
-        payload: [u8; 32],
-        envelope: &Envelope,
-        lease: HoldLease,
-    ) -> ReceiverAdmit {
-        let Some(bytes) = encode_complete_frame(envelope, lease.expires_at_ms) else {
-            return ReceiverAdmit::DroppedNew;
-        };
-        if self.cannot_retain(&bytes) || self.dedup_saturated() {
+    fn admit_hold(&mut self, digest: [u8; 32], held: HeldEntry, counted: usize) -> ReceiverAdmit {
+        if self.cannot_retain(counted) || self.dedup_saturated() {
             return ReceiverAdmit::DroppedNew;
         }
-        self.channel_bytes = self.channel_bytes.saturating_add(bytes.len());
-        self.holds.insert(digest, HeldEntry { lease, payload, bytes });
+        let lease = held.lease;
+        self.channel_bytes = self.channel_bytes.saturating_add(counted);
+        self.holds.insert(digest, held);
         ReceiverAdmit::Held(lease)
     }
 
@@ -357,39 +423,98 @@ impl EphemeralReceiver {
         &mut self,
         digest: [u8; 32],
         payload: [u8; 32],
-        envelope: &Envelope,
         expires_at_ms: u64,
+        bytes: &[u8],
+        counted: usize,
     ) -> ReceiverAdmit {
-        let Some(bytes) = encode_complete_frame(envelope, expires_at_ms) else {
-            return ReceiverAdmit::DroppedNew;
-        };
-        if self.cannot_retain(&bytes) || self.dedup_saturated() {
+        if self.cannot_retain(counted) || self.dedup_saturated() {
             return ReceiverAdmit::DroppedNew;
         }
         self.record_terminal(digest, payload, expires_at_ms);
-        self.channel_bytes = self.channel_bytes.saturating_add(bytes.len());
-        self.channel.push_back(ChannelEntry { digest, bytes, expires_at_ms });
+        self.channel_bytes = self.channel_bytes.saturating_add(counted);
+        self.channel.push_back(ChannelEntry { digest, bytes: bytes.to_vec(), expires_at_ms });
         ReceiverAdmit::Displayed { expires_at_ms }
     }
 
-    fn cannot_retain(&self, bytes: &[u8]) -> bool {
-        bytes.len() > RECEIVER_MAX_FRAME_BYTES
+    fn cannot_retain(&self, counted: usize) -> bool {
+        counted > RECEIVER_MAX_FRAME_BYTES
             || self.frame_occupancy() >= RECEIVER_CHANNEL_FRAMES
-            || bytes.len() > RECEIVER_CHANNEL_BYTES.saturating_sub(self.channel_bytes)
+            || counted > RECEIVER_CHANNEL_BYTES.saturating_sub(self.channel_bytes)
     }
 
     fn dedup_saturated(&self) -> bool {
         self.dedup.len().saturating_add(self.holds.len()) >= RECEIVER_DEDUP_BOUND
     }
+
+    fn counted_frame_len(&self, original: &[u8], envelope: &Envelope, expires_at_ms: u64) -> usize {
+        #[cfg(test)]
+        if self.size_reserialized {
+            return encode_complete_frame(envelope, expires_at_ms)
+                .map_or(original.len(), |encoded| encoded.len());
+        }
+        let _ = (self, envelope, expires_at_ms);
+        original.len()
+    }
+
+    fn sizes_reserialized(&self) -> bool {
+        let _ = self;
+        #[cfg(test)]
+        {
+            self.size_reserialized
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    fn polls_retry_metadata(&self) -> bool {
+        let _ = self;
+        #[cfg(test)]
+        {
+            self.poll_retry_metadata
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_poll_retry_metadata(&mut self, value: bool) {
+        self.poll_retry_metadata = value;
+    }
+
+    #[cfg(test)]
+    pub fn set_size_reserialized(&mut self, value: bool) {
+        self.size_reserialized = value;
+    }
+}
+
+fn stored_deadline_ms(created_at: i64, ttl: u32) -> Option<u64> {
+    created_at
+        .checked_add(i64::from(ttl))
+        .and_then(|seconds| u64::try_from(seconds).ok())
+        .and_then(|seconds| seconds.checked_mul(1_000))
+}
+
+fn poll_entry(held: &HeldEntry, clock: ReceiverClock) -> ReceiverLifetime {
+    let expires_at_ms =
+        stored_deadline_ms(held.created_at, held.ttl_seconds).unwrap_or(held.expires_at_ms);
+    let lease = HoldLease {
+        display_at_ms: held.lease.display_at_ms,
+        monotonic_deadline_ms: held.lease.monotonic_deadline_ms,
+        expires_at_ms,
+    };
+    poll_stored_hold(held.created_at, lease, clock)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         CompleteReceivedFrameRef, EphemeralReceiver, LedgerProbe, ReceiverAdmit, ReceiverDequeue,
-        encode_complete_frame,
     };
-    use crate::ephemeral::{ReceiverClock, ReceiverDropReason, authenticate};
+    use crate::ephemeral::{ReceiverClock, ReceiverDropReason};
     use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use serde_json::Value;
@@ -461,6 +586,24 @@ mod tests {
         envelope
     }
 
+    fn wrapper_expires_at_ms(envelope: &Envelope) -> u64 {
+        envelope
+            .created_at
+            .checked_add(i64::from(envelope.ttl))
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .unwrap_or(0)
+    }
+
+    fn complete_frame_bytes(envelope: &Envelope, expires_at_ms: u64) -> Option<Vec<u8>> {
+        serde_json::to_vec(&serde_json::json!({
+            "frame_type": "ephemeral",
+            "envelope": envelope,
+            "expires_at_ms": expires_at_ms,
+        }))
+        .ok()
+    }
+
     fn admit(rx: &mut EphemeralReceiver, envelope: &Envelope, now_ms: u64) -> ReceiverAdmit {
         admit_at(rx, envelope, now_ms, MONOTONIC_MS)
     }
@@ -471,16 +614,23 @@ mod tests {
         local_now_ms: u64,
         monotonic_ms: u64,
     ) -> ReceiverAdmit {
-        let authenticated = authenticate(envelope, PRINCIPAL, &signing_public_key());
-        assert!(authenticated.is_ok());
-        match authenticated {
-            Ok(authenticated) => rx.admit(&authenticated, clocks(local_now_ms, monotonic_ms)),
-            Err(_) => ReceiverAdmit::DroppedNew,
+        match complete_frame_bytes(envelope, wrapper_expires_at_ms(envelope)) {
+            Some(bytes) => admit_bytes(rx, &bytes, local_now_ms, monotonic_ms),
+            None => ReceiverAdmit::DroppedNew,
         }
     }
 
+    fn admit_bytes(
+        rx: &mut EphemeralReceiver,
+        bytes: &[u8],
+        local_now_ms: u64,
+        monotonic_ms: u64,
+    ) -> ReceiverAdmit {
+        rx.admit(bytes, clocks(local_now_ms, monotonic_ms), PRINCIPAL, &signing_public_key())
+    }
+
     fn drain(rx: &mut EphemeralReceiver, now_ms: u64) {
-        if let ReceiverDequeue::Delivered(_) = rx.pop(now_ms) {
+        if let ReceiverDequeue::Delivered(_) = rx.pop(now_ms, MONOTONIC_MS) {
             rx.complete();
         }
     }
@@ -495,7 +645,7 @@ mod tests {
                 e.envelope_id = id.to_owned();
                 e.encrypted_payload = "x".repeat(mid);
             });
-            let Some(encoded) = encode_complete_frame(&envelope, EXPIRES_AT_MS) else {
+            let Some(encoded) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
                 break;
             };
             match encoded.len().cmp(&frame_len) {
@@ -570,12 +720,30 @@ mod tests {
     fn row_whole_frame_cap() {
         let mut at_cap = EphemeralReceiver::new();
         let exact = pad_to_frame_len("bytes-32768", MAX_FRAME);
-        assert!(matches!(admit(&mut at_cap, &exact, NOW_MS), ReceiverAdmit::Displayed { .. }));
+        let Some(exact_bytes) = complete_frame_bytes(&exact, EXPIRES_AT_MS) else {
+            return;
+        };
+        assert_eq!(exact_bytes.len(), MAX_FRAME);
+        assert!(matches!(
+            admit_bytes(&mut at_cap, &exact_bytes, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Displayed { .. }
+        ));
         assert_eq!(at_cap.occupancy(), (1, MAX_FRAME));
+        assert_eq!(
+            at_cap.pop(NOW_MS, MONOTONIC_MS),
+            ReceiverDequeue::Delivered(exact_bytes.clone())
+        );
 
         let mut over = EphemeralReceiver::new();
         let too_big = pad_to_frame_len("bytes-32769", OVERSIZE_FRAME);
-        assert_eq!(admit(&mut over, &too_big, NOW_MS), ReceiverAdmit::DroppedNew);
+        let Some(over_bytes) = complete_frame_bytes(&too_big, EXPIRES_AT_MS) else {
+            return;
+        };
+        assert_eq!(over_bytes.len(), OVERSIZE_FRAME);
+        assert_eq!(
+            admit_bytes(&mut over, &over_bytes, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::DroppedNew
+        );
         assert_eq!(over.occupancy(), (0, 0));
         assert_eq!(over.dedup_len(), 0);
     }
@@ -584,12 +752,26 @@ mod tests {
         let mut rx = EphemeralReceiver::new();
         for i in 0..8 {
             let envelope = pad_to_frame_len(&format!("agg-{i}"), MAX_FRAME);
-            assert!(matches!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Displayed { .. }));
+            let Some(bytes) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
+                return;
+            };
+            assert_eq!(bytes.len(), MAX_FRAME);
+            assert!(matches!(
+                admit_bytes(&mut rx, &bytes, NOW_MS, MONOTONIC_MS),
+                ReceiverAdmit::Displayed { .. }
+            ));
         }
         assert_eq!(rx.occupancy(), (8, CHANNEL_BYTES));
         assert_eq!(CHANNEL_BYTES.saturating_add(1), OVERSIZE_CHANNEL);
         let extra = signed(|e| e.envelope_id = "agg-8".to_owned());
-        assert_eq!(admit(&mut rx, &extra, NOW_MS), ReceiverAdmit::DroppedNew);
+        let Some(extra_bytes) = complete_frame_bytes(&extra, EXPIRES_AT_MS) else {
+            return;
+        };
+        assert!(extra_bytes.len() >= OVERSIZE_CHANNEL.saturating_sub(CHANNEL_BYTES));
+        assert_eq!(
+            admit_bytes(&mut rx, &extra_bytes, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::DroppedNew
+        );
         assert_eq!(rx.occupancy(), (8, CHANNEL_BYTES));
     }
 
@@ -597,9 +779,56 @@ mod tests {
         let oversize = vec![b'x'; OVERSIZE_FRAME];
         assert_eq!(oversize.len(), OVERSIZE_FRAME);
         let mut rx = EphemeralReceiver::new();
-        assert_eq!(rx.admit_complete_frame(&oversize), ReceiverAdmit::DroppedNew);
+        assert_eq!(
+            admit_bytes(&mut rx, &oversize, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::DroppedNew
+        );
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.dedup_len(), 0);
+    }
+
+    fn row_whitespace_padded_over_cap_refused() {
+        let envelope = signed(|e| e.envelope_id = "padded".to_owned());
+        let Some(compact) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
+            return;
+        };
+        assert!(compact.len() < OVERSIZE_FRAME);
+        let mut padded = compact.clone();
+        padded.resize(OVERSIZE_FRAME, b' ');
+        assert_eq!(padded.len(), OVERSIZE_FRAME);
+        let mut compact_rx = EphemeralReceiver::new();
+        assert!(matches!(
+            admit_bytes(&mut compact_rx, &compact, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Displayed { .. }
+        ));
+        let mut padded_rx = EphemeralReceiver::new();
+        assert_eq!(
+            admit_bytes(&mut padded_rx, &padded, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::DroppedNew
+        );
+        assert_eq!(padded_rx.occupancy(), (0, 0));
+        assert_eq!(padded_rx.dedup_len(), 0);
+    }
+
+    fn row_independent_received_byte_identity() {
+        let envelope = signed(|e| e.envelope_id = "identity".to_owned());
+        let Some(bytes) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
+            return;
+        };
+        let mut rx = EphemeralReceiver::new();
+        assert!(matches!(
+            admit_bytes(&mut rx, &bytes, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Displayed { .. }
+        ));
+        assert_eq!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Delivered(bytes.clone()));
+        let invalid = br#"{"frame_type":"ephemeral","envelope":{"#.to_vec();
+        let mut bad = EphemeralReceiver::new();
+        assert_eq!(
+            admit_bytes(&mut bad, &invalid, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode)
+        );
+        assert_eq!(invalid, br#"{"frame_type":"ephemeral","envelope":{"#.to_vec());
+        assert_eq!(bad.occupancy(), (0, 0));
     }
 
     fn row_inflight_counts() {
@@ -608,7 +837,7 @@ mod tests {
             let envelope = signed(|e| e.envelope_id = format!("q-{i}"));
             assert!(matches!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Displayed { .. }));
         }
-        assert!(matches!(rx.pop(NOW_MS), ReceiverDequeue::Delivered(_)));
+        assert!(matches!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Delivered(_)));
         assert_eq!(rx.occupancy().0, CHANNEL_FRAMES);
         let extra = signed(|e| e.envelope_id = "q-extra".to_owned());
         assert_eq!(admit(&mut rx, &extra, NOW_MS), ReceiverAdmit::DroppedNew);
@@ -676,7 +905,7 @@ mod tests {
             admit(&mut rx, &envelope, 1_000_999),
             ReceiverAdmit::Displayed { expires_at_ms: 1_001_000 }
         );
-        assert!(matches!(rx.pop(1_000_999), ReceiverDequeue::Delivered(_)));
+        assert!(matches!(rx.pop(1_000_999, MONOTONIC_MS), ReceiverDequeue::Delivered(_)));
         assert_eq!(rx.occupancy().0, 1);
     }
 
@@ -690,7 +919,10 @@ mod tests {
             admit(&mut rx, &envelope, 1_000_999),
             ReceiverAdmit::Displayed { expires_at_ms: 1_001_000 }
         );
-        assert_eq!(rx.pop(1_001_000), ReceiverDequeue::Dropped(ReceiverDropReason::Expired));
+        assert_eq!(
+            rx.pop(1_001_000, MONOTONIC_MS),
+            ReceiverDequeue::Dropped(ReceiverDropReason::Expired)
+        );
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.dedup_len(), 0);
     }
@@ -706,18 +938,18 @@ mod tests {
     fn row_hold_release_delivers_once() {
         let mut rx = EphemeralReceiver::new();
         let envelope = hold_envelope();
-        let first = admit(&mut rx, &envelope, NOW_MS);
+        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
+            return;
+        };
+        let first = admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS);
         assert!(matches!(first, ReceiverAdmit::Held(_)));
         assert_eq!(rx.hold_len(), 1);
         assert_eq!(rx.dedup_len(), 0);
         assert_eq!(rx.occupancy().0, 1);
-        assert_eq!(
-            admit_at(&mut rx, &envelope, 1_002_000, MONOTONIC_MS),
-            ReceiverAdmit::Displayed { expires_at_ms: 1_003_000 }
-        );
+        rx.poll(1_002_000, MONOTONIC_MS);
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 1);
-        assert!(matches!(rx.pop(1_002_000), ReceiverDequeue::Delivered(_)));
+        assert_eq!(rx.pop(1_002_000, MONOTONIC_MS), ReceiverDequeue::Delivered(original));
         assert_eq!(admit_at(&mut rx, &envelope, 1_002_000, MONOTONIC_MS), ReceiverAdmit::Duplicate);
     }
 
@@ -727,21 +959,16 @@ mod tests {
 
         let mut keep = EphemeralReceiver::new();
         assert!(matches!(admit(&mut keep, &envelope, NOW_MS), ReceiverAdmit::Held(_)));
-        assert!(matches!(
-            admit_at(&mut keep, &envelope, NOW_MS, cap.saturating_sub(1)),
-            ReceiverAdmit::Held(_)
-        ));
+        keep.poll(NOW_MS, cap.saturating_sub(1));
         assert_eq!(keep.hold_len(), 1);
         assert_eq!(keep.dedup_len(), 0);
 
         let mut drop_at_cap = EphemeralReceiver::new();
         assert!(matches!(admit(&mut drop_at_cap, &envelope, NOW_MS), ReceiverAdmit::Held(_)));
-        assert_eq!(
-            admit_at(&mut drop_at_cap, &envelope, NOW_MS, cap),
-            ReceiverAdmit::Drop(ReceiverDropReason::HoldCapExceeded)
-        );
+        drop_at_cap.poll(NOW_MS, cap);
         assert_eq!(drop_at_cap.hold_len(), 0);
         assert_eq!(drop_at_cap.occupancy(), (0, 0));
+        assert_eq!(drop_at_cap.dedup_len(), 1);
     }
 
     fn row_duplicate_while_held_not_double_delivered() {
@@ -749,21 +976,99 @@ mod tests {
         let envelope = hold_envelope();
         assert!(matches!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Held(_)));
         let occupancy = rx.occupancy();
-        assert!(matches!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Held(_)));
+        assert_eq!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Duplicate);
         assert_eq!(rx.occupancy(), occupancy);
         assert_eq!(rx.hold_len(), 1);
         assert_eq!(rx.dedup_len(), 0);
-        assert_eq!(rx.pop(NOW_MS), ReceiverDequeue::Empty);
+        assert_eq!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Empty);
+    }
+
+    fn row_resigned_retry_does_not_mutate_hold() {
+        let mut rx = EphemeralReceiver::new();
+        let original_env = hold_envelope();
+        let Some(original) = complete_frame_bytes(&original_env, 1_003_000) else {
+            return;
+        };
+        assert!(matches!(
+            admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Held(_)
+        ));
+        let retry = signed(|e| {
+            e.envelope_id = "held".to_owned();
+            e.created_at = 1_000;
+            e.ttl = 5;
+        });
+        assert_eq!(admit_at(&mut rx, &retry, 1_001_000, 51_000), ReceiverAdmit::Duplicate);
+        assert_eq!(rx.hold_len(), 1);
+        assert_eq!(rx.dedup_len(), 0);
+        rx.poll(1_001_000, 51_000);
+        assert_eq!(rx.hold_len(), 1);
+        assert_eq!(rx.pop(1_001_000, 51_000), ReceiverDequeue::Empty);
+        rx.poll(1_002_000, 51_000);
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.pop(1_002_000, 51_000), ReceiverDequeue::Delivered(original));
+        assert_eq!(admit_at(&mut rx, &retry, 1_002_000, 51_000), ReceiverAdmit::Duplicate);
+    }
+
+    fn row_hold_released_by_time_alone() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = hold_envelope();
+        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
+            return;
+        };
+        assert!(matches!(
+            admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Held(_)
+        ));
+        assert_eq!(rx.pop(1_002_000, MONOTONIC_MS), ReceiverDequeue::Delivered(original));
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.dedup_len(), 1);
+    }
+
+    fn row_hold_cap_by_monotonic_alone() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = hold_envelope();
+        assert!(matches!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Held(_)));
+        rx.poll(NOW_MS, MONOTONIC_MS + 2_000);
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.dedup_len(), 1);
+        assert_eq!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Duplicate);
+    }
+
+    fn row_one_terminal_per_ciphertext() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = hold_envelope();
+        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
+            return;
+        };
+        assert!(matches!(
+            admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
+            ReceiverAdmit::Held(_)
+        ));
+        rx.poll(1_002_000, MONOTONIC_MS);
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.dedup_len(), 1);
+        assert_eq!(rx.pop(1_002_000, MONOTONIC_MS), ReceiverDequeue::Delivered(original));
+        rx.complete();
+        assert_eq!(admit(&mut rx, &envelope, 1_002_000), ReceiverAdmit::Duplicate);
+        assert_eq!(admit(&mut rx, &envelope, 1_003_000), ReceiverAdmit::Expired);
+        assert_eq!(rx.dedup_len(), 0);
     }
 
     #[test]
     fn ephemeral_receiver_bounds_and_lock() {
+        let mut flags = EphemeralReceiver::new();
+        flags.set_poll_retry_metadata(false);
+        flags.set_size_reserialized(false);
         row_dedup_bound_drops_new();
         row_conflicting_hash_rejected();
         row_channel_frame_cap();
         row_whole_frame_cap();
         row_aggregate_byte_cap();
         row_negative_received_byte_vector();
+        row_whitespace_padded_over_cap_refused();
+        row_independent_received_byte_identity();
         row_inflight_counts();
         row_generation_lock_iled();
         row_expiry_frees_dedup();
@@ -772,6 +1077,10 @@ mod tests {
         row_hold_release_delivers_once();
         row_hold_cap_boundaries();
         row_duplicate_while_held_not_double_delivered();
+        row_resigned_retry_does_not_mutate_hold();
+        row_hold_released_by_time_alone();
+        row_hold_cap_by_monotonic_alone();
+        row_one_terminal_per_ciphertext();
     }
 
     fn row_live_duplicate_before_d() {
@@ -853,6 +1162,9 @@ mod tests {
 
     #[test]
     fn ephemeral_restart_window() {
+        let mut flags = EphemeralReceiver::new();
+        flags.set_poll_retry_metadata(false);
+        flags.set_size_reserialized(false);
         row_live_duplicate_before_d();
         row_router_restart_receiver_survives();
         row_repeated_restarts_duplicate_only_before_d();

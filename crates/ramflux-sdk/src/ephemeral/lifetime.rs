@@ -253,6 +253,19 @@ fn poll_hold(created_at_ms: i128, clock: ReceiverClock, lease: HoldLease) -> Rec
     ReceiverLifetime::Hold(lease)
 }
 
+/// Poll a held ciphertext from its stored authenticated metadata and injected clocks.
+/// The signed interval is never taken from a later retry.
+pub(crate) fn poll_stored_hold(
+    created_at: i64,
+    lease: HoldLease,
+    clock: ReceiverClock,
+) -> ReceiverLifetime {
+    if clock.local_now_ms >= lease.expires_at_ms {
+        return ReceiverLifetime::Drop(ReceiverDropReason::Expired);
+    }
+    poll_hold(i128::from(created_at) * 1_000, clock, lease)
+}
+
 fn in_signed_display_window(created_at_ms: i128, now_ms: u64, expires_at_ms: u64) -> bool {
     created_at_ms <= i128::from(now_ms) && now_ms < expires_at_ms
 }
