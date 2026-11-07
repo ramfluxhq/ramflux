@@ -55,6 +55,8 @@ struct Plan {
     draft: PairControlDraft,
     request: SendMaterialRequest,
     session: SessionClient,
+    /// The reset the draft belongs to; a refusal applies only while it is still current.
+    submitted: Option<serde_json::Value>,
 }
 fn plan(
     account: &LocalBusAccountState,
@@ -64,7 +66,9 @@ fn plan(
         .map(|draft| {
             let session = account.live_session_client()?;
             let request = account.client.pair_control_material_request(session.config(), &draft)?;
-            Ok(Plan { draft, request, session })
+            let local = account.client.local_device_identity(&session.config().device_id)?;
+            let submitted = account.client.pair_reset_fingerprint(&local, draft.remote())?;
+            Ok(Plan { draft, request, session, submitted })
         })
         .transpose()
 }
@@ -90,6 +94,7 @@ async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
         };
     let config = plan.session.config().clone();
     let (remote, kind) = (plan.draft.remote().clone(), plan.draft.kind());
+    let submitted = plan.submitted.clone();
     let draft = plan.draft;
     let envelope = writer
         .apply(move |account| {
@@ -107,7 +112,13 @@ async fn send(writer: &Writer, mut plan: Plan) -> Result<(), SdkError> {
             return Err(writer
                 .apply(move |account| {
                     let local = account.client.local_device_identity(&config.device_id)?;
-                    account.client.pair_control_refused(&local, &remote, kind, refusal)
+                    account.client.pair_control_refused(
+                        &local,
+                        &remote,
+                        kind,
+                        refusal,
+                        submitted.as_ref(),
+                    )
                 })
                 .await?);
         }

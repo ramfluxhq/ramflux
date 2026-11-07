@@ -16,6 +16,8 @@ pub(super) struct Wire {
     on_accept: Option<AcceptanceHook>,
     /// Answers every submit with a `nack` of exactly this reason (the submit is still recorded).
     nack: Option<String>,
+    /// Holds every submit (after recording it) until the test releases it.
+    hold: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 impl Wire {
     pub(super) fn engine(
@@ -29,20 +31,31 @@ impl Wire {
         remote: &Fixture,
         on_accept: Option<AcceptanceHook>,
     ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
-        Self::scripted(local, remote, on_accept, None)
+        Self::scripted_held(local, remote, on_accept, None, None)
     }
     pub(super) fn engine_nacking(
         local: &Fixture,
         remote: &Fixture,
         reason: &str,
     ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
-        Self::scripted(local, remote, None, Some(reason.to_owned()))
+        Self::scripted_held(local, remote, None, Some(reason.to_owned()), None)
     }
-    fn scripted(
+    /// A nacking engine whose submit signals `entered` and waits for `release` before replying.
+    pub(super) fn engine_held(
+        local: &Fixture,
+        remote: &Fixture,
+        reason: &str,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
+        Self::scripted_held(local, remote, None, Some(reason.to_owned()), Some((entered, release)))
+    }
+    fn scripted_held(
         local: &Fixture,
         remote: &Fixture,
         on_accept: Option<AcceptanceHook>,
         nack: Option<String>,
+        hold: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     ) -> Result<(GatewaySessionEngine, Sent), SdkError> {
         let sent = Arc::new(Mutex::new(Vec::new()));
         Ok((
@@ -57,6 +70,7 @@ impl Wire {
                     sent: sent.clone(),
                     on_accept,
                     nack,
+                    hold,
                 }),
             ),
             sent,
@@ -97,6 +111,10 @@ impl ramflux_transport::GatewaySessionFrameSink for Wire {
                         .push(entry.clone());
                     if let Some(hook) = &self.on_accept {
                         hook().map_err(ramflux_transport::TransportError::Quic)?;
+                    }
+                    if let Some((entered, release)) = &self.hold {
+                        entered.notify_one();
+                        release.notified().await;
                     }
                     match &self.nack {
                         Some(reason) => GatewayServerFrame::Nack { reason: reason.clone() },

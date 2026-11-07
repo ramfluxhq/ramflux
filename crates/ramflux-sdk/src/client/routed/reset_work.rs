@@ -41,16 +41,33 @@ impl RamfluxClient {
         }
         Ok(remote.device_id().to_owned())
     }
+    /// The identity of the reset a submit belongs to: the stored `ResetWork` row (attempt count,
+    /// schedule and first attempt) at submit time. A confirmed receive clears it, and a later
+    /// reset writes a different one, so a refusal can tell whether it is still current.
+    pub(crate) fn pair_reset_fingerprint(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Option<serde_json::Value>, SdkError> {
+        let key = Self::reset_work_key(local, remote)?;
+        Ok(self.account_db()?.load_actor_state::<serde_json::Value>(&key)?)
+    }
     /// The policy for a certain gateway refusal of a pair control submit. A Conflict on a reset
     /// takes the existing lifetime-expiry terminal (manual recovery) and journals the refusal in
     /// the `pair-reset-refused` form; a capacity refusal pushes the next attempt to the gateway's
     /// floor; `RetrySafe` keeps the existing schedule. Acknowledgements have no durable work.
+    ///
+    /// `submitted` is the reset's fingerprint taken when the submit was prepared. The refusal is
+    /// applied only inside a transaction that re-reads the work row and finds the same
+    /// fingerprint; a reset confirmed or replaced meanwhile makes the refusal stale, and it is
+    /// dropped without any state change.
     pub(crate) fn pair_control_refused(
         &self,
         local: &ramflux_crypto::RootQualifiedDeviceRef,
         remote: &ramflux_crypto::RootQualifiedDeviceRef,
         kind: PairControlKind,
         refusal: SubmitRefusal,
+        submitted: Option<&serde_json::Value>,
     ) -> Result<SdkError, SdkError> {
         let at = now_unix_timestamp();
         if kind == PairControlKind::Reset {
@@ -58,7 +75,10 @@ impl RamfluxClient {
             match refusal {
                 SubmitRefusal::Conflict => {
                     let pair = RamfluxClient::pair_key(local, remote)?;
-                    db.write_transaction(|| -> Result<(), SdkError> {
+                    let applied = db.write_transaction(|| -> Result<bool, SdkError> {
+                        if self.pair_reset_fingerprint(local, remote)?.as_ref() != submitted {
+                            return Ok(false);
+                        }
                         db.append_journal(
                             &format!("pair-reset-refused:{pair}:{at}"),
                             "session.reset",
@@ -66,13 +86,20 @@ impl RamfluxClient {
                             at,
                             None,
                         )?;
-                        self.mark_pair_manual(local, remote, at)
+                        self.mark_pair_manual(local, remote, at)?;
+                        Ok(true)
                     })?;
+                    // The outer transaction deferred the retirement checkpoints: run them now.
+                    if applied {
+                        self.finish_pair_retirement()?;
+                    }
                 }
                 SubmitRefusal::CapacityRetryAfter { retry_after_ms } => {
                     let floor = i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX);
                     let key = Self::reset_work_key(local, remote)?;
-                    if let Some(mut work) = db.load_actor_state::<ResetWork>(&key)? {
+                    if self.pair_reset_fingerprint(local, remote)?.as_ref() == submitted
+                        && let Some(mut work) = db.load_actor_state::<ResetWork>(&key)?
+                    {
                         work.next_at = work.next_at.max(at.saturating_add(floor));
                         db.persist_actor_state(&key, &work)?;
                     }
@@ -94,13 +121,20 @@ impl RamfluxClient {
             _ => return Err(super::invalid("unknown pair control")),
         };
         let draft = self.prepare_pair_control_draft(engine.config(), remote, kind)?;
+        let local = self.local_device_identity(&engine.config().device_id)?;
+        let submitted = self.pair_reset_fingerprint(&local, remote)?;
         let sealed =
             self.seal_routed_as(engine, &draft.message, &draft.body, Route::control()).await?;
         if self.pair_control_draft_current(&draft)? {
             let envelope = self.finish_pair_control_draft(engine.config(), draft, &sealed)?;
             if let Err(refusal) = engine.submit_classified(envelope).await? {
-                let local = self.local_device_identity(&engine.config().device_id)?;
-                return Err(self.pair_control_refused(&local, remote, kind, refusal)?);
+                return Err(self.pair_control_refused(
+                    &local,
+                    remote,
+                    kind,
+                    refusal,
+                    submitted.as_ref(),
+                )?);
             }
         }
         // Submission is transport acceptance, not peer confirmation. Work remains durable.
