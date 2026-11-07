@@ -24,6 +24,8 @@ pub enum SessionPushReason {
     InternalError,
     #[error("boot_mismatch")]
     BootMismatch,
+    #[error("recipient_unsupported")]
+    RecipientUnsupported,
 }
 #[derive(Debug, Serialize, thiserror::Error)]
 #[error("{reason}")]
@@ -85,12 +87,15 @@ pub struct SessionPushCapabilities {
     pub capabilities: Vec<String>,
     pub router_boot_id: String,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct EphemeralRegistrationItem {
     pub target: String,
     pub session_id: String,
+    pub gateway_id: String,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct EphemeralRegistrationsRequest {
     pub router_boot_id: String,
     pub items: Vec<EphemeralRegistrationItem>,

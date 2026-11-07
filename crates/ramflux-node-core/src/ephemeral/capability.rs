@@ -23,6 +23,9 @@ pub enum EphemeralReassertionError {
     /// `items` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`].
     #[error("too_many_items")]
     TooManyItems,
+    /// Asserting gateway does not match the live descriptor route.
+    #[error("recipient_unsupported")]
+    RecipientUnsupported,
 }
 
 pub(crate) fn new_router_boot_id() -> String {
@@ -145,8 +148,10 @@ impl crate::RouterCore {
     ///
     /// # Errors
     /// Returns [`EphemeralReassertionError::BootMismatch`] when `boot_id` does not
-    /// match this process, or [`EphemeralReassertionError::TooManyItems`] when
-    /// `items.len()` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`].
+    /// match this process, [`EphemeralReassertionError::TooManyItems`] when
+    /// `items.len()` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`], or
+    /// [`EphemeralReassertionError::RecipientUnsupported`] when an item's asserting
+    /// gateway does not equal the live descriptor gateway.
     pub fn reassert_ephemeral_registrations(
         &self,
         boot_id: &str,
@@ -160,34 +165,43 @@ impl crate::RouterCore {
         }
         let mut applied: usize = 0;
         for item in items {
-            if self.reassert_item(&item.target, &item.session_id) {
+            if self.reassert_item(&item.target, &item.session_id, &item.gateway_id)? {
                 applied = applied.saturating_add(1);
             }
         }
         Ok(applied)
     }
 
-    fn reassert_item(&self, target: &str, session_id: &str) -> bool {
-        if target.is_empty() || session_id.is_empty() {
-            return false;
+    fn reassert_item(
+        &self,
+        target: &str,
+        session_id: &str,
+        gateway_id: &str,
+    ) -> Result<bool, EphemeralReassertionError> {
+        if target.is_empty() || session_id.is_empty() || gateway_id.is_empty() {
+            return Ok(false);
         }
         let descriptor = self.session(target);
         let mut state = lock_unpoisoned(&self.ephemeral_capability);
         if state.established_in_boot.len() >= EPHEMERAL_CAPABILITY_BOUND
             || state.established_in_boot.contains(target)
         {
-            return false;
+            return Ok(false);
         }
         let Some(descriptor) = descriptor else {
-            return false;
+            return Ok(false);
         };
         if descriptor.lifecycle != SessionLifecycle::Live || descriptor.session_id != session_id {
-            return false;
+            return Ok(false);
         }
-        state.bind(target, &descriptor.gateway_id, &descriptor.session_id);
-        state.map.get(target).is_some_and(|entry| {
-            entry.0 == descriptor.gateway_id && entry.1 == descriptor.session_id
-        })
+        if descriptor.gateway_id != gateway_id {
+            return Err(EphemeralReassertionError::RecipientUnsupported);
+        }
+        let recorded = state.bind(target, gateway_id, session_id);
+        Ok(recorded
+            && state.map.get(target).is_some_and(|entry| {
+                entry.gateway_id == gateway_id && entry.session_id == session_id
+            }))
     }
 
     /// C1: capability-gated route for `T`. Lazily drops a stale map entry.
