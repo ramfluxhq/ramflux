@@ -66,7 +66,17 @@ impl AccountDb {
         created_at: i64,
         ttl: u64,
     ) -> Result<(), StorageError> {
-        let now = crate::unix_now();
+        self.record_erased_input_at(tuple, created_at, ttl, crate::unix_now())
+    }
+
+    /// `record_erased_input` against an explicit clock, so boundaries are tested without sleeps.
+    pub(crate) fn record_erased_input_at(
+        &self,
+        tuple: &ErasedTuple<'_>,
+        created_at: i64,
+        ttl: u64,
+        now: i64,
+    ) -> Result<(), StorageError> {
         let ttl = i64::try_from(ttl).unwrap_or(i64::MAX).min(MAX_ENVELOPE_TTL);
         let expires_at = created_at.min(now.saturating_add(MAX_CLOCK_SKEW)) + ttl + SLACK;
         if expires_at <= now {
@@ -100,7 +110,15 @@ impl AccountDb {
         &self,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<bool, StorageError> {
-        let now = crate::unix_now();
+        self.erased_input_matches_at(envelope, crate::unix_now())
+    }
+
+    /// `erased_input_matches` against an explicit clock.
+    pub(crate) fn erased_input_matches_at(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+        now: i64,
+    ) -> Result<bool, StorageError> {
         for (_, selector) in self.erased_input_selectors(&ErasedTuple::from_envelope(envelope))? {
             let live: bool = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM receive_erased_input WHERE selector=?1 AND expires_at>?2)",
@@ -123,10 +141,18 @@ impl AccountDb {
 /// # Errors
 /// Returns `Integrity` for an unknown or mismatched bundle, or SQLite errors.
 pub(crate) fn merge_from(db: &rusqlite::Connection, schema: &str) -> Result<(), StorageError> {
+    merge_from_at(db, schema, crate::unix_now())
+}
+
+/// `merge_from` against an explicit clock, so the expiry boundary is tested without sleeps.
+pub(crate) fn merge_from_at(
+    db: &rusqlite::Connection,
+    schema: &str,
+    now: i64,
+) -> Result<(), StorageError> {
     if schema != "incoming" {
         return Err(StorageError::AuthorizationRejected);
     }
-    let now = crate::unix_now();
     let present: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='receive_erased_input')",
         [],

@@ -147,9 +147,23 @@ fn already_seen_unprojected_collision_stays_staged() -> Result<(), StorageError>
     value["envelope"]["source_principal_id"] = json!("other-source");
     value["envelope"]["source_device_id"] = json!("other-device");
     let wire = serde_json::to_vec(&value).expect("entry encoding");
-    let seen = db.routed_seen_key(&wire)?;
+    // B's seen marker is derived the way the real lookup does: from the canonical envelope,
+    // not from the whole inbox entry (which no replay lookup ever hashes).
+    let canonical = {
+        let parsed: serde_json::Value = serde_json::from_slice(&wire).expect("entry fixture");
+        let envelope: ramflux_protocol::Envelope =
+            serde_json::from_value(parsed["envelope"].clone()).expect("envelope fixture");
+        ramflux_protocol::canonical_json_bytes(&envelope).expect("canonical envelope")
+    };
+    let seen = db.routed_seen_key(&canonical)?;
+    assert_ne!(seen, db.routed_seen_key(&wire)?, "the entry hash is not the replay key");
     db.persist_actor_state(&seen, &json!({"sender":"other-device"}))?;
     db.persist_actor_state("routed/committed/B", &json!({"projected":false}))?;
+    // The real lookup now sees B, and A's deleted-envelope marker covers the shared id: the
+    // forbidden conjunction is present, so only the absence of a marker-based drop keeps B.
+    assert_eq!(db.inbox_envelope_marker(&wire)?, Some(seen.clone()));
+    assert!(db.actor_state_exists(&seen)?);
+    assert!(db.deleted_inbox_envelope(&wire)?.is_some());
     assert_eq!(run(&db, input(&wire, 5))?, R::Staged);
     assert_eq!(work_rows(&db)?, 1);
     assert!(footprints(&db)?.contains(&("copy:payload:HB".to_owned(), locator(5))));
@@ -170,6 +184,62 @@ fn already_seen_unprojected_collision_stays_staged() -> Result<(), StorageError>
     assert_eq!(bind(&db, 5, "B")?, ReceiveBind::Bound);
     assert!(footprints(&db)?.contains(&("B".to_owned(), locator(5))));
     assert_eq!(work_rows(&db)?, 1);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn receive_bind_refusals_leave_state_unchanged_and_held_receipts_bind() -> Result<(), StorageError>
+{
+    let (root, db) = setup("w0-bind-refusals")?;
+    db.connection.disable_background_checkpoints_for_test();
+    db.send_direct_message("thread", "L", "peer", b"secret")?;
+    let snapshot = |db: &AccountDb| -> Result<(i64, i64, usize), StorageError> {
+        Ok((
+            db.connection
+                .query_row("SELECT count(*) FROM gateway_receive_receipt", [], |r| r.get(0))?,
+            work_rows(db)?,
+            footprints(db)?.len(),
+        ))
+    };
+    // A coordinate with no receipt at all.
+    let before = snapshot(&db)?;
+    let missing = bind(&db, 20, "L");
+    assert!(
+        matches!(
+            missing,
+            Err(StorageError::Integrity("receive bind requires a staged or held receipt"))
+        ),
+        "{:?}",
+        missing.err()
+    );
+    assert_eq!(snapshot(&db)?, before);
+    // A staged receipt whose work is gone.
+    db.connection.execute(
+        "INSERT INTO gateway_receive_receipt VALUES('t','e',?1,'staged',100,1)",
+        params![21u64.to_be_bytes().as_slice()],
+    )?;
+    let before = snapshot(&db)?;
+    let workless = bind(&db, 21, "L");
+    assert!(
+        matches!(workless, Err(StorageError::Integrity("receive bind requires staged work"))),
+        "{:?}",
+        workless.err()
+    );
+    assert_eq!(snapshot(&db)?, before);
+    assert_eq!(receipt_state(&db, 21)?.as_deref(), Some("staged"));
+    // A held receipt binds like a staged one.
+    let held = entry(22, "HH", None);
+    assert_eq!(run(&db, input(&held, 22))?, R::Staged);
+    db.connection.execute(
+        "UPDATE gateway_receive_receipt SET disposition='held' WHERE inbox_seq=?1",
+        params![22u64.to_be_bytes().as_slice()],
+    )?;
+    assert_eq!(bind(&db, 22, "L")?, ReceiveBind::Bound);
+    assert!(footprints(&db)?.contains(&("L".to_owned(), locator(22))));
+    assert_eq!(receipt_state(&db, 22)?.as_deref(), Some("held"));
+    assert_eq!(work_for(&db, 22)?, 1);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

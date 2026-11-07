@@ -166,3 +166,100 @@ fn erased_input_store_bounds_and_retirement() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn tuple_of(e: &ramflux_protocol::Envelope) -> ErasedTuple<'_> {
+    ErasedTuple::from_envelope(e)
+}
+
+fn only_expiry(db: &AccountDb) -> Result<i64, StorageError> {
+    count(db, "SELECT max(expires_at) FROM receive_erased_input")
+}
+
+#[test]
+fn erased_input_lifetime_boundaries_are_exact() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("erased-input-lifetime")?;
+    let now = 1_000_000_i64;
+    let e = envelope("device", "key", "hash");
+    let write = |created: i64, ttl: u64| -> Result<i64, StorageError> {
+        db.connection.execute("DELETE FROM receive_erased_input", [])?;
+        db.record_erased_input_at(&tuple_of(&e), created, ttl, now)?;
+        only_expiry(&db)
+    };
+    // Ordinary input: created_at + ttl + 300 slack.
+    assert_eq!(write(now - 10, 60)?, now - 10 + 60 + 300);
+    // Skew cap, inclusive: created_at = now + 120 is kept, now + 121 is clamped to it.
+    assert_eq!(write(now + 120, 60)?, now + 120 + 60 + 300);
+    assert_eq!(write(now + 121, 60)?, now + 120 + 60 + 300);
+    assert_eq!(write(now + 5_000, 60)?, now + 120 + 60 + 300);
+    // TTL cap, inclusive: 604,800 is kept, 604,801 is clamped to it.
+    assert_eq!(write(now, 604_800)?, now + 604_800 + 300);
+    assert_eq!(write(now, 604_801)?, now + 604_800 + 300);
+    // Both caps together stay at the documented worst case.
+    assert_eq!(write(now + 9_000, u64::MAX)?, now + 120 + 604_800 + 300);
+    // expires_at == now writes nothing; now + 1 is written.
+    assert_eq!(count(&db, "SELECT count(*) FROM receive_erased_input")?, 1);
+    db.connection.execute("DELETE FROM receive_erased_input", [])?;
+    db.record_erased_input_at(&tuple_of(&e), now - 300, 0, now)?;
+    assert_eq!(count(&db, "SELECT count(*) FROM receive_erased_input")?, 0);
+    db.record_erased_input_at(&tuple_of(&e), now - 299, 0, now)?;
+    assert_eq!(only_expiry(&db)?, now + 1);
+    // Matching treats expires_at == now as expired and now - 1 as live.
+    assert!(db.erased_input_matches_at(&e, now)?);
+    assert!(!db.erased_input_matches_at(&e, now + 1)?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn add_retired_bundle(db: &AccountDb) -> Result<String, StorageError> {
+    use sha2::Digest;
+    let keys = [7_u8; 192];
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"ramflux.account-mac-bundle.v1");
+    hash.update(keys);
+    let id = ramflux_protocol::encode_base64url(hash.finalize());
+    db.connection.execute(
+        "INSERT INTO account_mac_bundle(bundle_id,subkeys,is_current) VALUES(?1,?2,0)",
+        params![&id, keys.as_slice()],
+    )?;
+    Ok(id)
+}
+
+#[test]
+fn erased_input_matcher_authority_is_exact() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("erased-input-matcher")?;
+    let now = crate::unix_now();
+    let retired = add_retired_bundle(&db)?;
+    let base = envelope("device", "key", "hash");
+    db.record_erased_input_at(&tuple_of(&base), now, 60, now)?;
+    // One row per retained bundle.
+    assert_eq!(count(&db, "SELECT count(*) FROM receive_erased_input")?, 2);
+    assert_eq!(
+        db.connection.query_row(
+            "SELECT count(*) FROM receive_erased_input WHERE bundle_id=?1",
+            params![&retired],
+            |r| r.get::<_, i64>(0)
+        )?,
+        1
+    );
+    // The principal is part of the authenticated tuple.
+    let mut other_principal = base.clone();
+    other_principal.source_principal_id = "another-principal".into();
+    assert!(db.erased_input_matches_at(&base, now)?);
+    assert!(!db.erased_input_matches_at(&other_principal, now)?);
+    // An expired stored row never matches.
+    db.connection.execute("UPDATE receive_erased_input SET expires_at=?1", params![now - 1])?;
+    assert!(!db.erased_input_matches_at(&base, now)?);
+    db.connection.execute("UPDATE receive_erased_input SET expires_at=?1", params![now + 100])?;
+    assert!(db.erased_input_matches_at(&base, now)?);
+    // Authority held only under a non-current retained bundle still matches.
+    db.connection
+        .execute("DELETE FROM receive_erased_input WHERE bundle_id<>?1", params![&retired])?;
+    assert_eq!(count(&db, "SELECT count(*) FROM receive_erased_input")?, 1);
+    assert!(db.erased_input_matches_at(&base, now)?);
+    // ...and the same row for a different tuple does not.
+    assert!(!db.erased_input_matches_at(&envelope("device", "key", "other"), now)?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

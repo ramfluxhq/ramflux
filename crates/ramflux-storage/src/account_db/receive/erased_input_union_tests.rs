@@ -57,6 +57,81 @@ fn expiry(db: &rusqlite::Connection, selector: &str) -> rusqlite::Result<Option<
     .optional()
 }
 
+type State = (Vec<String>, Vec<String>, Vec<(String, i64)>);
+
+/// Bundles, domain rows and tombstones: everything a refused merge must leave untouched.
+fn state(db: &rusqlite::Connection) -> rusqlite::Result<State> {
+    let column = |sql: &str| -> rusqlite::Result<Vec<String>> {
+        db.prepare(sql)?.query_map([], |r| r.get(0))?.collect()
+    };
+    let mut tombstones =
+        db.prepare("SELECT selector,expires_at FROM receive_erased_input ORDER BY 1")?;
+    let tombstones =
+        tombstones.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+    Ok((
+        column("SELECT bundle_id FROM account_mac_bundle ORDER BY 1")?,
+        column("SELECT message_id FROM direct_message_projection ORDER BY 1")?,
+        tombstones,
+    ))
+}
+
+/// Runs a merge that must fail with the exact `Integrity` text. The incoming snapshot carries a
+/// message and its own MAC bundle that a successful merge would import; none of it may remain,
+/// immediately or after reopen.
+fn assert_refused(p: &Pair, expected: &'static str) -> Result<(), StorageError> {
+    p.source.send_direct_message("thread", "incoming-only", "peer", b"payload")?;
+    let incoming = p.root.join("incoming.db");
+    let snapshot = p.source.write_backup_snapshot(&incoming)?;
+    let path = p.root.join("merged.db");
+    let target = p.local.write_backup_snapshot(&path)?;
+    let mut merged = BackupDatabase::open(&path, &target.key)?;
+    let before = state(&merged.db)?;
+    assert!(!before.1.contains(&"incoming-only".to_owned()));
+    let refused = merged.merge_backup(&incoming, &snapshot.key, || Ok(()));
+    assert!(
+        matches!(&refused, Err(StorageError::Integrity(text)) if *text == expected),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(state(&merged.db)?, before, "refused merge changed state");
+    drop(merged);
+    let reopened = BackupDatabase::open(&path, &target.key)?;
+    assert_eq!(state(&reopened.db)?, before, "refused merge changed state after reopen");
+    Ok(())
+}
+
+#[test]
+fn erased_input_merge_sweep_and_union_honour_the_expiry_boundary() -> Result<(), StorageError> {
+    let db = rusqlite::Connection::open_in_memory()?;
+    db.execute_batch(
+        "ATTACH ':memory:' AS incoming;
+         CREATE TABLE main.account_mac_bundle(bundle_id TEXT);
+         INSERT INTO account_mac_bundle VALUES('b');
+         CREATE TABLE main.receive_erased_input(selector TEXT PRIMARY KEY,bundle_id TEXT,expires_at INTEGER);
+         CREATE TABLE incoming.receive_erased_input(selector TEXT PRIMARY KEY,bundle_id TEXT,expires_at INTEGER);",
+    )?;
+    let now = 5_000;
+    for (table, selector, at) in [
+        ("main", "local-now", now),
+        ("main", "local-next", now + 1),
+        ("incoming", "incoming-now", now),
+        ("incoming", "incoming-next", now + 1),
+    ] {
+        db.execute(
+            &format!("INSERT INTO {table}.receive_erased_input VALUES(?1,'b',?2)"),
+            params![selector, at],
+        )?;
+    }
+    super::erased_input::merge_from_at(&db, "incoming", now)?;
+    let kept: Vec<String> = db
+        .prepare("SELECT selector FROM main.receive_erased_input ORDER BY 1")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    // expires_at == now is expired (dropped and swept); now + 1 is live (kept and imported).
+    assert_eq!(kept, vec!["incoming-next".to_owned(), "local-next".to_owned()]);
+    Ok(())
+}
+
 #[test]
 #[allow(clippy::too_many_lines)] // one named test carries all eight cells
 fn erased_input_restore_union() -> Result<(), StorageError> {
@@ -100,25 +175,8 @@ fn erased_input_restore_union() -> Result<(), StorageError> {
     let p = pair("erased-union-e")?;
     put(&p.local, "kept", &p.bundle, now + 3000)?;
     put(&p.source, "foreign", "bogus-bundle", now + 3000)?;
-    let incoming = p.root.join("incoming.db");
-    let snapshot = p.source.write_backup_snapshot(&incoming)?;
-    let path = p.root.join("merged.db");
-    let target = p.local.write_backup_snapshot(&path)?;
-    let mut merged = BackupDatabase::open(&path, &target.key)?;
-    let refused = merged.merge_backup(&incoming, &snapshot.key, || Ok(()));
-    assert!(
-        matches!(
-            refused,
-            Err(StorageError::Integrity("erased-input bundle unknown to the merged set"))
-        ),
-        "{:?}",
-        refused.err()
-    );
-    // Zero rows changed: the local row survives and the foreign row never arrived.
-    assert_eq!(expiry(&merged.db, "kept")?, Some(now + 3000));
-    assert_eq!(expiry(&merged.db, "foreign")?, None);
-    drop(merged);
-    // (f) A bundle mismatch on an equal selector is refused.
+    assert_refused(&p, "erased-input bundle unknown to the merged set")?;
+    // (f) A bundle mismatch on an equal selector is refused, also atomically.
     let p = pair("erased-union-f")?;
     let other: String =
         p.source
@@ -126,12 +184,7 @@ fn erased_input_restore_union() -> Result<(), StorageError> {
             .query_row("SELECT bundle_id FROM account_mac_bundle", [], |r| r.get(0))?;
     put(&p.local, "same", &p.bundle, now + 3000)?;
     put(&p.source, "same", &other, now + 3000)?;
-    let refused = merge(&p).map(|_| ());
-    assert!(
-        matches!(refused, Err(StorageError::Integrity("erased-input bundle mismatch"))),
-        "{:?}",
-        refused.err()
-    );
+    assert_refused(&p, "erased-input bundle mismatch")?;
     // (h) Whole-generation restore carries the table unstripped.
     let p = pair("erased-union-h")?;
     put(&p.source, "carried", &p.bundle, now + 3000)?;
