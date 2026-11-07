@@ -13,6 +13,36 @@ use crate::attachment_authority::{
 use ramflux_transport::{MeshTlsConfig, TransportError, mesh_quic_post_json_with_peer_ca_pems};
 use std::{path::Path, process::Command, sync::Arc};
 
+/// The application-close code in either transport error form:
+/// `...ApplicationClose { error_code: 403 ...` or `closed by peer: ... (code 403)`.
+fn close_code(message: &str) -> Option<u32> {
+    ["error_code: ", "(code "].iter().find_map(|marker| {
+        let rest = &message[message.find(marker)? + marker.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    })
+}
+
+#[test]
+fn close_code_reads_every_transport_error_form_exactly() {
+    for (message, code) in [
+        (
+            "connection lost; detail=ConnectionLost(ApplicationClosed(ApplicationClose { error_code: 403, reason: b\"x\" }))",
+            Some(403),
+        ),
+        ("closed by peer: router identity required (code 403)", Some(403)),
+        ("closed by peer: other (code 4031)", Some(4031)),
+        ("closed by peer: other (code 404)", Some(404)),
+        (
+            "connection lost; detail=ConnectionLost(ApplicationClosed(ApplicationClose { error_code: 0 }))",
+            Some(0),
+        ),
+        ("some other failure", None),
+    ] {
+        assert_eq!(close_code(message), code, "{message}");
+    }
+}
+
 struct Pki {
     ca_pem: String,
     relay: MeshTlsConfig,
@@ -123,6 +153,9 @@ fn post(
     )
 }
 fn start(e: &Env, pki: &Pki) -> AuthorityQuicServer {
+    start_with(e, pki, std::time::Duration::from_secs(10))
+}
+fn start_with(e: &Env, pki: &Pki, budget: std::time::Duration) -> AuthorityQuicServer {
     let issuer = SourceIssuer::new(e.f.registry.clone(), e.f.source_signer(), policy()).unwrap();
     let now = e.now;
     AuthorityQuicServer::start(
@@ -131,7 +164,7 @@ fn start(e: &Env, pki: &Pki) -> AuthorityQuicServer {
         vec![pki.ca_pem.clone()],
         issuer,
         Arc::new(move || now),
-        std::time::Duration::from_secs(10),
+        budget,
     )
     .unwrap()
     .expect("a configured listener binds")
@@ -171,7 +204,7 @@ fn router_identity_is_admitted_over_real_quic_and_other_services_are_refused() {
             for payload in [&body, &oversized] {
                 let out = post(&addr, &pki, client, path, payload);
                 assert!(
-                    matches!(&out, Err(TransportError::Quic(m)) if m.contains("error_code: 403")),
+                    matches!(&out, Err(TransportError::Quic(m)) if close_code(m) == Some(403)),
                     "{path}: {out:?}"
                 );
             }
@@ -224,5 +257,31 @@ fn the_sixteen_kib_cap_is_exact_on_received_bytes_through_real_quic() {
             "{path}: {over:?}"
         );
     }
+    server.stop();
+}
+
+#[test]
+fn a_held_ledger_writer_is_refused_busy_within_the_budget_and_the_listener_keeps_serving() {
+    let e = Env::new("quic-held");
+    let pki = pki("quic-held");
+    let server = start_with(&e, &pki, std::time::Duration::from_secs(2));
+    let addr = server.local_addr().to_string();
+    let body = serde_json::to_value(wire(&e)).unwrap();
+    let holder = e.f.hold_ledger_writer();
+    let started = std::time::Instant::now();
+    let held = post(&addr, &pki, &pki.router, CHALLENGE_PATH, &body).unwrap();
+    // Busy arrives inside the original 2 s budget, as a typed frame.
+    assert_eq!(
+        serde_json::from_value::<ChallengeReply>(held).unwrap(),
+        ChallengeReply::Refused { code: RenewalRefusal::Busy }
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    drop(holder);
+    // The serving thread was not stalled: the next request is served.
+    let next = post(&addr, &pki, &pki.router, CHALLENGE_PATH, &body).unwrap();
+    assert!(matches!(
+        serde_json::from_value::<ChallengeReply>(next).unwrap(),
+        ChallengeReply::Minted { .. }
+    ));
     server.stop();
 }

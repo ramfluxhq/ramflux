@@ -64,6 +64,8 @@ pub struct ScopedGrantRegistry {
     leases: std::sync::Arc<retirement::LeaseOwner>,
     ledger: AttachmentLedger,
     authority: AttachmentAuthority,
+    /// Bounds every write-lock wait of the calls made through this handle.
+    deadline: Option<std::time::Instant>,
 }
 /// Existing gateway-attested owner-session verification, with a pinned cache.
 /// This is not native operation `PoP` admission or a substitute for the replay ledger.
@@ -123,10 +125,17 @@ impl AttachmentLedger {
             leases: retirement::owner(&self.db)?,
             ledger: self.clone(),
             authority,
+            deadline: None,
         })
     }
 }
 impl ScopedGrantRegistry {
+    /// A handle whose write-lock waits end at `deadline`. State is shared with `self`.
+    #[must_use]
+    pub fn with_deadline(&self, deadline: Option<std::time::Instant>) -> Self {
+        Self { deadline, ..self.clone() }
+    }
+
     /// The pinned source authority this registry issues and verifies under.
     #[must_use]
     pub fn authority(&self) -> &AttachmentAuthority {

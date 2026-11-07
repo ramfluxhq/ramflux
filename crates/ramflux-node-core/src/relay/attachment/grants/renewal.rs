@@ -214,6 +214,14 @@ impl From<AttachmentLedgerError> for RenewalRefusal {
         }
     }
 }
+impl From<super::super::BeginError> for RenewalRefusal {
+    fn from(error: super::super::BeginError) -> Self {
+        match error {
+            super::super::BeginError::Busy => Self::Busy,
+            super::super::BeginError::Store(_) => Self::Storage,
+        }
+    }
+}
 impl From<AttachmentReplayError> for RenewalRefusal {
     fn from(error: AttachmentReplayError) -> Self {
         match error {
@@ -445,7 +453,7 @@ impl ScopedGrantRegistry {
         self.check_renewal_target(policy, g, &target, now)?;
         let digest = requester_digest(request.requester).map_err(|_| RenewalRefusal::Invalid)?;
         let target_hash = target.hash().map_err(|_| RenewalRefusal::TargetInvalid)?;
-        let tx = self.ledger.db.begin_write().map_err(store)?;
+        let tx = self.ledger.begin_write_until(self.deadline)?;
         let effective = replay::fence_clock(&tx, now)?;
         clock(&tx, effective)?;
         if Self::committed_generation(&tx, g, &row, effective)? != Some(target.payload_generation) {

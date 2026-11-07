@@ -151,6 +151,9 @@ fn serve(
                 continue;
             }
         };
+        // Handling ends early enough to leave time to write a typed `Busy` before the
+        // original deadline.
+        let handle_by = deadline.checked_sub(budget / 5).unwrap_or(deadline);
         let mut sink = QuicSink { runtime, responder: Some(request.responder), deadline };
         let handled = listener.handle(
             &Incoming {
@@ -158,6 +161,7 @@ fn serve(
                 method: &request.method,
                 path: &request.path,
                 body: &request.body,
+                deadline: Some(handle_by),
             },
             clock,
             &mut sink,

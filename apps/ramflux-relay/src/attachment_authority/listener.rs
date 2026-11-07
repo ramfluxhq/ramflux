@@ -93,6 +93,8 @@ pub struct Incoming<'a> {
     pub method: &'a str,
     pub path: &'a str,
     pub body: &'a [u8],
+    /// The original request deadline; handling never waits on the ledger past it.
+    pub deadline: Option<std::time::Instant>,
 }
 
 pub struct AuthorityListener<'a> {
@@ -124,7 +126,7 @@ impl<'a> AuthorityListener<'a> {
         sink: &mut dyn TokenSink,
         hooks: &IssueHooks<'_>,
     ) -> Result<Handled, IssueError> {
-        let Incoming { peer_spiffe_uri, method, path, body } = *incoming;
+        let Incoming { peer_spiffe_uri, method, path, body, deadline } = *incoming;
         if !self.authorize(peer_spiffe_uri) {
             return Ok(Handled::Rejected {
                 status: "403 Forbidden",
@@ -138,12 +140,23 @@ impl<'a> AuthorityListener<'a> {
             return Ok(Handled::Rejected { status: "413 Payload Too Large", reason: "body" });
         }
         if path == CHALLENGE_PATH {
-            return Ok(Handled::Challenge(self.challenge(body, clock())));
+            return Ok(Handled::Challenge(self.challenge(body, clock(), deadline)));
         }
-        self.renew(body, clock, sink, hooks)
+        let bounded = IssueHooks {
+            before_admission: hooks.before_admission,
+            after_commit: hooks.after_commit,
+            before_final_token_check: hooks.before_final_token_check,
+            deadline: deadline.or(hooks.deadline),
+        };
+        self.renew(body, clock, sink, &bounded)
     }
 
-    fn challenge(&self, body: &[u8], now: u64) -> ChallengeReply {
+    fn challenge(
+        &self,
+        body: &[u8],
+        now: u64,
+        deadline: Option<std::time::Instant>,
+    ) -> ChallengeReply {
         let refused = |code| ChallengeReply::Refused { code };
         let Ok(request) = serde_json::from_slice::<ChallengeMintRequest>(body) else {
             return refused(RenewalRefusal::Invalid);
@@ -152,7 +165,7 @@ impl<'a> AuthorityListener<'a> {
             return refused(RenewalRefusal::HomeTrustUnavailable);
         };
         let requester = QualifiedOwner::from(&request.requester);
-        match self.issuer.challenge(
+        match self.issuer.challenge_until(
             &ChallengeMint {
                 capability: &request.capability,
                 target_operation: &request.target_operation,
@@ -162,6 +175,7 @@ impl<'a> AuthorityListener<'a> {
                 verdict,
             },
             now,
+            deadline,
         ) {
             Ok(c) => ChallengeReply::Minted {
                 challenge: c.challenge,

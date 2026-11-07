@@ -472,12 +472,28 @@ fn handle_mesh_request_inner(
     handle_mesh_general_value(&method, &path, &body, router)
 }
 
+/// `raw_body` is the request body exactly as received, for routes whose byte cap must be
+/// enforced on the wire bytes; `None` re-serializes the decoded value as before.
+#[cfg(test)]
 pub(crate) async fn handle_mesh_quic_request_value(
     request: &ramflux_transport::GatewayQuicRequest,
     router: &crate::router_runtime::RouterHandle,
     peer_service_id: &str,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
-    let body = serde_json::to_vec(&request.body)?;
+    handle_mesh_quic_request_raw(request, None, router, peer_service_id).await
+}
+
+/// As [`handle_mesh_quic_request_value`], with the body bytes as received (see below).
+pub(crate) async fn handle_mesh_quic_request_raw(
+    request: &ramflux_transport::GatewayQuicRequest,
+    raw_body: Option<&[u8]>,
+    router: &crate::router_runtime::RouterHandle,
+    peer_service_id: &str,
+) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
+    let body = match raw_body {
+        Some(raw) => raw.to_vec(),
+        None => serde_json::to_vec(&request.body)?,
+    };
     if (request.method.as_str(), request.path.as_str()) == ("POST", "/mvp0/envelope") {
         let response = handle_mvp0_envelope_async_from(
             &body,

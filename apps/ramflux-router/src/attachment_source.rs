@@ -116,12 +116,12 @@ pub(crate) fn route(
     if peer_service_id != FEDERATION_SERVICE_ID {
         return text("403 Forbidden", "attachment source requires federation identity");
     }
-    let Some(backend) = backend else {
-        return text("503 Service Unavailable", "attachment source is not configured");
-    };
     if body.len() > MAX_BODY {
         return text("413 Payload Too Large", "body");
     }
+    let Some(backend) = backend else {
+        return text("503 Service Unavailable", "attachment source is not configured");
+    };
     let Ok(envelope) = serde_json::from_slice::<SourceEnvelope>(body) else {
         return refused(RenewalRefusal::Invalid);
     };

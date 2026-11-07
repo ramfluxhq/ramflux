@@ -37,7 +37,7 @@ fn call(
     let mut sink = VecSink::default();
     let now = e.now;
     let out = listener.handle(
-        &Incoming { peer_spiffe_uri: peer, method: "POST", path, body },
+        &Incoming { peer_spiffe_uri: peer, method: "POST", path, body, deadline: None },
         &|| now,
         &mut sink,
         &IssueHooks::none(),
@@ -191,7 +191,7 @@ fn get(e: &Env, path: &str, method: &str) -> Handled {
     let now = e.now;
     listener
         .handle(
-            &Incoming { peer_spiffe_uri: Some(ROUTER), method, path, body: b"{}" },
+            &Incoming { peer_spiffe_uri: Some(ROUTER), method, path, body: b"{}", deadline: None },
             &|| now,
             &mut sink,
             &IssueHooks::none(),
@@ -240,4 +240,52 @@ fn the_sixteen_kib_wire_cap_is_exact_on_both_routes() {
         call(&e, Some(ROUTER), CHALLENGE_PATH, &body).0.unwrap(),
         Handled::Challenge(ChallengeReply::Minted { .. })
     ));
+}
+
+#[test]
+fn a_held_ledger_writer_makes_mint_and_renew_busy_at_the_deadline_without_consuming() {
+    let e = Env::new("listener-held");
+    let body = serde_json::to_vec(&wire(&e)).unwrap();
+    let challenge = challenge_of(call(&e, Some(ROUTER), CHALLENGE_PATH, &body).0.unwrap());
+    let renew = serde_json::to_vec(&e.build(e.g(), &e.cap, &e.target(), challenge, 7)).unwrap();
+    let with_deadline = |path: &str, payload: &[u8], budget_ms: u64| {
+        let listener = AuthorityListener::new(&e.issuer);
+        let mut sink = VecSink::default();
+        let now = e.now;
+        let out = listener
+            .handle(
+                &Incoming {
+                    peer_spiffe_uri: Some(ROUTER),
+                    method: "POST",
+                    path,
+                    body: payload,
+                    deadline: Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(budget_ms),
+                    ),
+                },
+                &|| now,
+                &mut sink,
+                &IssueHooks::none(),
+            )
+            .unwrap();
+        (out, sink)
+    };
+    let holder = e.f.hold_ledger_writer();
+    let started = std::time::Instant::now();
+    let (mint, _) = with_deadline(CHALLENGE_PATH, &body, 200);
+    assert_eq!(mint, Handled::Challenge(ChallengeReply::Refused { code: RenewalRefusal::Busy }));
+    let (busy, sink) = with_deadline(RENEW_PATH, &renew, 200);
+    assert_eq!(busy, Handled::Renew(Outcome::Refused(RenewalRefusal::Busy)));
+    assert!(matches!(
+        serde_json::from_slice::<RenewAdmitResponse>(&sink.bytes).unwrap(),
+        RenewAdmitResponse::Refused { code: RenewalRefusal::Busy }
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    // An already elapsed deadline refuses without waiting at all.
+    let (late, _) = with_deadline(CHALLENGE_PATH, &body, 0);
+    assert_eq!(late, Handled::Challenge(ChallengeReply::Refused { code: RenewalRefusal::Busy }));
+    drop(holder);
+    // Nothing was consumed: the very same renewal is still issued.
+    let (issued, _) = with_deadline(RENEW_PATH, &renew, 5_000);
+    assert_eq!(issued, Handled::Renew(Outcome::Issued));
 }

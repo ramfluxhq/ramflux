@@ -36,6 +36,8 @@ use arc_swap::ArcSwap;
 pub use raw_request::{MeshQuicRawPost, mesh_quic_post_raw_with_peer_ca_pems_async};
 use tokio::sync::{Mutex, Notify};
 
+/// Paths under this prefix keep their request body bytes exactly as received.
+pub const RAW_BODY_PATH_PREFIX: &str = "/s9/attachments/";
 const MESH_QUIC_CONNECT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(3);
 const MESH_QUIC_CONNECT_BREAKER_COOLDOWN_DEFAULT: Duration = Duration::from_secs(5);
 const MESH_QUIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,6 +64,9 @@ pub struct MeshQuicConnection {
 
 pub struct MeshQuicAcceptedRequest {
     pub request: GatewayQuicRequest,
+    /// The body exactly as received, kept for [`RAW_BODY_PATH_PREFIX`] routes so their
+    /// byte cap is enforced on the wire bytes, not on a re-serialized `Value`.
+    pub raw_body: Option<Vec<u8>>,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
 }
@@ -604,7 +609,18 @@ impl MeshQuicServer {
             }));
         }
         let request = serde_json::from_slice::<GatewayQuicRequest>(&frame)?;
-        Ok(MeshQuicAcceptedWireRequest::Json(MeshQuicAcceptedRequest { request, send, recv }))
+        let raw_body = if request.path.starts_with(RAW_BODY_PATH_PREFIX) {
+            let raw = serde_json::from_slice::<crate::mesh_quic_limited::RawBodyOnly>(&frame)?;
+            Some(raw.body.get().as_bytes().to_vec())
+        } else {
+            None
+        };
+        Ok(MeshQuicAcceptedWireRequest::Json(MeshQuicAcceptedRequest {
+            request,
+            raw_body,
+            send,
+            recv,
+        }))
     }
 
     /// # Errors
@@ -647,7 +663,7 @@ impl MeshQuicServer {
             error
         })?;
         record_mesh_server_quic_request_read(request_read_started.elapsed());
-        Ok(MeshQuicAcceptedRequest { request, send, recv })
+        Ok(MeshQuicAcceptedRequest { request, raw_body: None, send, recv })
     }
 }
 
