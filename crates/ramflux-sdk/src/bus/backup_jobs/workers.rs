@@ -66,6 +66,7 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::AccountAlreadyExists(_)
         | E::Serde(_)
         | E::AuthorizationRejected
+        | E::FootprintMigrationIncomplete
         | E::GroupMemberLimitExceeded
         | E::InvalidGroupRole(_)
         | E::GroupPermissionDenied

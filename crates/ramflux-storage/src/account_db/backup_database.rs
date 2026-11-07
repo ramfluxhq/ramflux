@@ -175,6 +175,7 @@ impl BackupDatabase {
         db.execute_batch(crate::schema_large_segments::RETIREMENT_SCHEMA)?;
         db.execute_batch(super::event_counter::SCHEMA)?;
         super::message_footprint::install(&db)?;
+        super::message_footprint::migration::complete(&db)?;
         if mode == BackupOpenMode::Normalized && original_input.unowned_legacy_actor_count > 0 {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }

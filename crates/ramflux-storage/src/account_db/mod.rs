@@ -142,6 +142,7 @@ impl AccountDb {
         crate::schema_contact_requests::upgrade(&db.connection)?;
         crate::schema_shared_group::upgrade(&db.connection)?;
         db.enable_runtime()?;
+        db.complete_footprint_migration()?;
         mac_subkeys::initialize_managed(&db.connection, key, fresh)?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;

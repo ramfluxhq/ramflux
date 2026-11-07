@@ -977,6 +977,7 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         | E::Serde(_)
         | E::HistoryBundleHashMismatch
         | E::AuthorizationRejected
+        | E::FootprintMigrationIncomplete
         | E::GroupMemberLimitExceeded
         | E::InvalidGroupRole(_)
         | E::GroupPermissionDenied

@@ -5,6 +5,9 @@
 #[cfg(test)]
 mod audit;
 mod erasure;
+pub(super) mod migration;
+#[cfg(test)]
+mod migration_tests;
 mod replay_reference;
 mod schema;
 
@@ -13,6 +16,21 @@ use crate::StorageError;
 use rusqlite::params;
 use serde_json::Value;
 use std::collections::BTreeSet;
+
+/// Stages one actor registration; the consume trigger writes the footprint rows.
+pub(super) const STAGE_ACTOR: &str =
+    "INSERT INTO message_footprint_actor_stage VALUES(?1,?2,?3,?4)";
+/// Re-fires erasure for a deleted owner reached through a freshly registered actor locator.
+pub(super) const FENCE_OUTBOX: &str = "INSERT INTO message_footprint
+             SELECT f.message_id,'outbox',CAST(o.sequence AS TEXT)
+             FROM runtime_outbox o
+             JOIN runtime_actor_state a ON a.rowid=o.row_id
+             JOIN message_footprint f ON f.kind='actor' AND f.locator=a.state_kind
+             WHERE o.table_name='runtime_actor_state' AND o.change_kind<>'delete'
+              AND a.state_kind=?1 ON CONFLICT DO NOTHING";
+pub(super) const FENCE_PROJECTION: &str =
+    "UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN
+             (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=?1)";
 
 pub(crate) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     super::object_retention::install(db)?;
@@ -35,7 +53,7 @@ impl AccountDb {
         replay_reference::register(self, key, value)?;
         let registration = actor_registration(key, value);
         self.connection.execute(
-            "INSERT INTO message_footprint_actor_stage VALUES(?1,?2,?3,?4)",
+            STAGE_ACTOR,
             params![
                 key,
                 serde_json::to_string(&registration.message_ids)?,
@@ -47,21 +65,8 @@ impl AccountDb {
     }
 
     pub(super) fn fence_actor_message_footprint(&self, key: &str) -> Result<(), StorageError> {
-        self.connection.execute(
-            "INSERT INTO message_footprint
-             SELECT f.message_id,'outbox',CAST(o.sequence AS TEXT)
-             FROM runtime_outbox o
-             JOIN runtime_actor_state a ON a.rowid=o.row_id
-             JOIN message_footprint f ON f.kind='actor' AND f.locator=a.state_kind
-             WHERE o.table_name='runtime_actor_state' AND o.change_kind<>'delete'
-              AND a.state_kind=?1 ON CONFLICT DO NOTHING",
-            params![key],
-        )?;
-        self.connection.execute(
-            "UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN
-             (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=?1)",
-            params![key],
-        )?;
+        self.connection.execute(FENCE_OUTBOX, params![key])?;
+        self.connection.execute(FENCE_PROJECTION, params![key])?;
         Ok(())
     }
 

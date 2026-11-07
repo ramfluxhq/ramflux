@@ -63,6 +63,8 @@ pub enum StorageError {
     HistoryBundleHashMismatch,
     #[error("authorization rejected")]
     AuthorizationRejected,
+    #[error("footprint migration incomplete")]
+    FootprintMigrationIncomplete,
     #[error("group member limit exceeded")]
     GroupMemberLimitExceeded,
     #[error("invalid group role: {0}")]
