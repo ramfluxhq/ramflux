@@ -22,7 +22,7 @@ impl GatewaySessionEngine {
         loop {
             match self.read_step("submit response", Wait::Submit).await? {
                 Step::SubmitAccepted(accepted) => return self.adopt_accepted(*accepted, submitted),
-                Step::ResumePage(_) | Step::Refused(_) => {
+                Step::ResumePage(_) | Step::Reply(_) | Step::Refused(_) => {
                     return Err(self.retire("unexpected capable reply while awaiting a submit"));
                 }
                 Step::Legacy(frame) => {

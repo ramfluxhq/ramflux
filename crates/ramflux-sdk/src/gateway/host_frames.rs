@@ -21,6 +21,14 @@ pub(crate) enum Wait {
     Submit,
     /// A `resume_page`, or a keyed refusal for this session.
     ResumePage,
+    /// `entry`, `entry_too_large` or `entry_gone`, or a keyed refusal. Dormant until a caller.
+    #[allow(dead_code)]
+    Fetch,
+    /// `ack_batch`, or a keyed refusal. Dormant until a caller.
+    #[allow(dead_code)]
+    AckBatch,
+    /// The capable single `ack`, or a keyed refusal.
+    Ack,
 }
 
 /// A frame returned to the caller of `read_step`.
@@ -28,6 +36,8 @@ pub(crate) enum Step {
     Legacy(Box<GatewayServerFrame>),
     SubmitAccepted(Box<CapableServerFrame>),
     ResumePage(Box<CapableServerFrame>),
+    /// The reply of a point read, a batch ACK or a single ACK; the caller checks its fields.
+    Reply(Box<CapableServerFrame>),
     /// A capable `nack` keyed to this session's incarnation.
     Refused(super::session_push::PushNackReason),
 }
@@ -235,7 +245,7 @@ impl GatewaySessionEngine {
     ) -> Result<GatewayServerFrame, SdkError> {
         match self.read_step(operation, Wait::Legacy).await? {
             Step::Legacy(frame) => Ok(*frame),
-            Step::SubmitAccepted(_) | Step::ResumePage(_) | Step::Refused(_) => {
+            Step::SubmitAccepted(_) | Step::ResumePage(_) | Step::Reply(_) | Step::Refused(_) => {
                 Err(self.retire("capable reply outside a capable wait"))
             }
         }
@@ -301,7 +311,17 @@ impl GatewaySessionEngine {
                         Ok(Some(Step::ResumePage(Box::new(page))))
                     }
                     (
-                        Wait::ResumePage,
+                        Wait::Fetch,
+                        reply @ (CapableServerFrame::Entry { .. }
+                        | CapableServerFrame::EntryTooLarge { .. }
+                        | CapableServerFrame::EntryGone { .. }),
+                    )
+                    | (Wait::AckBatch, reply @ CapableServerFrame::AckBatch { .. })
+                    | (Wait::Ack, reply @ CapableServerFrame::Ack { .. }) => {
+                        Ok(Some(Step::Reply(Box::new(reply))))
+                    }
+                    (
+                        Wait::ResumePage | Wait::Fetch | Wait::AckBatch | Wait::Ack,
                         CapableServerFrame::Nack { reason, incarnation_id: Some(id) },
                     ) => {
                         if matches!(&self.mode, SessionMode::Push { incarnation } if *incarnation == id)
@@ -313,6 +333,9 @@ impl GatewaySessionEngine {
                     }
                     (Wait::ResumePage, _) => {
                         Err(self.retire("unexpected capable reply while awaiting a page"))
+                    }
+                    (Wait::Fetch | Wait::AckBatch | Wait::Ack, _) => {
+                        Err(self.retire("unexpected capable reply while awaiting a point reply"))
                     }
                     (Wait::Legacy, _) => Err(self.retire("capable reply outside a capable wait")),
                 },

@@ -12,7 +12,6 @@ use super::{GatewayCursor, GatewayInboxEntry, GatewayServerFrame};
 use serde::{Deserialize, Serialize};
 
 mod client;
-#[allow(unused_imports)]
 pub(crate) use client::{CapableClientFrame, ClientFrameError};
 #[cfg(test)]
 mod carrier_tests;
@@ -20,6 +19,8 @@ mod carrier_tests;
 mod client_tests;
 #[cfg(test)]
 mod negotiation_tests;
+#[cfg(test)]
+mod point_tests;
 #[cfg(test)]
 mod resume_tests;
 #[cfg(test)]

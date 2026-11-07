@@ -27,12 +27,12 @@ use std::sync::{Arc, Mutex};
 
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
-type Sent = Arc<Mutex<Vec<Vec<u8>>>>;
+pub(super) type Sent = Arc<Mutex<Vec<Vec<u8>>>>;
 
 /// Serves the scripted frames in order and records every client frame.
-struct Gateway {
-    frames: VecDeque<Vec<u8>>,
-    sent: Sent,
+pub(super) struct Gateway {
+    pub(super) frames: VecDeque<Vec<u8>>,
+    pub(super) sent: Sent,
 }
 
 impl GatewaySessionFrameSink for Gateway {
@@ -57,7 +57,7 @@ impl GatewaySessionFrameSource for Gateway {
     }
 }
 
-fn session(mode: SessionMode, frames: Vec<Vec<u8>>) -> (GatewaySessionEngine, Sent) {
+pub(super) fn session(mode: SessionMode, frames: Vec<Vec<u8>>) -> (GatewaySessionEngine, Sent) {
     let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
         bind_addr: "0.0.0.0:0".parse().unwrap(),
         gateway_addr: "127.0.0.1:443".parse().unwrap(),
@@ -76,11 +76,11 @@ fn session(mode: SessionMode, frames: Vec<Vec<u8>>) -> (GatewaySessionEngine, Se
     (engine, sent)
 }
 
-fn eid(first: u8) -> String {
+pub(super) fn eid(first: u8) -> String {
     format!("{first:02x}{}", &E[2..])
 }
 
-fn node_record(seq: u64, retain_until: i64) -> n::PageEntryRecord {
+pub(super) fn node_record(seq: u64, retain_until: i64) -> n::PageEntryRecord {
     n::PageEntryRecord {
         entry: n::InboxEntry {
             inbox_seq: seq,
@@ -133,16 +133,16 @@ fn expected(after: u64) -> PageReply {
 }
 
 /// Producer order (i): node-core struct order.
-fn typed(frame: &F) -> Vec<u8> {
+pub(super) fn typed(frame: &F) -> Vec<u8> {
     serde_json::to_vec(frame).unwrap()
 }
 
 /// Producer order (ii): sorted-key `Value` order, as forwarded router JSON.
-fn forwarded(value: &Value) -> Vec<u8> {
+pub(super) fn forwarded(value: &Value) -> Vec<u8> {
     serde_json::to_vec(value).unwrap()
 }
 
-fn nack(reason: n::SessionPushNackReason, key: Option<String>) -> Vec<u8> {
+pub(super) fn nack(reason: n::SessionPushNackReason, key: Option<String>) -> Vec<u8> {
     typed(&F::Nack { reason, incarnation_id: key })
 }
 
