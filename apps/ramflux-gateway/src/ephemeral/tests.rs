@@ -476,10 +476,22 @@ fn bind_source_mismatch_and_bad_signature() -> TestResult {
     anyhow::ensure!(crate::submit_source::bind_source(&runtime, &envelope).is_ok());
     let mut mismatch = envelope.clone();
     mismatch.source_principal_id = "mallory".into();
-    anyhow::ensure!(crate::submit_source::bind_source(&runtime, &mismatch).is_err());
+    anyhow::ensure!(
+        crate::submit_source::bind_source(&runtime, &mismatch)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref()
+            == Some("submit source differs from authenticated session")
+    );
     let mut bad_sig = envelope;
     bad_sig.signed.signature = "invalid".into();
-    anyhow::ensure!(crate::submit_source::bind_source(&runtime, &bad_sig).is_err());
+    anyhow::ensure!(
+        crate::submit_source::bind_source(&runtime, &bad_sig)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref()
+            == Some("base64url decode failed: Invalid last symbol 100, offset 6.")
+    );
     Ok(())
 }
 
