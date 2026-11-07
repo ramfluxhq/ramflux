@@ -30,6 +30,8 @@ pub(crate) enum FrameKind {
     Drain,
     InBandWake,
     Close,
+    /// A capable `resync` event (negotiated sessions only).
+    Resync,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,12 +74,20 @@ impl FrameKind {
         }
     }
 
+    /// The kind a subscriber filters on; a capable deliver shares `Deliver` with legacy.
+    pub(crate) const fn of_capable(event: &super::session_push::CapableEvent) -> Self {
+        match event {
+            super::session_push::CapableEvent::Deliver { .. } => Self::Deliver,
+            super::session_push::CapableEvent::Resync { .. } => Self::Resync,
+        }
+    }
+
     pub(crate) const fn class(self) -> FrameClass {
         match self {
             Self::PushRouteRegistered | Self::PushRouteRefused | Self::PushRouteDeregistered => {
                 FrameClass::PushRoute
             }
-            Self::Deliver | Self::InBandWake => FrameClass::Event,
+            Self::Deliver | Self::InBandWake | Self::Resync => FrameClass::Event,
             Self::Drain | Self::Close => FrameClass::Terminal,
             Self::SessionEstablished => FrameClass::Unexpected,
             Self::VoiceLease

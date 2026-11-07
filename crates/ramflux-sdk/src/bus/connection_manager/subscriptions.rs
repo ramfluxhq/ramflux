@@ -15,9 +15,25 @@ use tokio::sync::{Notify, mpsc};
 
 #[derive(Clone, Debug)]
 pub(crate) enum SessionEvent {
-    Frame { frame: Arc<GatewayServerFrame>, generation: u64 },
-    Lagged { dropped: u64, generation: u64 },
-    Disconnected { reason: DisconnectReason, generation: u64 },
+    Frame {
+        frame: Arc<GatewayServerFrame>,
+        generation: u64,
+    },
+    /// A negotiated-session event; the legacy `Frame` shape is unchanged. The first consumer
+    /// arrives with the receive adapters of a later part.
+    #[allow(dead_code)]
+    Capable {
+        event: Arc<crate::gateway::session_push::CapableEvent>,
+        generation: u64,
+    },
+    Lagged {
+        dropped: u64,
+        generation: u64,
+    },
+    Disconnected {
+        reason: DisconnectReason,
+        generation: u64,
+    },
 }
 
 #[derive(Default)]
@@ -113,6 +129,23 @@ impl SessionHub {
     pub(crate) fn publish(&self, frame: GatewayServerFrame) {
         let kind = FrameKind::of(&frame);
         let frame = Arc::new(frame);
+        self.fan_out(kind, |generation| SessionEvent::Frame {
+            frame: Arc::clone(&frame),
+            generation,
+        });
+    }
+
+    pub(crate) fn publish_capable(&self, event: crate::gateway::session_push::CapableEvent) {
+        let kind = FrameKind::of_capable(&event);
+        let event = Arc::new(event);
+        self.fan_out(kind, |generation| SessionEvent::Capable {
+            event: Arc::clone(&event),
+            generation,
+        });
+    }
+
+    /// One nonblocking delivery per matching subscriber, with the shared lag accounting.
+    fn fan_out(&self, kind: FrameKind, event: impl Fn(u64) -> SessionEvent) {
         let mut subscribers =
             self.subscribers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         subscribers.retain(|subscriber| !subscriber.queue.is_closed());
@@ -126,14 +159,7 @@ impl SessionHub {
                 state.dropped = state.dropped.saturating_add(1);
                 continue;
             }
-            if subscriber
-                .queue
-                .try_send(SessionEvent::Frame {
-                    frame: Arc::clone(&frame),
-                    generation: self.generation,
-                })
-                .is_err()
-            {
+            if subscriber.queue.try_send(event(self.generation)).is_err() {
                 state.dropping = true;
                 state.dropped = 1;
                 subscriber.wake.notify_one();
