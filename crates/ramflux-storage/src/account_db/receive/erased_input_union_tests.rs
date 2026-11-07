@@ -107,6 +107,7 @@ fn erased_input_merge_sweep_and_union_honour_the_expiry_boundary() -> Result<(),
         "ATTACH ':memory:' AS incoming;
          CREATE TABLE main.account_mac_bundle(bundle_id TEXT);
          INSERT INTO account_mac_bundle VALUES('b');
+         CREATE TABLE main.message_copy_binding(copy_id TEXT,message_id TEXT);
          CREATE TABLE main.receive_erased_input(selector TEXT PRIMARY KEY,bundle_id TEXT,expires_at INTEGER);
          CREATE TABLE incoming.receive_erased_input(selector TEXT PRIMARY KEY,bundle_id TEXT,expires_at INTEGER);",
     )?;
@@ -159,7 +160,13 @@ fn erased_input_restore_union() -> Result<(), StorageError> {
     }
     put(&p.source, "incoming-expired", &p.bundle, now - 10)?;
     put(&p.local, "local-expired", &p.bundle, now - 10)?;
+    // Positive control for the refusal oracle: a successful merge imports this message and the
+    // source's own MAC bundle, so their absence after a refusal is meaningful.
+    p.source.send_direct_message("thread", "incoming-only", "peer", b"payload")?;
     let (merged, path, key) = merge(&p)?;
+    let imported = state(&merged.db)?;
+    assert!(imported.1.contains(&"incoming-only".to_owned()));
+    assert_eq!(imported.0.len(), 2, "local and source bundles");
     let rows: i64 =
         merged.db.query_row("SELECT count(*) FROM receive_erased_input", [], |r| r.get(0))?;
     assert_eq!(rows, 40);

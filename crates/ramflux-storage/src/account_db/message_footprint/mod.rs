@@ -40,7 +40,9 @@ pub(crate) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     )?;
     super::object_retention::install(db)?;
     schema::install(db)?;
-    erased_input_store(db)
+    erased_input_store(db)?;
+    super::receive::erased_capture::sweep_open(db, crate::unix_now())?;
+    Ok(())
 }
 
 /// Tombstones of deleted authenticated inputs (selector MACs only) and the bundle-retirement
@@ -374,11 +376,13 @@ pub(super) fn admits(key: &str, value: &Value) -> bool {
     actor_state_may_reference_message(key) || value_holds_envelope(value)
 }
 
-fn value_holds_envelope(value: &Value) -> bool {
+/// The first fixed-path object (`$`, `$.envelope`, `$.entry.envelope`) holding all six envelope
+/// fields with the right JSON types. Anything below `ext` is never read.
+pub(in crate::account_db) fn fixed_path_envelope(value: &Value) -> Option<&Value> {
     [value.pointer(""), value.pointer("/envelope"), value.pointer("/entry/envelope")]
         .into_iter()
         .flatten()
-        .any(|candidate| {
+        .find(|candidate| {
             let text = |name: &str| candidate.get(name).is_some_and(Value::is_string);
             let number = |name: &str| candidate.get(name).is_some_and(Value::is_number);
             text("source_principal_id")
@@ -388,6 +392,10 @@ fn value_holds_envelope(value: &Value) -> bool {
                 && number("created_at")
                 && number("ttl")
         })
+}
+
+fn value_holds_envelope(value: &Value) -> bool {
+    fixed_path_envelope(value).is_some()
 }
 
 fn actor_state_may_reference_message(key: &str) -> bool {
