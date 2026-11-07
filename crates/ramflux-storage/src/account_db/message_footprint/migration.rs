@@ -18,14 +18,22 @@ struct Store {
     table: &'static str,
     kind: &'static str,
     locator: &'static str,
+    /// Primary-key expression; row identity is never a rowid, which SQLite reuses.
+    key: &'static str,
 }
 
 const STORES: [Store; 2] = [
-    Store { table: "runtime_actor_state", kind: "actor", locator: "t.state_kind" },
+    Store {
+        table: "runtime_actor_state",
+        kind: "actor",
+        locator: "t.state_kind",
+        key: "t.state_kind",
+    },
     Store {
         table: "backup_archived_actor_state",
         kind: "archived_actor",
         locator: "CAST(t.rowid AS TEXT)",
+        key: "t.source||char(31)||t.state_kind",
     },
 ];
 
@@ -64,18 +72,30 @@ fn conversion(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
+/// Pending candidate rows in rowid order. The rowid only pages the scan; with `skip_seen` rows
+/// identical (same primary key and bytes) to a pre-merge unregistered row are not candidates.
 fn candidates(
     db: &Connection,
     store: &Store,
     after: i64,
     limit: usize,
+    skip_seen: bool,
 ) -> rusqlite::Result<Vec<(i64, String, Vec<u8>)>> {
     let envelope = super::schema::envelope_sql_for("t.state_json");
+    let seen = if skip_seen {
+        format!(
+            "AND NOT EXISTS(SELECT 1 FROM temp.footprint_merge_seen s WHERE s.table_name='{}' \
+             AND s.row_key={} AND s.body=CAST(t.state_json AS BLOB)) ",
+            store.table, store.key
+        )
+    } else {
+        String::new()
+    };
     let mut query = db.prepare(&format!(
         "SELECT t.rowid,t.state_kind,CAST(t.state_json AS BLOB) FROM {table} t \
          WHERE t.rowid>?1 AND (t.state_kind GLOB 'legacy/replay/*' OR COALESCE({envelope},0)) \
          AND NOT EXISTS(SELECT 1 FROM message_footprint f WHERE f.kind=?2 AND f.locator={locator}) \
-         ORDER BY t.rowid LIMIT ?3",
+         {seen}ORDER BY t.rowid LIMIT ?3",
         table = store.table,
         locator = store.locator
     ))?;
@@ -170,7 +190,7 @@ pub(crate) fn complete(db: &Connection) -> rusqlite::Result<()> {
                 transaction.commit()?;
                 break;
             }
-            let rows = candidates(db, store, cursor, CHUNK)?;
+            let rows = candidates(db, store, cursor, CHUNK, false)?;
             for (rowid, key, body) in &rows {
                 #[cfg(test)]
                 test_visit(db, store, *rowid)?;
@@ -199,7 +219,8 @@ pub(crate) fn complete(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Records each store's highest rowid so a merge can register only rows it imports.
+/// Records the rows that are already unregistered before a merge (no-op replay values), by
+/// primary key and bytes, so the merge pass can tell exactly which rows the merge brought in.
 ///
 /// # Errors
 /// Returns `FootprintMigrationIncomplete` without the marker, or SQLite errors.
@@ -208,31 +229,40 @@ pub(crate) fn begin_merge(db: &Connection) -> Result<(), StorageError> {
         return Err(StorageError::FootprintMigrationIncomplete);
     }
     db.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS footprint_merge_floor(table_name TEXT PRIMARY KEY,floor INTEGER NOT NULL);
-         DELETE FROM temp.footprint_merge_floor;",
+        "CREATE TEMP TABLE IF NOT EXISTS footprint_merge_seen(
+            table_name TEXT NOT NULL,row_key TEXT NOT NULL,body BLOB NOT NULL);
+         DELETE FROM temp.footprint_merge_seen;",
     )?;
+    let envelope = super::schema::envelope_sql_for("t.state_json");
     for store in STORES {
         if super::schema::exists(db, store.table)? {
             db.execute(
                 &format!(
-                    "INSERT INTO temp.footprint_merge_floor SELECT ?1,COALESCE(MAX(rowid),0) FROM main.{}",
-                    store.table
+                    "INSERT INTO temp.footprint_merge_seen \
+                     SELECT ?1,{key},CAST(t.state_json AS BLOB) FROM main.{table} t \
+                     WHERE (t.state_kind GLOB 'legacy/replay/*' OR COALESCE({envelope},0)) \
+                     AND NOT EXISTS(SELECT 1 FROM message_footprint f \
+                                    WHERE f.kind=?2 AND f.locator={locator})",
+                    key = store.key,
+                    table = store.table,
+                    locator = store.locator
                 ),
-                params![store.table],
+                params![store.table, store.kind],
             )?;
         }
     }
     Ok(())
 }
 
-/// Registers every unfootprinted candidate the merge inserted; unbounded, inside the merge
-/// transaction, so imported pre-fix rows are owned before tombstones and reconcile run.
+/// Registers every unfootprinted candidate the merge brought in (anything not recorded by
+/// `begin_merge`); unbounded, inside the merge transaction, so imported pre-fix rows are owned
+/// before tombstones and reconcile run.
 ///
 /// # Errors
 /// Returns SQLite errors.
 pub(crate) fn register_imported(db: &Connection) -> rusqlite::Result<()> {
     let armed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='footprint_merge_floor')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='footprint_merge_seen')",
         [],
         |row| row.get(0),
     )?;
@@ -243,16 +273,9 @@ pub(crate) fn register_imported(db: &Connection) -> rusqlite::Result<()> {
         if !super::schema::exists(db, store.table)? {
             continue;
         }
-        let floor: i64 = db
-            .query_row(
-                "SELECT floor FROM temp.footprint_merge_floor WHERE table_name=?1",
-                params![store.table],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let mut after = floor;
+        let mut after = 0;
         loop {
-            let rows = candidates(db, &store, after, CHUNK)?;
+            let rows = candidates(db, &store, after, CHUNK, true)?;
             for (rowid, key, body) in &rows {
                 register_row(db, &store, *rowid, key, body)?;
             }
