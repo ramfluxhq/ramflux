@@ -29,8 +29,11 @@ const UNEXPECTED: &str =
 const FOREIGN_E: &str = "unexpected gateway frame: reply with a foreign incarnation";
 const FOREIGN_NACK: &str = "unexpected gateway frame: capable nack with a foreign incarnation";
 const OUTSIDE: &str = "unexpected gateway frame: capable reply outside a capable wait";
+/// The complete signed capable ack frame as written on the wire (fixed keys and clock).
+const PUSH_ACK_GOLDEN: &str = r#"{"frame_type":"ack","incarnation_id":"0123456789abcdef0123456789abcdef","ack":{"schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1","ext":{"inbox_seq":21,"receiver_root_commitment":"PFJFQemtHUtFOLU60gf6Yf5aT4KG6otCZTo80YGOkiE"},"signing_key_id":"device:point-device","signature_alg":"ed25519","signature":"yYsjuPmCClkwxVK9LrOAly6ZontmeKwpUiLTUY3fF_QEdPrmTrqWKmYuEFp9rRXQuDVg_9xAzZPLwIQEdtEwDg","ack_id":"ack_env-route_point-device","envelope_id":"env-route","receiver_device_id":"point-device","received_at":1}}"#;
+
 /// The complete legacy ack frame as written on the wire.
-const LEGACY_ACK_GOLDEN: &str = r#"{"frame_type":"ack","ack":{"schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1","ext":{"receiver_root_commitment":"PFJFQemtHUtFOLU60gf6Yf5aT4KG6otCZTo80YGOkiE"},"signing_key_id":"device:point-device","signature_alg":"ed25519","signature":"3Y3bdLgRMDJx9_NCiUjKoS2tx0K9fleOSWQBYXuvbW4KZUbavVWsNuEwzrHw3rX9joS5SimyjI1SCGJuSjTPCA","ack_id":"ack_env-route_point-device","envelope_id":"env-route","receiver_device_id":"point-device","received_at":1}}"#;
+const LEGACY_ACK_GOLDEN: &str = r#"{"frame_type":"ack","ack":{"schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1","ext":{"inbox_seq":21,"receiver_root_commitment":"PFJFQemtHUtFOLU60gf6Yf5aT4KG6otCZTo80YGOkiE"},"signing_key_id":"device:point-device","signature_alg":"ed25519","signature":"yYsjuPmCClkwxVK9LrOAly6ZontmeKwpUiLTUY3fF_QEdPrmTrqWKmYuEFp9rRXQuDVg_9xAzZPLwIQEdtEwDg","ack_id":"ack_env-route_point-device","envelope_id":"env-route","receiver_device_id":"point-device","received_at":1}}"#;
 
 fn node_cursor(target: &str) -> n::InboxCursorResponse {
     n::InboxCursorResponse {
@@ -133,8 +136,11 @@ fn all_kinds() -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-/// A signed Push engine that records what it writes.
-fn signed(mode: SessionMode, frames: Vec<Vec<u8>>) -> (GatewaySessionEngine, Sent) {
+/// A signed engine on the given transport.
+pub(super) fn signed_on(
+    mode: SessionMode,
+    stream: Box<dyn GatewaySessionTransport + Send>,
+) -> GatewaySessionEngine {
     let root = ramflux_crypto::create_identity_root("point-principal", [0x71; 32]);
     let branch =
         ramflux_crypto::create_device_branch("point-principal", "point-device", 1, [0x72; 32]);
@@ -150,16 +156,37 @@ fn signed(mode: SessionMode, frames: Vec<Vec<u8>>) -> (GatewaySessionEngine, Sen
     })
     .with_owned_device(&root, branch)
     .unwrap();
+    let mut engine = GatewaySessionEngine::with_test_transport(config, stream);
+    engine.mode = mode;
+    engine
+}
+
+/// A signed engine that records what it writes.
+pub(super) fn signed(mode: SessionMode, frames: Vec<Vec<u8>>) -> (GatewaySessionEngine, Sent) {
     let sent: Sent = Arc::default();
     let stream: Box<dyn GatewaySessionTransport + Send> =
         Box::new(Gateway { frames: frames.into(), sent: Arc::clone(&sent) });
-    let mut engine = GatewaySessionEngine::with_test_transport(config, stream);
-    engine.mode = mode;
-    (engine, sent)
+    (signed_on(mode, stream), sent)
 }
 
+/// An ack for entry 21, carrying the `ext.inbox_seq` the gateway requires (a missing or zero
+/// value is nacked `invalid_seq`, `session_push.rs` input admission).
 fn ack_of(engine: &GatewaySessionEngine) -> ramflux_protocol::Ack {
-    crate::dm::gateway_ack("env-route", engine.config.source_identity.as_ref().unwrap(), 1)
+    let mut ack =
+        crate::dm::gateway_ack("env-route", engine.config.source_identity.as_ref().unwrap(), 1);
+    ack.ext.ext.insert("inbox_seq".into(), json!(21));
+    ack
+}
+
+/// The gateway's admission predicate for a client `ack`, restated independently.
+fn gateway_admits_ack(bytes: &[u8]) -> bool {
+    match serde_json::from_slice::<n::SessionPushClientFrame>(bytes) {
+        Ok(n::SessionPushClientFrame::Ack { incarnation_id, ack }) => {
+            incarnation_id == E
+                && ack.ext.ext.get("inbox_seq").is_some_and(|v| v.as_u64().is_some_and(|s| s > 0))
+        }
+        _ => false,
+    }
 }
 
 fn retired_with<T: std::fmt::Debug>(
@@ -360,9 +387,11 @@ async fn capable_point_and_ack_exact_reply_sets() {
     // (p6) Push ack() adapts the capable ack to a GatewayCursor, sends one capable ack, and
     // records the cursor; (p11) a matching-E nack is a refusal with the session alive.
     for bytes in [typed(&ack_frame()), forwarded(&value_of(&ack_frame()))] {
+        let clock = crate::time::FixedClock::set(1_700_000_000);
         let (mut engine, sent) = signed(push(), vec![bytes]);
         let ack = ack_of(&engine);
         assert_eq!(engine.ack(ack).await.unwrap(), sdk_cursor());
+        drop(clock);
         assert_eq!(engine.config.last_seen_inbox_seq, 30);
         let written = sent.lock().unwrap().clone();
         assert_eq!(written.len(), 1);
@@ -371,7 +400,13 @@ async fn capable_point_and_ack_exact_reply_sets() {
         assert_eq!(wire["incarnation_id"], E);
         assert_eq!(wire["ack"]["envelope_id"], "env-route");
         assert!(wire["ack"]["signature"].is_string());
-        assert!(serde_json::from_slice::<n::SessionPushClientFrame>(&written[0]).is_ok());
+        assert_eq!(wire["ack"]["ext"]["inbox_seq"], 21);
+        assert!(gateway_admits_ack(&written[0]), "the gateway would admit this ack");
+        // The complete signed capable ACK as an independent literal, and decode then encode
+        // (through the node-core type) is the identity.
+        assert_eq!(String::from_utf8(written[0].clone()).unwrap(), PUSH_ACK_GOLDEN);
+        let decoded: n::SessionPushClientFrame = serde_json::from_slice(&written[0]).unwrap();
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), written[0]);
     }
     let (mut engine, _) = signed(push(), vec![busy()]);
     let ack = ack_of(&engine);
