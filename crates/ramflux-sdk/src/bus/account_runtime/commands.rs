@@ -89,6 +89,10 @@ impl AccountRuntime {
                 let _ = entered.send(tokio::time::Instant::now());
                 let _ = release.await;
             }
+            #[cfg(test)]
+            super::super::actor::PrivateCommand::ReleasePreSendHold { hold, reply } => {
+                let _ = reply.send(hold.release().map_err(SdkError::from));
+            }
             super::super::actor::PrivateCommand::NativeUnlock {
                 passphrase,
                 home_node_id,

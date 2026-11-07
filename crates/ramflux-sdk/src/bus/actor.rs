@@ -27,6 +27,11 @@ pub(super) enum PrivateCommand {
         entered: oneshot::Sender<tokio::time::Instant>,
         release: oneshot::Receiver<()>,
     },
+    #[cfg(test)]
+    ReleasePreSendHold {
+        hold: Box<ramflux_storage::PreSendObjectHold>,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
     NativeUnlock {
         passphrase: zeroize::Zeroizing<String>,
         home_node_id: Option<String>,
@@ -224,6 +229,18 @@ impl AccountActor {
     ) -> Result<crate::LocalBusCreatedAccount, SdkError> {
         let (reply, response) = oneshot::channel();
         self.send_private(PrivateCommand::NativeUnlock { passphrase, home_node_id, reply })?;
+        response.await.map_err(|_| stopped())?
+    }
+
+    /// Releases a pre-send hold on the actor so it never shares the account connection across
+    /// threads (the connection tracks one transaction at a time and is not a cross-thread lock).
+    #[cfg(test)]
+    pub(super) async fn release_pre_send_hold(
+        &self,
+        hold: ramflux_storage::PreSendObjectHold,
+    ) -> Result<(), SdkError> {
+        let (reply, response) = oneshot::channel();
+        self.send_private(PrivateCommand::ReleasePreSendHold { hold: Box::new(hold), reply })?;
         response.await.map_err(|_| stopped())?
     }
 
