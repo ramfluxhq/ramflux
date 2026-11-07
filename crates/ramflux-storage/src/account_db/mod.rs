@@ -148,6 +148,7 @@ impl AccountDb {
         db.enable_runtime()?;
         db.complete_footprint_migration()?;
         mac_subkeys::initialize_managed(&db.connection, key, fresh)?;
+        db.connection.call(|raw| message_footprint::erased_input_store(raw))?;
         crate::schema_device_namespace::upgrade(&db.connection)?;
         crate::schema_identity_keys::upgrade(&db.connection)?;
         crate::schema_receipt_identity::upgrade(&db.connection)?;
