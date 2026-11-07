@@ -137,12 +137,7 @@ fn envelope_ephemeral(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
-    let Ok(request) = serde_json::from_slice::<ramflux_node_core::EphemeralRouteRequest>(body)
-    else {
-        return reply(&ramflux_node_core::EphemeralRouteResponse::Dropped {
-            reason: ramflux_node_core::EphemeralDropReason::Invalid,
-        });
-    };
+    let request = ramflux_protocol::parse_i_json::<ramflux_node_core::EphemeralRouteRequest>(body)?;
     let result =
         router.state().route_ephemeral(&request.envelope, request.expires_at_ms, envelope_now_ms());
     reply(&result.into_response())
