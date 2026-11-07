@@ -115,6 +115,92 @@ fn compacted_names_reject_blank_invisible_bidi_and_reserved_prefixes() -> Result
 }
 
 #[test]
+fn message_layer_declaration_requires_branch_proof_and_bounded_validity() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let branch = crate::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let device = DeviceRef {
+        account_anchor: genesis.body.account_anchor.clone(),
+        device_id: "primary".into(),
+        device_epoch: 1,
+    };
+    let sign_declaration = |declaration: LayerDeclaration| -> Result<SignedLayerDeclaration> {
+        let bytes = signing_bytes(domain::CUSTODY_MESSAGE_LAYER_DECLARATION, &declaration)?;
+        Ok(SignedLayerDeclaration {
+            branch_signature: crate::sign_canonical_bytes_with_device_branch(&bytes, &branch),
+            declaration,
+        })
+    };
+
+    let declaration = LayerDeclaration {
+        device: device.clone(),
+        max_layer: MESSAGE_LAYER_FLOOR,
+        declaration_sequence: 1,
+        issued_at: now,
+        expires_at: now + MAX_LAYER_DECLARATION_VALIDITY_SECONDS,
+    };
+    let signed = sign_declaration(declaration.clone())?;
+    let mut body = genesis.body.clone();
+    body.devices[0].message_layer = Some(signed.clone());
+    let valid = primary.sign_record(body.clone())?;
+    verify_record(&valid, now, None, None)?;
+
+    let mut bad_signature = signed;
+    bad_signature.branch_signature = encode_base64url([0; 64]);
+    body.devices[0].message_layer = Some(bad_signature);
+    assert!(matches!(
+        primary.sign_record(body.clone()),
+        Err(CryptoError::IdentityAuthority("message-layer branch signature verification failed"))
+    ));
+
+    let too_long = sign_declaration(LayerDeclaration {
+        expires_at: declaration.expires_at + 1,
+        ..declaration.clone()
+    })?;
+    body.devices[0].message_layer = Some(too_long);
+    assert!(matches!(
+        primary.sign_record(body.clone()),
+        Err(CryptoError::IdentityAuthority("message-layer declaration validity exceeds 24 hours"))
+    ));
+
+    let below_floor = sign_declaration(LayerDeclaration {
+        max_layer: MESSAGE_LAYER_FLOOR - 1,
+        ..declaration.clone()
+    })?;
+    body.devices[0].message_layer = Some(below_floor);
+    assert!(matches!(
+        primary.sign_record(body.clone()),
+        Err(CryptoError::IdentityAuthority(
+            "message-layer declaration below the active floor or unsupported"
+        ))
+    ));
+
+    let not_yet_endorsed = sign_declaration(LayerDeclaration {
+        issued_at: now + 1,
+        expires_at: now + MAX_LAYER_DECLARATION_VALIDITY_SECONDS + 1,
+        ..declaration.clone()
+    })?;
+    body.devices[0].message_layer = Some(not_yet_endorsed);
+    assert!(matches!(
+        primary.sign_record(body.clone()),
+        Err(CryptoError::IdentityAuthority(
+            "message-layer declaration is newer than its endorsing publication"
+        ))
+    ));
+
+    let foreign = sign_declaration(LayerDeclaration {
+        device: DeviceRef { device_id: "other".into(), ..device },
+        ..declaration
+    })?;
+    body.devices[0].message_layer = Some(foreign);
+    assert!(matches!(
+        primary.sign_record(body),
+        Err(CryptoError::IdentityAuthority("message-layer declaration device binding mismatch"))
+    ));
+    Ok(())
+}
+
+#[test]
 fn compacted_device_cannot_reactivate_in_a_signed_roster() -> Result {
     let (_, primary, genesis) = fixture()?;
     let now = genesis.body.issued_at;

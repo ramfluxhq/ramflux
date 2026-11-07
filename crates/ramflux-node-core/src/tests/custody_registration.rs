@@ -35,6 +35,54 @@ fn native_at(principal: &str, seed: u8, now: u64) -> TestResult<crate::CustodyPu
     )?;
     Ok(crate::CustodyPublication { record, compacted_ids: None })
 }
+fn native_with_message_layer(
+    principal: &str,
+    seed: u8,
+    now: u64,
+) -> TestResult<(crate::CustodyPublication, ramflux_protocol::custody::SignedLayerDeclaration)> {
+    let mut publication = native_at(principal, seed, now)?;
+    let branch = ramflux_crypto::create_device_branch(principal, "primary", 1, [seed + 2; 32]);
+    let declaration = ramflux_protocol::custody::LayerDeclaration {
+        device: ramflux_protocol::custody::DeviceRef {
+            account_anchor: publication.record.body.account_anchor.clone(),
+            device_id: "primary".into(),
+            device_epoch: 1,
+        },
+        max_layer: ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+        declaration_sequence: 1,
+        issued_at: now,
+        expires_at: now + ramflux_protocol::custody::MAX_LAYER_DECLARATION_VALIDITY_SECONDS,
+    };
+    let declaration_bytes = ramflux_protocol::custody::signing_bytes(
+        ramflux_protocol::domain::CUSTODY_MESSAGE_LAYER_DECLARATION,
+        &declaration,
+    )?;
+    let signed = ramflux_protocol::custody::SignedLayerDeclaration {
+        declaration,
+        branch_signature: ramflux_crypto::sign_canonical_bytes_with_device_branch(
+            &declaration_bytes,
+            &branch,
+        ),
+    };
+    let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+    let mut body = publication.record.body.clone();
+    body.devices[0].message_layer = Some(signed.clone());
+    publication.record = primary.sign_record(body)?;
+    Ok((publication, signed))
+}
+fn assert_layer_manifest_round_trip(
+    manifest: &ramflux_protocol::custody::CustodyManifest,
+    expected: &ramflux_protocol::custody::SignedLayerDeclaration,
+) -> TestResult {
+    let encoded = ramflux_protocol::canonical_json_bytes(manifest)?;
+    let decoded: ramflux_protocol::custody::CustodyManifest = ramflux_protocol::custody::decode(
+        &encoded,
+        ramflux_protocol::custody::MAX_CUSTODY_FRAME_BYTES,
+    )?;
+    assert_eq!(ramflux_protocol::canonical_json_bytes(&decoded)?, encoded);
+    assert_eq!(decoded.devices[0].message_layer.as_ref(), Some(expected));
+    Ok(())
+}
 
 #[test]
 fn custody_principal_owner_is_first_authenticated_root_and_survives_restart() -> TestResult {
@@ -299,7 +347,7 @@ fn custody_ownership_survives_scoped_legacy_admission_and_journal_replay() -> Te
 fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys() -> TestResult {
     let path = temp_store_path("custody-ordinary-directory")?;
     let now = crate::now_unix_seconds();
-    let publication = native_at("ordinary-alice", 10, now)?;
+    let (publication, signed_declaration) = native_with_message_layer("ordinary-alice", 10, now)?;
     let branch = ramflux_crypto::create_device_branch("ordinary-alice", "primary", 1, [12; 32]);
     let agreement = ramflux_crypto::X25519KeyPair::from_seed([13; 32]);
     let signed = ramflux_crypto::X25519KeyPair::from_seed([99; 32]);
@@ -311,6 +359,26 @@ fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys()
         let store = RouterRedbStore::open_without_wal(&path)?;
         let router = RouterCore::new();
         store.bootstrap_router(&router)?;
+        let mut invalid = publication.clone();
+        invalid.record.body.devices[0]
+            .message_layer
+            .as_mut()
+            .ok_or("layer declaration")?
+            .branch_signature = ramflux_protocol::encode_base64url([0; 64]);
+        invalid.record.body.section_hashes =
+            ramflux_protocol::custody::section_hashes(&invalid.record.body)?;
+        invalid.record.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+            &ramflux_protocol::custody::signing_bytes(
+                ramflux_protocol::domain::SIGNED_DEVICE_SET_V3,
+                &invalid.record.body,
+            )?,
+            [11; 32],
+        );
+        assert!(matches!(
+            router.publish_custody_record(&invalid, now, &store),
+            Err(NodeCoreError::ItestHttp(reason))
+                if reason == "identity authority rejected: message-layer branch signature verification failed"
+        ));
         router.publish_custody_record(&publication, now, &store)?;
         let response = router.mvp1_device_auth_key_checked(&address)?.ok_or("native auth key")?;
         assert!(response.custody_authority.is_some());
@@ -333,6 +401,8 @@ fn custody_ordinary_directory_uses_native_authority_and_current_signed_prekeys()
         assert_eq!(manifest.publication.record, publication.record);
         assert_eq!(manifest.devices.len(), 1);
         assert_eq!(manifest.devices[0].target_delivery_id, address);
+        assert_eq!(manifest.devices[0].message_layer.as_ref(), Some(&signed_declaration));
+        assert_layer_manifest_round_trip(&manifest, &signed_declaration)?;
         router.upsert_session(crate::SessionDescriptor {
             target_delivery_id: address.clone(),
             device_id: "primary".into(),

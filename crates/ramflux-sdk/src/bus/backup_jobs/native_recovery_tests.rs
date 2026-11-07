@@ -347,6 +347,7 @@ fn history_manifest(
                 },
                 target_delivery_id: owner.storage_key().into(),
                 prekey_bundle: serde_json::to_value(data.load_x3dh_private_state(&owner)?.bundle)?,
+                message_layer: None,
             }],
         },
     )?;

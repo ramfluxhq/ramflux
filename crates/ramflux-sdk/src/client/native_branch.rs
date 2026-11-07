@@ -57,6 +57,7 @@ impl RamfluxClient {
                     device_ref: reference.clone(),
                     target_delivery_id: identity.storage_key().into(),
                     prekey_bundle: serde_json::to_value(&state.bundle)?,
+                    message_layer: None,
                 }],
             },
             &reference.account_anchor,

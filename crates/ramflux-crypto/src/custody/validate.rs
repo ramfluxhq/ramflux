@@ -7,9 +7,11 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use ramflux_protocol::{
     MAX_SAFE_JSON_INTEGER, PrincipalKind,
     custody::{
-        BranchCertificate, CustodyKind, DeviceRef, DeviceSet, Envelope, MASTER_SCOPES,
-        MAX_BRANCH_LEASE_SECONDS, MAX_RECORD_BYTES, MAX_ROSTER, MasterCertificate, MigrationState,
-        decode_epoch, encode_epoch, object_hash, section_hashes, signing_bytes,
+        BranchCertificate, CustodyKind, DeviceRef, DeviceSet, Envelope, LayerDeclaration,
+        MASTER_SCOPES, MAX_BRANCH_LEASE_SECONDS, MAX_LAYER_DECLARATION_VALIDITY_SECONDS,
+        MAX_MESSAGE_LAYER, MAX_RECORD_BYTES, MAX_ROSTER, MESSAGE_LAYER_FLOOR, MasterCertificate,
+        MigrationState, SignedLayerDeclaration, decode_epoch, encode_epoch, object_hash,
+        section_hashes, signing_bytes,
     },
     domain,
 };
@@ -235,6 +237,18 @@ fn roster(body: &DeviceSet) -> Result<(), CryptoError> {
                     return Err(reject("custody branch binding mismatch"));
                 }
                 signature(&signer, domain::CUSTODY_BRANCH_CERTIFICATE, branch)?;
+                if let Some(declaration) = &device.message_layer {
+                    message_layer_declaration(
+                        declaration,
+                        &DeviceRef {
+                            account_anchor: body.account_anchor.clone(),
+                            device_id: device.device_id.clone(),
+                            device_epoch: device.device_epoch,
+                        },
+                        b,
+                        body.issued_at,
+                    )?;
+                }
                 let (signing, agreement) = crate::device_key_commitments(
                     &b.branch_signing_public_key,
                     &b.agreement_identity_public_key,
@@ -250,7 +264,7 @@ fn roster(body: &DeviceSet) -> Result<(), CryptoError> {
                 MigrationState::Revoked,
                 Some(at),
                 None,
-            ) => time(at)?,
+            ) if device.message_layer.is_none() => time(at)?,
             _ => return Err(reject("invalid native custody device state")),
         }
     }
@@ -263,4 +277,46 @@ fn roster(body: &DeviceSet) -> Result<(), CryptoError> {
         return Err(reject("local primary must remain represented in its roster"));
     }
     Ok(())
+}
+
+fn message_layer_declaration(
+    signed: &SignedLayerDeclaration,
+    expected_device: &DeviceRef,
+    branch_certificate: &BranchCertificate,
+    record_issued_at: u64,
+) -> Result<(), CryptoError> {
+    let declaration: &LayerDeclaration = &signed.declaration;
+    reference(&declaration.device)?;
+    positive(declaration.declaration_sequence)?;
+    time(declaration.issued_at)?;
+    time(declaration.expires_at)?;
+    let validity = declaration
+        .expires_at
+        .checked_sub(declaration.issued_at)
+        .ok_or_else(|| reject("message-layer declaration expiry precedes issue time"))?;
+    if validity == 0 || validity > MAX_LAYER_DECLARATION_VALIDITY_SECONDS {
+        return Err(reject("message-layer declaration validity exceeds 24 hours"));
+    }
+    if declaration.device != *expected_device {
+        return Err(reject("message-layer declaration device binding mismatch"));
+    }
+    if declaration.issued_at > record_issued_at {
+        return Err(reject("message-layer declaration is newer than its endorsing publication"));
+    }
+    if declaration.issued_at < branch_certificate.not_before
+        || declaration.expires_at > branch_certificate.expires_at
+    {
+        return Err(reject("message-layer declaration exceeds branch certificate lease"));
+    }
+    if declaration.max_layer < MESSAGE_LAYER_FLOOR || declaration.max_layer > MAX_MESSAGE_LAYER {
+        return Err(reject("message-layer declaration below the active floor or unsupported"));
+    }
+    let signature = Signature::from_slice(&bytes(&signed.branch_signature, 64)?)
+        .map_err(|_| reject("invalid message-layer branch signature"))?;
+    key(&branch_certificate.branch_signing_public_key)?
+        .verify_strict(
+            &signing_bytes(domain::CUSTODY_MESSAGE_LAYER_DECLARATION, declaration)?,
+            &signature,
+        )
+        .map_err(|_| reject("message-layer branch signature verification failed"))
 }

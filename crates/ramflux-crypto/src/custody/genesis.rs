@@ -115,6 +115,7 @@ pub fn create_genesis(
             status: DeviceSetStatus::Active,
             revoked_at: None,
             branch_certificate: Some(branch_cert),
+            message_layer: None,
             migration_state: MigrationState::Native,
         }],
         delegations: vec![],

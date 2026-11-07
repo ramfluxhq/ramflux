@@ -102,6 +102,7 @@ pub fn recover_primary(
         status: DeviceSetStatus::Active,
         revoked_at: None,
         branch_certificate: Some(branch_certificate),
+        message_layer: None,
         migration_state: MigrationState::Native,
     });
     body.devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));

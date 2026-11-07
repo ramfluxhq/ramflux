@@ -158,6 +158,7 @@ impl super::RouterCore {
                 device_ref: reference,
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: bundle,
+                message_layer: entry.message_layer.clone(),
             };
             bytes = bytes
                 .checked_add(

@@ -34,6 +34,7 @@ pub(super) fn generated_task_native_custody_manifest_round_trips_without_install
                 device_ref: reference,
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: serde_json::to_value(bundle)?,
+                message_layer: None,
             }],
         },
     )?;

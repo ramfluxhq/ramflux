@@ -23,6 +23,7 @@ fn manifest(client: &RamfluxClient) -> Result<crate::prekey::SdkDeviceManifestRe
                 },
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: serde_json::to_value(bundle)?,
+                message_layer: None,
             }],
         },
     )?)

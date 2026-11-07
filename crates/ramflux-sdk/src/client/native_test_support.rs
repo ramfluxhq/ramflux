@@ -46,6 +46,7 @@ impl Fixture {
                 },
                 target_delivery_id: identity.storage_key().into(),
                 prekey_bundle: serde_json::to_value(bundle)?,
+                message_layer: None,
             }],
         })?;
         client.persist_fetched_identity_directory(&manifest)?;
