@@ -946,6 +946,7 @@ fn handle_s1_session_upsert(
     store: &ramflux_node_core::RouterRedbStore,
 ) -> anyhow::Result<ramflux_node_core::SessionDescriptor> {
     let descriptor: ramflux_node_core::SessionDescriptor = serde_json::from_slice(body)?;
+    state.clear_ephemeral_capability(&descriptor.target_delivery_id);
     state.upsert_session(descriptor.clone())?;
     state.mark_live(&descriptor.target_delivery_id)?;
     let session = state
