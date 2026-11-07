@@ -567,9 +567,9 @@ async fn router_async_compio_mesh_quic_accept_loop(
 
 #[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
 #[derive(Clone)]
-struct RouterSubmitBridge {
-    router: Arc<crate::router_runtime::RouterHandle>,
-    tokio: tokio::runtime::Handle,
+pub(crate) struct RouterSubmitBridge {
+    pub(crate) router: Arc<crate::router_runtime::RouterHandle>,
+    pub(crate) tokio: tokio::runtime::Handle,
 }
 
 #[cfg(any(test, all(target_os = "linux", feature = "compio-mesh")))]
@@ -708,7 +708,7 @@ impl RouterSubmitBridge {
         receiver.await
     }
 
-    async fn submit_raw_envelope(
+    pub(crate) async fn submit_raw_envelope(
         &self,
         body: Vec<u8>,
         total_started: std::time::Instant,
@@ -906,6 +906,33 @@ async fn router_async_mesh_quic_connection_loop(
     }
 }
 
+async fn write_quic_transport_error(
+    accepted: ramflux_transport::MeshQuicAcceptedRequest,
+    error: anyhow::Error,
+) -> anyhow::Result<()> {
+    if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+        accepted.write_json_response(200, &refusal).await?;
+    } else {
+        accepted.write_text_response(500, &error.to_string()).await?;
+    }
+    Ok(())
+}
+
+fn write_tls_transport_error(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    error: &anyhow::Error,
+) -> Result<(), ramflux_transport::TransportError> {
+    if let Some(refusal) = crate::durable_mode::transport_refusal(error) {
+        ramflux_transport::write_mesh_json_response(stream, "200 OK", &refusal)
+    } else {
+        ramflux_transport::write_mesh_text_response(
+            stream,
+            "500 Internal Server Error",
+            &error.to_string(),
+        )
+    }
+}
+
 async fn handle_router_async_mesh_quic_request(
     accepted: ramflux_transport::MeshQuicAcceptedWireRequest,
     router: Arc<crate::router_runtime::RouterHandle>,
@@ -933,7 +960,7 @@ async fn handle_router_async_mesh_quic_request(
                         .await?;
                 }
                 Err(error) => {
-                    accepted.write_text_response(500, &error.to_string()).await?;
+                    write_quic_transport_error(accepted, error).await?;
                 }
             }
         }
@@ -965,7 +992,11 @@ async fn handle_router_postcard_mesh_quic_request(
                 accepted.write_postcard_response(200, &response).await?;
             }
             Err(error) => {
-                accepted.write_text_response(500, &error.to_string()).await?;
+                if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+                    accepted.write_postcard_response(200, &refusal).await?;
+                } else {
+                    accepted.write_text_response(500, &error.to_string()).await?;
+                }
             }
         }
         return Ok(());
@@ -1031,7 +1062,11 @@ async fn handle_router_async_compio_mesh_quic_request(
                         .await?;
                 }
                 Err(error) => {
-                    accepted.write_text_response(500, &error.to_string()).await?;
+                    if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+                        accepted.write_json_response(200, &refusal).await?;
+                    } else {
+                        accepted.write_text_response(500, &error.to_string()).await?;
+                    }
                 }
             }
         }
@@ -1063,7 +1098,11 @@ async fn handle_router_compio_postcard_mesh_quic_request(
                 accepted.write_postcard_response(200, &response).await?;
             }
             Err(error) => {
-                accepted.write_text_response(500, &error.to_string()).await?;
+                if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+                    accepted.write_postcard_response(200, &refusal).await?;
+                } else {
+                    accepted.write_text_response(500, &error.to_string()).await?;
+                }
             }
         }
         return Ok(());
@@ -1136,11 +1175,7 @@ fn serve_mesh_mtls(
                         Ok(false) => break,
                         Err(error) => {
                             if !ramflux_node_core::service_shutdown_token().is_cancelled() {
-                                let _ = ramflux_transport::write_mesh_text_response(
-                                    &mut stream,
-                                    "500 Internal Server Error",
-                                    &error.to_string(),
-                                );
+                                let _ = write_tls_transport_error(&mut stream, &error);
                             }
                             tracing::debug!(%error, "router mesh connection ended");
                             break;

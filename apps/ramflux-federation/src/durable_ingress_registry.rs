@@ -76,10 +76,10 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
                 serde_json::Value::Null,
             ] {
                 let request = marked_forward(ordinal, mode.clone())?;
-                let control = unmarked_forward(&request);
-                exercise_federation_control(entry, &control)?;
+                let control = unmarked_forward(&request)?;
+                exercise_federation_control(entry, &store, &control)?;
                 let before = store_snapshot(&path)?;
-                exercise_federation_ingress(entry, &request)?;
+                exercise_federation_ingress(entry, &store, &request)?;
                 let after = store_snapshot(&path)?;
                 assert_eq!(after, before, "WAL={with_wal}, ingress={entry}, mode={mode}");
                 ordinal += 1;
@@ -112,6 +112,7 @@ fn durable_ingress_registry_scanner_rejects_drift_fixtures() {
 
 fn exercise_federation_control(
     entry: &str,
+    store: &ramflux_node_core::FederationRedbStore,
     request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
@@ -148,16 +149,11 @@ fn exercise_federation_control(
                 &crate::SharedFederationTrustState::new(
                     ramflux_node_core::FederationTrustState::new(),
                 ),
-                &ramflux_node_core::FederationRedbStore::open(temp_store_path("s8_forward_ctrl")?)?,
+                store,
                 &dummy_router(),
                 &dummy_discovery(),
             );
-            assert!(
-                response.as_ref().is_ok_and(
-                    |reply| reply.delivery.outcome != "rejected_security:delivery_mode_refused"
-                ) || response.is_err(),
-                "control refused at mode for {entry}: {response:?}"
-            );
+            assert_control_forward(entry, response);
         }
         "flow.rs:handle_s8_receive_envelope" => {
             let response = crate::flow::handle_s8_receive_envelope(
@@ -165,17 +161,12 @@ fn exercise_federation_control(
                 &crate::SharedFederationTrustState::new(
                     ramflux_node_core::FederationTrustState::new(),
                 ),
-                &ramflux_node_core::FederationRedbStore::open(temp_store_path("s8_receive_ctrl")?)?,
+                store,
                 &dummy_router(),
                 &dummy_discovery(),
                 None,
             );
-            assert!(
-                response.as_ref().is_ok_and(
-                    |reply| reply.delivery.outcome != "rejected_security:delivery_mode_refused"
-                ) || response.is_err(),
-                "control refused at mode for {entry}: {response:?}"
-            );
+            assert_control_forward(entry, response);
         }
         other => return Err(format!("unknown federation ingress {other}").into()),
     }
@@ -184,6 +175,7 @@ fn exercise_federation_control(
 
 fn exercise_federation_ingress(
     entry: &str,
+    store: &ramflux_node_core::FederationRedbStore,
     request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
@@ -193,7 +185,7 @@ fn exercise_federation_ingress(
                 &crate::SharedFederationTrustState::new(
                     ramflux_node_core::FederationTrustState::new(),
                 ),
-                &ramflux_node_core::FederationRedbStore::open(temp_store_path("s8_forward")?)?,
+                store,
                 &dummy_router(),
                 &dummy_discovery(),
             )?;
@@ -205,7 +197,7 @@ fn exercise_federation_ingress(
                 &crate::SharedFederationTrustState::new(
                     ramflux_node_core::FederationTrustState::new(),
                 ),
-                &ramflux_node_core::FederationRedbStore::open(temp_store_path("s8_receive")?)?,
+                store,
                 &dummy_router(),
                 &dummy_discovery(),
                 None,
@@ -241,36 +233,88 @@ fn assert_refused_forward(
     assert_eq!(response.delivery.outcome, "rejected_security:delivery_mode_refused", "{entry}");
 }
 
+fn assert_control_forward(
+    entry: &str,
+    response: Result<
+        ramflux_node_core::FederatedEnvelopeForwardResponse,
+        ramflux_node_core::NodeCoreError,
+    >,
+) {
+    match response {
+        Ok(reply) => {
+            assert_ne!(
+                reply.delivery.outcome, "rejected_security:delivery_mode_refused",
+                "control refused at mode for {entry}"
+            );
+        }
+        Err(error) => {
+            let text = error.to_string();
+            assert_ne!(text, "delivery_mode_refused", "control refused at mode for {entry}");
+            assert!(
+                text.contains("target")
+                    || text.contains("trust")
+                    || text.contains("route")
+                    || text.contains("authority")
+                    || text.contains("signature")
+                    || text.contains("peer")
+                    || text.contains("paused"),
+                "control post-mode stage for {entry}: {text}"
+            );
+        }
+    }
+}
+
 fn marked_forward(
     ordinal: u64,
     mode: serde_json::Value,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
-    let mut request: ramflux_node_core::FederatedEnvelopeForwardRequest =
-        serde_json::from_value(serde_json::json!({
-            "admin_token":"", "source_node_id":"node-a.example", "target_node_id":"node-b.example",
+    let discovery = dummy_discovery();
+    let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+    let mut request: ramflux_node_core::FederatedEnvelopeForwardRequest = serde_json::from_value(
+        serde_json::json!({
+            "admin_token":"", "source_node_id": discovery.node_id, "target_node_id":"node-b.example",
             "delivery_class":"opaque_event", "required_capability":"opaque_delivery",
-            "signing_key_id":"node-a.example","signature_alg":"ed25519","signature":"",
+            "signing_key_id": discovery.node_id,"signature_alg":"ed25519","signature":"",
             "envelope": {
                 "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
                 "ext":{},
                 "signing_key_id":"device","signature_alg":"ed25519","signature":"sig",
                 "envelope_id": format!("fed_{ordinal}"),
-                "source_principal_id":"alice","source_device_id":"foreign",
+                "source_principal_id":"alice","source_device_id": format!("foreign_{ordinal}"),
                 "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
-                "priority":"low","ttl":5,"created_at":1_760_000_000,
+                "priority":"low","ttl":5,"created_at": now,
                 "encrypted_payload":"opaque","payload_hash":"hash"
             }
-        }))?;
+        }),
+    )?;
     request.envelope.ext.ext.insert("delivery_mode".into(), mode);
+    request.envelope.signed.signature = ramflux_crypto::sign_protocol_object(&request.envelope)?;
+    request.envelope.ext.ext.insert(
+        "source_device_authority".into(),
+        serde_json::json!({
+            "principal_id":"alice",
+            "device_id": format!("foreign_{ordinal}"),
+            "device_epoch":1,
+            "branch_public_key": ramflux_crypto::fixture_public_key_base64url(),
+            "target_delivery_id":"peer",
+            "revoked": false
+        }),
+    );
+    ramflux_node_core::sign_federated_envelope_forward(&mut request, discovery.node_signing_seed)?;
     Ok(request)
 }
 
 fn unmarked_forward(
     request: &ramflux_node_core::FederatedEnvelopeForwardRequest,
-) -> ramflux_node_core::FederatedEnvelopeForwardRequest {
+) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
     let mut control = request.clone();
     control.envelope.ext.ext.remove("delivery_mode");
-    control
+    control.envelope.signed.signature = ramflux_crypto::sign_protocol_object(&control.envelope)?;
+    ramflux_node_core::sign_federated_envelope_forward(
+        &mut control,
+        dummy_discovery().node_signing_seed,
+    )?;
+    Ok(control)
 }
 
 fn dummy_router() -> crate::RouterMeshClient {
