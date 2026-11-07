@@ -8,6 +8,10 @@ use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, Tran
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// Hang guard for real-time waits in tests. It is far above any loaded-host latency; the
+/// assertions themselves are causal (events, barriers, paused time), never a latency bound.
+const HANG: Duration = Duration::from_secs(30);
 use tokio::sync::oneshot;
 
 type GatewaySessionFrameFuture<'a, T> =
