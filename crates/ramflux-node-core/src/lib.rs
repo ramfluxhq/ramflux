@@ -30,11 +30,11 @@ mod gateway_state;
 mod home_migration_store;
 mod home_node_migration;
 pub use home_migration_store::{
-    AttachmentHomeVerdicts, AttestMigration, AttestedHome, CommitMigration, FenceOutcome,
-    FloorObservation, HomeFloor, MAX_CACHED_VERDICTS, MAX_FLOOR_ANCHORS, MigrationAdmission,
-    MigrationBacklogCursor, MigrationDrainEntry, MigrationDrainOutcome, MigrationDrainState,
-    MigrationEndpoints, MigrationNode, MigrationOperation, MigrationPeer, MigrationRole,
-    PrepareMigration, SealedMigration,
+    AttestMigration, AttestedHome, CommitMigration, FenceOutcome, FloorObservation, HomeFloor,
+    MAX_CACHED_VERDICTS, MAX_FLOOR_ANCHORS, MigrationAdmission, MigrationBacklogCursor,
+    MigrationDrainEntry, MigrationDrainOutcome, MigrationDrainState, MigrationEndpoints,
+    MigrationNode, MigrationOperation, MigrationPeer, MigrationRole, PrepareMigration,
+    SealedMigration,
 };
 #[cfg(test)]
 mod http_response_tests;

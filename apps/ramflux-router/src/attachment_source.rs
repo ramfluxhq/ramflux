@@ -8,18 +8,22 @@
 use ramflux_node_core::attachment::{HomeVerdict, RenewalRefusal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Instant;
 
 pub(crate) const SOURCE_PATH: &str = "/s9/attachments/renew/source";
 pub(crate) const FEDERATION_SERVICE_ID: &str = "ramflux-federation";
 const RELAY_CHALLENGE_PATH: &str = "/s9/attachment-authority/challenge";
 const RELAY_RENEW_PATH: &str = "/s9/attachment-authority/renew";
-/// JSON byte arrays expand up to four characters per byte of the 16 KiB decoded cap.
-const MAX_BODY: usize = 80 * 1024;
+/// Design section 1: bodies are at most 16 KiB at every hop, in and out.
+pub(crate) const MAX_BODY: usize = 16 * 1024;
+/// One budget covers the whole route.
+pub(crate) const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Computes the verdict and reaches the relay authority. Production wiring (P20/S10a)
 /// supplies the floor, the resolver and the router-to-relay mesh client.
 pub(crate) trait SourceBackend {
     fn now(&self) -> u64;
+    /// `deadline` is the end of the shared route budget; the call must not outlive it.
     /// # Errors
     /// The typed refusal of the verdict computation.
     fn verdict(
@@ -27,11 +31,27 @@ pub(crate) trait SourceBackend {
         account_anchor: &str,
         peer_node: &str,
         now: u64,
+        deadline: Instant,
     ) -> Result<HomeVerdict, RenewalRefusal>;
-    /// Sends `body` to the relay authority `path` and returns the relay's JSON reply.
+    /// Sends `body` to the relay authority `path` and returns the relay's JSON reply,
+    /// bounded by the same `deadline`.
     /// # Errors
     /// The typed refusal when the relay cannot be reached.
-    fn relay(&self, path: &str, body: Vec<u8>) -> Result<Vec<u8>, RenewalRefusal>;
+    fn relay(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, RenewalRefusal>;
+}
+
+/// The budget left before each backend call; an elapsed budget is `Busy`.
+fn ensure_budget(deadline: Instant) -> Result<(), RenewalRefusal> {
+    if deadline.checked_duration_since(Instant::now()).is_some_and(|d| !d.is_zero()) {
+        Ok(())
+    } else {
+        Err(RenewalRefusal::Busy)
+    }
 }
 
 /// What federation sends: the peer stamped from TLS, and the relay request without a verdict.
@@ -86,10 +106,12 @@ fn requester_of(kind: &SourceEnvelope) -> Result<(String, String), RenewalRefusa
     }
 }
 
+/// `deadline` is when the shared route budget ends (received time plus [`ROUTE_BUDGET`]).
 pub(crate) fn route(
     peer_service_id: &str,
     body: &[u8],
     backend: Option<&dyn SourceBackend>,
+    deadline: Instant,
 ) -> SourceReply {
     if peer_service_id != FEDERATION_SERVICE_ID {
         return text("403 Forbidden", "attachment source requires federation identity");
@@ -103,7 +125,7 @@ pub(crate) fn route(
     let Ok(envelope) = serde_json::from_slice::<SourceEnvelope>(body) else {
         return refused(RenewalRefusal::Invalid);
     };
-    match serve(&envelope, backend) {
+    match serve(&envelope, backend, deadline) {
         Ok(reply) => SourceReply { status: "200 OK", body: reply },
         Err(code) => refused(code),
     }
@@ -112,6 +134,7 @@ pub(crate) fn route(
 fn serve(
     envelope: &SourceEnvelope,
     backend: &dyn SourceBackend,
+    deadline: Instant,
 ) -> Result<Vec<u8>, RenewalRefusal> {
     let (anchor, requester_home) = requester_of(envelope)?;
     let (peer_node, mut request, path) = match envelope {
@@ -122,7 +145,8 @@ fn serve(
             (peer_node, request.clone(), RELAY_RENEW_PATH)
         }
     };
-    let verdict = backend.verdict(&anchor, peer_node, backend.now())?;
+    ensure_budget(deadline)?;
+    let verdict = backend.verdict(&anchor, peer_node, backend.now(), deadline)?;
     if verdict.home_node != *peer_node
         || *peer_node != requester_home
         || verdict.account_anchor != anchor
@@ -138,7 +162,12 @@ fn serve(
     if path == RELAY_CHALLENGE_PATH {
         object.insert("home_node".into(), Value::String(peer_node.clone()));
     }
-    backend.relay(path, serde_json::to_vec(&request).map_err(|_| RenewalRefusal::Invalid)?)
+    let out = serde_json::to_vec(&request).map_err(|_| RenewalRefusal::Invalid)?;
+    if out.len() > MAX_BODY {
+        return Err(RenewalRefusal::Invalid);
+    }
+    ensure_budget(deadline)?;
+    backend.relay(path, out, deadline)
 }
 
 #[cfg(test)]

@@ -19,9 +19,8 @@ pub const RENEW_PATH: &str = "/s9/attachment-authority/renew";
 /// The only peer service the relay authority accepts.
 pub const ROUTER_SERVICE_ID: &str = "ramflux-router";
 const RELAY_SERVICE_ID: &str = "ramflux-relay";
-/// JSON carries byte arrays (up to four characters per byte), so the wire cap is the
-/// 16 KiB decoded cap that `SourceIssuer` enforces, times that expansion, plus framing.
-const MAX_WIRE_BODY: usize = 80 * 1024;
+/// Design section 1: bodies are at most 16 KiB on the wire.
+pub const MAX_WIRE_BODY: usize = 16 * 1024;
 const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Off by default: no bind address, no listener.

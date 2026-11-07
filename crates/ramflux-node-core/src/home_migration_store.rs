@@ -20,9 +20,10 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod destination;
-pub use attachment_floor::{
-    AttachmentHomeVerdicts, FloorObservation, HomeFloor, MAX_CACHED_VERDICTS, MAX_FLOOR_ANCHORS,
-};
+pub(crate) use attachment_floor::VerdictCache;
+#[cfg(test)]
+pub(crate) use attachment_floor::VerdictHook;
+pub use attachment_floor::{FloorObservation, HomeFloor, MAX_CACHED_VERDICTS, MAX_FLOOR_ANCHORS};
 pub use destination::{MigrationAdmission, PrepareMigration};
 pub use source::{AttestMigration, AttestedHome, CommitMigration, FenceOutcome, MigrationPeer};
 mod attachment_floor;
@@ -289,7 +290,8 @@ fn write<T: Serialize>(
 fn save_head(tx: &redb::WriteTransaction, evidence: &RecordEvidence) -> Result<(), NodeCoreError> {
     let hash = record_hash(&evidence.record).map_err(storage)?;
     write(tx, RECORDS, &hash, evidence)?;
-    write(tx, HEADS, evidence.record.account_anchor(), evidence)
+    write(tx, HEADS, evidence.record.account_anchor(), evidence)?;
+    attachment_floor::record_head_in_tx(tx, evidence)
 }
 fn clock(tx: &redb::WriteTransaction, now: u64) -> Result<u64, NodeCoreError> {
     if now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {

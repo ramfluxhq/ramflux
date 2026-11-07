@@ -17,7 +17,7 @@ use crate::{
 use ramflux_protocol::home_migration::{MAX_CHAIN_RECORDS, ResolvePayload, ResolveResult};
 use redb::{ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::collections::BTreeMap;
 
 const FLOOR: TableDefinition<&str, &[u8]> = TableDefinition::new("attachment_home_floor_v1");
 /// Rows are never evicted: past this many anchors new anchors are refused.
@@ -46,6 +46,36 @@ fn refusal_storage(_: NodeCoreError) -> RenewalRefusal {
     RenewalRefusal::Storage
 }
 
+/// One floor write: the evidence, the clock, and the two policy knobs.
+#[derive(Clone, Copy)]
+pub(super) struct FloorWrite<'a> {
+    pub anchor: &'a str,
+    pub epoch: u64,
+    pub hash: &'a str,
+    pub now: u64,
+    /// Refuse evidence below the floor instead of ignoring it.
+    pub strict: bool,
+    pub max_anchors: usize,
+}
+impl<'a> FloorWrite<'a> {
+    pub(super) fn new(anchor: &'a str, epoch: u64, hash: &'a str, now: u64, strict: bool) -> Self {
+        Self { anchor, epoch, hash, now, strict, max_anchors: MAX_FLOOR_ANCHORS }
+    }
+}
+
+/// Verdict cache and its generation, shared by every observer of one store. The
+/// generation moves on every floor advance made through the store, under the same lock
+/// that guards publication, so a verdict is never published across an advance.
+#[derive(Default)]
+pub(crate) struct VerdictCache {
+    generation: u64,
+    entries: BTreeMap<(String, u64, String), HomeVerdict>,
+}
+
+/// Test seam: called at named points with no lock held.
+#[cfg(test)]
+pub(crate) type VerdictHook = std::sync::Arc<dyn Fn(&RouterRedbStore, &'static str) + Send + Sync>;
+
 impl RouterRedbStore {
     /// Read the durable floor for `anchor`.
     /// # Errors
@@ -65,11 +95,10 @@ impl RouterRedbStore {
             .map_err(refusal_storage)
     }
 
-    /// Advance the floor with verified home evidence in one write transaction.
-    /// Older evidence is a no-op; the same epoch with another hash is a fork.
+    /// Fold verified home evidence into the floor. Older evidence is a no-op.
     /// # Errors
-    /// `HomeMismatch` on a fork, `HomeTrustUnavailable` when a new anchor would exceed
-    /// [`MAX_FLOOR_ANCHORS`], `Storage` on a durable failure. Nothing is written on refusal.
+    /// `HomeMismatch` on a fork at the floor epoch, `HomeTrustUnavailable` when a new
+    /// anchor would exceed [`MAX_FLOOR_ANCHORS`], `Storage` on a durable failure.
     pub fn observe_attachment_home(
         &self,
         anchor: &str,
@@ -77,19 +106,39 @@ impl RouterRedbStore {
         hash: &str,
         now: u64,
     ) -> Result<FloorObservation, RenewalRefusal> {
-        self.observe_attachment_home_capped(anchor, epoch, hash, now, MAX_FLOOR_ANCHORS)
+        self.floor_commit(&FloorWrite::new(anchor, epoch, hash, now, false)).map(|(o, _)| o)
     }
 
-    pub(super) fn observe_attachment_home_capped(
+    /// Check and fold in one write transaction: evidence below the floor, or forking
+    /// it, is refused instead of being a no-op.
+    /// # Errors
+    /// As [`Self::observe_attachment_home`], plus `HomeMismatch` below the floor.
+    pub fn admit_attachment_home(
         &self,
         anchor: &str,
         epoch: u64,
         hash: &str,
         now: u64,
-        max_anchors: usize,
     ) -> Result<FloorObservation, RenewalRefusal> {
+        self.floor_commit(&FloorWrite::new(anchor, epoch, hash, now, true)).map(|(o, _)| o)
+    }
+
+    pub(super) fn floor_commit(
+        &self,
+        write_request: &FloorWrite<'_>,
+    ) -> Result<(FloorObservation, u64), RenewalRefusal> {
+        let FloorWrite { anchor, epoch, hash, now, strict, max_anchors } = *write_request;
+        if !strict {
+            // Fast path for the common no-op, without a write transaction.
+            if let Some(row) = self.attachment_home_floor(anchor)?
+                && (epoch < row.epoch || (epoch == row.epoch && hash == row.record_hash))
+            {
+                return Ok((FloorObservation::Unchanged, self.floor_generation()?));
+            }
+        }
+        let mut cache = self.attachment_verdicts.lock().map_err(|_| RenewalRefusal::Storage)?;
         let tx = self.begin_write().map_err(refusal_storage)?;
-        let outcome = {
+        {
             let table = tx.open_table(FLOOR).map_err(|e| refusal_storage(storage(e)))?;
             let existing: Option<HomeFloor> = table
                 .get(anchor)
@@ -98,19 +147,28 @@ impl RouterRedbStore {
                 .transpose()
                 .map_err(refusal_storage)?;
             match existing {
-                Some(row) if epoch < row.epoch => return Ok(FloorObservation::Unchanged),
-                Some(row) if epoch == row.epoch && hash == row.record_hash => {
-                    return Ok(FloorObservation::Unchanged);
+                Some(row) if epoch < row.epoch => {
+                    return if strict {
+                        Err(RenewalRefusal::HomeMismatch)
+                    } else {
+                        Ok((FloorObservation::Unchanged, cache.generation))
+                    };
                 }
-                Some(row) if epoch == row.epoch => return Err(RenewalRefusal::HomeMismatch),
+                Some(row) if epoch == row.epoch => {
+                    return if hash == row.record_hash {
+                        Ok((FloorObservation::Unchanged, cache.generation))
+                    } else {
+                        Err(RenewalRefusal::HomeMismatch)
+                    };
+                }
                 None if table.len().map_err(|e| refusal_storage(storage(e)))?
                     >= max_anchors as u64 =>
                 {
                     return Err(RenewalRefusal::HomeTrustUnavailable);
                 }
-                _ => FloorObservation::Advanced,
+                _ => {}
             }
-        };
+        }
         write(
             &tx,
             FLOOR,
@@ -119,7 +177,13 @@ impl RouterRedbStore {
         )
         .map_err(refusal_storage)?;
         commit_transition(self, tx).map_err(refusal_storage)?;
-        Ok(outcome)
+        cache.generation += 1;
+        cache.entries.retain(|(a, _, _), _| a != anchor);
+        Ok((FloorObservation::Advanced, cache.generation))
+    }
+
+    fn floor_generation(&self) -> Result<u64, RenewalRefusal> {
+        Ok(self.attachment_verdicts.lock().map_err(|_| RenewalRefusal::Storage)?.generation)
     }
 
     /// Refuse home evidence that is below the floor, or forks it at the same epoch.
@@ -141,7 +205,7 @@ impl RouterRedbStore {
         }
     }
 
-    /// Fold the router's own current head into the floor (a `latest_migration_home` source).
+    /// Fold the router's own current head into the floor.
     /// # Errors
     /// As [`Self::observe_attachment_home`].
     pub fn observe_attachment_head(
@@ -163,44 +227,75 @@ impl RouterRedbStore {
             }
         };
         let Some(head) = head else { return Ok(FloorObservation::Unchanged) };
-        let hash = record_hash(&head.record).map_err(|_| RenewalRefusal::Storage)?;
-        self.observe_attachment_home(anchor, head.record.epoch(), &hash, now)
+        self.observe_attachment_evidence(&head, now)
     }
-}
 
-/// In-memory verdict cache. It is advisory: the durable floor is the authority.
-#[derive(Default)]
-pub struct AttachmentHomeVerdicts {
-    cache: Mutex<BTreeMap<(String, u64, String), HomeVerdict>>,
-}
+    /// Fold one verified `RecordEvidence` into the floor.
+    /// # Errors
+    /// As [`Self::observe_attachment_home`].
+    pub fn observe_attachment_evidence(
+        &self,
+        evidence: &RecordEvidence,
+        now: u64,
+    ) -> Result<FloorObservation, RenewalRefusal> {
+        let hash = record_hash(&evidence.record).map_err(|_| RenewalRefusal::Storage)?;
+        self.observe_attachment_home(
+            evidence.record.account_anchor(),
+            evidence.record.epoch(),
+            &hash,
+            now,
+        )
+    }
 
-impl AttachmentHomeVerdicts {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    /// Resolver hook: every verified `latest_migration_home` result lands in the floor.
+    /// A fork or a full floor is the attachment verdict's concern, not a migration
+    /// failure; only a durable failure propagates.
+    pub(crate) fn observe_attachment_resolved(
+        &self,
+        result: &ResolveResult,
+        now: u64,
+    ) -> Result<(), NodeCoreError> {
+        match self.observe_attachment_evidence(&result.home, now) {
+            Err(RenewalRefusal::Storage) => Err(storage("attachment home floor write failed")),
+            _ => Ok(()),
+        }
     }
 
     /// Number of cached verdicts.
     #[must_use]
-    pub fn cached(&self) -> usize {
-        self.cache.lock().map_or(0, |c| c.len())
+    pub fn attachment_cached_verdicts(&self) -> usize {
+        self.attachment_verdicts.lock().map_or(0, |c| c.entries.len())
     }
 
-    /// Verdict for `anchor`: a fresh cache hit, otherwise `resolve` (which performs the
-    /// `latest_migration_home` lookup), checked against and folded into the floor.
+    #[cfg(test)]
+    fn verdict_hook(&self, point: &'static str) {
+        let hook = self.attachment_verdict_hook.lock().ok().and_then(|h| h.clone());
+        if let Some(hook) = hook {
+            hook(self, point);
+        }
+    }
+
+    /// Verdict for `anchor`. A cache hit is revalidated against the durable floor; a
+    /// miss runs `resolve` (the `latest_migration_home` lookup), then check and floor
+    /// advance happen in one transaction, and the verdict is published only if no other
+    /// advance happened since.
     /// # Errors
-    /// `HomeMismatch` when the resolved head is below or forks the floor,
-    /// `HomeTrustUnavailable` when the floor is full or the head key is unusable,
-    /// `Storage` on a durable failure, or the resolver's refusal.
-    pub fn verdict(
+    /// `HomeMismatch` when the head is below or forks the floor or names another anchor,
+    /// `HomeTrustUnavailable` when the floor is full, the key is unusable or publication
+    /// keeps racing advances, `Storage` on a durable failure, or the resolver's refusal.
+    pub fn attachment_home_verdict(
         &self,
-        store: &RouterRedbStore,
         anchor: &str,
         now: u64,
         resolve: impl FnOnce() -> Result<ResolveResult, RenewalRefusal>,
     ) -> Result<HomeVerdict, RenewalRefusal> {
-        if let Some(hit) = self.lookup(anchor, now)? {
-            return Ok(hit);
+        if let Some(hit) = self.cache_lookup(anchor, now)? {
+            let hash = ramflux_protocol::encode_base64url(hit.home_record_hash);
+            match self.check_attachment_home(anchor, hit.home_epoch, &hash) {
+                Ok(()) => return Ok(hit),
+                Err(RenewalRefusal::HomeMismatch) => self.cache_evict(anchor)?,
+                Err(other) => return Err(other),
+            }
         }
         let result = resolve()?;
         let record = &result.home.record;
@@ -208,7 +303,6 @@ impl AttachmentHomeVerdicts {
             return Err(RenewalRefusal::HomeMismatch);
         }
         let hash = record_hash(record).map_err(|_| RenewalRefusal::Storage)?;
-        store.check_attachment_home(anchor, record.epoch(), &hash)?;
         let (node, key) = record.home();
         let home_node_key = decode_array(key).ok_or(RenewalRefusal::HomeTrustUnavailable)?;
         let home_record_hash = decode_array(&hash).ok_or(RenewalRefusal::Storage)?;
@@ -220,71 +314,90 @@ impl AttachmentHomeVerdicts {
             home_record_hash,
             checked_at: now,
         };
-        if store.observe_attachment_home(anchor, record.epoch(), &hash, now)?
-            == FloorObservation::Advanced
-        {
-            self.evict(anchor)?;
+        for _ in 0..3 {
+            #[cfg(test)]
+            self.verdict_hook("before_admit");
+            let (_, generation) =
+                self.floor_commit(&FloorWrite::new(anchor, record.epoch(), &hash, now, true))?;
+            #[cfg(test)]
+            self.verdict_hook("before_publish");
+            let mut cache = self.attachment_verdicts.lock().map_err(|_| RenewalRefusal::Storage)?;
+            if cache.generation != generation {
+                continue;
+            }
+            cache.entries.retain(|_, v| now.saturating_sub(v.checked_at) <= CACHE_TTL);
+            while cache.entries.len() >= MAX_CACHED_VERDICTS {
+                let Some(oldest) =
+                    cache.entries.iter().min_by_key(|(_, v)| v.checked_at).map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                cache.entries.remove(&oldest);
+            }
+            cache.entries.insert((anchor.to_owned(), verdict.home_epoch, hash), verdict.clone());
+            return Ok(verdict);
         }
-        self.insert(&hash, &verdict, now)?;
-        Ok(verdict)
+        Err(RenewalRefusal::HomeTrustUnavailable)
     }
 
-    /// Fold verified evidence into the floor; an advance evicts every cached verdict
-    /// for that anchor.
-    /// # Errors
-    /// As [`RouterRedbStore::observe_attachment_home`].
-    pub fn observe(
-        &self,
-        store: &RouterRedbStore,
-        anchor: &str,
-        epoch: u64,
-        hash: &str,
-        now: u64,
-    ) -> Result<FloorObservation, RenewalRefusal> {
-        let outcome = store.observe_attachment_home(anchor, epoch, hash, now)?;
-        if outcome == FloorObservation::Advanced {
-            self.evict(anchor)?;
-        }
-        Ok(outcome)
-    }
-
-    fn lookup(&self, anchor: &str, now: u64) -> Result<Option<HomeVerdict>, RenewalRefusal> {
-        let mut cache = self.cache.lock().map_err(|_| RenewalRefusal::Storage)?;
-        cache.retain(|_, v| now.saturating_sub(v.checked_at) <= CACHE_TTL);
+    fn cache_lookup(&self, anchor: &str, now: u64) -> Result<Option<HomeVerdict>, RenewalRefusal> {
+        let mut cache = self.attachment_verdicts.lock().map_err(|_| RenewalRefusal::Storage)?;
+        cache.entries.retain(|_, v| now.saturating_sub(v.checked_at) <= CACHE_TTL);
         Ok(cache
+            .entries
             .iter()
             .filter(|((a, _, _), v)| a == anchor && v.checked_at <= now)
             .max_by_key(|((_, epoch, _), _)| *epoch)
             .map(|(_, v)| v.clone()))
     }
 
-    pub(super) fn insert(
-        &self,
-        hash: &str,
-        verdict: &HomeVerdict,
-        now: u64,
-    ) -> Result<(), RenewalRefusal> {
-        let mut cache = self.cache.lock().map_err(|_| RenewalRefusal::Storage)?;
-        cache.retain(|_, v| now.saturating_sub(v.checked_at) <= CACHE_TTL);
-        while cache.len() >= MAX_CACHED_VERDICTS {
-            let Some(oldest) =
-                cache.iter().min_by_key(|(_, v)| v.checked_at).map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            cache.remove(&oldest);
-        }
-        cache.insert(
-            (verdict.account_anchor.clone(), verdict.home_epoch, hash.to_owned()),
-            verdict.clone(),
-        );
+    fn cache_evict(&self, anchor: &str) -> Result<(), RenewalRefusal> {
+        self.attachment_verdicts
+            .lock()
+            .map_err(|_| RenewalRefusal::Storage)?
+            .entries
+            .retain(|(a, _, _), _| a != anchor);
         Ok(())
     }
 
-    fn evict(&self, anchor: &str) -> Result<(), RenewalRefusal> {
-        self.cache.lock().map_err(|_| RenewalRefusal::Storage)?.retain(|(a, _, _), _| a != anchor);
-        Ok(())
+    /// Test seam: insert directly.
+    #[cfg(test)]
+    pub(super) fn cache_insert_for_test(&self, hash: &str, verdict: &HomeVerdict) {
+        if let Ok(mut c) = self.attachment_verdicts.lock() {
+            c.entries.insert(
+                (verdict.account_anchor.clone(), verdict.home_epoch, hash.to_owned()),
+                verdict.clone(),
+            );
+        }
     }
+}
+
+/// Floor write inside the transaction that saves a home head: every persisted head is
+/// verified evidence. A fork, older evidence or a full floor leaves the floor alone.
+pub(super) fn record_head_in_tx(
+    tx: &redb::WriteTransaction,
+    evidence: &RecordEvidence,
+) -> Result<(), NodeCoreError> {
+    let anchor = evidence.record.account_anchor();
+    let epoch = evidence.record.epoch();
+    let hash = record_hash(&evidence.record).map_err(storage)?;
+    let now = tx
+        .open_table(super::CLOCK)
+        .map_err(storage)?
+        .get("floor")
+        .map_err(storage)?
+        .map_or(0, |v| v.value());
+    {
+        let table = tx.open_table(FLOOR).map_err(storage)?;
+        let existing: Option<HomeFloor> =
+            table.get(anchor).map_err(storage)?.map(|v| decode(v.value())).transpose()?;
+        match existing {
+            Some(row) if epoch <= row.epoch => return Ok(()),
+            None if table.len().map_err(storage)? >= MAX_FLOOR_ANCHORS as u64 => return Ok(()),
+            _ => {}
+        }
+    }
+    write(tx, FLOOR, anchor, &HomeFloor { epoch, record_hash: hash, observed_at: now })
 }
 
 fn decode_array(encoded: &str) -> Option<[u8; 32]> {
@@ -295,16 +408,16 @@ impl HomeMigrationService {
     /// Current-home verdict for `anchor`, resolving through `peer_node` as the hint.
     /// Dormant: no production caller.
     /// # Errors
-    /// As [`AttachmentHomeVerdicts::verdict`]; a failed resolve is `HomeTrustUnavailable`.
+    /// As [`RouterRedbStore::attachment_home_verdict`]; a failed resolve is
+    /// `HomeTrustUnavailable`.
     pub fn attachment_home_verdict(
         &self,
-        verdicts: &AttachmentHomeVerdicts,
         store: &RouterRedbStore,
         anchor: &str,
         peer_node: &str,
         now: u64,
     ) -> Result<HomeVerdict, RenewalRefusal> {
-        verdicts.verdict(store, anchor, now, || {
+        store.attachment_home_verdict(anchor, now, || {
             let payload = ResolvePayload {
                 target_anchor: anchor.to_owned(),
                 after_home_hash: None,

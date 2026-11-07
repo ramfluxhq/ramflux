@@ -377,6 +377,7 @@ fn write_through_lease(
 }
 
 pub mod listener;
+pub mod quic;
 
 #[cfg(test)]
 mod tests;

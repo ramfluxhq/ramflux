@@ -412,7 +412,12 @@ fn handle_mesh_request_inner(
 
     if method == "POST" && path == crate::attachment_source::SOURCE_PATH {
         // Dormant: no backend is configured until the P20/S10a activation card.
-        let reply = crate::attachment_source::route(peer_service_id, &body, None);
+        let reply = crate::attachment_source::route(
+            peer_service_id,
+            &body,
+            None,
+            std::time::Instant::now() + crate::attachment_source::ROUTE_BUDGET,
+        );
         return Ok(MeshResponse::json(reply.status, reply.body));
     }
     if method == "POST" && path == ramflux_node_core::MIGRATION_PEER_PATH {

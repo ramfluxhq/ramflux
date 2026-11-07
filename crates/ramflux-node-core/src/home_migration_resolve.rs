@@ -33,6 +33,19 @@ impl HomeMigrationService {
         payload: &ResolvePayload,
         id: &str,
     ) -> Result<ResolveResult, NodeCoreError> {
+        let result = self.resolve_latest_home(store, now, deadline, payload, id)?;
+        // Every verified result is evidence of the successor chain: remember it durably.
+        store.observe_attachment_resolved(&result, now)?;
+        Ok(result)
+    }
+    fn resolve_latest_home(
+        &self,
+        store: &crate::RouterRedbStore,
+        now: u64,
+        deadline: std::time::Instant,
+        payload: &ResolvePayload,
+        id: &str,
+    ) -> Result<ResolveResult, NodeCoreError> {
         if payload.limit == 0 || payload.limit > MAX_CHAIN_RECORDS as u64 {
             return Err(failure(Refusal::HomeCheckpointRequired));
         }
