@@ -7,7 +7,8 @@
 use super::handler_tests::{accepted, dropped, now_ms, submit};
 use super::tests::{EnqueueRecorder, RouteRecorder, TestResult, admit_ok, guard_10s, mutated};
 use super::{
-    EPHEMERAL_RATE_BURST, EPHEMERAL_RATE_FULL_REFILL_MS, EphemeralRateRegistry, NEGOTIATED_FOR_TEST,
+    EPHEMERAL_RATE_BURST, EPHEMERAL_RATE_FULL_REFILL_MS, EphemeralRate, EphemeralRateRegistry,
+    NEGOTIATED_FOR_TEST,
 };
 use crate::session::submit_fixtures::test_runtime;
 use crate::session_push::tests::support::{Fixture, Sink, Source, sink};
@@ -237,29 +238,93 @@ async fn ephemeral_rate_survives_same_session_resume() -> TestResult {
     Ok(())
 }
 
-/// M1 expiry: a bucket is retained until it would have refilled completely, then dropped.
+/// r4 row 1, the reviewer's interleaving: A, then B (which used to evict A's never-used entry),
+/// A spends its burst, a real resume of A still finds it spent.
 #[tokio::test(flavor = "current_thread")]
-async fn ephemeral_rate_registry_expiry() -> TestResult {
+async fn ephemeral_rate_survives_other_establishment() -> TestResult {
+    let mut fixture = Fixture::new("p09-interleave")?;
+    let a = establish(&mut fixture, open_frame(None)?).await?;
+    let b = establish(&mut fixture, open_frame(None)?).await?;
+    anyhow::ensure!(a.session_id != b.session_id);
+    anyhow::ensure!(fixture.context.hub.ephemeral_rates.len() == 2);
+    let at = now_ms() + 3_600_000;
+    let mut route = RouteRecorder::default();
+    admit_n(&a, EPHEMERAL_RATE_BURST, at, &mut route, 0).await?;
+    let hash = ramflux_node_core::gateway_resume_token_hash(&a.resume_token);
+    let resumed =
+        establish(&mut fixture, open_frame(Some((a.session_id.as_str(), hash.as_str())))?).await?;
+    anyhow::ensure!(resumed.session_id == a.session_id);
+    anyhow::ensure!(Arc::ptr_eq(&a.ephemeral_rate, &resumed.ephemeral_rate), "A's entry was lost");
+    let limited = admit_n(&resumed, 1, at, &mut route, 100).await?;
+    anyhow::ensure!(
+        super::tests::dropped_frame(
+            &limited[0],
+            "resume-100",
+            ramflux_protocol::ephemeral::EphemeralDropReason::RateLimited
+        ),
+        "{limited:?}"
+    );
+    anyhow::ensure!(route.calls.len() == EPHEMERAL_RATE_BURST as usize);
+    drop(b);
+    Ok(())
+}
+
+async fn exhaust(bucket: &EphemeralRate, at_ms: u64) -> TestResult {
+    for _ in 0..EPHEMERAL_RATE_BURST {
+        anyhow::ensure!(bucket.lock().await.try_acquire(at_ms));
+    }
+    anyhow::ensure!(!bucket.lock().await.try_acquire(at_ms));
+    Ok(())
+}
+
+async fn admitted(bucket: &EphemeralRate, at_ms: u64) -> u32 {
+    let mut count = 0;
+    while bucket.lock().await.try_acquire(at_ms) {
+        count += 1;
+    }
+    count
+}
+
+/// r4 row 2: an owned entry is never evicted, however idle; time alone decides what it admits.
+#[tokio::test(flavor = "current_thread")]
+async fn ephemeral_rate_owned_entry_is_never_evicted() -> TestResult {
     let registry = EphemeralRateRegistry::default();
     let base = 10_000_u64;
-    let bucket = registry.bucket("session", base);
-    for _ in 0..EPHEMERAL_RATE_BURST {
-        anyhow::ensure!(bucket.lock().await.try_acquire(base));
-    }
-    anyhow::ensure!(!bucket.lock().await.try_acquire(base));
-    let just_before = base + EPHEMERAL_RATE_FULL_REFILL_MS - 1;
-    anyhow::ensure!(Arc::ptr_eq(&registry.bucket("session", just_before), &bucket));
-    let at_bound = base + EPHEMERAL_RATE_FULL_REFILL_MS;
-    let fresh = registry.bucket("session", at_bound);
-    anyhow::ensure!(!Arc::ptr_eq(&fresh, &bucket), "bucket outlived its refill bound");
-    for _ in 0..EPHEMERAL_RATE_BURST {
-        anyhow::ensure!(fresh.lock().await.try_acquire(at_bound));
-    }
-    anyhow::ensure!(!fresh.lock().await.try_acquire(at_bound));
-    // Other sessions are independent and an in-use bucket is never dropped.
-    anyhow::ensure!(!Arc::ptr_eq(&registry.bucket("other", at_bound), &fresh));
-    let held = fresh.lock().await;
-    anyhow::ensure!(Arc::ptr_eq(&registry.bucket("session", at_bound + 10 * 60_000), &fresh));
-    drop(held);
+    let owned = registry.bucket("session", base);
+    exhaust(&owned, base).await?;
+    // Not yet refilled (500 ms = 10 tokens): kept, and exactly the refilled tokens are admitted.
+    anyhow::ensure!(Arc::ptr_eq(&registry.bucket("session", base + 500), &owned));
+    anyhow::ensure!(admitted(&owned, base + 500).await == 10);
+    // Idle far past the refill bound while owned: still the same entry, exactly 40 admitted.
+    let idle = base + 500 + 5 * EPHEMERAL_RATE_FULL_REFILL_MS;
+    anyhow::ensure!(Arc::ptr_eq(&registry.bucket("session", idle), &owned));
+    registry.sweep(idle);
+    anyhow::ensure!(registry.len() == 1);
+    anyhow::ensure!(admitted(&owned, idle).await == EPHEMERAL_RATE_BURST);
+    Ok(())
+}
+
+/// r4 rows 3 and 4: an orphan is removed only once refilled.
+#[tokio::test(flavor = "current_thread")]
+async fn ephemeral_rate_orphan_removed_only_when_refilled() -> TestResult {
+    let registry = EphemeralRateRegistry::default();
+    let base = 10_000_u64;
+    let spent = registry.bucket("spent", base);
+    exhaust(&spent, base).await?;
+    drop(spent);
+    let never_used = registry.bucket("never-used", base);
+    drop(never_used);
+    anyhow::ensure!(registry.len() == 2);
+    // Row 4: the spent orphan is kept until it would be full; the never-used one is already full.
+    registry.sweep(base + EPHEMERAL_RATE_FULL_REFILL_MS - 1);
+    anyhow::ensure!(registry.len() == 1, "kept {}", registry.len());
+    // Row 3: refilled and orphaned, so it is removed and the size drops.
+    registry.sweep(base + EPHEMERAL_RATE_FULL_REFILL_MS);
+    anyhow::ensure!(registry.len() == 0);
+    // A lookup afterwards creates a fresh, full bucket.
+    let fresh = registry.bucket("spent", base + EPHEMERAL_RATE_FULL_REFILL_MS);
+    anyhow::ensure!(
+        admitted(&fresh, base + EPHEMERAL_RATE_FULL_REFILL_MS).await == EPHEMERAL_RATE_BURST
+    );
     Ok(())
 }
