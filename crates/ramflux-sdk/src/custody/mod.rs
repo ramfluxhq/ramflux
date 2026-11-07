@@ -87,6 +87,8 @@ impl crate::RamfluxClient {
 }
 
 #[cfg(test)]
+pub(crate) mod observer;
+#[cfg(test)]
 pub(crate) mod tests;
 
 #[cfg(any(test, feature = "itest-memory-vault"))]

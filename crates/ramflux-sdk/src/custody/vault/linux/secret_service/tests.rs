@@ -115,7 +115,7 @@ fn linux_vault_installation_init_is_serial_and_crash_safe() -> TestResult {
 #[ignore = "private unlocked gnome-keyring fixture"]
 fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
     prepare()?;
-    observer::begin();
+    let _session = observer::begin(&["p05-response", "p05-readback", "p05-generated"]);
     let (_sender, cancel) = watch::channel(false);
     let deadline = Instant::now() + Duration::from_secs(30);
     let id = "a123456789abcdef0123456789abcdef";

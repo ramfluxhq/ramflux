@@ -141,7 +141,7 @@ fn owned_buffers_body() -> TestResult {
         class: "test",
         role: LinuxVaultRole::AttendedPrimary,
     };
-    observer::begin();
+    let _session = observer::begin(&["p06-primary-seed", "p06-branch-seed", "p06-owned-kek"]);
     for i in 0..3 {
         let mut key = Secret::new("p06-owned-kek");
         key.bytes_mut().fill(9);
