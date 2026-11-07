@@ -28,6 +28,12 @@ impl Hold {
 pub(super) struct Gateway {
     pub sessions: BTreeMap<String, usize>,
     pub sent: Vec<ramflux_protocol::Envelope>,
+    /// Every submitted envelope, whatever the gateway answered.
+    pub attempts: Vec<ramflux_protocol::Envelope>,
+    /// Nacks every submit with this exact reason.
+    pub nack_submit: Option<String>,
+    /// The first this-many submits are answered normally before `nack_submit` applies.
+    pub nack_after: usize,
     pub inbox: Vec<GatewayInboxEntry>,
     pub acked: BTreeSet<String>,
     pub resumes: Vec<u64>,
@@ -325,14 +331,24 @@ async fn serve(
                     if let Some(hold) = hold {
                         hold.wait().await;
                     }
-                    shared.lock().map_err(|_| "gateway")?.sent.push(submit.envelope.clone());
-                    GatewayServerFrame::Deliver {
-                        entry: GatewayInboxEntry {
-                            forwarded: false,
-                            inbox_seq: 1,
-                            target_delivery_id: submit.envelope.target_delivery_id.clone(),
-                            envelope: submit.envelope,
-                        },
+                    let refused = {
+                        let mut gateway = shared.lock().map_err(|_| "gateway")?;
+                        gateway.attempts.push(submit.envelope.clone());
+                        let later = gateway.attempts.len() > gateway.nack_after;
+                        gateway.nack_submit.clone().filter(|_| later)
+                    };
+                    if let Some(reason) = refused {
+                        GatewayServerFrame::Nack { reason }
+                    } else {
+                        shared.lock().map_err(|_| "gateway")?.sent.push(submit.envelope.clone());
+                        GatewayServerFrame::Deliver {
+                            entry: GatewayInboxEntry {
+                                forwarded: false,
+                                inbox_seq: 1,
+                                target_delivery_id: submit.envelope.target_delivery_id.clone(),
+                                envelope: submit.envelope,
+                            },
+                        }
                     }
                 }
                 GatewayClientFrame::OwnDeviceFanout { fanout } => own_copy_response(fanout)?,

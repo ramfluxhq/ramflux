@@ -34,7 +34,10 @@ fn diagnose(
 /// quarantine. An Approval Decision keeps its signed packet under the same key, made
 /// ineligible (`attempts = 8`, the existing exhaustion), and its receipt becomes
 /// `failed / submit_conflict`, so an explicit `grant.approve` can still re-enqueue it once.
-fn conflict_terminal(account: &LocalBusAccountState, item: &Item) -> Result<(), SdkError> {
+pub(in crate::bus) fn conflict_terminal(
+    account: &LocalBusAccountState,
+    item: &Item,
+) -> Result<(), SdkError> {
     use crate::client::task::approval::Payload;
     use crate::client::task::approval_retention::{DeliveryReason, DeliveryState};
     let Some((mut job, revision)) = queue::load(account, &item.key)? else {

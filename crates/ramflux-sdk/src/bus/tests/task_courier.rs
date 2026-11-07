@@ -843,6 +843,8 @@ async fn inbound_delivered(sender: &mpsc::Sender<AccountCommand>, call_id: &str)
 
 #[path = "task_courier_native.rs"]
 mod native;
+#[path = "task_courier_refusal.rs"]
+mod refusal;
 
 #[path = "courier_priority_r2.rs"]
 mod priority_r2;
