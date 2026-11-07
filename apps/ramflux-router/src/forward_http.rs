@@ -161,40 +161,50 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let endpoint = listener.local_addr()?;
             let response_body = body.as_bytes().to_vec();
+            let (server_done_tx, server_done_rx) = std::sync::mpsc::channel();
             let server = thread::spawn(move || -> std::io::Result<()> {
-                let (stream, _) = listener.accept()?;
-                let mut stream = BufReader::new(stream);
-                let mut content_length = 0;
-                loop {
-                    let mut line = String::new();
-                    stream.read_line(&mut line)?;
-                    if line == "\r\n" || line.is_empty() {
-                        break;
+                let result = (|| {
+                    let (stream, _) = listener.accept()?;
+                    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+                    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+                    let mut stream = BufReader::new(stream);
+                    let mut content_length = 0;
+                    loop {
+                        let mut line = String::new();
+                        stream.read_line(&mut line)?;
+                        if line == "\r\n" || line.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse::<usize>().map_err(|error| {
+                                std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                            })?;
+                        }
                     }
-                    if let Some((name, value)) = line.split_once(':')
-                        && name.eq_ignore_ascii_case("content-length")
-                    {
-                        content_length = value.trim().parse::<usize>().map_err(|error| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-                        })?;
-                    }
-                }
-                let mut request_body = vec![0; content_length];
-                stream.read_exact(&mut request_body)?;
-                let mut stream = stream.into_inner();
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response_body.len()
-                )?;
-                stream.write_all(&response_body)
+                    let mut request_body = vec![0; content_length];
+                    stream.read_exact(&mut request_body)?;
+                    let mut stream = stream.into_inner();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response_body.len()
+                    )?;
+                    stream.write_all(&response_body)
+                })();
+                let completion = match &result {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = server_done_tx.send(completion);
+                result
             });
             let result = post(
                 &format!("http://{endpoint}/forward"),
                 &serde_json::json!({}),
-                Duration::from_secs(5),
+                Duration::from_secs(10),
             );
-            server.join().map_err(|_| anyhow::anyhow!("forward response server panicked"))??;
             match rejected_reason {
                 Some(reason) => match result {
                     Err(NodeCoreError::ItestHttp(message)) => {
@@ -205,6 +215,14 @@ mod tests {
                 },
                 None => assert_eq!(result?.delivery.inbox_seq, Some(9_007_199_254_740_991_u64)),
             }
+            let server_result =
+                server_done_rx.recv_timeout(Duration::from_secs(10)).map_err(|error| {
+                    anyhow::anyhow!(
+                        "forward response fixture did not finish within 10 seconds: {error}"
+                    )
+                })?;
+            server_result.map_err(anyhow::Error::msg)?;
+            server.join().map_err(|_| anyhow::anyhow!("forward response server panicked"))??;
         }
         Ok(())
     }
