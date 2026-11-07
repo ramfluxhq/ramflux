@@ -12,7 +12,7 @@ pub struct GatewaySessionEngine {
     pub(crate) stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     pub(crate) session: GatewaySessionState,
     request_counter: u64,
-    pub(crate) pending_deliveries: VecDeque<(GatewayInboxEntry, usize)>,
+    pub(crate) pending_deliveries: VecDeque<PendingDelivery>,
     pub(crate) buffered_bytes: usize,
     pub(crate) deferred_frames: VecDeque<GatewayServerFrame>,
     #[cfg(test)]
@@ -27,9 +27,15 @@ pub struct GatewaySessionEngine {
     /// Negotiated at establishment; read by the capable operations of later parts.
     #[allow(dead_code)]
     pub(crate) mode: super::session_push::SessionMode,
-    /// Capable events read while a legacy wait was active; drained by later parts.
+}
+
+/// One buffered delivery. `push` is set only for a negotiated-session deliver.
+pub(crate) struct PendingDelivery {
+    pub(crate) entry: GatewayInboxEntry,
     #[allow(dead_code)]
-    pub(crate) capable_events: VecDeque<super::session_push::CapableServerFrame>,
+    pub(crate) push: Option<super::session_push::PushMeta>,
+    #[allow(dead_code)]
+    pub(crate) bytes: usize,
 }
 
 pub(crate) enum GatewaySessionClientTransport {
@@ -287,7 +293,6 @@ impl GatewaySessionEngine {
             push_route_expires_at: None,
             pending_push_route: None,
             mode,
-            capable_events: VecDeque::new(),
         };
         engine.remember_session_for_resume();
         Ok(engine)
@@ -323,7 +328,6 @@ impl GatewaySessionEngine {
             push_route_expires_at: None,
             pending_push_route: None,
             mode: super::session_push::SessionMode::Legacy,
-            capable_events: VecDeque::new(),
         }
     }
 
