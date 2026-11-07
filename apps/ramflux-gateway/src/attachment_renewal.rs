@@ -276,6 +276,47 @@ pub(crate) const FORWARD_PATH: &str = "/s9/attachments/renew/forward";
 /// One budget for the whole route; the router splits it per hop.
 const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The two things the egress needs from the node: a session refresh and one POST to the
+/// home router. Nothing else can be reached from here, which is what makes "zero posts"
+/// checkable at the entrypoint.
+pub(crate) trait HomeLink {
+    fn node_id(&self) -> &str;
+    /// Refreshes the session's current device authority.
+    async fn refresh(&self, runtime: &GatewaySessionRuntime, now: u64) -> anyhow::Result<()>;
+    /// One bounded POST to the home router.
+    async fn post(&self, path: &str, body: serde_json::Value) -> anyhow::Result<Vec<u8>>;
+}
+
+struct ContextLink<'a>(&'a GatewayQuicContext);
+impl HomeLink for ContextLink<'_> {
+    fn node_id(&self) -> &str {
+        &self.0.node_id
+    }
+    async fn refresh(&self, runtime: &GatewaySessionRuntime, now: u64) -> anyhow::Result<()> {
+        let key: Option<ramflux_node_core::DeviceAuthKeyResponse> = crate::router_get_json_async(
+            &self.0.router,
+            &format!("/mvp1/device-auth-key/{}", runtime.source_identity.storage_key()),
+        )
+        .await?;
+        check_current(
+            runtime,
+            &key.ok_or_else(|| anyhow::anyhow!("renewal authority unavailable"))?,
+            now,
+        )?;
+        Ok(())
+    }
+    async fn post(&self, path: &str, body: serde_json::Value) -> anyhow::Result<Vec<u8>> {
+        let reply: serde_json::Value = crate::router_post_json_until(
+            &self.0.router,
+            path,
+            &body,
+            std::time::Instant::now() + ROUTE_BUDGET,
+        )
+        .await?;
+        Ok(serde_json::to_vec(&reply)?)
+    }
+}
+
 /// Requests the relay challenge through the home router. The requester is derived from
 /// the refreshed session, never from client fields. Replies are opaque bytes.
 #[allow(dead_code)] // Deliberately dormant until the complete S9 endpoint is activated.
@@ -287,13 +328,24 @@ pub(crate) async fn challenge_current_session(
     target_operation: &[u8],
     now: u64,
 ) -> anyhow::Result<Vec<u8>> {
-    // Section 2, step 1: nothing leaves this node unless the signed grant prefix, the
-    // target and the session requester already agree.
-    let requester = session_requester(runtime, &context.node_id)?;
+    challenge_via(&ContextLink(context), runtime, config, capability, target_operation, now).await
+}
+
+/// The challenge egress entrypoint. Section 2, step 1: nothing leaves this node unless the
+/// signed grant prefix, the target and the session requester already agree.
+pub(crate) async fn challenge_via(
+    link: &impl HomeLink,
+    runtime: &GatewaySessionRuntime,
+    config: &HomeRenewalConfig,
+    capability: &[u8],
+    target_operation: &[u8],
+    now: u64,
+) -> anyhow::Result<Vec<u8>> {
+    let requester = session_requester(runtime, link.node_id())?;
     preflight_challenge(&requester, config, capability, target_operation, now)?;
-    refresh_current(context, runtime, now).await?;
-    let envelope = challenge_envelope(runtime, &context.node_id, capability, target_operation)?;
-    post_home(context, CHALLENGE_PATH, &envelope).await
+    link.refresh(runtime, now).await?;
+    let envelope = challenge_envelope(runtime, link.node_id(), capability, target_operation)?;
+    link.post(CHALLENGE_PATH, serde_json::to_value(&envelope)?).await
 }
 
 /// Forward over the home router. Replies are opaque signed token bytes; source validation
@@ -307,43 +359,21 @@ pub(crate) async fn forward_current_session(
     w: &SignedHomeForward,
     proof: SignedRequesterProof<'_>,
 ) -> anyhow::Result<Vec<u8>> {
-    refresh_current(context, runtime, attempt.now).await?;
-    let requester = session_requester(runtime, &context.node_id)?;
-    let bytes = forward_bytes(&requester, config, attempt, w, proof.proof, proof.signature)?;
-    post_home(context, FORWARD_PATH, &bytes).await
+    forward_via(&ContextLink(context), runtime, config, attempt, w, proof).await
 }
 
-async fn refresh_current(
-    context: &GatewayQuicContext,
+pub(crate) async fn forward_via(
+    link: &impl HomeLink,
     runtime: &GatewaySessionRuntime,
-    now: u64,
-) -> anyhow::Result<()> {
-    let key: Option<ramflux_node_core::DeviceAuthKeyResponse> = crate::router_get_json_async(
-        &context.router,
-        &format!("/mvp1/device-auth-key/{}", runtime.source_identity.storage_key()),
-    )
-    .await?;
-    check_current(
-        runtime,
-        &key.ok_or_else(|| anyhow::anyhow!("renewal authority unavailable"))?,
-        now,
-    )?;
-    Ok(())
-}
-
-async fn post_home<T: serde::Serialize + Sync>(
-    context: &GatewayQuicContext,
-    path: &str,
-    body: &T,
+    config: &HomeRenewalConfig,
+    attempt: &HomeRenewalAttempt<'_>,
+    w: &SignedHomeForward,
+    proof: SignedRequesterProof<'_>,
 ) -> anyhow::Result<Vec<u8>> {
-    let reply: serde_json::Value = crate::router_post_json_until(
-        &context.router,
-        path,
-        body,
-        std::time::Instant::now() + ROUTE_BUDGET,
-    )
-    .await?;
-    Ok(serde_json::to_vec(&reply)?)
+    link.refresh(runtime, attempt.now).await?;
+    let requester = session_requester(runtime, link.node_id())?;
+    let bytes = forward_bytes(&requester, config, attempt, w, proof.proof, proof.signature)?;
+    link.post(FORWARD_PATH, serde_json::to_value(&bytes)?).await
 }
 
 #[cfg(test)]

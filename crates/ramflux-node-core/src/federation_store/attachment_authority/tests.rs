@@ -54,6 +54,15 @@ fn record(authority: Option<FederationAttachmentAuthority>) -> FederationServerR
         signature: String::new(),
     }
 }
+/// A record that also lists `attachment-renewal.v1` in its own capabilities.
+fn signed_adv(
+    authority: Option<FederationAttachmentAuthority>,
+) -> TestResult<FederationServerRecord> {
+    let mut r = record(authority);
+    r.node_capabilities.push(ATTACHMENT_RENEWAL_CAPABILITY.to_owned());
+    sign_federation_server_record_with_seed(&mut r, [7; 32])?;
+    Ok(r)
+}
 fn signed(authority: Option<FederationAttachmentAuthority>) -> TestResult<FederationServerRecord> {
     let mut r = record(authority);
     sign_federation_server_record_with_seed(&mut r, [7; 32])?;
@@ -126,7 +135,7 @@ fn fresh_signed_records_drive_history_through_withdrawal_restart_and_peer_remova
     let book = AttachmentAuthorityBook::new();
     let live = active(true);
     // A fresh signed g4 record is verified, adopted and published.
-    let g4 = signed(Some(authority(4, 4)))?;
+    let g4 = signed_adv(Some(authority(4, 4)))?;
     assert_eq!(gen_of(book.adopt_record(&store, &live, &g4, NOW)?), Some(4));
     assert!(
         matches!(book.answer(&store, &live, NODE, NOW), PinAnswer::Available { pin } if pin.generation == 4 && pin.key == [4; 32])
@@ -153,7 +162,7 @@ fn fresh_signed_records_drive_history_through_withdrawal_restart_and_peer_remova
     // Restart: a fresh signed g3 record is a rollback; history stays g4.
     let store = FederationRedbStore::open(&p)?;
     let book = AttachmentAuthorityBook::new();
-    let g3 = signed(Some(authority(3, 3)))?;
+    let g3 = signed_adv(Some(authority(3, 3)))?;
     assert_eq!(
         book.adopt_record(&store, &live, &g3, NOW)?,
         AuthorityAdoption::Unavailable(Withdrawn::Rollback)
@@ -162,7 +171,7 @@ fn fresh_signed_records_drive_history_through_withdrawal_restart_and_peer_remova
     let h = store.attachment_authority_history(NODE)?.ok_or("row")?;
     assert_eq!((h.max_generation, h.key_at_max.as_str()), (4, key(4).as_str()));
     // Equal generation, different key: substitution, history unchanged.
-    let swapped = signed(Some(authority(4, 9)))?;
+    let swapped = signed_adv(Some(authority(4, 9)))?;
     assert_eq!(
         book.adopt_record(&store, &live, &swapped, NOW)?,
         AuthorityAdoption::Unavailable(Withdrawn::Substitution)
@@ -170,7 +179,7 @@ fn fresh_signed_records_drive_history_through_withdrawal_restart_and_peer_remova
     assert_eq!(store.attachment_authority_history(NODE)?, Some(h));
     // Re-introducing g4 with the same key is available; g5 with a new key is the new history.
     assert_eq!(gen_of(book.adopt_record(&store, &live, &g4, NOW)?), Some(4));
-    let g5 = signed(Some(authority(5, 5)))?;
+    let g5 = signed_adv(Some(authority(5, 5)))?;
     assert_eq!(gen_of(book.adopt_record(&store, &live, &g5, NOW)?), Some(5));
     let h = store.attachment_authority_history(NODE)?.ok_or("row")?;
     assert_eq!((h.max_generation, h.key_at_max.as_str()), (5, key(5).as_str()));
@@ -185,12 +194,12 @@ fn records_that_fail_verification_are_refused_with_the_exact_error_and_change_no
     let book = AttachmentAuthorityBook::new();
     let live = active(true);
     assert_eq!(
-        gen_of(book.adopt_record(&store, &live, &signed(Some(authority(4, 4)))?, NOW)?),
+        gen_of(book.adopt_record(&store, &live, &signed_adv(Some(authority(4, 4)))?, NOW)?),
         Some(4)
     );
     // Tampering with either member after signing breaks the node signature.
     for (generation, k) in [(5, 4), (4, 5)] {
-        let mut t = signed(Some(authority(4, 4)))?;
+        let mut t = signed_adv(Some(authority(4, 4)))?;
         t.attachment_authority = Some(authority(generation, k));
         let out = book.adopt_record(&store, &live, &t, NOW);
         assert!(
@@ -224,7 +233,7 @@ fn a_pin_needs_admission_and_a_negotiated_capability_at_every_lookup() -> TestRe
         book.answer(&store, &state(FederationTrustStatus::Revoked, true), "node-z", NOW),
         PinAnswer::SourceUnknown
     );
-    let g4 = signed(Some(authority(4, 4)))?;
+    let g4 = signed_adv(Some(authority(4, 4)))?;
     assert_eq!(gen_of(book.adopt_record(&store, &active(true), &g4, NOW)?), Some(4));
     // Published, then the capability drops out of the negotiated set: unavailable at lookup
     // even though the record still advertises it and the pin is still in the book.
@@ -259,7 +268,7 @@ fn adoption_holds_the_publication_lock_through_the_history_write() -> TestResult
             seen.store(b.available.try_lock().is_err(), std::sync::atomic::Ordering::SeqCst);
         }));
     assert_eq!(
-        gen_of(book.adopt_record(&store, &live, &signed(Some(authority(4, 4)))?, NOW)?),
+        gen_of(book.adopt_record(&store, &live, &signed_adv(Some(authority(4, 4)))?, NOW)?),
         Some(4)
     );
     assert!(
@@ -282,7 +291,7 @@ fn concurrent_adoptions_never_publish_below_the_durable_maximum() -> TestResult 
                     (store.clone(), book.clone(), live.clone(), barrier.clone());
                 std::thread::spawn(move || -> Result<(), String> {
                     let record =
-                        signed(Some(authority(u64::from(g), g))).map_err(|e| e.to_string())?;
+                        signed_adv(Some(authority(u64::from(g), g))).map_err(|e| e.to_string())?;
                     barrier.wait();
                     book.adopt_record(&store, &live, &record, NOW).map_err(|e| e.to_string())?;
                     Ok(())
@@ -337,7 +346,7 @@ fn history_capacity_is_exactly_4096_nodes_never_refunded_and_needs_no_cache() ->
     let book = AttachmentAuthorityBook::new();
     let live = active(true);
     assert!(matches!(
-        book.adopt_record(&store, &live, &signed(Some(authority(1, 1)))?, NOW),
+        book.adopt_record(&store, &live, &signed_adv(Some(authority(1, 1)))?, NOW),
         Err(NodeCoreError::AttachmentAuthorityHistoryCapacity)
     ));
     assert_eq!(book.answer(&store, &live, NODE, NOW), PinAnswer::SourceUnknown);
@@ -442,5 +451,62 @@ fn noncanonical_authority_input_is_refused_with_the_exact_decoder_error() -> Tes
         let decoded = serde_json::from_value::<FederationServerRecord>(v)?;
         assert_eq!(decoded.attachment_authority.map(|a| a.generation), Some(generation));
     }
+    Ok(())
+}
+
+#[test]
+fn a_first_time_peer_is_available_at_the_first_lookup_after_negotiation() -> TestResult {
+    let store = FederationRedbStore::open(path("first-time"))?;
+    let book = AttachmentAuthorityBook::new();
+    let g4 = signed_adv(Some(authority(4, 4)))?;
+    // Discovery verified the record while the handshake had not negotiated anything yet.
+    assert_eq!(
+        book.adopt_record(&store, &active(false), &g4, NOW)?,
+        AuthorityAdoption::Unavailable(Withdrawn::Absent)
+    );
+    assert_eq!(book.answer(&store, &active(false), NODE, NOW), PinAnswer::Unavailable);
+    assert_eq!(store.attachment_authority_history(NODE)?, None);
+    // Negotiation completes; the very next lookup publishes the pin and records the history,
+    // with no further discovery.
+    assert!(matches!(
+        book.answer(&store, &active(true), NODE, NOW + 1),
+        PinAnswer::Available { pin } if pin.generation == 4 && pin.key == [4; 32]
+    ));
+    assert_eq!(store.attachment_authority_history(NODE)?.map(|h| h.max_generation), Some(4));
+    Ok(())
+}
+
+#[test]
+fn a_fresh_record_that_withdraws_the_advertisement_clears_the_pin_despite_an_old_negotiated_set()
+-> TestResult {
+    let store = FederationRedbStore::open(path("withdraw"))?;
+    let book = AttachmentAuthorityBook::new();
+    let live = active(true);
+    assert_eq!(
+        gen_of(book.adopt_record(&store, &live, &signed_adv(Some(authority(4, 4)))?, NOW)?),
+        Some(4)
+    );
+    assert!(matches!(book.answer(&store, &live, NODE, NOW), PinAnswer::Available { .. }));
+    // Same field, but the record no longer lists the capability; the negotiated set from the
+    // earlier handshake still contains it.
+    let unlisted = signed(Some(authority(4, 4)))?;
+    assert_eq!(
+        book.adopt_record(&store, &live, &unlisted, NOW + 1)?,
+        AuthorityAdoption::Unavailable(Withdrawn::Absent)
+    );
+    assert_eq!(book.answer(&store, &live, NODE, NOW + 1), PinAnswer::Unavailable);
+    // And it stays withdrawn at every later lookup (no stale candidate resurrects it).
+    assert_eq!(book.answer(&store, &live, NODE, NOW + 2), PinAnswer::Unavailable);
+    // Dropping the field instead has the same effect.
+    assert_eq!(
+        gen_of(book.adopt_record(&store, &live, &signed_adv(Some(authority(4, 4)))?, NOW + 3)?),
+        Some(4)
+    );
+    assert_eq!(
+        book.adopt_record(&store, &live, &signed_adv(None)?, NOW + 4)?,
+        AuthorityAdoption::Unavailable(Withdrawn::Absent)
+    );
+    assert_eq!(book.answer(&store, &live, NODE, NOW + 4), PinAnswer::Unavailable);
+    assert_eq!(store.attachment_authority_history(NODE)?.map(|h| h.max_generation), Some(4));
     Ok(())
 }

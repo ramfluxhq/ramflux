@@ -58,13 +58,21 @@ fn ensure_budget(deadline: Instant) -> Result<(), RenewalRefusal> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum SourceEnvelope {
-    Challenge { peer_node: String, request: Value },
-    Forward { peer_node: String, request: Value },
+    Challenge { peer_node: String, budget_ms: u64, request: Value },
+    Forward { peer_node: String, budget_ms: u64, request: Value },
 }
 
 #[derive(Debug, Serialize)]
 enum Refused {
     Refused { code: RenewalRefusal },
+}
+
+impl SourceEnvelope {
+    fn budget_ms(&self) -> u64 {
+        match self {
+            Self::Challenge { budget_ms, .. } | Self::Forward { budget_ms, .. } => *budget_ms,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -125,7 +133,13 @@ pub(crate) fn route(
     let Ok(envelope) = serde_json::from_slice::<SourceEnvelope>(body) else {
         return refused(RenewalRefusal::Invalid);
     };
-    match serve(&envelope, backend, deadline) {
+    // The carried remainder of the originating budget can only shorten the deadline.
+    let Ok(carried) =
+        ramflux_node_core::migration_hop_deadline(envelope.budget_ms(), Instant::now())
+    else {
+        return refused(RenewalRefusal::Invalid);
+    };
+    match serve(&envelope, backend, deadline.min(carried)) {
         Ok(reply) => SourceReply { status: "200 OK", body: reply },
         Err(code) => refused(code),
     }
@@ -138,10 +152,10 @@ fn serve(
 ) -> Result<Vec<u8>, RenewalRefusal> {
     let (anchor, requester_home) = requester_of(envelope)?;
     let (peer_node, mut request, path) = match envelope {
-        SourceEnvelope::Challenge { peer_node, request } => {
+        SourceEnvelope::Challenge { peer_node, request, .. } => {
             (peer_node, request.clone(), RELAY_CHALLENGE_PATH)
         }
-        SourceEnvelope::Forward { peer_node, request } => {
+        SourceEnvelope::Forward { peer_node, request, .. } => {
             (peer_node, request.clone(), RELAY_RENEW_PATH)
         }
     };

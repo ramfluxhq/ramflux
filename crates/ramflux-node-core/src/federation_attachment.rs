@@ -101,6 +101,13 @@ pub enum AuthorityAdoption {
     Unavailable(Withdrawn),
 }
 
+#[derive(Clone)]
+struct Candidate {
+    authority: Option<FederationAttachmentAuthority>,
+    /// The record's own `node_capabilities` list the capability.
+    advertised: bool,
+}
+
 #[cfg(test)]
 pub(crate) type HistoryHook = std::sync::Arc<dyn Fn(&AttachmentAuthorityBook) + Send + Sync>;
 
@@ -110,6 +117,10 @@ pub(crate) type HistoryHook = std::sync::Arc<dyn Fn(&AttachmentAuthorityBook) + 
 #[derive(Default)]
 pub struct AttachmentAuthorityBook {
     pub(crate) available: Mutex<BTreeMap<String, AuthorityPin>>,
+    /// The latest verified record per node (bounded by the history capacity). A pin whose
+    /// record arrived before the capability was negotiated is published at the first
+    /// lookup after negotiation, without waiting for another discovery.
+    candidates: Mutex<BTreeMap<String, Candidate>>,
     #[cfg(test)]
     pub(crate) after_history_write: Mutex<Option<HistoryHook>>,
 }
@@ -133,10 +144,30 @@ impl AttachmentAuthorityBook {
         now: u64,
     ) -> Result<AuthorityAdoption, NodeCoreError> {
         crate::verify_federation_server_record(record, now)?;
+        // Availability needs the field, the record's own advertisement and the live
+        // negotiated set. A fresh record that drops the advertisement or the field
+        // withdraws the pin whatever an older negotiated set still says.
+        let advertised =
+            record.node_capabilities.iter().any(|c| c == ATTACHMENT_RENEWAL_CAPABILITY);
         let negotiated = state
             .negotiated_capabilities(&record.node_id)
             .is_some_and(|caps| caps.contains(ATTACHMENT_RENEWAL_CAPABILITY));
-        self.adopt(store, &record.node_id, record.attachment_authority.as_ref(), negotiated, now)
+        let authority = record.attachment_authority.as_ref().filter(|_| advertised);
+        {
+            let mut candidates = self
+                .candidates
+                .lock()
+                .map_err(|_| NodeCoreError::Redb("attachment authority book poisoned".into()))?;
+            if u64::try_from(candidates.len()).is_ok_and(|n| n < crate::MAX_AUTHORITY_NODES)
+                || candidates.contains_key(&record.node_id)
+            {
+                candidates.insert(
+                    record.node_id.clone(),
+                    Candidate { authority: authority.cloned(), advertised },
+                );
+            }
+        }
+        self.adopt(store, &record.node_id, authority, negotiated, now)
     }
 
     pub(crate) fn adopt(
@@ -193,6 +224,22 @@ impl AttachmentAuthorityBook {
         }
         if let Some(pin) = self.available.lock().ok().and_then(|a| a.get(node_id).copied()) {
             return PinAnswer::Available { pin };
+        }
+        // Negotiation may have completed after the record was verified: publish now.
+        let pending = self
+            .candidates
+            .lock()
+            .ok()
+            .and_then(|c| c.get(node_id).cloned())
+            .and_then(|c| c.authority.filter(|_| c.advertised));
+        if let Some(authority) = pending {
+            match self.adopt(store, node_id, Some(&authority), true, now) {
+                Ok(AuthorityAdoption::Available(pin)) => return PinAnswer::Available { pin },
+                Err(NodeCoreError::AttachmentAuthorityHistoryCapacity) => {
+                    return PinAnswer::SourceUnknown;
+                }
+                _ => return PinAnswer::Unavailable,
+            }
         }
         let no_row = store.attachment_authority_history(node_id).is_ok_and(|h| h.is_none());
         let full =
