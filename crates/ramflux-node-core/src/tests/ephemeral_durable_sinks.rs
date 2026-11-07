@@ -8,11 +8,18 @@
 //! `transient`. Test-only files are excluded. Before matching, each file is
 //! normalised: comments and string literals are stripped, whitespace around
 //! `::` is collapsed, and `use` / `pub use` groups are expanded into full
-//! paths. Alias bindings are rewritten to their full paths. `#[cfg(test)]`
-//! items are ignored, so absence proofs may open a store.
+//! paths. Alias bindings are rewritten to their full paths. Crate paths
+//! (`crate::`, `self::`, `super::`) are then resolved through a table of every
+//! `use` / `pub use` binding in the hosting crate's `src/`, so a re-export in
+//! another file cannot hide a sink. `#[cfg(test)]` items are ignored, so
+//! absence proofs may open a store.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// Longest chain of re-export substitutions followed for one path.
+const MAX_ALIAS_HOPS: usize = 8;
 
 const FORBIDDEN_SYMBOLS: &[&str] = &[
     "begin_write",
@@ -185,10 +192,14 @@ fn forbidden_hits(src: &str) -> Vec<&'static str> {
 /// Normalised text used for matching: comments and string literals stripped,
 /// `#[cfg(test)]` items removed, whitespace collapsed, and use-group aliases
 /// expanded. Both the raw text and the expanded paths are included.
-fn production_source(src: &str) -> String {
-    let stripped = strip_cfg_test_items(&strip_comments(src));
-    let collapsed = collapse_path_ws(&stripped);
-    expand_detection_text(&collapsed)
+fn production_source(src: &str, file_module: &str, table: &AliasTable) -> Result<String, String> {
+    let collapsed = normalised_items(src);
+    expand_detection_text(&collapsed, file_module, table)
+}
+
+/// Comments and strings stripped, `#[cfg(test)]` items removed, whitespace collapsed.
+fn normalised_items(src: &str) -> String {
+    collapse_path_ws(&strip_cfg_test_items(&strip_comments(src)))
 }
 
 fn strip_comments(src: &str) -> String {
@@ -460,9 +471,13 @@ fn collapse_path_ws(src: &str) -> String {
 }
 
 /// Appends the expanded paths of every `use` item and the alias-rewritten text.
-fn expand_detection_text(collapsed: &str) -> String {
+fn expand_detection_text(
+    collapsed: &str,
+    file_module: &str,
+    table: &AliasTable,
+) -> Result<String, String> {
     let mut bindings: Vec<(String, String)> = Vec::new();
-    for body in use_bodies(collapsed) {
+    for (_, body) in use_bodies(collapsed) {
         expand_use_tree("", body, &mut bindings);
     }
     let mut rewritten = collapsed.to_string();
@@ -471,6 +486,7 @@ fn expand_detection_text(collapsed: &str) -> String {
             rewritten = rewrite_alias(&rewritten, alias, full);
         }
     }
+    let resolved = resolve_crate_paths(&rewritten, file_module, table)?;
     let mut out = String::with_capacity(collapsed.len() * 2);
     out.push_str(collapsed);
     out.push('\n');
@@ -478,12 +494,13 @@ fn expand_detection_text(collapsed: &str) -> String {
         out.push_str(full);
         out.push('\n');
     }
-    out.push_str(&rewritten);
-    out
+    out.push_str(&resolved);
+    Ok(out)
 }
 
-/// Bodies of `use` / `pub use` items, without the leading keyword or the `;`.
-fn use_bodies(text: &str) -> Vec<&str> {
+/// Bodies of `use` / `pub use` items with their byte offsets, without the
+/// leading keyword or the `;`.
+fn use_bodies(text: &str) -> Vec<(usize, &str)> {
     let mut bodies = Vec::new();
     let mut from = 0;
     while let Some(rel) = text[from..].find("use ") {
@@ -494,13 +511,59 @@ fn use_bodies(text: &str) -> Vec<&str> {
         match found {
             Some(end_rel) => {
                 let end = body_start + end_rel;
-                bodies.push(&text[body_start..end]);
+                bodies.push((body_start, &text[body_start..end]));
                 from = end + 1;
             }
             None => from = body_start,
         }
     }
     bodies
+}
+
+/// Byte ranges `(name, start, end)` of inline `mod name { .. }` items, in
+/// source order. Nested items follow their enclosing item.
+fn inline_mod_spans(text: &str) -> Vec<(String, usize, usize)> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find("mod ") {
+        let at = from + rel;
+        from = at + 4;
+        let boundary = text[..at].chars().next_back().is_none_or(|c| !is_ident_char(c) && c != ':');
+        if !boundary {
+            continue;
+        }
+        let name_start = skip_ws(text, at + 4);
+        let name_len =
+            text[name_start..].find(|c: char| !is_ident_char(c)).unwrap_or(text.len() - name_start);
+        let name_end = name_start + name_len;
+        let brace = skip_ws(text, name_end);
+        if name_len == 0 || !text[brace..].starts_with('{') {
+            continue;
+        }
+        let end = skip_delimited(text, brace, '{', '}');
+        spans.push((text[name_start..name_end].to_string(), at, end));
+    }
+    spans
+}
+
+/// Module path in effect at byte `at`: the file's module plus every inline
+/// `mod` span that strictly encloses `at`.
+fn module_at(file_module: &str, spans: &[(String, usize, usize)], at: usize) -> String {
+    let mut module = file_module.to_string();
+    for (name, start, end) in spans {
+        if *start < at && at < *end {
+            module = join_module(&module, name);
+        }
+    }
+    module
+}
+
+fn join_module(module: &str, segment: &str) -> String {
+    format!("{module}::{segment}")
+}
+
+fn parent_module(module: &str) -> Option<String> {
+    module.rsplit_once("::").map(|(parent, _)| parent.to_string())
 }
 
 fn join_path(prefix: &str, path: &str) -> String {
@@ -575,6 +638,201 @@ fn rewrite_alias(text: &str, alias: &str, full: &str) -> String {
     out
 }
 
+/// Every `use` / `pub use` binding of one crate's `src/`. `bindings` maps a
+/// module-qualified name (`crate::disk`) to the absolute path it names
+/// (`std::fs`). `modules` holds every module path, file or inline, so that a
+/// 2018-style `use foo::x` inside `crate` resolves to `crate::foo::x`.
+#[derive(Debug, Default)]
+struct AliasTable {
+    bindings: Vec<(String, String)>,
+    modules: BTreeSet<String>,
+}
+
+impl AliasTable {
+    /// One substitution step: the longest binding whose key is a whole-segment
+    /// prefix of `path`, with that prefix replaced by its target.
+    fn step(&self, path: &str) -> Option<String> {
+        self.bindings
+            .iter()
+            .filter(|(key, _)| {
+                path.strip_prefix(key.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            })
+            .max_by_key(|(key, _)| key.len())
+            .map(|(key, target)| format!("{target}{}", &path[key.len()..]))
+    }
+}
+
+/// Builds the table from `(module path, source)` pairs. Each source is
+/// normalised first, so `#[cfg(test)]` items and comments contribute nothing.
+fn build_alias_table(files: &[(&str, &str)]) -> Result<AliasTable, String> {
+    let mut table = AliasTable::default();
+    let mut parsed = Vec::new();
+    for (file_module, src) in files {
+        let text = normalised_items(src);
+        let spans = inline_mod_spans(&text);
+        table.modules.insert((*file_module).to_string());
+        for (name, start, _) in &spans {
+            let parent = module_at(file_module, &spans, *start);
+            table.modules.insert(join_module(&parent, name));
+        }
+        parsed.push((*file_module, text, spans));
+    }
+    for (file_module, text, spans) in &parsed {
+        for (at, body) in use_bodies(text) {
+            let module = module_at(file_module, spans, at);
+            let mut raw = Vec::new();
+            expand_use_tree("", body, &mut raw);
+            for (full, alias) in raw {
+                if alias == "*" || alias == "_" {
+                    continue;
+                }
+                let target = normalise_target(&module, &full, &table.modules)?;
+                let key = join_module(&module, &alias);
+                if target != key {
+                    table.bindings.push((key, target));
+                }
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// Anchors a path written inside `module` to an absolute path. `crate::` paths
+/// are already absolute, `self::` and `super::` are relative to `module`, and
+/// a first segment naming a child module of `module` is resolved into it.
+/// Anything else (`std::fs`, an extern crate) is returned unchanged.
+fn normalise_target(
+    module: &str,
+    full: &str,
+    modules: &BTreeSet<String>,
+) -> Result<String, String> {
+    let mut parts: Vec<&str> = full.split("::").collect();
+    let mut base = match parts[0] {
+        "crate" => return Ok(full.to_string()),
+        "self" => {
+            parts.remove(0);
+            module.to_string()
+        }
+        "super" => {
+            let mut base = module.to_string();
+            while parts.first() == Some(&"super") {
+                parts.remove(0);
+                base = parent_module(&base)
+                    .ok_or_else(|| format!("`{full}` escapes the crate root in {module}"))?;
+            }
+            base
+        }
+        first if modules.contains(&join_module(module, first)) => module.to_string(),
+        _ => return Ok(full.to_string()),
+    };
+    for part in parts {
+        base = join_module(&base, part);
+    }
+    Ok(base)
+}
+
+/// Resolves `token` (an absolute, `self::` or `super::` path) through the
+/// table until no binding applies. Fails on a cycle or past `MAX_ALIAS_HOPS`.
+fn resolve_path(token: &str, module: &str, table: &AliasTable) -> Result<String, String> {
+    let mut current = normalise_target(module, token, &table.modules)?;
+    let mut seen = BTreeSet::from([current.clone()]);
+    let mut hops = 0;
+    while let Some(next) = table.step(&current) {
+        hops += 1;
+        if hops > MAX_ALIAS_HOPS {
+            return Err(format!(
+                "re-export resolution exceeded {MAX_ALIAS_HOPS} hops for `{token}` in {module}"
+            ));
+        }
+        if !seen.insert(next.clone()) {
+            return Err(format!(
+                "re-export alias cycle through `{next}` for `{token}` in {module}"
+            ));
+        }
+        current = next;
+    }
+    Ok(current)
+}
+
+/// Rewrites every `crate::`, `self::` and `super::` path in `text` to its
+/// resolved form. The module used for `self` and `super` is the file's module
+/// plus any inline `mod` enclosing the path.
+fn resolve_crate_paths(
+    text: &str,
+    file_module: &str,
+    table: &AliasTable,
+) -> Result<String, String> {
+    let spans = inline_mod_spans(text);
+    let mut starts: Vec<usize> = ["crate::", "self::", "super::"]
+        .iter()
+        .flat_map(|keyword| text.match_indices(keyword).map(|(at, _)| at))
+        .filter(|&at| text[..at].chars().next_back().is_none_or(|c| !is_ident_char(c) && c != ':'))
+        .collect();
+    starts.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for at in starts {
+        if at < last {
+            continue;
+        }
+        let tail = &text[at..];
+        let len = tail.find(|c: char| !is_ident_char(c) && c != ':').unwrap_or(tail.len());
+        let module = module_at(file_module, &spans, at);
+        out.push_str(&text[last..at]);
+        out.push_str(&resolve_path(&text[at..at + len], &module, table)?);
+        last = at + len;
+    }
+    out.push_str(&text[last..]);
+    Ok(out)
+}
+
+/// Module path (`crate::a::b`) of a file under a crate's `src/`.
+fn module_path_of(src_dir: &Path, path: &Path) -> io::Result<String> {
+    let rel = rel_path(src_dir, path);
+    let stem = rel
+        .strip_suffix(".rs")
+        .ok_or_else(|| io::Error::other(format!("{rel} is not a .rs file")))?;
+    let mut segments: Vec<&str> = stem.split('/').collect();
+    match segments.last().copied() {
+        Some("mod") => {
+            segments.pop();
+        }
+        Some("lib" | "main") if segments.len() == 1 => {
+            segments.pop();
+        }
+        _ => {}
+    }
+    Ok(std::iter::once("crate").chain(segments).collect::<Vec<_>>().join("::"))
+}
+
+/// Loads the alias table for the crate whose `src/` is `src_dir`. Test-only
+/// trees (`tests/`, `*_tests.rs`) are skipped, as they never ship.
+fn load_crate_table(src_dir: &Path) -> io::Result<AliasTable> {
+    let mut files = Vec::new();
+    collect_rs_dir(src_dir, &mut files)?;
+    files.sort();
+    let mut sources = Vec::new();
+    for path in &files {
+        if rel_path(src_dir, path).split('/').any(|part| part == "tests") {
+            continue;
+        }
+        sources.push((module_path_of(src_dir, path)?, std::fs::read_to_string(path)?));
+    }
+    let refs: Vec<(&str, &str)> =
+        sources.iter().map(|(module, src)| (module.as_str(), src.as_str())).collect();
+    build_alias_table(&refs).map_err(io::Error::other)
+}
+
+/// `<root>/{crates,apps}/<name>/src` for a discovered module.
+fn crate_src_of(root: &Path, path: &Path) -> io::Result<PathBuf> {
+    let rel = rel_path(root, path);
+    match rel.split('/').collect::<Vec<_>>().as_slice() {
+        [top, name, "src", ..] => Ok(root.join(top).join(name).join("src")),
+        _ => Err(io::Error::other(format!("{rel} is outside a crate src tree"))),
+    }
+}
+
 fn planted_spellings(symbol: &str) -> [(&'static str, String); 3] {
     [
         ("bare", format!("fn sink() {{ {symbol}(); }}\n")),
@@ -588,8 +846,18 @@ fn planted_spellings(symbol: &str) -> [(&'static str, String); 3] {
     ]
 }
 
-fn detect(src: &str) -> Vec<&'static str> {
-    forbidden_hits(&production_source(src))
+/// Hits for `src` as the module `file_module` of a crate described by `table`.
+fn detect_in(
+    src: &str,
+    file_module: &str,
+    table: &AliasTable,
+) -> Result<Vec<&'static str>, String> {
+    Ok(forbidden_hits(&production_source(src, file_module, table)?))
+}
+
+/// Hits for a single self-contained fixture: `crate::ephemeral` with no re-exports.
+fn detect(src: &str) -> Result<Vec<&'static str>, String> {
+    detect_in(src, "crate::ephemeral", &AliasTable::default())
 }
 
 #[test]
@@ -599,10 +867,19 @@ fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
     if files.is_empty() {
         return Err(io::Error::other("ephemeral module scan produced zero files").into());
     }
+    let mut tables: BTreeMap<PathBuf, AliasTable> = BTreeMap::new();
     let mut violations = String::new();
     for path in &files {
+        let src_dir = crate_src_of(&root, path)?;
+        if !tables.contains_key(&src_dir) {
+            tables.insert(src_dir.clone(), load_crate_table(&src_dir)?);
+        }
+        let Some(table) = tables.get(&src_dir) else {
+            return Err(io::Error::other("crate alias table missing after insert").into());
+        };
+        let file_module = module_path_of(&src_dir, path)?;
         let source = std::fs::read_to_string(path)?;
-        for symbol in detect(&source) {
+        for symbol in detect_in(&source, &file_module, table).map_err(io::Error::other)? {
             violations.push_str(&rel_path(&root, path));
             violations.push_str(": ");
             violations.push_str(symbol);
@@ -647,63 +924,71 @@ fn ephemeral_inventory_discovery() -> TestResult {
 }
 
 #[test]
-fn normaliser_grouped_alias_is_detected() {
+fn normaliser_grouped_alias_is_detected() -> TestResult {
     let src = "use std::{fs as disk}; fn f() { disk::write(\"x\", b\"x\"); }\n";
-    assert_eq!(detect(src), vec!["std::fs"]);
+    assert_eq!(detect(src)?, vec!["std::fs"]);
+    Ok(())
 }
 
 #[test]
-fn normaliser_pub_use_reexport_is_detected() {
+fn normaliser_pub_use_reexport_is_detected() -> TestResult {
     let src = "pub use std::{fs as disk};\n";
-    assert_eq!(detect(src), vec!["std::fs"]);
+    assert_eq!(detect(src)?, vec!["std::fs"]);
+    Ok(())
 }
 
 #[test]
-fn normaliser_nested_group_is_detected() {
+fn normaliser_nested_group_is_detected() -> TestResult {
     let src = "use std::{io::{self, Write}, fs as disk};\nfn f() { let _ = disk::read(\"x\"); }\n";
-    assert_eq!(detect(src), vec!["std::fs"]);
+    assert_eq!(detect(src)?, vec!["std::fs"]);
+    Ok(())
 }
 
 #[test]
-fn normaliser_whitespace_separated_path_is_detected() {
+fn normaliser_whitespace_separated_path_is_detected() -> TestResult {
     let src = "fn f() { std :: fs :: write(\"x\", b\"x\"); }\n";
-    assert_eq!(detect(src), vec!["std::fs"]);
+    assert_eq!(detect(src)?, vec!["std::fs"]);
+    Ok(())
 }
 
 #[test]
-fn normaliser_direct_call_is_detected() {
+fn normaliser_direct_call_is_detected() -> TestResult {
     let src = "fn f() { std::fs::write(\"x\", b\"x\"); }\n";
-    assert_eq!(detect(src), vec!["std::fs"]);
+    assert_eq!(detect(src)?, vec!["std::fs"]);
+    Ok(())
 }
 
 #[test]
-fn normaliser_comment_and_string_are_not_detected() {
+fn normaliser_comment_and_string_are_not_detected() -> TestResult {
     let src = "// std::fs begin_write\nfn f() { let _ = \"std::fs OpenOptions\"; }\n";
-    assert_eq!(detect(src), Vec::<&'static str>::new());
+    assert_eq!(detect(src)?, Vec::<&'static str>::new());
+    Ok(())
 }
 
 #[test]
-fn planted_forbidden_symbols_are_caught() {
+fn planted_forbidden_symbols_are_caught() -> TestResult {
     for symbol in FORBIDDEN_SYMBOLS {
         for (kind, source) in planted_spellings(symbol) {
-            let hits = detect(&source);
+            let hits = detect(&source)?;
             assert!(
                 hits.iter().any(|hit| hit == symbol),
                 "symbol {symbol} spelling {kind} must be caught in {source:?}, hits={hits:?}"
             );
         }
     }
+    Ok(())
 }
 
 #[test]
-fn planted_near_miss_identifiers_are_not_caught() {
+fn planted_near_miss_identifiers_are_not_caught() -> TestResult {
     let src = "fn sink() { begin_write_txn(); std::fmt::write(); open_options(); }\n";
-    let hits = detect(src);
+    let hits = detect(src)?;
     assert!(hits.is_empty(), "near-miss identifiers must not match, hits={hits:?}");
+    Ok(())
 }
 
 #[test]
-fn ephemeral_sink_guard_ignores_cfg_test_items() {
+fn ephemeral_sink_guard_ignores_cfg_test_items() -> TestResult {
     let src = r#"
         fn production() {}
         #[cfg(test)]
@@ -716,17 +1001,95 @@ fn ephemeral_sink_guard_ignores_cfg_test_items() {
             }
         }
     "#;
-    let hits = detect(src);
+    let hits = detect(src)?;
     assert!(hits.is_empty(), "cfg(test) fixtures must not count, hits={hits:?}");
 
     let src = "fn production() { begin_write(); }\n#[cfg(test)]\nmod tests {}\n";
-    let hits = detect(src);
+    let hits = detect(src)?;
     assert!(hits.contains(&"begin_write"), "production hits must remain visible, hits={hits:?}");
+    Ok(())
 }
 
 #[test]
-fn comments_naming_forbidden_symbols_are_not_hits() {
+fn comments_naming_forbidden_symbols_are_not_hits() -> TestResult {
     let src = "// begin_write RouterRedbStore std::fs\nfn f() {}\n";
-    let hits = detect(src);
+    let hits = detect(src)?;
     assert!(hits.is_empty(), "comments must not count, hits={hits:?}");
+    Ok(())
+}
+
+/// M2 (reviewer case): a non-ephemeral `lib.rs` re-export hides `std::fs`
+/// behind `crate::disk`. The ephemeral file must still report `std::fs`.
+#[test]
+fn cross_file_reexport_is_resolved() -> TestResult {
+    let table = build_alias_table(&[("crate", "pub use std::fs as disk;\n")])?;
+    let src = "fn sink() { crate::disk::write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect_in(src, "crate::ephemeral", &table)?, vec!["std::fs"]);
+    Ok(())
+}
+
+/// Two hops: `crate::disk` -> `foo::x` (2018 child path in lib.rs) -> `std::fs`
+/// declared in `foo/mod.rs`.
+#[test]
+fn two_hop_reexport_through_mod_rs_is_resolved() -> TestResult {
+    let table = build_alias_table(&[
+        ("crate", "pub mod foo;\npub use foo::x as disk;\n"),
+        ("crate::foo", "pub use std::fs as x;\n"),
+    ])?;
+    let src = "fn sink() { let _ = crate::disk::read(\"x\"); }\n";
+    assert_eq!(detect_in(src, "crate::ephemeral", &table)?, vec!["std::fs"]);
+    Ok(())
+}
+
+/// `self::` and `super::` inside a nested module resolve against that module.
+#[test]
+fn relative_paths_resolve_against_their_module() -> TestResult {
+    let table = build_alias_table(&[
+        ("crate", "pub mod wal;\npub mod ephemeral;\n"),
+        ("crate::wal", "pub use std::fs as disk;\n"),
+        ("crate::wal::inner", "pub use super::disk as d;\n"),
+    ])?;
+    let src = "fn sink() { let _ = crate::wal::inner::d::write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect_in(src, "crate::ephemeral", &table)?, vec!["std::fs"]);
+    Ok(())
+}
+
+/// Cycle `a -> b -> a` terminates with the explicit cycle error.
+#[test]
+fn reexport_cycle_is_an_explicit_error() -> TestResult {
+    let table = build_alias_table(&[
+        ("crate::a", "pub use crate::b::x;\n"),
+        ("crate::b", "pub use crate::a::x;\n"),
+    ])?;
+    let src = "fn sink() { crate::a::x::write(); }\n";
+    let Err(err) = detect_in(src, "crate::ephemeral", &table) else {
+        return Err("a re-export cycle must fail the guard".into());
+    };
+    assert!(err.contains("alias cycle"), "got {err}");
+    Ok(())
+}
+
+/// A chain longer than `MAX_ALIAS_HOPS` fails loudly instead of truncating.
+#[test]
+fn reexport_chain_past_the_hop_cap_is_an_explicit_error() -> TestResult {
+    let lines: Vec<String> =
+        (0..10).map(|i| format!("pub use crate::m{} as m{i};\n", i + 1)).collect();
+    let lib = lines.join("");
+    let table = build_alias_table(&[("crate", lib.as_str())])?;
+    let src = "fn sink() { crate::m0::write(); }\n";
+    let Err(err) = detect_in(src, "crate::ephemeral", &table) else {
+        return Err("a re-export chain past the hop cap must fail the guard".into());
+    };
+    assert!(err.contains("exceeded"), "got {err}");
+    Ok(())
+}
+
+/// A benign re-export of a non-forbidden path is not a hit.
+#[test]
+fn benign_reexport_is_not_detected() -> TestResult {
+    let table = build_alias_table(&[("crate", "pub use std::path::Path as disk;\n")])?;
+    let src = "fn f() { let _ = crate::disk::new(\"x\"); }\n";
+    let hits = detect_in(src, "crate::ephemeral", &table)?;
+    assert!(hits.is_empty(), "benign re-export must not match, hits={hits:?}");
+    Ok(())
 }
