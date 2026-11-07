@@ -27,6 +27,9 @@ pub struct GatewaySessionEngine {
     /// Negotiated at establishment; read by the capable operations of later parts.
     #[allow(dead_code)]
     pub(crate) mode: super::session_push::SessionMode,
+    /// Capable events read while a legacy wait was active; drained by later parts.
+    #[allow(dead_code)]
+    pub(crate) capable_events: VecDeque<super::session_push::CapableServerFrame>,
 }
 
 pub(crate) enum GatewaySessionClientTransport {
@@ -284,6 +287,7 @@ impl GatewaySessionEngine {
             push_route_expires_at: None,
             pending_push_route: None,
             mode,
+            capable_events: VecDeque::new(),
         };
         engine.remember_session_for_resume();
         Ok(engine)
@@ -319,6 +323,7 @@ impl GatewaySessionEngine {
             push_route_expires_at: None,
             pending_push_route: None,
             mode: super::session_push::SessionMode::Legacy,
+            capable_events: VecDeque::new(),
         }
     }
 

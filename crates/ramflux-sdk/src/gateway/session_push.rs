@@ -8,13 +8,15 @@
 //! the gateway can never produce is refused at decode time. Nothing is wired yet.
 #![allow(dead_code)]
 
-use super::{GatewayCursor, GatewayInboxEntry, GatewayResumeFrame};
+use super::{GatewayCursor, GatewayInboxEntry, GatewayResumeFrame, GatewayServerFrame};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]
 mod negotiation_tests;
+#[cfg(test)]
+mod routing_tests;
 #[cfg(test)]
 mod server_tests;
 
@@ -408,4 +410,86 @@ pub(crate) fn negotiate(
             .map(|incarnation| SessionMode::Push { incarnation })
             .map_err(|_| refused("invalid inbox incarnation")),
     }
+}
+
+impl CapableServerFrame {
+    /// Events carry no request; every other capable frame is a reply.
+    pub(crate) const fn is_event(&self) -> bool {
+        matches!(self, Self::Deliver { .. } | Self::Resync { .. })
+    }
+}
+
+/// Where the raw bytes of one frame go.
+#[derive(Debug)]
+pub(crate) enum Routed {
+    Legacy(Box<GatewayServerFrame>),
+    Capable(Box<CapableServerFrame>),
+}
+
+/// Why a frame could not be routed. Everything except `Legacy` retires the session.
+#[derive(Debug)]
+pub(crate) enum RouteError {
+    /// The frame is not allowed in this mode; the text names the arm.
+    Retire(&'static str),
+    /// A capable frame failed its strict decode. It is never re-read as legacy.
+    Capable(serde_json::Error),
+    /// A legacy frame failed to decode, exactly as before routing existed.
+    Legacy(serde_json::Error),
+}
+
+/// Frames only a negotiated gateway sends; each always carries `incarnation_id`.
+const CAPABLE_ONLY: [&str; 7] = [
+    "resume_page",
+    "entry",
+    "entry_too_large",
+    "entry_gone",
+    "ack_batch",
+    "submit_accepted",
+    "resync",
+];
+/// Tags shared by both protocols; the `incarnation_id` key selects the shape.
+const SHARED: [&str; 4] = ["deliver", "ack", "cursor", "nack"];
+
+fn legacy(bytes: &[u8]) -> Result<Routed, RouteError> {
+    serde_json::from_slice(bytes)
+        .map(|frame| Routed::Legacy(Box::new(frame)))
+        .map_err(RouteError::Legacy)
+}
+
+fn capable(bytes: &[u8]) -> Result<Routed, RouteError> {
+    decode_server_frame(bytes)
+        .map(|frame| Routed::Capable(Box::new(frame)))
+        .map_err(RouteError::Capable)
+}
+
+/// Routes one raw frame from its `frame_type` and the presence of `incarnation_id`.
+///
+/// # Errors
+/// See [`RouteError`]. A capable decode failure never falls back to legacy decoding.
+pub(crate) fn route(bytes: &[u8], mode: &SessionMode) -> Result<Routed, RouteError> {
+    let peek = match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(serde_json::Value::Object(map)) => map
+            .get("frame_type")
+            .and_then(serde_json::Value::as_str)
+            .map(|tag| (tag.to_owned(), map.contains_key("incarnation_id"))),
+        _ => None,
+    };
+    let Some((tag, keyed)) = peek else { return legacy(bytes) };
+    let capable_only = CAPABLE_ONLY.contains(&tag.as_str());
+    let shared = SHARED.contains(&tag.as_str());
+    if matches!(mode, SessionMode::Push { .. }) {
+        return match (tag.as_str(), keyed) {
+            _ if capable_only || (shared && keyed) => capable(bytes),
+            ("deliver" | "ack", false) => {
+                Err(RouteError::Retire("keyless shape in a push session"))
+            }
+            ("resume", _) => Err(RouteError::Retire("legacy resume in a push session")),
+            // Keyless `nack`/`cursor` (submit refusals, legacy cursor) and every other tag.
+            _ => legacy(bytes),
+        };
+    }
+    if capable_only || (shared && keyed) {
+        return Err(RouteError::Retire("capable frame on an unnegotiated session"));
+    }
+    legacy(bytes)
 }
