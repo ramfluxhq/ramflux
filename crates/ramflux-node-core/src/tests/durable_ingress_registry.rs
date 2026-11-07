@@ -153,13 +153,10 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
 
 #[test]
 fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std::error::Error>> {
-    let scanned =
-        scan_public_envelope_functions(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"))?;
     let listed = DURABLE_INGRESS.iter().map(|(name, _)| (*name).to_owned()).collect::<Vec<_>>();
-    let mut sorted_listed = listed.clone();
-    sorted_listed.sort();
-    assert_eq!(listed.len(), sorted_listed.len(), "duplicate durable ingress registry entries");
-    assert_eq!(scanned, sorted_listed, "scanner matches differ from DURABLE_INGRESS");
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let sources = public_envelope_sources(&source_root)?;
+    assert_registry_scan_matches(&sources, &listed).map_err(std::io::Error::other)?;
 
     let ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Ingress).count();
@@ -207,26 +204,29 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
                 );
                 marked.source_device_id = format!("foreign_registry_{ordinal}");
                 marked.priority = Priority::Low;
-                marked.ttl = 5;
+                marked.ttl = 50;
                 marked.ext.ext.insert("delivery_mode".into(), mode.clone());
                 let marked = forwarded_source_envelope(marked)?;
-                let source = replay_source(&marked.source_device_id)?;
+                let control = without_delivery_mode(&marked)?;
+                let authority: DeviceAuthKeyResponse =
+                    serde_json::from_value(marked.ext.ext["source_device_authority"].clone())?;
+                let source = authority.authenticated_device_identity()?;
+                let fixture = IngressFixture {
+                    router: &router,
+                    router_store: &router_store,
+                    federation_store: &federation_store,
+                    source: &source,
+                    envelope: &marked,
+                    control: &control,
+                    ordinal,
+                };
+                exercise_ingress_control(entry, fixture)?;
                 let before = (
                     router.durable_ingress_ephemeral_snapshot(),
                     router_store.durable_ingress_snapshot()?,
                     federation_store.durable_ingress_snapshot()?,
                 );
-                exercise_ingress(
-                    entry,
-                    IngressFixture {
-                        router: &router,
-                        router_store: &router_store,
-                        federation_store: &federation_store,
-                        source: &source,
-                        envelope: &marked,
-                        ordinal,
-                    },
-                )?;
+                exercise_ingress(entry, fixture)?;
                 let after = (
                     router.durable_ingress_ephemeral_snapshot(),
                     router_store.durable_ingress_snapshot()?,
@@ -247,15 +247,47 @@ struct IngressFixture<'a> {
     federation_store: &'a FederationRedbStore,
     source: &'a ramflux_crypto::RootQualifiedDeviceRef,
     envelope: &'a Envelope,
+    control: &'a Envelope,
     ordinal: u64,
+}
+
+fn exercise_ingress_control(
+    entry: &str,
+    fixture: IngressFixture<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let IngressFixture { router, router_store, federation_store, source, control, .. } = fixture;
+    match entry {
+        "custody_delivery.rs:submit" => {}
+        "federation_store.rs:spool_outbound_forward"
+        | "federation_store.rs:accept_inbound_forward_once"
+        | "federation_store.rs:deliver_inbound_forward_once"
+        | "federation_store.rs:deliver_inbound_forward_once_with_lease" => {
+            exercise_federation_control(entry, federation_store, source, control)?;
+        }
+        "forwarded_delivery.rs:submit_forwarded_envelope"
+        | "forwarded_delivery.rs:prepare_forwarded_envelope"
+        | "forwarded_delivery.rs:prepare_forwarded_envelope_with_metadata" => {
+            exercise_forwarded_control(entry, router, router_store, control)?;
+        }
+        _ => exercise_router_control(entry, router, router_store, source, control)?,
+    }
+    Ok(())
+}
+
+fn without_delivery_mode(envelope: &Envelope) -> Result<Envelope, Box<dyn std::error::Error>> {
+    let mut control = envelope.clone();
+    control.ext.ext.remove("delivery_mode");
+    control.signed.signature = ramflux_crypto::sign_protocol_object(&control)?;
+    Ok(control)
 }
 
 fn exercise_ingress(
     entry: &str,
     fixture: IngressFixture<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let IngressFixture { router, router_store, federation_store, source, envelope, ordinal } =
-        fixture;
+    let IngressFixture {
+        router, router_store, federation_store, source, envelope, ordinal, ..
+    } = fixture;
     match entry {
         "custody_delivery.rs:submit" => {
             exercise_custody_ingress(router, router_store, envelope, ordinal)
@@ -289,16 +321,65 @@ fn exercise_custody_ingress(
         None,
         None,
     )?;
+    let branch = ramflux_crypto::create_device_branch(
+        "durable_ingress_registry",
+        "primary",
+        1,
+        [seed + 2; 32],
+    );
+    let source =
+        ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(&authority, "primary")?;
+    let mut valid = super::envelope(
+        &format!("custody_registry_{ordinal}"),
+        "registry_target",
+        DeliveryClass::OpaqueEvent,
+    );
+    valid.source_principal_id = "durable_ingress_registry".into();
+    valid.source_device_id = "primary".into();
+    valid
+        .ext
+        .ext
+        .insert("source_root_commitment".into(), serde_json::json!(source.root_commitment()));
+    valid.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &valid)?;
+    valid.ext.ext.insert(
+        "delivery_mode".into(),
+        envelope.ext.ext.get("delivery_mode").cloned().ok_or("marked mode absent")?,
+    );
+    let mut control = valid.clone();
+    control.ext.ext.remove("delivery_mode");
     let session = ramflux_protocol::custody::CustodySession {
         session_id: format!("session_{ordinal}"),
         device_ref: driver.reference.clone(),
-        target_delivery_id: envelope.target_delivery_id.clone(),
+        target_delivery_id: valid.target_delivery_id.clone(),
         record_hash: "record_hash".into(),
         proof_hash: "proof_hash".into(),
         binding_mode: ramflux_protocol::custody::BindingMode::HomeRelayReceipt,
         expires_at: 1_760_000_100,
     };
-    let source = replay_source("custody_source")?;
+    let control_result = crate::custody_delivery::submit(
+        router,
+        store,
+        crate::custody_delivery::DeliveryAuthority {
+            authority: &authority,
+            session: &session,
+            source: &source,
+        },
+        control,
+        1_760_000_000,
+    );
+    assert_eq!(
+        control_result,
+        Err(ramflux_protocol::custody::CustodyRefusal::AuthorityUnavailable)
+    );
+    assert_eq!(
+        ramflux_protocol::ephemeral::require_durable(&valid)
+            .map_err(NodeCoreError::from)
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("delivery_mode_refused")
+    );
     let result = crate::custody_delivery::submit(
         router,
         store,
@@ -307,10 +388,10 @@ fn exercise_custody_ingress(
             session: &session,
             source: &source,
         },
-        envelope.clone(),
+        valid,
         1_760_000_000,
     );
-    assert!(matches!(result, Err(ramflux_protocol::custody::CustodyRefusal::InvalidInput)));
+    assert_eq!(result, Err(ramflux_protocol::custody::CustodyRefusal::InvalidInput));
     Ok(())
 }
 
@@ -328,33 +409,74 @@ fn exercise_federation_ingress(
     let now = 1_760_000_010;
     match entry {
         "federation_store.rs:spool_outbound_forward" => {
-            assert!(matches!(
+            assert_delivery_mode_refused(
                 store.spool_outbound_forward("peer", &forward, now, 5),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+                entry,
+            );
         }
         "federation_store.rs:accept_inbound_forward_once" => {
-            assert!(matches!(
+            assert_delivery_mode_refused(
                 store.accept_inbound_forward_once(source, &forward, now),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+                entry,
+            );
         }
         "federation_store.rs:deliver_inbound_forward_once" => {
-            assert!(matches!(
-                store.deliver_inbound_forward_once(source, &forward, now, || Err(
-                    NodeCoreError::Unauthorized("unexpected delivery".into())
-                )),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+            assert_delivery_mode_refused(
+                store.deliver_inbound_forward_once(source, &forward, now, || {
+                    Err(NodeCoreError::Unauthorized("unexpected delivery".into()))
+                }),
+                entry,
+            );
         }
         "federation_store.rs:deliver_inbound_forward_once_with_lease" => {
-            assert!(matches!(
-                store.deliver_inbound_forward_once_with_lease(source, &forward, now, 10, || Err(
-                    NodeCoreError::Unauthorized("unexpected delivery".into())
-                )),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+            assert_delivery_mode_refused(
+                store.deliver_inbound_forward_once_with_lease(source, &forward, now, 10, || {
+                    Err(NodeCoreError::Unauthorized("unexpected delivery".into()))
+                }),
+                entry,
+            );
         }
+        _ => return Err(format!("unknown federation ingress {entry}").into()),
+    }
+    Ok(())
+}
+
+fn exercise_federation_control(
+    entry: &str,
+    store: &FederationRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &Envelope,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut forward = super::federation::federation_forward_request(
+        &envelope.envelope_id,
+        &envelope.target_delivery_id,
+    );
+    forward.envelope.clone_from(envelope);
+    match entry {
+        "federation_store.rs:spool_outbound_forward" => assert_not_mode_refused(
+            store.spool_outbound_forward("peer", &forward, 1_760_000_010, 5),
+            entry,
+        ),
+        "federation_store.rs:accept_inbound_forward_once" => assert_not_mode_refused(
+            store.accept_inbound_forward_once(source, &forward, 1_760_000_010),
+            entry,
+        ),
+        "federation_store.rs:deliver_inbound_forward_once" => assert_not_mode_refused(
+            store.deliver_inbound_forward_once(source, &forward, 1_760_000_010, || {
+                Err(NodeCoreError::Unauthorized("next-stage control".into()))
+            }),
+            entry,
+        ),
+        "federation_store.rs:deliver_inbound_forward_once_with_lease" => assert_not_mode_refused(
+            store.deliver_inbound_forward_once_with_lease(
+                source,
+                &forward,
+                1_760_000_010,
+                10,
+                || Err(NodeCoreError::Unauthorized("next-stage control".into())),
+            ),
+            entry,
+        ),
         _ => return Err(format!("unknown federation ingress {entry}").into()),
     }
     Ok(())
@@ -373,27 +495,63 @@ fn exercise_forwarded_ingress(
     };
     match entry {
         "forwarded_delivery.rs:submit_forwarded_envelope" => {
-            assert!(matches!(
+            assert_delivery_mode_refused(
                 router.submit_forwarded_envelope(store, None, request(), 1_760_000_010),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+                entry,
+            );
         }
         "forwarded_delivery.rs:prepare_forwarded_envelope" => {
-            assert!(matches!(
+            assert_delivery_mode_refused(
                 router.prepare_forwarded_envelope(store, None, request(), 1_760_000_010),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+                entry,
+            );
         }
         "forwarded_delivery.rs:prepare_forwarded_envelope_with_metadata" => {
-            assert!(matches!(
+            assert_delivery_mode_refused(
                 router.prepare_forwarded_envelope_with_metadata(
                     store,
                     None,
                     request(),
-                    1_760_000_010
+                    1_760_000_010,
                 ),
-                Err(NodeCoreError::DeliveryModeRefused)
-            ));
+                entry,
+            );
+        }
+        _ => return Err(format!("unknown forwarded ingress {entry}").into()),
+    }
+    Ok(())
+}
+
+fn exercise_forwarded_control(
+    entry: &str,
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    envelope: &Envelope,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = || crate::ForwardedEnvelopeRequest {
+        peer_node_id: "peer".into(),
+        envelope: envelope.clone(),
+        migration_evidence: None,
+    };
+    match entry {
+        "forwarded_delivery.rs:submit_forwarded_envelope" => assert_not_mode_refused(
+            router.submit_forwarded_envelope(store, None, request(), 1_760_000_010),
+            entry,
+        ),
+        "forwarded_delivery.rs:prepare_forwarded_envelope" => assert_not_mode_refused(
+            router.prepare_forwarded_envelope(store, None, request(), 1_760_000_010),
+            entry,
+        ),
+        "forwarded_delivery.rs:prepare_forwarded_envelope_with_metadata" => {
+            assert_not_mode_refused(
+                router.prepare_forwarded_envelope_with_metadata(
+                    store,
+                    None,
+                    request(),
+                    1_760_000_010,
+                ),
+                entry,
+            );
         }
         _ => return Err(format!("unknown forwarded ingress {entry}").into()),
     }
@@ -414,32 +572,31 @@ fn exercise_router_ingress(
     };
     let rejected = |outcome: RouterSubmitOutcome| matches!(outcome, RouterSubmitOutcome::RejectedSecurity { reason, .. } if reason == "delivery_mode_refused");
     match entry {
-        "router.rs:mvp10_own_device_fanout" => assert!(matches!(
-            router.mvp10_own_device_fanout(request()),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
-        "router.rs:mvp10_own_device_fanout_at" => assert!(matches!(
+        "router.rs:mvp10_own_device_fanout" => {
+            assert_delivery_mode_refused(router.mvp10_own_device_fanout(request()), entry);
+        }
+        "router.rs:mvp10_own_device_fanout_at" => assert_delivery_mode_refused(
             router.mvp10_own_device_fanout_at(request(), 1_760_000_010),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
-        "router.rs:accept_envelope_replay" => assert!(matches!(
+            entry,
+        ),
+        "router.rs:accept_envelope_replay" => assert_delivery_mode_refused(
             router.accept_envelope_replay(source, envelope.clone(), 1_760_000_010),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
+            entry,
+        ),
         "router.rs:submit_replay_accepted_envelope" => {
             assert!(rejected(router.submit_replay_accepted_envelope(
                 ReplayAcceptedEnvelope { envelope: envelope.clone() },
                 1_760_000_010
             )));
         }
-        "router.rs:accept_own_device_fanout_replay" => assert!(matches!(
+        "router.rs:accept_own_device_fanout_replay" => assert_delivery_mode_refused(
             router.accept_own_device_fanout_replay(request(), 1_760_000_010),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
-        "router.rs:accept_leased_fanout" => assert!(matches!(
+            entry,
+        ),
+        "router.rs:accept_leased_fanout" => assert_delivery_mode_refused(
             router.accept_leased_fanout(request(), store, 1_760_000_010),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
+            entry,
+        ),
         "router.rs:submit_envelope" => {
             assert!(rejected(router.submit_envelope(source, envelope.clone())));
         }
@@ -469,23 +626,134 @@ fn exercise_router_ingress(
                 return Err("marked envelope reserved a forward".into());
             }
         },
-        "router/committed_forward.rs:prepare_committed_home_forward" => assert!(matches!(
+        "router/committed_forward.rs:prepare_committed_home_forward" => {
+            assert_delivery_mode_refused(
+                router.prepare_committed_home_forward(
+                    store,
+                    source,
+                    envelope.clone(),
+                    1_760_000_010,
+                    10,
+                ),
+                entry,
+            );
+        }
+        "router/sender_fanout.rs:prepare_sender_fanout" => assert_delivery_mode_refused(
+            router.prepare_sender_fanout(store, &request(), 1_760_000_010),
+            entry,
+        ),
+        _ => return Err(format!("unknown router ingress {entry}").into()),
+    }
+    Ok(())
+}
+
+fn exercise_router_control(
+    entry: &str,
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: &Envelope,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request = || ItestMvp10OwnDeviceFanoutRequest {
+        principal_id: envelope.source_principal_id.clone(),
+        source_device_id: envelope.source_device_id.clone(),
+        envelope: envelope.clone(),
+    };
+    match entry {
+        "router.rs:mvp10_own_device_fanout" => {
+            assert_not_mode_refused(router.mvp10_own_device_fanout(request()), entry);
+        }
+        "router.rs:mvp10_own_device_fanout_at" => assert_not_mode_refused(
+            router.mvp10_own_device_fanout_at(request(), 1_760_000_010),
+            entry,
+        ),
+        "router.rs:accept_envelope_replay" => assert_not_mode_refused(
+            router.accept_envelope_replay(source, envelope.clone(), 1_760_000_010),
+            entry,
+        ),
+        "router.rs:submit_replay_accepted_envelope" => {
+            assert_submit_control(
+                router.submit_replay_accepted_envelope(
+                    ReplayAcceptedEnvelope { envelope: envelope.clone() },
+                    1_760_000_010,
+                ),
+                entry,
+            );
+        }
+        "router.rs:accept_own_device_fanout_replay" => assert_not_mode_refused(
+            router.accept_own_device_fanout_replay(request(), 1_760_000_010),
+            entry,
+        ),
+        "router.rs:accept_leased_fanout" => assert_not_mode_refused(
+            router.accept_leased_fanout(request(), store, 1_760_000_010),
+            entry,
+        ),
+        "router.rs:submit_envelope" => {
+            assert_submit_control(router.submit_envelope(source, envelope.clone()), entry);
+        }
+        "router.rs:submit_envelope_at" => assert_submit_control(
+            router.submit_envelope_at(source, envelope.clone(), 1_760_000_010),
+            entry,
+        ),
+        "router.rs:submit_envelope_with_home_node_forward_at" => assert_submit_control(
+            router.submit_envelope_with_home_node_forward_at(
+                source,
+                envelope.clone(),
+                1_760_000_010,
+                RouterEnvelopeOrigin::Federation,
+                |_| Err(NodeCoreError::Unauthorized("next-stage control".into())),
+            ),
+            entry,
+        ),
+        "router.rs:prepare_envelope_with_home_node_forward_at" => match router
+            .prepare_envelope_with_home_node_forward_at(
+                source,
+                envelope.clone(),
+                1_760_000_010,
+                RouterEnvelopeOrigin::Federation,
+                10,
+            ) {
+            RouterForwardPreparation::Complete(outcome) => assert_submit_control(*outcome, entry),
+            RouterForwardPreparation::Forward(_) => {}
+        },
+        "router/committed_forward.rs:prepare_committed_home_forward" => assert_not_mode_refused(
             router.prepare_committed_home_forward(
                 store,
                 source,
                 envelope.clone(),
                 1_760_000_010,
-                10
+                10,
             ),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
-        "router/sender_fanout.rs:prepare_sender_fanout" => assert!(matches!(
+            entry,
+        ),
+        "router/sender_fanout.rs:prepare_sender_fanout" => assert_not_mode_refused(
             router.prepare_sender_fanout(store, &request(), 1_760_000_010),
-            Err(NodeCoreError::DeliveryModeRefused)
-        )),
+            entry,
+        ),
         _ => return Err(format!("unknown router ingress {entry}").into()),
     }
     Ok(())
+}
+
+fn assert_not_mode_refused<T>(result: Result<T, NodeCoreError>, entry: &str) {
+    let mode_refused =
+        result.err().is_some_and(|error| error.to_string() == "delivery_mode_refused");
+    assert!(!mode_refused, "control rejected at mode check: {entry}");
+}
+
+fn assert_delivery_mode_refused<T>(result: Result<T, NodeCoreError>, entry: &str) {
+    assert_eq!(
+        result.err().map(|error| error.to_string()).as_deref(),
+        Some("delivery_mode_refused"),
+        "{entry}"
+    );
+}
+
+fn assert_submit_control(outcome: RouterSubmitOutcome, entry: &str) {
+    assert!(
+        !matches!(outcome, RouterSubmitOutcome::RejectedSecurity { reason, .. } if reason == "delivery_mode_refused"),
+        "control rejected at mode check: {entry}"
+    );
 }
 
 fn first_statement_has_mode_guard(
@@ -518,16 +786,28 @@ fn first_statement_has_mode_guard(
         .is_some_and(|line| line.contains("require_durable")))
 }
 
-fn scan_public_envelope_functions(src: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn public_envelope_sources(
+    src: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     let mut files = Vec::new();
     collect_rust_files(src, &mut files)?;
+    files
+        .into_iter()
+        .map(|file| {
+            let relative = file.strip_prefix(src)?.to_string_lossy().replace('\\', "/");
+            Ok((relative, std::fs::read_to_string(file)?))
+        })
+        .collect()
+}
+
+fn scan_public_envelope_functions(
+    sources: &[(String, String)],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut matches = Vec::new();
-    for file in files {
-        let relative = file.strip_prefix(src)?.to_string_lossy().replace('\\', "/");
+    for (relative, source) in sources {
         if relative.split('/').any(|part| part.contains("test") || part.contains("fixture")) {
             continue;
         }
-        let source = std::fs::read_to_string(&file)?;
         let lines = source.lines().collect::<Vec<_>>();
         let mut index = 0;
         while index < lines.len() {
@@ -568,6 +848,39 @@ fn scan_public_envelope_functions(src: &Path) -> Result<Vec<String>, Box<dyn std
     Ok(matches)
 }
 
+fn assert_registry_scan_matches(
+    sources: &[(String, String)],
+    listed: &[String],
+) -> Result<(), String> {
+    let mut sorted_listed = listed.to_vec();
+    sorted_listed.sort();
+    if listed.len() != sorted_listed.len() {
+        return Err("duplicate durable ingress registry entries".into());
+    }
+    let scanned = scan_public_envelope_functions(sources).map_err(|error| error.to_string())?;
+    if scanned != sorted_listed {
+        return Err(format!("scanner matches differ: {scanned:?} != {sorted_listed:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_ingress_registry_scanner_rejects_drift_fixtures() {
+    let unlisted =
+        vec![("registry.rs".to_owned(), "pub fn newly_exposed(envelope: Envelope) {}".to_owned())];
+    assert!(assert_registry_scan_matches(&unlisted, &[]).is_err());
+
+    let no_longer_matching =
+        vec![("registry.rs".to_owned(), "pub fn previously_listed() {}".to_owned())];
+    assert!(
+        assert_registry_scan_matches(
+            &no_longer_matching,
+            &["registry.rs:previously_listed".to_owned()]
+        )
+        .is_err()
+    );
+}
+
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
@@ -602,47 +915,59 @@ fn is_public_function(line: &str) -> bool {
 }
 
 #[test]
-fn e1_refuses_marked_fresh_foreign_authority() -> Result<(), Box<dyn std::error::Error>> {
+fn e1_public_wrappers_refuse_marked_fresh_foreign_authority()
+-> Result<(), Box<dyn std::error::Error>> {
     let modes = [
         serde_json::Value::String("ephemeral".into()),
         serde_json::Value::String("unknown-mode".into()),
         serde_json::Value::Null,
     ];
-    let mut mutations = Vec::new();
     for with_wal in [true, false] {
         for (index, mode) in modes.iter().enumerate() {
-            let path = temp_store_path(&format!("e1_refusal_{with_wal}_{index}"))?;
-            let store = if with_wal {
-                RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?
-            } else {
-                RouterRedbStore::open_without_wal(&path)?
-            };
-            let router = RouterCore::new();
-            let before = store.foreign_authority_row_counts()?;
-            let device_id = format!("foreign_device_{with_wal}_{index}");
-            let mut marked = envelope(
-                &format!("e1_marked_{with_wal}_{index}"),
-                "foreign_target",
-                DeliveryClass::OpaqueEvent,
-            );
-            marked.source_device_id = device_id;
-            marked.priority = Priority::Low;
-            marked.ttl = 5;
-            marked.ext.ext.insert("delivery_mode".into(), mode.clone());
-            let marked = forwarded_source_envelope(marked)?;
-            let result = router.authenticated_envelope_source_from(
-                &marked,
-                Some(&store),
-                RouterEnvelopeOrigin::Federation,
-            );
-            assert!(matches!(result, Err(NodeCoreError::DeliveryModeRefused)));
-            let after = store.foreign_authority_row_counts()?;
-            if after != before {
-                mutations.push(format!("WAL={with_wal}, mode={mode}: {before:?} -> {after:?}"));
+            for wrapper in
+                ["authenticated_envelope_source", "authenticated_envelope_source_durable"]
+            {
+                let path = temp_store_path(&format!("e1_{wrapper}_{with_wal}_{index}"))?;
+                let store = if with_wal {
+                    RouterRedbStore::open_with_wal(&path, path.with_extension("wal"))?
+                } else {
+                    RouterRedbStore::open_without_wal(&path)?
+                };
+                let router = RouterCore::new();
+                let mut marked = envelope(
+                    &format!("e1_{wrapper}_{with_wal}_{index}"),
+                    "foreign_target",
+                    DeliveryClass::OpaqueEvent,
+                );
+                marked.source_device_id = format!("foreign_device_{with_wal}_{index}");
+                marked.priority = Priority::Low;
+                marked.ttl = 50;
+                marked.ext.ext.insert("delivery_mode".into(), mode.clone());
+                let marked = forwarded_source_envelope(marked)?;
+                let control = without_delivery_mode(&marked)?;
+                let control_result = if wrapper == "authenticated_envelope_source" {
+                    router.authenticated_envelope_source(&control)
+                } else {
+                    router.authenticated_envelope_source_durable(&control, &store)
+                };
+                assert!(
+                    matches!(control_result, Err(NodeCoreError::Unauthorized(_))),
+                    "unmarked {wrapper} control did not reach its gateway-origin check: {control_result:?}"
+                );
+                let before = store.foreign_authority_row_counts()?;
+                let result = if wrapper == "authenticated_envelope_source" {
+                    router.authenticated_envelope_source(&marked)
+                } else {
+                    router.authenticated_envelope_source_durable(&marked, &store)
+                };
+                assert_eq!(
+                    result.err().map(|error| error.to_string()).as_deref(),
+                    Some("delivery_mode_refused")
+                );
+                assert_eq!(store.foreign_authority_row_counts()?, before);
             }
         }
     }
-    assert!(mutations.is_empty(), "foreign-device rows changed before E1 refusal: {mutations:?}");
     Ok(())
 }
 
