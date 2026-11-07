@@ -562,6 +562,7 @@ async fn capable_registration(
     let request = ramflux_node_core::SessionPushSessionRequest {
         session: descriptor.clone(),
         session_push: true,
+        ephemeral: false,
     };
     let response = post(context, "/s1/session", &serde_json::to_value(request)?).await?;
     let id = response["incarnation_id"]

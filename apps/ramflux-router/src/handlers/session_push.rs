@@ -56,6 +56,13 @@ pub(super) fn route(
                 .state()
                 .prepare_publication_target(router.store(), &request.session.target_delivery_id)?;
             let session = super::handle_s1_session_upsert(body, router.state(), router.store())?;
+            if request.ephemeral {
+                router.state().bind_ephemeral_capability(
+                    &session.target_delivery_id,
+                    &session.gateway_id,
+                    &session.session_id,
+                );
+            }
             reply(&ramflux_node_core::SessionPushSessionResponse { session, incarnation_id: id })
         }
         ("GET", "/mvp1/session-push-capabilities") => {

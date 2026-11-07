@@ -237,5 +237,8 @@ pub use router::PreparedFanout;
 mod session_push;
 pub use session_push::*;
 
+mod ephemeral;
+pub use ephemeral::{EPHEMERAL_CAPABILITY_BOUND, EphemeralRouteGate};
+
 mod session_push_frames;
 pub use session_push_frames::*;
