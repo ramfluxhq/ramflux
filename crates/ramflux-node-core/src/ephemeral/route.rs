@@ -112,30 +112,47 @@ pub fn ephemeral_replay_digest(
     *hasher.finalize().as_bytes()
 }
 
-/// Exclusive live check: a marker survives only while `now_ms < D * 1000`.
-fn marker_is_live(now_ms: u64, deadline_unix: u64) -> bool {
-    deadline_unix.checked_mul(1_000).is_some_and(|deadline_ms| now_ms < deadline_ms)
+/// Unix-seconds exclusive deadline `D`. Stored D3 values are seconds, never milliseconds.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct DeadlineSecs(u64);
+
+impl DeadlineSecs {
+    /// Exact `expires_at_ms == secs * 1000`. Non-multiples of 1000 ms are refused.
+    fn from_expires_at_ms(expires_at_ms: u64) -> Option<Self> {
+        let secs = expires_at_ms / 1_000;
+        match secs.checked_mul(1_000) {
+            Some(restored_ms) if restored_ms == expires_at_ms => Some(Self(secs)),
+            _ => None,
+        }
+    }
+
+    fn from_unix(secs: u64) -> Self {
+        Self(secs)
+    }
+
+    fn unix(self) -> u64 {
+        self.0
+    }
 }
 
-/// Unix-seconds `D` stored by D3. `expires_at_ms` is the protocol `D * 1000` value.
-fn deadline_unix_from_ms(expires_at_ms: u64) -> Option<u64> {
-    let deadline_unix = expires_at_ms / 1_000;
-    deadline_unix.checked_mul(1_000).filter(|restored| *restored == expires_at_ms)
+/// Exclusive live check: a marker survives only while `now_ms < D * 1000`.
+fn marker_is_live(now_ms: u64, deadline: DeadlineSecs) -> bool {
+    deadline.unix().checked_mul(1_000).is_some_and(|deadline_ms| now_ms < deadline_ms)
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EphemeralReplaySet {
     /// Sole `(digest, D)` store. Layout overhead counts toward [`EPHEMERAL_REPLAY_BUDGET_BYTES`].
-    by_digest: HashMap<[u8; 32], u64>,
+    by_digest: HashMap<[u8; 32], DeadlineSecs>,
     /// Compact expiry index keyed by stored `D` (no second digest copy).
-    by_deadline: BTreeSet<u64>,
+    by_deadline: BTreeSet<DeadlineSecs>,
 }
 
 impl EphemeralReplaySet {
     fn expire_due(&mut self, now_ms: u64) {
         let mut dropped_any = false;
-        while let Some(&deadline_unix) = self.by_deadline.first() {
-            if marker_is_live(now_ms, deadline_unix) {
+        while let Some(&deadline) = self.by_deadline.first() {
+            if marker_is_live(now_ms, deadline) {
                 break;
             }
             self.by_deadline.pop_first();
@@ -146,9 +163,14 @@ impl EphemeralReplaySet {
         }
     }
 
-    fn admit(&mut self, digest: [u8; 32], deadline_unix: u64, now_ms: u64) -> EphemeralReplayAdmit {
+    fn admit(
+        &mut self,
+        digest: [u8; 32],
+        deadline: DeadlineSecs,
+        now_ms: u64,
+    ) -> EphemeralReplayAdmit {
         self.expire_due(now_ms);
-        if !marker_is_live(now_ms, deadline_unix) {
+        if !marker_is_live(now_ms, deadline) {
             return EphemeralReplayAdmit::Expired;
         }
         if self.by_digest.contains_key(&digest) {
@@ -159,16 +181,14 @@ impl EphemeralReplaySet {
             tracing::debug!("ephemeral replay set full; live marker not evicted");
             return EphemeralReplayAdmit::RateLimited;
         }
-        self.by_digest.insert(digest, deadline_unix);
-        self.by_deadline.insert(deadline_unix);
+        self.by_digest.insert(digest, deadline);
+        self.by_deadline.insert(deadline);
         EphemeralReplayAdmit::Fresh
     }
 
     #[cfg(test)]
     fn contains_live(&self, digest: &[u8; 32], now_ms: u64) -> bool {
-        self.by_digest
-            .get(digest)
-            .is_some_and(|deadline_unix| marker_is_live(now_ms, *deadline_unix))
+        self.by_digest.get(digest).is_some_and(|deadline| marker_is_live(now_ms, *deadline))
     }
 }
 
@@ -327,7 +347,7 @@ impl RouterCore {
         else {
             return EphemeralRouteResult::RootMismatch;
         };
-        let Some(deadline_unix) = deadline_unix_from_ms(supplied_expires_at_ms) else {
+        let Some(deadline) = DeadlineSecs::from_expires_at_ms(supplied_expires_at_ms) else {
             return EphemeralRouteResult::DeadlineMismatch;
         };
         let digest = ephemeral_replay_digest(
@@ -336,7 +356,7 @@ impl RouterCore {
             &envelope.envelope_id,
             &envelope.payload_hash,
         );
-        match self.admit_ephemeral_replay(digest, deadline_unix, now_ms) {
+        match self.admit_ephemeral_replay(digest, deadline.unix(), now_ms) {
             EphemeralReplayAdmit::Fresh => EphemeralRouteResult::Online { gateway_id, session_id },
             EphemeralReplayAdmit::Replayed => {
                 EphemeralRouteResult::Dropped(EphemeralDropReason::Replayed)
@@ -357,7 +377,11 @@ impl RouterCore {
         deadline_unix: u64,
         now_ms: u64,
     ) -> EphemeralReplayAdmit {
-        lock_unpoisoned(&self.ephemeral_replay).admit(digest, deadline_unix, now_ms)
+        lock_unpoisoned(&self.ephemeral_replay).admit(
+            digest,
+            DeadlineSecs::from_unix(deadline_unix),
+            now_ms,
+        )
     }
 
     #[cfg(test)]
@@ -379,7 +403,8 @@ pub(crate) fn saturation_total() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        EPHEMERAL_REPLAY_BOUND, EphemeralReplayAdmit, EphemeralRouteRequest, EphemeralRouteResponse,
+        DeadlineSecs, EPHEMERAL_REPLAY_BOUND, EphemeralReplayAdmit, EphemeralRouteRequest,
+        EphemeralRouteResponse, ephemeral_replay_digest,
     };
     use super::{
         EphemeralDropReason, EphemeralDurableSnapshot, EphemeralRouteResult,
@@ -549,6 +574,21 @@ mod tests {
         Ok(deadline(envelope, NOW_MS)?)
     }
 
+    fn routed_digest(envelope: &Envelope) -> Fallible<[u8; 32]> {
+        let root = envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("source_root_commitment")?;
+        Ok(ephemeral_replay_digest(
+            root,
+            &envelope.source_device_id,
+            &envelope.envelope_id,
+            &envelope.payload_hash,
+        ))
+    }
+
     fn route(router: &RouterCore, envelope: &Envelope, expires_at_ms: u64) -> EphemeralRouteResult {
         router.route_ephemeral(envelope, expires_at_ms, NOW_MS)
     }
@@ -567,7 +607,7 @@ mod tests {
         path: &std::path::Path,
     ) -> TestResult {
         assert_eq!(&router.ephemeral_durable_snapshot()?, before);
-        assert_eq!(std::fs::read(path).unwrap_or_default(), store_bytes);
+        assert_eq!(std::fs::read(path)?, store_bytes);
         Ok(())
     }
 
@@ -592,7 +632,7 @@ mod tests {
         register_alice(&router)?;
         store.record_identity_registry(&router.mvp1_identities_snapshot())?;
         bind_capable(&router, TARGET)?;
-        let store_bytes = std::fs::read(&path).unwrap_or_default();
+        let store_bytes = std::fs::read(&path)?;
 
         let envelope = signed_ephemeral("ok", TARGET)?;
         let expires = computed_d(&envelope)?;
@@ -684,6 +724,20 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_route_missing_store_fails_oracle() -> TestResult {
+        let router = RouterCore::new();
+        register_alice(&router)?;
+        bind_capable(&router, TARGET)?;
+        let before = router.ephemeral_durable_snapshot()?;
+        let missing = temp_path("missing-oracle");
+        assert!(
+            assert_read_only(&router, &before, b"", &missing).is_err(),
+            "missing store artifact must fail the oracle"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ephemeral_deadline() -> TestResult {
         let router = RouterCore::new();
         register_alice(&router)?;
@@ -698,6 +752,50 @@ mod tests {
             router.route_ephemeral(&envelope, expires, expires),
             EphemeralRouteResult::Dropped(EphemeralDropReason::Expired)
         );
+        assert_eq!(
+            router.route_ephemeral(&envelope, expires.saturating_add(1), NOW_MS),
+            EphemeralRouteResult::DeadlineMismatch
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ephemeral_route_replay_deadline() -> TestResult {
+        let router = RouterCore::new();
+        register_alice(&router)?;
+        bind_capable(&router, TARGET)?;
+        let envelope = signed_ephemeral("marker-d", TARGET)?;
+        let expires = computed_d(&envelope)?;
+        let digest = routed_digest(&envelope)?;
+        let deadline_unix = DeadlineSecs::from_expires_at_ms(expires).ok_or("exact secs")?.unix();
+
+        assert_eq!(
+            router.route_ephemeral(&envelope, expires, expires.saturating_sub(1)),
+            EphemeralRouteResult::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
+        );
+        assert!(router.ephemeral_replay_contains_live(&digest, expires.saturating_sub(1)));
+        assert!(
+            !router.ephemeral_replay_contains_live(&digest, expires),
+            "marker must be gone at exclusive D"
+        );
+        assert_eq!(
+            router.route_ephemeral(&envelope, expires, expires),
+            EphemeralRouteResult::Dropped(EphemeralDropReason::Expired)
+        );
+        assert_eq!(
+            router.admit_ephemeral_replay(digest, deadline_unix, expires),
+            EphemeralReplayAdmit::Expired
+        );
+        assert_eq!(
+            router.admit_ephemeral_replay(digest, deadline_unix.saturating_add(1), expires),
+            EphemeralReplayAdmit::Fresh
+        );
+
+        assert_eq!(
+            DeadlineSecs::from_expires_at_ms(1_005_000),
+            Some(DeadlineSecs::from_unix(1_005))
+        );
+        assert_eq!(DeadlineSecs::from_expires_at_ms(1_005_001), None);
         assert_eq!(
             router.route_ephemeral(&envelope, expires.saturating_add(1), NOW_MS),
             EphemeralRouteResult::DeadlineMismatch
