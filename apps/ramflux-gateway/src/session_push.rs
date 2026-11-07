@@ -3,11 +3,14 @@
 
 //! Frozen capability binding and asynchronous durable-session adapters.
 mod validation;
-use crate::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime, RouterMeshClient};
+use crate::{
+    GatewayQuicContext, GatewaySendHandle, GatewaySessionHub, GatewaySessionRuntime,
+    RouterMeshClient,
+};
 use ramflux_node_core::{SessionPushClientFrame as Client, SessionPushNackReason as Reason};
 use serde_json::{Value, json};
 use std::sync::{
-    Arc,
+    Arc, Mutex, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -43,6 +46,18 @@ const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) struct Readiness {
     started: AtomicBool,
     ready: AtomicBool,
+    ephemeral: AtomicBool,
+    asserted_boot: Mutex<Option<String>>,
+}
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct NegotiatedBinding {
+    pub incarnation_id: Option<String>,
+    pub ephemeral: bool,
+}
+struct CapabilityEcho {
+    session_push: bool,
+    ephemeral: bool,
+    boot_id: Option<String>,
 }
 impl Readiness {
     /// Fixtures that own every mesh request keep the discovery probe from starting.
@@ -50,14 +65,27 @@ impl Readiness {
     pub(crate) fn suppress_discovery_for_test(&self) {
         self.started.store(true, Ordering::Release);
     }
-    pub(crate) fn start(self: &Arc<Self>, router: &RouterMeshClient) {
-        self.start_with_interval(router, DISCOVERY_INTERVAL, DISCOVERY_PROBE_TIMEOUT);
+    pub(crate) fn start_with_hub(
+        self: &Arc<Self>,
+        router: &RouterMeshClient,
+        hub: &Arc<GatewaySessionHub>,
+        gateway_id: &str,
+    ) {
+        self.start_with_interval(
+            router,
+            DISCOVERY_INTERVAL,
+            DISCOVERY_PROBE_TIMEOUT,
+            Some(Arc::downgrade(hub)),
+            Some(gateway_id.to_owned()),
+        );
     }
-    fn start_with_interval(
+    pub(crate) fn start_with_interval(
         self: &Arc<Self>,
         router: &RouterMeshClient,
         period: Duration,
         probe_timeout: Duration,
+        hub: Option<Weak<GatewaySessionHub>>,
+        gateway_id: Option<String>,
     ) {
         if self.started.swap(true, Ordering::AcqRel) {
             return;
@@ -80,12 +108,27 @@ impl Readiness {
                     ),
                 )
                 .await;
-                let ready =
-                    result.ok().and_then(Result::ok).is_some_and(|value| capability_reply(&value));
+                let echo = result
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|value| parse_capability_echo(&value));
                 let Some(state) = weak.upgrade() else {
                     return;
                 };
-                state.ready.store(ready, Ordering::Release);
+                let session_push = echo.as_ref().is_some_and(|echo| echo.session_push);
+                let ephemeral = session_push && echo.as_ref().is_some_and(|echo| echo.ephemeral);
+                state.ready.store(session_push, Ordering::Release);
+                state.ephemeral.store(ephemeral, Ordering::Release);
+                if let Some(boot) = echo.as_ref().and_then(|echo| echo.boot_id.as_deref()) {
+                    reassert_if_boot_changed(
+                        &state,
+                        &router,
+                        hub.as_ref(),
+                        gateway_id.as_deref(),
+                        boot,
+                    )
+                    .await;
+                }
                 drop(state);
             }
         });
@@ -93,13 +136,76 @@ impl Readiness {
     pub(crate) fn supports(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
+    pub(crate) fn supports_ephemeral(&self) -> bool {
+        self.ephemeral.load(Ordering::Acquire)
+    }
 }
-fn capability_reply(value: &Value) -> bool {
-    value.get("capabilities").and_then(Value::as_array).is_some_and(|caps| {
-        caps.len() <= 64
-            && caps.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256))
-            && caps.iter().any(|v| v == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY)
-    })
+fn parse_capability_echo(value: &Value) -> Option<CapabilityEcho> {
+    let caps = value.get("capabilities")?.as_array()?;
+    if caps.len() > 64
+        || !caps.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256))
+    {
+        return None;
+    }
+    let session_push =
+        caps.iter().any(|v| v.as_str() == Some(ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY));
+    let ephemeral = session_push
+        && caps
+            .iter()
+            .any(|v| v.as_str() == Some(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY));
+    let boot_id = value
+        .get("router_boot_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .map(str::to_owned);
+    Some(CapabilityEcho { session_push, ephemeral, boot_id })
+}
+async fn reassert_if_boot_changed(
+    state: &Readiness,
+    router: &RouterMeshClient,
+    hub: Option<&Weak<GatewaySessionHub>>,
+    gateway_id: Option<&str>,
+    boot: &str,
+) {
+    let already = state.asserted_boot.lock().is_ok_and(|guard| guard.as_deref() == Some(boot));
+    if already {
+        return;
+    }
+    let Some(hub) = hub.and_then(Weak::upgrade) else {
+        return;
+    };
+    let Some(gateway_id) = gateway_id else {
+        return;
+    };
+    let items = hub.ephemeral_registrations(gateway_id).await;
+    if items.is_empty() {
+        return;
+    }
+    let mut ok = true;
+    for chunk in items.chunks(ramflux_node_core::EPHEMERAL_REASSERTION_ITEM_BOUND) {
+        let body = json!({"router_boot_id": boot, "items": chunk});
+        let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
+        if tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            crate::router_post_json_until::<Value, Value>(
+                router,
+                "/mvp0/ephemeral-registrations",
+                &body,
+                deadline,
+            ),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_none()
+        {
+            ok = false;
+            break;
+        }
+    }
+    if ok && let Ok(mut asserted) = state.asserted_boot.lock() {
+        *asserted = Some(boot.to_owned());
+    }
 }
 #[derive(Debug)]
 pub(crate) struct Retired;
@@ -113,14 +219,14 @@ pub(crate) fn recognizes(bytes: &[u8], capable: bool) -> bool {
     #[derive(serde::Deserialize)]
     struct Tag {
         frame_type: String,
-        #[serde(default)]
-        incarnation_id: Option<String>,
     }
-    serde_json::from_slice::<Tag>(bytes).is_ok_and(|tag| {
-        matches!(tag.frame_type.as_str(), "fetch_entry" | "ack_batch")
-            || ((capable || tag.incarnation_id.is_some())
-                && matches!(tag.frame_type.as_str(), "resume" | "ack" | "nack"))
-    })
+    capable
+        && serde_json::from_slice::<Tag>(bytes).is_ok_and(|tag| {
+            matches!(
+                tag.frame_type.as_str(),
+                "fetch_entry" | "ack_batch" | "resume" | "ack" | "nack"
+            )
+        })
 }
 pub(crate) async fn write(
     send: &GatewaySendHandle,
@@ -534,8 +640,8 @@ pub(crate) async fn negotiate(
     context: &GatewayQuicContext,
     auth: &ramflux_node_core::GatewayAuthFrame,
     descriptor: &ramflux_node_core::SessionDescriptor,
-) -> anyhow::Result<Option<String>> {
-    context.hub.readiness.start(&context.router);
+) -> anyhow::Result<NegotiatedBinding> {
+    context.hub.readiness.start_with_hub(&context.router, &context.hub, &context.gateway_id);
     crate::issued_probe::start(&context.hub, &context.router);
     let capable = context.hub.readiness.supports()
         && auth
@@ -543,9 +649,12 @@ pub(crate) async fn negotiate(
             .capability_scope
             .iter()
             .any(|s| s == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY);
+    let ephemeral = capable && context.hub.readiness.supports_ephemeral();
     if capable {
-        match capable_registration(context, descriptor).await {
-            Ok(id) => return Ok(Some(id)),
+        match capable_registration(context, descriptor, ephemeral).await {
+            Ok(id) => {
+                return Ok(NegotiatedBinding { incarnation_id: Some(id), ephemeral });
+            }
             Err(error) => {
                 // post() clears readiness only when the capable route is gone.
                 tracing::debug!(%error,"capable registration unavailable; selecting compatibility");
@@ -558,16 +667,17 @@ pub(crate) async fn negotiate(
         crate::router_post_json_until(&context.router, "/s1/session/upsert", descriptor, deadline),
     )
     .await??;
-    Ok(None)
+    Ok(NegotiatedBinding { incarnation_id: None, ephemeral: false })
 }
 async fn capable_registration(
     context: &GatewayQuicContext,
     descriptor: &ramflux_node_core::SessionDescriptor,
+    ephemeral: bool,
 ) -> anyhow::Result<String> {
     let request = ramflux_node_core::SessionPushSessionRequest {
         session: descriptor.clone(),
         session_push: true,
-        ephemeral: false,
+        ephemeral,
     };
     let response = post(context, "/s1/session", &serde_json::to_value(request)?).await?;
     let id = response["incarnation_id"]
@@ -582,10 +692,19 @@ async fn capable_registration(
     Ok(id.into())
 }
 
+fn established_capabilities(ephemeral: bool) -> Vec<String> {
+    let mut capabilities = vec![ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into()];
+    if ephemeral {
+        capabilities.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    }
+    capabilities
+}
+
 pub(crate) async fn established(
     send: &mut (impl ramflux_transport::GatewaySessionFrameSink + ?Sized),
     session: ramflux_node_core::GatewaySessionEstablishedFrame,
     id: Option<&str>,
+    ephemeral: bool,
 ) -> anyhow::Result<()> {
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         if let Some(id) = id {
@@ -594,9 +713,7 @@ pub(crate) async fn established(
                 &ramflux_node_core::SessionPushServerFrame::SessionEstablished {
                     session: ramflux_node_core::SessionPushEstablishedFrame {
                         session,
-                        capabilities: vec![
-                            ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into(),
-                        ],
+                        capabilities: established_capabilities(ephemeral),
                         inbox_incarnation_id: id.into(),
                     },
                 },

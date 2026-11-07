@@ -8,6 +8,7 @@ pub(crate) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     let branch = ramflux_crypto::create_device_branch("agent", "agent-device", 1, [4; 32]);
     Ok(crate::GatewaySessionRuntime {
         session_push: None,
+        ephemeral: false,
         push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?,
         session_id: "agent-session".into(),

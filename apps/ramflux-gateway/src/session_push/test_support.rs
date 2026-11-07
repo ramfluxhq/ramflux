@@ -34,6 +34,7 @@ pub(crate) fn sink() -> (crate::GatewaySendHandle, Arc<Mutex<Vec<Value>>>) {
 pub(crate) fn runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
     Ok(crate::GatewaySessionRuntime {
         session_push: Some(ID.into()),
+        ephemeral: false,
         push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &ramflux_crypto::create_identity_root("agent", [3; 32]),
@@ -204,6 +205,7 @@ pub(crate) async fn negotiate_incarnation(
     request.respond.send((200, reply)).map_err(|_| anyhow::anyhow!("registration cancelled"))?;
     tokio::time::timeout(std::time::Duration::from_secs(10), task)
         .await???
+        .incarnation_id
         .ok_or_else(|| anyhow::anyhow!("capability not selected"))
 }
 

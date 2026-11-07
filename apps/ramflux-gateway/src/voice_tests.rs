@@ -85,6 +85,7 @@ fn runtime(
 ) -> anyhow::Result<GatewaySessionRuntime> {
     Ok(GatewaySessionRuntime {
         session_push: None,
+        ephemeral: false,
         push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::from_signed_device_set(
             &ramflux_crypto::verifying_key_from_base64url(&endpoint.root_public_key)?,
@@ -199,6 +200,7 @@ fn native_runtime(
     let verified = ramflux_crypto::custody::verify_publication(&authority, now)?;
     Ok(GatewaySessionRuntime {
         session_push: None,
+        ephemeral: false,
         push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::from_custody_record(
             &verified,

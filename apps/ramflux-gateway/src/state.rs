@@ -64,6 +64,7 @@ pub(crate) struct GatewayQuicContext {
 #[derive(Clone)]
 pub(crate) struct GatewaySessionRuntime {
     pub(crate) session_push: Option<String>,
+    pub(crate) ephemeral: bool,
     pub(crate) push_limit: usize,
     pub(crate) source_identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub(crate) session_id: String,

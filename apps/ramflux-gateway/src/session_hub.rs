@@ -14,12 +14,22 @@ pub(crate) struct GatewayRegistration {
     pub(crate) closed: tokio::sync::watch::Receiver<bool>,
 }
 
+struct BindSpec {
+    target_delivery_id: String,
+    session_id: String,
+    sender: GatewaySendHandle,
+    incarnation: Option<String>,
+    limit: usize,
+    ephemeral: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayHubEntry {
     session_id: String,
     pub(crate) token: GatewayRegistrationToken,
     pub(crate) queue: crate::push_queue::PushQueue,
     pub(crate) incarnation: Option<String>,
+    pub(crate) ephemeral: bool,
     sender: GatewaySendHandle,
 }
 
@@ -40,6 +50,25 @@ impl GatewaySessionHub {
     }
     pub(crate) async fn snapshot(&self) -> Arc<Index<GatewayHubEntry>> {
         self.senders_by_target.lock().await.clone()
+    }
+    pub(crate) async fn ephemeral_registrations(
+        &self,
+        gateway_id: &str,
+    ) -> Vec<ramflux_node_core::EphemeralRegistrationItem> {
+        self.snapshot()
+            .await
+            .iter()
+            .filter(|(_, entry)| entry.ephemeral && !entry.queue.is_closed())
+            .map(|(target, entry)| ramflux_node_core::EphemeralRegistrationItem {
+                target: target.to_owned(),
+                session_id: entry.session_id.clone(),
+                gateway_id: gateway_id.to_owned(),
+            })
+            .collect()
+    }
+    #[cfg(test)]
+    pub(crate) async fn ephemeral_flag(&self, target: &str) -> Option<bool> {
+        self.snapshot().await.get(target).map(|entry| entry.ephemeral)
     }
     async fn update<F>(&self, edit: F) -> anyhow::Result<Option<GatewayHubEntry>>
     where
@@ -87,6 +116,7 @@ impl GatewaySessionHub {
     ) -> anyhow::Result<GatewayRegistration> {
         self.register_with_limit(target_delivery_id, session_id, sender, incarnation, 256).await
     }
+    #[cfg(test)]
     pub(crate) async fn register_with_limit(
         self: &Arc<Self>,
         target_delivery_id: String,
@@ -95,7 +125,57 @@ impl GatewaySessionHub {
         incarnation: Option<String>,
         limit: usize,
     ) -> anyhow::Result<GatewayRegistration> {
+        self.bind_registration(BindSpec {
+            target_delivery_id,
+            session_id,
+            sender,
+            incarnation,
+            limit,
+            ephemeral: false,
+        })
+        .await
+    }
+    pub(crate) async fn register_runtime(
+        self: &Arc<Self>,
+        runtime: &crate::GatewaySessionRuntime,
+        sender: GatewaySendHandle,
+    ) -> anyhow::Result<GatewayRegistration> {
+        self.bind_registration(BindSpec {
+            target_delivery_id: runtime.target_delivery_id.clone(),
+            session_id: runtime.session_id.clone(),
+            sender,
+            incarnation: runtime.session_push.clone(),
+            limit: runtime.push_limit,
+            ephemeral: runtime.ephemeral,
+        })
+        .await
+    }
+    #[cfg(test)]
+    pub(crate) async fn register_ephemeral(
+        self: &Arc<Self>,
+        target_delivery_id: String,
+        session_id: String,
+        sender: GatewaySendHandle,
+        incarnation: Option<String>,
+        limit: usize,
+    ) -> anyhow::Result<GatewayRegistration> {
+        self.bind_registration(BindSpec {
+            target_delivery_id,
+            session_id,
+            sender,
+            incarnation,
+            limit,
+            ephemeral: true,
+        })
+        .await
+    }
+    async fn bind_registration(
+        self: &Arc<Self>,
+        spec: BindSpec,
+    ) -> anyhow::Result<GatewayRegistration> {
         use std::sync::atomic::Ordering;
+        let BindSpec { target_delivery_id, session_id, sender, incarnation, limit, ephemeral } =
+            spec;
         let sequence = self
             .next_registration
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
@@ -113,6 +193,7 @@ impl GatewaySessionHub {
                         token,
                         queue: queue.clone(),
                         incarnation: incarnation.clone(),
+                        ephemeral,
                         sender: sender.clone(),
                     },
                 )
@@ -143,6 +224,7 @@ impl GatewaySessionHub {
                     token: GatewayRegistrationToken(n as u64),
                     queue: crate::push_queue::PushQueue::new(16, closed),
                     incarnation: Some(id.into()),
+                    ephemeral: false,
                     sender: sender.clone(),
                 },
             );

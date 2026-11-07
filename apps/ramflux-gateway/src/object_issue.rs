@@ -137,6 +137,7 @@ mod tests {
         )?;
         let runtime = crate::GatewaySessionRuntime {
             session_push: None,
+            ephemeral: false,
             push_limit: 256,
             source_identity: attacker.clone(),
             session_id: "session".into(),

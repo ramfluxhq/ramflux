@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Raw requests prove negotiation, input fences and recipient wire behavior.
+#[path = "ephemeral_negotiation.rs"]
+mod ephemeral_negotiation;
 #[path = "negotiation_tests.rs"]
 mod negotiation;
 #[cfg(feature = "itest-local-mint")]
@@ -307,6 +309,7 @@ async fn unnegotiated_dispatch_and_legacy_establishment() -> anyhow::Result<()> 
             resume_window_seconds: 300,
         },
         None,
+        false,
     )
     .await?;
     assert_eq!(

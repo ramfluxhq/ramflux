@@ -87,17 +87,21 @@ async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
 #[ignore = "requires a separately built same-tree router binary"]
 async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()> {
     let (_child, context) = real_router().await?;
-    context.hub.readiness.start(&context.router);
+    context.hub.readiness.start_with_hub(&context.router, &context.hub, &context.gateway_id);
     tokio::time::timeout(Duration::from_secs(10), async {
         while !context.hub.readiness.supports() {
             tokio::task::yield_now().await;
         }
     })
     .await?;
-    assert_eq!(negotiate(&context, &auth(false)?, &descriptor()).await?, None);
-    let id = negotiate(&context, &auth(true)?, &descriptor())
-        .await?
+    let legacy = negotiate(&context, &auth(false)?, &descriptor()).await?;
+    assert_eq!(legacy.incarnation_id, None);
+    assert!(!legacy.ephemeral);
+    let binding = negotiate(&context, &auth(true)?, &descriptor()).await?;
+    let id = binding
+        .incarnation_id
         .ok_or_else(|| anyhow::anyhow!("actual router refused capable binding"))?;
+    assert!(!binding.ephemeral);
     assert!(ramflux_node_core::valid_inbox_incarnation(&id));
     let issued: Value = crate::router_post_json_async(
         &context.router,
