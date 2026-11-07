@@ -166,15 +166,44 @@ fn erased_input_restore_union_lifecycle_local_sources() -> Result<(), StorageErr
     let p = pair("erased-life-vii")?;
     both_have_message(&p)?;
     let vii = seed_binding(&p, "pvii", now)?;
+    delete_incoming(&p)?;
+    // The copy row is written after the source deletion, so it survives into the snapshot and
+    // only the merge's own erasure of M can remove it.
+    let copy = serde_json::to_vec(
+        &json!({"routing":{"message_id":"M"},"entry":{"envelope":full("rp","rd","pvii-copy",now,3600)}}),
+    )
+    .expect("copy body");
+    p.source.connection.execute(
+        "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES('routed/committed/pvii-copy',?1)",
+        params![copy],
+    )?;
+    p.source.connection.execute(
+        "INSERT INTO message_footprint VALUES('M','actor','routed/committed/pvii-copy')",
+        [],
+    )?;
     p.source
         .connection
         .execute("INSERT INTO message_copy_binding VALUES('payload:pvii-copy','M')", [])?;
-    p.source.persist_actor_state(
-        "routed/committed/pvii-copy",
-        &json!({"routing":{"message_id":"M"},"entry":{"envelope":full("rp","rd","pvii-copy",now,3600)}}),
+    let before: i64 = p.source.connection.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind='routed/committed/pvii-copy'",
+        [],
+        |r| r.get(0),
     )?;
-    delete_incoming(&p)?;
-    check(&p, &[vii], true, true)?;
+    assert_eq!(before, 1, "the copy is present in the incoming snapshot before the merge");
+    let (merged, path, key) = merge(&p)?;
+    let gone = |db: &rusqlite::Connection| -> Result<(), StorageError> {
+        let rows: i64 = db.query_row(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind='routed/committed/pvii-copy'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(rows, 0, "the re-fired copy is erased by the merge");
+        assert_eq!(expiry(db, &vii.selector)?, Some(vii.expires_at));
+        Ok(())
+    };
+    gone(&merged.db)?;
+    drop(merged);
+    gone(&BackupDatabase::open(&path, &key)?.db)?;
     // (viii) Over-capture is discarded: M ends the merge live, so no row exists for its tuples.
     let p = pair("erased-life-viii")?;
     both_have_message(&p)?;
