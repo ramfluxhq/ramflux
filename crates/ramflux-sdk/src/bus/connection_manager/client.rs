@@ -54,6 +54,22 @@ impl SessionClient {
             .await?;
         Ok(())
     }
+    /// Submits through the host and separates a certain gateway refusal (inner `Err`) from
+    /// every uncertain failure (outer `Err`). The first callers arrive with the sender sites.
+    #[allow(dead_code)]
+    pub(crate) fn submit_envelope_classified(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        Box::pin(self.handle.call_generation(
+            move |engine| {
+                Box::pin(async move { engine.submit_envelope_classified(envelope).await })
+            },
+            self.deadline,
+            self.generation,
+        ))
+    }
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
