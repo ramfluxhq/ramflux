@@ -327,6 +327,7 @@ impl BackupDatabase {
         candidate: bool,
         after_capture: impl FnOnce(&rusqlite::Connection) -> Result<(), StorageError>,
     ) -> Result<Vec<String>, StorageError> {
+        super::message_footprint::migration::begin_merge(&self.db)?;
         let tables = self.incoming_tables()?;
         self.begin_message_merge()?;
         if candidate {

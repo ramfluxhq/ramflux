@@ -286,6 +286,7 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::Serde(_)
         | E::HistoryBundleHashMismatch
         | E::AuthorizationRejected
+        | E::FootprintMigrationIncomplete
         | E::GroupMemberLimitExceeded
         | E::InvalidGroupRole(_)
         | E::GroupPermissionDenied

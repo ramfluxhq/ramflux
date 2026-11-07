@@ -30,6 +30,7 @@ ALLOW = {
     ('account_db/backup_merge.rs', 'archive_outbound'): 'private restore staging database',
     ('account_db/backup_native.rs', 'sanitize_native_backup'): 'private native archive snapshot',
     ('account_db/backup_normalization.rs', 'normalize_backup_candidate'): 'atomic single-input normalization of a private restore generation',
+    ('account_db/message_footprint/migration.rs', 'complete'): 'chunked completing footprint migration with a persisted cursor; also runs on private restore generations',
 }
 METHOD = re.compile(r'\.\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\s*(?:::\s*<[^;{}]*>)?\s*\(')
 ASSOCIATED = re.compile(r'\b(?:Transaction|Savepoint)\s*::\s*(?:new(?:_unchecked)?|with_name)\b|(?:\bConnection\s*|<[^;{}>]*\bConnection[^;{}>]*>\s*)::\s*(?:savepoint(?:_with_name)?|transaction(?:_with_behavior)?|unchecked_transaction)\b')

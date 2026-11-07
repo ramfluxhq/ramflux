@@ -16,6 +16,7 @@ impl AccountDb {
         message: &str,
         own_override: Option<bool>,
     ) -> Result<bool, StorageError> {
+        self.require_footprint_migration()?;
         let Some((sender,stored_own,was_deleted))=self.connection.query_row(
             "SELECT sender_id,is_own,deleted FROM direct_message_projection WHERE conversation_id=?1 AND message_id=?2",
             params![conversation,message],|row|Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?,row.get::<_,bool>(2)?)),

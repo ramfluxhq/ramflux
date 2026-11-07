@@ -515,7 +515,7 @@ fn replay_quarantine_envelope_is_footprinted_and_erased() -> Result<(), StorageE
     Ok(())
 }
 
-fn actor_owners(db: &AccountDb, locator: &str) -> Result<Vec<String>, StorageError> {
+pub(super) fn actor_owners(db: &AccountDb, locator: &str) -> Result<Vec<String>, StorageError> {
     let mut query = db.connection.prepare(
         "SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=?1 \
          ORDER BY message_id",
@@ -524,7 +524,7 @@ fn actor_owners(db: &AccountDb, locator: &str) -> Result<Vec<String>, StorageErr
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn full_envelope() -> serde_json::Value {
+pub(super) fn full_envelope() -> serde_json::Value {
     json!({"source_principal_id":"principal-private","source_device_id":"device-private",
         "signing_key_id":"key-private","payload_hash":"payload-private-hash",
         "created_at":1,"ttl":2,"encrypted_payload":"unlisted-private-content"})
@@ -577,11 +577,11 @@ fn admits_predicate_controls_are_isolated() -> Result<(), StorageError> {
     Ok(())
 }
 
-fn audit(db: &AccountDb) -> Result<Vec<String>, StorageError> {
+pub(super) fn audit(db: &AccountDb) -> Result<Vec<String>, StorageError> {
     Ok(db.connection.call(|raw| audit::unregistered_envelope_copies(raw, 16))?)
 }
 
-fn envelope_value(message: &str) -> serde_json::Value {
+pub(super) fn envelope_value(message: &str) -> serde_json::Value {
     json!({"routing":{"message_id":message},"entry":{"envelope":full_envelope()}})
 }
 
@@ -828,7 +828,10 @@ fn trigger_sql(db: &AccountDb, name: &str) -> Result<String, StorageError> {
     )?)
 }
 
-fn archived_owners(db: &AccountDb, state_kind: &str) -> Result<Vec<String>, StorageError> {
+pub(super) fn archived_owners(
+    db: &AccountDb,
+    state_kind: &str,
+) -> Result<Vec<String>, StorageError> {
     let mut query = db.connection.prepare(
         "SELECT f.message_id FROM backup_archived_actor_state a JOIN message_footprint f \
          ON f.kind='archived_actor' AND f.locator=CAST(a.rowid AS TEXT) \
@@ -838,7 +841,7 @@ fn archived_owners(db: &AccountDb, state_kind: &str) -> Result<Vec<String>, Stor
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn archive_row_count(db: &AccountDb, state_kind: &str) -> Result<i64, StorageError> {
+pub(super) fn archive_row_count(db: &AccountDb, state_kind: &str) -> Result<i64, StorageError> {
     Ok(db.connection.query_row(
         "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind=?1",
         params![state_kind],
@@ -846,7 +849,11 @@ fn archive_row_count(db: &AccountDb, state_kind: &str) -> Result<i64, StorageErr
     )?)
 }
 
-fn insert_archived(db: &AccountDb, state_kind: &str, message: &str) -> Result<(), StorageError> {
+pub(super) fn insert_archived(
+    db: &AccountDb,
+    state_kind: &str,
+    message: &str,
+) -> Result<(), StorageError> {
     db.connection.execute(
         "INSERT INTO backup_archived_actor_state(source,state_kind,state_json) VALUES('s',?1,?2)",
         params![state_kind, serde_json::to_vec(&envelope_value(message))?],
@@ -855,7 +862,7 @@ fn insert_archived(db: &AccountDb, state_kind: &str, message: &str) -> Result<()
 }
 
 /// Builds a database whose archive triggers carry the pre-fix guard (listed prefixes only).
-fn old_archive_trigger_fixture(
+pub(super) fn old_archive_trigger_fixture(
     name: &str,
 ) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
     let (root, db) = crate::tests::test_db(name)?;
@@ -875,7 +882,7 @@ fn old_archive_trigger_fixture(
     Ok((root, db))
 }
 
-fn reopen(root: &std::path::Path, db: AccountDb) -> Result<AccountDb, StorageError> {
+pub(super) fn reopen(root: &std::path::Path, db: AccountDb) -> Result<AccountDb, StorageError> {
     drop(db);
     AccountDb::open(
         &AccountIndex::open(root)?,
@@ -924,13 +931,17 @@ fn archive_footprint_triggers_renewed_on_open() -> Result<(), StorageError> {
 }
 
 #[test]
-#[ignore = "completed in P03a-0d"]
 fn archive_footprint_triggers_renewed_on_open_registers_existing_rows() -> Result<(), StorageError>
 {
     let (root, db) = old_archive_trigger_fixture("footprint-archive-existing")?;
     db.send_direct_message("thread", "live", "peer", b"secret")?;
     insert_archived(&db, "zz-new/existing", "live")?;
     insert_archived(&db, "legacy/replay/committed/existing", "live")?;
+    // A pre-fix database has never run the completing migration.
+    db.connection.execute(
+        "DELETE FROM projection_checkpoint WHERE projection_name LIKE 'footprint_replay_migration:v1%'",
+        [],
+    )?;
     let db = reopen(&root, db)?;
     // (b) The completing migration registers existing rows (P03a-0d).
     assert_eq!(archived_owners(&db, "zz-new/existing")?.len(), 2);

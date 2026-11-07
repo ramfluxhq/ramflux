@@ -13,7 +13,7 @@ impl BackupDatabase {
     ) -> Result<(), StorageError> {
         let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='message_footprint')",[],|r|r.get(0))?;
         if !exists {
-            return Ok(());
+            return Ok(super::message_footprint::migration::register_imported(&self.db)?);
         }
         let candidate = super::backup_selector_admission::placeholders::active(&self.db)?;
         let actor = if candidate {
@@ -42,7 +42,7 @@ impl BackupDatabase {
                 self.db.execute(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,?1,CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.{table} r ON r.rowid=CAST(f.locator AS INTEGER) JOIN {table} a ON a.source=?2||'/'||r.source AND a.{key_column}=r.{key_column} WHERE f.kind=?1"),params![kind,source])?;
             }
         }
-        Ok(())
+        Ok(super::message_footprint::migration::register_imported(&self.db)?)
     }
 }
 
