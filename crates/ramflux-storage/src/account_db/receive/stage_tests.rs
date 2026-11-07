@@ -427,3 +427,92 @@ fn receive_work_footprint_registered_atomically() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn receipt_state(db: &AccountDb, sequence: u64) -> Result<Option<String>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(db
+        .connection
+        .query_row(
+            "SELECT disposition FROM gateway_receive_receipt WHERE inbox_seq=?1",
+            params![sequence.to_be_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+fn work_for(db: &AccountDb, sequence: u64) -> Result<i64, StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE inbox_seq=?1",
+        params![sequence.to_be_bytes().as_slice()],
+        |row| row.get(0),
+    )?)
+}
+
+fn assert_erased_pair(db: &AccountDb) -> Result<(), StorageError> {
+    // (a) Both receipts of the deleted message are erased and carry no work or row.
+    for sequence in [1, 2] {
+        assert_eq!(receipt_state(db, sequence)?.as_deref(), Some("erased"), "s{sequence}");
+        assert_eq!(work_for(db, sequence)?, 0, "s{sequence} work");
+        assert!(!footprints(db)?.iter().any(|(_, at)| *at == locator(sequence)));
+    }
+    // (b) The same wire id with a distinct payload is untouched.
+    assert_eq!(receipt_state(db, 3)?.as_deref(), Some("staged"));
+    assert_eq!(work_for(db, 3)?, 1);
+    assert!(footprints(db)?.contains(&("copy:payload:other".to_owned(), locator(3))));
+    // (c) No non-terminal receipt exists without its work.
+    let orphaned: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_receipt r WHERE r.disposition IN ('staged','held') \
+         AND NOT EXISTS(SELECT 1 FROM gateway_receive_work w WHERE w.target_delivery_id=r.target_delivery_id \
+         AND w.incarnation_id=r.incarnation_id AND w.inbox_seq=r.inbox_seq)",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(orphaned, 0);
+    Ok(())
+}
+
+#[test]
+fn receive_erasure_marks_receipt_before_work() -> Result<(), StorageError> {
+    let (root, db) = setup("w0-erasure")?;
+    db.connection.disable_background_checkpoints_for_test();
+    db.send_direct_message("thread", "M", "peer", b"secret")?;
+    db.connection.execute("INSERT INTO message_copy_binding VALUES('payload:shared','M')", [])?;
+    // s1 staged and s2 held, both bound to M; s3 shares the wire id but has a distinct payload.
+    for (sequence, hash) in [(1, "shared"), (2, "shared"), (3, "other")] {
+        let wire = entry(sequence, hash, None);
+        assert_eq!(run(&db, input(&wire, sequence))?, R::Staged);
+    }
+    db.connection.execute(
+        "UPDATE gateway_receive_receipt SET disposition='held' WHERE inbox_seq=?1",
+        params![2u64.to_be_bytes().as_slice()],
+    )?;
+    db.delete_direct_message("thread", "M", "local", "delete-m")?;
+    assert_erased_pair(&db)?;
+    // (d) Deletion arms the flag; TRUNCATE is clean and leaves an empty WAL.
+    let pending: i64 = db.connection.query_row(
+        "SELECT erasure_pending FROM runtime_privacy_maintenance WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(pending, 1);
+    let (busy, _log, _checkpointed): (i64, i64, i64) =
+        db.connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    assert_eq!(busy, 0);
+    let mut wal = db.path.clone().into_os_string();
+    wal.push("-wal");
+    assert_eq!(std::fs::metadata(&wal).map_or(0, |meta| meta.len()), 0);
+    let secure: i64 = db.connection.query_row("PRAGMA secure_delete", [], |row| row.get(0))?;
+    assert_eq!(secure, 1);
+    // (e) After reopen (a) to (c) still hold.
+    drop(db);
+    let db = AccountDb::open(
+        &crate::AccountIndex::open(&root)?,
+        "acct",
+        &crate::AccountDbKey::derive("acct", b"storage-test-secret"),
+    )?;
+    assert_erased_pair(&db)?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

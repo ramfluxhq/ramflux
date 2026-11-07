@@ -16,11 +16,26 @@ pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
             body.insert_str(0,&format!("DELETE FROM {table} WHERE rowid IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='{kind}');"));
         }
     }
+    if super::schema::exists(db, "gateway_receive_work")? {
+        // The receipt is marked before its work is deleted: deleting the work drops the
+        // `receive_work` locator rows this lookup reads, so the order is load-bearing.
+        body.insert_str(0, RECEIVE_ERASE);
+    }
     db.execute_batch(&format!("DROP TRIGGER IF EXISTS footprint_erase_message; CREATE TRIGGER footprint_erase_message AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN {body} END;"))?;
     // Keep object work behind the indexed message edge, including on deletion re-fires.
     db.execute_batch(&format!("DROP TRIGGER IF EXISTS object_erase_message; CREATE TRIGGER object_erase_message AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 AND EXISTS(SELECT 1 FROM object_message_reference WHERE message_id=NEW.message_id) BEGIN {objects} END;"))?;
     Ok(())
 }
+const RECEIVE_ERASE: &str = r"
+ UPDATE gateway_receive_receipt SET disposition='erased' WHERE disposition<>'erased'
+  AND (target_delivery_id,incarnation_id,inbox_seq) IN (
+   SELECT json_extract(locator,'$[0]'),json_extract(locator,'$[1]'),unhex(json_extract(locator,'$[2]'))
+   FROM message_footprint WHERE message_id=NEW.message_id AND kind='receive_work');
+ DELETE FROM gateway_receive_work
+  WHERE (target_delivery_id,incarnation_id,inbox_seq) IN (
+   SELECT json_extract(locator,'$[0]'),json_extract(locator,'$[1]'),unhex(json_extract(locator,'$[2]'))
+   FROM message_footprint WHERE message_id=NEW.message_id AND kind='receive_work');
+";
 const BODY: &str = r"
  INSERT INTO runtime_privacy_maintenance VALUES(1,1)
  ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1;

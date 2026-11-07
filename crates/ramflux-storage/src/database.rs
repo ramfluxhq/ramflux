@@ -176,6 +176,11 @@ impl Connection {
         self.request_background_checkpoint();
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_background_checkpoints_for_test(&self) {
+        self.inner.checkpoints.disable_for_test();
+    }
+
     pub(crate) fn request_background_checkpoint(&self) {
         self.inner.checkpoints.request();
         self.wake_checkpoint_worker();
