@@ -292,7 +292,9 @@ impl RouterHandle {
         request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
     ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
         if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
-            anyhow::bail!("delivery_mode_refused");
+            anyhow::bail!(crate::durable_mode::DeliveryModeRefused::from_envelope(
+                &request.envelope
+            ));
         }
         match self {
             Self::Tokio(runtime) => crate::router_engine::own_device_fanout(

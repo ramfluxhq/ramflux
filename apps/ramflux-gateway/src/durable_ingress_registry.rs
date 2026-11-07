@@ -3,10 +3,15 @@
 
 //! Scanner-backed durable ingress registry for the gateway crate.
 
+#[cfg(feature = "itest-http")]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ramflux_node_core::GatewayServerFrame;
+
+const GATEWAY_REGISTRY_TEST: &str =
+    "durable_ingress_registry::durable_ingress_registry_refuses_marked_envelopes";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Class {
@@ -27,6 +32,7 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "durable_mode.rs:rejected_security",
         Class::NonIngress("typed refusal construction; no envelope persist"),
     ),
+    ("itest_http.rs:dispatch_protected_itest_request", Class::Edge),
     ("quic_dispatch.rs:forward_quic_envelope", Class::Edge),
     ("session.rs:handle_gateway_submit", Class::Edge),
     ("session.rs:handle_gateway_own_device_fanout", Class::Edge),
@@ -42,19 +48,22 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
 
 #[test]
 fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std::error::Error>> {
-    let listed_scan = DURABLE_INGRESS
-        .iter()
-        .filter(|(_, class)| !matches!(class, Class::Edge))
-        .map(|(name, _)| (*name).to_owned())
-        .collect::<Vec<_>>();
     let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let sources = public_envelope_sources(&source_root)?;
+    let scanned = scan_public_envelope_functions(&sources).map_err(|error| error.to_string())?;
+    let listed_scan = DURABLE_INGRESS
+        .iter()
+        .filter(|(name, class)| {
+            !matches!(class, Class::Edge) || scanned.iter().any(|scanned| scanned == name)
+        })
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<Vec<_>>();
     assert_registry_scan_matches(&sources, &listed_scan).map_err(std::io::Error::other)?;
 
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (5, 3));
+    assert_eq!((non_ingress_count, edge_count), (5, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
@@ -67,22 +76,39 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         }
     }
 
+    if std::env::var_os("RAMFLUX_S6C_P03_CHILD").is_none() {
+        for with_wal in ["1", "0"] {
+            let capture = std::env::temp_dir().join(format!(
+                "ramflux-s6c-p03-gw-{}-{}-{}.jsonl",
+                with_wal,
+                std::process::id(),
+                ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
+            ));
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", GATEWAY_REGISTRY_TEST, "--nocapture"])
+                .env("RAMFLUX_S6C_P03_CHILD", "1")
+                .env("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON", &capture)
+                .status()?;
+            let _ = std::fs::remove_file(&capture);
+            assert!(status.success(), "gateway registry child WAL={with_wal} failed: {status}");
+        }
+        return Ok(());
+    }
+
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
-        for with_wal in [true, false] {
-            let mut ordinal = 0_u64;
-            for (entry, class) in DURABLE_INGRESS {
-                if *class != Class::Edge {
-                    continue;
-                }
-                for mode in [
-                    serde_json::Value::String("ephemeral".into()),
-                    serde_json::Value::String("unknown-mode".into()),
-                    serde_json::Value::Null,
-                ] {
-                    drive_gateway_edge(entry, ordinal, mode, with_wal).await?;
-                    ordinal += 1;
-                }
+        let mut ordinal = 0_u64;
+        for (entry, class) in DURABLE_INGRESS {
+            if *class != Class::Edge {
+                continue;
+            }
+            for mode in [
+                serde_json::Value::String("ephemeral".into()),
+                serde_json::Value::String("unknown-mode".into()),
+                serde_json::Value::Null,
+            ] {
+                drive_gateway_edge(entry, ordinal, mode).await?;
+                ordinal += 1;
             }
         }
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -113,7 +139,6 @@ async fn drive_gateway_edge(
     entry: &str,
     ordinal: u64,
     mode: serde_json::Value,
-    with_wal: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
     let runtime = crate::session::submit_fixtures::test_runtime()?;
@@ -124,16 +149,78 @@ async fn drive_gateway_edge(
     resign_submit(&mut submit)?;
     let mut control = crate::session::submit_fixtures::signed_submit(&runtime, now)?;
     control.envelope.ext.ext.remove("delivery_mode");
-    ramflux_protocol::ephemeral::require_durable(&control.envelope)?;
+    resign_submit(&mut control)?;
+    ramflux_protocol::ephemeral::require_durable(&control.envelope)
+        .map_err(|error| format!("control refused at mode for {entry}: {error}"))?;
+    drive_control_gateway_edge(entry, &runtime, &control).await?;
+    drive_marked_gateway_edge(entry, ordinal, &runtime, &submit).await
+}
 
+async fn drive_control_gateway_edge(
+    entry: &str,
+    runtime: &crate::GatewaySessionRuntime,
+    control: &ramflux_node_core::GatewaySubmitFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
         "session.rs:handle_gateway_submit" => {
-            let capture = capture_path(ordinal, with_wal);
+            let context = crate::session::tests::test_gateway_context()?;
+            let (send, frames) = frame_sink();
+            match crate::session::handle_gateway_submit(&send, &context, runtime, control).await {
+                Ok(()) => assert_frames_not_mode_refused(entry, &frames)?,
+                Err(error) => assert_control_error(entry, &error),
+            }
+        }
+        "session.rs:handle_gateway_own_device_fanout" => {
+            let context = crate::session::tests::test_gateway_context()?;
+            let fanout = fanout_frame(runtime, control);
+            let (send, frames) = frame_sink();
+            match crate::session::handle_gateway_own_device_fanout(
+                &send, &context, runtime, &fanout,
+            )
+            .await
+            {
+                Ok(()) => assert_frames_not_mode_refused(entry, &frames)?,
+                Err(error) => assert_control_error(entry, &error),
+            }
+        }
+        "quic_dispatch.rs:forward_quic_envelope" => {
+            let body = serde_json::to_value(&control.envelope)?;
+            match crate::quic_dispatch::forward_quic_envelope(
+                &crate::session::tests::test_gateway_context()?.router,
+                body,
+            )
+            .await
+            {
+                Ok(response) => assert_ne!(
+                    response.get("outcome").and_then(serde_json::Value::as_str),
+                    Some("rejected_security:delivery_mode_refused"),
+                    "control refused at mode for {entry}: {response}"
+                ),
+                Err(error) => assert_control_error(entry, &error),
+            }
+        }
+        "itest_http.rs:dispatch_protected_itest_request" => {
+            drive_itest_http_control(entry, control)?;
+        }
+        other => return Err(format!("unknown gateway edge {other}").into()),
+    }
+    Ok(())
+}
+
+async fn drive_marked_gateway_edge(
+    entry: &str,
+    ordinal: u64,
+    runtime: &crate::GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let capture = capture_path(ordinal);
+    match entry {
+        "session.rs:handle_gateway_submit" => {
             let context = crate::session::tests::test_gateway_context()?;
             let before = capture_snapshot(&capture);
             let store_before = gateway_store_snapshot(&context)?;
             let (send, frames) = frame_sink();
-            crate::session::handle_gateway_submit(&send, &context, &runtime, &submit).await?;
+            crate::session::handle_gateway_submit(&send, &context, runtime, submit).await?;
             let frames = frames.lock().map_err(|error| error.to_string())?.clone();
             assert_eq!(frames.len(), 1, "{entry}");
             assert!(
@@ -149,21 +236,18 @@ async fn drive_gateway_edge(
         }
         "session.rs:handle_gateway_own_device_fanout" => {
             let context = crate::session::tests::test_gateway_context()?;
+            let before = capture_snapshot(&capture);
             let store_before = gateway_store_snapshot(&context)?;
-            let fanout = ramflux_node_core::GatewayOwnDeviceFanoutFrame {
-                signed_request: submit.signed_request.clone(),
-                principal_id: runtime.principal_id.clone(),
-                source_device_id: runtime.device_id.clone(),
-                envelope: submit.envelope.clone(),
-            };
+            let fanout = fanout_frame(runtime, submit);
             let (send, frames) = frame_sink();
-            crate::session::handle_gateway_own_device_fanout(&send, &context, &runtime, &fanout)
+            crate::session::handle_gateway_own_device_fanout(&send, &context, runtime, &fanout)
                 .await?;
             let frames = frames.lock().map_err(|error| error.to_string())?.clone();
             assert!(
                 matches!(&frames[..], [GatewayServerFrame::Nack { reason }] if reason == crate::durable_mode::NACK_REASON),
                 "{entry}: {frames:?}"
             );
+            assert_eq!(capture_snapshot(&capture), before, "{entry} capture file changed");
             assert_eq!(
                 gateway_store_snapshot(&context)?,
                 store_before,
@@ -179,9 +263,135 @@ async fn drive_gateway_edge(
             .await?;
             assert_eq!(response["outcome"], "rejected_security:delivery_mode_refused", "{entry}");
         }
+        "itest_http.rs:dispatch_protected_itest_request" => {
+            drive_itest_http_marked(entry, submit)?;
+        }
         other => return Err(format!("unknown gateway edge {other}").into()),
     }
     Ok(())
+}
+
+fn fanout_frame(
+    runtime: &crate::GatewaySessionRuntime,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> ramflux_node_core::GatewayOwnDeviceFanoutFrame {
+    ramflux_node_core::GatewayOwnDeviceFanoutFrame {
+        signed_request: submit.signed_request.clone(),
+        principal_id: runtime.principal_id.clone(),
+        source_device_id: runtime.device_id.clone(),
+        envelope: submit.envelope.clone(),
+    }
+}
+
+fn assert_frames_not_mode_refused(
+    entry: &str,
+    frames: &Mutex<Vec<GatewayServerFrame>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let frames = frames.lock().map_err(|error| error.to_string())?.clone();
+    for frame in &frames {
+        if let GatewayServerFrame::Nack { reason } = frame {
+            assert_ne!(
+                reason,
+                crate::durable_mode::NACK_REASON,
+                "control refused at mode for {entry}: {frames:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn assert_control_error(entry: &str, error: &anyhow::Error) {
+    let text = error.to_string();
+    assert_ne!(text, crate::durable_mode::NACK_REASON, "control refused at mode for {entry}");
+    assert!(!text.contains("delivery_mode_refused"), "control refused at mode for {entry}: {text}");
+}
+
+#[cfg(feature = "itest-http")]
+fn drive_itest_http_control(
+    entry: &str,
+    control: &ramflux_node_core::GatewaySubmitFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let context = crate::session::tests::test_gateway_context()?;
+    let (mut server, mut client) = loopback()?;
+    let request = envelope_http_request(&control.envelope)?;
+    match crate::itest_http::dispatch_protected_itest_request(
+        &mut server,
+        &context.router,
+        &request,
+    ) {
+        Ok(()) => {
+            drop(server);
+            let mut response = Vec::new();
+            client.read_to_end(&mut response)?;
+            let text = String::from_utf8_lossy(&response);
+            assert!(
+                !text.contains("rejected_security:delivery_mode_refused"),
+                "control refused at mode for {entry}: {text}"
+            );
+        }
+        Err(error) => assert_control_error(entry, &error),
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "itest-http"))]
+#[allow(clippy::unnecessary_wraps)]
+fn drive_itest_http_control(
+    _entry: &str,
+    _control: &ramflux_node_core::GatewaySubmitFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn drive_itest_http_marked(
+    entry: &str,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let context = crate::session::tests::test_gateway_context()?;
+    let (mut server, mut client) = loopback()?;
+    let request = envelope_http_request(&submit.envelope)?;
+    crate::itest_http::dispatch_protected_itest_request(&mut server, &context.router, &request)?;
+    drop(server);
+    let mut response = Vec::new();
+    client.read_to_end(&mut response)?;
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.contains("200"), "{entry}: {text}");
+    assert!(text.contains("rejected_security:delivery_mode_refused"), "{entry}: {text}");
+    Ok(())
+}
+
+#[cfg(not(feature = "itest-http"))]
+#[allow(clippy::unnecessary_wraps)]
+fn drive_itest_http_marked(
+    _entry: &str,
+    _submit: &ramflux_node_core::GatewaySubmitFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn envelope_http_request(
+    envelope: &ramflux_protocol::Envelope,
+) -> Result<ramflux_node_core::NodeHttpRequest, Box<dyn std::error::Error>> {
+    Ok(ramflux_node_core::NodeHttpRequest {
+        method: "POST".into(),
+        path: "/mvp0/envelope".into(),
+        body: serde_json::to_vec(envelope)?,
+        keep_alive: false,
+        source_ip_hash: None,
+        pre_auth_cookie: None,
+        pre_auth_now: None,
+    })
+}
+
+#[cfg(feature = "itest-http")]
+fn loopback() -> Result<(std::net::TcpStream, std::net::TcpStream), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let client = std::net::TcpStream::connect(addr)?;
+    let (server, _) = listener.accept()?;
+    Ok((server, client))
 }
 
 struct TestFrameSink(std::sync::Arc<Mutex<Vec<GatewayServerFrame>>>);
@@ -243,13 +453,11 @@ fn resign_submit(
     Ok(())
 }
 
-fn capture_path(ordinal: u64, with_wal: bool) -> PathBuf {
+fn capture_path(ordinal: u64) -> PathBuf {
     std::env::var_os("RAMFLUX_GATEWAY_ITEST_CAPTURE_JSON").map_or_else(
         || {
-            std::env::temp_dir().join(format!(
-                "ramflux-s6c-p03-capture-{with_wal}-{ordinal}-{}.json",
-                std::process::id()
-            ))
+            std::env::temp_dir()
+                .join(format!("ramflux-s6c-p03-capture-{ordinal}-{}.jsonl", std::process::id()))
         },
         PathBuf::from,
     )

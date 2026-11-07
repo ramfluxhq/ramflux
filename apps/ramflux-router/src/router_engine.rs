@@ -571,7 +571,7 @@ pub(crate) fn own_device_fanout(
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
     if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
-        anyhow::bail!("delivery_mode_refused");
+        anyhow::bail!(crate::durable_mode::DeliveryModeRefused::from_envelope(&request.envelope));
     }
     Ok(ramflux_node_core::publication::capture(|| own_device_fanout_inner(state, store, request))?
         .published_blocking()??
@@ -584,7 +584,7 @@ pub(crate) fn own_device_fanout_inner(
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::PreparedFanout> {
     if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
-        anyhow::bail!("delivery_mode_refused");
+        anyhow::bail!(crate::durable_mode::DeliveryModeRefused::from_envelope(&request.envelope));
     }
     Ok(state.prepare_sender_fanout(
         store,
