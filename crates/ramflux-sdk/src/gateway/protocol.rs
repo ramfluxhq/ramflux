@@ -556,9 +556,9 @@ pub enum GatewayServerFrame {
     },
     EphemeralResult {
         envelope_id: String,
-        outcome: ramflux_protocol::ephemeral::EphemeralSubmitOutcome,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<ramflux_protocol::ephemeral::EphemeralDropReason>,
+        /// Outcome and reason, coupled when the received bytes are decoded.
+        #[serde(flatten)]
+        result: ramflux_protocol::ephemeral::EphemeralSubmitResult,
     },
     Close {
         reason: String,
@@ -597,3 +597,7 @@ pub struct GatewaySessionState {
     pub resume_window_seconds: u64,
     pub accepted_inbox_seq: u64,
 }
+
+#[cfg(test)]
+#[path = "protocol_ephemeral_tests.rs"]
+mod ephemeral_result_tests;

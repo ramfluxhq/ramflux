@@ -94,6 +94,7 @@ pub(crate) mod tests {
             branch_public_key: authority.branch_public_key.clone(),
             device_epoch: 1,
             supports_forward_ack: false,
+            ephemeral_rate: std::sync::Arc::default(),
         };
         let mut envelope = ramflux_protocol::Envelope {
             schema: "ramflux.envelope.v1".into(),

@@ -140,6 +140,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
         device_epoch: 1,
         branch_public_key: "fixture-branch-key".into(),
         supports_forward_ack: false,
+        ephemeral_rate: std::sync::Arc::default(),
     };
     let frames = Arc::new(Mutex::new(Vec::new()));
     let send: crate::GatewaySendHandle =

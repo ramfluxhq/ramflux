@@ -235,6 +235,26 @@ fn config_with_generation(config: &HomeRenewalConfig, generation: u64) -> HomeRe
         home_key: config.home_key.clone(),
     }
 }
+
+fn resident_runtime(
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    public: &str,
+) -> GatewaySessionRuntime {
+    GatewaySessionRuntime {
+        session_push: None,
+        push_limit: 256,
+        source_identity: source.clone(),
+        session_id: "s".into(),
+        resume_token: "r".into(),
+        principal_id: "resident".into(),
+        device_id: "device".into(),
+        target_delivery_id: source.storage_key().into(),
+        branch_public_key: public.to_owned(),
+        device_epoch: 1,
+        supports_forward_ack: false,
+        ephemeral_rate: std::sync::Arc::default(),
+    }
+}
 #[test]
 fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_requester() -> Result {
     let root = ramflux_crypto::create_identity_root("resident", [31; 32]);
@@ -262,19 +282,7 @@ fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_reques
         },
     )?;
     let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-    let runtime = GatewaySessionRuntime {
-        session_push: None,
-        push_limit: 256,
-        source_identity: source.clone(),
-        session_id: "s".into(),
-        resume_token: "r".into(),
-        principal_id: "resident".into(),
-        device_id: "device".into(),
-        target_delivery_id: source.storage_key().into(),
-        branch_public_key: public.clone(),
-        device_epoch: 1,
-        supports_forward_ack: false,
-    };
+    let runtime = resident_runtime(&source, &public);
     let key = ramflux_node_core::DeviceAuthKeyResponse {
         custody_authority: None,
         root_public_key: Some(ramflux_protocol::encode_base64url(
@@ -677,6 +685,7 @@ mod entrypoint {
             ),
             device_epoch: 1,
             supports_forward_ack: false,
+            ephemeral_rate: std::sync::Arc::default(),
         })
     }
 

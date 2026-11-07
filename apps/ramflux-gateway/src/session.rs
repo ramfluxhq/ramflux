@@ -648,6 +648,7 @@ pub(crate) async fn establish_gateway_session(
         branch_public_key: registered_auth_key.branch_public_key,
         device_epoch: registered_auth_key.device_epoch,
         supports_forward_ack: auth_supports_forward_ack(auth_frame),
+        ephemeral_rate: std::sync::Arc::default(),
     })
 }
 
@@ -1163,14 +1164,18 @@ fn issue_relay_token_for_authenticated_session(
     )?)
 }
 
-pub(crate) fn validate_gateway_session_signed_request<T: serde::Serialize>(
-    context: &GatewayQuicContext,
+/// Read-only authentication of a session-bound signed request: source, path, method, session
+/// binding, lifetime, body hash and signature. It never touches replay state or the store, so
+/// an ephemeral ingress (I-NP) can use it; durable callers go through
+/// [`validate_gateway_session_signed_request`], which adds the persisted replay record.
+/// Returns the unix second used for the lifetime check.
+pub(crate) fn verify_gateway_session_signed_request<T: serde::Serialize>(
     runtime: &GatewaySessionRuntime,
     signed_request: &ramflux_protocol::SignedRequest,
     method: &str,
     path: &str,
     body: &T,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i64> {
     if signed_request.source_device_id != runtime.device_id {
         anyhow::bail!("signed request source device does not match authenticated session");
     }
@@ -1199,6 +1204,18 @@ pub(crate) fn validate_gateway_session_signed_request<T: serde::Serialize>(
         &signed_request.signed.signature,
         &runtime.branch_public_key,
     )?;
+    Ok(now)
+}
+
+pub(crate) fn validate_gateway_session_signed_request<T: serde::Serialize>(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    signed_request: &ramflux_protocol::SignedRequest,
+    method: &str,
+    path: &str,
+    body: &T,
+) -> anyhow::Result<()> {
+    let now = verify_gateway_session_signed_request(runtime, signed_request, method, path, body)?;
     {
         let mut gateway = gateway_state(&context.state)?;
         gateway.replay_guard_state_mut().check_signed_request(
@@ -2125,6 +2142,7 @@ pub(crate) mod tests {
             branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
             device_epoch: 1,
             supports_forward_ack: false,
+            ephemeral_rate: std::sync::Arc::default(),
         };
         let mut fanout = ramflux_node_core::GatewayOwnDeviceFanoutFrame {
             signed_request: test_signed_request("device_a"),
@@ -2417,6 +2435,7 @@ pub(crate) mod tests {
                 branch.signing_key.verifying_key().to_bytes(),
             ),
             supports_forward_ack: false,
+            ephemeral_rate: std::sync::Arc::default(),
         })
     }
 

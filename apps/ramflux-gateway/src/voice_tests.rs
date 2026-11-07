@@ -101,6 +101,7 @@ fn runtime(
         resume_token: "resume".into(),
         target_delivery_id: endpoint.principal_id.clone(),
         supports_forward_ack: false,
+        ephemeral_rate: std::sync::Arc::default(),
     })
 }
 fn native_identity(
@@ -213,6 +214,7 @@ fn native_runtime(
         resume_token: "resume".into(),
         target_delivery_id: endpoint.principal_id.clone(),
         supports_forward_ack: false,
+        ephemeral_rate: std::sync::Arc::default(),
     })
 }
 #[test]

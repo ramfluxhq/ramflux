@@ -20,6 +20,7 @@ pub(crate) fn test_runtime() -> anyhow::Result<crate::GatewaySessionRuntime> {
             branch.signing_key.verifying_key().to_bytes(),
         ),
         supports_forward_ack: true,
+        ephemeral_rate: std::sync::Arc::default(),
     })
 }
 
