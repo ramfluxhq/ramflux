@@ -117,7 +117,7 @@ fn mesh_compat_overflow() -> anyhow::Result<()> {
         (json!({"delivered":1}), "invalid type: integer `1`, expected a boolean"),
         (
             json!({"delivered":true,"outcome":"mystery"}),
-            "unknown variant `mystery`, expected one of `queued`, `overflowed`, `no_session`, `full`, `unsupported`, `expired`",
+            "unknown variant `mystery`, expected one of `queued`, `overflowed`, `no_session`, `full`, `unsupported`, `expired`, `invalid`",
         ),
     ] {
         assert_eq!(
