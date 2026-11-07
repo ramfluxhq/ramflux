@@ -60,17 +60,7 @@ pub(crate) fn local(
     if let LocalMigrationAction::AttachmentAuthorityPin { node_id } = request.action {
         // Not a migration action: it is gated by the attachment capability, not by
         // home migration being enabled.
-        let admitted = crate::now_unix_seconds().is_ok_and(|now| {
-            context.state.snapshot().is_ok_and(|state| state.can_deliver_to(&node_id, now))
-        });
-        // An unadmitted node is not a source at all; an admitted one is available or not.
-        let answer = if !admitted {
-            ramflux_node_core::PinAnswer::SourceUnknown
-        } else if context.discovery.attachment_authority.is_some() {
-            context.state.attachment_authority().answer(&node_id)
-        } else {
-            ramflux_node_core::PinAnswer::Unavailable
-        };
+        let answer = crate::attachment_renewal::pin_answer(context, &node_id)?;
         return Ok(LocalMigrationReply::AttachmentAuthorityPin { node_id, answer });
     }
     let result = (|| {

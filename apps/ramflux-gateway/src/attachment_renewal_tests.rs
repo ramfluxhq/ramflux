@@ -130,6 +130,109 @@ fn large_home_egress_clamps_w_and_never_falls_back() -> Result {
     Ok(())
 }
 #[test]
+fn challenge_preflight_refuses_each_predicate_in_isolation_before_any_egress() -> Result {
+    let j = fixture()?;
+    let r = &j["renewal"];
+    let grant = grant(&j)?;
+    let request = RenewalRequest {
+        operation: bytes(&r["renewal_operation_hex"])?,
+        body: bytes(&r["renewal_body_hex"])?,
+    };
+    let (renew, target) = request.target()?;
+    let q = grant.grant().grantee.clone();
+    let config = HomeRenewalConfig {
+        source_issuer: renew.audience.clone(),
+        relay_audience: target.audience.clone(),
+        authority_generation: 3,
+        home_key: ed25519_dalek::SigningKey::from_bytes(
+            &bytes(&r["source_home_seed_hex"])?.try_into().map_err(|_| "seed")?,
+        ),
+    };
+    let cap = capability(&grant);
+    let now = grant.grant().issued_at + 1;
+    let encoded = |t: &AttachmentOperation| t.canonical_bytes();
+    let run = |q: &QualifiedOwner,
+               config: &HomeRenewalConfig,
+               cap: &[u8],
+               t: &AttachmentOperation,
+               now: u64| { preflight_challenge(q, config, cap, &encoded(t)?, now) };
+    // Valid from the start, and at both inclusive ends of the grant window.
+    run(&q, &config, &cap, &target, now)?;
+    run(&q, &config, &cap, &target, grant.grant().issued_at)?;
+    run(&q, &config, &cap, &target, grant.grant().expires_at - 1)?;
+    let err = |name: &'static str| Err(FormatError(name));
+    // Capability shape.
+    let garbage = vec![1, 2, 3];
+    assert_eq!(run(&q, &config, &garbage, &target, now), err("capability grant"));
+    let receipt_free = grant.signed_bytes()?;
+    assert_eq!(run(&q, &config, &receipt_free, &target, now), err("capability receipt"));
+    let mut tampered = cap.clone();
+    tampered[20] ^= 1;
+    assert!(run(&q, &config, &tampered, &target, now).is_err());
+    // Requester: the session identity must be the grantee.
+    let mut other = q.clone();
+    other.device_id.push('x');
+    assert_eq!(run(&other, &config, &cap, &target, now), err("renewal requester"));
+    // Target audience and generation (config side).
+    let mut t = target.clone();
+    t.audience.push('x');
+    assert_eq!(run(&q, &config, &cap, &t, now), err("renewal audience"));
+    let mut other_gen = config_with_generation(&config, 4);
+    assert_eq!(run(&q, &other_gen, &cap, &target, now), err("renewal source generation"));
+    other_gen = config_with_generation(&config, 3);
+    run(&q, &other_gen, &cap, &target, now)?;
+    // Grant binding, one operand at a time.
+    for field in 0..4 {
+        let mut t = target.clone();
+        match field {
+            0 => t.object_id[0] ^= 1,
+            1 => t.manifest_hash[0] ^= 1,
+            2 => t.grant_id[0] ^= 1,
+            _ => t.grant_epoch += 1,
+        }
+        // The endpoint embeds both ids, so keep it consistent: only the binding differs.
+        t.path = format!(
+            "/attachments/{}/{}/segments/{}",
+            hex_of(&t.object_id),
+            hex_of(&t.manifest_hash),
+            t.segment_index
+        );
+        assert_eq!(run(&q, &config, &cap, &t, now), err("renewal grant binding"), "{field}");
+    }
+    // Rights: an operation the grant does not allow.
+    let missing = (1..=5).find(|op| grant.grant().rights & (1 << (op - 1)) == 0);
+    if let Some(op) = missing {
+        let mut t = target.clone();
+        t.op = op;
+        assert_eq!(run(&q, &config, &cap, &t, now), err("renewal rights"));
+    }
+    // Grant window: not yet valid, and expired (inclusive).
+    assert_eq!(
+        run(&q, &config, &cap, &target, grant.grant().issued_at - 1),
+        err("renewal grant time")
+    );
+    assert_eq!(
+        run(&q, &config, &cap, &target, grant.grant().expires_at),
+        err("renewal grant time")
+    );
+    Ok(())
+}
+fn hex_of(raw: &[u8]) -> String {
+    raw.iter().fold(String::new(), |mut out, b| {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+fn config_with_generation(config: &HomeRenewalConfig, generation: u64) -> HomeRenewalConfig {
+    HomeRenewalConfig {
+        source_issuer: config.source_issuer.clone(),
+        relay_audience: config.relay_audience.clone(),
+        authority_generation: generation,
+        home_key: config.home_key.clone(),
+    }
+}
+#[test]
 fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_requester() -> Result {
     let root = ramflux_crypto::create_identity_root("resident", [31; 32]);
     let branch = ramflux_crypto::create_device_branch("resident", "device", 1, [32; 32]);
@@ -370,4 +473,152 @@ fn assert_forwarding_refusals(
     }
     assert_eq!(forward_bytes(requester, config, attempt, forward, pop, signature)?, forwarded);
     Ok(())
+}
+
+mod relay_clamp {
+    //! The clamp is proved against the relay's own challenge row, not against the gateway's
+    //! arithmetic: a W that outlives its challenge is refused with `ChallengeMismatch`.
+    use super::*;
+    use ramflux_node_core::attachment::{
+        AttachmentReplayProof, ChallengeMint, HomeVerdict, RenewalAdmission, RenewalPolicy,
+        RenewalRefusal,
+        fixture::{FixtureSpec, RetirementFixture},
+    };
+    use ramflux_protocol::large_attachment::body_digest;
+
+    const RELAY: &str = "https://relay.example";
+    const ISSUER: &str = "https://gateway.owner.example";
+    const NOW: u64 = 1_700_000_001;
+
+    fn target_of(g: &ScopedAttachmentGrant) -> AttachmentOperation {
+        let object = |raw: &[u8]| {
+            raw.iter().fold(String::new(), |mut out, b| {
+                use std::fmt::Write;
+                let _ = write!(out, "{b:02x}");
+                out
+            })
+        };
+        AttachmentOperation {
+            op: 1,
+            method: "GET".into(),
+            path: format!(
+                "/attachments/{}/{}/segments/0",
+                object(&g.object_id),
+                object(&g.manifest_hash)
+            ),
+            audience: RELAY.into(),
+            object_id: g.object_id,
+            manifest_hash: g.manifest_hash,
+            grant_id: g.grant_id,
+            grant_epoch: g.epoch,
+            authority_generation: 3,
+            operation_id: [0xa1; 32],
+            payload_generation: 1,
+            segment_index: 0,
+            offset: 0,
+            length: 16,
+            body_digest: body_digest(&[]),
+        }
+    }
+
+    #[test]
+    fn relay_refuses_a_w_that_outlives_its_challenge_and_accepts_the_clamped_one() -> Result {
+        let path = std::env::temp_dir().join(format!(
+            "rf-gw-clamp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let spec = FixtureSpec {
+            case: 1,
+            source: "node-owner".into(),
+            generation: 3,
+            signer_seed: std::array::from_fn(|i| 0x60 + u8::try_from(i).unwrap_or(0)),
+        };
+        let f = RetirementFixture::new_with(&path, NOW, &spec);
+        let g = f.grant.grant().clone();
+        let capability = ramflux_protocol::decode_base64url(
+            &f.registry.lookup(&g.grant_id)?.ok_or("row")?.capability,
+        )?;
+        let policy = RenewalPolicy { relay_audience: RELAY.into(), token_issuer: ISSUER.into() };
+        let target = target_of(&g);
+        let verdict = HomeVerdict {
+            account_anchor: g.grantee.account_anchor.clone(),
+            home_node: g.grantee.home_node_id.clone(),
+            home_node_key: [9; 32],
+            home_epoch: 1,
+            home_record_hash: [3; 32],
+            checked_at: NOW,
+        };
+        let encoded = target.canonical_bytes()?;
+        let minted = f
+            .registry
+            .mint_renewal_challenge(
+                &policy,
+                &ChallengeMint {
+                    capability: &capability,
+                    target_operation: &encoded,
+                    requester: &g.grantee,
+                    home_node: &g.grantee.home_node_id,
+                    peer_node: &g.grantee.home_node_id,
+                    verdict: &verdict,
+                },
+                NOW,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(minted.expires_at, NOW + 30);
+        let request = RenewalRequest::new(&target, ISSUER, [0xb2; 32])?;
+        let config = HomeRenewalConfig {
+            source_issuer: ISSUER.into(),
+            relay_audience: RELAY.into(),
+            authority_generation: 3,
+            home_key: ed25519_dalek::SigningKey::from_bytes(&[0x40; 32]),
+        };
+        // The delayed signature: W is made 20 s after the mint, so the default +30 s would
+        // outlive the challenge by 20 s.
+        let at = NOW + 20;
+        let sign = |challenge_expires_at: u64| -> Result<SignedHomeForward> {
+            let attempt = HomeRenewalAttempt {
+                request: &request,
+                grant: &f.grant,
+                challenge: minted.challenge,
+                challenge_expires_at,
+                capability: &capability,
+                now: at,
+            };
+            Ok(attest_requester(g.grantee.clone(), &g.grantee.home_node_id, &config, &attempt)?)
+        };
+        let admit = |w: &SignedHomeForward, nonce: u8| {
+            f.registry.admit_renewal_after_authentication(
+                &RenewalAdmission {
+                    grant: &f.grant,
+                    challenge: minted.challenge,
+                    target_hash: target.hash().unwrap_or_default(),
+                    requester: &g.grantee,
+                    home_node: &g.grantee.home_node_id,
+                    home_epoch: 1,
+                    payload_generation: 1,
+                    authority_generation: 3,
+                    w_issued_at: w.attestation.issued_at,
+                    w_expires_at: w.attestation.expires_at,
+                    verdict_checked_at: NOW,
+                    proof: &AttachmentReplayProof {
+                        nonce: [nonce; 32],
+                        issued_at: at,
+                        expires_at: at + 30,
+                    },
+                },
+                &|| at + 5,
+            )
+        };
+        // Without the clamp (the challenge expiry treated as unbounded) W outlives the row.
+        let unclamped = sign(u64::MAX)?;
+        assert_eq!(unclamped.attestation.expires_at, at + 30);
+        assert_eq!(admit(&unclamped, 1).err(), Some(RenewalRefusal::ChallengeMismatch));
+        // With the real challenge expiry W stops exactly there and the relay admits it.
+        let clamped = sign(minted.expires_at)?;
+        assert_eq!(clamped.attestation.expires_at, minted.expires_at);
+        assert!(admit(&clamped, 2).is_ok());
+        let _ = std::fs::remove_dir_all(&path);
+        Ok(())
+    }
 }

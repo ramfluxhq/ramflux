@@ -325,6 +325,16 @@ pub(crate) fn serve_mesh_mtls(
     }
 }
 
+/// The body cap for a request, decided from its path before any body byte is read. The
+/// attachment renewal route is bounded at 16 KiB; everything else keeps the migration frame cap.
+pub(crate) fn mesh_body_cap(_method: &str, path: &str) -> usize {
+    if path == crate::attachment_renewal::PEER_PATH {
+        crate::attachment_renewal::MAX_BODY
+    } else {
+        ramflux_protocol::home_migration::MAX_FRAME_BYTES
+    }
+}
+
 pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     context: &MeshServerContext,
@@ -334,11 +344,9 @@ pub(crate) fn handle_mesh_request(
 ) -> Result<bool, ramflux_node_core::NodeCoreError> {
     let received = std::time::Instant::now();
     let _deadline = migration_request_deadline(stream, context, received)?;
-    let Some(request) = ramflux_transport::read_bounded_mesh_http_request(
-        stream,
-        ramflux_protocol::home_migration::MAX_FRAME_BYTES,
-    )
-    .map_err(|error| mesh_transport_error(&error))?
+    let Some(request) =
+        ramflux_transport::read_bounded_mesh_http_request_by_path(stream, &mesh_body_cap)
+            .map_err(|error| mesh_transport_error(&error))?
     else {
         return Ok(false);
     };
@@ -867,6 +875,7 @@ fn migration_request_deadline(
             .node_capabilities
             .iter()
             .any(|cap| cap == ramflux_node_core::HOME_MIGRATION_CAPABILITY)
+            || context.discovery.attachment_authority.is_some()
         {
             Some(
                 ramflux_transport::mesh_request_deadline(
