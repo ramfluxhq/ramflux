@@ -145,7 +145,7 @@ async fn establish(
     fixture: &mut Fixture,
     open: ramflux_node_core::GatewayOpenFrame,
 ) -> TestResult<crate::GatewaySessionRuntime> {
-    fixture.context.hub.readiness.started.store(true, std::sync::atomic::Ordering::Release);
+    fixture.context.hub.readiness.suppress_discovery_for_test();
     let context = fixture.context.clone();
     let source = crate::session_push::tests::support::runtime()?.source_identity;
     let key = ramflux_node_core::DeviceAuthKeyResponse {
