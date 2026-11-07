@@ -354,8 +354,9 @@ jobs:
 
       - name: Real local Secret Service initialization and cleanup proofs
         run: |
-          sudo --preserve-env=PATH cargo-nextest nextest list --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
-          sudo --preserve-env=PATH cargo-nextest nextest list --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
+          NEXTEST=$(command -v cargo-nextest)
+          sudo --preserve-env=PATH "$NEXTEST" nextest list --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
+          sudo --preserve-env=PATH "$NEXTEST" nextest list --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
           mapfile -t sdk < <(find target/debug/deps -maxdepth 1 -type f -name 'ramflux_sdk-*' -executable)
           mapfile -t platform < <(find target/debug/deps -maxdepth 1 -type f -name 'linux_vault_platform-*' -executable)
           test "${#sdk[@]}" -eq 1
