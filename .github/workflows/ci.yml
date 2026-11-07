@@ -7,9 +7,12 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
-  # Nightly: the only scheduled job is the advisory mutants run; every other job skips on schedule.
-  schedule:
-    - cron: "17 2 * * *"
+    inputs:
+      mutants_base:
+        description: "Git base the advisory mutants run diffs against (mutants job only)"
+        required: false
+        default: "origin/main~20"
+        type: string
 
 # One group per ref: a newer run on the same ref (feature branch or main) cancels the older one,
 # so superseded main runs stop queueing for runner slots. Only the newest main commit is verified.
@@ -23,7 +26,6 @@ permissions:
 jobs:
   provenance:
     name: Provenance gate
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -45,7 +47,6 @@ jobs:
 
   compose-preflight:
     name: Compose input preflight
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -76,7 +77,6 @@ jobs:
   # Pool jobs have no secrets and require the host's native build dependencies.
   rust:
     name: Rust checks
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 10
     steps:
@@ -130,7 +130,6 @@ jobs:
 
   clippy-itest:
     name: Clippy (itest, all features)
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -164,7 +163,6 @@ jobs:
 
   clippy-default:
     name: Clippy (default features)
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -198,7 +196,6 @@ jobs:
 
   doctests:
     name: Doctests
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -235,7 +232,6 @@ jobs:
 
   build-sdk:
     name: Build test archive (sdk)
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -282,7 +278,6 @@ jobs:
 
   build-rest:
     name: Build test archive (rest)
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -329,7 +324,6 @@ jobs:
 
   linux-vault-platform:
     name: Linux vault platform fixture
-    if: github.event_name != 'schedule'
     needs: [build-rest, build-sdk]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -369,7 +363,6 @@ jobs:
   # again when mobile/ABI integration starts. The all-features clippy job still compiles c_abi.
   test-sdk:
     name: Tests (sdk ${{ matrix.shard }}/2)
-    if: github.event_name != 'schedule'
     needs: build-sdk
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
@@ -437,7 +430,6 @@ jobs:
 
   test-rest:
     name: Tests (rest ${{ matrix.shard }}/2)
-    if: github.event_name != 'schedule'
     needs: build-rest
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
@@ -505,7 +497,6 @@ jobs:
 
   v-sdk-a:
     name: "SDK variant: memory vault and production absence"
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -577,7 +568,6 @@ jobs:
 
   v-sdk-b:
     name: "SDK variant: legacy accounts and gateway local-mint"
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -661,7 +651,7 @@ jobs:
 
   mutants:
     name: Mutants (advisory, diff only)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 10
     continue-on-error: true
@@ -688,7 +678,7 @@ jobs:
       - name: Rust diff
         id: diff
         run: |
-          git diff "origin/${{ github.base_ref }}...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
+          git diff "${{ inputs.mutants_base }}...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
           if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; fi
 
       - name: Cache
@@ -728,7 +718,6 @@ jobs:
 
   test-graceful-shutdown:
     name: Configured graceful shutdown (Linux)
-    if: github.event_name != 'schedule'
     runs-on: ${{ fromJSON(vars.RF_CI_RUNNER == 'github' && '"ubuntu-latest"' || ((github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'dependabot[bot]') || (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository)) && '["self-hosted","linux","x64","rf-qa-sandboxed"]' || '"ubuntu-latest"') }}
     timeout-minutes: 30
     steps:
@@ -783,7 +772,6 @@ jobs:
 
   quic-dependencies:
     name: Patched QUIC dependency tests
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
