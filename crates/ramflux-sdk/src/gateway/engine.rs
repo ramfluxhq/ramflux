@@ -24,6 +24,9 @@ pub struct GatewaySessionEngine {
     pub(crate) host: Option<super::host_frames::HostFrames>,
     pub(crate) push_route_expires_at: Option<u64>,
     pub(crate) pending_push_route: Option<super::push_route::PendingPushRoute>,
+    /// Negotiated at establishment; read by the capable operations of later parts.
+    #[allow(dead_code)]
+    pub(crate) mode: super::session_push::SessionMode,
 }
 
 pub(crate) enum GatewaySessionClientTransport {
@@ -242,13 +245,16 @@ impl GatewaySessionEngine {
             .await?;
         let auth = gateway_auth_frame(&config, &open)?;
         write_gateway_client_frame(&mut *stream, &GatewayClientFrame::Auth { auth }).await?;
-        let established = frame_timeout(limits.frame, "gateway session established", async {
-            read_gateway_server_frame(&mut *stream).await
-        })
-        .await?;
-        let session = match established {
+        let (established, established_bytes) =
+            frame_timeout(limits.frame, "gateway session established", async {
+                read_gateway_server_frame_bytes(&mut *stream).await
+            })
+            .await?;
+        let (session, mode) = match established {
             GatewayServerFrame::SessionEstablished { session } => {
-                gateway_session_state(&session, config.last_seen_inbox_seq)
+                let echo = super::session_push::EstablishmentEcho::from_bytes(&established_bytes)?;
+                let mode = super::session_push::negotiate(config.session_push_advertise, &echo)?;
+                (gateway_session_state(&session, config.last_seen_inbox_seq), mode)
             }
             GatewayServerFrame::Nack { reason } => {
                 return Err(SdkError::GatewaySessionRejected(reason));
@@ -277,6 +283,7 @@ impl GatewaySessionEngine {
             host: None,
             push_route_expires_at: None,
             pending_push_route: None,
+            mode,
         };
         engine.remember_session_for_resume();
         Ok(engine)
@@ -311,6 +318,7 @@ impl GatewaySessionEngine {
             host: None,
             push_route_expires_at: None,
             pending_push_route: None,
+            mode: super::session_push::SessionMode::Legacy,
         }
     }
 
@@ -910,10 +918,17 @@ pub(crate) async fn write_gateway_client_frame(
     ramflux_transport::write_gateway_session_json(stream, frame).await.map_err(SdkError::from)
 }
 
-async fn read_gateway_server_frame(
+/// Reads one frame and keeps its bytes for the second (echo) decode of the establishment.
+async fn read_gateway_server_frame_bytes(
     stream: &mut (dyn ramflux_transport::GatewaySessionTransport + Send),
-) -> Result<GatewayServerFrame, SdkError> {
-    ramflux_transport::read_gateway_session_json(stream).await.map_err(SdkError::from)
+) -> Result<(GatewayServerFrame, Vec<u8>), SdkError> {
+    let body = ramflux_transport::GatewaySessionFrameSource::recv_frame(stream)
+        .await
+        .map_err(SdkError::from)?;
+    let frame = ramflux_protocol::parse_i_json(&body)
+        .map_err(ramflux_transport::TransportError::from)
+        .map_err(SdkError::from)?;
+    Ok((frame, body))
 }
 
 #[cfg(test)]

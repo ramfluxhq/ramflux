@@ -17,6 +17,8 @@ pub(crate) use client::{CapableClientFrame, ClientFrameError};
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]
+mod negotiation_tests;
+#[cfg(test)]
 mod server_tests;
 
 /// A 32-character lowercase hexadecimal inbox incarnation identifier.
@@ -246,4 +248,77 @@ pub(crate) enum CapableServerFrame {
 /// grammar violations and coupling violations.
 pub(crate) fn decode_server_frame(bytes: &[u8]) -> Result<CapableServerFrame, serde_json::Error> {
     serde_json::from_slice(bytes)
+}
+/// How a session was negotiated. Frozen at establishment; a reconnect negotiates again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SessionMode {
+    /// The capability was not advertised and nothing was echoed.
+    Legacy,
+    /// The capability was advertised but the gateway did not echo it.
+    Compat,
+    /// Advertised, echoed and accompanied by a valid inbox incarnation.
+    Push { incarnation: IncarnationId },
+}
+
+/// The second decode of the establishment frame bytes.
+#[derive(Debug, Deserialize)]
+struct EchoFrame {
+    session: EchoSession,
+}
+
+#[derive(Debug, Deserialize)]
+struct EchoSession {
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    inbox_incarnation_id: Option<String>,
+}
+
+/// What the gateway echoed on `session_established`.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct EstablishmentEcho {
+    capabilities: Option<Vec<String>>,
+    inbox_incarnation_id: Option<String>,
+}
+
+impl EstablishmentEcho {
+    /// # Errors
+    /// Refuses establishment bytes whose echo fields have the wrong JSON types.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, crate::SdkError> {
+        let frame: EchoFrame =
+            serde_json::from_slice(bytes).map_err(|_| refused("echo is malformed"))?;
+        Ok(Self {
+            capabilities: frame.session.capabilities,
+            inbox_incarnation_id: frame.session.inbox_incarnation_id,
+        })
+    }
+}
+
+fn refused(why: &str) -> crate::SdkError {
+    crate::SdkError::GatewaySessionRejected(format!("session push negotiation refused: {why}"))
+}
+
+/// Push needs all three operands: advertised, echoed, and a valid incarnation.
+///
+/// # Errors
+/// Refuses an echo of anything that was not advertised, an incarnation without an echo, an
+/// echo without an incarnation, and a malformed incarnation.
+pub(crate) fn negotiate(
+    advertised: bool,
+    echo: &EstablishmentEcho,
+) -> Result<SessionMode, crate::SdkError> {
+    let capabilities = echo.capabilities.as_deref().unwrap_or(&[]);
+    if capabilities.iter().any(|capability| {
+        !(advertised && capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY)
+    }) {
+        return Err(refused("echo names a capability that was not advertised"));
+    }
+    match (capabilities.is_empty(), &echo.inbox_incarnation_id) {
+        (true, Some(_)) => Err(refused("incarnation without an echoed capability")),
+        (true, None) => Ok(if advertised { SessionMode::Compat } else { SessionMode::Legacy }),
+        (false, None) => Err(refused("echo without an inbox incarnation")),
+        (false, Some(id)) => IncarnationId::try_from(id.clone())
+            .map(|incarnation| SessionMode::Push { incarnation })
+            .map_err(|_| refused("invalid inbox incarnation")),
+    }
 }
