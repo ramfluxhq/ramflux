@@ -245,6 +245,16 @@ fn publish(
     ops: &dyn DurabilityOps,
     cut: &impl Fn(&str),
 ) -> Result<(), Error> {
+    publish_with(dir, name, bytes, RenameFlags::NOREPLACE, ops, cut)
+}
+fn publish_with(
+    dir: &OwnedFd,
+    name: &str,
+    bytes: &[u8],
+    flags: RenameFlags,
+    ops: &dyn DurabilityOps,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
     let temp = format!(".{name}.staging");
     // Only unpublished staging is removed, after caller established destination absence.
     remove(dir, &temp, ops)?;
@@ -254,11 +264,63 @@ fn publish(
     cut("before-file-sync");
     ops.fsync_file(&file)?;
     cut("after-file-sync");
-    ops.rename(dir, &temp, name, RenameFlags::NOREPLACE)?;
+    ops.rename(dir, &temp, name, flags)?;
     cut("after-publish");
     ops.fsync_dir(dir)?;
     cut("after-parent-sync");
     Ok(())
+}
+/// Secret Service leg of one attempt: item ensure plus the durable per-realm progress record.
+struct SecretServiceRun<'a> {
+    dir: &'a OwnedFd,
+    manifest: &'a Manifest,
+    committed: bool,
+    progress: [bool; 3],
+}
+impl SecretServiceRun<'_> {
+    fn step(
+        &mut self,
+        realm: usize,
+        plan: &Plan<'_>,
+        cancel: &watch::Receiver<bool>,
+        cut: &impl Fn(&str),
+    ) -> Result<(), Error> {
+        let identity = secret_service::Identity {
+            vault_id: &self.manifest.vault_id,
+            key_id: &self.manifest.key_ids[realm],
+            realm,
+        };
+        let fresh = !self.committed && !self.progress[realm];
+        // A realm already recorded complete never creates again: a vanished item refuses.
+        secret_service::ensure(&identity, fresh, cancel, plan.deadline, cut)?;
+        if fresh {
+            self.progress[realm] = true;
+            write_progress(self.dir, self.progress, plan.ops, cut)?;
+            cut("ss-progress");
+        }
+        Ok(())
+    }
+}
+const PROGRESS: &str = "init.progress";
+/// Per-realm completion record of the Secret Service leg: `ssp1:` plus one `0`/`1` per realm.
+/// Written (durable replace) only after an item was created or adopted and read back.
+fn read_progress(dir: &OwnedFd) -> Result<[bool; 3], Error> {
+    let Some(bytes) = optional(dir, PROGRESS, 16)? else { return Ok([false; 3]) };
+    let Some(flags) = bytes.strip_prefix(b"ssp1:") else { return Err(Error::Corrupt) };
+    if flags.len() != 3 || !flags.iter().all(|b| matches!(b, b'0' | b'1')) {
+        return Err(Error::Corrupt);
+    }
+    Ok(std::array::from_fn(|i| flags[i] == b'1'))
+}
+fn write_progress(
+    dir: &OwnedFd,
+    done: [bool; 3],
+    ops: &dyn DurabilityOps,
+    cut: &impl Fn(&str),
+) -> Result<(), Error> {
+    let mut bytes = b"ssp1:".to_vec();
+    bytes.extend(done.iter().map(|d| if *d { b'1' } else { b'0' }));
+    publish_with(dir, PROGRESS, &bytes, RenameFlags::empty(), ops, cut)
 }
 /// Removes the init intent: unlink, then parent fsync. A missing intent still gets the parent
 /// fsync, which reconciles a process killed after the unlink but before that fsync.
@@ -446,6 +508,16 @@ async fn attempt_with(
             (m, false)
         }
     };
+    let mut ss = SecretServiceRun {
+        dir: &dir,
+        manifest: &manifest,
+        committed,
+        progress: if mode == LinuxVaultMode::DesktopSecretService && !committed {
+            read_progress(&dir)?
+        } else {
+            [false; 3]
+        },
+    };
     for realm in 0..3 {
         if *cancel.borrow() {
             return Err(Error::Cancelled);
@@ -454,14 +526,7 @@ async fn attempt_with(
             return Err(Error::Timeout);
         }
         if mode == LinuxVaultMode::DesktopSecretService {
-            secret_service::ensure(
-                &manifest.key_ids[realm],
-                realm,
-                !committed,
-                cancel,
-                deadline,
-                cut,
-            )?;
+            ss.step(realm, plan, cancel, cut)?;
             continue;
         }
         let name = manifest.slot(realm);
@@ -488,6 +553,9 @@ async fn attempt_with(
     }
     if initialize {
         cut("before-intent-remove");
+        // Realm progress is only meaningful before the descriptor commit.
+        remove(&dir, PROGRESS, ops)?;
+        remove(&dir, ".init.progress.staging", ops)?;
         retire_intent(&dir, ops, cut)?;
         cut("intent-removed");
     }
