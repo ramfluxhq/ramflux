@@ -633,7 +633,14 @@ fn handle_mesh_fast_path_value(
                     "forwarded ingress requires federation peer",
                 )));
             }
-            let request = serde_json::from_slice(body)?;
+            let request: ramflux_node_core::ForwardedEnvelopeRequest =
+                serde_json::from_slice(body)?;
+            if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+                return Ok(Some(MeshResponse::json(
+                    "200 OK",
+                    serde_json::to_vec(&crate::durable_mode::rejected_security(&request.envelope))?,
+                )));
+            }
             Ok(Some(MeshResponse::json(
                 "200 OK",
                 serde_json::to_vec(&router.submit_forwarded(request)?)?,
@@ -859,10 +866,14 @@ fn write_mesh_value_response(
 }
 
 #[cfg(feature = "itest-http")]
-fn handle_mvp0_envelope(
+pub(crate) fn handle_mvp0_envelope(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&envelope));
+    }
     handle_mvp0_envelope_from(body, router, ramflux_node_core::RouterEnvelopeOrigin::Gateway)
 }
 pub(crate) fn envelope_origin_for_peer(
@@ -874,17 +885,20 @@ pub(crate) fn envelope_origin_for_peer(
         _ => anyhow::bail!("mesh peer cannot submit envelopes"),
     }
 }
-fn handle_mvp0_envelope_mesh_from(
+pub(crate) fn handle_mvp0_envelope_mesh_from(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     let started = Instant::now();
     let envelope = serde_json::from_slice(body)?;
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+    }
     router.submit_envelope_mesh_from(envelope, started, origin)
 }
 #[cfg(feature = "itest-http")]
-fn handle_mvp0_envelope_from(
+pub(crate) fn handle_mvp0_envelope_from(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
@@ -892,6 +906,9 @@ fn handle_mvp0_envelope_from(
     let total_started = Instant::now();
     let decode_started = Instant::now();
     let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&envelope));
+    }
     ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
     router.submit_envelope_from(envelope, total_started, origin)
 }
@@ -904,6 +921,9 @@ pub(crate) async fn handle_mvp0_envelope_async_from(
     let total_started = Instant::now();
     let decode_started = Instant::now();
     let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+    }
     ramflux_node_core::record_router_submit_decode_us(elapsed_us(decode_started));
     router.submit_envelope_mesh_async_from(envelope, total_started, origin).await
 }
@@ -1376,6 +1396,7 @@ fn refresh_forward_authority(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_protocol::Envelope> {
     let mut envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    ramflux_protocol::ephemeral::require_durable(&envelope)?;
     router.state().authenticated_envelope_source_from(
         &envelope,
         Some(router.store()),
@@ -1391,6 +1412,7 @@ fn mesh_fanout_response(
 ) -> anyhow::Result<MeshResponse> {
     let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
         serde_json::from_slice(body)?;
+    ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
     let response = ramflux_node_core::publication::capture(|| {
         crate::router_engine::own_device_fanout_inner(router.state(), router.store(), &request)
     })?

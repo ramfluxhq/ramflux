@@ -6,6 +6,9 @@ mod clients;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
 mod custody;
+#[cfg(test)]
+mod durable_ingress_registry;
+mod durable_mode;
 mod hub_index;
 mod ingress;
 mod issued_probe;

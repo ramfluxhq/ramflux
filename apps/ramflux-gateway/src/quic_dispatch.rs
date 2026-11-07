@@ -100,13 +100,16 @@ fn lookup_error(error: &dyn std::fmt::Display) -> ramflux_transport::GatewayQuic
     }
 }
 
-async fn forward_quic_envelope(
+pub(crate) async fn forward_quic_envelope(
     router: &RouterMeshClient,
     body: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     let total_started = Instant::now();
     let decode_started = Instant::now();
     let envelope: ramflux_protocol::Envelope = serde_json::from_value(body)?;
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(serde_json::to_value(crate::durable_mode::rejected_security(&envelope))?);
+    }
     ramflux_node_core::record_gateway_submit_decode_us(elapsed_us(decode_started));
     ramflux_node_core::record_gateway_submit_received();
     let router_started = Instant::now();

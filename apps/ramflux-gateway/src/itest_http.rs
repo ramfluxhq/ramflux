@@ -165,6 +165,14 @@ pub(crate) fn dispatch_protected_itest_request(
         }
         ("POST", "/mvp0/envelope") => {
             let envelope: ramflux_protocol::Envelope = serde_json::from_slice(&request.body)?;
+            if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+                ramflux_node_core::write_itest_json_response(
+                    stream,
+                    "200 OK",
+                    &crate::durable_mode::rejected_security(&envelope),
+                )?;
+                return Ok(());
+            }
             ramflux_node_core::record_gateway_submit_received();
             let response: ramflux_node_core::EnvelopeSubmitResponse =
                 router_post_json(router, "/mvp0/envelope", &envelope)?;

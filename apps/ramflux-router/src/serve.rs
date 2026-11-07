@@ -720,6 +720,9 @@ impl RouterSubmitBridge {
         self.tokio.spawn(async move {
             let result = async move {
                 let envelope = serde_json::from_slice::<ramflux_protocol::Envelope>(&body)?;
+                if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+                    return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+                }
                 router.submit_envelope_mesh_async_from(envelope, total_started, origin).await
             }
             .await;
