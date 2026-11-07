@@ -139,8 +139,10 @@ async fn serve(
             Wire::Json(a) => tokio::select! {
                 biased;
                 () = a.response_stopped() => {
+                    // Only this request is gone; the connection keeps serving, so
+                    // a request that follows the cancellation never races a close.
                     cancelled.send(()).await?;
-                    return Ok(());
+                    continue;
                 }
                 reply = tokio::time::timeout(std::time::Duration::from_secs(12), response) => reply??,
             },

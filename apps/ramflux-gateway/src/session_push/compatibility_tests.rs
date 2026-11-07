@@ -89,14 +89,16 @@ async fn initial_registration_readiness_scope() -> anyhow::Result<()> {
         let context = fixture.context.clone();
         let auth = super::negotiation::auth(true)?;
         let descriptor = super::negotiation::descriptor();
-        let task = tokio::spawn(async move { negotiate(&context, &auth, &descriptor).await });
+        // The timeout case shortens only the held capable request's timeout, so
+        // it elapses on its own while the clock keeps running for the mesh.
+        let shortened = (status == 0).then_some(Duration::from_millis(200));
+        let task =
+            tokio::spawn(NEXT_REQUEST_TIMEOUT.scope(std::cell::Cell::new(shortened), async move {
+                negotiate(&context, &auth, &descriptor).await
+            }));
         let capable = fixture.next().await?;
         assert_eq!(capable.path, "/s1/session");
-        if status == 0 {
-            tokio::time::pause();
-            tokio::time::advance(REQUEST_TIMEOUT).await;
-            tokio::time::resume();
-        } else {
+        if status != 0 {
             capable.respond.send((status, response)).map_err(|_| Retired)?;
         }
         let legacy = fixture.next().await?;
