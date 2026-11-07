@@ -318,7 +318,10 @@ async fn sender_outcome_call_deadline_after_the_write_is_uncertain() -> Case {
         );
         tokio::time::advance(Duration::from_secs(7)).await;
         match first.await? {
-            Err(error) => assert_eq!(error.to_string(), "TODO-deadline"),
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "transport error: I/O error: session call deadline expired"
+            ),
             Ok(inner) => return Err(format!("expected an outer error, got {inner:?}").into()),
         }
         // The next attempt: a fresh session when the host retired this one, else the same.
