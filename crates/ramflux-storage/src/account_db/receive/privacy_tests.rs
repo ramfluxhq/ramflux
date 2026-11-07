@@ -3,6 +3,8 @@
 
 //! Late-stage fence: an input is dropped only on deletion tied to that exact input.
 #![allow(clippy::expect_used, clippy::panic)]
+use super::ReceiveExpectation;
+use super::privacy::ReceiveBind;
 use super::stage_tests::{
     entry, footprints, input, locator, receipt_state, run, setup, work_for, work_rows,
 };
@@ -19,6 +21,39 @@ fn reopen(root: &std::path::Path, db: AccountDb) -> Result<AccountDb, StorageErr
         "acct",
         &crate::AccountDbKey::derive("acct", b"storage-test-secret"),
     )
+}
+
+fn bind(db: &AccountDb, sequence: u64, message: &str) -> Result<ReceiveBind, StorageError> {
+    db.receive_transaction(
+        ReceiveExpectation {
+            target: "t",
+            incarnation: "e",
+            cursor: 0,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        1,
+        |tx| tx.bind_logical_message(sequence, message),
+    )
+}
+
+/// A direct TRUNCATE checkpoint is clean and leaves an empty `-wal`.
+fn assert_wal_truncated(db: &AccountDb) -> Result<(), StorageError> {
+    let busy: i64 =
+        db.connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+    assert_eq!(busy, 0);
+    let mut wal = db.path.clone().into_os_string();
+    wal.push("-wal");
+    assert_eq!(std::fs::metadata(&wal).map_or(0, |meta| meta.len()), 0);
+    Ok(())
+}
+
+fn erasure_pending(db: &AccountDb) -> Result<i64, StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT erasure_pending FROM runtime_privacy_maintenance WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 #[test]
@@ -50,6 +85,44 @@ fn erasure_late_stage_and_process() -> Result<(), StorageError> {
     assert_eq!(receipt_state(&db, 2)?.as_deref(), Some("erased"));
     assert_eq!(work_for(&db, 2)?, 0);
     assert!(!footprints(&db)?.iter().any(|(_, at)| *at == locator(2)));
+    // (f) stage -> bind -> erase: the unbound row is adopted by the bound message.
+    db.send_direct_message("thread", "F", "peer", b"secret")?;
+    let staged = entry(10, "HF", None);
+    assert_eq!(run(&db, input(&staged, 10))?, R::Staged);
+    assert!(footprints(&db)?.contains(&("copy:payload:HF".to_owned(), locator(10))));
+    assert_eq!(bind(&db, 10, "F")?, ReceiveBind::Bound);
+    assert!(footprints(&db)?.contains(&("F".to_owned(), locator(10))));
+    db.delete_direct_message("thread", "F", "local", "delete-f")?;
+    assert_eq!(receipt_state(&db, 10)?.as_deref(), Some("erased"));
+    assert_eq!(work_for(&db, 10)?, 0);
+    // (g) stage -> erase -> late bind, from a settled WAL.
+    db.send_direct_message("thread", "A", "peer", b"secret")?;
+    let late = entry(11, "HA", None);
+    assert_eq!(run(&db, input(&late, 11))?, R::Staged);
+    db.delete_direct_message("thread", "A", "local", "delete-a")?;
+    assert_eq!(receipt_state(&db, 11)?.as_deref(), Some("staged"), "unbound work is not A's yet");
+    db.connection.execute(
+        "UPDATE runtime_privacy_maintenance SET erasure_pending=0 WHERE singleton=1",
+        [],
+    )?;
+    assert_wal_truncated(&db)?;
+    assert_eq!(erasure_pending(&db)?, 0);
+    assert_eq!(bind(&db, 11, "A")?, ReceiveBind::Erased);
+    assert_eq!(receipt_state(&db, 11)?.as_deref(), Some("erased"));
+    assert_eq!(work_for(&db, 11)?, 0);
+    assert!(!footprints(&db)?.iter().any(|(_, at)| *at == locator(11)));
+    assert_eq!(erasure_pending(&db)?, 1, "late bind re-arms WAL retirement");
+    assert_wal_truncated(&db)?;
+    // (i) Binding a terminal receipt fails with the exact text.
+    let terminal = bind(&db, 11, "A");
+    assert!(
+        matches!(
+            terminal,
+            Err(StorageError::Integrity("receive bind requires a staged or held receipt"))
+        ),
+        "{:?}",
+        terminal.err()
+    );
     drop(db);
     std::fs::remove_dir_all(root)?;
     already_seen_unprojected_collision_stays_staged()
@@ -92,6 +165,11 @@ fn already_seen_unprojected_collision_stays_staged() -> Result<(), StorageError>
         |row| row.get(0),
     )?;
     assert_eq!(stored, wire);
+    // (h) The collision B binds to its live message instead of being dropped.
+    db.send_direct_message("thread", "B", "peer", b"secret")?;
+    assert_eq!(bind(&db, 5, "B")?, ReceiveBind::Bound);
+    assert!(footprints(&db)?.contains(&("B".to_owned(), locator(5))));
+    assert_eq!(work_rows(&db)?, 1);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
