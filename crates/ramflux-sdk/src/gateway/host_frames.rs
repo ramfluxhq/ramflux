@@ -3,7 +3,9 @@
 
 //! One frame dispatcher for idle reads and bounded gateway helpers.
 
+use super::engine::PendingDelivery;
 use super::frame_dispatch::{ExpectedReply, FrameClass, FrameKind};
+use super::session_push::{CapableEvent, PushMeta};
 use super::{GatewayClientFrame, GatewayInboxEntry, GatewayServerFrame, GatewaySessionEngine};
 use crate::SdkError;
 use crate::bus::connection_manager::{DisconnectReason, SessionHub};
@@ -30,6 +32,16 @@ impl GatewaySessionEngine {
     }
 
     pub(crate) fn buffer_delivery(&mut self, entry: GatewayInboxEntry) {
+        self.buffer(entry, None);
+    }
+
+    /// Buffers a negotiated-session deliver under the same bounds and overflow action as a
+    /// legacy one.
+    pub(crate) fn buffer_capable_delivery(&mut self, entry: GatewayInboxEntry, meta: PushMeta) {
+        self.buffer(entry, Some(meta));
+    }
+
+    fn buffer(&mut self, entry: GatewayInboxEntry, push: Option<PushMeta>) {
         let bytes = self.last_frame_bytes;
         if self.pending_deliveries.len() >= SESSION_BUFFER
             || self.buffered_bytes.saturating_add(bytes) > SESSION_BUFFER_BYTES
@@ -46,7 +58,7 @@ impl GatewaySessionEngine {
             return;
         }
         self.buffered_bytes += bytes;
-        self.pending_deliveries.push_back((entry, bytes));
+        self.pending_deliveries.push_back(PendingDelivery { entry, push, bytes });
         #[cfg(test)]
         {
             self.buffer_stats.entries =
@@ -66,7 +78,15 @@ impl GatewaySessionEngine {
 
     pub(crate) fn take_pending_deliveries(&mut self) -> Vec<GatewayInboxEntry> {
         self.buffered_bytes = 0;
-        self.pending_deliveries.drain(..).map(|(entry, _)| entry).collect()
+        self.pending_deliveries.drain(..).map(|pending| pending.entry).collect()
+    }
+
+    /// Drains the buffer with the push metadata of each delivery. Unused until the receive
+    /// adapters of a later part consume it; the carrier test exercises it.
+    #[allow(dead_code)]
+    pub(crate) fn take_pending_capable(&mut self) -> Vec<(GatewayInboxEntry, Option<PushMeta>)> {
+        self.buffered_bytes = 0;
+        self.pending_deliveries.drain(..).map(|pending| (pending.entry, pending.push)).collect()
     }
 
     pub(crate) async fn read_reply(
@@ -213,14 +233,13 @@ impl GatewaySessionEngine {
         use super::session_push::{RouteError, Routed, route};
         match route(bytes, &self.mode) {
             Ok(Routed::Legacy(frame)) => Ok(Some(*frame)),
-            Ok(Routed::Capable(event)) if event.is_event() => {
-                if self.capable_events.len() >= SESSION_BUFFER {
-                    return Err(self.retire("capable event queue full"));
+            Ok(Routed::Capable(frame)) => match CapableEvent::try_from(*frame) {
+                Ok(event) => {
+                    self.accept_capable(event);
+                    Ok(None)
                 }
-                self.capable_events.push_back(*event);
-                Ok(None)
-            }
-            Ok(Routed::Capable(_)) => Err(self.retire("capable reply outside a capable wait")),
+                Err(_reply) => Err(self.retire("capable reply outside a capable wait")),
+            },
             Err(RouteError::Retire(why)) => Err(self.retire(why)),
             Err(RouteError::Capable(_)) => Err(self.retire("malformed capable frame")),
             Err(RouteError::Legacy(error)) => {
@@ -229,6 +248,18 @@ impl GatewaySessionEngine {
                 }
                 Err(SdkError::from(error))
             }
+        }
+    }
+
+    /// Buffers a deliver and publishes the event; nothing is dropped silently.
+    fn accept_capable(&mut self, event: CapableEvent) {
+        if let CapableEvent::Deliver { entry, incarnation_id, retain_until } = &event {
+            let meta =
+                PushMeta { incarnation_id: incarnation_id.clone(), retain_until: *retain_until };
+            self.buffer_capable_delivery(entry.clone(), meta);
+        }
+        if let Some(host) = &self.host {
+            host.hub.publish_capable(event);
         }
     }
 
