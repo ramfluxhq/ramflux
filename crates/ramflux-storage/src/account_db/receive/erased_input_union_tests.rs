@@ -6,14 +6,14 @@
 use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase, StorageError};
 use rusqlite::params;
 
-struct Pair {
-    root: std::path::PathBuf,
-    source: AccountDb,
-    local: AccountDb,
-    bundle: String,
+pub(super) struct Pair {
+    pub(super) root: std::path::PathBuf,
+    pub(super) source: AccountDb,
+    pub(super) local: AccountDb,
+    pub(super) bundle: String,
 }
 
-fn pair(name: &str) -> Result<Pair, StorageError> {
+pub(super) fn pair(name: &str) -> Result<Pair, StorageError> {
     let root = crate::tests::temp_root(name);
     let source_index = AccountIndex::open(root.join("source"))?;
     let local_index = AccountIndex::open(root.join("local"))?;
@@ -35,7 +35,7 @@ fn put(db: &AccountDb, selector: &str, bundle: &str, expires_at: i64) -> Result<
     Ok(())
 }
 
-fn merge(
+pub(super) fn merge(
     pair: &Pair,
 ) -> Result<(BackupDatabase, std::path::PathBuf, crate::AccountDbKey), StorageError> {
     let incoming = pair.root.join("incoming.db");
@@ -47,7 +47,7 @@ fn merge(
     Ok((merged, path, target.key))
 }
 
-fn expiry(db: &rusqlite::Connection, selector: &str) -> rusqlite::Result<Option<i64>> {
+pub(super) fn expiry(db: &rusqlite::Connection, selector: &str) -> rusqlite::Result<Option<i64>> {
     use rusqlite::OptionalExtension;
     db.query_row(
         "SELECT expires_at FROM receive_erased_input WHERE selector=?1",

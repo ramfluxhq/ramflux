@@ -332,6 +332,13 @@ impl BackupDatabase {
         super::message_footprint::migration::begin_merge(&self.db)?;
         let tables = self.incoming_tables()?;
         self.begin_message_merge()?;
+        // Capture before `prepare` and every later replacement, re-fire or finalization can drop a
+        // local source of an erased-input tuple.
+        super::receive::erased_capture::stage_merge_capture(
+            &self.db,
+            super::receive::erased_capture::Side::Local,
+            crate::unix_now(),
+        )?;
         if candidate {
             super::backup_selector_admission::prepare(&self.db)?;
             after_capture(&self.db)?;
@@ -359,6 +366,7 @@ impl BackupDatabase {
         if candidate {
             super::backup_selector_admission::final_deletion::verify(&self.db)?;
         }
+        super::receive::erased_capture::reconcile_merge_capture(&self.db, crate::unix_now())?;
         super::backup_selector_admission::drop_scratch(&self.db)?;
         #[cfg(test)]
         super::backup_selector_admission::staging_tests::before_commit(&self.db)?;
