@@ -185,6 +185,8 @@ fn transient_gateway_and_manifest_failures_keep_genuine_legacy_ciphertext_unackn
 #[tokio::test(flavor = "current_thread")]
 async fn repeated_group_receives_respect_backoff_and_a_new_pin_redrives_the_genuine_message()
 -> Result<(), SdkError> {
+    // Backoff is wall-clock seconds; freeze this test's clock so load cannot shift the schedule.
+    let _clock = crate::time::test_clock::FrozenClock::freeze();
     let (root, sender, mut receiver, good) = legacy_group_fixture_with_pin(false)?;
     receiver.client.retain_legacy_group_entry(&good)?;
     let request = LocalBusFrame::request(
@@ -196,8 +198,7 @@ async fn repeated_group_receives_respect_backoff_and_a_new_pin_redrives_the_genu
     );
     let start = now_unix_timestamp();
     for _ in 0..4 {
-        crate::bus::dispatch::group::dispatch_group_receive_request(&request, &mut receiver)
-            .await?;
+        dispatch_guarded(&request, &mut receiver).await?;
     }
     let db = receiver.client.account_db()?;
     assert!(db.has_inbox_retry(&legacy_key(&good)?)?);
@@ -345,9 +346,26 @@ fn gateway_receipt_replays_share_one_legacy_retry_key_but_forged_signatures_do_n
     Ok(())
 }
 
+/// A hung dispatch fails the test instead of stalling the whole module run.
+async fn dispatch_guarded(
+    request: &LocalBusFrame,
+    receiver: &mut LocalBusAccountState,
+) -> Result<(), SdkError> {
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::bus::dispatch::group::dispatch_group_receive_request(request, receiver),
+    )
+    .await;
+    assert!(outcome.is_ok(), "group.receive dispatch hung");
+    outcome.map_err(|_| SdkError::LocalBus("group.receive dispatch hung".into()))?.map(|_| ())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_the_group_message()
 -> Result<(), SdkError> {
+    // The first-contact backoff is wall-clock seconds; freeze this test's clock so a slow host
+    // cannot make the retry due between dispatches.
+    let clock = crate::time::test_clock::FrozenClock::freeze();
     let (root, sender, mut receiver, good) = legacy_group_fixture()?;
     let db = receiver.client.account_db()?;
     let mut record =
@@ -412,8 +430,7 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
         serde_json::json!({"group_id":"g","conversation_id":"thread","limit":32}),
     );
     for _ in 0..4 {
-        crate::bus::dispatch::group::dispatch_group_receive_request(&request, &mut receiver)
-            .await?;
+        dispatch_guarded(&request, &mut receiver).await?;
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(receiver.client.account_db()?.has_inbox_retry(&legacy_key(&good)?)?);
@@ -432,9 +449,10 @@ async fn gateway_tcp_tls_503_during_first_contact_is_backed_off_without_acking_t
         "device-alice",
         &complete_record,
     )?;
-    crate::bus::dispatch::group::dispatch_group_receive_request(&request, &mut receiver).await?;
+    dispatch_guarded(&request, &mut receiver).await?;
     assert!(receiver.client.direct_message_by_id("valid")?.is_some());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(clock);
     server.abort();
     let _ = server.await;
     drop(sender);
