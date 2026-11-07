@@ -5,6 +5,8 @@
 pub(crate) mod erased_input;
 #[cfg(test)]
 mod erased_input_tests;
+#[cfg(test)]
+mod erased_input_union_tests;
 pub(crate) mod privacy;
 #[cfg(test)]
 mod privacy_tests;
