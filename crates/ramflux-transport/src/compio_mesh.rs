@@ -1260,10 +1260,7 @@ mod tests {
                     .await??;
                     assert_eq!(
                         response,
-                        serde_json::to_vec(&GatewayQuicResponse {
-                            status: 400,
-                            body: ramflux_protocol::i_json_rejection_body(),
-                        })?,
+                        br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#,
                         "I-JSON rejection response must be byte-exact"
                     );
                 }
@@ -1291,23 +1288,14 @@ mod tests {
                 .await??;
                 assert_eq!(
                     rejection,
-                    serde_json::to_vec(&GatewayQuicResponse {
-                        status: 400,
-                        body: ramflux_protocol::i_json_rejection_body(),
-                    })?
+                    br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#
                 );
                 let response = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
                     read_quinn_raw_frame(&mut recv),
                 )
                 .await??;
-                assert_eq!(
-                    response,
-                    serde_json::to_vec(&GatewayQuicResponse {
-                        status: 200,
-                        body: json!({"ok": true}),
-                    })?
-                );
+                assert_eq!(response, br#"{"status":200,"body":{"ok":true}}"#);
                 receive_compio_ijson_event(events, &format!("{prefix}:served")).await?;
                 acknowledgements
                     .send(format!("{prefix}:received"))

@@ -559,6 +559,51 @@ mod tests {
     }
 
     #[test]
+    fn itest_http_json_reader_enforces_ijson_at_the_http_entry_point()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (body, rejected_reason) in [
+            (r#"{"outer":{"x_probe":null,"x_probe":null}}"#, Some("duplicate I-JSON member")),
+            (r#"{"created_at":9007199254740992}"#, Some("unsafe exact JSON integer")),
+            (r#"{"created_at":9007199254740991}"#, None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let url = format!("http://{}/probe", listener.local_addr()?);
+            let response_body = body.as_bytes().to_vec();
+            let server = thread::spawn(move || -> Result<(), String> {
+                let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+                read_itest_http_request(&mut stream)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing HTTP request".to_owned())?;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .map_err(|error| error.to_string())?;
+                stream.write_all(&response_body).map_err(|error| error.to_string())
+            });
+            let result = itest_http_get_json::<serde_json::Value>(&url);
+            server.join().map_err(|_| "HTTP response server panicked")??;
+            match rejected_reason {
+                Some(reason) => match result {
+                    Err(NodeCoreError::ItestJson(message)) => {
+                        assert!(message.starts_with("I-JSON ingress rejected: "));
+                        assert!(message.contains(reason), "{message}");
+                    }
+                    other => {
+                        return Err(format!("expected ItestJson rejection, got {other:?}").into());
+                    }
+                },
+                None => assert_eq!(
+                    result?,
+                    serde_json::json!({"created_at": 9_007_199_254_740_991_i64})
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn request_limits_reject_huge_lengths_and_read_actual_body_incrementally()
     -> Result<(), Box<dyn std::error::Error>> {
         for (length, expected) in [

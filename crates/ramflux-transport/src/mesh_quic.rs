@@ -2619,10 +2619,8 @@ mod tests {
         let response =
             tokio::time::timeout(Duration::from_secs(10), super::read_quic_raw_frame(recv))
                 .await??;
-        let expected = serde_json::to_vec(&GatewayQuicResponse {
-            status: 400,
-            body: ramflux_protocol::i_json_rejection_body(),
-        })?;
+        let expected =
+            br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#;
         assert_eq!(response, expected, "I-JSON rejection response must be byte-exact");
         Ok(())
     }
@@ -2696,7 +2694,8 @@ mod tests {
                     Ok::<_, Box<dyn std::error::Error>>((connection, send, recv))
                 });
             let server_connection = server_connection_result?;
-            let (client_connection, _first_send, mut first_recv) = client_result?;
+            let (client_connection, first_send, mut first_recv) = client_result?;
+            let mut held_sends = vec![first_send];
 
             for wire_api in [false, true] {
                 let deadline = if expired {
@@ -2738,6 +2737,7 @@ mod tests {
                 if !trailing {
                     send.finish()?;
                 }
+                held_sends.push(send);
                 first_recv = recv;
             }
             for wire_api in [false, true] {

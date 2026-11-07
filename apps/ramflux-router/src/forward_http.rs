@@ -137,6 +137,77 @@ async fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn forward_http_response_reader_enforces_ijson_at_the_public_entry_point() -> anyhow::Result<()>
+    {
+        for (body, rejected_reason) in [
+            (
+                r#"{"accepted":true,"source_node_id":"src","target_node_id":"dst","delivery":{"outcome":"accepted","target_delivery_id":"id","inbox_seq":null,"cursor":null,"nack":null,"ext":{"x_probe":null,"x_probe":null}}}"#,
+                Some("duplicate I-JSON member"),
+            ),
+            (
+                r#"{"accepted":true,"source_node_id":"src","target_node_id":"dst","delivery":{"outcome":"accepted","target_delivery_id":"id","inbox_seq":9007199254740992,"cursor":null,"nack":null}}"#,
+                Some("unsafe exact JSON integer"),
+            ),
+            (
+                r#"{"accepted":true,"source_node_id":"src","target_node_id":"dst","delivery":{"outcome":"accepted","target_delivery_id":"id","inbox_seq":9007199254740991,"cursor":null,"nack":null}}"#,
+                None,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let endpoint = listener.local_addr()?;
+            let response_body = body.as_bytes().to_vec();
+            let server = thread::spawn(move || -> std::io::Result<()> {
+                let (stream, _) = listener.accept()?;
+                let mut stream = BufReader::new(stream);
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    stream.read_line(&mut line)?;
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse::<usize>().map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                        })?;
+                    }
+                }
+                let mut request_body = vec![0; content_length];
+                stream.read_exact(&mut request_body)?;
+                let mut stream = stream.into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )?;
+                stream.write_all(&response_body)
+            });
+            let result = post(
+                &format!("http://{endpoint}/forward"),
+                &serde_json::json!({}),
+                Duration::from_secs(5),
+            );
+            server.join().map_err(|_| anyhow::anyhow!("forward response server panicked"))??;
+            match rejected_reason {
+                Some(reason) => match result {
+                    Err(NodeCoreError::ItestHttp(message)) => {
+                        assert!(message.starts_with("I-JSON ingress rejected: "), "{message}");
+                        assert!(message.contains(reason), "{message}");
+                    }
+                    other => anyhow::bail!("expected ItestHttp I-JSON refusal, got {other:?}"),
+                },
+                None => assert_eq!(result?.delivery.inbox_seq, Some(9_007_199_254_740_991_u64)),
+            }
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn timed_out_dns_jobs_keep_admission_and_excess_work_fails_fast() -> anyhow::Result<()> {
