@@ -188,8 +188,11 @@ pub(crate) fn merge_from_at(
     // S2: the only full sweep also drops every expired local `erased-input:` binding.
     db.execute("DELETE FROM main.receive_erased_input WHERE expires_at<=?1", params![now])?;
     db.execute(
-        "DELETE FROM main.message_copy_binding WHERE copy_id GLOB 'erased-input:*' \
-         AND CAST(substr(copy_id,length(rtrim(copy_id,'0123456789'))+1) AS INTEGER)<=?1",
+        &format!(
+            "DELETE FROM main.message_copy_binding WHERE copy_id GLOB 'erased-input:*' \
+             AND {}<=?1",
+            super::erased_capture::BINDING_EXPIRY_SQL
+        ),
         params![now],
     )?;
     Ok(())

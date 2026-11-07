@@ -700,3 +700,135 @@ fn erased_input_source_kinds_classify_every_footprint_kind() {
     tables.dedup();
     assert_eq!(tables.len(), SOURCE_KINDS.len());
 }
+
+#[test]
+fn erased_input_import_collapses_local_variants_to_the_combined_maximum() -> Result<(), StorageError>
+{
+    let now = crate::unix_now();
+    let (root, db) = crate::tests::test_db("erased-capture-collapse")?;
+    attach(&db)?;
+    let (bundle, selector) = current(&db, "p", "d", "pcollapse")?;
+    message(&db, "main", "M", false)?;
+    message(&db, "incoming", "M", false)?;
+    // Two local variants straddle the incoming one; the local maximum wins and is the only one left.
+    bind(&db, "main", binding_id(&bundle, &selector, now + 500), "M")?;
+    bind(&db, "main", binding_id(&bundle, &selector, now + 2_000), "M")?;
+    bind(&db, "incoming", binding_id(&bundle, &selector, now + 1_000), "M")?;
+    on(&db, move |raw| {
+        stage_merge_capture(raw, Side::Local, now)?;
+        stage_merge_capture(raw, Side::Incoming, now)?;
+        reconcile_merge_capture(raw, now)
+    })?;
+    assert_eq!(bindings(&db, "M")?, vec![binding_id(&bundle, &selector, now + 2_000)]);
+    // Two local variants below the incoming one collapse to the incoming expiry.
+    on(&db, |raw| raw.execute_batch("DELETE FROM main.message_copy_binding").map_err(Into::into))?;
+    bind(&db, "main", binding_id(&bundle, &selector, now + 300), "M")?;
+    bind(&db, "main", binding_id(&bundle, &selector, now + 400), "M")?;
+    on(&db, move |raw| {
+        stage_merge_capture(raw, Side::Local, now)?;
+        stage_merge_capture(raw, Side::Incoming, now)?;
+        reconcile_merge_capture(raw, now)
+    })?;
+    assert_eq!(bindings(&db, "M")?, vec![binding_id(&bundle, &selector, now + 1_000)]);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn erased_input_sweeps_remove_negative_expiry_bindings() -> Result<(), StorageError> {
+    let now = crate::unix_now();
+    let (root, db) = crate::tests::test_db("erased-capture-negative")?;
+    attach(&db)?;
+    on(&db, |raw| {
+        raw.execute_batch(
+            "CREATE TABLE incoming.receive_erased_input AS SELECT * FROM main.receive_erased_input WHERE 0;",
+        )
+        .map_err(Into::into)
+    })?;
+    let seed = |db: &AccountDb| -> Result<(), StorageError> {
+        for (copy, message) in [
+            ("erased-input:b:neg:-2000000000", "M"),
+            ("erased-input:b:zero:0", "M"),
+            ("erased-input:b:live:2000000000000", "M"),
+        ] {
+            db.connection.execute(
+                "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
+                params![copy, message],
+            )?;
+        }
+        Ok(())
+    };
+    let remaining = |db: &AccountDb| bindings(db, "M");
+    // S3 (account open sweep).
+    seed(&db)?;
+    on(&db, move |raw| sweep_open(raw, now).map_err(Into::into))?;
+    assert_eq!(remaining(&db)?, vec!["erased-input:b:live:2000000000000".to_owned()]);
+    // S2 (merge sweep).
+    seed(&db)?;
+    on(&db, move |raw| super::erased_input::merge_from_at(raw, "incoming", now))?;
+    assert_eq!(remaining(&db)?, vec!["erased-input:b:live:2000000000000".to_owned()]);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn id_of(len: usize, fill: u8) -> String {
+    ramflux_protocol::encode_base64url(vec![fill; len])
+}
+
+#[test]
+fn erased_input_binding_validator_rejects_each_predicate_in_isolation() -> Result<(), StorageError>
+{
+    let now = crate::unix_now();
+    let (root, db) = crate::tests::test_db("erased-capture-validator")?;
+    attach(&db)?;
+    message(&db, "incoming", "M", false)?;
+    let good_b = id_of(32, 1);
+    let good_s = id_of(32, 2);
+    let state = |db: &AccountDb| -> Result<(i64, i64, i64, i64), StorageError> {
+        Ok((
+            staged(db)?.0,
+            staged(db)?.1,
+            count(db, "SELECT count(*) FROM receive_erased_input")?,
+            count(db, "SELECT count(*) FROM main.message_copy_binding")?,
+        ))
+    };
+    let refuse = |db: &AccountDb, copy: String| -> Result<(), StorageError> {
+        on(db, |raw| {
+            raw.execute_batch("DELETE FROM incoming.message_copy_binding").map_err(Into::into)
+        })?;
+        bind(db, "incoming", copy.clone(), "M")?;
+        on(db, move |raw| stage_merge_capture(raw, Side::Local, now))?;
+        let before = state(db)?;
+        let result = on(db, move |raw| stage_merge_capture(raw, Side::Incoming, now));
+        assert!(
+            matches!(result, Err(StorageError::Integrity("malformed erased-input binding"))),
+            "{copy}: {result:?}"
+        );
+        assert_eq!(state(db)?, before, "{copy}: state changed");
+        Ok(())
+    };
+    refuse(&db, binding_id(&id_of(31, 1), &good_s, now + 100))?;
+    refuse(&db, binding_id(&id_of(33, 1), &good_s, now + 100))?;
+    refuse(&db, binding_id(&good_b, &id_of(31, 2), now + 100))?;
+    refuse(&db, binding_id(&good_b, &id_of(33, 2), now + 100))?;
+    refuse(&db, format!("erased-input:{good_b}:{good_s}:not-a-number"))?;
+    refuse(&db, format!("erased-input:{good_b}:{good_s}:9223372036854775808"))?;
+    refuse(&db, format!("erased-input:{good_b}:{good_s}:"))?;
+    // Expiry boundary: `== now` is expired and not staged; `now + 1` is staged.
+    for (expiry, expected) in [(now, (0, 0)), (now + 1, (1, 1))] {
+        on(&db, |raw| {
+            raw.execute_batch("DELETE FROM incoming.message_copy_binding").map_err(Into::into)
+        })?;
+        bind(&db, "incoming", binding_id(&good_b, &good_s, expiry), "M")?;
+        on(&db, move |raw| {
+            stage_merge_capture(raw, Side::Local, now)?;
+            stage_merge_capture(raw, Side::Incoming, now)
+        })?;
+        assert_eq!(staged(&db)?, expected, "expiry {expiry}");
+    }
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
