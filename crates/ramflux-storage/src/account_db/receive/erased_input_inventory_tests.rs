@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! `erased_input_source_inventory_local`: every Source family on the local side leaves its exact
+//! `erased_input_source_inventory_local` and `_incoming`: every Source family on the local side leaves its exact
 //! selector when the merge deletes the owning message. Archived rows are produced by an earlier
 //! merge, as in production.
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
 use super::erased_capture_tests::{current, full};
 use super::erased_input_union_tests::{Pair, expiry, pair};
 use super::stage_tests::{bytes, input, run};
-use crate::{BackupDatabase, StorageError};
+use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase, StorageError};
 use rusqlite::params;
 use serde_json::{Value, json};
 
@@ -235,4 +235,162 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
 
 fn current_in(p: &Pair, payload: &str) -> Result<(String, String), StorageError> {
     current(&p.local, "ip", "id", payload)
+}
+
+/// An account of the same root, used to build the incoming snapshot.
+fn carrier_account(p: &Pair, name: &str) -> Result<(AccountIndex, AccountDb), StorageError> {
+    let index = AccountIndex::open(p.root.join(name))?;
+    index.create_account("account", "root")?;
+    let db = AccountDb::open(&index, "account", &AccountDbKey::generate()?)?;
+    Ok((index, db))
+}
+
+#[test]
+fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
+    let now = crate::unix_now();
+    let kinds = [
+        "actor",
+        "event",
+        "unrouted",
+        "retry",
+        "dead_letter",
+        "journal",
+        "group_pending_undecrypted",
+        "contact_message_request",
+    ];
+    // `receive_work` is absent on purpose: installing the receive ledger stamps schema version
+    // 15 on the incoming account, which a merge refuses as too new (`AccountSchemaTooNew`), and
+    // backups are to strip the ledger tables (P03b). An incoming snapshot cannot carry it yet.
+    let p = pair("erased-inventory-incoming")?;
+    let families: Vec<Family> = kinds.iter().map(|k| Family::new(k)).collect();
+    // The local account holds every message and deletes it: it has no source of its own.
+    let mut messages: Vec<String> = families.iter().map(|f| f.message.clone()).collect();
+    messages.extend(["A".to_owned(), "L".to_owned()]);
+    for id in &messages {
+        p.local.send_direct_message("thread", id, "peer", b"x")?;
+        p.local.delete_direct_message("thread", id, "local", &format!("d-{id}"))?;
+    }
+    // Archived families come from an earlier merge into the incoming account: a group-transfer
+    // actor row (archived only) and an event row, both carried by a first snapshot.
+    p.source.send_direct_message("thread", "A", "peer", b"x")?;
+    p.source
+        .connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:p-archived','A')", [])?;
+    p.source.persist_actor_state(
+        "group-transfer/p-archived",
+        &json!({"entry":{"envelope":full("ip","id","p-archived",now,3600)}}),
+    )?;
+    p.source
+        .connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:p-archived-event','A')", [])?;
+    p.source.connection.execute(
+        "INSERT INTO local_event_log VALUES('ev-archived','test','peer','device',900,900,1,NULL,?1,x'1234','verified','pending')",
+        params![body("p-archived-event", now)],
+    )?;
+    let early = p.root.join("early.db");
+    let early_snapshot = p.source.write_backup_snapshot(&early)?;
+    let (mid, mid_db) = carrier_account(&p, "mid")?;
+    let mid_path = p.root.join("mid.db");
+    let mid_target = mid_db.write_backup_snapshot(&mid_path)?;
+    let mut mid_merged = BackupDatabase::open(&mid_path, &mid_target.key)?;
+    mid_merged.merge_backup(&early, &early_snapshot.key, || Ok(()))?;
+    drop(mid_db);
+    // The merged result is installed as the incoming account.
+    let carrier_root = p.root.join("carrier");
+    let carrier_index = AccountIndex::open(&carrier_root)?;
+    let account = carrier_index.create_account("account", "root")?;
+    let installed = carrier_root.join(account.db_relative_path);
+    std::fs::create_dir_all(installed.parent().ok_or(StorageError::AuthorizationRejected)?)?;
+    mid_merged.copy_to(&installed, &mid_target.key)?;
+    drop(mid_merged);
+    drop(mid);
+    let carrier = AccountDb::open(&carrier_index, "account", &mid_target.key)?;
+    for payload in ["p-archived", "p-archived-event"] {
+        carrier.connection.execute(
+            "INSERT INTO message_copy_binding VALUES(?1,'A')",
+            params![format!("payload:{payload}")],
+        )?;
+    }
+    for f in &families {
+        carrier.send_direct_message("thread", &f.message, "peer", b"x")?;
+    }
+    for (n, f) in (1_i64..).zip(&families) {
+        seed_local(&carrier, f, n, now)?;
+    }
+    let contact = Family::new("contact_message_request");
+    carrier.connection.execute(
+        "INSERT INTO contact_message_request VALUES('c','s',?1,'thread',?2,10,9999999999,1)",
+        params![contact.message, body(&contact.payload, now)],
+    )?;
+    // Rule C: a replay row written before footprints existed has no footprint and is owned
+    // only through its payload binding.
+    carrier.send_direct_message("thread", "L", "peer", b"x")?;
+    carrier
+        .connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:p-legacy','L')", [])?;
+    carrier.connection.execute(
+        "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES('legacy/replay/committed/l',?1)",
+        params![body("p-legacy", now)],
+    )?;
+    carrier.connection.execute(
+        "DELETE FROM message_footprint WHERE kind='actor' AND locator='legacy/replay/committed/l'",
+        [],
+    )?;
+    let unfootprinted: i64 = carrier.connection.query_row(
+        "SELECT count(*) FROM message_footprint WHERE locator='legacy/replay/committed/l'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(unfootprinted, 0, "the legacy replay row has no footprint");
+    let incoming = p.root.join("incoming.db");
+    let incoming_snapshot = carrier.write_backup_snapshot(&incoming)?;
+    let path = p.root.join("merged.db");
+    let target = p.local.write_backup_snapshot(&path)?;
+    let mut merged = BackupDatabase::open(&path, &target.key)?;
+    merged.merge_backup(&incoming, &incoming_snapshot.key, || Ok(()))?;
+    let mut expected: Vec<(String, String)> =
+        families.iter().map(|f| (f.kind.to_owned(), f.payload.clone())).collect();
+    expected.push(("archived_actor".to_owned(), "p-archived".to_owned()));
+    expected.push(("archived_event".to_owned(), "p-archived-event".to_owned()));
+    expected.push(("legacy_replay_rule_c".to_owned(), "p-legacy".to_owned()));
+    let verify = |db: &rusqlite::Connection| -> Result<(), StorageError> {
+        let mut wrong = Vec::new();
+        for (kind, payload) in &expected {
+            let (_, selector) = current(&p.local, "ip", "id", payload)?;
+            if expiry(db, &selector)? != Some(now + 3_900) {
+                wrong.push(kind.as_str());
+            }
+        }
+        assert_eq!(wrong, Vec::<&str>::new(), "families without their exact selector");
+        Ok(())
+    };
+    verify(&merged.db)?;
+    drop(merged);
+    verify(&BackupDatabase::open(&path, &target.key)?.db)?;
+    Ok(())
+}
+
+#[test]
+fn erased_input_incoming_receive_ledger_is_refused_as_too_new() -> Result<(), StorageError> {
+    // Declared exclusion: `receive_work` cannot be an incoming Source family yet. Installing the
+    // receive ledger stamps schema version 15 and a merge refuses any newer incoming schema.
+    // Pinning the exact refusal means the family is added to the incoming inventory when merge
+    // compatibility (P03b) lands, and this test is then replaced.
+    let p = pair("erased-inventory-incoming-ledger")?;
+    p.source.install_receive_ledger_schema()?;
+    let incoming = p.root.join("incoming.db");
+    let snapshot = p.source.write_backup_snapshot(&incoming)?;
+    let path = p.root.join("merged.db");
+    let target = p.local.write_backup_snapshot(&path)?;
+    let mut merged = BackupDatabase::open(&path, &target.key)?;
+    let refused = merged.merge_backup(&incoming, &snapshot.key, || Ok(()));
+    assert!(
+        matches!(
+            &refused,
+            Err(StorageError::AccountSchemaTooNew { schema_version: 15, supported: 14 })
+        ),
+        "{:?}",
+        refused.err()
+    );
+    Ok(())
 }
