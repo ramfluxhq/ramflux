@@ -50,3 +50,5 @@ mod sender_fanout;
 
 mod durable_ingress_registry;
 mod fanout_entry_bound;
+
+mod ephemeral_durable_sinks;
