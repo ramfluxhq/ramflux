@@ -8,6 +8,8 @@ use crate::{AccountDbKey, AccountIndex};
 use serde_json::json;
 
 const MARKER: &str = "footprint_replay_migration:v1";
+/// Migration state must stay silent under both its old and its current table name.
+const MIGRATION_OUTBOX: &str = "SELECT count(*) FROM runtime_outbox WHERE table_name IN ('projection_checkpoint','message_footprint_migration')";
 
 fn checkpoint(db: &AccountDb, name: &str) -> Result<Option<String>, StorageError> {
     use rusqlite::OptionalExtension;
@@ -110,10 +112,7 @@ fn replay_footprint_migration_completes_on_open() -> Result<(), StorageError> {
     }
     assert_eq!(audit(&db)?, Vec::<String>::new());
     // Migration bookkeeping never reaches the domain outbox.
-    assert_eq!(
-        count(&db, "SELECT count(*) FROM runtime_outbox WHERE table_name='projection_checkpoint'")?,
-        0
-    );
+    assert_eq!(count(&db, MIGRATION_OUTBOX)?, 0);
     // (b) Every candidate, no-op rows included, is visited exactly once.
     assert_eq!(count(&db, "SELECT count(*) FROM footprint_migration_test_visits")?, 2500);
     assert_eq!(
@@ -158,6 +157,8 @@ fn replay_footprint_migration_resumes_from_its_cursor_after_a_crash() -> Result<
         &AccountDbKey::derive("acct", b"storage-test-secret"),
     )?;
     assert_eq!(checkpoint(&db, MARKER)?.as_deref(), Some("complete"));
+    // Interrupted and resumed bookkeeping writes publish nothing, under either table name.
+    assert_eq!(count(&db, MIGRATION_OUTBOX)?, 0, "resumed migration must be silent");
     assert_eq!(audit(&db)?, Vec::<String>::new());
     assert_eq!(
         count(
@@ -341,6 +342,38 @@ fn replay_footprint_merge_pass_cost_is_independent_of_local_history() -> Result<
     drop(merged);
     drop(source);
     drop(local);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn replay_footprint_migration_state_is_silent_on_fresh_and_reopened_opens()
+-> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-migration-silent")?;
+    assert_eq!(checkpoint(&db, MARKER)?.as_deref(), Some("complete"));
+    assert_eq!(count(&db, MIGRATION_OUTBOX)?, 0, "fresh open");
+    let triggers = |db: &AccountDb| {
+        count(
+            db,
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='message_footprint_migration'",
+        )
+    };
+    assert_eq!(triggers(&db)?, 0);
+    let db = reopen(&root, db)?;
+    assert_eq!(count(&db, MIGRATION_OUTBOX)?, 0, "reopened open");
+    assert_eq!(triggers(&db)?, 0);
+    // A database that already carries notification triggers (from a build that installed
+    // them) loses them at the next open, and later bookkeeping writes stay silent.
+    db.connection.execute_batch(
+        "CREATE TRIGGER runtime_message_footprint_migration_insert AFTER INSERT ON message_footprint_migration
+         BEGIN SELECT 1; END;",
+    )?;
+    assert_eq!(triggers(&db)?, 1);
+    let db = reopen(&root, db)?;
+    assert_eq!(triggers(&db)?, 0);
+    db.connection.execute("INSERT INTO message_footprint_migration VALUES('probe','x')", [])?;
+    assert_eq!(count(&db, MIGRATION_OUTBOX)?, 0);
+    drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
