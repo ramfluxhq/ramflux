@@ -6,12 +6,14 @@
 //! Capable vectors come from node-core typed frames. Every row runs through the real reader
 //! (`read_reply`/`idle_read`) on a scripted transport, or through `route` for the decoder choice.
 use super::{
-    CapableServerFrame as C, IncarnationId, PushNackReason, ResyncReason, RouteError, Routed,
-    SessionMode, route,
+    CapableEvent, CapableServerFrame as C, IncarnationId, PushMeta, PushNackReason, ResyncReason,
+    RouteError, Routed, SessionMode, route,
 };
 use crate::SdkError;
 use crate::bus::connection_manager::DisconnectReason;
+use crate::bus::connection_manager::subscriptions::SessionEvent;
 use crate::gateway::frame_dispatch::ExpectedReply;
+use crate::gateway::frame_dispatch::FrameKind;
 use crate::gateway::{
     GatewayQuicEndpointConfig, GatewayServerFrame, GatewaySessionConfig, GatewaySessionEngine,
 };
@@ -22,7 +24,7 @@ use ramflux_transport::{
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
-const E: &str = "0123456789abcdef0123456789abcdef";
+pub(super) const E: &str = "0123456789abcdef0123456789abcdef";
 
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
@@ -49,15 +51,15 @@ impl GatewaySessionFrameSource for Script {
     }
 }
 
-fn id() -> IncarnationId {
+pub(super) fn id() -> IncarnationId {
     IncarnationId::try_from(E.to_owned()).unwrap()
 }
 
-fn push() -> SessionMode {
+pub(super) fn push() -> SessionMode {
     SessionMode::Push { incarnation: id() }
 }
 
-fn scripted(mode: SessionMode, frames: Vec<Value>) -> GatewaySessionEngine {
+pub(super) fn scripted(mode: SessionMode, frames: Vec<Value>) -> GatewaySessionEngine {
     let config = GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
         bind_addr: "0.0.0.0:0".parse().unwrap(),
         gateway_addr: "127.0.0.1:443".parse().unwrap(),
@@ -76,7 +78,7 @@ fn scripted(mode: SessionMode, frames: Vec<Value>) -> GatewaySessionEngine {
     engine
 }
 
-fn envelope() -> ramflux_protocol::Envelope {
+pub(super) fn envelope() -> ramflux_protocol::Envelope {
     serde_json::from_value(json!({
         "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
         "signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture",
@@ -88,7 +90,7 @@ fn envelope() -> ramflux_protocol::Envelope {
     .unwrap()
 }
 
-fn node_entry() -> n::InboxEntry {
+pub(super) fn node_entry() -> n::InboxEntry {
     n::InboxEntry { inbox_seq: 71, target_delivery_id: "target-route".into(), envelope: envelope() }
 }
 
@@ -96,7 +98,7 @@ fn capable(frame: &n::SessionPushServerFrame) -> Value {
     serde_json::to_value(frame).unwrap()
 }
 
-fn capable_deliver() -> Value {
+pub(super) fn capable_deliver() -> Value {
     capable(&n::SessionPushServerFrame::Deliver {
         entry: node_entry(),
         incarnation_id: E.into(),
@@ -104,7 +106,7 @@ fn capable_deliver() -> Value {
     })
 }
 
-fn capable_resync() -> Value {
+pub(super) fn capable_resync() -> Value {
     capable(&n::SessionPushServerFrame::Resync {
         incarnation_id: E.into(),
         target_delivery_id: "target-route".into(),
@@ -124,7 +126,7 @@ fn legacy_nack(reason: &str) -> Value {
     json!({"frame_type":"nack","reason":reason})
 }
 
-fn heartbeat() -> Value {
+pub(super) fn heartbeat() -> Value {
     json!({"frame_type":"heartbeat","now":5})
 }
 
@@ -146,7 +148,7 @@ fn retired(result: Result<GatewayServerFrame, SdkError>, engine: &GatewaySession
         other => panic!("expected a retirement ({why}), got {other:?}"),
     }
     assert!(matches!(engine.terminal_reason, Some(DisconnectReason::UnexpectedReply)));
-    assert!(engine.capable_events.is_empty(), "a refused frame must not queue an event");
+    assert!(engine.pending_deliveries.is_empty(), "a refused frame must not buffer a delivery");
 }
 
 #[tokio::test]
@@ -192,26 +194,33 @@ async fn push_reader_routes_shared_and_capable_frames() {
         }
     }
 
-    // (p11)/(p12) capable events reach the queue while a legacy heartbeat wait is active, in
-    // order, and the heartbeat still completes.
+    // (p11)/(p12) capable events are carried while a legacy heartbeat wait is active: the
+    // deliver is buffered with its push metadata, the resync is published, and the heartbeat
+    // still completes.
     let mut engine = scripted(push(), vec![capable_deliver(), capable_resync(), heartbeat()]);
+    let (hub, _) = super::carrier_tests::attach_host(&mut engine);
+    let mut resyncs = hub.subscribe([FrameKind::Resync]);
     assert_eq!(read(&mut engine).await.unwrap(), GatewayServerFrame::Heartbeat { now: 5 });
-    assert_eq!(engine.capable_events.len(), 2);
-    match &engine.capable_events[0] {
-        C::Deliver { entry, incarnation_id, retain_until } => {
-            assert_eq!(entry.inbox_seq, 71);
-            assert_eq!(incarnation_id, &id());
-            assert_eq!(*retain_until, 7_777);
-        }
-        other => panic!("not a deliver: {other:?}"),
-    }
-    match &engine.capable_events[1] {
-        C::Resync { target_delivery_id, after_inbox_seq, reason, .. } => {
-            assert_eq!(target_delivery_id, "target-route");
-            assert_eq!(*after_inbox_seq, 72);
-            assert_eq!(*reason, ResyncReason::QueueFull);
-        }
-        other => panic!("not a resync: {other:?}"),
+    let pending = engine.take_pending_capable();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0.inbox_seq, 71);
+    assert_eq!(pending[0].1, Some(PushMeta { incarnation_id: id(), retain_until: 7_777 }));
+    match resyncs.recv().await {
+        Some(SessionEvent::Capable { event, .. }) => match &*event {
+            CapableEvent::Resync {
+                incarnation_id,
+                target_delivery_id,
+                after_inbox_seq,
+                reason,
+            } => {
+                assert_eq!(incarnation_id, &id());
+                assert_eq!(target_delivery_id, "target-route");
+                assert_eq!(*after_inbox_seq, 72);
+                assert_eq!(*reason, ResyncReason::QueueFull);
+            }
+            other @ CapableEvent::Deliver { .. } => panic!("not a resync: {other:?}"),
+        },
+        other => panic!("not a capable event: {other:?}"),
     }
 
     // (p13) Legacy mode: every legacy vector decodes byte-for-byte as before routing.

@@ -24,6 +24,8 @@ pub(super) async fn run(mut context: SessionContext, work: mpsc::Sender<AccountW
                 tracing::trace!(?reason,generation,session_id=%context.session_id,"push route observer stopped");
                 break;
             }
+            // This child subscribes to push-route kinds only; a capable event never matches.
+            SessionEvent::Capable { .. } => continue,
             SessionEvent::Frame { frame, generation } => {
                 if generation != context.generation {
                     continue;

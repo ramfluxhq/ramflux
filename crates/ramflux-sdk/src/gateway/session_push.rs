@@ -15,6 +15,8 @@ mod client;
 #[allow(unused_imports)]
 pub(crate) use client::{CapableClientFrame, ClientFrameError};
 #[cfg(test)]
+mod carrier_tests;
+#[cfg(test)]
 mod client_tests;
 #[cfg(test)]
 mod negotiation_tests;
@@ -325,13 +327,6 @@ pub(crate) fn negotiate(
     }
 }
 
-impl CapableServerFrame {
-    /// Events carry no request; every other capable frame is a reply.
-    pub(crate) const fn is_event(&self) -> bool {
-        matches!(self, Self::Deliver { .. } | Self::Resync { .. })
-    }
-}
-
 /// Where the raw bytes of one frame go.
 #[derive(Debug)]
 pub(crate) enum Routed {
@@ -405,4 +400,49 @@ pub(crate) fn route(bytes: &[u8], mode: &SessionMode) -> Result<Routed, RouteErr
         return Err(RouteError::Retire("capable frame on an unnegotiated session"));
     }
     legacy(bytes)
+}
+
+/// What a push delivery carries beyond the legacy entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PushMeta {
+    pub(crate) incarnation_id: IncarnationId,
+    pub(crate) retain_until: i64,
+}
+
+/// A capable event that must reach consumers without loss. Every field of the wire frame is
+/// kept, so no consumer has to re-read the bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum CapableEvent {
+    Deliver {
+        entry: GatewayInboxEntry,
+        incarnation_id: IncarnationId,
+        retain_until: i64,
+    },
+    Resync {
+        incarnation_id: IncarnationId,
+        target_delivery_id: String,
+        after_inbox_seq: u64,
+        reason: ResyncReason,
+    },
+}
+
+impl TryFrom<CapableServerFrame> for CapableEvent {
+    /// The frame, when it is a reply rather than an event.
+    type Error = CapableServerFrame;
+
+    fn try_from(frame: CapableServerFrame) -> Result<Self, Self::Error> {
+        match frame {
+            CapableServerFrame::Deliver { entry, incarnation_id, retain_until } => {
+                Ok(Self::Deliver { entry, incarnation_id, retain_until })
+            }
+            CapableServerFrame::Resync {
+                incarnation_id,
+                target_delivery_id,
+                after_inbox_seq,
+                reason,
+            } => Ok(Self::Resync { incarnation_id, target_delivery_id, after_inbox_seq, reason }),
+            reply => Err(reply),
+        }
+    }
 }
