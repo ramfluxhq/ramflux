@@ -58,6 +58,23 @@ fn gateway_open_frame_with_nonce(
     }
 }
 
+/// The scope the device proof signs. The session-push capability is present exactly when the
+/// config advertises it, whatever the caller's scope held (stripped, then appended once).
+pub(crate) fn signed_capability_scope(config: &GatewaySessionConfig) -> Vec<String> {
+    let mut scope: Vec<String> = config
+        .capability_scope
+        .iter()
+        .filter(|capability| {
+            capability.as_str() != ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
+        })
+        .cloned()
+        .collect();
+    if config.session_push_advertise {
+        scope.push(ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.to_owned());
+    }
+    scope
+}
+
 pub(crate) fn gateway_auth_frame(
     config: &GatewaySessionConfig,
     open: &GatewayOpenFrame,
@@ -78,7 +95,7 @@ pub(crate) fn gateway_auth_frame(
         device_id: config.device_id.clone(),
         device_epoch: config.device_epoch,
         branch_proof_hash: config.branch_proof_hash.clone(),
-        capability_scope: config.capability_scope.clone(),
+        capability_scope: signed_capability_scope(config),
         nonce: open.stream_nonce.clone(),
         expires_at: config.auth_expires_at,
     };
