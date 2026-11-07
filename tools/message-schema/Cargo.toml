@@ -8,11 +8,11 @@ publish = false
 
 [dependencies]
 prost = "=0.14.4"
-prost-build = "=0.14.3"
+prost-build = "=0.14.4"
 protox = "=0.9.1"
 pbjson-build = "=0.9.0"
 syn = { version = "=2.0.117", features = ["full"] }
-quote = "=1.0.45"
+quote = "=1.0.47"
 prettyplease = "=0.2.37"
 
 [lints]
