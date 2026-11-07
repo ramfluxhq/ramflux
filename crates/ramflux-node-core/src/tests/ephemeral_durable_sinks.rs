@@ -11,10 +11,13 @@
 //! paths. Alias bindings are rewritten to their full paths. Crate paths
 //! (`crate::`, `self::`, `super::`) are then resolved through a table of every
 //! `use` / `pub use` binding in the hosting crate's `src/`, so a re-export in
-//! another file cannot hide a sink. `#[cfg(test)]` items are ignored, so
+//! another file cannot hide a sink. Glob imports are expanded, and a crate path
+//! that does not resolve to a binding, module or item fails the guard.
+//! `#[cfg(test)]` items are ignored, so
 //! absence proofs may open a store.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -190,11 +193,17 @@ fn forbidden_hits(src: &str) -> Vec<&'static str> {
 }
 
 /// Normalised text used for matching: comments and string literals stripped,
-/// `#[cfg(test)]` items removed, whitespace collapsed, and use-group aliases
-/// expanded. Both the raw text and the expanded paths are included.
-fn production_source(src: &str, file_module: &str, table: &AliasTable) -> Result<String, String> {
+/// `#[cfg(test)]` items removed, whitespace collapsed, use-group aliases and
+/// crate-wide bindings expanded, and crate paths resolved. Fails closed.
+fn production_source(
+    src: &str,
+    label: &str,
+    file_module: &str,
+    table: &AliasTable,
+) -> Result<String, String> {
     let collapsed = normalised_items(src);
-    expand_detection_text(&collapsed, file_module, table)
+    check_ephemeral_globs(&collapsed, label, file_module, table)?;
+    expand_detection_text(&collapsed, label, file_module, table)
 }
 
 /// Comments and strings stripped, `#[cfg(test)]` items removed, whitespace collapsed.
@@ -470,9 +479,12 @@ fn collapse_path_ws(src: &str) -> String {
     src.split_whitespace().collect::<Vec<_>>().join(" ").replace(" ::", "::").replace(":: ", "::")
 }
 
-/// Appends the expanded paths of every `use` item and the alias-rewritten text.
+/// Appends the expanded paths of every `use` item, then the rewritten and
+/// crate-resolved text. Names the file imports (by `use` or by glob) are
+/// rewritten both as `name::` and as `name(` calls.
 fn expand_detection_text(
     collapsed: &str,
+    label: &str,
     file_module: &str,
     table: &AliasTable,
 ) -> Result<String, String> {
@@ -486,7 +498,11 @@ fn expand_detection_text(
             rewritten = rewrite_alias(&rewritten, alias, full);
         }
     }
-    let resolved = resolve_crate_paths(&rewritten, file_module, table)?;
+    for (name, target) in module_bindings(table, file_module) {
+        rewritten = rewrite_word(&rewritten, &format!("{name}::"), &format!("{target}::"));
+        rewritten = rewrite_word(&rewritten, &format!("{name}("), &format!("{target}("));
+    }
+    let resolved = resolve_crate_paths(&rewritten, label, file_module, table)?;
     let mut out = String::with_capacity(collapsed.len() * 2);
     out.push_str(collapsed);
     out.push('\n');
@@ -620,17 +636,19 @@ fn expand_use_tree(prefix: &str, tree: &str, out: &mut Vec<(String, String)>) {
     }
 }
 
-/// Rewrites `alias::x` to `full::x` wherever `alias` is a whole path segment.
-fn rewrite_alias(text: &str, alias: &str, full: &str) -> String {
-    let needle = format!("{alias}::");
+/// Rewrites every whole-segment occurrence of `needle` to `replacement`. A
+/// match preceded by an identifier, `:` or `.` is a different name and is kept.
+fn rewrite_word(text: &str, needle: &str, replacement: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
-    for (at, _) in text.match_indices(&needle) {
-        let boundary = text[..at].chars().next_back().is_none_or(|c| !is_ident_char(c) && c != ':');
+    for (at, _) in text.match_indices(needle) {
+        let boundary = text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_ident_char(c) && c != ':' && c != '.');
         if boundary {
             out.push_str(&text[last..at]);
-            out.push_str(full);
-            out.push_str("::");
+            out.push_str(replacement);
             last = at + needle.len();
         }
     }
@@ -638,14 +656,61 @@ fn rewrite_alias(text: &str, alias: &str, full: &str) -> String {
     out
 }
 
-/// Every `use` / `pub use` binding of one crate's `src/`. `bindings` maps a
-/// module-qualified name (`crate::disk`) to the absolute path it names
-/// (`std::fs`). `modules` holds every module path, file or inline, so that a
-/// 2018-style `use foo::x` inside `crate` resolves to `crate::foo::x`.
+/// Rewrites `alias::x` to `full::x` wherever `alias` is a whole path segment.
+fn rewrite_alias(text: &str, alias: &str, full: &str) -> String {
+    rewrite_word(text, &format!("{alias}::"), &format!("{full}::"))
+}
+
+/// Single-segment bindings that `module` declares, by `use` or by glob.
+fn module_bindings(table: &AliasTable, module: &str) -> Vec<(String, String)> {
+    let prefix = format!("{module}::");
+    table
+        .bindings
+        .iter()
+        .filter_map(|(key, target)| {
+            let name = key.strip_prefix(&prefix)?;
+            (!name.contains("::")).then(|| (name.to_string(), target.clone()))
+        })
+        .collect()
+}
+
+/// Every name a crate module declares by item keyword, with its byte offset.
+const ITEM_KEYWORDS: &[&str] =
+    &["fn", "struct", "enum", "trait", "type", "const", "static", "union", "mod", "macro_rules!"];
+
+fn declared_items(text: &str) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for &keyword in ITEM_KEYWORDS {
+        for (at, _) in text.match_indices(keyword) {
+            let before = text[..at].chars().next_back();
+            if before.is_some_and(|c| is_ident_char(c) || matches!(c, ':' | '\'' | '.')) {
+                continue;
+            }
+            let after = at + keyword.len();
+            if !text[after..].starts_with(char::is_whitespace) {
+                continue;
+            }
+            let name_start = skip_ws(text, after);
+            let name: String =
+                text[name_start..].chars().take_while(|c| is_ident_char(*c)).collect();
+            if !name.is_empty() {
+                found.push((name, at));
+            }
+        }
+    }
+    found
+}
+
+/// Crate-wide name tables. `bindings` maps a module-qualified name
+/// (`crate::disk`) to the absolute path it names (`std::fs`). `modules` holds
+/// every module path, file or inline, so a 2018-style `use foo::x` inside
+/// `crate` resolves to `crate::foo::x`. `items` holds each module's declared
+/// names, which is what makes a `crate::` path concrete.
 #[derive(Debug, Default)]
 struct AliasTable {
     bindings: Vec<(String, String)>,
     modules: BTreeSet<String>,
+    items: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl AliasTable {
@@ -678,13 +743,26 @@ fn build_alias_table(files: &[(&str, &str)]) -> Result<AliasTable, String> {
         }
         parsed.push((*file_module, text, spans));
     }
+    let mut globs: Vec<(String, String)> = Vec::new();
     for (file_module, text, spans) in &parsed {
+        for (name, at) in declared_items(text) {
+            let module = module_at(file_module, spans, at);
+            table.items.entry(module).or_default().insert(name);
+        }
         for (at, body) in use_bodies(text) {
             let module = module_at(file_module, spans, at);
             let mut raw = Vec::new();
             expand_use_tree("", body, &mut raw);
             for (full, alias) in raw {
-                if alias == "*" || alias == "_" {
+                if alias == "*" {
+                    let base = full.strip_suffix("::*").unwrap_or(&full);
+                    let target = normalise_target(&module, base, &table.modules)?;
+                    if table.modules.contains(&target) {
+                        globs.push((module.clone(), target));
+                    }
+                    continue;
+                }
+                if alias == "_" {
                     continue;
                 }
                 let target = normalise_target(&module, &full, &table.modules)?;
@@ -695,7 +773,64 @@ fn build_alias_table(files: &[(&str, &str)]) -> Result<AliasTable, String> {
             }
         }
     }
+    expand_globs(&mut table, &globs)?;
     Ok(table)
+}
+
+/// Expands glob imports to a fixed point. Each pass propagates one more link
+/// of a glob chain, and a chain of more than `MAX_ALIAS_HOPS` links fails.
+fn expand_globs(table: &mut AliasTable, globs: &[(String, String)]) -> Result<(), String> {
+    for _ in 0..=MAX_ALIAS_HOPS {
+        let mut changed = false;
+        for (into, from) in globs {
+            changed |= merge_glob(table, into, from);
+        }
+        if !changed {
+            return Ok(());
+        }
+    }
+    Err(format!("glob re-export chain exceeds {MAX_ALIAS_HOPS} hops"))
+}
+
+/// Copies `from`'s direct bindings, child modules and items into `into`. An
+/// explicit binding already in `into` shadows the glob. Returns whether
+/// anything new was added.
+fn merge_glob(table: &mut AliasTable, into: &str, from: &str) -> bool {
+    let from_prefix = format!("{from}::");
+    let mut changed = false;
+    let existing: BTreeSet<String> = table.bindings.iter().map(|(key, _)| key.clone()).collect();
+    let inherited: Vec<(String, String)> = table
+        .bindings
+        .iter()
+        .filter_map(|(key, target)| {
+            let name = key.strip_prefix(&from_prefix)?;
+            let new_key = join_module(into, name);
+            (!name.contains("::") && new_key != *target && !existing.contains(&new_key))
+                .then(|| (new_key, target.clone()))
+        })
+        .collect();
+    for (key, target) in inherited {
+        table.bindings.push((key, target));
+        changed = true;
+    }
+    let children: Vec<String> = table
+        .modules
+        .iter()
+        .filter_map(|module| {
+            let name = module.strip_prefix(&from_prefix)?;
+            (!name.contains("::")).then(|| join_module(into, name))
+        })
+        .collect();
+    for child in children {
+        changed |= table.modules.insert(child);
+    }
+    if let Some(names) = table.items.get(from).cloned() {
+        let slot = table.items.entry(into.to_string()).or_default();
+        for name in names {
+            changed |= slot.insert(name);
+        }
+    }
+    changed
 }
 
 /// Anchors a path written inside `module` to an absolute path. `crate::` paths
@@ -732,8 +867,31 @@ fn normalise_target(
     Ok(base)
 }
 
+/// Fail-closed: a `crate::` path is concrete only when it walks known modules
+/// and then names a declared item. Anything else is unresolved.
+fn check_reachable(path: &str, table: &AliasTable) -> Result<(), String> {
+    let mut segments = path.split("::");
+    if segments.next() != Some("crate") {
+        return Ok(());
+    }
+    let mut current = "crate".to_string();
+    for segment in segments {
+        let child = join_module(&current, segment);
+        if table.modules.contains(&child) {
+            current = child;
+            continue;
+        }
+        if table.items.get(&current).is_some_and(|names| names.contains(segment)) {
+            return Ok(());
+        }
+        return Err("no binding, module, or item".to_string());
+    }
+    Ok(())
+}
+
 /// Resolves `token` (an absolute, `self::` or `super::` path) through the
-/// table until no binding applies. Fails on a cycle or past `MAX_ALIAS_HOPS`.
+/// table until no binding applies, then checks that the result is concrete.
+/// Reasons are returned bare; the caller adds the path and file.
 fn resolve_path(token: &str, module: &str, table: &AliasTable) -> Result<String, String> {
     let mut current = normalise_target(module, token, &table.modules)?;
     let mut seen = BTreeSet::from([current.clone()]);
@@ -741,25 +899,23 @@ fn resolve_path(token: &str, module: &str, table: &AliasTable) -> Result<String,
     while let Some(next) = table.step(&current) {
         hops += 1;
         if hops > MAX_ALIAS_HOPS {
-            return Err(format!(
-                "re-export resolution exceeded {MAX_ALIAS_HOPS} hops for `{token}` in {module}"
-            ));
+            return Err(format!("re-export chain exceeds {MAX_ALIAS_HOPS} hops"));
         }
         if !seen.insert(next.clone()) {
-            return Err(format!(
-                "re-export alias cycle through `{next}` for `{token}` in {module}"
-            ));
+            return Err(format!("re-export cycle through {next}"));
         }
         current = next;
     }
+    check_reachable(&current, table)?;
     Ok(current)
 }
 
 /// Rewrites every `crate::`, `self::` and `super::` path in `text` to its
-/// resolved form. The module used for `self` and `super` is the file's module
-/// plus any inline `mod` enclosing the path.
+/// resolved form. Any path that does not resolve fails the guard with
+/// `unresolved path <p> in <label>: <reason>`.
 fn resolve_crate_paths(
     text: &str,
+    label: &str,
     file_module: &str,
     table: &AliasTable,
 ) -> Result<String, String> {
@@ -778,13 +934,46 @@ fn resolve_crate_paths(
         }
         let tail = &text[at..];
         let len = tail.find(|c: char| !is_ident_char(c) && c != ':').unwrap_or(tail.len());
+        let token = text[at..at + len].trim_end_matches("::");
         let module = module_at(file_module, &spans, at);
+        let resolved = resolve_path(token, &module, table)
+            .map_err(|reason| format!("unresolved path {token} in {label}: {reason}"))?;
         out.push_str(&text[last..at]);
-        out.push_str(&resolve_path(&text[at..at + len], &module, table)?);
-        last = at + len;
+        out.push_str(&resolved);
+        last = at + token.len();
     }
     out.push_str(&text[last..]);
     Ok(out)
+}
+
+/// Fail-closed for the scanned file itself: a glob import must name a crate
+/// module, since the names it brings in can only be resolved through one.
+fn check_ephemeral_globs(
+    text: &str,
+    label: &str,
+    file_module: &str,
+    table: &AliasTable,
+) -> Result<(), String> {
+    let spans = inline_mod_spans(text);
+    for (at, body) in use_bodies(text) {
+        let module = module_at(file_module, &spans, at);
+        let mut raw = Vec::new();
+        expand_use_tree("", body, &mut raw);
+        for (full, alias) in raw {
+            if alias != "*" {
+                continue;
+            }
+            let base = full.strip_suffix("::*").unwrap_or(&full);
+            let target = normalise_target(&module, base, &table.modules)
+                .map_err(|reason| format!("unresolved path {full} in {label}: {reason}"))?;
+            if !table.modules.contains(&target) {
+                return Err(format!(
+                    "unresolved path {full} in {label}: glob import of a non-crate module"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Module path (`crate::a::b`) of a file under a crate's `src/`.
@@ -807,7 +996,7 @@ fn module_path_of(src_dir: &Path, path: &Path) -> io::Result<String> {
 }
 
 /// Loads the alias table for the crate whose `src/` is `src_dir`. Test-only
-/// trees (`tests/`, `*_tests.rs`) are skipped, as they never ship.
+/// trees (`tests/`) are skipped, as they never ship.
 fn load_crate_table(src_dir: &Path) -> io::Result<AliasTable> {
     let mut files = Vec::new();
     collect_rs_dir(src_dir, &mut files)?;
@@ -834,30 +1023,49 @@ fn crate_src_of(root: &Path, path: &Path) -> io::Result<PathBuf> {
 }
 
 fn planted_spellings(symbol: &str) -> [(&'static str, String); 3] {
+    // A path-shaped symbol (`std::fs`) is spelt as itself. A bare identifier
+    // is an item of the fixture module `crate::persist`.
+    let path = if symbol.contains("::") {
+        symbol.to_string()
+    } else {
+        format!("crate::persist::{symbol}")
+    };
     [
         ("bare", format!("fn sink() {{ {symbol}(); }}\n")),
-        ("path_qualified", format!("fn sink() {{ crate::persist::{symbol}(); }}\n")),
-        (
-            "use_alias",
-            format!(
-                "use crate::persist::{symbol} as persist_sink;\nfn sink() {{ persist_sink(); }}\n"
-            ),
-        ),
+        ("path_qualified", format!("fn sink() {{ {path}(); }}\n")),
+        ("use_alias", format!("use {path} as persist_sink;\nfn sink() {{ persist_sink(); }}\n")),
     ]
+}
+
+const FIXTURE_LABEL: &str = "src/ephemeral.rs";
+const FIXTURE_MODULE: &str = "crate::ephemeral";
+
+/// Fixture crate: `crate::persist` declares every bare forbidden symbol as an
+/// item, so the planted spellings resolve concretely.
+fn fixture_table() -> Result<AliasTable, String> {
+    let items = FORBIDDEN_SYMBOLS.iter().filter(|symbol| !symbol.contains("::")).fold(
+        String::new(),
+        |mut acc, symbol| {
+            let _ = writeln!(acc, "pub fn {symbol}() {{}}");
+            acc
+        },
+    );
+    build_alias_table(&[("crate", "pub mod persist;\n"), ("crate::persist", items.as_str())])
 }
 
 /// Hits for `src` as the module `file_module` of a crate described by `table`.
 fn detect_in(
     src: &str,
+    label: &str,
     file_module: &str,
     table: &AliasTable,
 ) -> Result<Vec<&'static str>, String> {
-    Ok(forbidden_hits(&production_source(src, file_module, table)?))
+    Ok(forbidden_hits(&production_source(src, label, file_module, table)?))
 }
 
-/// Hits for a single self-contained fixture: `crate::ephemeral` with no re-exports.
+/// Hits for a self-contained fixture module using the persist fixture crate.
 fn detect(src: &str) -> Result<Vec<&'static str>, String> {
-    detect_in(src, "crate::ephemeral", &AliasTable::default())
+    detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &fixture_table()?)
 }
 
 #[test]
@@ -878,9 +1086,10 @@ fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
             return Err(io::Error::other("crate alias table missing after insert").into());
         };
         let file_module = module_path_of(&src_dir, path)?;
+        let label = rel_path(&root, path);
         let source = std::fs::read_to_string(path)?;
-        for symbol in detect_in(&source, &file_module, table).map_err(io::Error::other)? {
-            violations.push_str(&rel_path(&root, path));
+        for symbol in detect_in(&source, &label, &file_module, table).map_err(io::Error::other)? {
+            violations.push_str(&label);
             violations.push_str(": ");
             violations.push_str(symbol);
             violations.push('\n');
@@ -1018,13 +1227,38 @@ fn comments_naming_forbidden_symbols_are_not_hits() -> TestResult {
     Ok(())
 }
 
+/// `crate::m0::write` reaches `std::fs::write` through exactly `hops` steps.
+fn hop_chain(hops: usize) -> String {
+    (0..hops).fold(String::new(), |mut acc, i| {
+        if i + 1 == hops {
+            let _ = writeln!(acc, "pub use std::fs as m{i};");
+        } else {
+            let _ = writeln!(acc, "pub use crate::m{} as m{i};", i + 1);
+        }
+        acc
+    })
+}
+
 /// M2 (reviewer case): a non-ephemeral `lib.rs` re-export hides `std::fs`
 /// behind `crate::disk`. The ephemeral file must still report `std::fs`.
 #[test]
 fn cross_file_reexport_is_resolved() -> TestResult {
     let table = build_alias_table(&[("crate", "pub use std::fs as disk;\n")])?;
     let src = "fn sink() { crate::disk::write(\"x\", b\"x\"); }\n";
-    assert_eq!(detect_in(src, "crate::ephemeral", &table)?, vec!["std::fs"]);
+    assert_eq!(detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?, vec!["std::fs"]);
+    Ok(())
+}
+
+/// M2 r4 (reviewer case): a glob re-export of an inline module exposes
+/// `crate::disk`, and the guard must follow it to `std::fs`.
+#[test]
+fn glob_reexport_is_resolved() -> TestResult {
+    let table = build_alias_table(&[(
+        "crate",
+        "mod io {\n    pub use std::fs as disk;\n}\npub use io::*;\n",
+    )])?;
+    let src = "fn sink() { crate::disk::write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?, vec!["std::fs"]);
     Ok(())
 }
 
@@ -1037,7 +1271,7 @@ fn two_hop_reexport_through_mod_rs_is_resolved() -> TestResult {
         ("crate::foo", "pub use std::fs as x;\n"),
     ])?;
     let src = "fn sink() { let _ = crate::disk::read(\"x\"); }\n";
-    assert_eq!(detect_in(src, "crate::ephemeral", &table)?, vec!["std::fs"]);
+    assert_eq!(detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?, vec!["std::fs"]);
     Ok(())
 }
 
@@ -1050,11 +1284,40 @@ fn relative_paths_resolve_against_their_module() -> TestResult {
         ("crate::wal::inner", "pub use super::disk as d;\n"),
     ])?;
     let src = "fn sink() { let _ = crate::wal::inner::d::write(\"x\", b\"x\"); }\n";
-    assert_eq!(detect_in(src, "crate::ephemeral", &table)?, vec!["std::fs"]);
+    assert_eq!(detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?, vec!["std::fs"]);
     Ok(())
 }
 
-/// Cycle `a -> b -> a` terminates with the explicit cycle error.
+/// Fail-closed: a crate path that names nothing is an explicit error.
+#[test]
+fn unresolvable_crate_path_fails_closed() -> TestResult {
+    let table = build_alias_table(&[("crate", "pub fn other() {}\n")])?;
+    let src = "fn sink() { crate::nowhere::x(); }\n";
+    let Err(err) = detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table) else {
+        return Err("an unresolvable crate path must fail the guard".into());
+    };
+    assert_eq!(
+        err,
+        "unresolved path crate::nowhere::x in src/ephemeral.rs: no binding, module, or item"
+    );
+    Ok(())
+}
+
+/// A glob import in the scanned file must name a crate module.
+#[test]
+fn glob_import_of_non_crate_module_fails_closed() -> TestResult {
+    let src = "use std::fs::*;\nfn sink() { write(\"x\", b\"x\"); }\n";
+    let Err(err) = detect(src) else {
+        return Err("a glob of a non-crate module must fail the guard".into());
+    };
+    assert_eq!(
+        err,
+        "unresolved path std::fs::* in src/ephemeral.rs: glob import of a non-crate module"
+    );
+    Ok(())
+}
+
+/// Cycle `a -> b -> a` terminates with the complete explicit cycle error.
 #[test]
 fn reexport_cycle_is_an_explicit_error() -> TestResult {
     let table = build_alias_table(&[
@@ -1062,25 +1325,39 @@ fn reexport_cycle_is_an_explicit_error() -> TestResult {
         ("crate::b", "pub use crate::a::x;\n"),
     ])?;
     let src = "fn sink() { crate::a::x::write(); }\n";
-    let Err(err) = detect_in(src, "crate::ephemeral", &table) else {
+    let Err(err) = detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table) else {
         return Err("a re-export cycle must fail the guard".into());
     };
-    assert!(err.contains("alias cycle"), "got {err}");
+    assert_eq!(
+        err,
+        "unresolved path crate::a::x::write in src/ephemeral.rs: re-export cycle through crate::a::x::write"
+    );
     Ok(())
 }
 
-/// A chain longer than `MAX_ALIAS_HOPS` fails loudly instead of truncating.
+/// Inclusive boundary: a chain of exactly `MAX_ALIAS_HOPS` steps resolves.
+#[test]
+fn reexport_chain_at_the_hop_cap_succeeds() -> TestResult {
+    let lib = hop_chain(MAX_ALIAS_HOPS);
+    let table = build_alias_table(&[("crate", lib.as_str())])?;
+    let src = "fn sink() { crate::m0::write(\"x\", b\"x\"); }\n";
+    assert_eq!(detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?, vec!["std::fs"]);
+    Ok(())
+}
+
+/// One step past the cap fails with the complete explicit error.
 #[test]
 fn reexport_chain_past_the_hop_cap_is_an_explicit_error() -> TestResult {
-    let lines: Vec<String> =
-        (0..10).map(|i| format!("pub use crate::m{} as m{i};\n", i + 1)).collect();
-    let lib = lines.join("");
+    let lib = hop_chain(MAX_ALIAS_HOPS + 1);
     let table = build_alias_table(&[("crate", lib.as_str())])?;
     let src = "fn sink() { crate::m0::write(); }\n";
-    let Err(err) = detect_in(src, "crate::ephemeral", &table) else {
+    let Err(err) = detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table) else {
         return Err("a re-export chain past the hop cap must fail the guard".into());
     };
-    assert!(err.contains("exceeded"), "got {err}");
+    assert_eq!(
+        err,
+        "unresolved path crate::m0::write in src/ephemeral.rs: re-export chain exceeds 8 hops"
+    );
     Ok(())
 }
 
@@ -1089,7 +1366,7 @@ fn reexport_chain_past_the_hop_cap_is_an_explicit_error() -> TestResult {
 fn benign_reexport_is_not_detected() -> TestResult {
     let table = build_alias_table(&[("crate", "pub use std::path::Path as disk;\n")])?;
     let src = "fn f() { let _ = crate::disk::new(\"x\"); }\n";
-    let hits = detect_in(src, "crate::ephemeral", &table)?;
+    let hits = detect_in(src, FIXTURE_LABEL, FIXTURE_MODULE, &table)?;
     assert!(hits.is_empty(), "benign re-export must not match, hits={hits:?}");
     Ok(())
 }
