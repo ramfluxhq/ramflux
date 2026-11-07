@@ -103,3 +103,27 @@ async fn custody_inconsistent_and_invalidly_named_markers_leave_other_accounts_a
     flow?;
     Ok(())
 }
+
+#[tokio::test]
+async fn daemon_status_reports_schema_generation() -> Result {
+    let root = Root::new()?;
+    let socket = root.0.join("bus.sock");
+    let config = LocalBusConfig::new(&socket, &root.0);
+    let (stop, receiver) = watch::channel(false);
+    let flow = async {
+        let _stop = Shutdown(stop.clone());
+        let _ceremony = connect(&socket).await?;
+        let mut bus = LocalBusClient::connect(&socket).await?;
+        let status = bus.request(None, "daemon", "daemon.status", serde_json::json!({})).await?;
+        assert_eq!(
+            status["schema_generation"],
+            ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
+            "schema_generation equals ACTIVE_STORAGE_GENERATION"
+        );
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let (server, flow) = tokio::join!(crate::serve_local_bus_until(config, receiver), flow);
+    server?;
+    flow?;
+    Ok(())
+}

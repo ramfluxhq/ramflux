@@ -13,6 +13,7 @@ pub(crate) fn dispatch_daemon_bus_request(
         "daemon.status" => Ok(local_bus_ok(serde_json::json!({
             "accounts": state.accounts.len(),
             "socket_path": state.config.socket_path,
+            "schema_generation": ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION,
         }))),
         "daemon.stop" => Ok(local_bus_ok(serde_json::json!({
             "stopping": false,

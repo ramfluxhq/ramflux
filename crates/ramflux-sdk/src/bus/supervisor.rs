@@ -370,7 +370,7 @@ impl Supervisor {
             }
             "daemon.status" => {
                 return Ok(reply(
-                    serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path, "born_v3_creation":true}),
+                    serde_json::json!({"accounts": self.accounts.borrow().values().filter(|actor| actor.is_open()).count(), "socket_path": self.config.socket_path, "born_v3_creation":true, "schema_generation": ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION}),
                 ));
             }
             "daemon.stop" => {
