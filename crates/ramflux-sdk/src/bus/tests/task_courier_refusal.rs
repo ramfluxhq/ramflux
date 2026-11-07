@@ -91,7 +91,7 @@ fn attempts_of(db: &AccountDb, key: &str) -> Result<Option<u64>, SdkError> {
 }
 
 async fn scenario(row: Row, nack: Option<&str>, nack_after: usize, conflict: bool) -> Case<Done> {
-    let mut fixture = Box::pin(Fixture::new("courier-refusal-policy")).await?;
+    let fixture = Box::pin(Fixture::new("courier-refusal-policy")).await?;
     let healthy = carrier(&fixture.source, "healthy", "healthy-task")?;
     let key = row.key();
     match row {
