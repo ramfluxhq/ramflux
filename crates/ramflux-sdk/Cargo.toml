@@ -89,7 +89,7 @@ chacha20 = { version = "=0.9.1", features = ["zeroize"] }
 poly1305 = { version = "=0.8.0", features = ["zeroize"] }
 
 [dev-dependencies]
-ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
+ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget", "durability-test-hooks"] }
 rusqlite = { workspace = true }
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }

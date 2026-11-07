@@ -34,6 +34,8 @@ pub(super) struct Gateway {
     pub nack_submit: Option<String>,
     /// The first this-many submits are answered normally before `nack_submit` applies.
     pub nack_after: usize,
+    /// Reads every submit (it is recorded in `attempts`) and never answers it.
+    pub stall_submit: bool,
     pub inbox: Vec<GatewayInboxEntry>,
     pub acked: BTreeSet<String>,
     pub resumes: Vec<u64>,
@@ -70,6 +72,8 @@ pub(super) struct Fixture {
     pub source: LocalBusAccountState,
     pub peer: LocalBusAccountState,
     pub sibling: LocalBusAccountState,
+    /// A second device of the peer principal, present only for `with_second_peer`.
+    pub peer2: Option<LocalBusAccountState>,
     pub gateway: Arc<Mutex<Gateway>>,
     _server: tokio::task::JoinHandle<()>,
 }
@@ -100,6 +104,16 @@ pub(super) fn seed_pair(a: &RamfluxClient, b: &RamfluxClient) -> Result<(), SdkE
 
 impl Fixture {
     pub async fn new(label: &str) -> Case<Self> {
+        Box::pin(Self::build(label, false, None)).await
+    }
+
+    /// `second_peer` adds a second peer device so a control plan has three targets.
+    #[allow(clippy::too_many_lines)]
+    pub async fn build(
+        label: &str,
+        second_peer: bool,
+        frame_timeout: Option<Duration>,
+    ) -> Case<Self> {
         let root = runtime_tests::root(label);
         let mut source = account(&root.join("source"), "sender")?;
         let peer = account(&root.join("peer"), "peer")?;
@@ -110,9 +124,20 @@ impl Fixture {
         sibling_manifest.devices[0].target_delivery_id = "sibling".into();
         own.devices.extend(sibling_manifest.devices);
         sign_manifest(source.client.identity_root.as_ref().ok_or("root")?, &mut own, 2)?;
-        let remote = public_manifest(&peer.client)?;
+        let mut remote = public_manifest(&peer.client)?;
+        let mut peer2 =
+            if second_peer { Some(account(&root.join("peer2"), "peer")?) } else { None };
+        if let Some(second) = &mut peer2 {
+            second.client.create_device_branch("peer", "device-peer2", 1, [78; 32]);
+            let mut manifest = public_manifest(&second.client)?;
+            manifest.devices[0].target_delivery_id = "peer2".into();
+            remote.devices.extend(manifest.devices);
+            sign_manifest(peer.client.identity_root.as_ref().ok_or("root")?, &mut remote, 2)?;
+        }
         source.principal_commitment = own.principal_commitment.clone();
-        for local in [&source, &peer, &sibling] {
+        for local in
+            [Some(&source), Some(&peer), Some(&sibling), peer2.as_ref()].into_iter().flatten()
+        {
             local.client.persist_identity_directory(&own)?;
             local.client.persist_identity_directory(&remote)?;
             local.client.account_db()?.establish_friend_link(
@@ -130,6 +155,9 @@ impl Fixture {
         }
         seed_pair(&source.client, &peer.client)?;
         seed_pair(&source.client, &sibling.client)?;
+        if let Some(second) = &peer2 {
+            seed_pair(&source.client, &second.client)?;
+        }
         let gateway = Arc::new(Mutex::new(Gateway {
             manifests: BTreeMap::from([
                 (own.principal_commitment.clone(), serde_json::to_value(own)?),
@@ -185,8 +213,12 @@ impl Fixture {
         config.timeout = Duration::from_secs(600);
         config.quic_fallback_timeout = Duration::from_secs(600);
         source.engine = None;
-        source.install_test_session(GatewaySessionEngine::connect(config).await?);
-        Ok(Self { root, source, peer, sibling, gateway, _server: server })
+        let mut engine = GatewaySessionEngine::connect(config).await?;
+        if let Some(frame_timeout) = frame_timeout {
+            engine.frame_timeout = frame_timeout;
+        }
+        source.install_test_session(engine);
+        Ok(Self { root, source, peer, sibling, peer2, gateway, _server: server })
     }
 
     pub async fn inbound(&mut self) -> Case<String> {
@@ -331,12 +363,15 @@ async fn serve(
                     if let Some(hold) = hold {
                         hold.wait().await;
                     }
-                    let refused = {
+                    let (stall, refused) = {
                         let mut gateway = shared.lock().map_err(|_| "gateway")?;
                         gateway.attempts.push(submit.envelope.clone());
                         let later = gateway.attempts.len() > gateway.nack_after;
-                        gateway.nack_submit.clone().filter(|_| later)
+                        (gateway.stall_submit, gateway.nack_submit.clone().filter(|_| later))
                     };
+                    if stall {
+                        return std::future::pending().await;
+                    }
                     if let Some(reason) = refused {
                         GatewayServerFrame::Nack { reason }
                     } else {
