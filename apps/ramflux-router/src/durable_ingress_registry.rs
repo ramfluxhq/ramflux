@@ -348,27 +348,22 @@ fn exercise_router_control(
             );
         }
         "migration_drain.rs:forward" => {
-            let row = ramflux_node_core::MigrationDrainEntry {
-                account_anchor: "anchor".into(),
-                migration_id: "migration".into(),
-                entry: ramflux_node_core::InboxEntry {
-                    inbox_seq: 1,
-                    target_delivery_id: envelope.target_delivery_id.clone(),
-                    envelope: envelope.clone(),
-                },
-                retain_until: i64::MAX,
-                state: ramflux_node_core::MigrationDrainState::Pending,
-                attempts: 0,
-                next_attempt: 0,
-            };
+            let before = crate::migration_drain::DRAIN_PAST_MODE_GUARD
+                .load(std::sync::atomic::Ordering::SeqCst);
             let outcome = crate::migration_drain::forward(
                 handle.state(),
                 handle.store(),
-                no_forward(),
-                &row,
+                drain_forward(),
+                &drain_row(envelope),
                 ramflux_node_core::now_unix_seconds(),
             )?;
-            assert_eq!(outcome, ramflux_node_core::MigrationDrainOutcome::Held, "{entry}");
+            let passed = crate::migration_drain::DRAIN_PAST_MODE_GUARD
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .saturating_sub(before);
+            assert_eq!(
+                passed, 1,
+                "{entry} unmarked drain must pass the mode guard, outcome={outcome:?}"
+            );
         }
         other => return Err(format!("unknown router ingress {other}").into()),
     }
@@ -661,7 +656,7 @@ fn refuse_mesh_json_edge(
         peer,
     )?;
     assert_eq!(response.status, "200 OK", "{entry}");
-    assert_refused_bytes(&response.body, &envelope_from_body(body)?, entry);
+    assert_refused_bytes(&response.body, &d2_submit(&envelope_from_body(body)?)?, entry)?;
     Ok(())
 }
 
@@ -702,7 +697,7 @@ fn refuse_fanout_edge(
         "ramflux-gateway",
     ))?;
     assert_eq!(quic.status, 200, "{entry}");
-    assert_d2_value(&quic.body, envelope, entry);
+    assert_d2_body(&quic.body, &d2_quic(envelope), entry);
     Ok(())
 }
 
@@ -730,7 +725,25 @@ fn refuse_drain_edge(
     envelope: &ramflux_protocol::Envelope,
     entry: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let row = ramflux_node_core::MigrationDrainEntry {
+    let before =
+        crate::migration_drain::DRAIN_PAST_MODE_GUARD.load(std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::migration_drain::forward(
+        handle.state(),
+        handle.store(),
+        drain_forward(),
+        &drain_row(envelope),
+        ramflux_node_core::now_unix_seconds(),
+    )?;
+    let passed = crate::migration_drain::DRAIN_PAST_MODE_GUARD
+        .load(std::sync::atomic::Ordering::SeqCst)
+        .saturating_sub(before);
+    assert_eq!(outcome, ramflux_node_core::MigrationDrainOutcome::Held, "{entry}");
+    assert_eq!(passed, 0, "{entry} marked drain must refuse at the mode guard");
+    Ok(())
+}
+
+fn drain_row(envelope: &ramflux_protocol::Envelope) -> ramflux_node_core::MigrationDrainEntry {
+    ramflux_node_core::MigrationDrainEntry {
         account_anchor: "anchor".into(),
         migration_id: "migration".into(),
         entry: ramflux_node_core::InboxEntry {
@@ -742,34 +755,37 @@ fn refuse_drain_edge(
         state: ramflux_node_core::MigrationDrainState::Pending,
         attempts: 0,
         next_attempt: 0,
-    };
-    let outcome = crate::migration_drain::forward(
-        handle.state(),
-        handle.store(),
-        no_forward(),
-        &row,
-        ramflux_node_core::now_unix_seconds(),
-    )?;
-    assert_eq!(outcome, ramflux_node_core::MigrationDrainOutcome::Held, "{entry}");
+    }
+}
+
+fn d2_submit(
+    envelope: &ramflux_protocol::Envelope,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(serde_json::to_value(crate::durable_mode::rejected_security(envelope))?)
+}
+
+fn d2_mesh(
+    envelope: &ramflux_protocol::Envelope,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    Ok(serde_json::to_value(crate::durable_mode::rejected_security_mesh(envelope))?)
+}
+
+fn d2_quic(envelope: &ramflux_protocol::Envelope) -> serde_json::Value {
+    crate::durable_mode::refused_quic(envelope).body
+}
+
+fn assert_refused_bytes(
+    body: &[u8],
+    expected: &serde_json::Value,
+    entry: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value: serde_json::Value = serde_json::from_slice(body)?;
+    assert_d2_body(&value, expected, entry);
     Ok(())
 }
 
-fn assert_refused_bytes(body: &[u8], envelope: &ramflux_protocol::Envelope, entry: &str) {
-    let value: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
-    assert_d2_value(&value, envelope, entry);
-}
-
-fn assert_d2_value(value: &serde_json::Value, envelope: &ramflux_protocol::Envelope, entry: &str) {
-    let outcome = value
-        .get("outcome")
-        .or_else(|| value.get("delivery").and_then(|delivery| delivery.get("outcome")))
-        .and_then(serde_json::Value::as_str);
-    let target = value
-        .get("target_delivery_id")
-        .or_else(|| value.get("delivery").and_then(|delivery| delivery.get("target_delivery_id")))
-        .and_then(serde_json::Value::as_str);
-    assert_eq!(outcome, Some(crate::durable_mode::OUTCOME), "{entry}: {value}");
-    assert_eq!(target, Some(envelope.target_delivery_id.as_str()), "{entry}: {value}");
+fn assert_d2_body(actual: &serde_json::Value, expected: &serde_json::Value, entry: &str) {
+    assert_eq!(actual, expected, "{entry}: {actual}");
 }
 
 #[cfg(feature = "itest-http")]
@@ -783,7 +799,7 @@ fn assert_refused_http(
     let status = head.lines().next().ok_or("missing HTTP status line")?;
     assert_eq!(status, "HTTP/1.1 200 OK", "{entry}: {text}");
     let value: serde_json::Value = serde_json::from_str(body.trim_end())?;
-    assert_d2_value(&value, envelope, entry);
+    assert_d2_body(&value, &d2_submit(envelope)?, entry);
     Ok(())
 }
 
@@ -824,18 +840,18 @@ fn assert_http_families(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (status, body) = post_itest_http(handle, "/mvp0/envelope", &serde_json::to_vec(envelope)?)?;
     assert_eq!(status, "HTTP/1.1 200 OK", "http envelope: {status}");
-    assert_d2_value(&body, envelope, "http envelope");
+    assert_d2_body(&body, &d2_submit(envelope)?, "http envelope");
     let (status, body) = post_itest_http(
         handle,
         "/mvp10/own-devices/fanout",
         &serde_json::to_vec(&fanout_request(envelope))?,
     )?;
     assert_eq!(status, "HTTP/1.1 200 OK", "http fanout: {status}");
-    assert_d2_value(&body, envelope, "http fanout");
+    assert_d2_body(&body, &d2_submit(envelope)?, "http fanout");
     let (status, body) =
         post_itest_http(handle, "/mvp1/envelope-authority", &serde_json::to_vec(envelope)?)?;
     assert_eq!(status, "HTTP/1.1 200 OK", "http authority: {status}");
-    assert_d2_value(&body, envelope, "http authority");
+    assert_d2_body(&body, &d2_submit(envelope)?, "http authority");
     Ok(())
 }
 
@@ -879,10 +895,11 @@ fn assert_tls_families(
     pki: &MeshPki,
     envelope: &ramflux_protocol::Envelope,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let envelope_body =
+    let (status, envelope_body) =
         tls_marked_post(handle, pki, "/mvp0/envelope", "ramflux-gateway", envelope, &pki.gateway)?;
-    assert_d2_value(&envelope_body, envelope, "tls envelope");
-    let fanout_body = tls_marked_post(
+    assert_eq!(status, 200, "tls envelope");
+    assert_d2_body(&envelope_body, &d2_mesh(envelope)?, "tls envelope");
+    let (status, fanout_body) = tls_marked_post(
         handle,
         pki,
         "/mvp10/own-devices/fanout",
@@ -890,8 +907,9 @@ fn assert_tls_families(
         &fanout_request(envelope),
         &pki.gateway,
     )?;
-    assert_d2_value(&fanout_body, envelope, "tls fanout");
-    let authority_body = tls_marked_post(
+    assert_eq!(status, 200, "tls fanout");
+    assert_d2_body(&fanout_body, &d2_submit(envelope)?, "tls fanout");
+    let (status, authority_body) = tls_marked_post(
         handle,
         pki,
         "/mvp1/envelope-authority",
@@ -899,7 +917,8 @@ fn assert_tls_families(
         envelope,
         &pki.federation,
     )?;
-    assert_d2_value(&authority_body, envelope, "tls authority");
+    assert_eq!(status, 200, "tls authority");
+    assert_d2_body(&authority_body, &d2_submit(envelope)?, "tls authority");
     Ok(())
 }
 
@@ -910,7 +929,7 @@ fn tls_marked_post<T: serde::Serialize>(
     peer: &str,
     payload: &T,
     client_tls: &ramflux_transport::MeshTlsConfig,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+) -> Result<(u16, serde_json::Value), Box<dyn std::error::Error>> {
     let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &pki.router)?;
     let endpoint = server.local_addr()?.to_string();
     let handle = handle.clone();
@@ -924,21 +943,15 @@ fn tls_marked_post<T: serde::Serialize>(
             .map_err(|error| error.to_string())?;
         Ok(())
     });
-    let body: serde_json::Value = match ramflux_transport::mesh_http_post_json(
+    let (status, body) = ramflux_transport::mesh_http_post_status_body(
         &endpoint,
         path,
         client_tls,
         "ramflux-router",
         payload,
-    ) {
-        Ok(body) => body,
-        Err(ramflux_transport::TransportError::HttpStatus { status, body }) => {
-            return Err(format!("tls {path} status {status}: {body}").into());
-        }
-        Err(error) => return Err(error.into()),
-    };
+    )?;
     worker.join().map_err(|_| "tls worker panicked")??;
-    Ok(body)
+    Ok((status, serde_json::from_slice(&body)?))
 }
 
 fn assert_quic_families(
@@ -956,7 +969,7 @@ fn assert_quic_families(
         "ramflux-gateway",
     ))?;
     assert_eq!(submit.status, 200, "quic envelope");
-    assert_d2_value(&submit.body, envelope, "quic envelope");
+    assert_d2_body(&submit.body, &d2_mesh(envelope)?, "quic envelope");
     let fanout = runtime.block_on(crate::handlers::handle_mesh_quic_request_value(
         &ramflux_transport::GatewayQuicRequest {
             method: "POST".into(),
@@ -967,7 +980,7 @@ fn assert_quic_families(
         "ramflux-gateway",
     ))?;
     assert_eq!(fanout.status, 200, "quic fanout");
-    assert_d2_value(&fanout.body, envelope, "quic fanout");
+    assert_d2_body(&fanout.body, &d2_quic(envelope), "quic fanout");
     let authority = runtime.block_on(crate::handlers::handle_mesh_quic_request_value(
         &ramflux_transport::GatewayQuicRequest {
             method: "POST".into(),
@@ -978,7 +991,7 @@ fn assert_quic_families(
         "ramflux-federation",
     ))?;
     assert_eq!(authority.status, 200, "quic authority");
-    assert_d2_value(&authority.body, envelope, "quic authority");
+    assert_d2_body(&authority.body, &d2_submit(envelope)?, "quic authority");
     Ok(())
 }
 
@@ -1369,6 +1382,21 @@ fn no_forward() -> crate::router_engine::AsyncForwardContext<'static> {
         client: None,
         semaphore: SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(32))),
         timeout: Duration::from_secs(20),
+    }
+}
+
+fn drain_forward() -> crate::router_engine::AsyncForwardContext<'static> {
+    static SEMAPHORE: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    static CLIENT: std::sync::OnceLock<crate::router_runtime::LocalFederationForwardClient> =
+        std::sync::OnceLock::new();
+    crate::router_engine::AsyncForwardContext {
+        client: Some(CLIENT.get_or_init(|| crate::router_runtime::LocalFederationForwardClient {
+            url: "http://127.0.0.1:1/forward".into(),
+            admin_token: None,
+            source_node_id: "A".into(),
+        })),
+        semaphore: SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(32))),
+        timeout: Duration::from_millis(50),
     }
 }
 

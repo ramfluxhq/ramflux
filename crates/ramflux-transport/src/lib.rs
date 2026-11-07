@@ -54,8 +54,8 @@ pub use error::TransportError;
 pub use loopback::transport_submit_result;
 pub use mesh_http::{
     MeshHttpClient, close_mesh_server_stream, mesh_http_get_json, mesh_http_post_json,
-    mesh_http_post_json_with_peer_ca_pems, read_mesh_http_request, write_mesh_json_response,
-    write_mesh_text_response,
+    mesh_http_post_json_with_peer_ca_pems, mesh_http_post_status_body, read_mesh_http_request,
+    write_mesh_json_response, write_mesh_text_response,
 };
 pub use mesh_quic::{
     MeshQuicAcceptedBiStream, MeshQuicAcceptedRequest, MeshQuicAcceptedWireRequest,

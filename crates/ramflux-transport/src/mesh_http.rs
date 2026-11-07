@@ -557,6 +557,25 @@ fn mesh_http_json_request(
     })
 }
 
+fn mesh_http_json_request_status_body(
+    request: MeshHttpClientRequest<'_>,
+) -> Result<(u16, Vec<u8>), TransportError> {
+    let endpoint = normalized_endpoint(request.endpoint);
+    record_mesh_client_request();
+    let mut connection = new_mesh_http_connection(endpoint, &request)?;
+    let request_bytes =
+        mesh_http_request_bytes(request.method, endpoint, request.path, request.body, false)?;
+    connection.stream.sock.install(request.timeouts);
+    connection.stream.write_all(&request_bytes)?;
+    connection.stream.flush()?;
+    let status_and_body = {
+        let mut reader = BufReader::new(&mut connection.stream);
+        read_mesh_http_status_and_body(&mut reader)
+    };
+    close_mesh_client_connection(connection);
+    status_and_body
+}
+
 fn mesh_http_json_request_with_timeouts(
     request: MeshHttpClientRequest<'_>,
 ) -> Result<Vec<u8>, TransportError> {
@@ -673,6 +692,37 @@ where
     Ok(serde_json::from_slice(&response)?)
 }
 
+/// POST JSON and return the HTTP status code plus the raw response body.
+///
+/// Unlike [`mesh_http_post_json`], this does not treat every 2xx status as success.
+///
+/// # Errors
+/// Returns an error when the JSON request cannot be encoded or the TLS/HTTP exchange fails.
+pub fn mesh_http_post_status_body<T>(
+    endpoint: &str,
+    path: &str,
+    tls: &MeshTlsConfig,
+    server_name: &str,
+    value: &T,
+) -> Result<(u16, Vec<u8>), TransportError>
+where
+    T: serde::Serialize,
+{
+    let body = serde_json::to_vec(value)?;
+    mesh_http_json_request_status_body(MeshHttpClientRequest {
+        method: "POST",
+        endpoint,
+        path,
+        tls,
+        server_name,
+        peer_ca_pems: None,
+        body: Some(&body),
+        timeouts: MeshHttpTimeouts::DEFAULT,
+        resolver: None,
+        resolver_pool: None,
+    })
+}
+
 /// # Errors
 /// Returns an error when the JSON request cannot be encoded, the peer CA root cannot be loaded,
 /// the TLS/HTTP exchange fails, or the response cannot be decoded.
@@ -785,9 +835,9 @@ fn read_mesh_http_response(
     read_mesh_http_response_from_reader(&mut reader)
 }
 
-fn read_mesh_http_response_from_reader<R: BufRead>(
+fn read_mesh_http_status_and_body<R: BufRead>(
     reader: &mut R,
-) -> Result<Vec<u8>, TransportError> {
+) -> Result<(u16, Vec<u8>), TransportError> {
     let mut status_line = String::new();
     reader.read_line(&mut status_line)?;
     let mut parts = status_line.split_whitespace();
@@ -795,6 +845,8 @@ fn read_mesh_http_response_from_reader<R: BufRead>(
         parts.next().ok_or_else(|| TransportError::Http("missing HTTP version".to_owned()))?;
     let status_code =
         parts.next().ok_or_else(|| TransportError::Http("missing HTTP status code".to_owned()))?;
+    let status: u16 =
+        status_code.parse().map_err(|_| TransportError::Http("invalid HTTP status code".into()))?;
     let mut content_length = None;
     loop {
         let mut line = String::new();
@@ -815,13 +867,18 @@ fn read_mesh_http_response_from_reader<R: BufRead>(
     };
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
-    if status_code.starts_with('2') {
+    Ok((status, body))
+}
+
+fn read_mesh_http_response_from_reader<R: BufRead>(
+    reader: &mut R,
+) -> Result<Vec<u8>, TransportError> {
+    let (status, body) = read_mesh_http_status_and_body(reader)?;
+    if (200..300).contains(&status) {
         Ok(body)
     } else {
         Err(TransportError::HttpStatus {
-            status: status_code
-                .parse()
-                .map_err(|_| TransportError::Http("invalid HTTP status code".into()))?,
+            status,
             body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
@@ -917,8 +974,8 @@ mod tests {
         MeshHttpClient, MeshHttpClientRequest, MeshHttpTimeouts, MeshResolver, ResolverPool,
         connect_mesh_tcp, mesh_http_get_json, mesh_http_json_request_with_timeouts,
         mesh_http_pool_key, mesh_http_post_json_with_peer_ca_pems, mesh_http_request_bytes,
-        read_mesh_http_request, read_mesh_http_response_from_reader, system_resolve,
-        write_mesh_json_response,
+        read_mesh_http_request, read_mesh_http_response_from_reader,
+        read_mesh_http_status_and_body, system_resolve, write_mesh_json_response,
     };
 
     #[test]
@@ -968,6 +1025,21 @@ mod tests {
         );
         let body = read_mesh_http_response_from_reader(&mut response)?;
         assert_eq!(body, br#"{"ok":true}"#);
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_client_status_reader_returns_exact_non_200() -> Result<(), Box<dyn std::error::Error>> {
+        let mut response = std::io::Cursor::new(
+            b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),
+        );
+        let (status, body) = read_mesh_http_status_and_body(&mut response)?;
+        assert_eq!(status, 201);
+        assert_eq!(body, b"{}");
+        let mut filtered = std::io::Cursor::new(
+            b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_vec(),
+        );
+        assert!(read_mesh_http_response_from_reader(&mut filtered).is_ok());
         Ok(())
     }
 

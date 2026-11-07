@@ -13,6 +13,12 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(test)]
+pub(crate) static DRAIN_PAST_MODE_GUARD: AtomicU64 = AtomicU64::new(0);
+
 pub(crate) struct MigrationDrain {
     stopped: Arc<(Mutex<bool>, Condvar)>,
     worker: Option<JoinHandle<()>>,
@@ -177,6 +183,8 @@ pub(crate) fn forward(
     if ramflux_protocol::ephemeral::require_durable(&row.entry.envelope).is_err() {
         return Ok(MigrationDrainOutcome::Held);
     }
+    #[cfg(test)]
+    DRAIN_PAST_MODE_GUARD.fetch_add(1, Ordering::SeqCst);
     let Some(client) = context.client else {
         return Ok(MigrationDrainOutcome::Held);
     };
