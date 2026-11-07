@@ -15,6 +15,7 @@ pub(crate) use capability::{EphemeralCapabilityState, new_router_boot_id};
 pub use route::EphemeralDurableSnapshot;
 pub(crate) use route::EphemeralReplaySet;
 pub use route::{
-    EPHEMERAL_REPLAY_BOUND, EphemeralDropReason, EphemeralReplayAdmit, EphemeralRouteRequest,
-    EphemeralRouteResponse, EphemeralRouteResult, ephemeral_replay_digest,
+    EPHEMERAL_REPLAY_BOUND, EPHEMERAL_REPLAY_BUDGET_BYTES, EPHEMERAL_REPLAY_ENTRY_BYTES,
+    EphemeralDropReason, EphemeralReplayAdmit, EphemeralRouteRequest, EphemeralRouteResponse,
+    EphemeralRouteResult, ephemeral_replay_digest,
 };
