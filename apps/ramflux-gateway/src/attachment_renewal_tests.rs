@@ -129,6 +129,9 @@ fn large_home_egress_clamps_w_and_never_falls_back() -> Result {
     assert_eq!(FORWARD_PATH, "/s9/attachments/renew/forward");
     Ok(())
 }
+/// The exact refusal for a grant whose bytes were altered after signing.
+const TAMPERED: &str = "grant signature";
+
 #[test]
 fn challenge_preflight_refuses_each_predicate_in_isolation_before_any_egress() -> Result {
     let j = fixture()?;
@@ -168,7 +171,7 @@ fn challenge_preflight_refuses_each_predicate_in_isolation_before_any_egress() -
     assert_eq!(run(&q, &config, &receipt_free, &target, now), err("capability receipt"));
     let mut tampered = cap.clone();
     tampered[20] ^= 1;
-    assert!(run(&q, &config, &tampered, &target, now).is_err());
+    assert_eq!(run(&q, &config, &tampered, &target, now), err(TAMPERED));
     // Requester: the session identity must be the grantee.
     let mut other = q.clone();
     other.device_id.push('x');
@@ -619,6 +622,139 @@ mod relay_clamp {
         assert_eq!(clamped.attestation.expires_at, minted.expires_at);
         assert!(admit(&clamped, 2).is_ok());
         let _ = std::fs::remove_dir_all(&path);
+        Ok(())
+    }
+}
+
+mod entrypoint {
+    //! `challenge_via` is the egress entrypoint: refusals must happen before the session is
+    //! refreshed and before the single POST, proven with independently signed grants.
+    use super::*;
+    use ed25519_dalek::Signer;
+    use std::cell::{Cell, RefCell};
+
+    struct Counting {
+        refreshes: Cell<usize>,
+        posts: RefCell<Vec<(String, serde_json::Value)>>,
+    }
+    impl HomeLink for Counting {
+        fn node_id(&self) -> &'static str {
+            "home"
+        }
+        fn refresh(
+            &self,
+            _: &GatewaySessionRuntime,
+            _: u64,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> {
+            self.refreshes.set(self.refreshes.get() + 1);
+            std::future::ready(Ok(()))
+        }
+        fn post(
+            &self,
+            path: &str,
+            body: serde_json::Value,
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<u8>>> {
+            self.posts.borrow_mut().push((path.into(), body));
+            std::future::ready(Ok(b"reply".to_vec()))
+        }
+    }
+
+    fn runtime() -> Result<GatewaySessionRuntime> {
+        let root = ramflux_crypto::create_identity_root("resident", [31; 32]);
+        let branch = ramflux_crypto::create_device_branch("resident", "device", 1, [32; 32]);
+        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
+        Ok(GatewaySessionRuntime {
+            session_push: None,
+            push_limit: 256,
+            source_identity: source.clone(),
+            session_id: "s".into(),
+            resume_token: "r".into(),
+            principal_id: "resident".into(),
+            device_id: "device".into(),
+            target_delivery_id: source.storage_key().into(),
+            branch_public_key: ramflux_protocol::encode_base64url(
+                branch.signing_key.verifying_key().to_bytes(),
+            ),
+            device_epoch: 1,
+            supports_forward_ack: false,
+        })
+    }
+
+    /// A grant for the session's requester, signed by an owner key of our own, carrying
+    /// exactly `rights`, wrapped in a source-signed registration receipt.
+    fn capability_with_rights(
+        base: &VerifiedScopedGrant,
+        requester: &QualifiedOwner,
+        rights: u32,
+    ) -> Result<Vec<u8>> {
+        let owner_key = ed25519_dalek::SigningKey::from_bytes(&[0x51; 32]);
+        let mut g = base.grant().clone();
+        g.owner.signing_public_key = owner_key.verifying_key().to_bytes();
+        g.grantee = requester.clone();
+        g.rights = rights;
+        let signature = owner_key.sign(&g.signing_bytes()?).to_bytes();
+        let verified = ScopedAttachmentGrant::decode_signed(&g.signed_bytes(&signature)?)?;
+        let receipt = ramflux_protocol::large_attachment::AttachmentRegistrationReceipt {
+            grant_hash: g.hash()?,
+            grant_epoch: g.epoch,
+            source_authority: "node-owner".into(),
+            authority_generation: 3,
+            expires_at: g.expires_at,
+        };
+        let source = ed25519_dalek::SigningKey::from_bytes(&[0x60; 32]);
+        let receipt_sig = source.sign(&receipt.signing_bytes()?).to_bytes();
+        Ok(receipt.capability(&verified, &receipt_sig, &source.verifying_key().to_bytes())?)
+    }
+
+    #[tokio::test]
+    async fn challenge_entrypoint_refuses_missing_rights_with_zero_posts() -> Result {
+        let j = fixture()?;
+        let r = &j["renewal"];
+        let base = grant(&j)?;
+        let request = RenewalRequest {
+            operation: bytes(&r["renewal_operation_hex"])?,
+            body: bytes(&r["renewal_body_hex"])?,
+        };
+        let (renew, target) = request.target()?;
+        assert_eq!(target.op, 1, "the target is a GET");
+        let config = HomeRenewalConfig {
+            source_issuer: renew.audience.clone(),
+            relay_audience: target.audience.clone(),
+            authority_generation: 3,
+            home_key: ed25519_dalek::SigningKey::from_bytes(&[0x40; 32]),
+        };
+        let runtime = runtime()?;
+        let requester = session_requester(&runtime, "home")?;
+        let encoded = target.canonical_bytes()?;
+        let now = base.grant().issued_at + 1;
+        let run = |rights: u32| {
+            let link = Counting { refreshes: Cell::new(0), posts: RefCell::default() };
+            let cap = capability_with_rights(&base, &requester, rights);
+            let (runtime, config, encoded) = (&runtime, &config, &encoded);
+            async move {
+                let out = challenge_via(&link, runtime, config, &cap?, encoded, now).await;
+                Ok::<_, Box<dyn std::error::Error>>((out, link))
+            }
+        };
+        // GET + Renew: reaches the single POST on the challenge path.
+        let (out, link) = run(1 | 8).await?;
+        assert_eq!(out?, b"reply".to_vec());
+        assert_eq!(link.refreshes.get(), 1);
+        let posted: Vec<String> = link.posts.borrow().iter().map(|p| p.0.clone()).collect();
+        assert_eq!(posted, vec![CHALLENGE_PATH.to_owned()]);
+        // Missing the Renew right (GET only), and missing the target's own right (Renew
+        // only): each exact refusal, before the refresh and with zero posts.
+        for (name, rights) in [("missing Renew", 1_u32), ("missing target right", 8)] {
+            let (out, link) = run(rights).await?;
+            let error = out.err().ok_or(name)?;
+            assert_eq!(
+                error.downcast_ref::<FormatError>(),
+                Some(&FormatError("renewal rights")),
+                "{name}"
+            );
+            assert_eq!(link.refreshes.get(), 0, "{name}");
+            assert!(link.posts.borrow().is_empty(), "{name}");
+        }
         Ok(())
     }
 }

@@ -807,14 +807,21 @@ fn serve_attachment_peer(
     body: &[u8],
     received: std::time::Instant,
 ) -> Result<(), ramflux_node_core::NodeCoreError> {
-    let reply = crate::attachment_renewal::serve_peer(
-        peer_spiffe_uri,
-        body,
-        &context.state,
-        &context.router,
-        &context.discovery,
-        received,
-    );
+    // The listener's socket deadline is tightened to the originating budget once the
+    // envelope names it, so a late read, forward or write is cut off at that deadline.
+    let guard = std::cell::RefCell::new(None);
+    let tighten = |deadline: std::time::Instant| {
+        ramflux_transport::mesh_request_deadline(stream, deadline)
+            .map(|g| *guard.borrow_mut() = Some(g))
+            .map_err(|_| ramflux_node_core::attachment::RenewalRefusal::Busy)
+    };
+    let server = crate::attachment_renewal::PeerServer {
+        state: &context.state,
+        router: &context.router,
+        discovery: &context.discovery,
+    };
+    let reply =
+        crate::attachment_renewal::serve_peer(&server, peer_spiffe_uri, body, received, &tighten);
     if reply.status == "200 OK" {
         let value: serde_json::Value =
             serde_json::from_slice(&reply.body).unwrap_or(serde_json::Value::Null);

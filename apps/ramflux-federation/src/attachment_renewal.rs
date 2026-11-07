@@ -33,15 +33,29 @@ pub(crate) enum Kind {
 pub(crate) struct PeerEnvelope {
     pub(crate) kind: Kind,
     pub(crate) home_node: String,
+    /// The remainder of the originating route budget when this envelope was sent.
+    pub(crate) budget_ms: u64,
     pub(crate) request: Value,
 }
 
-/// A federation -> A router.
+/// A federation -> A router. `budget_ms` is what is left of the originating budget.
 #[derive(Debug, Serialize)]
 struct SourceEnvelope<'a> {
     kind: Kind,
     peer_node: &'a str,
+    budget_ms: u64,
     request: &'a Value,
+}
+
+/// The deadline an envelope's carried budget gives at the moment it was received. Zero
+/// and anything over the ten-second route ceiling are refused as malformed.
+fn hop_deadline(budget_ms: u64, received: Instant) -> Result<Instant, RenewalRefusal> {
+    ramflux_node_core::migration_hop_deadline(budget_ms, received)
+        .map_err(|_| RenewalRefusal::Invalid)
+}
+/// What is left of `deadline`, to be carried to the next hop; none left is `Busy`.
+fn remainder(deadline: Instant) -> Result<u64, RenewalRefusal> {
+    ramflux_node_core::migration_hop_budget(deadline).map_err(|_| RenewalRefusal::Busy)
 }
 
 /// This node's view of one peer, read from its own trust state.
@@ -97,7 +111,8 @@ pub(crate) fn inbound_peer(
     body: &[u8],
     view: &PeerView,
     router: &dyn Forwarder,
-    deadline: Instant,
+    received: Instant,
+    bound: &dyn Fn(Instant) -> Result<(), RenewalRefusal>,
 ) -> Reply {
     let identity = match peer_spiffe_uri.map(parse_mesh_spiffe_uri) {
         Some(Ok(identity)) if identity.service_id == FEDERATION_SERVICE => identity,
@@ -109,6 +124,10 @@ pub(crate) fn inbound_peer(
     let Ok(envelope) = serde_json::from_slice::<PeerEnvelope>(body) else {
         return refused(RenewalRefusal::Invalid);
     };
+    let deadline = match hop_deadline(envelope.budget_ms, received) {
+        Ok(deadline) => deadline,
+        Err(code) => return refused(code),
+    };
     let facts = PeerRenewalFacts {
         tls_node: &identity.node_id,
         home_node: &envelope.home_node,
@@ -119,15 +138,22 @@ pub(crate) fn inbound_peer(
     if let Err(code) = admit_peer_renewal(&facts) {
         return refused(code);
     }
-    let forward = serde_json::to_vec(&SourceEnvelope {
-        kind: envelope.kind,
-        peer_node: &identity.node_id,
-        request: &envelope.request,
-    });
-    let result = forward
-        .map_err(|_| RenewalRefusal::Invalid)
-        .and_then(|bytes| budget(deadline).map(|()| bytes))
-        .and_then(|bytes| router.post("", ROUTER_SOURCE_PATH, bytes, deadline));
+    // Reads, forwarding and output are all bounded by the originating deadline: the
+    // listener tightens its socket deadline to it, and the next hop gets only the remainder.
+    let result = bound(deadline)
+        .and_then(|()| remainder(deadline))
+        .and_then(|budget_ms| {
+            serde_json::to_vec(&SourceEnvelope {
+                kind: envelope.kind,
+                peer_node: &identity.node_id,
+                budget_ms,
+                request: &envelope.request,
+            })
+            .map_err(|_| RenewalRefusal::Invalid)
+        })
+        .and_then(|bytes| router.post("", ROUTER_SOURCE_PATH, bytes, deadline))
+        // Nothing is returned for work that finished after the deadline.
+        .and_then(|bytes| budget(deadline).map(|()| bytes));
     match result {
         Ok(bytes) => Reply { status: "200 OK", body: bytes },
         Err(code) => refused(code),
@@ -142,6 +168,8 @@ pub(crate) struct LocalRequest {
     pub(crate) admin_token: String,
     pub(crate) source_node: String,
     pub(crate) kind: Kind,
+    /// The remainder of the originating route budget when the router sent this.
+    pub(crate) budget_ms: u64,
     pub(crate) request: Value,
 }
 
@@ -151,7 +179,7 @@ pub(crate) fn local_peer(
     own_node: &str,
     view: &dyn Fn(&str) -> PeerView,
     peer: &dyn Forwarder,
-    deadline: Instant,
+    received: Instant,
 ) -> Result<Reply, NodeCoreError> {
     if body.len() > MAX_BODY {
         return Ok(text("413 Payload Too Large", "body"));
@@ -159,6 +187,10 @@ pub(crate) fn local_peer(
     let request: LocalRequest = serde_json::from_slice(body)
         .map_err(|_| NodeCoreError::ItestHttp("invalid attachment renewal request".into()))?;
     crate::admin_http::require_admin_token(configured_admin_token, &request.admin_token)?;
+    let deadline = match hop_deadline(request.budget_ms, received) {
+        Ok(deadline) => deadline,
+        Err(code) => return Ok(refused(code)),
+    };
     let view = view(&request.source_node);
     // The outbound claim is this node's own id, and the TLS check happens at the peer.
     let facts = PeerRenewalFacts {
@@ -172,15 +204,18 @@ pub(crate) fn local_peer(
         return Ok(refused(code));
     }
     let source_node = request.source_node;
-    let envelope = PeerEnvelope {
-        kind: request.kind,
-        home_node: own_node.to_owned(),
-        request: request.request,
-    };
-    let result = serde_json::to_vec(&envelope)
-        .map_err(|_| RenewalRefusal::Invalid)
-        .and_then(|bytes| budget(deadline).map(|()| bytes))
-        .and_then(|bytes| peer.post(&source_node, PEER_PATH, bytes, deadline));
+    let result = remainder(deadline)
+        .and_then(|budget_ms| {
+            serde_json::to_vec(&PeerEnvelope {
+                kind: request.kind,
+                home_node: own_node.to_owned(),
+                budget_ms,
+                request: request.request,
+            })
+            .map_err(|_| RenewalRefusal::Invalid)
+        })
+        .and_then(|bytes| peer.post(&source_node, PEER_PATH, bytes, deadline))
+        .and_then(|bytes| budget(deadline).map(|()| bytes));
     Ok(match result {
         Ok(bytes) => Reply { status: "200 OK", body: bytes },
         Err(code) => refused(code),
@@ -288,21 +323,27 @@ fn pin_answer_for(
     Ok(state.attachment_authority().answer(store, &snapshot, node_id, crate::now_unix_seconds()?))
 }
 
+/// What the mesh listener needs to serve `/s9/attachments/renew/peer`.
+pub(crate) struct PeerServer<'a> {
+    pub(crate) state: &'a crate::SharedFederationTrustState,
+    pub(crate) router: &'a crate::RouterMeshClient,
+    pub(crate) discovery: &'a crate::FederationDiscoverySurface,
+}
+
 /// `/s9/attachments/renew/peer` on the mesh listener.
 pub(crate) fn serve_peer(
+    server: &PeerServer<'_>,
     peer_spiffe_uri: Option<&str>,
     body: &[u8],
-    state: &crate::SharedFederationTrustState,
-    router: &crate::RouterMeshClient,
-    discovery: &crate::FederationDiscoverySurface,
     received: Instant,
+    bound: &dyn Fn(Instant) -> Result<(), RenewalRefusal>,
 ) -> Reply {
     let tls_node = peer_spiffe_uri
         .and_then(|uri| parse_mesh_spiffe_uri(uri).ok())
         .map(|identity| identity.node_id)
         .unwrap_or_default();
-    let view = view_of(state, discovery, &tls_node);
-    inbound_peer(peer_spiffe_uri, body, &view, &LocalRouter(router), received + BUDGET)
+    let view = view_of(server.state, server.discovery, &tls_node);
+    inbound_peer(peer_spiffe_uri, body, &view, &LocalRouter(server.router), received, bound)
 }
 
 /// `/internal/attachment-renewal/peer` on the admin listener.
@@ -317,12 +358,9 @@ pub(crate) fn serve_local(
         &context.discovery.node_id,
         &|node| view_of(&context.state, &context.discovery, node),
         &AdmittedPeer { state: &context.state, tls: &context.router.tls },
-        received + BUDGET,
+        received,
     )
 }
-
-/// One budget for the whole route (design section 1).
-const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests;

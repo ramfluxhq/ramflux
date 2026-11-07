@@ -72,6 +72,7 @@ fn challenge(peer: &str, home: &str) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "kind": "challenge",
         "peer_node": peer,
+        "budget_ms": 10_000,
         "request": {
             "capability": [1], "target_operation": [2],
             "requester": {"account_anchor": "anchor-1", "device_id": "d", "device_epoch": 1,
@@ -104,6 +105,7 @@ fn forward(peer: &str, home: &str) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "kind": "forward",
         "peer_node": peer,
+        "budget_ms": 10_000,
         "request": {"attestation": w.canonical_bytes().unwrap(), "peer_node": "client-claim"}
     }))
     .unwrap()
@@ -225,26 +227,26 @@ fn verdict_refusals_and_malformed_bodies_are_typed() {
     let bad: Vec<(&str, Vec<u8>)> = vec![
         ("not json", b"not json".to_vec()),
         ("unknown kind", br#"{"kind":"other"}"#.to_vec()),
-        ("no requester", br#"{"kind":"challenge","peer_node":"x","request":{}}"#.to_vec()),
+        ("no requester", br#"{"kind":"challenge","peer_node":"x","budget_ms":10000,"request":{}}"#.to_vec()),
         (
             "no anchor",
-            br#"{"kind":"challenge","peer_node":"x","request":{"requester":{"home_node_id":"x"}}}"#
+            br#"{"kind":"challenge","peer_node":"x","budget_ms":10000,"request":{"requester":{"home_node_id":"x"}}}"#
                 .to_vec(),
         ),
         (
             "no home",
-            br#"{"kind":"challenge","peer_node":"x","request":{"requester":{"account_anchor":"a"}}}"#
+            br#"{"kind":"challenge","peer_node":"x","budget_ms":10000,"request":{"requester":{"account_anchor":"a"}}}"#
                 .to_vec(),
         ),
-        ("request not an object", br#"{"kind":"challenge","peer_node":"x","request":[]}"#.to_vec()),
-        ("forward without W", br#"{"kind":"forward","peer_node":"x","request":{}}"#.to_vec()),
+        ("request not an object", br#"{"kind":"challenge","peer_node":"x","budget_ms":10000,"request":[]}"#.to_vec()),
+        ("forward without W", br#"{"kind":"forward","peer_node":"x","budget_ms":10000,"request":{}}"#.to_vec()),
         (
             "W not bytes",
-            br#"{"kind":"forward","peer_node":"x","request":{"attestation":"abc"}}"#.to_vec(),
+            br#"{"kind":"forward","peer_node":"x","budget_ms":10000,"request":{"attestation":"abc"}}"#.to_vec(),
         ),
         (
             "W undecodable",
-            br#"{"kind":"forward","peer_node":"x","request":{"attestation":[1,2,3]}}"#.to_vec(),
+            br#"{"kind":"forward","peer_node":"x","budget_ms":10000,"request":{"attestation":[1,2,3]}}"#.to_vec(),
         ),
     ];
     for (name, body) in &bad {
@@ -307,4 +309,52 @@ fn the_shared_route_budget_reaches_every_backend_call_and_expiry_is_busy() {
     assert_eq!(*backend.deadlines.borrow(), vec![deadline, deadline]);
     // The whole route budget is the protocol's ten seconds.
     assert_eq!(ROUTE_BUDGET, std::time::Duration::from_secs(10));
+}
+
+fn with_budget(body: &[u8], budget_ms: u64) -> Vec<u8> {
+    let mut v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    v["budget_ms"] = json!(budget_ms);
+    serde_json::to_vec(&v).unwrap_or_default()
+}
+
+#[test]
+fn the_carried_budget_shortens_the_deadline_and_is_validated_at_both_ends() {
+    // 0 and anything over the ten-second ceiling are malformed; 1 and 10000 are accepted.
+    for (budget, ok) in [(0, false), (1, true), (10_000, true), (10_001, false)] {
+        let backend = Fake::new("node-b");
+        let reply = run(&backend, &with_budget(&challenge("node-b", "node-b"), budget));
+        if ok {
+            assert_eq!(backend.relayed.borrow().len(), 1, "{budget}");
+        } else {
+            assert_eq!(refusal(&reply), invalid(), "{budget}");
+            assert!(backend.untouched(), "{budget}");
+        }
+    }
+    // A missing budget is a malformed envelope, not a default.
+    let mut v: Value =
+        serde_json::from_slice(&challenge("node-b", "node-b")).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("budget_ms");
+    }
+    let backend = Fake::new("node-b");
+    let reply = run(&backend, &serde_json::to_vec(&v).unwrap_or_default());
+    assert_eq!(refusal(&reply), invalid());
+    assert!(backend.untouched());
+    // Downstream work is cut at the originating deadline, not at a fresh ten seconds.
+    let backend = Fake::new("node-b");
+    let started = Instant::now();
+    let reply = route(
+        FEDERATION_SERVICE_ID,
+        &with_budget(&forward("node-b", "node-b"), 2_000),
+        Some(&backend),
+        started + ROUTE_BUDGET,
+    );
+    assert_eq!(reply.status, "200 OK");
+    let latest =
+        started + std::time::Duration::from_millis(2_000) + std::time::Duration::from_secs(1);
+    for d in backend.deadlines.borrow().iter() {
+        assert!(*d <= latest, "a hop kept a deadline past the carried budget");
+        assert!(*d < started + ROUTE_BUDGET);
+    }
+    assert_eq!(backend.deadlines.borrow().len(), 2);
 }
