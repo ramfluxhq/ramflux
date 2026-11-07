@@ -26,10 +26,18 @@ pub enum EphemeralRouteGate {
     RecipientUnsupported,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapabilityRecord {
+    gateway_id: String,
+    session_id: String,
+    generation: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EphemeralCapabilityState {
-    map: HashMap<String, (String, String)>,
+    map: HashMap<String, CapabilityRecord>,
     established_in_boot: HashSet<String>,
+    next_generation: u64,
 }
 
 impl EphemeralCapabilityState {
@@ -42,16 +50,26 @@ impl EphemeralCapabilityState {
         }
     }
 
+    fn stamp(&mut self) -> u64 {
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.next_generation
+    }
+
     fn bind(&mut self, target: &str, gateway_id: &str, session_id: &str) -> bool {
+        let record = CapabilityRecord {
+            gateway_id: gateway_id.to_owned(),
+            session_id: session_id.to_owned(),
+            generation: self.stamp(),
+        };
         if let Some(entry) = self.map.get_mut(target) {
-            *entry = (gateway_id.to_owned(), session_id.to_owned());
+            *entry = record;
             return true;
         }
         if self.map.len() >= EPHEMERAL_CAPABILITY_BOUND {
             MAP_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
             return false;
         }
-        self.map.insert(target.to_owned(), (gateway_id.to_owned(), session_id.to_owned()));
+        self.map.insert(target.to_owned(), record);
         true
     }
 }
@@ -105,13 +123,13 @@ impl crate::RouterCore {
         let current = state.map.get(target).cloned();
         if let Some(descriptor) = descriptor.as_ref()
             && descriptor.lifecycle == SessionLifecycle::Live
-            && let Some((gateway_id, session_id)) = current.as_ref()
-            && gateway_id == &descriptor.gateway_id
-            && session_id == &descriptor.session_id
+            && let Some(record) = current.as_ref()
+            && record.gateway_id == descriptor.gateway_id
+            && record.session_id == descriptor.session_id
         {
             return EphemeralRouteGate::Online {
-                gateway_id: gateway_id.clone(),
-                session_id: session_id.clone(),
+                gateway_id: record.gateway_id.clone(),
+                session_id: record.session_id.clone(),
             };
         }
         if current == observed {
@@ -125,24 +143,28 @@ impl crate::RouterCore {
     }
 
     /// Inspection: in-memory capability occupancy.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn ephemeral_map_len(&self) -> usize {
         lock_unpoisoned(&self.ephemeral_capability).map.len()
     }
 
     /// Inspection: whether `target` has a capability map entry.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn ephemeral_map_contains(&self, target: &str) -> bool {
         lock_unpoisoned(&self.ephemeral_capability).map.contains_key(target)
     }
 
     /// Inspection: occupancy of `established_in_boot`.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn established_in_boot_len(&self) -> usize {
         lock_unpoisoned(&self.ephemeral_capability).established_in_boot.len()
     }
 
     /// Inspection: whether `target` was established in this boot.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn established_in_boot_contains(&self, target: &str) -> bool {
         lock_unpoisoned(&self.ephemeral_capability).established_in_boot.contains(target)
@@ -155,6 +177,7 @@ pub(crate) fn map_full_total() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "hang guards must panic")]
 mod tests {
     use super::{
         EPHEMERAL_CAPABILITY_BOUND, EphemeralRouteGate, map_full_total,
@@ -295,8 +318,8 @@ mod tests {
             released.wait();
             let _ = work_tx.send(result);
         });
-        let gate = lookup_rx.recv_timeout(Duration::from_secs(10))?;
-        work_rx.recv_timeout(Duration::from_secs(10))??;
+        let gate = lookup_rx.recv_timeout(Duration::from_secs(10)).expect("hang guard 10 s");
+        work_rx.recv_timeout(Duration::from_secs(10)).expect("hang guard 10 s")?;
         drop(clear);
         assert!(router.ephemeral_map_contains(&target));
         assert_eq!(
@@ -311,6 +334,59 @@ mod tests {
             EphemeralRouteGate::Online {
                 gateway_id: "gateway".into(),
                 session_id: "session-2".into(),
+            }
+        );
+        Ok(())
+    }
+
+    fn row_fresh_same_gs_capable_bind_survives_stale_lookup() -> TestResult {
+        let target = format!("target-same-gs-{}", std::process::id());
+        let router = Arc::new(RouterCore::new());
+        let initial = descriptor(&target, "gateway", "session", 1);
+        bind_live(&router, &initial)?;
+        router.mark_draining(&target)?;
+        let resume = descriptor(&target, "gateway", "session", 2);
+        let entered = Arc::new(Barrier::new(2));
+        let released = Arc::new(Barrier::new(2));
+        set_route_gate_after_session(Some((
+            &target,
+            Arc::new({
+                let entered = Arc::clone(&entered);
+                let released = Arc::clone(&released);
+                move || {
+                    entered.wait();
+                    released.wait();
+                }
+            }),
+        )));
+        let clear = ClearHook;
+        let (lookup_tx, lookup_rx) = mpsc::channel();
+        let lookup_router = Arc::clone(&router);
+        let lookup_target = target.clone();
+        std::thread::spawn(move || {
+            let gate = lookup_router.route_gate(&lookup_target);
+            let _ = lookup_tx.send(gate);
+        });
+        let (work_tx, work_rx) = mpsc::channel();
+        let work_router = Arc::clone(&router);
+        std::thread::spawn(move || {
+            entered.wait();
+            let result = bind_live(&work_router, &resume);
+            released.wait();
+            let _ = work_tx.send(result);
+        });
+        let _gate = lookup_rx.recv_timeout(Duration::from_secs(10)).expect("hang guard 10 s");
+        work_rx.recv_timeout(Duration::from_secs(10)).expect("hang guard 10 s")?;
+        drop(clear);
+        assert!(
+            router.ephemeral_map_contains(&target),
+            "fresh same-(G,S) capable bind removed by stale lookup"
+        );
+        assert_eq!(
+            router.route_gate(&target),
+            EphemeralRouteGate::Online {
+                gateway_id: "gateway".into(),
+                session_id: "session".into(),
             }
         );
         Ok(())
@@ -452,6 +528,7 @@ mod tests {
 
     #[test]
     fn ephemeral_capability_route_binding() -> TestResult {
+        row_fresh_same_gs_capable_bind_survives_stale_lookup()?;
         row_stale_lookup_preserves_fresh_bind()?;
         row_gateway_mismatch_retains_until_c1()?;
         row_session_mismatch_retains_until_c1()?;
