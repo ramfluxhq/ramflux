@@ -3,7 +3,12 @@
 
 //! Explicit dormant typed adapters. `NativePrimaryVault` selection is unchanged.
 use super::{
-    LinuxVaultConfig, LinuxVaultRole, cleanup::Secret, codec, files, init, writer::Operation,
+    LinuxVaultConfig, LinuxVaultRole,
+    cleanup::Secret,
+    codec,
+    durability::{DurabilityOps, RealDurabilityOps},
+    files, init,
+    writer::Operation,
 };
 use crate::{
     SdkError,
@@ -41,15 +46,60 @@ impl Realm {
             .map_err(unavailable)
     }
     pub(super) fn delete(&self, reference: &str, kind: u8) -> Result<(), SdkError> {
+        self.delete_with(reference, kind, &RealDurabilityOps)
+    }
+    /// Deletion is idempotent, and absence is only reported after the parent directory was
+    /// durably synced under the writer lock (a previous unlink may have lost its fsync).
+    pub(super) fn delete_with(
+        &self,
+        reference: &str,
+        kind: u8,
+        ops: &dyn DurabilityOps,
+    ) -> Result<(), SdkError> {
         let _slot = init::Slot::acquire().map_err(unavailable)?;
-        match self
-            .store
-            .apply(Operation::Delete { reference: reference.into(), kind, generation: 1 }, |_| {})
-        {
+        match self.store.publish(
+            Operation::Delete { reference: reference.into(), kind, generation: 1 },
+            ops,
+            &|_| Ok(()),
+        ) {
             Ok(_) | Err(files::Error::Missing) => Ok(()),
             Err(e) => Err(unavailable(e)),
         }
     }
+}
+
+/// Directory creation and fsync are blocking work: the stores are built inside a worker that
+/// owns a slot (so the four-operation cap applies), never on the async caller.
+async fn build_realms(
+    root: PathBuf,
+    account: String,
+    mut material: init::Material,
+) -> Result<[Option<Realm>; 3], SdkError> {
+    let slot = init::Slot::acquire().map_err(unavailable)?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        #[cfg(test)]
+        test_seam::record_open_thread(&root);
+        let mut realms: [Option<Realm>; 3] = std::array::from_fn(|_| None);
+        for (i, slot) in realms.iter_mut().enumerate() {
+            if let Some(key) = material.keys[i].take() {
+                *slot = Some(Realm {
+                    store: files::Store::open(
+                        &root,
+                        &account,
+                        u8::try_from(i + 1).map_err(unavailable)?,
+                        material.vault_id,
+                        material.key_ids[i],
+                    )
+                    .map_err(unavailable)?,
+                    key,
+                });
+            }
+        }
+        Ok(realms)
+    })
+    .await
+    .map_err(unavailable)?
 }
 
 /// Explicit per-account candidate provider. No production selector calls this factory.
@@ -83,24 +133,8 @@ impl LinuxPrimaryVault {
         }
         .validate_name()
         .map_err(unavailable)?;
-        let mut material =
-            init::material(root.clone(), config.clone()).await.map_err(unavailable)?;
-        let mut realms = std::array::from_fn(|_| None);
-        for (i, slot) in realms.iter_mut().enumerate() {
-            if let Some(key) = material.keys[i].take() {
-                *slot = Some(Realm {
-                    store: files::Store::open(
-                        &root,
-                        &account,
-                        u8::try_from(i + 1).map_err(unavailable)?,
-                        material.vault_id,
-                        material.key_ids[i],
-                    )
-                    .map_err(unavailable)?,
-                    key,
-                });
-            }
-        }
+        let material = init::material(root.clone(), config.clone()).await.map_err(unavailable)?;
+        let realms = build_realms(root, account, material).await?;
         Ok(Self { realms, reference, class: config.mode().strength_class(), role: config.role() })
     }
     fn realm(&self, i: usize) -> Result<&Realm, SdkError> {
@@ -177,6 +211,27 @@ impl PrimaryVault for LinuxPrimaryVault {
         };
         self.bound(reference, prefix)?;
         self.realm(i)?.delete(reference, kind)
+    }
+}
+
+/// Test seam: which thread constructed the stores of each root.
+#[cfg(test)]
+pub(super) mod test_seam {
+    use std::{collections::HashMap, path::Path, sync::Mutex, thread::ThreadId};
+    static OPEN_THREADS: Mutex<Option<HashMap<std::path::PathBuf, ThreadId>>> = Mutex::new(None);
+    pub(super) fn record_open_thread(root: &Path) {
+        OPEN_THREADS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert(root.to_owned(), std::thread::current().id());
+    }
+    pub(super) fn open_thread(root: &Path) -> Option<ThreadId> {
+        OPEN_THREADS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|map| map.get(root).copied())
     }
 }
 
