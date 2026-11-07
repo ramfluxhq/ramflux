@@ -66,6 +66,9 @@ fn intents(client: &RamfluxClient) -> Result<Vec<Value>, SdkError> {
 
 /// S1: one recipient device, one scripted nack.
 async fn state_delivery(case: Case) -> TestResult {
+    // The clock stays pinned for the whole row: submit, real reopen and every pass read it.
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
     let root = runtime_tests::root("group-sync-refusal-s1");
     let mut source = runtime_tests::account(
         &root.join("source"),
@@ -91,7 +94,6 @@ async fn state_delivery(case: Case) -> TestResult {
         config.clone(),
         Box::new(gateway),
     ));
-    let before = now_unix_timestamp();
     assert!(
         crate::bus::couriers::test_pass::drive(
             &mut source,
@@ -99,7 +101,6 @@ async fn state_delivery(case: Case) -> TestResult {
         )
         .await?
     );
-    let after = now_unix_timestamp();
     assert_eq!(attempted.lock().map_err(|_| "attempted")?.len(), 1, "one submit was written");
 
     match case {
@@ -119,24 +120,19 @@ async fn state_delivery(case: Case) -> TestResult {
             assert_eq!(kept[0]["attempt"], 1);
             assert_eq!(kept[0]["round_active"], false);
             assert_eq!(kept[0]["min_defer_secs"], 0);
-            let next = kept[0]["next_at"].as_i64().ok_or("next_at")?;
-            assert!(
-                (before + 2..=after + 2).contains(&next),
-                "next_at {next} outside [{}, {}]",
-                before + 2,
-                after + 2
-            );
+            assert_eq!(kept[0]["next_at"].as_i64(), Some(start + 2), "next attempt 2 s out");
             assert_eq!(failures(&source.client, "submit_failed")?, 1);
             assert_eq!(failures(&source.client, "submit_conflict")?, 0);
         }
     }
 
-    // Reopen from disk, then run again against a gateway that would accept everything: no
-    // submit is written (the terminal intent is gone, the deferral has not elapsed).
+    // Reopen from disk with the clock still at `start`, then run against a gateway that would
+    // accept everything: no submit is written before the deadline.
     reopen(&mut source, "sender")?;
     let (gateway, resent) = recording(None);
     source
         .install_test_session(GatewaySessionEngine::with_test_transport(config, Box::new(gateway)));
+    crate::time::FixedClock::advance_to(start + 1);
     assert!(
         !crate::bus::couriers::test_pass::drive(
             &mut source,
@@ -144,8 +140,27 @@ async fn state_delivery(case: Case) -> TestResult {
         )
         .await?
     );
-    assert_eq!(resent.lock().map_err(|_| "resent")?.len(), 0, "no resend after reopen");
+    assert_eq!(resent.lock().map_err(|_| "resent")?.len(), 0, "no resend before the deadline");
     assert_eq!(intents(&source.client)?.len(), usize::from(!matches!(case, Case::Conflict)));
+
+    // At the deadline: a deferral is resent exactly once, a Conflict is never resent.
+    crate::time::FixedClock::advance_to(start + 2);
+    let delivered = crate::bus::couriers::test_pass::drive(
+        &mut source,
+        crate::bus::shared_group_sync::deliver_pass,
+    )
+    .await?;
+    let resends = resent.lock().map_err(|_| "resent")?.len();
+    match case {
+        Case::Conflict => {
+            assert!(!delivered, "nothing is due for a Conflict");
+            assert_eq!(resends, 0, "a conflict is never resent");
+        }
+        Case::Capacity | Case::RetrySafe | Case::Uncertain => {
+            assert!(delivered, "the deferral is due at the deadline");
+            assert_eq!(resends, 1, "exactly one resend at the deadline");
+        }
+    }
     directory.abort();
     drop((source, peers));
     std::fs::remove_dir_all(root)?;
@@ -154,6 +169,8 @@ async fn state_delivery(case: Case) -> TestResult {
 
 /// S2: an admin's signed request to the group owner, one scripted nack.
 async fn control_courier(case: Case) -> TestResult {
+    let start = now_unix_timestamp();
+    let _clock = crate::time::FixedClock::set(start);
     let root = runtime_tests::root("group-sync-refusal-s2");
     let mut owner = runtime_tests::account(
         &root.join("owner"),
@@ -194,13 +211,11 @@ async fn control_courier(case: Case) -> TestResult {
         admin_config.clone(),
         Box::new(gateway),
     ));
-    let before = now_unix_timestamp();
     let first = crate::bus::couriers::test_pass::drive(
         &mut admin,
         crate::bus::shared_group_sync::request_pass,
     )
     .await;
-    let after = now_unix_timestamp();
     let sent = attempted.lock().map_err(|_| "attempted")?.clone();
     assert_eq!(sent.len(), 1, "one submit was written");
     let conflicted = sent[0].envelope_id.clone();
@@ -209,13 +224,7 @@ async fn control_courier(case: Case) -> TestResult {
     };
     let record = admin.client.group_change_record(&request, false)?.ok_or("record")?;
     assert!(record.delivered.is_empty(), "mark_sent is never called on a refusal");
-    assert!(
-        (before + 30..=after + 30).contains(&record.next_at),
-        "next_at {} outside [{}, {}]",
-        record.next_at,
-        before + 30,
-        after + 30
-    );
+    assert_eq!(record.next_at, start + 30, "deferral is 30 s out");
     match case {
         Case::Conflict => {
             // (a) the staged attempt took the expiry branch: no sealed record, no error.
@@ -233,13 +242,15 @@ async fn control_courier(case: Case) -> TestResult {
         }
     }
 
-    // Reopen from disk; the deferral is persisted, so nothing is written until it elapses.
+    // Reopen from disk with the clock still pinned: the deferral is persisted, so nothing is
+    // written before the deadline.
     reopen(&mut admin, "peer")?;
-    let (gateway, resent) = recording(None);
+    let (gateway, retried) = recording(None);
     admin.install_test_session(GatewaySessionEngine::with_test_transport(
         admin_config.clone(),
         Box::new(gateway),
     ));
+    crate::time::FixedClock::advance_to(start + 29);
     assert!(
         !crate::bus::couriers::test_pass::drive(
             &mut admin,
@@ -247,18 +258,11 @@ async fn control_courier(case: Case) -> TestResult {
         )
         .await?
     );
-    assert_eq!(resent.lock().map_err(|_| "resent")?.len(), 0, "deferral survives reopen");
+    assert_eq!(retried.lock().map_err(|_| "retried")?.len(), 0, "deferral survives reopen");
 
-    // Once it elapses: a Conflict never resends the conflicted envelope id (a fresh envelope
+    // At the deadline: a Conflict never resends the conflicted envelope id (a fresh envelope
     // is sealed), the deferrals resend the byte-identical staged envelope.
-    let mut due = admin.client.group_change_record(&request, false)?.ok_or("record")?;
-    due.next_at = 0;
-    admin.client.persist_group_request(&due)?;
-    let (gateway, retried) = recording(None);
-    admin.install_test_session(GatewaySessionEngine::with_test_transport(
-        admin_config,
-        Box::new(gateway),
-    ));
+    crate::time::FixedClock::advance_to(start + 30);
     assert!(
         crate::bus::couriers::test_pass::drive(
             &mut admin,
