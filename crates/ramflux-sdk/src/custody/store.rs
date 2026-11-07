@@ -76,7 +76,35 @@ impl std::fmt::Debug for AgentProvisioningBundle {
 }
 impl Drop for AgentProvisioningBundle {
     fn drop(&mut self) {
-        self.data_passphrase.zeroize();
+        // The String's bytes are wiped over their whole allocation, not just their length.
+        let mut bytes = std::mem::take(&mut self.data_passphrase).into_bytes();
+        wipe_allocation(&mut bytes, "p07-export-passphrase");
+    }
+}
+/// Wipes and (in tests) observes the complete owned allocation: spare capacity is initialized
+/// without reallocating, the whole slice is zeroized, and only then is the length dropped.
+fn wipe_allocation(buffer: &mut Vec<u8>, label: &'static str) {
+    let capacity = buffer.capacity();
+    buffer.resize(capacity, 0);
+    buffer.as_mut_slice().zeroize();
+    #[cfg(test)]
+    super::observer::inspect_capacity(label, capacity, buffer);
+    #[cfg(not(test))]
+    let _ = label;
+    buffer.clear();
+}
+/// Owned copy of the provisioning secret used for UTF-8 validation. It is wiped on every exit,
+/// including the invalid-UTF-8 error: validation borrows from this guard (`str::from_utf8`), so no
+/// unguarded `Vec`/`FromUtf8Error` buffer exists on any path.
+struct ExportSource(Vec<u8>);
+impl ExportSource {
+    fn copy(secret: &[u8]) -> Self {
+        Self(secret.to_vec())
+    }
+}
+impl Drop for ExportSource {
+    fn drop(&mut self) {
+        wipe_allocation(&mut self.0, "p07-export-utf8");
     }
 }
 /// An authenticated local account, with no legacy root signer or active session.
@@ -600,7 +628,10 @@ pub(crate) fn export_agent_credentials(
     }
     let reference = agent.stored.agent_provisioning_vault_ref.as_deref().ok_or_else(invalid)?;
     let secret = vault.load_provisioning_secret(reference)?;
-    let passphrase = String::from_utf8(secret.to_vec()).map_err(|_| invalid())?;
+    let passphrase = {
+        let source = ExportSource::copy(&secret);
+        std::str::from_utf8(&source.0).map_err(|_| invalid())?.to_owned()
+    };
     let bundle =
         AgentProvisioningBundle { account_id: account_id.to_owned(), data_passphrase: passphrase };
     let bytes = Zeroizing::new(ramflux_protocol::canonical_json_bytes(&bundle)?);

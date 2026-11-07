@@ -458,6 +458,66 @@ async fn custody_gateway_refuses_before_network_io_and_legacy_proof_generation()
     Ok(())
 }
 
+/// P07 case set of the growing cleanup contract: export conversion and serializer/destination
+/// failure paths. Every owned buffer is observed after cleanup, not merely trait-asserted.
+#[test]
+fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
+    let root = Root::new()?;
+    let vault = TestVault::default();
+    let now = super::network_now()?;
+    create(&root.0, "human", &vault, now)?;
+    mark_live(&root.0, "human", now)?;
+    // Setup first (no observed buffers), then one scoped Session per exported case.
+    let cases: [(&str, &[u8], bool); 2] = [
+        ("agent-a", b"\xff\xfe-not-utf8-passphrase", false),
+        ("agent-b", b"valid-agent-data-passphrase", true),
+    ];
+    for (account, secret, occupied) in cases {
+        let mut input = input(account);
+        input.principal_kind = PrincipalKind::HeadlessAi;
+        input.custodian_account_id = Some("human".into());
+        let mut ceremony = CreationCeremony::begin(&root.0, input, now)?;
+        let phrase = ceremony.show_once()?;
+        let positions = ceremony.hidden_challenge()?;
+        ceremony.confirm_with_passphrase(&words(&phrase, positions)?, &vault, now, secret)?;
+        mark_live(&root.0, account, now)?;
+        if occupied {
+            // Destination failure after the passphrase String was built.
+            std::fs::write(root.0.join(format!("{account}.bundle")), b"occupied")?;
+        }
+    }
+    for (account, secret, occupied) in cases {
+        let _session = super::observer::begin(&["p07-export-utf8", "p07-export-passphrase"]);
+        let path = root.0.join(format!("{account}.bundle"));
+        let outcome =
+            super::store::export_agent_credentials(&root.0, "human", account, &path, &vault, now);
+        if occupied {
+            // Destination failure: the exact I/O class, not any error.
+            assert!(
+                matches!(&outcome, Err(crate::SdkError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists),
+                "{account}: {outcome:?}"
+            );
+        } else {
+            assert!(matches!(outcome, Err(crate::SdkError::CustodySetupInvalid)), "{account}");
+        }
+        let observed = super::observer::take();
+        let mut expected = vec!["p07-export-utf8"];
+        if occupied {
+            expected.push("p07-export-passphrase");
+        }
+        for label in expected {
+            let seen = observed
+                .iter()
+                .find(|item| item.label == label)
+                .ok_or_else(|| format!("{account}: missing {label}"))?;
+            // A full-allocation observation: never empty, never smaller than the secret.
+            assert!(seen.capacity >= secret.len() && seen.capacity > 0, "{account}: {label}");
+            assert_eq!(seen.bytes.len(), seen.capacity, "{account}: {label} saw a partial slice");
+            assert!(seen.bytes.iter().all(|b| *b == 0), "P07 uncleared {label}");
+        }
+    }
+    Ok(())
+}
 #[test]
 fn custody_partial_vault_import_cannot_be_retried_as_a_legacy_account() -> Result {
     let root = Root::new()?;

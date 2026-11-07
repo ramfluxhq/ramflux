@@ -16,7 +16,14 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[tokio::test]
 #[ignore = "requires actual systemd host credential key; run privileged fixture"]
 async fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
-    observer::begin();
+    let _session = observer::begin(&[
+        "p04-fixture-key",
+        "p04-child-stdin",
+        "p04-child-output",
+        "p04-generated-key",
+        "p04-runtime-read",
+        "p04-injected-fixture",
+    ]);
     let (sender, mut cancel) = watch::channel(false);
     let mode = LinuxVaultMode::SystemdHost;
     let deadline = Instant::now() + Duration::from_secs(30);
