@@ -367,3 +367,33 @@ fn flipped_tag_body() -> TestResult {
     ));
     Ok(())
 }
+
+/// Source guard: the injectable sealer is test-only. `insert_with` may appear in production
+/// sources only as the `cfg(test)` definition, and `insert_inner` stays private.
+#[test]
+fn linux_vault_insert_sealer_seam_is_test_only() -> TestResult {
+    fn walk(dir: &Path, hits: &mut Vec<String>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(&path, hits)?;
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && !path.ends_with("custody/vault/linux/primary/tests.rs")
+                && std::fs::read_to_string(&path)?.contains(".insert_with(")
+            {
+                hits.push(path.display().to_string());
+            }
+        }
+        Ok(())
+    }
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let primary = std::fs::read_to_string(dir.join("custody/vault/linux/primary.rs"))?;
+    let at = primary.find("pub(super) fn insert_with(").ok_or("insert_with definition")?;
+    assert!(primary[..at].trim_end().ends_with("#[cfg(test)]"), "insert_with must be cfg(test)");
+    assert_eq!(primary.matches(" insert_with(").count(), 1, "no production caller of insert_with");
+    assert!(!primary.contains("pub(super) fn insert_inner"), "insert_inner must stay private");
+    let mut hits = Vec::new();
+    walk(&dir, &mut hits)?;
+    assert!(hits.is_empty(), "insert_with callers outside the test module: {hits:?}");
+    Ok(())
+}

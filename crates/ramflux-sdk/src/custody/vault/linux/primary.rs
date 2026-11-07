@@ -101,10 +101,26 @@ impl Realm {
             .map_err(|error| codec_error(CodecContext::Read, error))
     }
     pub(super) fn insert(&self, reference: &str, kind: u8, secret: &[u8]) -> Result<(), SdkError> {
-        self.insert_with(reference, kind, secret, codec::seal)
+        self.insert_inner(reference, kind, secret, codec::seal)
     }
-    /// `seal` is the test seam for nonce-randomness failure; production passes `codec::seal`.
+    /// Test seam for nonce-randomness failure. It exists only under `cfg(test)`; production has
+    /// no way to hand a sealer (which sees the KEK and plaintext) to the insert path.
+    #[cfg(test)]
     pub(super) fn insert_with(
+        &self,
+        reference: &str,
+        kind: u8,
+        secret: &[u8],
+        seal: impl FnOnce(
+            codec::Binding<'_>,
+            &Secret<32>,
+            &codec::Plaintext,
+        ) -> Result<Vec<u8>, codec::Error>,
+    ) -> Result<(), SdkError> {
+        self.insert_inner(reference, kind, secret, seal)
+    }
+    /// Shared insert path. Private: only `insert` (with `codec::seal`) and the test seam call it.
+    fn insert_inner(
         &self,
         reference: &str,
         kind: u8,
