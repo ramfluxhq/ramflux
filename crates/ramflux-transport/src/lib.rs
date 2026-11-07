@@ -58,13 +58,14 @@ pub use mesh_http::{
 pub use mesh_quic::{
     MeshQuicAcceptedBiStream, MeshQuicAcceptedRequest, MeshQuicAcceptedWireRequest,
     MeshQuicConnection, MeshQuicPostcardAcceptedRequest, MeshQuicRawPost, MeshQuicServer,
-    mesh_quic_get_json_with_peer_ca_pems, mesh_quic_get_json_with_peer_ca_pems_async,
-    mesh_quic_post_json_with_peer_ca_pems, mesh_quic_post_json_with_peer_ca_pems_async,
-    mesh_quic_post_postcard_with_peer_ca_pems_async, mesh_quic_post_raw_with_peer_ca_pems_async,
+    RAW_BODY_PATH_PREFIX, mesh_quic_get_json_with_peer_ca_pems,
+    mesh_quic_get_json_with_peer_ca_pems_async, mesh_quic_post_json_with_peer_ca_pems,
+    mesh_quic_post_json_with_peer_ca_pems_async, mesh_quic_post_postcard_with_peer_ca_pems_async,
+    mesh_quic_post_raw_with_peer_ca_pems_async,
 };
 pub use mesh_quic_limited::{
     LIMITED_ENVELOPE_SLACK, MeshQuicLimitedIngress, MeshQuicLimitedRequest,
-    MeshQuicLimitedResponder,
+    MeshQuicLimitedResponder, mesh_quic_exchange_raw_frame,
 };
 pub use mesh_request_deadline::{MeshRequestDeadline, mesh_request_deadline};
 pub use mesh_tls::{

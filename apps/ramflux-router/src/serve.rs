@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "itest-http")]
 use crate::handlers::handle_itest_request;
-use crate::handlers::handle_mesh_quic_request_value;
+use crate::handlers::handle_mesh_quic_request_raw;
 use crate::handlers::handle_mesh_request;
 use socket2::{Domain, Protocol, Socket, Type};
 #[cfg(feature = "itest-http")]
@@ -695,7 +695,8 @@ impl RouterSubmitBridge {
         let (sender, receiver) = bridge_reply_channel::<ramflux_transport::GatewayQuicResponse>();
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
-            let result = handle_mesh_quic_request_value(&request, &router, &peer_service_id).await;
+            let result =
+                handle_mesh_quic_request_raw(&request, None, &router, &peer_service_id).await;
             sender.send(result);
         });
         receiver.await
@@ -906,7 +907,13 @@ async fn handle_router_async_mesh_quic_request(
     };
     match accepted {
         ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) => {
-            match handle_mesh_quic_request_value(&accepted.request, &router, peer_service_id).await
+            match handle_mesh_quic_request_raw(
+                &accepted.request,
+                accepted.raw_body.as_deref(),
+                &router,
+                peer_service_id,
+            )
+            .await
             {
                 Ok(response) if (200..300).contains(&response.status) => {
                     accepted.write_json_response(response.status, &response.body).await?;
@@ -1145,6 +1152,9 @@ pub(crate) fn mesh_tls_config(
         service_key: config.mesh.service_key.clone().into(),
     }
 }
+
+#[cfg(test)]
+mod ingress_tests;
 
 #[cfg(test)]
 mod tests {

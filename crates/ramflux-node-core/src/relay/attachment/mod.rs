@@ -153,7 +153,58 @@ pub(super) fn install(
     grants::install(tx, replay_now).map_err(|e| crate::NodeCoreError::Redb(e.to_string()))?;
     Ok(())
 }
+/// Why a bounded write-lock acquisition failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BeginError {
+    /// The deadline passed before the single ledger writer became available.
+    Busy,
+    Store(String),
+}
+/// Abandoned waiters that are still parked on the writer lock.
+static PARKED_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_PARKED_WAITERS: usize = 4;
+
 impl AttachmentLedger {
+    /// Takes the ledger's single write lock, giving up at `deadline` (`None` waits as the
+    /// plain `begin_write` does). `redb` has no timed acquisition, so the wait happens on a
+    /// helper thread that rolls its transaction back if nobody is waiting any more. At most
+    /// a few such threads may be parked at once; beyond that the caller is refused at once.
+    pub(crate) fn begin_write_until(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<redb::WriteTransaction, BeginError> {
+        use std::sync::atomic::Ordering;
+        let Some(deadline) = deadline else {
+            return self.db.begin_write().map_err(|e| BeginError::Store(e.to_string()));
+        };
+        let remaining = || deadline.checked_duration_since(std::time::Instant::now());
+        let Some(first) = remaining().filter(|d| !d.is_zero()) else {
+            return Err(BeginError::Busy);
+        };
+        if PARKED_WAITERS.fetch_add(1, Ordering::AcqRel) >= MAX_PARKED_WAITERS {
+            PARKED_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            return Err(BeginError::Busy);
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let db = Arc::clone(&self.db);
+        std::thread::spawn(move || {
+            let begun = db.begin_write();
+            PARKED_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            // A receiver that has gone away drops (rolls back) the transaction.
+            let _ = sender.send(begun);
+        });
+        match receiver.recv_timeout(first) {
+            Ok(begun) => {
+                let tx = begun.map_err(|e| BeginError::Store(e.to_string()))?;
+                // Nothing is admitted after the deadline, even if the lock was won at the wire.
+                if remaining().is_none_or(|d| d.is_zero()) {
+                    return Err(BeginError::Busy);
+                }
+                Ok(tx)
+            }
+            Err(_) => Err(BeginError::Busy),
+        }
+    }
     pub(super) fn new(
         db: Arc<redb::Database>,
         policy: AttachmentPolicy,

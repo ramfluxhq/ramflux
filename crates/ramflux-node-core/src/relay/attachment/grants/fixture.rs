@@ -123,6 +123,13 @@ impl RetirementFixture {
             issued_at: self.now,
         }
     }
+    /// Holds the ledger's single write lock until the returned guard is dropped.
+    /// # Panics
+    /// Panics on storage failure.
+    #[must_use]
+    pub fn hold_ledger_writer(&self) -> redb::WriteTransaction {
+        self.registry.ledger.db.begin_write().unwrap()
+    }
     /// Rewrites the committed payload row's two generation fields independently.
     /// # Panics
     /// Panics on storage failure or a missing payload row.

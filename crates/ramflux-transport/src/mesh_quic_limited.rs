@@ -17,6 +17,12 @@ use std::time::Instant;
 /// Room for the method and path around the body inside one request frame.
 pub const LIMITED_ENVELOPE_SLACK: usize = 512;
 
+/// Only the body of a request frame, as received.
+#[derive(Deserialize)]
+pub(crate) struct RawBodyOnly {
+    pub(crate) body: Box<RawValue>,
+}
+
 #[derive(Deserialize)]
 struct RawRequest {
     method: String,
@@ -124,4 +130,43 @@ impl MeshQuicServer {
             responder: responder(send, recv),
         }))
     }
+}
+
+/// Sends one request frame exactly as given (no normalization) and returns the decoded
+/// response. For ingress tests that must control the wire bytes, such as padded bodies.
+/// # Errors
+/// TLS, QUIC or framing failures, or the deadline.
+pub async fn mesh_quic_exchange_raw_frame(
+    endpoint: &str,
+    tls: &crate::MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<GatewayQuicResponse, TransportError> {
+    let at = tokio::time::Instant::from_std(deadline);
+    let addr = tokio::net::lookup_host(endpoint)
+        .await?
+        .next()
+        .ok_or_else(|| TransportError::Quic("no address".into()))?;
+    let mut client = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(|_| expired())?)?;
+    client.set_default_client_config(crate::tls_config::mesh_quic_client_config_with_pem_roots(
+        tls,
+        peer_ca_pems,
+    )?);
+    let connecting =
+        client.connect(addr, server_name).map_err(|e| TransportError::Quic(e.to_string()))?;
+    let connection = tokio::time::timeout_at(at, connecting)
+        .await
+        .map_err(|_| expired())?
+        .map_err(|e| TransportError::Quic(e.to_string()))?;
+    let (mut send, mut recv) =
+        connection.open_bi().await.map_err(|e| TransportError::Quic(e.to_string()))?;
+    tokio::time::timeout_at(at, write_quic_raw_frame(&mut send, frame))
+        .await
+        .map_err(|_| expired())??;
+    let response = tokio::time::timeout_at(at, crate::quic_gateway::read_quic_raw_frame(&mut recv))
+        .await
+        .map_err(|_| expired())??;
+    Ok(serde_json::from_slice(&response)?)
 }

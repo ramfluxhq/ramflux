@@ -101,11 +101,19 @@ pub struct IssueHooks<'a> {
     pub after_commit: &'a dyn Fn() -> bool,
     /// After T is signed with the lease held, immediately before the final check.
     pub before_final_token_check: &'a dyn Fn(),
+    /// The original request deadline. Every ledger write-lock wait made for this request
+    /// ends there with a typed `Busy`; `None` keeps the unbounded wait.
+    pub deadline: Option<std::time::Instant>,
 }
 impl IssueHooks<'static> {
     #[must_use]
     pub fn none() -> Self {
-        Self { before_admission: &|| {}, after_commit: &|| false, before_final_token_check: &|| {} }
+        Self {
+            before_admission: &|| {},
+            after_commit: &|| false,
+            before_final_token_check: &|| {},
+            deadline: None,
+        }
     }
 }
 
@@ -152,7 +160,19 @@ impl SourceIssuer {
         request: &ChallengeMint<'_>,
         now: u64,
     ) -> Result<RenewalChallenge, RenewalRefusal> {
-        self.registry.mint_renewal_challenge(&self.policy, request, now)
+        self.challenge_until(request, now, None)
+    }
+
+    /// As [`Self::challenge`], but a busy ledger writer is waited for only until `deadline`.
+    /// # Errors
+    /// `Busy` when the deadline passes first; otherwise as [`Self::challenge`].
+    pub fn challenge_until(
+        &self,
+        request: &ChallengeMint<'_>,
+        now: u64,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<RenewalChallenge, RenewalRefusal> {
+        self.registry.with_deadline(deadline).mint_renewal_challenge(&self.policy, request, now)
     }
 
     /// Wire adapter. The JSON response frame is built and written through the same
@@ -215,23 +235,24 @@ impl SourceIssuer {
             expires_at: v.proof.expires_at,
         };
         (hooks.before_admission)();
-        let lease = self.registry.admit_renewal_after_authentication(
-            &RenewalAdmission {
-                grant: &v.grant,
-                challenge: v.attestation.challenge,
-                target_hash: v.target.hash().map_err(|_| RenewalRefusal::Invalid)?,
-                requester: &g.grantee,
-                home_node: &v.attestation.home_issuer,
-                home_epoch: v.home_epoch,
-                payload_generation: v.target.payload_generation,
-                authority_generation: authority.generation,
-                w_issued_at: v.attestation.issued_at,
-                w_expires_at: v.attestation.expires_at,
-                verdict_checked_at: request.home_verdict.checked_at,
-                proof: &proof,
-            },
-            clock,
-        )?;
+        let lease =
+            self.registry.with_deadline(hooks.deadline).admit_renewal_after_authentication(
+                &RenewalAdmission {
+                    grant: &v.grant,
+                    challenge: v.attestation.challenge,
+                    target_hash: v.target.hash().map_err(|_| RenewalRefusal::Invalid)?,
+                    requester: &g.grantee,
+                    home_node: &v.attestation.home_issuer,
+                    home_epoch: v.home_epoch,
+                    payload_generation: v.target.payload_generation,
+                    authority_generation: authority.generation,
+                    w_issued_at: v.attestation.issued_at,
+                    w_expires_at: v.attestation.expires_at,
+                    verdict_checked_at: request.home_verdict.checked_at,
+                    proof: &proof,
+                },
+                clock,
+            )?;
         if (hooks.after_commit)() {
             return Err(IssueError::Interrupted);
         }

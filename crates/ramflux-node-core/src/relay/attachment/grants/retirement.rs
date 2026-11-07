@@ -190,14 +190,20 @@ impl ScopedGrantRegistry {
         }
         self.current(grant, now).map_err(&map)?;
         // Fence clock rollback durably, sharing the registration clock owner.
-        let tx = self.ledger.db.begin_write().map_err(store).map_err(&map)?;
+        let tx = self.ledger.begin_write_until(self.deadline).map_err(|e| {
+            map(match e {
+                super::super::BeginError::Busy => AttachmentLedgerError::Capacity,
+                super::super::BeginError::Store(m) => AttachmentLedgerError::Store(m),
+            })
+        })?;
         let admitted_now = admit(&tx)?;
         clock(&tx, admitted_now).map_err(&map)?;
         tx.commit().map_err(store).map_err(&map)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         leases.entry(grant.grant().grant_id).or_default().push(Arc::downgrade(&cancelled));
         Ok(GrantPublicationLease {
-            registry: self.clone(),
+            // The lease outlives the request: later calls on it are not request-bounded.
+            registry: self.with_deadline(None),
             grant: grant.clone(),
             cancelled,
             now: admitted_now,
