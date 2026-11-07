@@ -225,7 +225,13 @@ async fn ephemeral_ingress_source_failures() -> TestResult {
     let mut bad_envelope = submit(&runtime, "src-badsig", 5, |_| {})?;
     bad_envelope.envelope.signed.signature = "invalid".to_owned();
     bad_envelope.signed_request = signed_request_for(&runtime, &bad_envelope.envelope, now)?;
-    anyhow::ensure!(crate::submit_source::bind_source(&runtime, &bad_envelope.envelope).is_err());
+    anyhow::ensure!(
+        crate::submit_source::bind_source(&runtime, &bad_envelope.envelope)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref()
+            == Some("base64url decode failed: Invalid last symbol 100, offset 6.")
+    );
     expect_refused(
         "envelope signature",
         &drive(&runtime, now_ms(), &[bad_envelope]).await?,
@@ -233,7 +239,7 @@ async fn ephemeral_ingress_source_failures() -> TestResult {
     )?;
 
     // Signed-request failures: (label, exact verify error, tamper).
-    let rows: [(&str, &str, Tamper); 7] = [
+    let rows: [(&str, &str, Tamper); 8] = [
         (
             "source device",
             "signed request source device does not match authenticated session",
@@ -248,6 +254,10 @@ async fn ephemeral_ingress_source_failures() -> TestResult {
         }),
         ("session binding", "signed request must bind to authenticated gateway session", |f| {
             f.signed_request.device_proof_hash = "proof".to_owned();
+            resign(&mut f.signed_request)
+        }),
+        ("method", "signed request method mismatch", |f| {
+            f.signed_request.method = ramflux_protocol::HttpMethod::GET;
             resign(&mut f.signed_request)
         }),
         ("expired", "signed request expired", |f| {
@@ -289,5 +299,42 @@ async fn ephemeral_ingress_source_failures() -> TestResult {
         anyhow::ensure!(error.as_deref() == Some(want), "{label}: {error:?}");
         expect_refused(label, &drive(&runtime, now_ms(), &[frame]).await?, "req-failure")?;
     }
+    Ok(())
+}
+
+/// Envelope binding negatives: the signed request is valid and only the envelope's device or
+/// `source_root_commitment` disagrees with the authenticated session; zero router calls.
+#[tokio::test(flavor = "current_thread")]
+async fn ephemeral_ingress_envelope_binding_failures() -> TestResult {
+    let runtime = test_runtime()?;
+    // Separate envelope binding negatives: the signed request is valid and only the envelope's
+    // device or source_root_commitment disagrees with the authenticated session.
+    let device = submit(&runtime, "src-device", 5, |e| {
+        e.source_device_id = "other-device".to_owned();
+    })?;
+    anyhow::ensure!(
+        crate::submit_source::bind_source(&runtime, &device.envelope)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref()
+            == Some("submit source differs from authenticated session")
+    );
+    expect_refused("envelope device", &drive(&runtime, now_ms(), &[device]).await?, "src-device")?;
+
+    let root = submit(&runtime, "src-root", 5, |e| {
+        e.ext.ext.insert("source_root_commitment".to_owned(), json!("wrong"));
+    })?;
+    anyhow::ensure!(
+        crate::submit_source::bind_source(&runtime, &root.envelope)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref()
+            == Some("submit source differs from authenticated session")
+    );
+    expect_refused(
+        "source_root_commitment",
+        &drive(&runtime, now_ms(), &[root]).await?,
+        "src-root",
+    )?;
     Ok(())
 }
