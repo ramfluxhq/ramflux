@@ -15,7 +15,6 @@ use crate::bus::connection_manager::DisconnectReason;
 use ramflux_transport::{
     GatewaySessionFrameSink, GatewaySessionFrameSource, GatewaySessionTransport, TransportError,
 };
-use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,6 +64,9 @@ impl GatewaySessionFrameSource for Faulty {
         })
     }
 }
+
+/// The submitted envelope as the wire must carry it, in struct order.
+const ORIGINAL_ENVELOPE: &str = r#"{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-route"}"#;
 
 fn nack_bytes(reason: &str) -> Vec<u8> {
     format!(r#"{{"frame_type":"nack","reason":"{reason}"}}"#).into_bytes()
@@ -145,7 +147,6 @@ async fn sender_outcome_classification() {
     // (r10) drop after the write, (r11) frame timeout after the write, (r13) write failure:
     // uncertain, in the outer error, never a refusal. (r14) the next attempt resubmits the
     // byte-identical envelope.
-    let original = serde_json::to_value(envelope()).unwrap();
     for (mode_name, mode) in modes() {
         for (row, fault) in [("r10", Fault::Drop), ("r11", Fault::Hang), ("r13", Fault::WriteFail)]
         {
@@ -179,17 +180,30 @@ async fn sender_outcome_classification() {
                 assert!(matches!(&result, Err(SdkError::GatewaySessionRejected(m))
                     if m == "submit response timed out after 7s"));
             }
-            // (r14) the next attempt, on a fresh session, writes the same envelope bytes.
+            // (r14) the next attempt, on a fresh session, writes the original envelope: the
+            // raw envelope bytes equal the independent literal, as the first attempt's did.
+            let clock = crate::time::FixedClock::set(1_700_000_000);
             let (mut next, next_sent) =
                 signed(mode.clone(), vec![nack_bytes("aborted_retry_safe")]);
             let again = next.submit_envelope_classified(envelope()).await;
+            drop(clock);
             assert!(matches!(again, Ok(Err(SubmitRefusal::RetrySafe))));
             let written = next_sent.lock().unwrap().clone();
-            let wire: Value = serde_json::from_slice(&written[0]).unwrap();
-            assert_eq!(wire["submit"]["envelope"], original, "{mode_name} {row} resubmit");
+            assert_eq!(written.len(), 1);
+            assert_eq!(
+                crate::bus::connection_manager::tests::submitted_envelope_bytes(&written[0])
+                    .unwrap(),
+                ORIGINAL_ENVELOPE.as_bytes(),
+                "{mode_name} {row} resubmit"
+            );
             if !matches!(fault, Fault::WriteFail) {
-                let first: Value = serde_json::from_slice(&sent.lock().unwrap()[0]).unwrap();
-                assert_eq!(first["submit"]["envelope"], wire["submit"]["envelope"]);
+                let first = sent.lock().unwrap()[0].clone();
+                assert_eq!(
+                    crate::bus::connection_manager::tests::submitted_envelope_bytes(&first)
+                        .unwrap(),
+                    ORIGINAL_ENVELOPE.as_bytes(),
+                    "{mode_name} {row} first attempt"
+                );
             }
         }
     }

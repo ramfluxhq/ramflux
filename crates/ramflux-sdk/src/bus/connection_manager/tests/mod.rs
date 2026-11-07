@@ -25,15 +25,26 @@ mod resume;
 pub(crate) struct SessionIo {
     pub input: mpsc::UnboundedSender<Vec<u8>>,
     pub output: mpsc::UnboundedReceiver<GatewayClientFrame>,
+    /// The exact bytes of every client frame, as written.
+    pub raw: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 struct ScriptedStream {
     input: mpsc::UnboundedReceiver<Vec<u8>>,
     output: mpsc::UnboundedSender<GatewayClientFrame>,
+    raw: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+/// The raw bytes of the `envelope` member of a written `submit` frame (its last member).
+pub(crate) fn submitted_envelope_bytes(frame: &[u8]) -> Option<&[u8]> {
+    const KEY: &[u8] = b",\"envelope\":";
+    let start = frame.windows(KEY.len()).rposition(|window| window == KEY)? + KEY.len();
+    frame.strip_suffix(b"}}").map(|body| &body[start.min(body.len())..])
 }
 impl GatewaySessionFrameSink for ScriptedStream {
     fn send_frame<'a>(&'a mut self, bytes: &'a [u8]) -> GatewaySessionFrameFuture<'a, ()> {
         Box::pin(async move {
             let frame = serde_json::from_slice(bytes)?;
+            let _ = self.raw.send(bytes.to_vec());
             self.output.send(frame).map_err(|_| TransportError::ShutdownDraining)
         })
     }
@@ -58,14 +69,15 @@ impl SessionConnector for Connector {
     ) -> SessionFuture<'_, GatewaySessionEngine> {
         let (input, receive) = mpsc::unbounded_channel();
         let (send, output) = mpsc::unbounded_channel();
+        let (raw_send, raw) = mpsc::unbounded_channel();
         let mut engine = GatewaySessionEngine::with_test_transport(
             config,
-            Box::new(ScriptedStream { input: receive, output: send }),
+            Box::new(ScriptedStream { input: receive, output: send, raw: raw_send }),
         );
         engine.frame_timeout = self.frame;
         let result = self
             .sessions
-            .send(SessionIo { input, output })
+            .send(SessionIo { input, output, raw })
             .map(|()| engine)
             .map_err(|_| SdkError::GatewaySessionNotEstablished);
         Box::pin(std::future::ready(result))
@@ -190,10 +202,11 @@ pub(crate) fn seeded_engine(
 ) -> (GatewaySessionEngine, SessionIo) {
     let (input, receive) = mpsc::unbounded_channel();
     let (send, output) = mpsc::unbounded_channel();
+    let (raw_send, raw) = mpsc::unbounded_channel();
     let mut engine = GatewaySessionEngine::with_test_transport(
         config,
-        Box::new(ScriptedStream { input: receive, output: send }),
+        Box::new(ScriptedStream { input: receive, output: send, raw: raw_send }),
     );
     engine.frame_timeout = limits.frame;
-    (engine, SessionIo { input, output })
+    (engine, SessionIo { input, output, raw })
 }
