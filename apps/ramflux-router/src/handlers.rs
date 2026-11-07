@@ -410,6 +410,11 @@ fn handle_mesh_request_inner(
         return Ok(MeshResponse::text("403 Forbidden", "own-device fanout requires gateway peer"));
     }
 
+    if method == "POST" && path == crate::attachment_source::SOURCE_PATH {
+        // Dormant: no backend is configured until the P20/S10a activation card.
+        let reply = crate::attachment_source::route(peer_service_id, &body, None);
+        return Ok(MeshResponse::json(reply.status, reply.body));
+    }
     if method == "POST" && path == ramflux_node_core::MIGRATION_PEER_PATH {
         if peer_service_id != "ramflux-federation" {
             return Ok(MeshResponse::text(
