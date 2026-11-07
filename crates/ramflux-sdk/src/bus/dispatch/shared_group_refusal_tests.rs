@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![allow(clippy::too_many_lines)]
 //! `sender_refusal_policy_group_sync`: typed gateway refusals on the two durable group-sync
 //! sites (S1 state delivery, S2 control courier), through the real writer, courier and a real
 //! account DB reopen. Every expectation is an exact literal.

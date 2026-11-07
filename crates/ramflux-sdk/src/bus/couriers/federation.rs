@@ -81,6 +81,8 @@ fn unclassified(outcome: Result<Result<(), SubmitRefusal>, SdkError>) -> Result<
     }
 }
 
+/// The unclassified form; production sites use [`submit_classified`], tests keep this one.
+#[cfg(test)]
 pub(crate) async fn submit(
     context: &SessionContext,
     envelope: ramflux_protocol::Envelope,
