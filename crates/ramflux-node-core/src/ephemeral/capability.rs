@@ -146,12 +146,15 @@ impl crate::RouterCore {
 
     /// Restore map entries after a restart. Retries are idempotent.
     ///
+    /// Items that do not bind (empty fields, non-live or mismatched descriptor,
+    /// session or gateway mismatch, saturated map) are skipped individually and
+    /// are not counted in the returned `applied` value; the rest of the batch
+    /// is still processed.
+    ///
     /// # Errors
     /// Returns [`EphemeralReassertionError::BootMismatch`] when `boot_id` does not
-    /// match this process, [`EphemeralReassertionError::TooManyItems`] when
-    /// `items.len()` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`], or
-    /// [`EphemeralReassertionError::RecipientUnsupported`] when an item's asserting
-    /// gateway does not equal the live descriptor gateway.
+    /// match this process, or [`EphemeralReassertionError::TooManyItems`] when
+    /// `items.len()` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`].
     pub fn reassert_ephemeral_registrations(
         &self,
         boot_id: &str,
@@ -165,43 +168,38 @@ impl crate::RouterCore {
         }
         let mut applied: usize = 0;
         for item in items {
-            if self.reassert_item(&item.target, &item.session_id, &item.gateway_id)? {
+            if self.reassert_item(&item.target, &item.session_id, &item.gateway_id) {
                 applied = applied.saturating_add(1);
             }
         }
         Ok(applied)
     }
 
-    fn reassert_item(
-        &self,
-        target: &str,
-        session_id: &str,
-        gateway_id: &str,
-    ) -> Result<bool, EphemeralReassertionError> {
+    fn reassert_item(&self, target: &str, session_id: &str, gateway_id: &str) -> bool {
         if target.is_empty() || session_id.is_empty() || gateway_id.is_empty() {
-            return Ok(false);
+            return false;
         }
         let descriptor = self.session(target);
         let mut state = lock_unpoisoned(&self.ephemeral_capability);
         if state.established_in_boot.len() >= EPHEMERAL_CAPABILITY_BOUND
             || state.established_in_boot.contains(target)
         {
-            return Ok(false);
+            return false;
         }
         let Some(descriptor) = descriptor else {
-            return Ok(false);
+            return false;
         };
         if descriptor.lifecycle != SessionLifecycle::Live || descriptor.session_id != session_id {
-            return Ok(false);
+            return false;
         }
         if descriptor.gateway_id != gateway_id {
-            return Err(EphemeralReassertionError::RecipientUnsupported);
+            return false;
         }
         let recorded = state.bind(target, gateway_id, session_id);
-        Ok(recorded
+        recorded
             && state.map.get(target).is_some_and(|entry| {
                 entry.gateway_id == gateway_id && entry.session_id == session_id
-            }))
+            })
     }
 
     /// C1: capability-gated route for `T`. Lazily drops a stale map entry.

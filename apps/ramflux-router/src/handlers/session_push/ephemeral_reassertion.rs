@@ -221,9 +221,46 @@ fn row_asserting_gateway_mismatch_refused() -> TestResult {
     let boot = boot_id(&router)?;
     let before = router.state().ephemeral_map_len();
     let response = reassert(&router, &boot, &items_for("target-gw-a", SESSION, "gateway-a"))?;
-    assert_eq!(response["reason"], "recipient_unsupported");
+    assert_eq!(response["applied"], 0);
     assert_eq!(router.state().ephemeral_map_len(), before);
     assert_unsupported(&router, "target-gw-a");
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn row_mixed_batch_skips_gateway_mismatch() -> TestResult {
+    let (router, path) = fresh("p05-mixed")?;
+    establish_capable(&router, "target-mix-1", GATEWAY)?;
+    establish_capable(&router, "target-mix-2", "gateway-b")?;
+    establish_capable(&router, "target-mix-3", GATEWAY)?;
+    let previous_boot = boot_id(&router)?;
+    let restored = persist_and_restart(router, &path)?;
+    let boot = boot_id(&restored)?;
+    anyhow::ensure!(previous_boot != boot, "boot id reused across restart");
+    assert_eq!(restored.state().ephemeral_map_len(), 0);
+    let items = json!([
+        item_json("target-mix-1", SESSION, GATEWAY),
+        item_json("target-mix-2", SESSION, "gateway-a"),
+        item_json("target-mix-3", SESSION, GATEWAY),
+    ]);
+    let response = reassert(&restored, &boot, &items)?;
+    assert_eq!(response["applied"], 2);
+    assert_online(&restored, "target-mix-1", GATEWAY, SESSION);
+    assert_online(&restored, "target-mix-3", GATEWAY, SESSION);
+    assert_unsupported(&restored, "target-mix-2");
+    assert_eq!(restored.state().ephemeral_map_len(), 2);
+    drop(restored);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn row_empty_gateway() -> TestResult {
+    let (router, path, _) = restarted_live("p05-empty-g", "target-empty-g", GATEWAY)?;
+    let boot = boot_id(&router)?;
+    let response = reassert(&router, &boot, &items_for("target-empty-g", SESSION, ""))?;
+    assert_eq!(response["applied"], 0);
+    assert_unsupported(&router, "target-empty-g");
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -421,6 +458,8 @@ fn ephemeral_router_restart_reassertion() -> TestResult {
     row_descriptor_mismatch()?;
     row_asserting_gateway_mismatch_refused()?;
     row_asserting_gateway_match_accepted()?;
+    row_mixed_batch_skips_gateway_mismatch()?;
+    row_empty_gateway()?;
     row_empty_target()?;
     row_empty_session()?;
     row_non_live_descriptor()?;
