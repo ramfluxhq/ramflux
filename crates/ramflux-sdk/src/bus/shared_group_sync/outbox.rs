@@ -78,6 +78,9 @@ struct Intent {
     round_failed: bool,
     #[serde(default)]
     round_devices: usize,
+    /// A gateway `capacity_retry_after` floor, in seconds, for the next deferral.
+    #[serde(default)]
+    min_defer_secs: i64,
     #[serde(default)]
     cursor: Option<RecipientCursor>,
 }
@@ -289,6 +292,7 @@ fn enqueue_kind(
             round_active: false,
             round_failed: false,
             round_devices: 0,
+            min_defer_secs: 0,
             cursor: None,
         }
     };
@@ -440,7 +444,9 @@ enum DeliveryProgress {
 }
 fn defer_round(client: &RamfluxClient, intent: &mut Intent) -> Result<(), SdkError> {
     intent.round_active = false;
-    intent.next_at = now_unix_timestamp().saturating_add((1_i64 << intent.attempt).min(60));
+    let backoff = (1_i64 << intent.attempt).min(60);
+    intent.next_at = now_unix_timestamp().saturating_add(backoff.max(intent.min_defer_secs));
+    intent.min_defer_secs = 0;
     persist_intent(client, intent)
 }
 fn persist_intent(client: &RamfluxClient, intent: &Intent) -> Result<(), SdkError> {

@@ -14,6 +14,10 @@ use crate::bus::{
     couriers::{federation, primary::PrimarySnapshot, writer::Writer},
 };
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
+use crate::gateway::session_push::SubmitRefusal;
+
+/// How long a picked packet waits before it is picked again.
+const DEFER_SECS: i64 = 30;
 
 #[derive(Clone)]
 struct Plan {
@@ -118,9 +122,9 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
     Ok(active)
 }
 async fn submit(context: &SessionContext, writer: &Writer, sealed: Sealed) -> Result<(), SdkError> {
-    tokio::time::timeout_at(
+    let outcome = tokio::time::timeout_at(
         context.receipt_deadline(),
-        federation::submit(
+        federation::submit_classified(
             context,
             sealed.attempt.envelope.clone(),
             sealed.attempt.federation.clone(),
@@ -128,20 +132,63 @@ async fn submit(context: &SessionContext, writer: &Writer, sealed: Sealed) -> Re
     )
     .await
     .map_err(|_| SdkError::InboundPending("group courier submit deadline".into()))??;
-    writer
-        .apply(move |account| {
-            if current(account, &sealed.plan)?
-                && account
-                    .client
-                    .account_db()?
-                    .load_actor_state::<serde_json::Value>(&active_key(&sealed.plan.id))?
-                    == Some(serde_json::to_value(&sealed.attempt)?)
-            {
-                mark_sent(&account.client, &sealed.attempt)?;
-            }
-            Ok(())
-        })
-        .await
+    match outcome {
+        Ok(()) => {
+            writer
+                .apply(move |account| {
+                    if staged(account, &sealed)? {
+                        mark_sent(&account.client, &sealed.attempt)?;
+                    }
+                    Ok(())
+                })
+                .await
+        }
+        Err(SubmitRefusal::Conflict) => {
+            // The gateway already holds this envelope id with different content. The staged
+            // attempt takes the expiry branch (its record is dropped) and is never resent;
+            // `mark_sent` is not called, so the packet stays undelivered.
+            tracing::warn!(reason = "submit_conflict", "group courier attempt retired");
+            writer
+                .apply(move |account| {
+                    if staged(account, &sealed)? {
+                        account
+                            .client
+                            .account_db()?
+                            .remove_actor_state(&active_key(&sealed.plan.id))?;
+                    }
+                    Ok(())
+                })
+                .await
+        }
+        Err(refusal) => {
+            // The existing deferral, with the next attempt no earlier than the gateway's floor.
+            let floor = match refusal {
+                SubmitRefusal::CapacityRetryAfter { retry_after_ms } => {
+                    i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX)
+                }
+                _ => 0,
+            };
+            writer
+                .apply(move |account| {
+                    if staged(account, &sealed)? {
+                        let next = now_unix_timestamp().saturating_add(DEFER_SECS.max(floor));
+                        defer(&account.client, &sealed.plan.id, &sealed.plan.packet, next)?;
+                    }
+                    Ok(())
+                })
+                .await?;
+            Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()))
+        }
+    }
+}
+/// Whether the sealed attempt is still the staged one for a current plan.
+fn staged(account: &LocalBusAccountState, sealed: &Sealed) -> Result<bool, SdkError> {
+    Ok(current(account, &sealed.plan)?
+        && account
+            .client
+            .account_db()?
+            .load_actor_state::<serde_json::Value>(&active_key(&sealed.plan.id))?
+            == Some(serde_json::to_value(&sealed.attempt)?))
 }
 fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     let now = now_unix_timestamp();
@@ -163,7 +210,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
     };
     db.persist_actor_state("group-courier/cursor", &id)?;
     let Some(state) = db.shared_group_state(packet.group())? else { return Ok(None) };
-    defer(client, &id, &packet, now.saturating_add(30))?;
+    defer(client, &id, &packet, now.saturating_add(DEFER_SECS))?;
     let Some(fingerprint) = fingerprint(client, &id, &packet)? else { return Ok(None) };
     Ok(Some(Plan { id, packet, state, fingerprint, config: account.gateway_config.clone() }))
 }
