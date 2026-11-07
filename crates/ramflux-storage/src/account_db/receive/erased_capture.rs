@@ -21,6 +21,9 @@ const MAX_ENVELOPE_TTL: i64 = 604_800;
 const SLACK: i64 = 300;
 /// Expired rows and bindings removed by each account open (sweep S3).
 const OPEN_SWEEP: i64 = 1024;
+/// SQL for the signed expiry: the whole final colon-delimited field of an `erased-input:` copy id.
+pub(crate) const BINDING_EXPIRY_SQL: &str =
+    "CAST(substr(copy_id,length(rtrim(copy_id,replace(copy_id,':','')))+1) AS INTEGER)";
 
 /// Which database a staging pass reads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -470,9 +473,8 @@ fn import_binding(
         params![prefix, message],
         |r| r.get(0),
     )?;
-    if newest.is_some_and(|existing| existing >= expires_at) {
-        return Ok(());
-    }
+    // Always collapse the prefix to exactly one variant at the combined maximum.
+    let expires_at = newest.map_or(expires_at, |existing| existing.max(expires_at));
     db.execute(
         "DELETE FROM main.message_copy_binding WHERE message_id=?2 AND substr(copy_id,1,length(?1))=?1",
         params![prefix, message],
@@ -536,9 +538,10 @@ pub(crate) fn sweep_open(db: &Connection, now: i64) -> rusqlite::Result<()> {
         params![now, OPEN_SWEEP],
     )?;
     db.execute(
-        "DELETE FROM message_copy_binding WHERE rowid IN (SELECT rowid FROM message_copy_binding \
-         WHERE copy_id GLOB 'erased-input:*' \
-         AND CAST(substr(copy_id,length(rtrim(copy_id,'0123456789'))+1) AS INTEGER)<=?1 LIMIT ?2)",
+        &format!(
+            "DELETE FROM message_copy_binding WHERE rowid IN (SELECT rowid FROM message_copy_binding \
+             WHERE copy_id GLOB 'erased-input:*' AND {BINDING_EXPIRY_SQL}<=?1 LIMIT ?2)"
+        ),
         params![now, OPEN_SWEEP],
     )?;
     Ok(())
