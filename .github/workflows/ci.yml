@@ -10,14 +10,14 @@ on:
     inputs:
       mutants_base:
         description: "Git base the advisory mutants run diffs against (mutants job only)"
-        required: false
+        required: true
         default: "origin/main~20"
         type: string
 
 # One group per ref: a newer run on the same ref (feature branch or main) cancels the older one,
 # so superseded main runs stop queueing for runner slots. Only the newest main commit is verified.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'dispatch-' || '' }}${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -547,10 +547,21 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
           RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-memory-vault -E 'test(custody) | test(approve_once_requires_daemon_opt_in_and_refuses_every_second_arm_with_a_typed_error)'
 
+      - name: Keep JUnit (memory vault)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-memory-vault.xml; fi
+
       - name: Test (production absence)
+        if: ${{ !cancelled() }}
         run: |
           RAMFLUX_PRODUCTION_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
           RAMFLUX_PRODUCTION_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --lib -E 'test(itest_migration_approve_once_method_is_absent_from_a_production_build)'
+
+      - name: Keep JUnit (production absence)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-production-absence.xml; fi
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -563,7 +574,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: junit-v-sdk-a
-          path: target/nextest/ci/junit.xml
+          path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
   v-sdk-b:
@@ -618,12 +629,24 @@ jobs:
           RAMFLUX_ITEST_BUILD=1 cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
           RAMFLUX_ITEST_BUILD=1 ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-sdk --features itest-legacy-accounts -E 'test(itest_legacy)'
 
+      - name: Keep JUnit (legacy accounts)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-legacy-accounts.xml; fi
+
       - name: Test (gateway local-mint)
+        if: ${{ !cancelled() }}
         run: |
           cargo nextest run --no-run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
           ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint
 
+      - name: Keep JUnit (gateway local-mint)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-local-mint.xml; fi
+
       - name: Build same-tree router for the session push real-router gate
+        if: ${{ !cancelled() }}
         run: |
           cargo build -p ramflux-router --bin ramflux-router
           router="$GITHUB_WORKSPACE/target/debug/ramflux-router"
@@ -631,8 +654,14 @@ jobs:
           echo "RAMFLUX_P17_ROUTER_BINARY=$router" >> "$GITHUB_ENV"
 
       - name: Session push real-router gate (explicit, ignored by default)
+        if: ${{ !cancelled() }}
         run: |
           ${{ runner.environment != 'github-hosted' && 'bash scripts/ci/private-netns.sh' || '' }} cargo nextest run --profile ci --no-tests=fail -p ramflux-gateway --features itest-local-mint --run-ignored only -E 'test(session_push_capability_negotiation_real_router)'
+
+      - name: Keep JUnit (real-router gate)
+        if: always()
+        run: |
+          if [ -f target/nextest/ci/junit.xml ]; then cp target/nextest/ci/junit.xml target/nextest/ci/junit-local-mint-gate.xml; fi
 
       - name: Clean private test temp directory
         if: always() && runner.environment == 'self-hosted'
@@ -645,7 +674,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: junit-v-sdk-b
-          path: target/nextest/ci/junit.xml
+          path: target/nextest/ci/junit-*.xml
           if-no-files-found: ignore
 
 
@@ -677,8 +706,14 @@ jobs:
 
       - name: Rust diff
         id: diff
+        env:
+          MUTANTS_BASE: ${{ inputs.mutants_base }}
         run: |
-          git diff "${{ inputs.mutants_base }}...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
+          if [ -z "$MUTANTS_BASE" ]; then echo "::error::mutants_base is empty"; exit 1; fi
+          if ! git rev-parse --verify --quiet "$MUTANTS_BASE^{commit}" >/dev/null; then
+            echo "::error::mutants_base is not a commit: $MUTANTS_BASE"; exit 1
+          fi
+          git diff "$MUTANTS_BASE...HEAD" -- '*.rs' ':(exclude)vendor/**' > pr.diff
           if [ -s pr.diff ]; then echo "has=true" >> "$GITHUB_OUTPUT"; fi
 
       - name: Cache
