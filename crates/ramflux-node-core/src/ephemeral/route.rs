@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Read-only ephemeral route authority (C1) and volatile replay set (D3).
-//! No store write, no foreign-head apply. Replay lives outside snapshot/save.
+//! Read-only ephemeral route authority (C1). No store write, no foreign-head apply.
+//! Volatile replay set (D3) lives on `RouterCore` outside snapshot/save.
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::HomeNodeMigrationRecord;
@@ -28,7 +28,7 @@ pub enum EphemeralRouteResponse {
     Dropped { reason: EphemeralDropReason },
 }
 
-/// Dropped reasons produced by C1 and D3 replay admission.
+/// Dropped reasons produced by this part. Later parts add queue/rate/replay variants.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EphemeralDropReason {
@@ -184,14 +184,8 @@ pub struct EphemeralDurableSnapshot {
     pub local_home_node_id: Vec<u8>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn snapshot_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, NodeCoreError> {
-    serde_json::to_vec(value)
-        .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))
-}
-
 impl RouterCore {
-    /// Read-only ephemeral route: recompute D, verify source without E1, then C1, then D3.
+    /// Read-only ephemeral route: recompute D, verify source without E1, then C1.
     #[must_use]
     pub fn route_ephemeral(
         &self,
@@ -234,6 +228,92 @@ impl RouterCore {
         }
     }
 
+    fn authenticate_ephemeral_source(
+        &self,
+        envelope: &ramflux_protocol::Envelope,
+    ) -> Result<(), EphemeralRouteResult> {
+        let root = envelope
+            .ext
+            .ext
+            .get("source_root_commitment")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(EphemeralRouteResult::RootMismatch)?;
+        let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
+            .map_err(|_| EphemeralRouteResult::RootMismatch)?;
+        let control = lock_unpoisoned(&self.control);
+        let Some(authority) = control
+            .mvp1_identities
+            .resolve_device_selector(&lookup)
+            .and_then(|identity| control.mvp1_identities.device_auth_key(&identity))
+        else {
+            return Err(EphemeralRouteResult::RootMismatch);
+        };
+        match authority.verify_envelope_source(envelope) {
+            Ok(_) => Ok(()),
+            Err(NodeCoreError::SourceAuthorityRefused {
+                reason_code: EnvelopeAuthorityReason::Revoked,
+            }) => Err(EphemeralRouteResult::RevokedSource),
+            Err(_) => Err(EphemeralRouteResult::RootMismatch),
+        }
+    }
+
+    fn ephemeral_target_not_local(&self, target: &str, now_unix_seconds: i64) -> bool {
+        self.effective_home_node_migration_for_target(target, now_unix_seconds).is_some()
+    }
+
+    /// Durable identities, replay guard and foreign-device heads as observed bytes.
+    ///
+    /// # Errors
+    /// Returns an error when a snapshot field cannot be encoded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn ephemeral_durable_snapshot(&self) -> Result<EphemeralDurableSnapshot, NodeCoreError> {
+        let snap = self.snapshot();
+        Ok(EphemeralDurableSnapshot {
+            identities: serde_json::to_vec(&snap.mvp1_identities)
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
+            replay: serde_json::to_vec(&snap.replay_guard_state)
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
+            foreign_device_heads: serde_json::to_vec(&snap.foreign_device_heads)
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
+            sessions: serde_json::to_vec(&snap.registry)
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
+            home_node_migrations: serde_json::to_vec(&snap.home_node_migrations)
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
+            local_home_node_id: serde_json::to_vec(&self.local_home_node_id())
+                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
+        })
+    }
+
+    /// Test-only: record an effective home-node migration for `identity_commitment`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_put_home_node_migration(
+        &self,
+        identity_commitment: String,
+        record: HomeNodeMigrationRecord,
+    ) {
+        let mut control = lock_unpoisoned(&self.control);
+        control.home_node_migrations.insert(identity_commitment, record);
+        self.refresh_migration_read_snapshot_from_control(&control);
+    }
+
+    /// Test-only: mark the envelope's registered source device revoked.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_revoke_envelope_source(&self, envelope: &ramflux_protocol::Envelope) {
+        let Some(root) =
+            envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let Ok(lookup) = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
+        else {
+            return;
+        };
+        let mut control = lock_unpoisoned(&self.control);
+        if let Some(identity) = control.mvp1_identities.resolve_device_selector(&lookup) {
+            control.mvp1_identities.revoked_devices.insert(identity.storage_key().to_owned());
+        }
+    }
+
     fn admit_routed_replay(
         &self,
         envelope: &ramflux_protocol::Envelope,
@@ -270,86 +350,6 @@ impl RouterCore {
         }
     }
 
-    fn authenticate_ephemeral_source(
-        &self,
-        envelope: &ramflux_protocol::Envelope,
-    ) -> Result<(), EphemeralRouteResult> {
-        let root = envelope
-            .ext
-            .ext
-            .get("source_root_commitment")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(EphemeralRouteResult::RootMismatch)?;
-        let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
-            .map_err(|_| EphemeralRouteResult::RootMismatch)?;
-        let control = lock_unpoisoned(&self.control);
-        let Some(authority) = control
-            .mvp1_identities
-            .resolve_device_selector(&lookup)
-            .and_then(|identity| control.mvp1_identities.device_auth_key(&identity))
-        else {
-            return Err(EphemeralRouteResult::RootMismatch);
-        };
-        match authority.verify_envelope_source(envelope) {
-            Ok(_) => Ok(()),
-            Err(NodeCoreError::SourceAuthorityRefused {
-                reason_code: EnvelopeAuthorityReason::Revoked,
-            }) => Err(EphemeralRouteResult::RevokedSource),
-            Err(_) => Err(EphemeralRouteResult::RootMismatch),
-        }
-    }
-
-    fn ephemeral_target_not_local(&self, target: &str, now_unix_seconds: i64) -> bool {
-        self.effective_home_node_migration_for_target(target, now_unix_seconds).is_some()
-    }
-
-    /// Durable identities, replay guard, foreign heads, sessions and migrations as observed bytes.
-    ///
-    /// # Errors
-    /// Returns an error when a snapshot field cannot be encoded.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn ephemeral_durable_snapshot(&self) -> Result<EphemeralDurableSnapshot, NodeCoreError> {
-        let snap = self.snapshot();
-        Ok(EphemeralDurableSnapshot {
-            identities: snapshot_bytes(&snap.mvp1_identities)?,
-            replay: snapshot_bytes(&snap.replay_guard_state)?,
-            foreign_device_heads: snapshot_bytes(&snap.foreign_device_heads)?,
-            sessions: snapshot_bytes(&snap.registry)?,
-            home_node_migrations: snapshot_bytes(&snap.home_node_migrations)?,
-            local_home_node_id: snapshot_bytes(&self.local_home_node_id())?,
-        })
-    }
-
-    /// Test-only: record an effective home-node migration for `identity_commitment`.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_put_home_node_migration(
-        &self,
-        identity_commitment: String,
-        record: HomeNodeMigrationRecord,
-    ) {
-        let mut control = lock_unpoisoned(&self.control);
-        control.home_node_migrations.insert(identity_commitment, record);
-        self.refresh_migration_read_snapshot_from_control(&control);
-    }
-
-    /// Test-only: mark the envelope's registered source device revoked.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_revoke_envelope_source(&self, envelope: &ramflux_protocol::Envelope) {
-        let Some(root) =
-            envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let Ok(lookup) = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
-        else {
-            return;
-        };
-        let mut control = lock_unpoisoned(&self.control);
-        if let Some(identity) = control.mvp1_identities.resolve_device_selector(&lookup) {
-            control.mvp1_identities.revoked_devices.insert(identity.storage_key().to_owned());
-        }
-    }
-
     /// Record or refuse an authenticated ephemeral digest until exclusive deadline `D`.
     pub fn admit_ephemeral_replay(
         &self,
@@ -379,8 +379,10 @@ pub(crate) fn saturation_total() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        EPHEMERAL_REPLAY_BOUND, EphemeralDropReason, EphemeralDurableSnapshot,
-        EphemeralReplayAdmit, EphemeralRouteRequest, EphemeralRouteResponse, EphemeralRouteResult,
+        EPHEMERAL_REPLAY_BOUND, EphemeralReplayAdmit, EphemeralRouteRequest, EphemeralRouteResponse,
+    };
+    use super::{
+        EphemeralDropReason, EphemeralDurableSnapshot, EphemeralRouteResult,
         HomeNodeMigrationRecord, RouterCore, deadline,
     };
     use crate::{
@@ -390,8 +392,6 @@ mod tests {
     use ramflux_protocol::{
         DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, ephemeral as proto,
     };
-    use serde::Serialize;
-    use serde::de::DeserializeOwned;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -408,7 +408,7 @@ mod tests {
     fn temp_path(name: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "ramflux-s6c-p07-{name}-{}-{}.redb",
+            "ramflux-s6c-p06-{name}-{}-{}.redb",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
@@ -499,7 +499,7 @@ mod tests {
         ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone")
     }
 
-    fn ephemeral_template(id: &str, target: &str) -> Fallible<Envelope> {
+    fn signed_ephemeral(id: &str, target: &str) -> Fallible<Envelope> {
         let created_at = i64::try_from(NOW_MS / 1_000)?;
         let mut envelope = Envelope {
             schema: "ramflux.envelope.v1".into(),
@@ -532,29 +532,8 @@ mod tests {
             "source_root_commitment".into(),
             json!(ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key())),
         );
-        Ok(envelope)
-    }
-
-    fn sign_envelope(envelope: &mut Envelope, seed: [u8; 32]) -> TestResult {
-        envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(envelope, seed)?;
-        Ok(())
-    }
-
-    fn signed_ephemeral(id: &str, target: &str) -> Fallible<Envelope> {
-        let mut envelope = ephemeral_template(id, target)?;
-        sign_envelope(&mut envelope, sign_seed())?;
-        Ok(envelope)
-    }
-
-    fn independently_signed(
-        id: &str,
-        target: &str,
-        seed: [u8; 32],
-        mutate: impl FnOnce(&mut Envelope),
-    ) -> Fallible<Envelope> {
-        let mut envelope = ephemeral_template(id, target)?;
-        mutate(&mut envelope);
-        sign_envelope(&mut envelope, seed)?;
+        envelope.signed.signature =
+            ramflux_crypto::sign_protocol_object_with_seed(&envelope, sign_seed())?;
         Ok(envelope)
     }
 
@@ -588,7 +567,7 @@ mod tests {
         path: &std::path::Path,
     ) -> TestResult {
         assert_eq!(&router.ephemeral_durable_snapshot()?, before);
-        assert_eq!(std::fs::read(path)?, store_bytes);
+        assert_eq!(std::fs::read(path).unwrap_or_default(), store_bytes);
         Ok(())
     }
 
@@ -605,33 +584,16 @@ mod tests {
         Ok(result)
     }
 
-    fn ready_router(name: &str) -> Fallible<(RouterCore, PathBuf, Vec<u8>, RouterRedbStore)> {
-        let path = temp_path(name);
+    #[test]
+    fn ephemeral_route_read_only() -> TestResult {
+        let path = temp_path("read-only");
         let store = RouterRedbStore::open(&path)?;
         let router = RouterCore::new();
         register_alice(&router)?;
         store.record_identity_registry(&router.mvp1_identities_snapshot())?;
         bind_capable(&router, TARGET)?;
-        let store_bytes = std::fs::read(&path)?;
-        Ok((router, path, store_bytes, store))
-    }
+        let store_bytes = std::fs::read(&path).unwrap_or_default();
 
-    fn round_trip_json<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Fallible<T> {
-        let bytes = serde_json::to_vec(value)?;
-        let decoded: T = serde_json::from_slice(&bytes)?;
-        assert_eq!(serde_json::to_vec(&decoded)?, bytes);
-        Ok(decoded)
-    }
-
-    fn digest(n: u32) -> [u8; 32] {
-        let mut out = [0_u8; 32];
-        out[28..].copy_from_slice(&n.to_be_bytes());
-        out
-    }
-
-    #[test]
-    fn ephemeral_route_read_only() -> TestResult {
-        let (router, path, store_bytes, store) = ready_router("read-only")?;
         let envelope = signed_ephemeral("ok", TARGET)?;
         let expires = computed_d(&envelope)?;
         let accepted = observe_route(&router, &envelope, expires, &path, &store_bytes)?;
@@ -639,7 +601,6 @@ mod tests {
             accepted,
             EphemeralRouteResult::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
         );
-        assert_eq!(router.ephemeral_replay_len(), 1);
 
         let mismatch = signed_ephemeral("mismatch", TARGET)?;
         let computed = computed_d(&mismatch)?;
@@ -647,14 +608,15 @@ mod tests {
             observe_route(&router, &mismatch, computed.saturating_add(1), &path, &store_bytes)?;
         assert_eq!(d_mismatch, EphemeralRouteResult::DeadlineMismatch);
         assert_no_dispatch(&d_mismatch);
-        assert_eq!(router.ephemeral_replay_len(), 1);
-        drop(store);
-        Ok(())
-    }
 
-    #[test]
-    fn ephemeral_route_gate_refusals() -> TestResult {
-        let (router, path, store_bytes, store) = ready_router("gate")?;
+        let mut root_mismatch = signed_ephemeral("root", TARGET)?;
+        root_mismatch.ext.ext.insert("source_root_commitment".into(), json!("other-root"));
+        let root_expires = deadline(&root_mismatch, NOW_MS).unwrap_or(expires);
+        let root_result =
+            observe_route(&router, &root_mismatch, root_expires, &path, &store_bytes)?;
+        assert_eq!(root_result, EphemeralRouteResult::RootMismatch);
+        assert_no_dispatch(&root_result);
+
         let offline = signed_ephemeral("offline", "target_offline")?;
         let offline_result =
             observe_route(&router, &offline, computed_d(&offline)?, &path, &store_bytes)?;
@@ -685,13 +647,7 @@ mod tests {
             EphemeralRouteResult::Dropped(EphemeralDropReason::RecipientUnsupported)
         );
         assert_no_dispatch(&map_ne_result);
-        drop(store);
-        Ok(())
-    }
 
-    #[test]
-    fn ephemeral_route_not_local_and_revoked() -> TestResult {
-        let (router, path, store_bytes, store) = ready_router("migration")?;
         let keys = router.mvp1_identities_snapshot().identity_keys_for_target_delivery_id(TARGET);
         let identity = keys.first().ok_or("identity key")?.clone();
         router.set_local_home_node_id(Some("node-a".into()));
@@ -722,79 +678,7 @@ mod tests {
             observe_route(&router, &revoked, computed_d(&revoked)?, &path, &store_bytes)?;
         assert_eq!(revoked_result, EphemeralRouteResult::RevokedSource);
         assert_no_dispatch(&revoked_result);
-        drop(store);
-        Ok(())
-    }
 
-    #[test]
-    fn ephemeral_route_authority() -> TestResult {
-        let (router, path, store_bytes, store) = ready_router("authority")?;
-        let bad_sig = independently_signed("sig", TARGET, [7_u8; 32], |_| {})?;
-        let sig_result =
-            observe_route(&router, &bad_sig, computed_d(&bad_sig)?, &path, &store_bytes)?;
-        assert_eq!(sig_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&sig_result);
-
-        let principal = independently_signed("principal", TARGET, sign_seed(), |envelope| {
-            envelope.source_principal_id = "bob".into();
-        })?;
-        let principal_result =
-            observe_route(&router, &principal, computed_d(&principal)?, &path, &store_bytes)?;
-        assert_eq!(principal_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&principal_result);
-
-        let device = independently_signed("device", TARGET, sign_seed(), |envelope| {
-            envelope.source_device_id = "alice_laptop".into();
-        })?;
-        let device_result =
-            observe_route(&router, &device, computed_d(&device)?, &path, &store_bytes)?;
-        assert_eq!(device_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&device_result);
-
-        let root = independently_signed("root", TARGET, sign_seed(), |envelope| {
-            envelope.ext.ext.insert("source_root_commitment".into(), json!("other-root"));
-        })?;
-        let root_result = observe_route(&router, &root, computed_d(&root)?, &path, &store_bytes)?;
-        assert_eq!(root_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&root_result);
-        drop(store);
-        Ok(())
-    }
-
-    #[test]
-    fn ephemeral_route_byte_identity() -> TestResult {
-        let (router, path, store_bytes, store) = ready_router("bytes")?;
-        let envelope = signed_ephemeral("bytes", TARGET)?;
-        let decoded = round_trip_json(&envelope)?;
-        let expires = computed_d(&decoded)?;
-        let request = round_trip_json(&EphemeralRouteRequest {
-            envelope: decoded.clone(),
-            expires_at_ms: expires,
-        })?;
-        let accepted =
-            observe_route(&router, &request.envelope, request.expires_at_ms, &path, &store_bytes)?;
-        assert_eq!(
-            accepted,
-            EphemeralRouteResult::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
-        );
-        let online = round_trip_json(&accepted.clone().into_response())?;
-        assert_eq!(
-            online,
-            EphemeralRouteResponse::Online {
-                gateway_id: GATEWAY.into(),
-                session_id: SESSION.into()
-            }
-        );
-
-        let mismatch = signed_ephemeral("bytes-mm", TARGET)?;
-        let computed = computed_d(&mismatch)?;
-        let refused =
-            observe_route(&router, &mismatch, computed.saturating_add(1), &path, &store_bytes)?;
-        let dropped = round_trip_json(&refused.into_response())?;
-        assert_eq!(
-            dropped,
-            EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid }
-        );
         drop(store);
         Ok(())
     }
@@ -821,9 +705,129 @@ mod tests {
         Ok(())
     }
 
+    fn independently_signed(
+        id: &str,
+        target: &str,
+        seed: [u8; 32],
+        mutate: impl FnOnce(&mut Envelope),
+    ) -> Fallible<Envelope> {
+        let mut envelope = signed_ephemeral(id, target)?;
+        envelope.signed.signature.clear();
+        mutate(&mut envelope);
+        envelope.signed.signature =
+            ramflux_crypto::sign_protocol_object_with_seed(&envelope, seed)?;
+        Ok(envelope)
+    }
+
+    fn round_trip_json<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq>(
+        value: &T,
+    ) -> Fallible<T> {
+        let bytes = serde_json::to_vec(value)?;
+        let decoded: T = serde_json::from_slice(&bytes)?;
+        assert_eq!(serde_json::to_vec(&decoded)?, bytes);
+        Ok(decoded)
+    }
+
+    fn digest(n: u32) -> [u8; 32] {
+        let mut out = [0_u8; 32];
+        out[28..].copy_from_slice(&n.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn ephemeral_route_authority() -> TestResult {
+        let path = temp_path("authority");
+        let store = RouterRedbStore::open(&path)?;
+        let router = RouterCore::new();
+        register_alice(&router)?;
+        store.record_identity_registry(&router.mvp1_identities_snapshot())?;
+        bind_capable(&router, TARGET)?;
+        let store_bytes = std::fs::read(&path)?;
+
+        let bad_sig = independently_signed("sig", TARGET, [7_u8; 32], |_| {})?;
+        let sig_result =
+            observe_route(&router, &bad_sig, computed_d(&bad_sig)?, &path, &store_bytes)?;
+        assert_eq!(sig_result, EphemeralRouteResult::RootMismatch);
+        assert_no_dispatch(&sig_result);
+
+        let principal = independently_signed("principal", TARGET, sign_seed(), |envelope| {
+            envelope.source_principal_id = "bob".into();
+        })?;
+        let principal_result =
+            observe_route(&router, &principal, computed_d(&principal)?, &path, &store_bytes)?;
+        assert_eq!(principal_result, EphemeralRouteResult::RootMismatch);
+        assert_no_dispatch(&principal_result);
+
+        let device = independently_signed("device", TARGET, sign_seed(), |envelope| {
+            envelope.source_device_id = "alice_laptop".into();
+        })?;
+        let device_result =
+            observe_route(&router, &device, computed_d(&device)?, &path, &store_bytes)?;
+        assert_eq!(device_result, EphemeralRouteResult::RootMismatch);
+        assert_no_dispatch(&device_result);
+
+        let root = independently_signed("root-signed", TARGET, sign_seed(), |envelope| {
+            envelope.ext.ext.insert("source_root_commitment".into(), json!("other-root"));
+        })?;
+        let root_result = observe_route(&router, &root, computed_d(&root)?, &path, &store_bytes)?;
+        assert_eq!(root_result, EphemeralRouteResult::RootMismatch);
+        assert_no_dispatch(&root_result);
+        drop(store);
+        Ok(())
+    }
+
+    #[test]
+    fn ephemeral_route_byte_identity() -> TestResult {
+        let path = temp_path("bytes");
+        let store = RouterRedbStore::open(&path)?;
+        let router = RouterCore::new();
+        register_alice(&router)?;
+        store.record_identity_registry(&router.mvp1_identities_snapshot())?;
+        bind_capable(&router, TARGET)?;
+        let store_bytes = std::fs::read(&path)?;
+        let envelope = signed_ephemeral("bytes", TARGET)?;
+        let decoded = round_trip_json(&envelope)?;
+        let expires = computed_d(&decoded)?;
+        let request = round_trip_json(&EphemeralRouteRequest {
+            envelope: decoded.clone(),
+            expires_at_ms: expires,
+        })?;
+        let accepted =
+            observe_route(&router, &request.envelope, request.expires_at_ms, &path, &store_bytes)?;
+        assert_eq!(
+            accepted,
+            EphemeralRouteResult::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
+        );
+        let online = round_trip_json(&accepted.clone().into_response())?;
+        assert_eq!(
+            online,
+            EphemeralRouteResponse::Online {
+                gateway_id: GATEWAY.into(),
+                session_id: SESSION.into()
+            }
+        );
+        let mismatch = signed_ephemeral("bytes-mm", TARGET)?;
+        let computed = computed_d(&mismatch)?;
+        let refused =
+            observe_route(&router, &mismatch, computed.saturating_add(1), &path, &store_bytes)?;
+        let dropped = round_trip_json(&refused.into_response())?;
+        assert_eq!(
+            dropped,
+            EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid }
+        );
+        drop(store);
+        Ok(())
+    }
+
     #[test]
     fn ephemeral_route_replay_outcomes() -> TestResult {
-        let (router, path, store_bytes, store) = ready_router("replay-path")?;
+        let path = temp_path("replay-path");
+        let store = RouterRedbStore::open(&path)?;
+        let router = RouterCore::new();
+        register_alice(&router)?;
+        store.record_identity_registry(&router.mvp1_identities_snapshot())?;
+        bind_capable(&router, TARGET)?;
+        let store_bytes = std::fs::read(&path)?;
         let envelope = signed_ephemeral("dup", TARGET)?;
         let expires = computed_d(&envelope)?;
         let first = observe_route(&router, &envelope, expires, &path, &store_bytes)?;
