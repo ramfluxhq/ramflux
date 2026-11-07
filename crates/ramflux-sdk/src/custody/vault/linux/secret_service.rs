@@ -39,6 +39,10 @@ fn attributes_of(service: &str, user: &str) -> Result<HashMap<String, String>, E
     Ok(attributes)
 }
 
+#[cfg(test)]
+pub(super) static LOSE_CREATE_REPLY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 struct Response(Vec<u8>);
 impl Drop for Response {
     fn drop(&mut self) {
@@ -170,6 +174,11 @@ pub(super) fn ensure(
                 "application/octet-stream",
             )
             .map_err(|_| Error::Provider)?;
+        // Test seam: the provider really created the item, but the reply is treated as lost.
+        #[cfg(test)]
+        if LOSE_CREATE_REPLY.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(Error::Timeout);
+        }
         cut("ss-set-reply");
         check(cancel, deadline)?;
         let readback = read(&item)?;

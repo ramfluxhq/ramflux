@@ -269,11 +269,12 @@ async fn linux_vault_secret_service_has_no_headless_fallback()
     let rf = std::env::var_os("RF_LINUX_VAULT_FIXTURE_RF")
         .map_or_else(|| env!("CARGO_BIN_EXE_rf").into(), std::path::PathBuf::from);
     // A child with no bus cannot fall back, and does not touch persisted state.
-    let missing = Command::new(&rf)
-        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/ramflux-fixture")
-        .args(["vault", "status", "--mode", "desktop-secret-service", "--vault-root"])
-        .arg(&root)
-        .output()?;
+    let missing = bounded(
+        Command::new(&rf)
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/ramflux-fixture")
+            .args(["vault", "status", "--mode", "desktop-secret-service", "--vault-root"])
+            .arg(&root),
+    )?;
     assert!(!missing.status.success());
     assert!(String::from_utf8(missing.stderr)?.contains("vault_provider"));
     assert_eq!(descriptor, std::fs::read(root.join("descriptor.json"))?);
