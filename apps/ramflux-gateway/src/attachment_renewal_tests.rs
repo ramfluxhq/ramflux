@@ -242,6 +242,7 @@ fn resident_runtime(
 ) -> GatewaySessionRuntime {
     GatewaySessionRuntime {
         session_push: None,
+        ephemeral: false,
         push_limit: 256,
         source_identity: source.clone(),
         session_id: "s".into(),
@@ -673,6 +674,7 @@ mod entrypoint {
         let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
         Ok(GatewaySessionRuntime {
             session_push: None,
+            ephemeral: false,
             push_limit: 256,
             source_identity: source.clone(),
             session_id: "s".into(),

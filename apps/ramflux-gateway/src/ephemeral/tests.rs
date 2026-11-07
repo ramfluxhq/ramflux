@@ -449,6 +449,7 @@ fn bind_source_mismatch_and_bad_signature() -> TestResult {
     )?;
     let runtime = crate::GatewaySessionRuntime {
         session_push: None,
+        ephemeral: false,
         push_limit: 256,
         source_identity: authority.authenticated_device_identity()?,
         session_id: "session".into(),
