@@ -39,7 +39,33 @@ pub(crate) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS message_footprint_migration(name TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);",
     )?;
     super::object_retention::install(db)?;
-    schema::install(db)
+    schema::install(db)?;
+    erased_input_store(db)
+}
+
+/// Tombstones of deleted authenticated inputs (selector MACs only) and the bundle-retirement
+/// guard. An ordinary rowid table: whole-database digests and audits enumerate by rowid. The guard needs the MAC bundle table, which a fresh account creates after the first
+/// install, so open installs it again once that table exists.
+pub(super) fn erased_input_store(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS receive_erased_input(
+            selector TEXT PRIMARY KEY NOT NULL,bundle_id TEXT NOT NULL,expires_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS receive_erased_input_expiry ON receive_erased_input(expires_at);",
+    )?;
+    if !schema::exists(db, "account_mac_bundle")? {
+        return Ok(());
+    }
+    db.execute_batch(
+        "DROP TRIGGER IF EXISTS main.receive_erased_input_bundle_guard;
+         CREATE TRIGGER receive_erased_input_bundle_guard BEFORE DELETE ON account_mac_bundle
+         WHEN EXISTS(SELECT 1 FROM receive_erased_input
+                     WHERE bundle_id=OLD.bundle_id AND expires_at>unixepoch())
+          OR EXISTS(SELECT 1 FROM message_copy_binding
+                    WHERE copy_id GLOB 'erased-input:'||OLD.bundle_id||':*'
+                    AND CAST(substr(copy_id,length(rtrim(copy_id,'0123456789'))+1) AS INTEGER)>unixepoch())
+         BEGIN SELECT RAISE(ABORT,'mac bundle retains erased-input authority'); END;",
+    )
 }
 
 impl AccountDb {
