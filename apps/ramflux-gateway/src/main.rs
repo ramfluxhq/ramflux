@@ -10,6 +10,7 @@ mod custody;
 mod durable_ingress_registry;
 mod durable_mode;
 mod ephemeral;
+mod ephemeral_forward;
 mod hub_index;
 mod ingress;
 mod issued_probe;

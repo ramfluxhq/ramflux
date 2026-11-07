@@ -257,6 +257,7 @@ fn resident_runtime(
     }
 }
 #[test]
+#[allow(clippy::too_many_lines)]
 fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_requester() -> Result {
     let root = ramflux_crypto::create_identity_root("resident", [31; 32]);
     let branch = ramflux_crypto::create_device_branch("resident", "device", 1, [32; 32]);

@@ -428,7 +428,48 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     assert_eq!(applied, 1);
     posted.respond.send((200, json!({"applied": applied}))).map_err(|_| Retired)?;
     assert_online(&router, session_id);
+    crate::ephemeral_forward::reset_wake_count();
+    let accepted = crate::ephemeral_forward::handle(
+        &fixture.context.hub,
+        crate::ephemeral_forward::GatewayForwardEphemeralRequest {
+            source_gateway_id: GATEWAY.into(),
+            target_delivery_id: TARGET.into(),
+            forwarded: true,
+            envelope: restart_envelope(TARGET),
+            expires_at_ms: 1_760_000_005_000,
+        },
+    )
+    .await?;
+    assert!(accepted.delivered);
+    assert_eq!(accepted.outcome, Some(ramflux_node_core::SessionPushForwardOutcome::Queued));
+    assert_eq!(fixture.context.hub.ephemeral_queued(TARGET).await, 1);
+    assert_eq!(crate::ephemeral_forward::wake_count(), 0);
     Ok(())
+}
+
+fn restart_envelope(target: &str) -> ramflux_protocol::Envelope {
+    ramflux_protocol::Envelope {
+        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        version: 1,
+        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        ext: ramflux_protocol::Ext::default(),
+        signed: ramflux_protocol::SignedFields {
+            signing_key_id: "test-p11-key".to_owned(),
+            signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
+            signature: "test-p11-signature".to_owned(),
+        },
+        envelope_id: "env-restart-accepted".to_owned(),
+        source_principal_id: "principal-p11".to_owned(),
+        source_device_id: "device-p11".to_owned(),
+        target_delivery_id: target.to_owned(),
+        routing_set_id: None,
+        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        priority: ramflux_protocol::Priority::Low,
+        ttl: 5,
+        created_at: 1_760_000_000,
+        encrypted_payload: "encrypted_payload".to_owned(),
+        payload_hash: "payload_hash".to_owned(),
+    }
 }
 
 fn seed_live(router: &RouterCore, target: &str, session_id: &str) -> TestResult {
