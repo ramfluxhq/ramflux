@@ -252,7 +252,6 @@ pub const ALL: [&str; 155] = [
     CUSTODY_MASTER_CERTIFICATE,
     SIGNED_DEVICE_SET_V3,
     CUSTODY_BRANCH_CERTIFICATE,
-    CUSTODY_MESSAGE_LAYER_DECLARATION,
     BRANCH_PROOF_V3,
     CUSTODY_DELEGATION,
     CUSTODY_GROUP_DELEGATION,
@@ -338,6 +337,7 @@ pub const ALL: [&str; 155] = [
     CUSTODY_PAIRING_INVITATION_V2,
     CUSTODY_PAIRING_CREATE_TICKET_V2,
     CUSTODY_PAIRING_CONTEXT_COMMITMENT_V2,
+    CUSTODY_MESSAGE_LAYER_DECLARATION,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
@@ -385,7 +385,7 @@ mod tests {
         for label in &super::ALL[117..140] {
             assert!(label.starts_with("ramflux.dm_bootstrap_fs."));
         }
-        assert_eq!(super::ALL[140..].len(), 14);
+        assert_eq!(super::ALL[140..].len(), 15);
         for label in &super::ALL[140..] {
             assert!(label.starts_with("ramflux.identity."));
         }
