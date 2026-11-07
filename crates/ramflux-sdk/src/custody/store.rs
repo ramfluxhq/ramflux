@@ -109,6 +109,75 @@ impl Drop for ExportSource {
         wipe_allocation(&mut self.0, "p07-export-utf8");
     }
 }
+/// Canonical JSON bytes of an [`AgentProvisioningBundle`], written into a buffer that is sized
+/// exactly up front (so nothing is ever reallocated and left behind) and wiped over its whole
+/// allocation on every exit. The schema is closed: keys are in canonical order.
+pub(super) struct BundleBytes(Vec<u8>);
+impl BundleBytes {
+    const ACCOUNT_KEY: &'static [u8] = br#"{"account_id":""#;
+    const PASSPHRASE_KEY: &'static [u8] = br#"","data_passphrase":""#;
+    const END: &'static [u8] = br#""}"#;
+    pub(super) fn serialize(bundle: &AgentProvisioningBundle) -> Self {
+        let (account, passphrase) = (&bundle.account_id, &bundle.data_passphrase);
+        let length = Self::ACCOUNT_KEY.len()
+            + escaped_len(account)
+            + Self::PASSPHRASE_KEY.len()
+            + escaped_len(passphrase)
+            + Self::END.len();
+        let mut buffer = Self(Vec::with_capacity(length));
+        buffer.0.extend_from_slice(Self::ACCOUNT_KEY);
+        escape_into(&mut buffer.0, account);
+        buffer.0.extend_from_slice(Self::PASSPHRASE_KEY);
+        escape_into(&mut buffer.0, passphrase);
+        buffer.0.extend_from_slice(Self::END);
+        debug_assert_eq!(buffer.0.len(), length);
+        buffer
+    }
+    #[cfg(test)]
+    pub(super) fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl Drop for BundleBytes {
+    fn drop(&mut self) {
+        wipe_allocation(&mut self.0, "p07-export-serializer");
+    }
+}
+/// JCS (RFC 8785) string escaping: short escapes for the five named controls, `\u00xx` for the
+/// rest below U+0020, backslash and quote escaped, everything else (U+007F, U+2028, non-BMP) literal.
+fn escaped_len(text: &str) -> usize {
+    text.chars()
+        .map(|character| match character {
+            '"' | '\\' | '\u{8}' | '\t' | '\n' | '\u{c}' | '\r' => 2,
+            '\0'..='\u{1f}' => 6,
+            other => other.len_utf8(),
+        })
+        .sum()
+}
+fn escape_into(out: &mut Vec<u8>, text: &str) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for character in text.chars() {
+        match character {
+            '"' => out.extend_from_slice(b"\\\""),
+            '\\' => out.extend_from_slice(b"\\\\"),
+            '\u{8}' => out.extend_from_slice(b"\\b"),
+            '\t' => out.extend_from_slice(b"\\t"),
+            '\n' => out.extend_from_slice(b"\\n"),
+            '\u{c}' => out.extend_from_slice(b"\\f"),
+            '\r' => out.extend_from_slice(b"\\r"),
+            '\0'..='\u{1f}' => {
+                let code = character as usize;
+                out.extend_from_slice(b"\\u00");
+                out.push(HEX[code >> 4]);
+                out.push(HEX[code & 0xf]);
+            }
+            other => {
+                let mut utf8 = [0u8; 4];
+                out.extend_from_slice(other.encode_utf8(&mut utf8).as_bytes());
+            }
+        }
+    }
+}
 /// An authenticated local account, with no legacy root signer or active session.
 #[derive(Clone, Debug)]
 pub struct BornAccount {
@@ -757,13 +826,13 @@ pub(crate) fn export_agent_credentials(
     };
     let bundle =
         AgentProvisioningBundle { account_id: account_id.to_owned(), data_passphrase: passphrase };
-    let bytes = Zeroizing::new(ramflux_protocol::canonical_json_bytes(&bundle)?);
+    let bytes = BundleBytes::serialize(&bundle);
     let mut created = false;
     let result = (|| {
         let mut file =
             fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
         created = true;
-        file.write_all(&bytes)?;
+        file.write_all(&bytes.0)?;
         file.sync_all()?;
         vault.delete(reference)?;
         Ok(())
