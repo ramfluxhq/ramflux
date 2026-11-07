@@ -271,7 +271,11 @@ fn capable_establishment_initializes_empty_inbox() -> anyhow::Result<()> {
         push_alias_hash: None,
         lifecycle: ramflux_node_core::SessionLifecycle::Live,
     };
-    let request = ramflux_node_core::SessionPushSessionRequest { session, session_push: true };
+    let request = ramflux_node_core::SessionPushSessionRequest {
+        session,
+        session_push: true,
+        ephemeral: false,
+    };
     let response = call(&router, "POST", "/s1/session", serde_json::to_value(request)?)?;
     let id = response["incarnation_id"].as_str().ok_or_else(|| anyhow::anyhow!("E"))?;
     assert_eq!(id.len(), 32);

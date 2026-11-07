@@ -144,6 +144,8 @@ pub struct SessionPushSessionRequest {
     #[serde(flatten)]
     pub session: crate::SessionDescriptor,
     pub session_push: bool,
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 #[derive(Debug, Serialize)]
 pub struct SessionPushSessionResponse {
