@@ -30,6 +30,45 @@ mod server_tests;
 #[cfg(test)]
 mod split_tests;
 
+/// A gateway refusal of a submit that is certain to be a refusal, decoded from a legacy
+/// `nack` whose reason is exactly one of the three outcome strings the gateway sends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubmitRefusal {
+    /// The attempt aborted before anything committed; resending is safe.
+    RetrySafe,
+    /// The gateway is at capacity; the next attempt should wait at least this long.
+    CapacityRetryAfter { retry_after_ms: u64 },
+    /// The envelope id was already used with different content.
+    Conflict,
+}
+
+/// The delay the design assigns to a `capacity_retry_after` refusal (the gateway sends none).
+pub(crate) const CAPACITY_RETRY_AFTER_DEFAULT_MS: u64 = 1000;
+
+impl SubmitRefusal {
+    /// Exact string equality only: near misses, case changes and decorated forms are not
+    /// refusals.
+    pub(crate) fn from_reason(reason: &str) -> Option<Self> {
+        match reason {
+            "aborted_retry_safe" => Some(Self::RetrySafe),
+            "capacity_retry_after" => {
+                Some(Self::CapacityRetryAfter { retry_after_ms: CAPACITY_RETRY_AFTER_DEFAULT_MS })
+            }
+            "idempotency_conflict" => Some(Self::Conflict),
+            _ => None,
+        }
+    }
+
+    /// The wire reason, byte-identical to what the gateway sent.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::RetrySafe => "aborted_retry_safe",
+            Self::CapacityRetryAfter { .. } => "capacity_retry_after",
+            Self::Conflict => "idempotency_conflict",
+        }
+    }
+}
+
 /// A 32-character lowercase hexadecimal inbox incarnation identifier.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "String")]

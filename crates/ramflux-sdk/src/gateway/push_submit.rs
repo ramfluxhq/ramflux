@@ -5,7 +5,7 @@
 
 use super::frame_dispatch::ExpectedReply;
 use super::host_frames::{Step, Wait};
-use super::session_push::{CapableServerFrame, SessionMode};
+use super::session_push::{CapableServerFrame, SessionMode, SubmitRefusal};
 use super::{GatewayInboxEntry, GatewayServerFrame, GatewaySessionEngine};
 use crate::SdkError;
 
@@ -18,10 +18,12 @@ impl GatewaySessionEngine {
     pub(crate) async fn read_push_submit_reply(
         &mut self,
         submitted: ramflux_protocol::Envelope,
-    ) -> Result<GatewayInboxEntry, SdkError> {
+    ) -> Result<Result<GatewayInboxEntry, SubmitRefusal>, SdkError> {
         loop {
             match self.read_step("submit response", Wait::Submit).await? {
-                Step::SubmitAccepted(accepted) => return self.adopt_accepted(*accepted, submitted),
+                Step::SubmitAccepted(accepted) => {
+                    return self.adopt_accepted(*accepted, submitted).map(Ok);
+                }
                 Step::ResumePage(_) | Step::Reply(_) | Step::Refused(_) => {
                     return Err(self.retire("unexpected capable reply while awaiting a submit"));
                 }
@@ -77,18 +79,18 @@ impl GatewaySessionEngine {
     fn legacy_submit_result(
         frame: GatewayServerFrame,
         submitted: ramflux_protocol::Envelope,
-    ) -> Result<GatewayInboxEntry, SdkError> {
+    ) -> Result<Result<GatewayInboxEntry, SubmitRefusal>, SdkError> {
         match frame {
             GatewayServerFrame::ForwardAck { ack }
                 if ack.envelope_id == submitted.envelope_id
                     && ack.target_delivery_id == submitted.target_delivery_id =>
             {
-                Ok(GatewayInboxEntry {
+                Ok(Ok(GatewayInboxEntry {
                     forwarded: true,
                     inbox_seq: ack.inbox_seq.unwrap_or(0),
                     target_delivery_id: ack.target_delivery_id,
                     envelope: submitted,
-                })
+                }))
             }
             GatewayServerFrame::ForwardAck { ack } => {
                 Err(SdkError::GatewaySessionRejected(format!(
@@ -99,14 +101,17 @@ impl GatewaySessionEngine {
             GatewayServerFrame::Nack { reason }
                 if reason == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON =>
             {
-                Ok(GatewayInboxEntry {
+                Ok(Ok(GatewayInboxEntry {
                     forwarded: true,
                     inbox_seq: 0,
                     target_delivery_id: submitted.target_delivery_id.clone(),
                     envelope: submitted,
-                })
+                }))
             }
-            GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
+            GatewayServerFrame::Nack { reason } => match SubmitRefusal::from_reason(&reason) {
+                Some(refusal) => Ok(Err(refusal)),
+                None => Err(SdkError::GatewaySessionRejected(reason)),
+            },
             other => Err(SdkError::GatewaySessionRejected(format!(
                 "expected deliver after submit, got {other:?}"
             ))),

@@ -280,7 +280,11 @@ async fn capable_resume_page_exact_reply() {
             } else {
                 engine.resume_after(7, limit).await
             };
-            assert!(matches!(result, Err(SdkError::GatewaySessionRejected(_))));
+            let want = if busy { "busy" } else { "resume_page refused locally: the limit is zero" };
+            assert!(
+                matches!(&result, Err(SdkError::GatewaySessionRejected(m)) if m == want),
+                "auth={authoritative} busy={busy}: {result:?}"
+            );
             assert!(engine.terminal_reason.is_none());
             assert_eq!(sent.lock().unwrap().is_empty(), !busy, "a write happens only for busy");
             assert_eq!(engine.pending_deliveries.len(), 1, "auth={authoritative} busy={busy}");

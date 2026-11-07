@@ -391,6 +391,26 @@ impl GatewaySessionEngine {
         &mut self,
         envelope: ramflux_protocol::Envelope,
     ) -> Result<GatewayInboxEntry, SdkError> {
+        match self.submit_envelope_classified(envelope).await? {
+            Ok(entry) => Ok(entry),
+            Err(refusal) => Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned())),
+        }
+    }
+
+    /// Submits an envelope and separates a gateway refusal that is certain to be a refusal
+    /// from every other failure.
+    ///
+    /// The inner `Err` is produced only from a decoded legacy `nack` whose `reason` is exactly
+    /// one of the three outcome strings the gateway sends. Every other failure (transport,
+    /// frame timeout, call deadline, failed write, any other reason) stays in the outer `Err`
+    /// and is uncertain after the write.
+    ///
+    /// # Errors
+    /// Returns an error when the envelope cannot be written or the reply is not a submit reply.
+    pub(crate) async fn submit_envelope_classified(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> Result<Result<GatewayInboxEntry, super::session_push::SubmitRefusal>, SdkError> {
         let submit = GatewaySubmitFrame {
             signed_request: self.signed_request(
                 "POST",
@@ -412,7 +432,7 @@ impl GatewaySessionEngine {
                 GatewayServerFrame::Deliver { entry }
                     if entry.envelope.envelope_id == expected_envelope_id =>
                 {
-                    return Ok(entry);
+                    return Ok(Ok(entry));
                 }
                 GatewayServerFrame::Deliver { entry } => {
                     self.buffer_delivery(entry);
@@ -422,12 +442,12 @@ impl GatewaySessionEngine {
                     if ack.envelope_id == expected_envelope_id
                         && ack.target_delivery_id == expected_target_delivery_id =>
                 {
-                    return Ok(GatewayInboxEntry {
+                    return Ok(Ok(GatewayInboxEntry {
                         forwarded: true,
                         inbox_seq: ack.inbox_seq.unwrap_or(0),
                         target_delivery_id: ack.target_delivery_id,
                         envelope: submitted_envelope,
-                    });
+                    }));
                 }
                 GatewayServerFrame::ForwardAck { ack } => {
                     return Err(SdkError::GatewaySessionRejected(format!(
@@ -437,12 +457,16 @@ impl GatewaySessionEngine {
                 }
                 GatewayServerFrame::Nack { reason } => {
                     if reason == ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON {
-                        return Ok(GatewayInboxEntry {
+                        return Ok(Ok(GatewayInboxEntry {
                             forwarded: true,
                             inbox_seq: 0,
                             target_delivery_id: expected_target_delivery_id,
                             envelope: submitted_envelope,
-                        });
+                        }));
+                    }
+                    if let Some(refusal) = super::session_push::SubmitRefusal::from_reason(&reason)
+                    {
+                        return Ok(Err(refusal));
                     }
                     return Err(SdkError::GatewaySessionRejected(reason));
                 }
