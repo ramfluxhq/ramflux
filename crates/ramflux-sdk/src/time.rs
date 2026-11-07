@@ -19,7 +19,7 @@ impl FixedClock {
 
     /// Moves the current thread's pinned clock to `now`; the pin lasts until its guard drops.
     pub(crate) fn advance_to(now: i64) {
-        FIXED_NOW.set(Some(now));
+        test_clock::set_frozen(Some(now));
     }
 }
 
