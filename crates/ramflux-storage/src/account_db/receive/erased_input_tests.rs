@@ -44,6 +44,9 @@ fn abort_message(result: Result<usize, rusqlite::Error>) -> Option<String> {
 #[test]
 #[allow(clippy::too_many_lines)] // one named test carries all seven cells
 fn erased_input_store_bounds_and_retirement() -> Result<(), StorageError> {
+    // Fixture plaintext from `envelope(...)` calls, each >= 8 chars.
+    const FIXTURE_PLAINTEXT: [&str; 4] =
+        ["source-principal", "other-device", "other-key", "other-hash"];
     let (root, db) = crate::tests::test_db("erased-input-store")?;
     let now = crate::unix_now();
     let base = envelope("device", "key", "hash");
@@ -104,14 +107,25 @@ fn erased_input_store_bounds_and_retirement() -> Result<(), StorageError> {
     let names: Vec<String> = columns.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     assert_eq!(names, vec!["selector", "bundle_id", "expires_at"]);
     drop(columns);
-    for forbidden in ["source-principal", "device", "key", "hash", "cipher"] {
-        let hits = count(
-            &db,
-            &format!(
-                "SELECT count(*) FROM receive_erased_input WHERE bundle_id<>'old-bundle' AND (selector LIKE '%{forbidden}%' OR bundle_id LIKE '%{forbidden}%')"
-            ),
-        )?;
-        assert_eq!(hits, 0, "{forbidden}");
+    // Every live row is a base64url-encoded 32-byte MAC. The plaintext check is exact and
+    // case-sensitive (no SQL LIKE), so a random digest can never trip it.
+    let mut rows = db.connection.prepare(
+        "SELECT selector, bundle_id FROM receive_erased_input WHERE bundle_id<>'old-bundle'",
+    )?;
+    let pairs: Vec<(String, String)> = rows
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<_, _>>()?;
+    drop(rows);
+    assert!(!pairs.is_empty(), "no live rows to check");
+    for (selector, bundle_id) in &pairs {
+        for value in [selector, bundle_id] {
+            let bytes = ramflux_protocol::decode_base64url(value).expect("base64url digest");
+            assert_eq!(bytes.len(), 32, "{value}");
+            assert_eq!(value.len(), 43, "{value}");
+            for plain in FIXTURE_PLAINTEXT {
+                assert!(!value.contains(plain), "{plain} appears in {value}");
+            }
+        }
     }
     // (f) Retirement: a live row blocks deleting its bundle; once expired, deletion is allowed.
     db.connection.execute("DELETE FROM receive_erased_input WHERE bundle_id='old-bundle'", [])?;
