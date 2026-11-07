@@ -337,6 +337,12 @@ fn every_refusal_has_a_pinned_wire_code_status_and_retry_class() {
         assert_eq!(serde_json::to_string(&r).unwrap(), format!("\"{code}\""));
         assert_eq!(serde_json::from_str::<RenewalRefusal>(&format!("\"{code}\"")).unwrap(), r);
     }
-    assert!(serde_json::from_str::<RenewalRefusal>("\"ChallengeUnknown\"").is_err());
-    assert!(serde_json::from_str::<RenewalRefusal>("\"nope\"").is_err());
+    assert_eq!(
+        serde_json::from_str::<RenewalRefusal>("\"ChallengeUnknown\"").unwrap_err().to_string(),
+        "unknown refusal code"
+    );
+    assert_eq!(
+        serde_json::from_str::<RenewalRefusal>("\"nope\"").unwrap_err().to_string(),
+        "unknown refusal code"
+    );
 }
