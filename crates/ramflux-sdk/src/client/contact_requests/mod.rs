@@ -20,6 +20,8 @@ mod retention;
 use metadata::Metadata;
 pub(crate) use retention::authority_digest;
 mod wire;
+#[cfg(test)]
+pub(crate) use delivery::background::refusal_cells;
 pub(crate) use delivery::background::{
     ContactWork, apply as apply_background, run as run_background,
 };

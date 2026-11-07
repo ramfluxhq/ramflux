@@ -152,6 +152,15 @@ async fn send(
     Ok(())
 }
 fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result<(), SdkError> {
+    finish_with(client, key, work, state, None)
+}
+fn finish_with(
+    client: &RamfluxClient,
+    key: &str,
+    work: &Work,
+    state: &str,
+    reason: Option<&str>,
+) -> Result<(), SdkError> {
     let db = client.account_db()?;
     db.write_transaction(|| {
         let id = if work.status_id.is_empty() {
@@ -170,13 +179,17 @@ fn finish(client: &RamfluxClient, key: &str, work: &Work, state: &str) -> Result
         )?;
         db.remove_actor_state(key)?;
         if state == "failed" {
+            let mut payload = json!({
+                "conversation_id": work.conversation, "message_id": work.message,
+                "receiver_device_id": work.receiver,
+            });
+            if let Some(reason) = reason {
+                payload["reason"] = json!(reason);
+            }
             db.append_journal(
                 &format!("receipt-failed:{id}"),
                 "message.delivery_receipt.failed",
-                &json!({
-                    "conversation_id": work.conversation, "message_id": work.message,
-                    "receiver_device_id": work.receiver,
-                }),
+                &payload,
                 now_unix_timestamp(),
                 None,
             )?;

@@ -12,6 +12,7 @@ use crate::client::contact_requests::{
     native_delivery::{self, ApprovalPlan, Approved},
 };
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
+use crate::gateway::session_push::SubmitRefusal;
 use crate::prelude::*;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -77,6 +78,12 @@ pub(crate) enum ContactWork {
         plan: Box<Plan>,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
+    Refused {
+        generation: u64,
+        plan: Box<Plan>,
+        refusal: SubmitRefusal,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
 }
 impl ContactWork {
     pub(crate) fn generation(&self) -> u64 {
@@ -87,7 +94,8 @@ impl ContactWork {
             | Self::Recipient { generation, .. }
             | Self::Seal { generation, .. }
             | Self::Complete { generation, .. }
-            | Self::Finish { generation, .. } => *generation,
+            | Self::Finish { generation, .. }
+            | Self::Refused { generation, .. } => *generation,
         }
     }
 }
@@ -227,17 +235,75 @@ async fn deliver(
     )
     .await?;
     let Some(envelope) = response.await.map_err(|_| stopped())?? else { return Ok(None) };
-    context
-        .call(
-            move |engine| {
-                Box::pin(async move { engine.submit_envelope(envelope).await.map(|_| ()) })
-            },
-            context.call_deadline(),
-        )
-        .await?;
+    match submit(context, envelope).await? {
+        Ok(()) => {}
+        Err(refusal) => {
+            let (reply, response) = oneshot::channel();
+            send(
+                writer,
+                ContactWork::Refused {
+                    generation,
+                    plan: Box::new(plan.plan.clone()),
+                    refusal,
+                    reply,
+                },
+            )
+            .await?;
+            response.await.map_err(|_| stopped())??;
+            // A conflict ends this intent's delivery; any other refusal is an ordinary deferral.
+            return if refusal == SubmitRefusal::Conflict {
+                Ok(None)
+            } else {
+                Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()))
+            };
+        }
+    }
     let (reply, response) = oneshot::channel();
     send(writer, ContactWork::Complete { generation, plan: Box::new(plan.clone()), reply }).await?;
     response.await.map_err(|_| stopped())?
+}
+/// One classified submit: a certain gateway refusal is the inner `Err`; every uncertain failure
+/// is the outer `Err`.
+async fn submit(
+    context: &SessionContext,
+    envelope: ramflux_protocol::Envelope,
+) -> Result<Result<(), SubmitRefusal>, SdkError> {
+    context
+        .call(
+            move |engine| {
+                Box::pin(async move {
+                    engine.submit_envelope_classified(envelope).await.map(|sent| sent.map(|_| ()))
+                })
+            },
+            context.call_deadline(),
+        )
+        .await
+}
+/// The actor step for a certain refusal. A conflict takes the existing exhaustion branch
+/// (`attempts = 8`: never picked again, a request reads `failed`, a response is dropped by the
+/// queue); a capacity refusal raises the next attempt to the gateway's floor.
+fn refused(
+    account: &LocalBusAccountState,
+    plan: &Plan,
+    refusal: SubmitRefusal,
+) -> Result<(), SdkError> {
+    if !current(account, plan)? {
+        return Ok(());
+    }
+    let mut intent = plan.intent.clone();
+    match refusal {
+        SubmitRefusal::Conflict => {
+            tracing::warn!(reason = "submit_conflict", "contact control delivery retired");
+            intent.attempts = 8;
+        }
+        SubmitRefusal::CapacityRetryAfter { retry_after_ms } => {
+            let floor = i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX);
+            intent.next_at = intent.next_at.max(now_unix_timestamp().saturating_add(floor));
+        }
+        SubmitRefusal::RetrySafe => return Ok(()),
+    }
+    account.client.account_db()?.persist_actor_state(&key(&intent), &intent)?;
+    Ok(())
 }
 pub(crate) fn apply(account: &LocalBusAccountState, work: ContactWork) {
     match work {
@@ -269,6 +335,11 @@ pub(crate) fn apply(account: &LocalBusAccountState, work: ContactWork) {
         ContactWork::Complete { plan, reply, .. } => {
             if !reply.is_closed() {
                 let _ = reply.send(complete(account, *plan));
+            }
+        }
+        ContactWork::Refused { plan, refusal, reply, .. } => {
+            if !reply.is_closed() {
+                let _ = reply.send(refused(account, &plan, refusal));
             }
         }
         ContactWork::Finish { plan, reply, .. } => {
@@ -506,3 +577,8 @@ fn complete(
     plan.plan.fingerprint = serde_json::to_value(&plan.plan.intent)?;
     Ok(Some(plan.plan))
 }
+
+#[cfg(test)]
+mod refusal_tests;
+#[cfg(test)]
+pub(crate) use refusal_tests::cells as refusal_cells;

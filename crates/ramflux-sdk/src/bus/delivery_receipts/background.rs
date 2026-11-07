@@ -5,11 +5,12 @@
 
 use super::{
     ATTEMPTS, Duration, GATEWAY_RETRY_AT, GatewayDirectMessage, GatewaySessionConfig, LIFETIME,
-    LocalBusAccountState, PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish,
+    LocalBusAccountState, PREFIX, SCAN, SCAN_CURSOR, SdkError, Work, discard, finish, finish_with,
     gateway_direct_message_envelope, mpsc, now_unix_timestamp, postpone, receipt_message,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::routed::{SendMaterial, SendMaterialRequest};
+use crate::gateway::session_push::SubmitRefusal;
 use tokio::sync::oneshot;
 
 pub(crate) struct Plan {
@@ -38,7 +39,7 @@ pub(crate) enum ReceiptWork {
     Complete {
         generation: u64,
         plan: Box<Plan>,
-        outcome: Result<(), SdkError>,
+        outcome: Result<Result<(), SubmitRefusal>, SdkError>,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
 }
@@ -103,7 +104,11 @@ async fn pass(
     let Some((plan, packet)) = response.await.map_err(|_| stopped())?? else { return Ok(true) };
     let outcome = context
         .priority_call(
-            move |engine| Box::pin(async move { engine.submit_envelope(packet).await.map(|_| ()) }),
+            move |engine| {
+                Box::pin(async move {
+                    engine.submit_envelope_classified(packet).await.map(|sent| sent.map(|_| ()))
+                })
+            },
             context.receipt_timeout(),
         )
         .await;
@@ -307,7 +312,7 @@ fn seal(
 fn complete(
     account: &LocalBusAccountState,
     plan: &Plan,
-    outcome: Result<(), SdkError>,
+    outcome: Result<Result<(), SubmitRefusal>, SdkError>,
 ) -> Result<(), SdkError> {
     if !current(account, plan)? {
         return Ok(());
@@ -316,7 +321,27 @@ fn complete(
         return discard(&account.client, &plan.key, &plan.work);
     }
     match outcome {
-        Ok(()) => finish(&account.client, &plan.key, &plan.work, "sent"),
+        Ok(Ok(())) => finish(&account.client, &plan.key, &plan.work, "sent"),
+        Ok(Err(SubmitRefusal::Conflict)) => {
+            // The gateway already holds this envelope id with different content. The receipt
+            // takes the same terminal branch as an exhausted or expired one (`failed`, never
+            // `sent`) and the stored ciphertext is never resubmitted.
+            tracing::warn!(reason = "submit_conflict", "delivery receipt retired");
+            finish_with(&account.client, &plan.key, &plan.work, "failed", Some("submit_conflict"))
+        }
+        Ok(Err(refusal)) => {
+            // The existing deferral, no earlier than the gateway's floor.
+            let floor = match refusal {
+                SubmitRefusal::CapacityRetryAfter { retry_after_ms } => {
+                    i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX)
+                }
+                _ => 0,
+            };
+            let mut work = plan.work.clone();
+            let backoff = (1_i64 << work.attempts.min(6)).min(60);
+            postpone(&account.client, &plan.key, &mut work, backoff.max(floor))?;
+            Err(SdkError::GatewaySessionRejected(refusal.reason().to_owned()))
+        }
         Err(error) => {
             if matches!(&error, SdkError::Transport(ramflux_transport::TransportError::Io(io))
                 if io.kind() == std::io::ErrorKind::TimedOut)
@@ -409,6 +434,9 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_hooks;
+
+#[cfg(test)]
+pub(crate) mod refusal_tests;
 
 #[cfg(test)]
 mod retention_tests {
@@ -507,7 +535,7 @@ pub(crate) async fn test_flush(account: &mut LocalBusAccountState) -> Result<usi
                         if idle { return Ok(sent); }
                     }
                     ReceiptWork::Complete { plan, outcome, reply, .. } => {
-                        let delivered = outcome.is_ok();
+                        let delivered = matches!(outcome, Ok(Ok(())));
                         let result = complete(account, &plan, outcome);
                         let failed = result.is_err();
                         let _ = reply.send(result);

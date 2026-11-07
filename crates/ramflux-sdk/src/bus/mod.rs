@@ -28,7 +28,7 @@ mod custody_response;
 mod custody_setup;
 pub mod daemon;
 pub(crate) mod data_root_lock;
-mod delivery_receipts;
+pub(crate) mod delivery_receipts;
 pub mod dispatch;
 mod events;
 #[expect(dead_code, reason = "resume fence port follows in the next integration round")]
