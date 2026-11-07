@@ -413,6 +413,18 @@ impl AccountDb {
 #[cfg(test)]
 mod tests;
 
+/// Creates the actor archive on first use and installs its registration and erasure triggers
+/// in the same transaction, before any caller writes to it. Every lazy creation site uses this.
+pub(super) fn ensure_archive_actor_table(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    if schema::exists(db, "backup_archived_actor_state")? {
+        return Ok(());
+    }
+    db.execute_batch(
+        "CREATE TABLE backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));",
+    )?;
+    install(db)
+}
+
 pub(super) fn table_exists(db: &rusqlite::Connection, table: &str) -> rusqlite::Result<bool> {
     schema::exists(db, table)
 }

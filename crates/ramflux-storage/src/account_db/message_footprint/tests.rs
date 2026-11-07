@@ -940,3 +940,163 @@ fn archive_footprint_triggers_renewed_on_open_registers_existing_rows() -> Resul
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn lazily_created_archive_registers_retired_outbound_copies() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("footprint-lazy-retirement")?;
+    db.send_direct_message("thread", "message", "peer", b"secret")?;
+    let sent = json!({"intent":{"id":"message"},"entry":{"envelope":full_envelope()}});
+    db.persist_actor_state("own-device/send/x", &sent)?;
+    let absent: bool = db.connection.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='backup_archived_actor_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(absent);
+    db.retire_outbound_for_recovery("head")?;
+    assert!(!db.actor_state_exists("own-device/send/x")?);
+    assert!(archived_owners(&db, "own-device/send/x")?.contains(&"message".to_owned()));
+    assert_eq!(audit(&db)?, Vec::<String>::new());
+    db.delete_direct_message("thread", "message", "local", "delete")?;
+    assert_eq!(archive_row_count(&db, "own-device/send/x")?, 0);
+    let db = reopen(&root, db)?;
+    assert_eq!(archive_row_count(&db, "own-device/send/x")?, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn lazily_created_archive_registers_merge_local_copies() -> Result<(), StorageError> {
+    let root = crate::tests::temp_root("footprint-lazy-merge");
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let local_index = AccountIndex::open(root.join("local"))?;
+    source_index.create_account("account", "root")?;
+    local_index.create_account("account", "root")?;
+    let source = AccountDb::open(&source_index, "account", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&local_index, "account", &AccountDbKey::generate()?)?;
+    local.send_direct_message("thread", "message", "peer", b"secret")?;
+    local.persist_actor_state("group-transfer/local", &envelope_value("message"))?;
+    let incoming = root.join("incoming.db");
+    let snapshot = source.write_backup_snapshot(&incoming)?;
+    let path = root.join("merged.db");
+    let target = local.write_backup_snapshot(&path)?;
+    let mut merged = crate::BackupDatabase::open(&path, &target.key)?;
+    assert!(!super::schema::exists(&merged.db, "backup_archived_actor_state")?);
+    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    let owned = |db: &rusqlite::Connection| -> rusqlite::Result<i64> {
+        db.query_row(
+            "SELECT count(*) FROM backup_archived_actor_state a JOIN message_footprint f \
+             ON f.kind='archived_actor' AND f.locator=CAST(a.rowid AS TEXT) \
+             AND f.message_id='message' WHERE a.state_kind='group-transfer/local'",
+            [],
+            |row| row.get(0),
+        )
+    };
+    assert_eq!(owned(&merged.db)?, 1);
+    assert_eq!(audit::unregistered_envelope_copies(&merged.db, 16)?, Vec::<String>::new());
+    merged
+        .db
+        .execute("UPDATE direct_message_projection SET deleted=1 WHERE message_id='message'", [])?;
+    let remaining = |db: &rusqlite::Connection| -> rusqlite::Result<i64> {
+        db.query_row(
+            "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='group-transfer/local'",
+            [],
+            |row| row.get(0),
+        )
+    };
+    assert_eq!(remaining(&merged.db)?, 0);
+    drop(merged);
+    let reopened = crate::BackupDatabase::open(&path, &target.key)?;
+    assert_eq!(remaining(&reopened.db)?, 0);
+    drop(reopened);
+    drop(source);
+    drop(local);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn envelope_sql_predicate_matches_the_rust_predicate() -> Result<(), StorageError> {
+    use serde_json::Value;
+    let fields = [
+        "source_principal_id",
+        "source_device_id",
+        "signing_key_id",
+        "payload_hash",
+        "created_at",
+        "ttl",
+    ];
+    let wrap = |path: &str, envelope: Value| -> Value {
+        match path {
+            "root" => envelope,
+            "envelope" => json!({ "envelope": envelope }),
+            "entry" => json!({"entry":{"envelope":envelope}}),
+            "ext" => json!({"ext":{"envelope":envelope}}),
+            "entry_direct" => json!({"entry": envelope}),
+            "nested" => json!({"entry":{"envelope":{"envelope":envelope}}}),
+            _ => unreachable!(),
+        }
+    };
+    let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+    for path in ["root", "envelope", "entry", "ext", "entry_direct", "nested"] {
+        cases.push((format!("{path} full"), serde_json::to_vec(&wrap(path, full_envelope()))?));
+        for field in fields {
+            let mut missing = full_envelope();
+            missing.as_object_mut().map(|fields| fields.remove(field));
+            cases.push((
+                format!("{path} missing {field}"),
+                serde_json::to_vec(&wrap(path, missing))?,
+            ));
+            for wrong in
+                [json!(null), json!(true), json!([1]), json!({"a":1}), json!(1), json!("s")]
+            {
+                let mut changed = full_envelope();
+                changed[field] = wrong.clone();
+                cases.push((
+                    format!("{path} {field}={wrong}"),
+                    serde_json::to_vec(&wrap(path, changed))?,
+                ));
+            }
+        }
+    }
+    let mut float = full_envelope();
+    float["created_at"] = json!(1.5);
+    cases.push(("float created_at".into(), serde_json::to_vec(&float)?));
+    for raw in ["{", "", "not json", "[]", "null", "\"text\"", "7"] {
+        cases.push((format!("raw {raw:?}"), raw.as_bytes().to_vec()));
+    }
+    // Two fixed paths present at once, one of them incomplete, is still complete.
+    cases.push((
+        "complete beside incomplete".into(),
+        serde_json::to_vec(&json!({"envelope":{"ttl":1},"entry":{"envelope":full_envelope()}}))?,
+    ));
+    let (root, db) = crate::tests::test_db("footprint-envelope-parity")?;
+    db.connection.execute_batch("CREATE TEMP TABLE parity(state_json BLOB);")?;
+    let sql = format!(
+        "SELECT {} FROM parity",
+        super::schema::envelope_sql("state_json").replace("NEW.", "parity.")
+    );
+    let (mut agree, mut accepted) = (0, 0);
+    for (name, body) in &cases {
+        db.connection.execute("DELETE FROM parity", [])?;
+        db.connection.execute("INSERT INTO parity VALUES(?1)", params![body])?;
+        // A trigger WHEN clause treats NULL as false, so NULL counts as rejection here.
+        let sql_says = db
+            .connection
+            .query_row(&sql, [], |row| row.get::<_, Option<i64>>(0))?
+            .is_some_and(|v| v != 0);
+        let rust_says =
+            serde_json::from_slice::<Value>(body).is_ok_and(|v| super::value_holds_envelope(&v));
+        assert_eq!(sql_says, rust_says, "SQL and Rust predicates disagree for {name}");
+        agree += 1;
+        accepted += i32::from(rust_says);
+    }
+    assert!(agree > 100);
+    // Accepted: three fixed paths x (full + six same-type replacements) = 21, the float
+    // created_at and the complete-beside-incomplete case; every other control is rejected.
+    assert_eq!(accepted, 23);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
