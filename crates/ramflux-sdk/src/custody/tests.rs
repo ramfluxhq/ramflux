@@ -487,7 +487,11 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
         }
     }
     for (account, secret, occupied) in cases {
-        let _session = super::observer::begin(&["p07-export-utf8", "p07-export-passphrase"]);
+        let _session = super::observer::begin(&[
+            "p07-export-utf8",
+            "p07-export-passphrase",
+            "p07-export-serializer",
+        ]);
         let path = root.0.join(format!("{account}.bundle"));
         let outcome =
             super::store::export_agent_credentials(&root.0, "human", account, &path, &vault, now);
@@ -504,6 +508,7 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
         let mut expected = vec!["p07-export-utf8"];
         if occupied {
             expected.push("p07-export-passphrase");
+            expected.push("p07-export-serializer");
         }
         for label in expected {
             let seen = observed
@@ -514,7 +519,49 @@ fn linux_vault_owned_buffers_clear_on_all_exits() -> Result {
             assert!(seen.capacity >= secret.len() && seen.capacity > 0, "{account}: {label}");
             assert_eq!(seen.bytes.len(), seen.capacity, "{account}: {label} saw a partial slice");
             assert!(seen.bytes.iter().all(|b| *b == 0), "P07 uncleared {label}");
+            if label == "p07-export-serializer" {
+                // Exactly sized up front: no reallocation left an unguarded copy behind.
+                let secret_text = std::str::from_utf8(secret)?;
+                let reference = ramflux_protocol::canonical_json_bytes(&serde_json::json!({
+                    "account_id": account,
+                    "data_passphrase": secret_text,
+                }))?;
+                assert_eq!(seen.capacity, reference.len(), "{account}: serializer capacity");
+            }
         }
+    }
+    Ok(())
+}
+/// The guarded writer must be byte-identical to the canonical JSON encoder for every escape class.
+#[test]
+fn custody_agent_bundle_bytes_match_canonical_json() -> Result {
+    let long = "x".repeat(8192);
+    let fixtures: [(&str, String); 16] = [
+        ("len1", "a".into()),
+        ("len8192", long),
+        ("quote", "a\"b".into()),
+        ("backslash", "a\\b".into()),
+        ("nul", "a\u{0}b".into()),
+        ("bs", "a\u{8}b".into()),
+        ("tab", "a\tb".into()),
+        ("lf", "a\nb".into()),
+        ("ff", "a\u{c}b".into()),
+        ("cr", "a\rb".into()),
+        ("us", "a\u{1f}b".into()),
+        ("del", "a\u{7f}b".into()),
+        ("ls", "a\u{2028}b".into()),
+        ("astral", "a\u{1F600}b".into()),
+        ("mixed", "\"\\\u{1}\u{1F600}\u{2029}é".into()),
+        ("empty-ish", "\u{20}".into()),
+    ];
+    for (name, passphrase) in fixtures {
+        let bundle = super::store::AgentProvisioningBundle {
+            account_id: format!("acct-{name}\"\n"),
+            data_passphrase: passphrase,
+        };
+        let expected = ramflux_protocol::canonical_json_bytes(&bundle)?;
+        let written = super::store::BundleBytes::serialize(&bundle);
+        assert_eq!(written.as_slice(), expected.as_slice(), "{name}");
     }
     Ok(())
 }
