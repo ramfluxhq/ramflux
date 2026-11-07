@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
-#![allow(clippy::too_many_lines, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::large_futures,
+    clippy::type_complexity
+)]
 
 //! `sender_refusal_policy_task`: typed gateway refusals on the task courier (S3) and the
 //! interactive task delivery (S4), through the real account actor, courier workers and a real
