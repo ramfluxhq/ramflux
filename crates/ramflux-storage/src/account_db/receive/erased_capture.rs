@@ -564,12 +564,17 @@ pub(crate) fn capture_for(
     for c in collect_for_deleted_targets(db, &wanted, now)? {
         staged.push((c.selector, c.bundle, c.expires_at));
     }
+    let any = !staged.is_empty();
     for (selector, bundle, expires_at) in staged {
         db.execute(
             "INSERT INTO main.receive_erased_input VALUES(?1,?2,?3) \
              ON CONFLICT(selector) DO UPDATE SET expires_at=max(expires_at,excluded.expires_at)",
             params![selector, bundle, expires_at],
         )?;
+    }
+    if any {
+        // S1: the live capture is a tombstone write, so it also reclaims expired rows.
+        db.execute(super::erased_input::S1_SWEEP_SQL, params![now, super::erased_input::SWEEP])?;
     }
     Ok(())
 }
