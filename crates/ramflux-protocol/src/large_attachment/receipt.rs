@@ -59,6 +59,42 @@ impl AttachmentRegistrationReceipt {
         }
         Ok(())
     }
+    /// Reads which source authority and generation a capability names, **without verifying
+    /// anything**. It only selects the candidate peer and pin to verify against; the
+    /// result must never be trusted until [`Self::decode_capability`] accepts the bytes.
+    /// # Errors
+    /// Refuses a capability with no receipt, trailing bytes or a malformed receipt body.
+    pub fn peek_source(input: &[u8]) -> Result<(String, u64), FormatError> {
+        if input.len() > 8192 {
+            return Err(FormatError("capability cap"));
+        }
+        let mut c = Cursor(input);
+        if c.take(4)? != b"RFC1" {
+            return Err(FormatError("capability version"));
+        }
+        let n = usize::try_from(c.u32()?).map_err(|_| FormatError("grant length"))?;
+        c.take(n)?;
+        if c.u32()? != 64 {
+            return Err(FormatError("grant signature length"));
+        }
+        c.take(64)?;
+        let n = usize::try_from(c.u32()?).map_err(|_| FormatError("receipt length"))?;
+        let bytes = c.take(n)?;
+        if !c.0.is_empty() {
+            return Err(FormatError("capability trailing"));
+        }
+        let mut r = Cursor(bytes);
+        let n = usize::try_from(r.u32()?).map_err(|_| FormatError("receipt length"))?;
+        let mut b = Cursor(r.take(n)?);
+        if b.take(4)? != b"RFAK" || b.u32()? != 1 {
+            return Err(FormatError("receipt version"));
+        }
+        b.array::<32>()?;
+        b.u64()?;
+        let source = b.identity()?;
+        Ok((source, b.u64()?))
+    }
+
     /// Verifies a registered capability, never live grant state or operation admission.
     /// # Errors
     /// Refuses missing receipts, substitutions, stale authority and expiry.
