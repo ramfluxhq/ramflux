@@ -134,9 +134,12 @@ mod tests {
         GATEWAY_EPHEMERAL_CAPABILITY, MAX_EPHEMERAL_TTL_SECONDS, MIN_EPHEMERAL_TTL_SECONDS,
         classify_delivery_mode, deadline, require_durable,
     };
-    use crate::Envelope;
-    use crate::{DeliveryClass, Ext, Priority, SignatureAlg, SignedFields};
+    use crate::canonical_json_bytes;
+    use crate::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
     use serde_json::Value;
+
+    /// Reference "now" for every otherwise-valid vector.
+    const NOW_MS: u64 = 1_000_000;
 
     fn valid_envelope() -> Envelope {
         let mut extensions = BTreeMap::new();
@@ -166,116 +169,418 @@ mod tests {
         }
     }
 
-    fn assert_deadline_error(envelope: &Envelope, now_ms: u64, expected: EphemeralModeError) {
-        assert_eq!(deadline(envelope, now_ms), Err(expected));
+    /// One otherwise-valid envelope with exactly one field replaced.
+    fn mutated(change: impl FnOnce(&mut Envelope)) -> Envelope {
+        let mut envelope = valid_envelope();
+        change(&mut envelope);
+        envelope
+    }
+
+    fn with_mode(value: Value) -> Envelope {
+        mutated(|e| {
+            e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), value);
+        })
+    }
+
+    /// Canonical wire bytes of a signed envelope (the crate's canonical JSON encoder).
+    fn wire(envelope: &Envelope) -> Result<Vec<u8>, crate::ProtocolError> {
+        canonical_json_bytes(envelope)
+    }
+
+    /// How a row reaches the decoder: canonical wire bytes, or raw bytes for values that the
+    /// canonical (I-JSON) encoder cannot carry exactly, such as integers above 2^53.
+    enum Input {
+        Canonical(Box<Envelope>),
+        NonCanonical(Vec<u8>),
+    }
+
+    /// One matrix row: the input bytes source, the `now` used for `deadline`, and the exact expected results.
+    struct Case {
+        id: &'static str,
+        input: Input,
+        now_ms: u64,
+        mode: DeliveryMode,
+        require: Result<(), EphemeralModeError>,
+        deadline: Result<u64, EphemeralModeError>,
+    }
+
+    fn case(
+        id: &'static str,
+        envelope: &Envelope,
+        now_ms: u64,
+        mode: DeliveryMode,
+        require: Result<(), EphemeralModeError>,
+        deadline: Result<u64, EphemeralModeError>,
+    ) -> Case {
+        Case {
+            id,
+            input: Input::Canonical(Box::new(envelope.clone())),
+            now_ms,
+            mode,
+            require,
+            deadline,
+        }
+    }
+
+    /// Like [`case`], but the bytes are the plain `serde_json` encoding of the envelope.
+    fn raw_case(
+        id: &'static str,
+        envelope: &Envelope,
+        now_ms: u64,
+        mode: DeliveryMode,
+        require: Result<(), EphemeralModeError>,
+        deadline: Result<u64, EphemeralModeError>,
+    ) -> Result<Case, Box<dyn std::error::Error>> {
+        Ok(Case {
+            id,
+            input: Input::NonCanonical(serde_json::to_vec(envelope)?),
+            now_ms,
+            mode,
+            require,
+            deadline,
+        })
+    }
+
+    /// Production decode of received bytes; the decoded value must re-encode byte-identically.
+    fn receive(bytes: &[u8]) -> Result<Envelope, Box<dyn std::error::Error>> {
+        let envelope: Envelope = serde_json::from_slice(bytes)?;
+        assert_eq!(wire(&envelope)?, bytes, "decode then canonical encode must be byte-identical");
+        Ok(envelope)
+    }
+
+    /// Encode the row to canonical wire bytes, decode those bytes, then classify the decoded value.
+    fn run(case: &Case) -> Result<(), Box<dyn std::error::Error>> {
+        let envelope = match &case.input {
+            Input::Canonical(envelope) => receive(&wire(envelope)?)?,
+            Input::NonCanonical(bytes) => {
+                let envelope: Envelope = serde_json::from_slice(bytes)?;
+                assert_ne!(
+                    wire(&envelope)?,
+                    *bytes,
+                    "{}: non-I-JSON integer must not re-encode identically",
+                    case.id
+                );
+                envelope
+            }
+        };
+        assert_eq!(classify_delivery_mode(&envelope), case.mode, "{}: mode", case.id);
+        assert_eq!(require_durable(&envelope), case.require, "{}: require_durable", case.id);
+        assert_eq!(deadline(&envelope, case.now_ms), case.deadline, "{}: deadline", case.id);
+        Ok(())
     }
 
     #[test]
-    fn ephemeral_mode_and_lifetime_matrix() {
+    #[allow(clippy::too_many_lines)]
+    fn ephemeral_mode_and_lifetime_matrix() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(GATEWAY_EPHEMERAL_CAPABILITY, "gateway.ephemeral.v1");
         assert_eq!(MIN_EPHEMERAL_TTL_SECONDS, 1);
         assert_eq!(MAX_EPHEMERAL_TTL_SECONDS, 5);
         assert_eq!(EPHEMERAL_FUTURE_TOLERANCE_MS, 2_000);
 
-        // Mode positives: missing and durable select durable; ephemeral selects ephemeral.
-        let mut absent = valid_envelope();
-        absent.ext.ext.remove(DELIVERY_MODE_EXTENSION);
-        assert_eq!(classify_delivery_mode(&absent), DeliveryMode::Durable);
-        assert_eq!(require_durable(&absent), Ok(()));
+        let ephemeral_ok = Ok(1_005_000);
+        let not_ephemeral = Err(EphemeralModeError::NotEphemeral);
+        let invalid_mode: Result<(), EphemeralModeError> =
+            Err(EphemeralModeError::InvalidDeliveryMode);
+        let invalid_deadline: Result<u64, EphemeralModeError> =
+            Err(EphemeralModeError::InvalidDeliveryMode);
+        let at_durable_sink = Err(EphemeralModeError::EphemeralAtDurableSink);
 
-        let mut durable = valid_envelope();
-        durable
-            .ext
-            .ext
-            .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("durable".to_owned()));
-        assert_eq!(classify_delivery_mode(&durable), DeliveryMode::Durable);
-        assert_eq!(require_durable(&durable), Ok(()));
+        // Controls (positive): each is an otherwise-valid vector that must be accepted.
+        let controls = [
+            case(
+                "control: ephemeral, low, ttl 5, now = created_at",
+                &valid_envelope(),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                ephemeral_ok,
+            ),
+            case(
+                "control: delivery_mode absent is durable",
+                &mutated(|e| {
+                    e.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+                }),
+                NOW_MS,
+                DeliveryMode::Durable,
+                Ok(()),
+                not_ephemeral,
+            ),
+            case(
+                "control: delivery_mode durable is durable",
+                &with_mode(Value::String("durable".to_owned())),
+                NOW_MS,
+                DeliveryMode::Durable,
+                Ok(()),
+                not_ephemeral,
+            ),
+            case(
+                "control: ttl 1 is the inclusive lower bound",
+                &mutated(|e| e.ttl = MIN_EPHEMERAL_TTL_SECONDS),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Ok(1_001_000),
+            ),
+            case(
+                "control: ttl 5 is the inclusive upper bound",
+                &mutated(|e| e.ttl = MAX_EPHEMERAL_TTL_SECONDS),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                ephemeral_ok,
+            ),
+            case(
+                "control: sender clock +2000 ms is inclusive",
+                &mutated(|e| {
+                    e.created_at = 1_002;
+                    e.ttl = 1;
+                }),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Ok(1_003_000),
+            ),
+            case(
+                "control: now = deadline - 1 ms is live",
+                &mutated(|e| {
+                    e.created_at = 1_000;
+                    e.ttl = 1;
+                }),
+                1_000_999,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Ok(1_001_000),
+            ),
+            case(
+                "control: now = 2^64-1 - 2000 leaves the tolerance sum representable",
+                &valid_envelope(),
+                u64::MAX - 2_000,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::Expired),
+            ),
+        ];
 
-        let ephemeral = valid_envelope();
-        assert_eq!(classify_delivery_mode(&ephemeral), DeliveryMode::Ephemeral);
-        assert_eq!(require_durable(&ephemeral), Err(EphemeralModeError::EphemeralAtDurableSink));
-        assert_eq!(deadline(&ephemeral, 1_000_000), Ok(1_005_000));
+        // Refusals: one row per predicate/arm/alternative; each is one isolated mutation of
+        // the valid vector (or of its delivery_mode), except the classifier rows, which are
+        // refused at mode classification and therefore refuse at both refusal APIs.
+        let refusals = [
+            case(
+                "mode: \"Ephemeral\" casing (catch-all)",
+                &with_mode(Value::String("Ephemeral".to_owned())),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: empty string (catch-all)",
+                &with_mode(Value::String(String::new())),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: \"Durable\" casing (catch-all)",
+                &with_mode(Value::String("Durable".to_owned())),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: trailing space \"ephemeral \" (catch-all)",
+                &with_mode(Value::String("ephemeral ".to_owned())),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: number 1 (catch-all)",
+                &with_mode(Value::Number(1.into())),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: null (catch-all)",
+                &with_mode(Value::Null),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: object {} (catch-all)",
+                &with_mode(serde_json::json!({})),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: array [] (catch-all)",
+                &with_mode(Value::Array(Vec::new())),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "mode: boolean true (catch-all)",
+                &with_mode(Value::Bool(true)),
+                NOW_MS,
+                DeliveryMode::Invalid,
+                invalid_mode,
+                invalid_deadline,
+            ),
+            case(
+                "deadline Durable arm: absent mode",
+                &mutated(|e| {
+                    e.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+                }),
+                NOW_MS,
+                DeliveryMode::Durable,
+                Ok(()),
+                not_ephemeral,
+            ),
+            case(
+                "deadline Durable arm: explicit durable",
+                &with_mode(Value::String("durable".to_owned())),
+                NOW_MS,
+                DeliveryMode::Durable,
+                Ok(()),
+                not_ephemeral,
+            ),
+            case(
+                "require_durable Ephemeral arm: valid ephemeral",
+                &valid_envelope(),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                ephemeral_ok,
+            ),
+            case(
+                "priority normal",
+                &mutated(|e| e.priority = Priority::Normal),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::InvalidPriority),
+            ),
+            case(
+                "priority high",
+                &mutated(|e| e.priority = Priority::High),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::InvalidPriority),
+            ),
+            case(
+                "priority urgent",
+                &mutated(|e| e.priority = Priority::Urgent),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::InvalidPriority),
+            ),
+            case(
+                "ttl 0 (below inclusive lower bound)",
+                &mutated(|e| e.ttl = 0),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::InvalidTtl),
+            ),
+            case(
+                "ttl 6 (above inclusive upper bound)",
+                &mutated(|e| e.ttl = 6),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::InvalidTtl),
+            ),
+            case(
+                "ttl u32::MAX",
+                &mutated(|e| e.ttl = u32::MAX),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::InvalidTtl),
+            ),
+            raw_case(
+                "created_at + ttl overflows i64",
+                &mutated(|e| {
+                    e.created_at = i64::MAX;
+                    e.ttl = 5;
+                }),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::CreatedAtTtlOverflow),
+            )?,
+            case(
+                "deadline is negative",
+                &mutated(|e| {
+                    e.created_at = -2;
+                    e.ttl = 1;
+                }),
+                NOW_MS,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::NegativeDeadline),
+            ),
+            raw_case(
+                "deadline in milliseconds overflows u64",
+                &mutated(|e| {
+                    e.created_at = i64::MAX / 2;
+                    e.ttl = 1;
+                }),
+                0,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::DeadlineMillisecondsOverflow),
+            )?,
+            case(
+                "now + 2000 ms tolerance overflows u64",
+                &valid_envelope(),
+                u64::MAX - 1_999,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::ClockToleranceOverflow),
+            ),
+            case(
+                "sender clock +2001 ms is refused",
+                &mutated(|e| {
+                    e.created_at = 1_002;
+                    e.ttl = 1;
+                }),
+                999_999,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::CreatedAtTooFarInFuture),
+            ),
+            case(
+                "now = deadline is expired (exclusive)",
+                &mutated(|e| {
+                    e.created_at = 1_000;
+                    e.ttl = 1;
+                }),
+                1_001_000,
+                DeliveryMode::Ephemeral,
+                at_durable_sink,
+                Err(EphemeralModeError::Expired),
+            ),
+        ];
 
-        // Each malformed mode alternative is an isolated negative row.
-        let mut mode = valid_envelope();
-        mode.ext
-            .ext
-            .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("Ephemeral".to_owned()));
-        assert_eq!(classify_delivery_mode(&mode), DeliveryMode::Invalid);
-        assert_eq!(require_durable(&mode), Err(EphemeralModeError::InvalidDeliveryMode));
-
-        let mut mode = valid_envelope();
-        mode.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String(String::new()));
-        assert_eq!(classify_delivery_mode(&mode), DeliveryMode::Invalid);
-
-        let mut mode = valid_envelope();
-        mode.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::Number(1.into()));
-        assert_eq!(classify_delivery_mode(&mode), DeliveryMode::Invalid);
-
-        let mut mode = valid_envelope();
-        mode.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::Null);
-        assert_eq!(classify_delivery_mode(&mode), DeliveryMode::Invalid);
-
-        let mut mode = valid_envelope();
-        mode.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), serde_json::json!({}));
-        assert_eq!(classify_delivery_mode(&mode), DeliveryMode::Invalid);
-
-        // Low priority is valid; each other priority has its own negative row.
-        assert_eq!(deadline(&valid_envelope(), 1_000_000), Ok(1_005_000));
-        for priority in [Priority::Normal, Priority::High, Priority::Urgent] {
-            let mut envelope = valid_envelope();
-            envelope.priority = priority;
-            assert_deadline_error(&envelope, 1_000_000, EphemeralModeError::InvalidPriority);
+        for row in controls.iter().chain(refusals.iter()) {
+            run(row)?;
         }
-
-        // Both inclusive TTL bounds are valid; each out-of-range value is isolated.
-        for ttl in [MIN_EPHEMERAL_TTL_SECONDS, MAX_EPHEMERAL_TTL_SECONDS] {
-            let mut envelope = valid_envelope();
-            envelope.ttl = ttl;
-            assert_eq!(deadline(&envelope, 1_000_000), Ok((1_000 + u64::from(ttl)) * 1_000));
-        }
-        for ttl in [0, 6, u32::MAX] {
-            let mut envelope = valid_envelope();
-            envelope.ttl = ttl;
-            assert_deadline_error(&envelope, 1_000_000, EphemeralModeError::InvalidTtl);
-        }
-
-        // The sender-clock lead is inclusive at +2000 ms and rejects +2001 ms.
-        let mut future = valid_envelope();
-        future.created_at = 1_002;
-        future.ttl = 1;
-        assert_eq!(deadline(&future, 1_000_000), Ok(1_003_000));
-
-        let mut future = valid_envelope();
-        future.created_at = 1_002;
-        future.ttl = 1;
-        assert_deadline_error(&future, 999_999, EphemeralModeError::CreatedAtTooFarInFuture);
-
-        // The deadline itself is exclusive: one millisecond before is live, equality is expired.
-        let mut expiry = valid_envelope();
-        expiry.created_at = 1_000;
-        expiry.ttl = 1;
-        assert_eq!(deadline(&expiry, 1_000_999), Ok(1_001_000));
-
-        let mut expiry = valid_envelope();
-        expiry.created_at = 1_000;
-        expiry.ttl = 1;
-        assert_deadline_error(&expiry, 1_001_000, EphemeralModeError::Expired);
-
-        // Each checked-arithmetic refusal has an isolated valid-vector mutation.
-        let mut overflow = valid_envelope();
-        overflow.created_at = i64::MAX;
-        overflow.ttl = 5;
-        assert_deadline_error(&overflow, 0, EphemeralModeError::CreatedAtTtlOverflow);
-
-        let mut overflow = valid_envelope();
-        overflow.created_at = i64::MAX / 2;
-        overflow.ttl = 1;
-        assert_deadline_error(&overflow, 0, EphemeralModeError::DeadlineMillisecondsOverflow);
-
-        let mut negative = valid_envelope();
-        negative.created_at = -2;
-        negative.ttl = 1;
-        assert_deadline_error(&negative, 0, EphemeralModeError::NegativeDeadline);
+        assert_eq!(controls.len(), 8, "control rows");
+        assert_eq!(refusals.len(), 24, "refusal rows (one per predicate/arm/alternative)");
+        Ok(())
     }
 }
