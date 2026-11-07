@@ -311,6 +311,30 @@ impl RouterCore {
         lock_unpoisoned(&self.control).mvp1_identities.clone()
     }
 
+    /// Test helper: in-memory replay tuples on the executing router.
+    #[must_use]
+    pub fn replay_guard_test_snapshot(&self) -> NodeReplayGuardState {
+        let mut snapshot = NodeReplayGuardState::new();
+        for shard in &self.replay_guard_shards {
+            for (key, expires_at) in lock_unpoisoned(shard).accepted_entries() {
+                snapshot.restore_accepted(key.clone(), *expires_at);
+            }
+        }
+        snapshot
+    }
+
+    /// Test helper: canonical bytes of foreign-device heads on the executing router.
+    #[must_use]
+    pub fn foreign_device_heads_test_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(&lock_unpoisoned(&self.control).foreign_device_heads).unwrap_or_default()
+    }
+
+    /// Test helper: inject a replay tuple so snapshot diffs can observe mutations.
+    pub fn restore_replay_guard_for_test(&self, key: String, expires_at: i64) {
+        let index = replay_guard_shard_index(&key);
+        lock_unpoisoned(&self.replay_guard_shards[index]).restore_accepted(key, expires_at);
+    }
+
     #[must_use]
     pub fn identity_lineage_events(&self, principal_id: &str) -> Vec<IdentityLineageEventRecord> {
         lock_unpoisoned(&self.control)

@@ -233,6 +233,10 @@ fn assert_refused_forward(
     assert_eq!(response.delivery.outcome, "rejected_security:delivery_mode_refused", "{entry}");
 }
 
+const CONTROL_FORWARD: &str =
+    "itest HTTP operation failed: federation delivery paused for node-b.example";
+const CONTROL_RECEIVE: &str = "itest HTTP operation failed: federation inbound target node-b.example is not local node node-a.example";
+
 fn assert_control_forward(
     entry: &str,
     response: Result<
@@ -240,27 +244,20 @@ fn assert_control_forward(
         ramflux_node_core::NodeCoreError,
     >,
 ) {
+    let expected = match entry {
+        "flow.rs:handle_s8_forward_envelope" => CONTROL_FORWARD,
+        "flow.rs:handle_s8_receive_envelope" => CONTROL_RECEIVE,
+        _ => "",
+    };
     match response {
         Ok(reply) => {
-            assert_ne!(
-                reply.delivery.outcome, "rejected_security:delivery_mode_refused",
-                "control refused at mode for {entry}"
+            assert_eq!(
+                "admitted", expected,
+                "control {entry} admitted: {}",
+                reply.delivery.outcome
             );
         }
-        Err(error) => {
-            let text = error.to_string();
-            assert_ne!(text, "delivery_mode_refused", "control refused at mode for {entry}");
-            assert!(
-                text.contains("target")
-                    || text.contains("trust")
-                    || text.contains("route")
-                    || text.contains("authority")
-                    || text.contains("signature")
-                    || text.contains("peer")
-                    || text.contains("paused"),
-                "control post-mode stage for {entry}: {text}"
-            );
-        }
+        Err(error) => assert_eq!(error.to_string(), expected, "{entry}"),
     }
 }
 
@@ -270,6 +267,48 @@ fn marked_forward(
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
     let discovery = dummy_discovery();
     let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+    let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+    let branch = ramflux_crypto::create_device_branch(
+        "alice",
+        "alice_phone",
+        1,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    );
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
+    let keys = ramflux_crypto::device_key_commitments(
+        &ramflux_protocol::encode_base64url(branch.signing_key.verifying_key().to_bytes()),
+        &ramflux_protocol::encode_base64url(agreement.public),
+    )?;
+    let set = ramflux_crypto::sign_device_set(
+        &root,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: 1,
+            devices: vec![ramflux_protocol::SignedDeviceSetEntry {
+                device_id: "alice_phone".into(),
+                device_epoch: 1,
+                signing_key_commitment: keys.0,
+                agreement_key_commitment: keys.1,
+                status: ramflux_protocol::DeviceSetStatus::Active,
+                revoked_at: None,
+            }],
+        },
+    )?;
+    let authority = ramflux_node_core::DeviceAuthKeyResponse {
+        custody_authority: None,
+        root_public_key: Some(ramflux_protocol::encode_base64url(
+            root.signing_key.verifying_key().to_bytes(),
+        )),
+        signed_device_set: Some(set),
+        principal_id: "alice".into(),
+        device_id: "alice_phone".into(),
+        device_epoch: 1,
+        branch_public_key: ramflux_protocol::encode_base64url(
+            branch.signing_key.verifying_key().to_bytes(),
+        ),
+        target_delivery_id: "peer".into(),
+        revoked: false,
+    };
     let mut request: ramflux_node_core::FederatedEnvelopeForwardRequest = serde_json::from_value(
         serde_json::json!({
             "admin_token":"", "source_node_id": discovery.node_id, "target_node_id":"node-b.example",
@@ -277,10 +316,14 @@ fn marked_forward(
             "signing_key_id": discovery.node_id,"signature_alg":"ed25519","signature":"",
             "envelope": {
                 "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
-                "ext":{},
+                "ext":{
+                    "source_root_commitment": ramflux_crypto::identity_root_commitment(
+                        &root.signing_key.verifying_key()
+                    )
+                },
                 "signing_key_id":"device","signature_alg":"ed25519","signature":"sig",
                 "envelope_id": format!("fed_{ordinal}"),
-                "source_principal_id":"alice","source_device_id": format!("foreign_{ordinal}"),
+                "source_principal_id":"alice","source_device_id":"alice_phone",
                 "target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event",
                 "priority":"low","ttl":5,"created_at": now,
                 "encrypted_payload":"opaque","payload_hash":"hash"
@@ -288,18 +331,13 @@ fn marked_forward(
         }),
     )?;
     request.envelope.ext.ext.insert("delivery_mode".into(), mode);
-    request.envelope.signed.signature = ramflux_crypto::sign_protocol_object(&request.envelope)?;
-    request.envelope.ext.ext.insert(
-        "source_device_authority".into(),
-        serde_json::json!({
-            "principal_id":"alice",
-            "device_id": format!("foreign_{ordinal}"),
-            "device_epoch":1,
-            "branch_public_key": ramflux_crypto::fixture_public_key_base64url(),
-            "target_delivery_id":"peer",
-            "revoked": false
-        }),
-    );
+    request.envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &request.envelope)?;
+    request
+        .envelope
+        .ext
+        .ext
+        .insert("source_device_authority".into(), serde_json::to_value(authority)?);
     ramflux_node_core::sign_federated_envelope_forward(&mut request, discovery.node_signing_seed)?;
     Ok(request)
 }
@@ -309,7 +347,14 @@ fn unmarked_forward(
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
     let mut control = request.clone();
     control.envelope.ext.ext.remove("delivery_mode");
-    control.envelope.signed.signature = ramflux_crypto::sign_protocol_object(&control.envelope)?;
+    let branch = ramflux_crypto::create_device_branch(
+        "alice",
+        "alice_phone",
+        1,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    );
+    control.envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &control.envelope)?;
     ramflux_node_core::sign_federated_envelope_forward(
         &mut control,
         dummy_discovery().node_signing_seed,
