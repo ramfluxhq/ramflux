@@ -260,9 +260,9 @@ fn in_signed_display_window(created_at_ms: i128, now_ms: u64, expires_at_ms: u64
 #[cfg(test)]
 mod tests {
     use super::{
-        HoldLease, MAX_EPHEMERAL_TTL_SECONDS, MIN_EPHEMERAL_TTL_SECONDS, ReceiverClock,
-        ReceiverDropReason, ReceiverHandoff, ReceiverLifetime, admit_authenticated_ciphertext,
-        authenticate, ttl_seconds,
+        HoldLease, MAX_EPHEMERAL_TTL_SECONDS, MIN_EPHEMERAL_TTL_SECONDS,
+        RECEIVER_OWN_CLOCK_TOLERANCE_MS, ReceiverClock, ReceiverDropReason, ReceiverHandoff,
+        ReceiverLifetime, admit_authenticated_ciphertext, authenticate, ttl_seconds,
     };
     use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
@@ -383,6 +383,34 @@ mod tests {
         }));
     }
 
+    fn round_trip(envelope: &Envelope) -> Envelope {
+        let encoded = serde_json::to_vec(envelope);
+        assert!(encoded.is_ok());
+        let Some(bytes) = encoded.ok() else {
+            return envelope.clone();
+        };
+        let decoded = serde_json::from_slice::<Envelope>(&bytes);
+        assert!(decoded.is_ok());
+        let Some(decoded) = decoded.ok() else {
+            return envelope.clone();
+        };
+        let reencoded = serde_json::to_vec(&decoded);
+        assert_eq!(reencoded.as_ref().ok(), Some(&bytes));
+        decoded
+    }
+
+    fn assert_drop_round_trip(
+        envelope: &Envelope,
+        local_now_ms: u64,
+        monotonic_ms: u64,
+        reason: ReceiverDropReason,
+    ) {
+        let decoded = round_trip(envelope);
+        assert_eq!(drop_reason(&admit(envelope, local_now_ms, monotonic_ms, None)), Some(reason));
+        assert_eq!(drop_reason(&admit(&decoded, local_now_ms, monotonic_ms, None)), Some(reason));
+        assert!(admit(&decoded, local_now_ms, monotonic_ms, None).ciphertext.is_none());
+    }
+
     fn ttl_alias_and_bounds() {
         let envelope = valid_envelope();
         assert_eq!(ttl_seconds(&envelope), envelope.ttl);
@@ -456,6 +484,17 @@ mod tests {
             drop_reason(&admit(&early, NOW_MS, u64::MAX - 1_999, None)),
             Some(ReceiverDropReason::HoldDeadlineOverflow)
         );
+
+        let at_max = admit(&early, NOW_MS, u64::MAX - RECEIVER_OWN_CLOCK_TOLERANCE_MS, None);
+        assert_eq!(
+            hold_lease(&at_max),
+            Some(HoldLease {
+                display_at_ms: 1_002_000,
+                monotonic_deadline_ms: u64::MAX,
+                expires_at_ms: 1_003_000,
+            })
+        );
+        assert_ciphertext(&at_max, &early);
     }
 
     fn overflow_display_bridge_handoff() {
@@ -513,6 +552,7 @@ mod tests {
             Value::from(1_u64),
             Value::Null,
             Value::Array(Vec::new()),
+            Value::Object(serde_json::Map::new()),
         ] {
             let unknown = mutated(|e| {
                 e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), mode);
@@ -585,27 +625,151 @@ mod tests {
         );
     }
 
-    fn received_byte_round_trip() {
+    fn received_byte_round_trip_valid() {
         let envelope = valid_envelope();
-        let encoded = serde_json::to_vec(&envelope);
-        assert!(encoded.is_ok());
-        let Some(bytes) = encoded.ok() else {
-            return;
-        };
-        let decoded = serde_json::from_slice::<Envelope>(&bytes);
-        assert!(decoded.is_ok());
-        let Some(decoded) = decoded.ok() else {
-            return;
-        };
-        let reencoded = serde_json::to_vec(&decoded);
-        assert_eq!(reencoded.as_ref().ok(), Some(&bytes));
+        let decoded = round_trip(&envelope);
         let handoff = admit(&decoded, NOW_MS, MONOTONIC_MS, None);
         assert_eq!(display_expires(&handoff), Some(1_005_000));
         assert_ciphertext(&handoff, &decoded);
         if let Some(handed) = handoff.ciphertext {
+            let original = serde_json::to_vec(&decoded);
             let handed_bytes = serde_json::to_vec(handed);
-            assert_eq!(handed_bytes.as_ref().ok(), Some(&bytes));
+            assert_eq!(handed_bytes.as_ref().ok(), original.as_ref().ok());
         }
+    }
+
+    fn received_byte_round_trip_lifetime_refusals() {
+        assert_drop_round_trip(
+            &mutated(|e| e.ttl = 0),
+            NOW_MS,
+            MONOTONIC_MS,
+            ReceiverDropReason::InvalidTtl,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| e.ttl = 6),
+            NOW_MS,
+            MONOTONIC_MS,
+            ReceiverDropReason::InvalidTtl,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| e.ttl = u32::MAX),
+            NOW_MS,
+            MONOTONIC_MS,
+            ReceiverDropReason::InvalidTtl,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| {
+                e.created_at = 1_002;
+                e.ttl = 1;
+            }),
+            999_999,
+            MONOTONIC_MS,
+            ReceiverDropReason::OwnClockTooFarInFuture,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| {
+                e.created_at = 1_002;
+                e.ttl = 1;
+            }),
+            NOW_MS,
+            u64::MAX - 1_999,
+            ReceiverDropReason::HoldDeadlineOverflow,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| {
+                e.created_at = i64::MAX;
+                e.ttl = 5;
+            }),
+            NOW_MS,
+            MONOTONIC_MS,
+            ReceiverDropReason::CreatedAtTtlOverflow,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| {
+                e.created_at = i64::MAX / 2;
+                e.ttl = 1;
+            }),
+            0,
+            MONOTONIC_MS,
+            ReceiverDropReason::DeadlineMillisecondsOverflow,
+        );
+        assert_drop_round_trip(
+            &valid_envelope(),
+            u64::MAX - 1_999,
+            MONOTONIC_MS,
+            ReceiverDropReason::ClockToleranceOverflow,
+        );
+        assert_drop_round_trip(
+            &mutated(|e| {
+                e.created_at = -2;
+                e.ttl = 1;
+            }),
+            NOW_MS,
+            MONOTONIC_MS,
+            ReceiverDropReason::NegativeDeadline,
+        );
+    }
+
+    fn received_byte_round_trip_mode_and_auth() {
+        let mut durable = valid_envelope();
+        durable.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+        sign_envelope(&mut durable);
+        assert_drop_round_trip(&durable, NOW_MS, MONOTONIC_MS, ReceiverDropReason::NotEphemeral);
+        for mode in [
+            Value::String("Ephemeral".to_owned()),
+            Value::Object(serde_json::Map::new()),
+            Value::Array(Vec::new()),
+            Value::Bool(true),
+            Value::Null,
+            Value::from(1_u64),
+        ] {
+            assert_drop_round_trip(
+                &mutated(|e| {
+                    e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), mode);
+                }),
+                NOW_MS,
+                MONOTONIC_MS,
+                ReceiverDropReason::InvalidDeliveryMode,
+            );
+        }
+        for priority in [Priority::Normal, Priority::High, Priority::Urgent] {
+            assert_drop_round_trip(
+                &mutated(|e| e.priority = priority),
+                NOW_MS,
+                MONOTONIC_MS,
+                ReceiverDropReason::InvalidPriority,
+            );
+        }
+
+        let mut tampered = valid_envelope();
+        tampered.signed.signature = "tampered".to_owned();
+        let tampered = round_trip(&tampered);
+        assert_eq!(
+            authenticate(&tampered, PRINCIPAL, &signing_public_key()),
+            Err(ReceiverDropReason::BadSignature)
+        );
+
+        let mut wrong_source = valid_envelope();
+        wrong_source.source_principal_id = "other".to_owned();
+        let wrong_source = round_trip(&wrong_source);
+        assert_eq!(
+            authenticate(&wrong_source, PRINCIPAL, &signing_public_key()),
+            Err(ReceiverDropReason::WrongSource)
+        );
+
+        let mut unsigned = valid_envelope();
+        unsigned.signed.signature = String::new();
+        let unsigned = round_trip(&unsigned);
+        assert_eq!(
+            authenticate(&unsigned, PRINCIPAL, &signing_public_key()),
+            Err(ReceiverDropReason::Unsigned)
+        );
+    }
+
+    fn received_byte_round_trip() {
+        received_byte_round_trip_valid();
+        received_byte_round_trip_lifetime_refusals();
+        received_byte_round_trip_mode_and_auth();
     }
 
     #[test]
