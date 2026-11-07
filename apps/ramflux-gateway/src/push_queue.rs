@@ -398,7 +398,7 @@ impl PushQueue {
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
     /// Forced clock (tests only, 0 = unset) or wall clock; production never sets the forced clock.
-    fn clock_ms(&self) -> u64 {
+    pub(crate) fn clock_ms(&self) -> u64 {
         let forced = self.inner.clock.load(Ordering::Acquire);
         if forced != 0 { forced } else { Self::wall_clock_ms() }
     }

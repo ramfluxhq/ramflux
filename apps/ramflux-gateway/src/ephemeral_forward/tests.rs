@@ -417,6 +417,50 @@ async fn row_expired_at_d() -> TestResult {
     Ok(())
 }
 
+async fn row_held_forward_refused_when_clock_reaches_d() -> TestResult {
+    reset_notify_wake_count();
+    let hub = capable_hub(TARGET).await?;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    park_next_enqueue(entered.clone(), release.clone());
+    let held = hub.clone();
+    let task = tokio::spawn(async move {
+        handle_at(&held, request(TARGET, TARGET, "env-held-at-d"), NOW_LIVE_MS).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    hub.set_queue_clock(TARGET, EXPIRES_AT_MS).await;
+    release.add_permits(1);
+    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    assert!(!reply.delivered);
+    assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Expired));
+    assert_eq!(EphemeralEnqueueOutcome::Expired.to_string(), EXPIRED);
+    assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
+    assert_no_wake();
+    Ok(())
+}
+
+async fn row_held_forward_queued_before_d() -> TestResult {
+    reset_notify_wake_count();
+    let (hub, frames) = capable_hub_frames(TARGET).await?;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    park_next_enqueue(entered.clone(), release.clone());
+    let held = hub.clone();
+    let task = tokio::spawn(async move {
+        handle_at(&held, request(TARGET, TARGET, "env-held-before-d"), NOW_LIVE_MS).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    release.add_permits(1);
+    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    assert!(reply.delivered);
+    assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Queued));
+    hub.flushed(TARGET).await?;
+    let recorded = frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.clone();
+    assert_eq!(recorded.len(), 1);
+    assert_no_wake();
+    Ok(())
+}
+
 async fn row_deadline_mismatch_invalid() -> TestResult {
     reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
@@ -560,6 +604,8 @@ async fn final_registration_capability() -> TestResult {
     row_held_forward_enqueues_on_a_after_router_move().await?;
     row_held_forward_drops_when_a_closed().await?;
     row_expired_at_d().await?;
+    row_held_forward_refused_when_clock_reaches_d().await?;
+    row_held_forward_queued_before_d().await?;
     row_deadline_mismatch_invalid().await?;
     row_durable_mode_invalid().await?;
     row_frame_32768_accepted_32769_invalid().await?;
