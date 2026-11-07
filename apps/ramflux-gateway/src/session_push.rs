@@ -14,18 +14,28 @@ use std::time::Duration;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 tokio::task_local! {
-    /// A one-shot request timeout for the task under test, so a test can end
-    /// one held request early without moving the clock.
-    static NEXT_REQUEST_TIMEOUT: std::cell::Cell<Option<Duration>>;
+    /// A manual expiry for the next router request of the task under test: the
+    /// test fires it only after its fixture has captured the held request.
+    static NEXT_REQUEST_EXPIRY: std::cell::Cell<Option<tokio::sync::oneshot::Receiver<()>>>;
 }
-/// The timeout of the next router request: always `REQUEST_TIMEOUT`, except
-/// that a test may shorten one request through `NEXT_REQUEST_TIMEOUT`.
-fn request_timeout() -> Duration {
+/// Bounds one router request by `REQUEST_TIMEOUT`; a test may also end it
+/// early through `NEXT_REQUEST_EXPIRY`, reported as the same `Elapsed`.
+async fn bounded<T>(
+    request: impl std::future::Future<Output = T>,
+) -> Result<T, tokio::time::error::Elapsed> {
     #[cfg(test)]
-    if let Some(shorter) = NEXT_REQUEST_TIMEOUT.try_with(std::cell::Cell::take).ok().flatten() {
-        return shorter;
+    if let Some(expiry) = NEXT_REQUEST_EXPIRY.try_with(std::cell::Cell::take).ok().flatten() {
+        let fired = async {
+            if expiry.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        return tokio::select! {
+            out = tokio::time::timeout(REQUEST_TIMEOUT, request) => out,
+            () = fired => tokio::time::timeout(Duration::ZERO, std::future::pending::<T>()).await,
+        };
     }
-    REQUEST_TIMEOUT
+    tokio::time::timeout(REQUEST_TIMEOUT, request).await
 }
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
 const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -134,11 +144,8 @@ async fn nack(send: &GatewaySendHandle, id: &str, reason: Reason) -> anyhow::Res
 }
 async fn post(context: &GatewayQuicContext, path: &str, body: &Value) -> anyhow::Result<Value> {
     let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
-    let result = tokio::time::timeout(
-        request_timeout(),
-        crate::router_post_json_until(&context.router, path, body, deadline),
-    )
-    .await;
+    let result =
+        bounded(crate::router_post_json_until(&context.router, path, body, deadline)).await;
     mesh_result(&context.hub.readiness, result)
 }
 async fn get(context: &GatewayQuicContext, path: &str) -> anyhow::Result<Value> {
@@ -542,7 +549,7 @@ pub(crate) async fn negotiate(
     }
     let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
     let _: ramflux_node_core::SessionDescriptor = tokio::time::timeout(
-        request_timeout(),
+        REQUEST_TIMEOUT,
         crate::router_post_json_until(&context.router, "/s1/session/upsert", descriptor, deadline),
     )
     .await??;
