@@ -814,3 +814,129 @@ fn envelope_merge_relocates_incoming_archive_rows_and_erases_them() -> Result<()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+const ARCHIVE_TRIGGERS: [&str; 2] = [
+    "footprint_backup_archived_actor_state_INSERT",
+    "footprint_backup_archived_actor_state_UPDATE",
+];
+
+fn trigger_sql(db: &AccountDb, name: &str) -> Result<String, StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+        params![name],
+        |row| row.get(0),
+    )?)
+}
+
+fn archived_owners(db: &AccountDb, state_kind: &str) -> Result<Vec<String>, StorageError> {
+    let mut query = db.connection.prepare(
+        "SELECT f.message_id FROM backup_archived_actor_state a JOIN message_footprint f \
+         ON f.kind='archived_actor' AND f.locator=CAST(a.rowid AS TEXT) \
+         WHERE a.state_kind=?1 ORDER BY f.message_id",
+    )?;
+    let rows = query.query_map(params![state_kind], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn archive_row_count(db: &AccountDb, state_kind: &str) -> Result<i64, StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind=?1",
+        params![state_kind],
+        |row| row.get(0),
+    )?)
+}
+
+fn insert_archived(db: &AccountDb, state_kind: &str, message: &str) -> Result<(), StorageError> {
+    db.connection.execute(
+        "INSERT INTO backup_archived_actor_state(source,state_kind,state_json) VALUES('s',?1,?2)",
+        params![state_kind, serde_json::to_vec(&envelope_value(message))?],
+    )?;
+    Ok(())
+}
+
+/// Builds a database whose archive triggers carry the pre-fix guard (listed prefixes only).
+fn old_archive_trigger_fixture(
+    name: &str,
+) -> Result<(std::path::PathBuf, AccountDb), StorageError> {
+    let (root, db) = crate::tests::test_db(name)?;
+    db.connection.execute_batch(
+        "CREATE TABLE backup_archived_actor_state(source TEXT,state_kind TEXT,state_json BLOB,PRIMARY KEY(source,state_kind));",
+    )?;
+    db.connection.call(|raw| super::install(raw))?;
+    let old_prefix =
+        schema::ACTOR_PREFIX_GUARD.replace(" OR NEW.state_kind GLOB 'legacy/replay/*'", "");
+    for trigger in ARCHIVE_TRIGGERS {
+        let current = trigger_sql(&db, trigger)?;
+        let old = current.replace(&schema::actor_guard(), &old_prefix);
+        assert_ne!(old, current, "the fixture must differ from the renewed definition");
+        db.connection.execute_batch(&format!("DROP TRIGGER {trigger}; {old};"))?;
+        assert!(!trigger_sql(&db, trigger)?.contains("signing_key_id"));
+    }
+    Ok((root, db))
+}
+
+fn reopen(root: &std::path::Path, db: AccountDb) -> Result<AccountDb, StorageError> {
+    drop(db);
+    AccountDb::open(
+        &AccountIndex::open(root)?,
+        "acct",
+        &AccountDbKey::derive("acct", b"storage-test-secret"),
+    )
+}
+
+#[test]
+fn archive_footprint_triggers_renewed_on_open() -> Result<(), StorageError> {
+    let (root, db) = old_archive_trigger_fixture("footprint-archive-renewal")?;
+    db.send_direct_message("thread", "live", "peer", b"secret")?;
+    // Under the old triggers an unlisted prefix and a quarantined row are not registered.
+    insert_archived(&db, "zz-new/old", "live")?;
+    insert_archived(&db, "legacy/replay/committed/old", "live")?;
+    assert_eq!(archived_owners(&db, "zz-new/old")?, Vec::<String>::new());
+    let db = reopen(&root, db)?;
+    // (a) The new definitions replace the old ones.
+    for trigger in ARCHIVE_TRIGGERS {
+        let sql = trigger_sql(&db, trigger)?;
+        assert!(sql.contains("legacy/replay/") && sql.contains("signing_key_id"), "{trigger}");
+    }
+    // (c) A new INSERT registers; an UPDATE registers a row the old trigger missed.
+    insert_archived(&db, "zz-new/inserted", "live")?;
+    insert_archived(&db, "legacy/replay/committed/inserted", "live")?;
+    assert_eq!(
+        archived_owners(&db, "zz-new/inserted")?,
+        vec!["copy:payload:payload-private-hash".to_owned(), "live".to_owned()]
+    );
+    assert_eq!(archived_owners(&db, "legacy/replay/committed/inserted")?.len(), 2);
+    db.connection.execute(
+        "UPDATE backup_archived_actor_state SET state_json=state_json WHERE state_kind='zz-new/old'",
+        [],
+    )?;
+    assert_eq!(archived_owners(&db, "zz-new/old")?.len(), 2);
+    // (d) Deleting the live owner erases the registered archived copies, also after reopen.
+    db.delete_direct_message("thread", "live", "local", "delete")?;
+    for kind in ["zz-new/inserted", "legacy/replay/committed/inserted", "zz-new/old"] {
+        assert_eq!(archive_row_count(&db, kind)?, 0, "{kind} survived deletion");
+    }
+    let db = reopen(&root, db)?;
+    assert_eq!(archive_row_count(&db, "zz-new/inserted")?, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "completed in P03a-0d"]
+fn archive_footprint_triggers_renewed_on_open_registers_existing_rows() -> Result<(), StorageError>
+{
+    let (root, db) = old_archive_trigger_fixture("footprint-archive-existing")?;
+    db.send_direct_message("thread", "live", "peer", b"secret")?;
+    insert_archived(&db, "zz-new/existing", "live")?;
+    insert_archived(&db, "legacy/replay/committed/existing", "live")?;
+    let db = reopen(&root, db)?;
+    // (b) The completing migration registers existing rows (P03a-0d).
+    assert_eq!(archived_owners(&db, "zz-new/existing")?.len(), 2);
+    db.delete_direct_message("thread", "live", "local", "delete")?;
+    assert_eq!(archive_row_count(&db, "zz-new/existing")?, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

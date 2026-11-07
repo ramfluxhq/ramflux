@@ -41,13 +41,14 @@ pub(super) fn exists(db: &Connection, table: &str) -> rusqlite::Result<bool> {
 fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
     staged_actor_copy(db)?;
     remove_outbox_copy_triggers(db)?;
+    let actor_guard = actor_guard();
     for (table, kind, key, column, guard, extra) in [
         (
             "backup_archived_actor_state",
             "archived_actor",
             "CAST(NEW.rowid AS TEXT)",
             "state_json",
-            ACTOR_GUARD,
+            actor_guard.as_str(),
             ACTOR_LINKS,
         ),
         ("local_event_log", "event", "NEW.event_id", "event_body", "1", ""),
@@ -147,7 +148,33 @@ fn remove_outbox_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-const ACTOR_GUARD: &str = "NEW.state_kind NOT GLOB 'routed/seen/*' AND (NEW.state_kind GLOB 'routed/*' OR NEW.state_kind GLOB 'directory/message/*' OR NEW.state_kind GLOB 'directory/object/*' OR NEW.state_kind GLOB 'message/origin/*' OR NEW.state_kind GLOB 'delivery-receipt/*' OR NEW.state_kind GLOB 'attachment/*' OR NEW.state_kind GLOB 'sync/attachment/*' OR NEW.state_kind GLOB 'surface/origin/*' OR NEW.state_kind GLOB 'surface/message/*' OR NEW.state_kind GLOB 'surface/pending/*' OR NEW.state_kind GLOB 'surface/history/*' OR NEW.state_kind GLOB 'directory/surface_error/*' OR NEW.state_kind GLOB 'task/message/*' OR NEW.state_kind GLOB 'group-message/alias/*' OR NEW.state_kind GLOB 'own-copy/*' OR NEW.state_kind GLOB 'own-device/*' OR NEW.state_kind GLOB 'inbox/*' OR NEW.state_kind GLOB 'backup/staging/*')";
+pub(super) const ACTOR_PREFIX_GUARD: &str = "NEW.state_kind NOT GLOB 'routed/seen/*' AND (NEW.state_kind GLOB 'routed/*' OR NEW.state_kind GLOB 'directory/message/*' OR NEW.state_kind GLOB 'directory/object/*' OR NEW.state_kind GLOB 'message/origin/*' OR NEW.state_kind GLOB 'delivery-receipt/*' OR NEW.state_kind GLOB 'attachment/*' OR NEW.state_kind GLOB 'sync/attachment/*' OR NEW.state_kind GLOB 'surface/origin/*' OR NEW.state_kind GLOB 'surface/message/*' OR NEW.state_kind GLOB 'surface/pending/*' OR NEW.state_kind GLOB 'surface/history/*' OR NEW.state_kind GLOB 'directory/surface_error/*' OR NEW.state_kind GLOB 'task/message/*' OR NEW.state_kind GLOB 'group-message/alias/*' OR NEW.state_kind GLOB 'own-copy/*' OR NEW.state_kind GLOB 'own-device/*' OR NEW.state_kind GLOB 'inbox/*' OR NEW.state_kind GLOB 'backup/staging/*' OR NEW.state_kind GLOB 'legacy/replay/*')";
+/// SQL twin of `value_holds_envelope`: six typed fields at `$`, `$.envelope` or `$.entry.envelope`.
+fn envelope_sql(column: &str) -> String {
+    let body = format!("CAST(NEW.{column} AS TEXT)");
+    let paths = ["$", "$.envelope", "$.entry.envelope"].map(|path| {
+        let at = |field: &str| {
+            let base = if path == "$" { "$".to_owned() } else { path.to_owned() };
+            format!("json_type({body},'{base}.{field}')")
+        };
+        format!(
+            "({}='text' AND {}='text' AND {}='text' AND {}='text' AND {} IN ('integer','real') AND {} IN ('integer','real'))",
+            at("source_principal_id"),
+            at("source_device_id"),
+            at("signing_key_id"),
+            at("payload_hash"),
+            at("created_at"),
+            at("ttl")
+        )
+    });
+    format!("CASE WHEN json_valid({body}) THEN ({}) ELSE 0 END", paths.join(" OR "))
+}
+
+/// Listed prefixes, quarantined replay rows, or any value holding a complete envelope.
+pub(super) fn actor_guard() -> String {
+    format!("(({ACTOR_PREFIX_GUARD}) OR ({}))", envelope_sql("state_json"))
+}
+
 const ACTOR_LINKS: &str = r"
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1)),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1) WHERE NEW.state_kind GLOB 'attachment/chunk/*/*' ON CONFLICT DO NOTHING;
 
@@ -195,6 +222,7 @@ fn json_copy(db: &Connection, store: CopyStore<'_>) -> rusqlite::Result<()> {
         db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS footprint_{table}_removed AFTER DELETE ON {table} BEGIN DELETE FROM message_footprint WHERE kind='{kind}' AND locator={old_locator}; END;"))?;
     }
     let extra = extra.replace("{kind}", kind).replace("{locator}", locator);
+    let actor_guard = actor_guard();
     for operation in ["INSERT", "UPDATE"] {
         // BEFORE registration makes ownership available to every AFTER invalidation trigger,
         // regardless of installation/reopen order. Erasure itself waits until the row exists.
@@ -217,15 +245,18 @@ fn json_copy(db: &Connection, store: CopyStore<'_>) -> rusqlite::Result<()> {
             )
         };
         if table == "runtime_actor_state" {
-            db.execute_batch(&format!("DROP TRIGGER IF EXISTS footprint_{table}_{operation}; CREATE TRIGGER IF NOT EXISTS footprint_actor_fence_{operation} AFTER {operation} ON {table} WHEN {ACTOR_GUARD} BEGIN UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=NEW.state_kind); END;"))?;
+            db.execute_batch(&format!("DROP TRIGGER IF EXISTS footprint_{table}_{operation}; DROP TRIGGER IF EXISTS main.footprint_actor_fence_{operation}; CREATE TRIGGER footprint_actor_fence_{operation} AFTER {operation} ON {table} WHEN {actor_guard} BEGIN UPDATE direct_message_projection SET deleted=1 WHERE deleted=1 AND message_id IN (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=NEW.state_kind); END;"))?;
         }
         let reset = if operation == "UPDATE" {
             format!("DELETE FROM message_footprint WHERE kind='{kind}' AND locator={locator};")
         } else {
             String::new()
         };
+        // Renew on every install so a database created by an older build never keeps old SQL.
         db.execute_batch(&format!(r"
-CREATE TRIGGER IF NOT EXISTS footprint_{table}_{operation} {phase} {operation} ON {table}
+-- Qualified: an attached incoming database must never be touched by renewal.
+DROP TRIGGER IF EXISTS main.footprint_{table}_{operation};
+CREATE TRIGGER footprint_{table}_{operation} {phase} {operation} ON {table}
 WHEN ({guard}) {insert_guard} AND json_valid(CAST(NEW.{column} AS TEXT))
  AND COALESCE(json_extract(CAST(NEW.{column} AS TEXT),'$.deleted'),0)!=1
  AND COALESCE(json_extract(CAST(NEW.{column} AS TEXT),'$.message.deleted'),0)!=1 BEGIN
