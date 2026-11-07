@@ -140,8 +140,8 @@ pub use ephemeral::{
     AuthenticatedCiphertext, EphemeralReceiver, HoldLease, LedgerProbe, RECEIVER_CHANNEL_BYTES,
     RECEIVER_CHANNEL_FRAMES, RECEIVER_DEDUP_BOUND, RECEIVER_DEDUP_BUDGET_BYTES,
     RECEIVER_DEDUP_ENTRY_BYTES, RECEIVER_MAX_FRAME_BYTES, ReceiverAdmit, ReceiverClock,
-    ReceiverDropReason, ReceiverHandoff, ReceiverLifetime, admit_authenticated_ciphertext,
-    authenticate, ttl_seconds,
+    ReceiverDequeue, ReceiverDropReason, ReceiverHandoff, ReceiverLifetime,
+    admit_authenticated_ciphertext, authenticate, ttl_seconds,
 };
 pub use error::{GroupOperation, SdkError};
 mod surface_refusal;
