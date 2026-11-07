@@ -3,6 +3,7 @@
 
 //! Raw requests prove negotiation, input fences and recipient wire behavior.
 #[path = "ephemeral_negotiation.rs"]
+#[cfg(test)]
 mod ephemeral_negotiation;
 #[path = "negotiation_tests.rs"]
 mod negotiation;
