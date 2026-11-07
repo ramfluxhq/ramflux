@@ -6,6 +6,8 @@
 use crate::{SessionLifecycle, lock_unpoisoned};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 
 /// Inclusive bound for the capability map and for `established_in_boot`.
 pub const EPHEMERAL_CAPABILITY_BOUND: usize = 262_144;
@@ -40,20 +42,38 @@ impl EphemeralCapabilityState {
         }
     }
 
-    fn bind(&mut self, target: &str, gateway_id: &str, session_id: &str) {
+    fn bind(&mut self, target: &str, gateway_id: &str, session_id: &str) -> bool {
         if let Some(entry) = self.map.get_mut(target) {
             *entry = (gateway_id.to_owned(), session_id.to_owned());
-            return;
+            return true;
         }
         if self.map.len() >= EPHEMERAL_CAPABILITY_BOUND {
             MAP_FULL_TOTAL.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(
-                target_delivery_id = target,
-                "ephemeral capability map full; flag not recorded"
-            );
-            return;
+            return false;
         }
         self.map.insert(target.to_owned(), (gateway_id.to_owned(), session_id.to_owned()));
+        true
+    }
+}
+
+#[cfg(test)]
+type AfterSessionHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static AFTER_SESSION: Mutex<Option<(String, AfterSessionHook)>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_route_gate_after_session(target: Option<(&str, AfterSessionHook)>) {
+    *lock_unpoisoned(&AFTER_SESSION) = target.map(|(name, hook)| (name.to_owned(), hook));
+}
+
+#[cfg(test)]
+fn run_after_session_hook(target: &str) {
+    let hook = lock_unpoisoned(&AFTER_SESSION)
+        .as_ref()
+        .and_then(|(name, hook)| (name == target).then(|| Arc::clone(hook)));
+    if let Some(hook) = hook {
+        hook();
     }
 }
 
@@ -65,46 +85,66 @@ impl crate::RouterCore {
 
     /// W2: record capability from this registration's own `ephemeral` advertisement.
     pub fn bind_ephemeral_capability(&self, target: &str, gateway_id: &str, session_id: &str) {
-        lock_unpoisoned(&self.ephemeral_capability).bind(target, gateway_id, session_id);
+        let recorded =
+            lock_unpoisoned(&self.ephemeral_capability).bind(target, gateway_id, session_id);
+        if !recorded {
+            tracing::debug!(
+                target_delivery_id = target,
+                "ephemeral capability map full; flag not recorded"
+            );
+        }
     }
 
     /// C1: capability-gated route for `T`. Lazily drops a stale map entry.
     pub fn route_gate(&self, target: &str) -> EphemeralRouteGate {
+        let observed = lock_unpoisoned(&self.ephemeral_capability).map.get(target).cloned();
         let descriptor = self.session(target);
+        #[cfg(test)]
+        run_after_session_hook(target);
         let mut state = lock_unpoisoned(&self.ephemeral_capability);
-        let Some(descriptor) = descriptor else {
-            state.map.remove(target);
-            return EphemeralRouteGate::Offline;
-        };
-        if let Some((gateway_id, session_id)) = state.map.get(target).cloned()
+        let current = state.map.get(target).cloned();
+        if let Some(descriptor) = descriptor.as_ref()
             && descriptor.lifecycle == SessionLifecycle::Live
-            && gateway_id == descriptor.gateway_id
-            && session_id == descriptor.session_id
+            && let Some((gateway_id, session_id)) = current.as_ref()
+            && gateway_id == &descriptor.gateway_id
+            && session_id == &descriptor.session_id
         {
-            EphemeralRouteGate::Online { gateway_id, session_id }
-        } else {
+            return EphemeralRouteGate::Online {
+                gateway_id: gateway_id.clone(),
+                session_id: session_id.clone(),
+            };
+        }
+        if current == observed {
             state.map.remove(target);
+        }
+        if descriptor.is_none() {
+            EphemeralRouteGate::Offline
+        } else {
             EphemeralRouteGate::RecipientUnsupported
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn ephemeral_map_len(&self) -> usize {
+    /// Inspection: in-memory capability occupancy.
+    #[must_use]
+    pub fn ephemeral_map_len(&self) -> usize {
         lock_unpoisoned(&self.ephemeral_capability).map.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn ephemeral_map_contains(&self, target: &str) -> bool {
+    /// Inspection: whether `target` has a capability map entry.
+    #[must_use]
+    pub fn ephemeral_map_contains(&self, target: &str) -> bool {
         lock_unpoisoned(&self.ephemeral_capability).map.contains_key(target)
     }
 
-    #[cfg(test)]
-    pub(crate) fn established_in_boot_len(&self) -> usize {
+    /// Inspection: occupancy of `established_in_boot`.
+    #[must_use]
+    pub fn established_in_boot_len(&self) -> usize {
         lock_unpoisoned(&self.ephemeral_capability).established_in_boot.len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn established_in_boot_contains(&self, target: &str) -> bool {
+    /// Inspection: whether `target` was established in this boot.
+    #[must_use]
+    pub fn established_in_boot_contains(&self, target: &str) -> bool {
         lock_unpoisoned(&self.ephemeral_capability).established_in_boot.contains(target)
     }
 }
@@ -116,15 +156,17 @@ pub(crate) fn map_full_total() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EPHEMERAL_CAPABILITY_BOUND, EphemeralRouteGate, map_full_total};
-    use crate::{
-        NodeCoreError, RouterCore, RouterRedbStore, SessionDescriptor, SessionLifecycle,
-        SessionPushSessionRequest,
+    use super::{
+        EPHEMERAL_CAPABILITY_BOUND, EphemeralRouteGate, map_full_total,
+        set_route_gate_after_session,
     };
+    use crate::{NodeCoreError, RouterCore, RouterRedbStore, SessionDescriptor, SessionLifecycle};
     use redb::{ReadableDatabase, ReadableTable, TableHandle};
-    use serde_json::json;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -151,35 +193,21 @@ mod tests {
         }
     }
 
-    fn establish_legacy(
-        router: &RouterCore,
-        session: &SessionDescriptor,
-    ) -> Result<(), NodeCoreError> {
+    fn bind_live(router: &RouterCore, session: &SessionDescriptor) -> Result<(), NodeCoreError> {
         router.clear_ephemeral_capability(&session.target_delivery_id);
         router.upsert_session(session.clone())?;
         router.mark_live(&session.target_delivery_id)?;
-        Ok(())
-    }
-
-    fn establish_capable(
-        router: &RouterCore,
-        session: &SessionDescriptor,
-        ephemeral: bool,
-    ) -> Result<(), NodeCoreError> {
-        establish_legacy(router, session)?;
-        if ephemeral {
-            router.bind_ephemeral_capability(
-                &session.target_delivery_id,
-                &session.gateway_id,
-                &session.session_id,
-            );
-        }
+        router.bind_ephemeral_capability(
+            &session.target_delivery_id,
+            &session.gateway_id,
+            &session.session_id,
+        );
         Ok(())
     }
 
     fn capable(router: &RouterCore, target: &str) -> Result<SessionDescriptor, NodeCoreError> {
         let session = descriptor(target, "gateway", "session", 1);
-        establish_capable(router, &session, true)?;
+        bind_live(router, &session)?;
         assert_eq!(
             router.route_gate(target),
             EphemeralRouteGate::Online {
@@ -197,14 +225,16 @@ mod tests {
         assert_eq!(*forwards, 0, "zero forwards");
     }
 
-    fn row_resume_without_capability() -> TestResult {
+    fn row_gateway_mismatch_retains_until_c1() -> TestResult {
         let router = RouterCore::new();
-        let session = capable(&router, "target-btf")?;
+        let session = capable(&router, "target-gw-only")?;
+        let mut changed = session.clone();
+        changed.gateway_id = "gateway-b".into();
+        changed.session_seq = 2;
+        router.upsert_session(changed)?;
+        router.mark_live(&session.target_delivery_id)?;
+        assert!(router.ephemeral_map_contains(&session.target_delivery_id));
         let mut forwards = 0;
-        establish_legacy(
-            &router,
-            &descriptor(&session.target_delivery_id, &session.gateway_id, &session.session_id, 2),
-        )?;
         let gate = router.route_gate(&session.target_delivery_id);
         assert_eq!(gate, EphemeralRouteGate::RecipientUnsupported);
         assert_no_forward(&gate, &mut forwards);
@@ -212,87 +242,85 @@ mod tests {
         Ok(())
     }
 
-    fn row_resume_with_capability_after_legacy() -> TestResult {
+    fn row_session_mismatch_retains_until_c1() -> TestResult {
         let router = RouterCore::new();
-        let session = capable(&router, "target-reverse")?;
-        establish_legacy(
-            &router,
-            &descriptor(&session.target_delivery_id, &session.gateway_id, &session.session_id, 2),
-        )?;
+        let session = capable(&router, "target-sid-only")?;
+        let mut changed = session.clone();
+        changed.session_id = "session-b".into();
+        changed.session_seq = 2;
+        router.upsert_session(changed)?;
+        router.mark_live(&session.target_delivery_id)?;
+        assert!(router.ephemeral_map_contains(&session.target_delivery_id));
+        let mut forwards = 0;
+        let gate = router.route_gate(&session.target_delivery_id);
+        assert_eq!(gate, EphemeralRouteGate::RecipientUnsupported);
+        assert_no_forward(&gate, &mut forwards);
+        assert!(!router.ephemeral_map_contains(&session.target_delivery_id));
+        Ok(())
+    }
+
+    fn row_stale_lookup_preserves_fresh_bind() -> TestResult {
+        let target = format!("target-m1-{}", std::process::id());
+        let router = Arc::new(RouterCore::new());
+        let initial = descriptor(&target, "gateway", "session", 1);
+        bind_live(&router, &initial)?;
+        let replacement = descriptor(&target, "gateway", "session-2", 2);
+        let entered = Arc::new(Barrier::new(2));
+        let released = Arc::new(Barrier::new(2));
+        set_route_gate_after_session(Some((
+            &target,
+            Arc::new({
+                let entered = Arc::clone(&entered);
+                let released = Arc::clone(&released);
+                move || {
+                    entered.wait();
+                    released.wait();
+                }
+            }),
+        )));
+        let clear = ClearHook;
+        let (lookup_tx, lookup_rx) = mpsc::channel();
+        let lookup_router = Arc::clone(&router);
+        let lookup_target = target.clone();
+        std::thread::spawn(move || {
+            let gate = lookup_router.route_gate(&lookup_target);
+            let _ = lookup_tx.send(gate);
+        });
+        let (work_tx, work_rx) = mpsc::channel();
+        let work_router = Arc::clone(&router);
+        std::thread::spawn(move || {
+            entered.wait();
+            work_router.clear_ephemeral_capability(&replacement.target_delivery_id);
+            let result = bind_live(&work_router, &replacement);
+            released.wait();
+            let _ = work_tx.send(result);
+        });
+        let gate = lookup_rx.recv_timeout(Duration::from_secs(10))?;
+        work_rx.recv_timeout(Duration::from_secs(10))??;
+        drop(clear);
+        assert!(router.ephemeral_map_contains(&target));
         assert_eq!(
-            router.route_gate(&session.target_delivery_id),
-            EphemeralRouteGate::RecipientUnsupported
-        );
-        establish_capable(
-            &router,
-            &descriptor(&session.target_delivery_id, &session.gateway_id, &session.session_id, 3),
-            true,
-        )?;
-        assert_eq!(
-            router.route_gate(&session.target_delivery_id),
+            router.route_gate(&target),
             EphemeralRouteGate::Online {
-                gateway_id: session.gateway_id,
-                session_id: session.session_id,
+                gateway_id: "gateway".into(),
+                session_id: "session-2".into(),
+            }
+        );
+        assert_ne!(
+            gate,
+            EphemeralRouteGate::Online {
+                gateway_id: "gateway".into(),
+                session_id: "session-2".into(),
             }
         );
         Ok(())
     }
 
-    fn row_capable_ephemeral_false_clears() -> TestResult {
-        let router = RouterCore::new();
-        let session = capable(&router, "target-false")?;
-        let body = json!({
-            "target_delivery_id": session.target_delivery_id,
-            "device_id": session.device_id,
-            "gateway_id": session.gateway_id,
-            "session_id": session.session_id,
-            "device_epoch": 1,
-            "session_seq": 2,
-            "last_cursor": null,
-            "push_alias_hash": null,
-            "lifecycle": "Live",
-            "session_push": true
-        });
-        let request: SessionPushSessionRequest = serde_json::from_value(body)?;
-        assert!(!request.ephemeral);
-        establish_capable(&router, &request.session, request.ephemeral)?;
-        let mut forwards = 0;
-        let gate = router.route_gate("target-false");
-        assert_eq!(gate, EphemeralRouteGate::RecipientUnsupported);
-        assert_no_forward(&gate, &mut forwards);
-        Ok(())
-    }
-
-    fn row_legacy_other_gateway_clears() -> TestResult {
-        let router = RouterCore::new();
-        let session = capable(&router, "target-other-gw")?;
-        establish_legacy(
-            &router,
-            &descriptor(&session.target_delivery_id, "gateway-b", "session-b", 2),
-        )?;
-        let mut forwards = 0;
-        let gate = router.route_gate(&session.target_delivery_id);
-        assert_eq!(gate, EphemeralRouteGate::RecipientUnsupported);
-        assert_no_forward(&gate, &mut forwards);
-        let recorded = router.session(&session.target_delivery_id).ok_or("descriptor")?;
-        assert_eq!(recorded.gateway_id, "gateway-b");
-        assert_eq!(recorded.session_id, "session-b");
-        Ok(())
-    }
-
-    fn row_new_capable_session_without_ephemeral_same_gateway() -> TestResult {
-        let router = RouterCore::new();
-        let session = capable(&router, "target-new-session")?;
-        establish_capable(
-            &router,
-            &descriptor(&session.target_delivery_id, &session.gateway_id, "session-2", 2),
-            false,
-        )?;
-        let mut forwards = 0;
-        let gate = router.route_gate(&session.target_delivery_id);
-        assert_eq!(gate, EphemeralRouteGate::RecipientUnsupported);
-        assert_no_forward(&gate, &mut forwards);
-        Ok(())
+    struct ClearHook;
+    impl Drop for ClearHook {
+        fn drop(&mut self) {
+            set_route_gate_after_session(None);
+        }
     }
 
     fn row_draining_refuses_and_lazily_removes() -> TestResult {
@@ -325,7 +353,12 @@ mod tests {
     fn row_map_full_flag_not_recorded_durable_unaffected() -> TestResult {
         let router = RouterCore::new();
         let session = capable(&router, "target-kept")?;
-        for index in 0..EPHEMERAL_CAPABILITY_BOUND.saturating_sub(1) {
+        assert_eq!(router.ephemeral_map_len(), 1);
+        assert!(router.ephemeral_map_contains("target-kept"));
+        for index in 0..EPHEMERAL_CAPABILITY_BOUND {
+            if router.ephemeral_map_len() >= EPHEMERAL_CAPABILITY_BOUND {
+                break;
+            }
             let filler = format!("f{index}");
             router.clear_ephemeral_capability(&filler);
             router.bind_ephemeral_capability(&filler, "g", "s");
@@ -334,7 +367,14 @@ mod tests {
         assert_eq!(router.established_in_boot_len(), EPHEMERAL_CAPABILITY_BOUND);
         let before_full = map_full_total();
         let overflow = descriptor("target-overflow", "gateway", "session-overflow", 1);
-        establish_capable(&router, &overflow, true)?;
+        router.clear_ephemeral_capability(&overflow.target_delivery_id);
+        router.upsert_session(overflow.clone())?;
+        router.mark_live(&overflow.target_delivery_id)?;
+        router.bind_ephemeral_capability(
+            &overflow.target_delivery_id,
+            &overflow.gateway_id,
+            &overflow.session_id,
+        );
         assert!(map_full_total() > before_full);
         assert_eq!(router.ephemeral_map_len(), EPHEMERAL_CAPABILITY_BOUND);
         assert!(!router.ephemeral_map_contains("target-overflow"));
@@ -412,11 +452,9 @@ mod tests {
 
     #[test]
     fn ephemeral_capability_route_binding() -> TestResult {
-        row_resume_without_capability()?;
-        row_resume_with_capability_after_legacy()?;
-        row_capable_ephemeral_false_clears()?;
-        row_legacy_other_gateway_clears()?;
-        row_new_capable_session_without_ephemeral_same_gateway()?;
+        row_stale_lookup_preserves_fresh_bind()?;
+        row_gateway_mismatch_retains_until_c1()?;
+        row_session_mismatch_retains_until_c1()?;
         row_draining_refuses_and_lazily_removes()?;
         row_removal_offline()?;
         row_map_full_flag_not_recorded_durable_unaffected()?;

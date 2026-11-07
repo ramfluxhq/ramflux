@@ -236,4 +236,6 @@ fn point(path: &str, router: &crate::router_runtime::RouterHandle) -> anyhow::Re
 }
 
 #[cfg(test)]
+mod capability_binding;
+#[cfg(test)]
 mod tests;
