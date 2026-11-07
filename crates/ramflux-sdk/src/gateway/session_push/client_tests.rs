@@ -45,9 +45,34 @@ fn decode(bytes: &[u8]) -> n::SessionPushClientFrame {
     serde_json::from_slice(bytes).unwrap()
 }
 
+/// Node-core decodes the bytes (`deny_unknown_fields`) and re-encodes them identically.
+fn node_round_trip(bytes: &[u8]) -> n::SessionPushClientFrame {
+    let decoded = decode(bytes);
+    assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes, "decode then encode is identical");
+    decoded
+}
+
+const ACK_GOLDEN: &str = concat!(
+    r#"{"frame_type":"ack","incarnation_id":"0123456789abcdef0123456789abcdef","ack":{"#,
+    r#""schema":"ramflux.ack.v1","version":1,"domain":"ramflux.ack.v1","#,
+    r#""signing_key_id":"dev-key","signature_alg":"ed25519","signature":"sig-ack","#,
+    r#""ack_id":"ack-7","envelope_id":"env-7","receiver_device_id":"device-7","#,
+    r#""received_at":1234,"cursor_after":"cursor-7"}}"#
+);
+
+const NACK_GOLDEN: &str = concat!(
+    r#"{"frame_type":"nack","incarnation_id":"0123456789abcdef0123456789abcdef","nack":{"#,
+    r#""schema":"ramflux.nack.v1","version":1,"domain":"ramflux.nack.v1","#,
+    r#""signing_key_id":"dev-key","signature_alg":"ed25519","signature":"sig-nack","#,
+    r#""nack_id":"nack-8","envelope_id":"env-8","receiver_device_id":"device-8","#,
+    r#""reason":"expired","received_at":5678,"retry_after":9,"proof_hash":"proof-8","#,
+    r#""new_home_node_hint":"hint-8"}}"#
+);
+
 #[test]
 fn capable_client_frame_codecs() {
-    // (p1) resume: golden bytes, and node-core decodes every field to the source values.
+    // (p1) resume: literal bytes, node-core round trip, and every decoded field equals the
+    // source values that went into the constructor.
     let resume = CapableClientFrame::resume(E, resume_frame(17)).unwrap().encode().unwrap();
     assert_eq!(
         std::str::from_utf8(&resume).unwrap(),
@@ -57,7 +82,7 @@ fn capable_client_frame_codecs() {
             r#""incarnation_id":"0123456789abcdef0123456789abcdef"}"#
         )
     );
-    match decode(&resume) {
+    match node_round_trip(&resume) {
         n::SessionPushClientFrame::Resume { resume, incarnation_id } => {
             assert_eq!(incarnation_id, E);
             assert_eq!(resume.target_delivery_id, "target-r");
@@ -76,7 +101,7 @@ fn capable_client_frame_codecs() {
         std::str::from_utf8(&fetch).unwrap(),
         r#"{"frame_type":"fetch_entry","incarnation_id":"0123456789abcdef0123456789abcdef","inbox_seq":9}"#
     );
-    match decode(&fetch) {
+    match node_round_trip(&fetch) {
         n::SessionPushClientFrame::FetchEntry { incarnation_id, inbox_seq } => {
             assert_eq!((incarnation_id.as_str(), inbox_seq), (E, 9));
         }
@@ -90,7 +115,7 @@ fn capable_client_frame_codecs() {
         std::str::from_utf8(&batch).unwrap(),
         r#"{"frame_type":"ack_batch","incarnation_id":"0123456789abcdef0123456789abcdef","inbox_seqs":[3,5,8,13]}"#
     );
-    match decode(&batch) {
+    match node_round_trip(&batch) {
         n::SessionPushClientFrame::AckBatch { incarnation_id, inbox_seqs } => {
             assert_eq!(incarnation_id, E);
             assert_eq!(inbox_seqs, [3, 5, 8, 13]);
@@ -101,41 +126,25 @@ fn capable_client_frame_codecs() {
     assert!(CapableClientFrame::ack_batch(E, vec![1]).is_ok());
     assert!(CapableClientFrame::ack_batch(E, (1..=64).collect()).is_ok());
 
-    // (p1) ack and nack: the frame equals the node-core encoding and the literal Value, and
-    // node-core decodes each field to the source values.
+    // (p1) ack and nack: literal bytes (so a shared nested serializer cannot move both sides),
+    // the node-core round trip, and each decoded field against the source JSON.
     let ack = serde_json::from_value(ack_json()).unwrap();
     let ack_bytes = CapableClientFrame::ack(E, ack).unwrap().encode().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&ack_bytes).unwrap(),
-        json!({"frame_type":"ack","incarnation_id":E,"ack":ack_json()})
-    );
-    match decode(&ack_bytes) {
+    assert_eq!(std::str::from_utf8(&ack_bytes).unwrap(), ACK_GOLDEN);
+    match node_round_trip(&ack_bytes) {
         n::SessionPushClientFrame::Ack { incarnation_id, ack } => {
             assert_eq!(incarnation_id, E);
             assert_eq!(serde_json::to_value(&ack).unwrap(), ack_json());
-            assert_eq!(
-                serde_json::to_vec(&n::SessionPushClientFrame::Ack { incarnation_id, ack })
-                    .unwrap(),
-                ack_bytes
-            );
         }
         other => panic!("not an ack: {other:?}"),
     }
     let nack = serde_json::from_value(nack_json()).unwrap();
     let nack_bytes = CapableClientFrame::nack(E, nack).unwrap().encode().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&nack_bytes).unwrap(),
-        json!({"frame_type":"nack","incarnation_id":E,"nack":nack_json()})
-    );
-    match decode(&nack_bytes) {
+    assert_eq!(std::str::from_utf8(&nack_bytes).unwrap(), NACK_GOLDEN);
+    match node_round_trip(&nack_bytes) {
         n::SessionPushClientFrame::Nack { incarnation_id, nack } => {
             assert_eq!(incarnation_id, E);
             assert_eq!(serde_json::to_value(&nack).unwrap(), nack_json());
-            assert_eq!(
-                serde_json::to_vec(&n::SessionPushClientFrame::Nack { incarnation_id, nack })
-                    .unwrap(),
-                nack_bytes
-            );
         }
         other => panic!("not a nack: {other:?}"),
     }
