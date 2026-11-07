@@ -197,11 +197,13 @@ fn parse_binding(copy_id: &str) -> Result<(String, String, i64), StorageError> {
 fn payload_sets(
     db: &Connection,
     schema: &str,
+    only: Option<&BTreeSet<&str>>,
 ) -> rusqlite::Result<BTreeMap<String, BTreeSet<String>>> {
+    let scope = in_list("b", only);
     let mut query = db.prepare(&format!(
         "SELECT b.message_id,substr(b.copy_id,9) FROM {schema}.message_copy_binding b \
          JOIN {schema}.direct_message_projection m ON m.message_id=b.message_id AND m.deleted=0 \
-         WHERE b.copy_id GLOB 'payload:*'"
+         WHERE b.copy_id GLOB 'payload:*'{scope}"
     ))?;
     let mut sets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for row in query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
@@ -209,6 +211,19 @@ fn payload_sets(
         sets.entry(message).or_default().insert(payload);
     }
     Ok(sets)
+}
+
+/// ` AND alias.message_id IN (...)` for a scoped read, or nothing. Ids are quoted, never bound
+/// as SQL text.
+fn in_list(alias: &str, only: Option<&BTreeSet<&str>>) -> String {
+    only.map_or_else(String::new, |set| {
+        let list = set
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(" AND {alias}.message_id IN ({list})")
+    })
 }
 
 fn current_bundle_mac(
@@ -222,43 +237,90 @@ fn current_bundle_mac(
         .ok_or(StorageError::AuthorizationRejected)
 }
 
+/// The authenticated tuple of a stored value's fixed-path envelope: payload, MAC inputs and the
+/// lifetime-clamped expiry. Nothing for an unparsable, incomplete or already-expired value.
+struct Tuple {
+    principal: String,
+    device: String,
+    signing_key_id: String,
+    payload_hash: String,
+    expires_at: i64,
+}
+
+fn tuple_of(body: &[u8], now: i64) -> Option<Tuple> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let envelope = super::super::message_footprint::fixed_path_envelope(&value)?;
+    let text =
+        |name: &str| envelope.get(name).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let expires_at =
+        lifetime(envelope.get("created_at")?.as_i64()?, envelope.get("ttl")?.as_i64()?, now);
+    (expires_at > now).then(|| Tuple {
+        principal: text("source_principal_id"),
+        device: text("source_device_id"),
+        signing_key_id: text("signing_key_id"),
+        payload_hash: text("payload_hash"),
+        expires_at,
+    })
+}
+
+/// Writes binding (i) for an admitted work item: one `erased-input:` binding per retained MAC
+/// bundle, bound to the message, so the tuple survives until its deletion is captured.
+///
+/// # Errors
+/// Returns storage or MAC errors.
+pub(crate) fn write_work_bindings(
+    db: &Connection,
+    message: &str,
+    entry_json: &[u8],
+    now: i64,
+) -> Result<(), StorageError> {
+    let Some(tuple) = tuple_of(entry_json, now) else { return Ok(()) };
+    let canonical = ErasedTuple {
+        principal: &tuple.principal,
+        device: &tuple.device,
+        signing_key_id: &tuple.signing_key_id,
+        payload_hash: &tuple.payload_hash,
+    }
+    .canonical()?;
+    for (bundle, selector) in super::super::mac_subkeys::bundle_macs(db, LABEL, &canonical)? {
+        import_binding(db, &bundle, &selector, tuple.expires_at, message)?;
+    }
+    Ok(())
+}
+
 /// Reads a six-field envelope out of one stored value, or nothing.
 fn candidate_tuple(
     db: &Connection,
     body: &[u8],
     now: i64,
 ) -> Result<Option<(String, String, String, i64)>, StorageError> {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else { return Ok(None) };
-    let Some(envelope) = super::super::message_footprint::fixed_path_envelope(&value) else {
-        return Ok(None);
-    };
-    let text = |name: &str| envelope.get(name).and_then(Value::as_str).unwrap_or_default();
-    let created_at = envelope.get("created_at").and_then(Value::as_i64);
-    let ttl = envelope.get("ttl").and_then(Value::as_i64);
-    let (Some(created_at), Some(ttl)) = (created_at, ttl) else { return Ok(None) };
-    let expires_at = lifetime(created_at, ttl, now);
-    if expires_at <= now {
-        return Ok(None);
-    }
+    let Some(t) = tuple_of(body, now) else { return Ok(None) };
     let tuple = ErasedTuple {
-        principal: text("source_principal_id"),
-        device: text("source_device_id"),
-        signing_key_id: text("signing_key_id"),
-        payload_hash: text("payload_hash"),
+        principal: &t.principal,
+        device: &t.device,
+        signing_key_id: &t.signing_key_id,
+        payload_hash: &t.payload_hash,
     };
     let (bundle, selector) = current_bundle_mac(db, &tuple)?;
-    Ok(Some((text("payload_hash").to_owned(), selector, bundle, expires_at)))
+    Ok(Some((t.payload_hash.clone(), selector, bundle, t.expires_at)))
 }
 
-fn collect(db: &Connection, side: Side, now: i64) -> Result<Vec<Candidate>, StorageError> {
+fn collect(
+    db: &Connection,
+    side: Side,
+    now: i64,
+    only: Option<&BTreeSet<&str>>,
+) -> Result<Vec<Candidate>, StorageError> {
     let schema = side.schema();
-    let payloads = payload_sets(db, schema)?;
+    let payloads = payload_sets(db, schema, only)?;
+    let binding_scope = in_list("b", only);
+    let footprint_scope = in_list("f", only);
     let mut found: Vec<Candidate> = Vec::new();
     // (A) pre-deletion bindings of live messages.
     let mut query = db.prepare(&format!(
         "SELECT b.copy_id,b.message_id FROM {schema}.message_copy_binding b \
          JOIN {schema}.direct_message_projection m ON m.message_id=b.message_id AND m.deleted=0 \
-         WHERE b.copy_id GLOB 'erased-input:*'"
+         WHERE b.copy_id GLOB 'erased-input:*'{binding_scope}"
     ))?;
     let bindings = query
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -303,7 +365,7 @@ fn collect(db: &Connection, side: Side, now: i64) -> Result<Vec<Candidate>, Stor
                 "SELECT f.message_id,CAST(t.{col} AS BLOB) FROM {schema}.message_footprint f \
                  JOIN {schema}.{table} t ON {locator}=f.locator \
                  JOIN {schema}.direct_message_projection m ON m.message_id=f.message_id AND m.deleted=0 \
-                 WHERE f.kind='{kind}'{legacy}",
+                 WHERE f.kind='{kind}'{footprint_scope}{legacy}",
                 col = source.column,
                 table = source.table,
                 locator = source.locator,
@@ -376,7 +438,7 @@ pub(crate) fn stage_merge_capture(
     if side == Side::Local {
         db.execute_batch("DELETE FROM temp.backup_erased_capture; DELETE FROM temp.backup_erased_capture_message;")?;
     }
-    for c in collect(db, side, now)? {
+    for c in collect(db, side, now, None)? {
         db.execute(
             "INSERT INTO temp.backup_erased_capture VALUES(?1,?2,?3) \
              ON CONFLICT(selector,bundle_id) DO UPDATE SET expires_at=max(expires_at,excluded.expires_at)",
@@ -518,7 +580,7 @@ fn collect_for_deleted_targets(
     wanted: &BTreeSet<&str>,
     now: i64,
 ) -> Result<Vec<Candidate>, StorageError> {
-    Ok(collect(db, Side::Local, now)?
+    Ok(collect(db, Side::Local, now, Some(wanted))?
         .into_iter()
         .filter(|c| wanted.contains(c.message.as_str()))
         .collect())
@@ -545,4 +607,16 @@ pub(crate) fn sweep_open(db: &Connection, now: i64) -> rusqlite::Result<()> {
         params![now, OPEN_SWEEP],
     )?;
     Ok(())
+}
+
+impl crate::AccountDb {
+    /// Converts a live message's tuple sources into tombstones before its deletion drops them.
+    pub(in crate::account_db) fn capture_erased_inputs(
+        &self,
+        message: &str,
+    ) -> Result<(), StorageError> {
+        let message = message.to_owned();
+        let now = crate::unix_now();
+        self.connection.call(move |raw| Ok(capture_for(raw, &[message.as_str()], now)))?
+    }
 }
