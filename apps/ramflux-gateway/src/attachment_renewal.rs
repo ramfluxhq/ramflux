@@ -14,13 +14,16 @@ pub(crate) struct HomeRenewalConfig {
     pub(crate) source_issuer: String,
     pub(crate) relay_audience: String,
     pub(crate) authority_generation: u64,
-    pub(crate) source_peer: String,
     pub(crate) home_key: ed25519_dalek::SigningKey,
 }
 pub(crate) struct HomeRenewalAttempt<'a> {
     pub(crate) request: &'a RenewalRequest,
     pub(crate) grant: &'a VerifiedScopedGrant,
     pub(crate) challenge: [u8; 32],
+    /// `expires_at` of the relay's challenge row: W never outlives it.
+    pub(crate) challenge_expires_at: u64,
+    /// The complete registered capability: grant plus registration receipt.
+    pub(crate) capability: &'a [u8],
     pub(crate) now: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +70,10 @@ fn attest_requester(
     if attempt.request.target()?.0.authority_generation != config.authority_generation {
         return Err(FormatError("renewal source generation"));
     }
+    // Nothing is signed once the challenge row has expired; the boundary is inclusive.
+    if attempt.now >= attempt.challenge_expires_at {
+        return Err(FormatError("challenge expired"));
+    }
     let g = attempt.grant.grant();
     let w = ForwardAttestation {
         requester,
@@ -82,6 +89,7 @@ fn attest_requester(
             .now
             .checked_add(30)
             .ok_or(FormatError("forward time"))?
+            .min(attempt.challenge_expires_at)
             .min(g.expires_at),
     };
     let signature = config.home_key.sign(&w.signing_bytes()?).to_bytes();
@@ -151,6 +159,7 @@ fn forward_bytes(
     if attempt.request.target()?.0.authority_generation != config.authority_generation {
         return Err(FormatError("renewal source generation"));
     }
+    let capability = checked_capability(attempt)?;
     w.attestation.validate(
         attempt.request,
         attempt.grant,
@@ -168,15 +177,89 @@ fn forward_bytes(
         home_signature: w.signature.to_vec(),
         proof: pop.canonical_bytes()?,
         requester_signature: signature.to_vec(),
-        grant: attempt.grant.signed_bytes()?,
+        grant: capability,
     })
 }
+/// The capability the router routes by: it must be exactly this grant followed by a
+/// receipt. A receipt-free `signed_bytes()` envelope is refused here and again by the router.
+fn checked_capability(attempt: &HomeRenewalAttempt<'_>) -> Result<Vec<u8>, FormatError> {
+    let prefix = attempt.grant.signed_bytes()?;
+    if !attempt.capability.starts_with(&prefix) {
+        return Err(FormatError("capability grant"));
+    }
+    if attempt.capability.len() == prefix.len() {
+        return Err(FormatError("capability receipt"));
+    }
+    Ok(attempt.capability.to_vec())
+}
+
+/// Requester identity on the wire, taken only from the authenticated session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RequesterWire {
+    pub(crate) account_anchor: String,
+    pub(crate) device_id: String,
+    pub(crate) device_epoch: u64,
+    pub(crate) signing_public_key: [u8; 32],
+    pub(crate) home_node_id: String,
+}
+/// Challenge request for the home router. `grant_id` is derived from the capability at the
+/// source, not sent; `home_node` is this node, never a client field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ChallengeEnvelope {
+    pub(crate) capability: Vec<u8>,
+    pub(crate) target_operation: Vec<u8>,
+    pub(crate) requester: RequesterWire,
+    pub(crate) home_node: String,
+}
+fn challenge_envelope(
+    runtime: &GatewaySessionRuntime,
+    home: &str,
+    capability: &[u8],
+    target_operation: &[u8],
+) -> Result<ChallengeEnvelope, FormatError> {
+    let q = session_requester(runtime, home)?;
+    Ok(ChallengeEnvelope {
+        capability: capability.to_vec(),
+        target_operation: target_operation.to_vec(),
+        requester: RequesterWire {
+            account_anchor: q.account_anchor,
+            device_id: q.device_id,
+            device_epoch: q.device_epoch,
+            signing_public_key: q.signing_public_key,
+            home_node_id: q.home_node_id,
+        },
+        home_node: home.into(),
+    })
+}
+
 pub(crate) struct SignedRequesterProof<'a> {
     pub(crate) proof: &'a RequesterPop,
     pub(crate) signature: &'a [u8; 64],
 }
-/// Explicit source POST over authenticated mesh QUIC. Replies are opaque signed
-/// token bytes; source validation/issuance is P25. No redirect or local mint fallback.
+/// Paths on the home router. The gateway has no other egress for renewals: there is no
+/// direct source-peer path, no retry on another path and no local mint.
+pub(crate) const CHALLENGE_PATH: &str = "/s9/attachments/renew/challenge";
+pub(crate) const FORWARD_PATH: &str = "/s9/attachments/renew/forward";
+/// One budget for the whole route; the router splits it per hop.
+const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Requests the relay challenge through the home router. The requester is derived from
+/// the refreshed session, never from client fields. Replies are opaque bytes.
+#[allow(dead_code)] // Deliberately dormant until the complete S9 endpoint is activated.
+pub(crate) async fn challenge_current_session(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    capability: &[u8],
+    target_operation: &[u8],
+    now: u64,
+) -> anyhow::Result<Vec<u8>> {
+    refresh_current(context, runtime, now).await?;
+    let envelope = challenge_envelope(runtime, &context.node_id, capability, target_operation)?;
+    post_home(context, CHALLENGE_PATH, &envelope).await
+}
+
+/// Forward over the home router. Replies are opaque signed token bytes; source validation
+/// and issuance are P25. No redirect, source-peer or local mint fallback.
 #[allow(dead_code)] // P24 prepares the complete dormant egress; P25 owns ingress.
 pub(crate) async fn forward_current_session(
     context: &GatewayQuicContext,
@@ -186,6 +269,17 @@ pub(crate) async fn forward_current_session(
     w: &SignedHomeForward,
     proof: SignedRequesterProof<'_>,
 ) -> anyhow::Result<Vec<u8>> {
+    refresh_current(context, runtime, attempt.now).await?;
+    let requester = session_requester(runtime, &context.node_id)?;
+    let bytes = forward_bytes(&requester, config, attempt, w, proof.proof, proof.signature)?;
+    post_home(context, FORWARD_PATH, &bytes).await
+}
+
+async fn refresh_current(
+    context: &GatewayQuicContext,
+    runtime: &GatewaySessionRuntime,
+    now: u64,
+) -> anyhow::Result<()> {
     let key: Option<ramflux_node_core::DeviceAuthKeyResponse> = crate::router_get_json_async(
         &context.router,
         &format!("/mvp1/device-auth-key/{}", runtime.source_identity.storage_key()),
@@ -194,39 +288,24 @@ pub(crate) async fn forward_current_session(
     check_current(
         runtime,
         &key.ok_or_else(|| anyhow::anyhow!("renewal authority unavailable"))?,
-        attempt.now,
+        now,
     )?;
-    let requester = session_requester(runtime, &context.node_id)?;
-    let bytes = forward_bytes(&requester, config, attempt, w, proof.proof, proof.signature)?;
-    let peer = context
-        .peers
-        .peer(&config.source_peer)
-        .ok_or_else(|| anyhow::anyhow!("renewal source peer unavailable"))?;
-    post_forwarded(
-        &peer.endpoint,
-        context.peers.tls(),
-        &peer.server_name,
-        context.peers.peer_ca_pems(),
-        &bytes,
-    )
-    .await
+    Ok(())
 }
-async fn post_forwarded(
-    endpoint: &str,
-    tls: &ramflux_transport::MeshTlsConfig,
-    server_name: &str,
-    roots: &[String],
-    bytes: &ForwardedRenewal,
+
+async fn post_home<T: serde::Serialize + Sync>(
+    context: &GatewayQuicContext,
+    path: &str,
+    body: &T,
 ) -> anyhow::Result<Vec<u8>> {
-    Ok(ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async(
-        endpoint,
-        "/s9/attachments/renew",
-        tls,
-        server_name,
-        roots,
-        bytes,
+    let reply: serde_json::Value = crate::router_post_json_until(
+        &context.router,
+        path,
+        body,
+        std::time::Instant::now() + ROUTE_BUDGET,
     )
-    .await?)
+    .await?;
+    Ok(serde_json::to_vec(&reply)?)
 }
 
 #[cfg(test)]
