@@ -287,6 +287,20 @@ impl GatewaySessionHub {
             crate::push_queue::Admission::Closed => Outcome::NoSession,
         }
     }
+    /// Enqueue a transient frame on the live registration for `target_delivery_id`.
+    /// Transients never touch the Resync slot or durable coverage (D4).
+    #[allow(dead_code)] // Deliberately dormant until P09 gateway ephemeral ingress.
+    pub(crate) async fn try_push_transient(
+        &self,
+        target_delivery_id: &str,
+        bytes: Vec<u8>,
+        expires_at_ms: u64,
+    ) -> crate::push_queue::TransientAdmission {
+        let Some(entry) = self.snapshot().await.get(target_delivery_id).cloned() else {
+            return crate::push_queue::TransientAdmission::Closed;
+        };
+        entry.queue.try_push_transient(bytes, expires_at_ms)
+    }
 }
 
 impl Drop for GatewaySessionHub {
