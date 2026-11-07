@@ -97,6 +97,8 @@ pub enum SdkError {
     CustodyConfirmationFailed,
     #[error("non-synchronizing primary vault unavailable; no file fallback")]
     CustodyVaultUnavailable,
+    #[error("{0}")]
+    CustodyVault(crate::custody::CustodyVaultReason),
     #[error("custody randomness unavailable")]
     CustodyRandomUnavailable,
     #[error("account not open: {0}")]

@@ -286,9 +286,9 @@ fn init_root_and_credential_metadata_predicates_are_exact() -> TestResult {
         put(base, "perm", &[7; 32], bad)?;
         assert_eq!(credential(&base.join("perm")), Err(Error::Metadata), "credential mode {bad:o}");
     }
-    // A credential the process cannot even open is an I/O refusal, not a metadata one.
+    // A credential the process cannot even open (EACCES) is a permission refusal (P07b1).
     put(base, "unreadable", &[7; 32], 0o200)?;
-    assert_eq!(credential(&base.join("unreadable")), Err(Error::Io));
+    assert_eq!(credential(&base.join("unreadable")), Err(Error::Metadata));
     std::fs::hard_link(base.join("key"), base.join("key-twin"))?;
     assert_eq!(credential(&base.join("key")), Err(Error::Metadata), "link count 2");
     std::os::unix::fs::symlink("key", base.join("key-link"))?;

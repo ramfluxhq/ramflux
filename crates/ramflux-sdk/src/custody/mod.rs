@@ -22,8 +22,8 @@ pub(crate) use store::{
 };
 pub(crate) use store::{finish_recovery, pending_restore};
 pub use vault::{
-    BranchCredentials, NativePrimaryVault, PrimaryVault, VAULT_CLASS_LOGIN_KEYCHAIN,
-    VAULT_CLASS_PROTECTED,
+    BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
+    VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
 
 #[cfg(any(target_os = "linux", test))]

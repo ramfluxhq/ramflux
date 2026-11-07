@@ -5,6 +5,9 @@
 #[cfg(any(target_os = "linux", test))]
 pub(super) mod linux;
 
+mod reason;
+pub use reason::CustodyVaultReason;
+
 use super::HomeAuthorizationRequest;
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;

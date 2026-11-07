@@ -69,6 +69,8 @@ struct Body {
 #[derive(Deserialize)]
 struct Error {
     code: String,
+    #[serde(default)]
+    reason_code: Option<String>,
 }
 
 impl LocalBusCreationClient {
@@ -301,19 +303,61 @@ impl LocalBusCreationClient {
             return Err(SdkError::CustodySetupInvalid);
         }
         if reply.kind == "error" {
-            return Err(match reply.error.as_ref().map(|error| error.code.as_str()) {
-                Some("CustodyConfirmationFailed") => SdkError::CustodyConfirmationFailed,
-                Some("CustodyVaultUnavailable") => SdkError::CustodyVaultUnavailable,
-                Some("CustodyExpired") => SdkError::CustodyExpired,
-                Some("CustodyAccountConflict") => SdkError::CustodyAccountConflict,
-                Some("NoNodeSelected") => SdkError::NoNodeSelected,
-                _ => SdkError::CustodySetupInvalid,
+            return Err(match reply.error.as_ref() {
+                Some(error) => decode_error(&error.code, error.reason_code.as_deref()),
+                None => SdkError::CustodySetupInvalid,
             });
         }
         if reply.kind != "response" || reply.ok != Some(true) || reply.error.is_some() {
             return Err(SdkError::CustodySetupInvalid);
         }
         reply.body.ok_or(SdkError::CustodySetupInvalid)
+    }
+}
+
+fn decode_error(code: &str, reason_code: Option<&str>) -> SdkError {
+    if let Some(reason) = crate::custody::CustodyVaultReason::from_wire(code, reason_code) {
+        return SdkError::CustodyVault(reason);
+    }
+    match code {
+        "CustodyConfirmationFailed" => SdkError::CustodyConfirmationFailed,
+        "CustodyVaultUnavailable" => SdkError::CustodyVaultUnavailable,
+        "CustodyExpired" => SdkError::CustodyExpired,
+        "CustodyAccountConflict" => SdkError::CustodyAccountConflict,
+        "NoNodeSelected" => SdkError::NoNodeSelected,
+        _ => SdkError::CustodySetupInvalid,
+    }
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+    use crate::bus::vault_reason_tests::ROWS;
+
+    #[test]
+    fn creation_reply_error_decodes_vault_reasons() -> Result<(), serde_json::Error> {
+        for (reason, text, code, ..) in ROWS {
+            let json = serde_json::json!({"code":code,"reason_code":text});
+            let error = serde_json::from_value::<Error>(json)?;
+            assert!(
+                matches!(decode_error(&error.code, error.reason_code.as_deref()), SdkError::CustodyVault(r) if r == reason),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            serde_json::from_value::<Error>(serde_json::json!({"code":"CustodyVaultUnavailable"})),
+            Ok(Error { reason_code: None, .. })
+        ));
+        assert!(matches!(
+            decode_error("CustodyVaultUnavailable", Some("vault_future")),
+            SdkError::CustodyVaultUnavailable
+        ));
+        assert!(matches!(
+            decode_error("CustodyVaultUnavailable", None),
+            SdkError::CustodyVaultUnavailable
+        ));
+        assert!(matches!(decode_error("CustodySetupInvalid", None), SdkError::CustodySetupInvalid));
+        Ok(())
     }
 }
 

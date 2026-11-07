@@ -44,12 +44,26 @@ struct Reply<'a> {
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum ResultBody {
-    Prepared { account_anchor: String, ceremony_id: String, expires_in_ms: u64 },
-    Phrase { phrase: Zeroizing<String> },
-    Challenge { positions: [u8; 3] },
-    NetworkingPending { account: serde_json::Value },
+    Prepared {
+        account_anchor: String,
+        ceremony_id: String,
+        expires_in_ms: u64,
+    },
+    Phrase {
+        phrase: Zeroizing<String>,
+    },
+    Challenge {
+        positions: [u8; 3],
+    },
+    NetworkingPending {
+        account: serde_json::Value,
+    },
     Cancelled,
-    Error { code: &'static str },
+    Error {
+        code: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason_code: Option<&'static str>,
+    },
 }
 pub(super) fn now() -> Result<u64, SdkError> {
     std::time::SystemTime::now()
@@ -73,7 +87,13 @@ pub(super) async fn respond(
             if request.method.starts_with("account.create") {
                 return super::custody_response::error(request, &error);
             }
-            ResultBody::Error { code: super::io::local_bus_error_code(&error) }
+            ResultBody::Error {
+                code: super::io::local_bus_error_code(&error),
+                reason_code: match &error {
+                    SdkError::CustodyVault(reason) => Some(reason.as_str()),
+                    _ => None,
+                },
+            }
         }
     };
     if request.method.starts_with("account.create") {
@@ -355,6 +375,23 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    #[test]
+    fn custody_error_frame_carries_the_reason_only_when_present() -> Result {
+        let with = serde_json::to_value(ResultBody::Error {
+            code: "CustodyVaultUnavailable",
+            reason_code: Some("vault_busy"),
+        })?;
+        assert_eq!(
+            with,
+            serde_json::json!({"state":"error","code":"CustodyVaultUnavailable","reason_code":"vault_busy"})
+        );
+        let without = serde_json::to_value(ResultBody::Error {
+            code: "CustodyVaultUnavailable",
+            reason_code: None,
+        })?;
+        assert_eq!(without, serde_json::json!({"state":"error","code":"CustodyVaultUnavailable"}));
+        Ok(())
+    }
     #[derive(Deserialize)]
     struct Frame<T> {
         bus_protocol: String,

@@ -85,6 +85,8 @@ pub(crate) use readers::test_account_reader_request;
 
 #[cfg(test)]
 mod custody_setup_tests;
+#[cfg(test)]
+pub(crate) mod vault_reason_tests;
 
 #[cfg(test)]
 mod native_account_tests;
