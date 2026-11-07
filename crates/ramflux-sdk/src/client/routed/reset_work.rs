@@ -97,12 +97,21 @@ impl RamfluxClient {
                 SubmitRefusal::CapacityRetryAfter { retry_after_ms } => {
                     let floor = i64::try_from(retry_after_ms.div_ceil(1000)).unwrap_or(i64::MAX);
                     let key = Self::reset_work_key(local, remote)?;
-                    if self.pair_reset_fingerprint(local, remote)?.as_ref() == submitted
-                        && let Some(mut work) = db.load_actor_state::<ResetWork>(&key)?
-                    {
+                    // Fingerprint recheck, row load and update are one transaction: a receive that
+                    // confirms the pair meanwhile can neither be undone nor have its cleared
+                    // work recreated. An absent row or a different fingerprint changes nothing.
+                    db.write_transaction(|| -> Result<(), SdkError> {
+                        let Some(row) = db.load_actor_state::<serde_json::Value>(&key)? else {
+                            return Ok(());
+                        };
+                        if Some(&row) != submitted {
+                            return Ok(());
+                        }
+                        let mut work: ResetWork = serde_json::from_value(row)?;
                         work.next_at = work.next_at.max(at.saturating_add(floor));
                         db.persist_actor_state(&key, &work)?;
-                    }
+                        Ok(())
+                    })?;
                 }
                 SubmitRefusal::RetrySafe => {}
             }

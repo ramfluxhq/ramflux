@@ -226,15 +226,16 @@ async fn courier_row(case: Case) -> TestResult {
     Ok(())
 }
 
-/// A Conflict that arrives after a confirmed receive cleared the reset work it belongs to is
-/// stale: the pair and its secrets stay intact. Without the receive, the terminal applies.
-async fn late_conflict_row(confirmed: bool) -> TestResult {
+/// A refusal that arrives after a confirmed receive cleared the reset work it belongs to is
+/// stale: the pair, its secrets and the cleared work stay as the receive left them. Without the
+/// receive, a Conflict applies its terminal and a capacity refusal keeps the schedule.
+async fn late_refusal_row(reason: &str, confirmed: bool) -> TestResult {
     let _clock = crate::time::FixedClock::set(START);
     let (alice, mut bob) = Box::pin(pending()).await?;
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let (refusing, attempted) =
-        Wire::engine_held(&bob, &alice, "idempotency_conflict", entered.clone(), release.clone())?;
+        Wire::engine_held(&bob, &alice, reason, entered.clone(), release.clone())?;
     let root = bob.client.surface_local_root_commitment()?;
     let mut account =
         crate::prelude::LocalBusAccountState::new(std::mem::take(&mut bob.client), refusing, root);
@@ -278,8 +279,9 @@ async fn late_conflict_row(confirmed: bool) -> TestResult {
     };
     assert_eq!(
         result.err().ok_or("refused")?.to_string(),
-        "gateway session rejected: idempotency_conflict"
+        format!("gateway session rejected: {reason}")
     );
+    let conflict = reason == "idempotency_conflict";
     let after = account.client.active_pair(&local, &remote)?.map(|(session, _)| session.session_id);
     if confirmed {
         // Stale refusal dropped: pair intact, no manual marker, no refusal record, no retirement.
@@ -297,11 +299,23 @@ async fn late_conflict_row(confirmed: bool) -> TestResult {
             after
         );
         assert!(manual(&account.client)?.is_none());
-    } else {
+        // A capacity refusal must not recreate the cleared reset work, before or after reopen.
+        assert!(work(&account.client)?.is_none());
+    } else if conflict {
         // Control: no receive in between, so the terminal applies.
         assert_eq!(after, None);
         assert!(manual(&account.client)?.is_some());
         assert_eq!(refusals(&account.client)?.len(), 1);
+    } else {
+        // Control: no receive in between, so the schedule is kept and no earlier than the floor
+        // (the second attempt's own 120 s backoff already exceeds the 1 s floor).
+        assert_eq!(after, Some(before));
+        let kept = work(&account.client)?.ok_or("kept work")?;
+        assert_eq!(kept["attempts"], 2);
+        assert_eq!(kept["next_at"], START + 181);
+        assert!(kept["next_at"].as_i64().ok_or("next_at")? > START + 61);
+        assert!(manual(&account.client)?.is_none());
+        assert_eq!(refusals(&account.client)?, Vec::<serde_json::Value>::new());
     }
     drop((alice, account));
     Ok(())
@@ -315,7 +329,9 @@ async fn sender_refusal_policy_reset() -> TestResult {
     for case in Case::ALL {
         Box::pin(courier_row(case)).await?;
     }
-    Box::pin(late_conflict_row(true)).await?;
-    Box::pin(late_conflict_row(false)).await?;
+    for reason in ["idempotency_conflict", "capacity_retry_after"] {
+        Box::pin(late_refusal_row(reason, true)).await?;
+        Box::pin(late_refusal_row(reason, false)).await?;
+    }
     Ok(())
 }
