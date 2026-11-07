@@ -261,23 +261,35 @@ fn the_sixteen_kib_cap_is_exact_on_received_bytes_through_real_quic() {
 }
 
 #[test]
-fn a_held_ledger_writer_is_refused_busy_within_the_budget_and_the_listener_keeps_serving() {
+fn a_held_ledger_writer_blocks_one_request_causally_and_the_listener_serves_after_release() {
+    use ramflux_node_core::attachment::parked_writer_waiters;
     let e = Env::new("quic-held");
     let pki = pki("quic-held");
-    let server = start_with(&e, &pki, std::time::Duration::from_secs(2));
+    let server = start(&e, &pki);
     let addr = server.local_addr().to_string();
     let body = serde_json::to_value(wire(&e)).unwrap();
     let holder = e.f.hold_ledger_writer();
-    let started = std::time::Instant::now();
-    let held = post(&addr, &pki, &pki.router, CHALLENGE_PATH, &body).unwrap();
-    // Busy arrives inside the original 2 s budget, as a typed frame.
-    assert_eq!(
-        serde_json::from_value::<ChallengeReply>(held).unwrap(),
-        ChallengeReply::Refused { code: RenewalRefusal::Busy }
-    );
-    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
-    drop(holder);
-    // The serving thread was not stalled: the next request is served.
+    let before = parked_writer_waiters();
+    let reply = std::thread::scope(|scope| {
+        let client = scope.spawn(|| post(&addr, &pki, &pki.router, CHALLENGE_PATH, &body));
+        // Causal barrier: the request is provably blocked on the ledger writer.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while parked_writer_waiters() <= before {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "hang guard: request never reached the writer"
+            );
+            std::thread::yield_now();
+        }
+        assert!(!client.is_finished(), "the request waits for the writer");
+        drop(holder);
+        client.join().unwrap()
+    });
+    assert!(matches!(
+        serde_json::from_value::<ChallengeReply>(reply.unwrap()).unwrap(),
+        ChallengeReply::Minted { .. }
+    ));
+    // The serving thread was never stalled: the next request is served straight away.
     let next = post(&addr, &pki, &pki.router, CHALLENGE_PATH, &body).unwrap();
     assert!(matches!(
         serde_json::from_value::<ChallengeReply>(next).unwrap(),

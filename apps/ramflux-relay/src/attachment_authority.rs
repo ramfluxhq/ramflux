@@ -7,7 +7,7 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use ramflux_node_core::attachment::{
     AttachmentReplayProof, ChallengeMint, GrantPublicationLease, HomeVerdict, RenewalAdmission,
-    RenewalChallenge, RenewalPolicy, RenewalRefusal, ScopedGrantRegistry,
+    RenewalChallenge, RenewalPolicy, RenewalRefusal, ScopedGrantRegistry, WriteDeadline,
 };
 use ramflux_protocol::large_attachment::{
     AttachmentOperation, AttachmentRegistrationReceipt, AttachmentToken, ForwardAttestation,
@@ -103,7 +103,7 @@ pub struct IssueHooks<'a> {
     pub before_final_token_check: &'a dyn Fn(),
     /// The original request deadline. Every ledger write-lock wait made for this request
     /// ends there with a typed `Busy`; `None` keeps the unbounded wait.
-    pub deadline: Option<std::time::Instant>,
+    pub deadline: Option<WriteDeadline>,
 }
 impl IssueHooks<'static> {
     #[must_use]
@@ -170,9 +170,13 @@ impl SourceIssuer {
         &self,
         request: &ChallengeMint<'_>,
         now: u64,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<WriteDeadline>,
     ) -> Result<RenewalChallenge, RenewalRefusal> {
-        self.registry.with_deadline(deadline).mint_renewal_challenge(&self.policy, request, now)
+        self.registry.with_write_deadline(deadline).mint_renewal_challenge(
+            &self.policy,
+            request,
+            now,
+        )
     }
 
     /// Wire adapter. The JSON response frame is built and written through the same
@@ -235,8 +239,10 @@ impl SourceIssuer {
             expires_at: v.proof.expires_at,
         };
         (hooks.before_admission)();
-        let lease =
-            self.registry.with_deadline(hooks.deadline).admit_renewal_after_authentication(
+        let lease = self
+            .registry
+            .with_write_deadline(hooks.deadline.clone())
+            .admit_renewal_after_authentication(
                 &RenewalAdmission {
                     grant: &v.grant,
                     challenge: v.attestation.challenge,

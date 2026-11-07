@@ -690,13 +690,19 @@ impl RouterSubmitBridge {
     async fn handle_json_request(
         &self,
         request: ramflux_transport::GatewayQuicRequest,
+        raw_body: Option<Vec<u8>>,
         peer_service_id: String,
     ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
         let (sender, receiver) = bridge_reply_channel::<ramflux_transport::GatewayQuicResponse>();
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
-            let result =
-                handle_mesh_quic_request_raw(&request, None, &router, &peer_service_id).await;
+            let result = handle_mesh_quic_request_raw(
+                &request,
+                raw_body.as_deref(),
+                &router,
+                &peer_service_id,
+            )
+            .await;
             sender.send(result);
         });
         receiver.await
@@ -1006,7 +1012,11 @@ async fn handle_router_async_compio_mesh_quic_request(
     match accepted {
         ramflux_transport::CompioMeshQuicAcceptedWireRequest::Json(accepted) => {
             match bridge
-                .handle_json_request(accepted.request.clone(), peer_service_id.to_owned())
+                .handle_json_request(
+                    accepted.request.clone(),
+                    accepted.raw_body.clone(),
+                    peer_service_id.to_owned(),
+                )
                 .await
             {
                 Ok(response) if (200..300).contains(&response.status) => {

@@ -28,6 +28,8 @@ use ramflux_protocol::large_attachment::{
     AttachmentRegistrationReceipt, VerifiedContentManifest, VerifiedScopedGrant,
 };
 use redb::{ReadableTableMetadata, TableDefinition};
+#[cfg(any(test, feature = "test-support"))]
+pub use retirement::lease_waits;
 pub use retirement::{GrantPublicationLease, RetirementOutcome};
 use serde::{Deserialize, Serialize};
 const GRANTS: TableDefinition<&[u8], &[u8]> =
@@ -65,7 +67,7 @@ pub struct ScopedGrantRegistry {
     ledger: AttachmentLedger,
     authority: AttachmentAuthority,
     /// Bounds every write-lock wait of the calls made through this handle.
-    deadline: Option<std::time::Instant>,
+    deadline: Option<super::WriteDeadline>,
 }
 /// Existing gateway-attested owner-session verification, with a pinned cache.
 /// This is not native operation `PoP` admission or a substitute for the replay ledger.
@@ -130,9 +132,18 @@ impl AttachmentLedger {
     }
 }
 impl ScopedGrantRegistry {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn leases_held(&self) -> bool {
+        self.leases.is_locked()
+    }
     /// A handle whose write-lock waits end at `deadline`. State is shared with `self`.
     #[must_use]
     pub fn with_deadline(&self, deadline: Option<std::time::Instant>) -> Self {
+        self.with_write_deadline(deadline.map(super::WriteDeadline::at))
+    }
+    /// As [`Self::with_deadline`], with a deadline a test can pass by raising a flag.
+    #[must_use]
+    pub fn with_write_deadline(&self, deadline: Option<super::WriteDeadline>) -> Self {
         Self { deadline, ..self.clone() }
     }
 

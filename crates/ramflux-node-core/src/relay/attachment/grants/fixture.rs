@@ -123,6 +123,11 @@ impl RetirementFixture {
             issued_at: self.now,
         }
     }
+    /// True while some thread holds the lease mutex (a retirement mid-flight).
+    #[must_use]
+    pub fn lease_mutex_held(&self) -> bool {
+        self.registry.leases_held()
+    }
     /// Holds the ledger's single write lock until the returned guard is dropped.
     /// # Panics
     /// Panics on storage failure.

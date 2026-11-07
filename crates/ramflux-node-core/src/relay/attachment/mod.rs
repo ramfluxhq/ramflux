@@ -160,9 +160,40 @@ pub(crate) enum BeginError {
     Busy,
     Store(String),
 }
+/// A request deadline for ledger waits. The clock decides in production; a test can hold a
+/// shared flag instead so "the deadline passes" is an explicit event, never a real wait.
+#[derive(Clone, Debug)]
+pub struct WriteDeadline {
+    at: std::time::Instant,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+impl WriteDeadline {
+    #[must_use]
+    pub fn at(at: std::time::Instant) -> Self {
+        Self { at, cancel: None }
+    }
+    /// The deadline also passes when `cancel` is raised.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn controlled(at: std::time::Instant, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { at, cancel: Some(cancel) }
+    }
+    pub(crate) fn expired(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
+            || std::time::Instant::now() >= self.at
+    }
+}
 /// Abandoned waiters that are still parked on the writer lock.
 static PARKED_WAITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const MAX_PARKED_WAITERS: usize = 4;
+/// Helper threads currently blocked on the ledger's write lock (test observation only).
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn parked_writer_waiters() -> usize {
+    PARKED_WAITERS.load(std::sync::atomic::Ordering::Acquire)
+}
+/// How often a bounded wait re-checks its deadline.
+const WAIT_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
 
 impl AttachmentLedger {
     /// Takes the ledger's single write lock, giving up at `deadline` (`None` waits as the
@@ -171,16 +202,15 @@ impl AttachmentLedger {
     /// a few such threads may be parked at once; beyond that the caller is refused at once.
     pub(crate) fn begin_write_until(
         &self,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<&WriteDeadline>,
     ) -> Result<redb::WriteTransaction, BeginError> {
         use std::sync::atomic::Ordering;
         let Some(deadline) = deadline else {
             return self.db.begin_write().map_err(|e| BeginError::Store(e.to_string()));
         };
-        let remaining = || deadline.checked_duration_since(std::time::Instant::now());
-        let Some(first) = remaining().filter(|d| !d.is_zero()) else {
+        if deadline.expired() {
             return Err(BeginError::Busy);
-        };
+        }
         if PARKED_WAITERS.fetch_add(1, Ordering::AcqRel) >= MAX_PARKED_WAITERS {
             PARKED_WAITERS.fetch_sub(1, Ordering::AcqRel);
             return Err(BeginError::Busy);
@@ -193,16 +223,25 @@ impl AttachmentLedger {
             // A receiver that has gone away drops (rolls back) the transaction.
             let _ = sender.send(begun);
         });
-        match receiver.recv_timeout(first) {
-            Ok(begun) => {
-                let tx = begun.map_err(|e| BeginError::Store(e.to_string()))?;
-                // Nothing is admitted after the deadline, even if the lock was won at the wire.
-                if remaining().is_none_or(|d| d.is_zero()) {
-                    return Err(BeginError::Busy);
+        loop {
+            match receiver.recv_timeout(WAIT_SLICE) {
+                Ok(begun) => {
+                    let tx = begun.map_err(|e| BeginError::Store(e.to_string()))?;
+                    // Nothing is admitted after the deadline, even if the lock was won at the wire.
+                    if deadline.expired() {
+                        return Err(BeginError::Busy);
+                    }
+                    return Ok(tx);
                 }
-                Ok(tx)
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if deadline.expired() {
+                        return Err(BeginError::Busy);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(BeginError::Store("writer wait ended".into()));
+                }
             }
-            Err(_) => Err(BeginError::Busy),
         }
     }
     pub(super) fn new(
