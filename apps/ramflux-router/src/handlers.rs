@@ -26,22 +26,40 @@ pub(crate) fn handle_itest_request(
         return Ok(());
     };
     log_router_itest_request(&request);
-    if handle_healthz_request(stream, &request)?
-        || handle_perf_metrics_request(stream, &request, router)?
+    match handle_itest_request_body(stream, &request, router) {
+        Err(error) => match i_json_rejection(&error) {
+            Some(body) => {
+                ramflux_node_core::write_itest_json_response(stream, "400 Bad Request", &body)?;
+                Ok(())
+            }
+            None => Err(error),
+        },
+        result => result,
+    }
+}
+
+#[cfg(feature = "itest-http")]
+fn handle_itest_request_body(
+    stream: &mut TcpStream,
+    request: &ramflux_node_core::NodeHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+) -> anyhow::Result<()> {
+    if handle_healthz_request(stream, request)?
+        || handle_perf_metrics_request(stream, request, router)?
     {
         return Ok(());
     }
-    if handle_itest_mvp0_request(stream, &request, router)?
-        || handle_itest_s1_request(stream, &request, router)?
-        || handle_itest_admin_request(stream, &request, router)?
-        || handle_itest_directory_request(stream, &request, router)?
+    if handle_itest_mvp0_request(stream, request, router)?
+        || handle_itest_s1_request(stream, request, router)?
+        || handle_itest_admin_request(stream, request, router)?
+        || handle_itest_directory_request(stream, request, router)?
     {
         return Ok(());
     }
-    if crate::identity_authority::handle_itest_identity_authority(stream, &request, router)? {
+    if crate::identity_authority::handle_itest_identity_authority(stream, request, router)? {
         return Ok(());
     }
-    if handle_itest_device_lookup(stream, &request, router)? {
+    if handle_itest_device_lookup(stream, request, router)? {
         return Ok(());
     }
     match (request.method.as_str(), request.path.as_str()) {
@@ -358,7 +376,16 @@ pub(crate) fn handle_mesh_request(
         path = %request.path,
         "router mesh request received"
     );
-    let response = handle_mesh_request_value(request, router, peer_service_id)?;
+    let response = match handle_mesh_request_value(request, router, peer_service_id) {
+        Ok(response) => response,
+        Err(error) => match i_json_rejection(&error) {
+            Some(body) => {
+                ramflux_transport::write_mesh_json_response(stream, "400 Bad Request", &body)?;
+                return Ok(true);
+            }
+            None => return Err(error),
+        },
+    };
     write_mesh_value_response(stream, &response)?;
     Ok(response.keep_alive)
 }
@@ -527,7 +554,8 @@ pub(crate) async fn handle_mesh_quic_request_raw(
                 body: serde_json::json!({"error": "forwarded ingress requires federation peer"}),
             });
         }
-        let request: ramflux_node_core::ForwardedEnvelopeRequest = serde_json::from_slice(&body)?;
+        let request: ramflux_node_core::ForwardedEnvelopeRequest =
+            ramflux_protocol::parse_i_json(&body)?;
         if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
             return Ok(crate::durable_mode::refused_quic(&request.envelope));
         }
@@ -545,7 +573,7 @@ pub(crate) async fn handle_mesh_quic_request_raw(
         }
 
         let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
-            serde_json::from_slice(&body)?;
+            ramflux_protocol::parse_i_json(&body)?;
         if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
             return Ok(crate::durable_mode::refused_quic(&request.envelope));
         }
@@ -641,7 +669,7 @@ fn handle_mesh_fast_path_value(
                 )));
             }
             let request: ramflux_node_core::ForwardedEnvelopeRequest =
-                serde_json::from_slice(body)?;
+                ramflux_protocol::parse_i_json(body)?;
             if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
                 return Ok(Some(MeshResponse::json(
                     "200 OK",
@@ -877,7 +905,7 @@ pub(crate) fn handle_mvp0_envelope(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
-    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security(&envelope));
     }
@@ -898,7 +926,7 @@ pub(crate) fn handle_mvp0_envelope_mesh_from(
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     let started = Instant::now();
-    let envelope = serde_json::from_slice(body)?;
+    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
     }
@@ -912,7 +940,7 @@ pub(crate) fn handle_mvp0_envelope_from(
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
     let total_started = Instant::now();
     let decode_started = Instant::now();
-    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security(&envelope));
     }
@@ -927,7 +955,7 @@ pub(crate) async fn handle_mvp0_envelope_async_from(
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
     let total_started = Instant::now();
     let decode_started = Instant::now();
-    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
     }
@@ -943,12 +971,19 @@ fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+pub(crate) fn i_json_rejection(error: &anyhow::Error) -> Option<serde_json::Value> {
+    error
+        .chain()
+        .any(ramflux_protocol::is_i_json_rejection)
+        .then(ramflux_protocol::i_json_rejection_body)
+}
+
 #[cfg(feature = "itest-http")]
 fn handle_mvp0_ack(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::RouterAckResponse> {
-    let ack: ramflux_protocol::Ack = serde_json::from_slice(body)?;
+    let ack = ramflux_protocol::decode_signed_ack_ijson(body)?;
     ack_response(router.apply_ack(&ack))
 }
 
@@ -956,7 +991,7 @@ fn handle_mvp0_ack_bound(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::RouterAckResponse> {
-    let request: ramflux_node_core::TargetAckRequest = serde_json::from_slice(body)?;
+    let request: ramflux_node_core::TargetAckRequest = ramflux_protocol::parse_i_json(body)?;
     ack_response(router.apply_bound_ack(&request))
 }
 
@@ -984,7 +1019,7 @@ fn handle_mvp0_nack(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
-    let nack: ramflux_protocol::Nack = serde_json::from_slice(body)?;
+    let nack = ramflux_protocol::decode_signed_nack_ijson(body)?;
     router.apply_nack(&nack)
 }
 
@@ -992,7 +1027,7 @@ fn handle_mvp0_nack_bound(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<ramflux_node_core::InboxCursorResponse> {
-    let request: ramflux_node_core::TargetNackRequest = serde_json::from_slice(body)?;
+    let request: ramflux_node_core::TargetNackRequest = ramflux_protocol::parse_i_json(body)?;
     router.apply_bound_nack(&request)
 }
 
@@ -1218,7 +1253,7 @@ fn handle_mvp10_own_devices_fanout(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<serde_json::Value> {
     let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
-        serde_json::from_slice(body)?;
+        ramflux_protocol::parse_i_json(body)?;
     if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
         return Ok(serde_json::to_value(crate::durable_mode::rejected_security(
             &request.envelope,
@@ -1379,7 +1414,7 @@ fn forward_authority_response(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
-    let envelope: ramflux_protocol::Envelope = serde_json::from_slice(body)?;
+    let envelope = ramflux_protocol::decode_signed_envelope_ijson(body)?;
     if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
         return Ok(MeshResponse::json(
             "200 OK",
@@ -1430,7 +1465,7 @@ fn mesh_fanout_response(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
     let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
-        serde_json::from_slice(body)?;
+        ramflux_protocol::parse_i_json(body)?;
     if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
         return Ok(MeshResponse::json(
             "200 OK",

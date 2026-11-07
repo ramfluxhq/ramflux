@@ -149,7 +149,7 @@ fn revoked_set(
 fn incarnation_mismatch_precedes_future_sequence() -> anyhow::Result<()> {
     let (router, path, accepted) = seed("E-before-sequence")?;
     let wrong = "ffffffffffffffffffffffffffffffff";
-    for seq in [1, 2, u64::MAX] {
+    for seq in [1, 2, ramflux_protocol::MAX_SAFE_JSON_INTEGER] {
         let batch = call(
             &router,
             "POST",

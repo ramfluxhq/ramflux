@@ -719,7 +719,7 @@ impl RouterSubmitBridge {
         let router = Arc::clone(&self.router);
         self.tokio.spawn(async move {
             let result = async move {
-                let envelope = serde_json::from_slice::<ramflux_protocol::Envelope>(&body)?;
+                let envelope = ramflux_protocol::decode_signed_envelope_ijson(&body)?;
                 if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
                     return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
                 }
@@ -910,7 +910,9 @@ async fn write_quic_transport_error(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
     error: anyhow::Error,
 ) -> anyhow::Result<()> {
-    if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+    if let Some(body) = crate::handlers::i_json_rejection(&error) {
+        accepted.write_json_response(400, &body).await?;
+    } else if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
         accepted.write_json_response(200, &refusal).await?;
     } else {
         accepted.write_text_response(500, &error.to_string()).await?;
@@ -992,7 +994,9 @@ async fn handle_router_postcard_mesh_quic_request(
                 accepted.write_postcard_response(200, &response).await?;
             }
             Err(error) => {
-                if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+                if let Some(body) = crate::handlers::i_json_rejection(&error) {
+                    accepted.write_postcard_response(400, &body).await?;
+                } else if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
                     accepted.write_postcard_response(200, &refusal).await?;
                 } else {
                     accepted.write_text_response(500, &error.to_string()).await?;
@@ -1062,7 +1066,9 @@ async fn handle_router_async_compio_mesh_quic_request(
                         .await?;
                 }
                 Err(error) => {
-                    if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+                    if let Some(body) = crate::handlers::i_json_rejection(&error) {
+                        accepted.write_json_response(400, &body).await?;
+                    } else if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
                         accepted.write_json_response(200, &refusal).await?;
                     } else {
                         accepted.write_text_response(500, &error.to_string()).await?;
@@ -1098,7 +1104,9 @@ async fn handle_router_compio_postcard_mesh_quic_request(
                 accepted.write_postcard_response(200, &response).await?;
             }
             Err(error) => {
-                if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
+                if let Some(body) = crate::handlers::i_json_rejection(&error) {
+                    accepted.write_postcard_response(400, &body).await?;
+                } else if let Some(refusal) = crate::durable_mode::transport_refusal(&error) {
                     accepted.write_postcard_response(200, &refusal).await?;
                 } else {
                     accepted.write_text_response(500, &error.to_string()).await?;
