@@ -37,10 +37,16 @@ pub(crate) fn set_open_race_hook(hook: Option<OpenRaceHook>) {
 }
 
 impl AccountIndex {
-    /// Tombstones an account under an exclusive writer lease (dormant; no file removal yet).
+    /// Tombstones an account under an exclusive writer lease, then removes its root payload
+    /// (dormant; nothing calls it yet).
     ///
     /// The lease is taken before the tombstone, so a refused erase leaves the state and
     /// the wrapped key unchanged. The tombstone sets `removed` and clears the wrapped key.
+    /// The root database, its `-wal`/`-shm`/`-journal` sidecars, the segment tree, `objects/`
+    /// and the backup-generation marker are then removed; the `.writer.lock` inode is kept.
+    /// `generation_*` trees are left for P03a-4c. Any symlink in the account directory is
+    /// refused with `Integrity("account erase symlink")` before the first unlink, which
+    /// happens after the tombstone, so a refused erase still leaves the account `removed`.
     /// The operation is idempotent.
     /// # Errors
     /// Returns `AuthorizationRejected` for an invalid id, `AccountNotFound` for an unknown
