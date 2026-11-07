@@ -133,6 +133,115 @@ pub(super) fn require_current_authority(
     })
 }
 impl BornAccount {
+    /// Build, but do not transmit, a branch-signed layer declaration endorsed by a new native head.
+    /// The caller may publish the returned candidate only through an explicit later action.
+    /// # Errors
+    /// Rejects a mismatched primary/branch credential, invalid validity bounds, exhausted native
+    /// revision, or any candidate that fails native authority verification.
+    pub fn candidate_message_layer_publication(
+        &self,
+        root: &Path,
+        branch: &super::BranchCredentials,
+        primary: &ramflux_crypto::custody::SelfSigningKey,
+        max_layer: u32,
+        validity: super::DeclarationValidity,
+    ) -> Result<ramflux_protocol::custody::Publication, SdkError> {
+        use ramflux_protocol::custody::{decode_epoch, encode_epoch};
+        let now = validity.issued_at;
+        let expires_at = validity.expires_at;
+        if self.branch_pending() || self.authority_blocked {
+            return Err(SdkError::NetworkingPending);
+        }
+        require_current_authority(&self.stored.pins, &self.verified)?;
+        let current = self.record();
+        let body = &current.body;
+        if primary.public_key() != body.master_certificate.body.self_signing_public_key {
+            return Err(invalid());
+        }
+        if now <= body.issued_at || now > ramflux_protocol::MAX_SAFE_JSON_INTEGER {
+            return Err(invalid());
+        }
+        let device_id = self.local_device_id()?;
+        let device =
+            body.devices.iter().find(|device| device.device_id == device_id).ok_or_else(invalid)?;
+        let certificate = device.branch_certificate.as_ref().ok_or_else(invalid)?;
+        let device_ref = ramflux_protocol::custody::DeviceRef {
+            account_anchor: body.account_anchor.clone(),
+            device_id: device.device_id.clone(),
+            device_epoch: device.device_epoch,
+        };
+        if branch.signing.signing_key.verifying_key()
+            != ramflux_crypto::verifying_key_from_base64url(
+                &certificate.body.branch_signing_public_key,
+            )?
+        {
+            return Err(invalid());
+        }
+        let sequence = device.message_layer.as_ref().map_or(Ok(1), |previous| {
+            previous.declaration.declaration_sequence.checked_add(1).ok_or_else(invalid)
+        })?;
+        let signed = super::layer_declaration::candidate(
+            &branch.signing,
+            device_ref.clone(),
+            max_layer,
+            sequence,
+            now,
+            expires_at,
+        )?;
+        if now < certificate.body.not_before || expires_at > certificate.body.expires_at {
+            return Err(invalid());
+        }
+        let body_bytes = ramflux_protocol::custody::signing_bytes(
+            ramflux_protocol::domain::CUSTODY_MESSAGE_LAYER_DECLARATION,
+            &signed.declaration,
+        )?;
+        ramflux_crypto::verify_canonical_signature(
+            &body_bytes,
+            &signed.branch_signature,
+            &certificate.body.branch_signing_public_key,
+        )?;
+
+        let mut next = body.clone();
+        let old_head = ramflux_protocol::custody::object_hash(current)?;
+        let (range, revision) = decode_epoch(body.device_set_epoch)?;
+        next.device_set_epoch = encode_epoch(range, revision.checked_add(1).ok_or_else(invalid)?)?;
+        next.previous_record_hash = Some(old_head);
+        next.issued_at = now;
+        let updated = next
+            .devices
+            .iter_mut()
+            .find(|entry| entry.device_id == device_id)
+            .ok_or_else(invalid)?;
+        updated.message_layer = Some(signed);
+        let record = primary.sign_record(next)?;
+        let custodian = match self.stored.custodian_publication.as_ref() {
+            Some(publication) => Some(ramflux_crypto::custody::verify_record(
+                &publication.record,
+                now,
+                publication.compacted_ids.as_deref(),
+                None,
+            )?),
+            None => self
+                .stored
+                .custodian_account_id
+                .as_deref()
+                .map(|id| load_human(root, id, now))
+                .transpose()?,
+        };
+        let verified =
+            verify_record(&record, now, self.stored.compacted_ids.as_deref(), custodian.as_ref())?;
+        let mut pins = self.stored.pins.clone();
+        if pins.observe_with_previous(&verified, Some(current))?
+            != ramflux_crypto::custody::PinOutcome::Advanced
+        {
+            return Err(invalid());
+        }
+        Ok(ramflux_protocol::custody::Publication {
+            record,
+            compacted_ids: self.stored.compacted_ids.clone(),
+        })
+    }
+
     pub(crate) fn group_primary(
         &self,
         vault: &dyn PrimaryVault,

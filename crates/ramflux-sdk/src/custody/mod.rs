@@ -96,6 +96,8 @@ pub(crate) mod memory_vault;
 #[cfg(feature = "itest-memory-vault")]
 pub use memory_vault::MemoryPrimaryVault;
 
+mod layer_declaration;
+pub use layer_declaration::DeclarationValidity;
 mod network;
 mod node_pins;
 pub(crate) mod retry;

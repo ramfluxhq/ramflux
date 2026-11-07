@@ -81,6 +81,7 @@ fn device_public_key(principal: &str, device: &str, seed: [u8; 32]) -> Result<St
             branch_public_key: public.clone(),
             target_delivery_id: device.into(),
             branch_authorized_event_id: format!("authorized:{device}"),
+            message_layer: None,
             branch_proof: Some(ramflux_crypto::authorize_device_branch_v2(
                 &root,
                 &branch,

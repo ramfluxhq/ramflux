@@ -217,6 +217,7 @@ async fn a_partial_or_stale_manifest_preserves_omitted_device_pairs_and_reset_wo
             ),
             target_delivery_id: "alice-new-target".into(),
             branch_proof: Some(proof),
+            message_layer: None,
             prekey_bundle: bundle,
             branch_authorized_event_id: "alice-new:authorized".into(),
         }],

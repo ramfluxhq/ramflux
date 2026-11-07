@@ -12,6 +12,78 @@ fn authority(fixture: &Fixture) -> TestResult<CustodyAuthority> {
         custodian_publication: native.custodian_publication.clone(),
     })
 }
+
+#[tokio::test]
+async fn candidate_layer_publication_is_endorsed_and_renews_without_auto_publish() -> TestResult {
+    let fixture = Fixture::new("native-layer-publication").await?;
+    let now = crate::custody::network_now()?;
+    let root = &fixture.root.0;
+    let id = fixture.client.account_db()?.local_account_id.clone();
+    let mut account = load_account(root, &id, now)?;
+    account.mark_live(root)?;
+    let primary = fixture.vault.primary_for_public_key(
+        &account.record().body.master_certificate.body.self_signing_public_key,
+    )?;
+    let (_, branch) = account.credentials(fixture.vault.as_ref(), "primary", now)?;
+    let first = account.candidate_message_layer_publication(
+        root,
+        &branch,
+        &primary,
+        ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+        crate::custody::DeclarationValidity { issued_at: now + 1, expires_at: now + 3600 },
+    )?;
+    assert_eq!(account.record().body.device_set_epoch, 1_u64 << 32 | 1);
+    let declaration =
+        first.record.body.devices[0].message_layer.as_ref().ok_or("candidate declaration")?;
+    assert_eq!(declaration.declaration.declaration_sequence, 1);
+    assert_eq!(declaration.declaration.max_layer, ramflux_protocol::custody::MESSAGE_LAYER_FLOOR);
+    let mut native_manifest =
+        (**fixture.manifest.custody.as_ref().ok_or("native manifest")?).clone();
+    native_manifest.publication = first.clone();
+    native_manifest.devices[0].message_layer = Some(declaration.clone());
+    let sdk_manifest = crate::prekey::SdkDeviceManifestResponse::from_native(native_manifest)?;
+    assert_eq!(sdk_manifest.devices[0].message_layer.as_ref(), Some(declaration));
+    let roundtrip: crate::prekey::SdkDeviceManifestResponse =
+        serde_json::from_value(serde_json::to_value(&sdk_manifest)?)?;
+    assert_eq!(roundtrip, sdk_manifest);
+    let manifest_bytes = ramflux_protocol::canonical_json_bytes(&sdk_manifest)?;
+    let decoded: crate::prekey::SdkDeviceManifestResponse =
+        ramflux_protocol::custody::decode(&manifest_bytes, 8 * 1024 * 1024)?;
+    assert_eq!(ramflux_protocol::canonical_json_bytes(&decoded)?, manifest_bytes);
+    let mut next = authority(&fixture)?;
+    next.publication = first;
+    assert_eq!(accept_publication(root, &id, &next, now + 2)?, PinOutcome::Advanced);
+
+    let renewed = load_account(root, &id, now + 2)?;
+    let (_, branch) = renewed.credentials(fixture.vault.as_ref(), "primary", now + 2)?;
+    let second = renewed.candidate_message_layer_publication(
+        root,
+        &branch,
+        &primary,
+        ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+        crate::custody::DeclarationValidity { issued_at: now + 3, expires_at: now + 7200 },
+    )?;
+    assert_eq!(
+        second.record.body.devices[0]
+            .message_layer
+            .as_ref()
+            .ok_or("renewed declaration")?
+            .declaration
+            .declaration_sequence,
+        2
+    );
+    assert_eq!(
+        renewed.record().body.devices[0]
+            .message_layer
+            .as_ref()
+            .ok_or("stored declaration")?
+            .declaration
+            .declaration_sequence,
+        1
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn native_own_head_survives_restart_with_credentials_and_registration_state_intact()
 -> TestResult {

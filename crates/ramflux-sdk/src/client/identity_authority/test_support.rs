@@ -77,6 +77,7 @@ pub(crate) fn manifest(client: &RamfluxClient) -> Result<SdkDeviceManifestRespon
                 device.signing_key.verifying_key().to_bytes(),
             ),
             target_delivery_id: device.device_id.clone(),
+            message_layer: None,
             branch_proof: Some(client.authorize_current_device(
                 "ramflux-node",
                 vec!["device.delivery.bind".into()],
@@ -159,6 +160,7 @@ pub(crate) fn remote_manifest(
             ),
             target_delivery_id: format!("delivery-{name}"),
             branch_authorized_event_id: format!("authorized:{name}"),
+            message_layer: None,
             branch_proof: Some(ramflux_crypto::authorize_device_branch_v2(
                 &root,
                 &branch,
