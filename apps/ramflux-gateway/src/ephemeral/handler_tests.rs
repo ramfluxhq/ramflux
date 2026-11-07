@@ -321,6 +321,26 @@ async fn ephemeral_ingress_envelope_binding_failures() -> TestResult {
     );
     expect_refused("envelope device", &drive(&runtime, now_ms(), &[device]).await?, "src-device")?;
 
+    // A validly encoded signature made by another key: the verifier refuses it, not the decoder.
+    let mut wrong_key = submit(&runtime, "src-wrongkey", 5, |_| {})?;
+    wrong_key.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::envelope_sender_signed_bytes(&wrong_key.envelope)?,
+        [9; 32],
+    );
+    wrong_key.signed_request = signed_request_for(&runtime, &wrong_key.envelope, unix_now())?;
+    anyhow::ensure!(
+        crate::submit_source::bind_source(&runtime, &wrong_key.envelope)
+            .err()
+            .map(|e| e.to_string())
+            .as_deref()
+            == Some("ed25519 verification failed")
+    );
+    expect_refused(
+        "envelope wrong key",
+        &drive(&runtime, now_ms(), &[wrong_key]).await?,
+        "src-wrongkey",
+    )?;
+
     let root = submit(&runtime, "src-root", 5, |e| {
         e.ext.ext.insert("source_root_commitment".to_owned(), json!("wrong"));
     })?;
