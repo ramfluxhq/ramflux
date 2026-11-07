@@ -431,12 +431,29 @@ fn busy_never_drops_the_last_owner_under_the_registry_lock() -> TestResult {
         let (go_tx, go_rx) = mpsc::sync_channel(1);
         let go_rx = Mutex::new(go_rx);
         let _reset = UpgradeHookReset;
+        // The hook runs with the registry mutex held, so it must never panic (a panic could drop
+        // the last owner under that lock). Failures are recorded and asserted after completion.
+        let barrier_failures = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let hook_failures = Arc::clone(&barrier_failures);
         crate::account_writer::set_upgrade_hook(Some(Arc::new(move |path| {
-            if path == canonical {
-                let _ = upgraded_tx.send(());
-                if let Ok(receiver) = go_rx.lock() {
-                    let _ = receiver.recv_timeout(Duration::from_secs(10));
+            if path != canonical {
+                return;
+            }
+            let note = |failure: &'static str| {
+                if let Ok(mut failures) = hook_failures.lock() {
+                    failures.push(failure);
                 }
+            };
+            if upgraded_tx.send(()).is_err() {
+                note("upgrade notification channel closed");
+            }
+            match go_rx.lock() {
+                Ok(receiver) => {
+                    if receiver.recv_timeout(Duration::from_secs(10)).is_err() {
+                        note("upgrade barrier timed out or its channel closed");
+                    }
+                }
+                Err(_) => note("upgrade barrier mutex poisoned"),
             }
         })));
         let (done_tx, done_rx) = mpsc::sync_channel(1);
@@ -456,6 +473,10 @@ fn busy_never_drops_the_last_owner_under_the_registry_lock() -> TestResult {
             .recv_timeout(Duration::from_secs(10))
             .map_err(|_| "Busy deadlocked: the last owner was dropped under the registry lock")?;
         expect_busy(&result, "acct");
+        // A barrier that was released by timeout instead of by the coordinator would let Busy
+        // drop an Arc while the original holder still exists, which hides the deadlock.
+        let failures = barrier_failures.lock().map_err(|_| "barrier failure log poisoned")?.clone();
+        assert!(failures.is_empty(), "upgrade barrier failed: {failures:?}");
         drop(index);
         std::fs::remove_dir_all(root)?;
     }
