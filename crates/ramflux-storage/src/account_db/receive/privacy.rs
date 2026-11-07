@@ -41,11 +41,11 @@ impl ReceiveTransaction<'_> {
         if !matches!(disposition.as_deref(), Some("staged" | "held")) {
             return Err(StorageError::Integrity("receive bind requires a staged or held receipt"));
         }
-        let payload: String = connection
+        let (payload, entry): (String, Vec<u8>) = connection
             .query_row(
-                "SELECT json_extract(CAST(entry_json AS TEXT),'$.envelope.payload_hash') FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+                "SELECT json_extract(CAST(entry_json AS TEXT),'$.envelope.payload_hash'),CAST(entry_json AS BLOB) FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
                 key,
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or(StorageError::Integrity("receive bind requires staged work"))?;
@@ -69,6 +69,12 @@ impl ReceiveTransaction<'_> {
             "INSERT INTO message_copy_binding VALUES('payload:'||?1,?2) ON CONFLICT DO NOTHING",
             params![payload, message],
         )?;
+        // Binding (i): keep the authenticated tuple until the message's deletion is captured.
+        let message = message.to_owned();
+        let now = crate::unix_now();
+        connection.call(move |raw| {
+            Ok(super::erased_capture::write_work_bindings(raw, &message, &entry, now))
+        })??;
         Ok(ReceiveBind::Bound)
     }
 }

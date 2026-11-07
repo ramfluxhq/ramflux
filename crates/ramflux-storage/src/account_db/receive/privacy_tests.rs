@@ -23,7 +23,11 @@ fn reopen(root: &std::path::Path, db: AccountDb) -> Result<AccountDb, StorageErr
     )
 }
 
-fn bind(db: &AccountDb, sequence: u64, message: &str) -> Result<ReceiveBind, StorageError> {
+pub(super) fn bind(
+    db: &AccountDb,
+    sequence: u64,
+    message: &str,
+) -> Result<ReceiveBind, StorageError> {
     db.receive_transaction(
         ReceiveExpectation {
             target: "t",

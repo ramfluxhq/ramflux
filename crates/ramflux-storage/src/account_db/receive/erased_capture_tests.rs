@@ -67,7 +67,13 @@ fn bind(
     })
 }
 
-fn full(principal: &str, device: &str, payload: &str, created_at: i64, ttl: i64) -> Value {
+pub(super) fn full(
+    principal: &str,
+    device: &str,
+    payload: &str,
+    created_at: i64,
+    ttl: i64,
+) -> Value {
     json!({"source_principal_id":principal,"source_device_id":device,"signing_key_id":"key",
         "payload_hash":payload,"created_at":created_at,"ttl":ttl})
 }
@@ -114,7 +120,7 @@ fn actor_copy(
     })
 }
 
-fn current(
+pub(super) fn current(
     db: &AccountDb,
     principal: &str,
     device: &str,
@@ -141,7 +147,7 @@ fn binding_id(bundle: &str, selector: &str, expires_at: i64) -> String {
     format!("erased-input:{bundle}:{selector}:{expires_at}")
 }
 
-fn tombstone(db: &AccountDb, selector: &str) -> Result<Option<i64>, StorageError> {
+pub(super) fn tombstone(db: &AccountDb, selector: &str) -> Result<Option<i64>, StorageError> {
     use rusqlite::OptionalExtension;
     Ok(db
         .connection
@@ -153,18 +159,18 @@ fn tombstone(db: &AccountDb, selector: &str) -> Result<Option<i64>, StorageError
         .optional()?)
 }
 
-fn bindings(db: &AccountDb, id: &str) -> Result<Vec<String>, StorageError> {
+pub(super) fn bindings(db: &AccountDb, id: &str) -> Result<Vec<String>, StorageError> {
     let mut q = db.connection.prepare(
         "SELECT copy_id FROM message_copy_binding WHERE message_id=?1 AND copy_id GLOB 'erased-input:*' ORDER BY 1",
     )?;
     Ok(q.query_map(params![id], |r| r.get(0))?.collect::<Result<_, _>>()?)
 }
 
-fn lifetime(created_at: i64, ttl: i64, now: i64) -> i64 {
+pub(super) fn lifetime(created_at: i64, ttl: i64, now: i64) -> i64 {
     created_at.min(now + 120) + ttl.min(604_800) + 300
 }
 
-fn count(db: &AccountDb, sql: &str) -> Result<i64, StorageError> {
+pub(super) fn count(db: &AccountDb, sql: &str) -> Result<i64, StorageError> {
     Ok(db.connection.query_row(sql, [], |r| r.get(0))?)
 }
 

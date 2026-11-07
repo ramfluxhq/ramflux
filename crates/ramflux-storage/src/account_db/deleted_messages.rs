@@ -29,6 +29,8 @@ impl AccountDb {
                     || self.message_sender_is_local(conversation, message, &sender)?
             }
         };
+        // Tombstones first: the update below drops the bindings and copies they come from.
+        self.capture_erased_inputs(message)?;
         self.persist_deleted_envelope_markers(message)?;
         // The update trigger drains only locators owned by this message, in this transaction.
         self.connection.execute("UPDATE direct_message_projection SET sender_id='',encrypted_body=x'',metadata_json=x'7b7d',deleted=1,is_own=?3 WHERE conversation_id=?1 AND message_id=?2",params![conversation,message,i64::from(is_own)])?;

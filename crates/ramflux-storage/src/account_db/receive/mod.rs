@@ -7,6 +7,8 @@ pub(crate) mod erased_capture;
 mod erased_capture_tests;
 pub(crate) mod erased_input;
 #[cfg(test)]
+mod erased_input_producers_tests;
+#[cfg(test)]
 mod erased_input_tests;
 #[cfg(test)]
 mod erased_input_union_tests;
