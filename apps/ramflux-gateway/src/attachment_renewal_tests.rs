@@ -47,16 +47,18 @@ async fn large_home_forwarding_preserves_authenticated_foreign_requester() -> Re
     let config = HomeRenewalConfig {
         source_issuer: renew.audience.clone(),
         relay_audience: target.audience.clone(),
-        source_peer: "source".into(),
         authority_generation: 3,
         home_key: ed25519_dalek::SigningKey::from_bytes(
             &bytes(&r["source_home_seed_hex"])?.try_into().map_err(|_| "seed")?,
         ),
     };
+    let cap = capability(&grant);
     let attempt = HomeRenewalAttempt {
         request: &request,
         grant: &grant,
         challenge: [0xc1; 32],
+        challenge_expires_at: 1_700_000_031,
+        capability: &cap,
         now: 1_700_000_001,
     };
     let w = attest_requester(q.clone(), &q.home_node_id, &config, &attempt)?;
@@ -86,7 +88,45 @@ async fn large_home_forwarding_preserves_authenticated_foreign_requester() -> Re
     assert_eq!(forwarded.proof, pop.canonical_bytes()?);
     assert_eq!(forward_bytes(&q, &config, &attempt, &w, &pop, &signature)?, forwarded);
     assert_forwarding_refusals(&q, &config, &attempt, &w, (&pop, &signature), r)?;
-    mesh_round_trip(&forwarded, &bytes(&r["token"]["bytes_hex"])?).await?;
+    assert_eq!(forwarded.grant, cap, "the full registered capability rides in the envelope");
+    assert_eq!(
+        serde_json::from_value::<ForwardedRenewal>(serde_json::to_value(&forwarded)?)?,
+        forwarded
+    );
+    Ok(())
+}
+#[test]
+fn large_home_egress_clamps_w_and_never_falls_back() -> Result {
+    let j = fixture()?;
+    let r = &j["renewal"];
+    let grant = grant(&j)?;
+    let request = RenewalRequest {
+        operation: bytes(&r["renewal_operation_hex"])?,
+        body: bytes(&r["renewal_body_hex"])?,
+    };
+    let (renew, target) = request.target()?;
+    let q = grant.grant().grantee.clone();
+    let config = HomeRenewalConfig {
+        source_issuer: renew.audience.clone(),
+        relay_audience: target.audience.clone(),
+        authority_generation: 3,
+        home_key: ed25519_dalek::SigningKey::from_bytes(
+            &bytes(&r["source_home_seed_hex"])?.try_into().map_err(|_| "seed")?,
+        ),
+    };
+    let cap = capability(&grant);
+    let attempt = HomeRenewalAttempt {
+        request: &request,
+        grant: &grant,
+        challenge: [0xc1; 32],
+        challenge_expires_at: 1_700_000_031,
+        capability: &cap,
+        now: 1_700_000_001,
+    };
+    assert_home_egress_rules(&q, &config, &attempt, &request, r)?;
+    // The only egress is the home router; there is no source-peer path to fall back to.
+    assert_eq!(CHALLENGE_PATH, "/s9/attachments/renew/challenge");
+    assert_eq!(FORWARD_PATH, "/s9/attachments/renew/forward");
     Ok(())
 }
 #[test]
@@ -183,71 +223,76 @@ fn renewal_session_binding_refreshes_current_authority_and_never_rewrites_reques
         ),
         Err(FormatError("renewal requester"))
     );
+    // The challenge envelope's requester and home come from the session, not from input.
+    let envelope = challenge_envelope(&runtime, "home", &capability(&g), &[7])?;
+    assert_eq!(envelope.requester.account_anchor, source.root_commitment());
+    assert_eq!(envelope.requester.device_id, "device");
+    assert_eq!(envelope.requester.home_node_id, "home");
+    assert_eq!(envelope.home_node, "home");
+    assert_eq!(envelope.requester.signing_public_key, requester.signing_public_key);
+    assert_eq!(envelope.capability, capability(&g));
     Ok(())
 }
 
-async fn mesh_round_trip(forwarded: &ForwardedRenewal, token: &[u8]) -> Result {
-    use crate::clients::tests::{issue_test_ca_and_service_cert, temp_cert_root};
-    let root = temp_cert_root("attachment-renewal")?;
-    let home = issue_test_ca_and_service_cert(&root, "mesh", "ramflux-gateway")?;
-    let source = issue_test_ca_and_service_cert(&root, "mesh", "ramflux-source")?;
-    let client_tls = home.tls.clone();
-    let trusted_source = source.ca_pem.clone();
-    let roots = std::sync::Arc::new(move || Ok(vec![home.ca_pem.clone()]));
-    let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
-        "127.0.0.1:0",
-        &source.tls,
-        roots,
-    )?;
-    let endpoint = server.local_addr()?.to_string();
-    let expected = forwarded.clone();
-    let response = token.to_vec();
-    let mut task = tokio::spawn(async move {
-        let connection = server.accept_connection().await?;
-        let accepted =
-            ramflux_transport::MeshQuicServer::accept_json_or_postcard_request_on_connection(
-                &connection,
-            )
-            .await?;
-        let ramflux_transport::MeshQuicAcceptedWireRequest::Json(accepted) = accepted else {
-            return Err(anyhow::anyhow!("native renewal transport framing"));
-        };
-        anyhow::ensure!(
-            accepted.request.method == "POST" && accepted.request.path == "/s9/attachments/renew",
-            "renewal path"
-        );
-        let actual: ForwardedRenewal = serde_json::from_value(accepted.request.body.clone())?;
-        anyhow::ensure!(actual == expected, "forwarded native bytes changed");
-        accepted.write_json_response(200, &response).await?;
-        // Keep the authenticated connection owner alive until the client has read.
-        Ok::<_, anyhow::Error>((server, connection))
-    });
-    let round_trip = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        let received =
-            post_forwarded(&endpoint, &client_tls, "ramflux-source", &[trusted_source], forwarded)
-                .await?;
-        anyhow::ensure!(received == token, "renewal token response changed");
-        let owners = (&mut task).await??;
-        drop(owners);
-        Ok::<_, anyhow::Error>(())
-    })
-    .await;
-    match round_trip {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            task.abort();
-            let _ = task.await;
-            let _ = std::fs::remove_dir_all(&root);
-            return Err(error.into());
-        }
-        Err(elapsed) => {
-            task.abort();
-            let _ = task.await;
-            let _ = std::fs::remove_dir_all(&root);
-            return Err(anyhow::anyhow!("renewal mesh round trip exceeded 15s: {elapsed}").into());
-        }
-    }
-    std::fs::remove_dir_all(root)?;
+fn capability(grant: &VerifiedScopedGrant) -> Vec<u8> {
+    use ed25519_dalek::Signer;
+    let receipt = ramflux_protocol::large_attachment::AttachmentRegistrationReceipt {
+        grant_hash: grant.grant().hash().unwrap_or_default(),
+        grant_epoch: grant.grant().epoch,
+        source_authority: "node-owner".into(),
+        authority_generation: 3,
+        expires_at: grant.grant().expires_at,
+    };
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x60; 32]);
+    let signature = key.sign(&receipt.signing_bytes().unwrap_or_default()).to_bytes();
+    receipt.capability(grant, &signature, &key.verifying_key().to_bytes()).unwrap_or_default()
+}
+
+fn assert_home_egress_rules(
+    q: &QualifiedOwner,
+    config: &HomeRenewalConfig,
+    attempt: &HomeRenewalAttempt<'_>,
+    request: &RenewalRequest,
+    vectors: &serde_json::Value,
+) -> Result {
+    let expires = |at: HomeRenewalAttempt<'_>| -> std::result::Result<u64, FormatError> {
+        Ok(attest_requester(q.clone(), &q.home_node_id, config, &at)?.attestation.expires_at)
+    };
+    let now = attempt.now;
+    let grant_expiry = attempt.grant.grant().expires_at;
+    assert!(grant_expiry > now + 30, "{vectors}");
+    // Delayed positive: the challenge outlives the clamp by 20 s, so W stops there.
+    let at = |challenge_expires_at: u64, now: u64| HomeRenewalAttempt {
+        request,
+        grant: attempt.grant,
+        challenge: attempt.challenge,
+        challenge_expires_at,
+        capability: attempt.capability,
+        now,
+    };
+    assert_eq!(expires(at(now + 20, now))?, now + 20);
+    // A challenge that lasts longer than the default 30 s does not extend W.
+    assert_eq!(expires(at(now + 31, now))?, now + 30);
+    assert_eq!(expires(at(now + 30, now))?, now + 30);
+    // Inclusive boundary: at the challenge expiry nothing is signed; one second before it, W
+    // lasts exactly one second.
+    assert_eq!(expires(at(now + 1, now))?, now + 1);
+    assert_eq!(expires(at(now, now)), Err(FormatError("challenge expired")));
+    assert_eq!(expires(at(now - 1, now)), Err(FormatError("challenge expired")));
+    // Capability: receipt-free grant bytes and a capability for another grant are refused
+    // before anything is signed into an envelope.
+    let signed = attempt.grant.signed_bytes()?;
+    assert_eq!(
+        checked_capability(&HomeRenewalAttempt { capability: &signed, ..*attempt }),
+        Err(FormatError("capability receipt"))
+    );
+    let mut other = attempt.capability.to_vec();
+    other[10] ^= 1;
+    assert_eq!(
+        checked_capability(&HomeRenewalAttempt { capability: &other, ..*attempt }),
+        Err(FormatError("capability grant"))
+    );
+    assert_eq!(checked_capability(attempt)?, attempt.capability);
     Ok(())
 }
 
