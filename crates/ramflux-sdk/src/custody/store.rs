@@ -57,6 +57,8 @@ pub(super) struct StoredAuthority {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     custodian_publication: Option<Box<ramflux_protocol::custody::Publication>>,
     pins: AuthorityPins,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    message_layer_sequences: std::collections::BTreeMap<String, u64>,
     custodian_account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_provisioning_vault_ref: Option<String>,
@@ -177,9 +179,16 @@ impl BornAccount {
         {
             return Err(invalid());
         }
-        let sequence = device.message_layer.as_ref().map_or(Ok(1), |previous| {
-            previous.declaration.declaration_sequence.checked_add(1).ok_or_else(invalid)
-        })?;
+        let previous_sequence = self
+            .stored
+            .message_layer_sequences
+            .get(&ramflux_protocol::qualified_device_id(&body.account_anchor, device_id)?)
+            .copied()
+            .into_iter()
+            .chain(device.message_layer.iter().map(|value| value.declaration.declaration_sequence))
+            .max()
+            .unwrap_or_default();
+        let sequence = previous_sequence.checked_add(1).ok_or_else(invalid)?;
         let signed = super::layer_declaration::candidate(
             &branch.signing,
             device_ref.clone(),
@@ -615,6 +624,10 @@ pub(super) fn persist(
     let human =
         input.custodian_account_id.as_ref().map(|id| load_human(root, id, now)).transpose()?;
     let verified = verify_record(&record, now, None, human.as_ref())?;
+    let message_layer_sequences = super::layer_declaration::sequence_high_water(
+        &record.body.account_anchor,
+        &record.body.devices,
+    )?;
     let mut pins = AuthorityPins::default();
     pins.observe(&verified)?;
     pins.discard_retained_records();
@@ -673,6 +686,7 @@ pub(super) fn persist(
             compacted_ids: None,
             custodian_publication: None,
             pins,
+            message_layer_sequences,
             custodian_account_id: input.custodian_account_id.clone(),
             agent_provisioning_vault_ref: agent_provisioning_reference.clone(),
         };

@@ -32,6 +32,11 @@ pub(crate) fn accept_publication(
     }
     let outcome =
         account.stored.pins.observe_with_previous(&verified, Some(&account.stored.record))?;
+    super::super::layer_declaration::remember_sequences(
+        &mut account.stored.message_layer_sequences,
+        &account.stored.record.body.account_anchor,
+        &account.stored.record.body.devices,
+    )?;
     if outcome == PinOutcome::Unchanged
         && account.stored.compacted_ids == authority.publication.compacted_ids
         && account.stored.custodian_publication.as_deref()
@@ -40,6 +45,11 @@ pub(crate) fn accept_publication(
         return Ok(outcome);
     }
     if !matches!(outcome, PinOutcome::Fenced(_)) {
+        super::super::layer_declaration::remember_sequences(
+            &mut account.stored.message_layer_sequences,
+            &authority.publication.record.body.account_anchor,
+            &authority.publication.record.body.devices,
+        )?;
         account.stored.record = authority.publication.record.clone();
         account.stored.compacted_ids.clone_from(&authority.publication.compacted_ids);
         account.stored.custodian_publication =

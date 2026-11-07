@@ -176,7 +176,7 @@ impl NodePins {
 struct PeerPins {
     pins: ramflux_crypto::custody::AuthorityPins,
     accepted: Option<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "super::layer_declaration::DeclarationPins::is_empty")]
     message_layers: super::layer_declaration::DeclarationPins,
 }
 impl NodePins {
@@ -192,19 +192,28 @@ impl NodePins {
         let record = verified.envelope();
         let native_head = ramflux_protocol::custody::object_hash(record)?;
         let mut message_layers = state.message_layers.clone();
-        message_layers.observe_roster(
+        let declaration_result = message_layers.observe_roster(
             &record.body.account_anchor,
             &record.body.devices,
             record.body.device_set_epoch,
             &native_head,
-        )?;
+        );
         let outcome = state.pins.observe_with_previous(verified, state.accepted.as_ref())?;
         if outcome == PinOutcome::Advanced {
             state.accepted = Some(verified.envelope().clone());
         }
-        if !matches!(outcome, PinOutcome::Fenced(_)) {
-            state.message_layers = message_layers;
+        if matches!(outcome, PinOutcome::Fenced(_)) {
+            self.persist_peer_state(&path, &state)?;
+            declaration_result?;
+            return Err(SdkError::CustodyForkFenced);
         }
+        declaration_result?;
+        state.message_layers = message_layers;
+        self.persist_peer_state(&path, &state)?;
+        super::store::require_current_authority(&state.pins, verified)?;
+        Ok(())
+    }
+    fn persist_peer_state(&self, path: &Path, state: &PeerPins) -> Result<(), SdkError> {
         let temp = self.root.join(format!(
             ".peer-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
@@ -216,10 +225,6 @@ impl NodePins {
         create(&temp, &bytes)?;
         fs::rename(temp, path)?;
         fs::File::open(&self.root)?.sync_all()?;
-        if matches!(outcome, PinOutcome::Fenced(_)) {
-            return Err(SdkError::CustodyForkFenced);
-        }
-        super::store::require_current_authority(&state.pins, verified)?;
         Ok(())
     }
 }
@@ -253,55 +258,204 @@ pub(super) fn log_unbound(root: &Path) -> Result<(), SdkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ramflux_protocol::custody::{
-        Device, DeviceRef, LayerDeclaration, MigrationState, SignedLayerDeclaration,
-    };
+    use crate::client::native_test_support::{Fixture, TestResult};
+    use crate::custody::{BranchCredentials, load_account};
+    use ramflux_protocol::custody::{DeviceRef, Publication, SignedLayerDeclaration, decode_epoch};
 
-    fn declaration(sequence: u64) -> Device {
-        Device {
-            device_id: "phone".into(),
-            device_epoch: 3,
-            signing_key_commitment: "signing".into(),
-            agreement_key_commitment: "agreement".into(),
-            status: ramflux_protocol::DeviceSetStatus::Active,
-            revoked_at: None,
-            branch_certificate: None,
-            message_layer: Some(SignedLayerDeclaration {
-                declaration: LayerDeclaration {
-                    device: DeviceRef {
-                        account_anchor: "anchor".into(),
-                        device_id: "phone".into(),
-                        device_epoch: 3,
-                    },
-                    max_layer: ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
-                    declaration_sequence: sequence,
-                    issued_at: 1,
-                    expires_at: 2,
-                },
-                branch_signature: format!("signature-{sequence}"),
-            }),
-            migration_state: MigrationState::Native,
-        }
+    fn successor(
+        prior: &Publication,
+        primary: &ramflux_crypto::custody::SelfSigningKey,
+        declaration: Option<SignedLayerDeclaration>,
+        issued_at: u64,
+    ) -> TestResult<Publication> {
+        let mut body = prior.record.body.clone();
+        body.previous_record_hash = Some(ramflux_protocol::custody::object_hash(&prior.record)?);
+        body.device_set_epoch = body.device_set_epoch.checked_add(1).ok_or("epoch overflow")?;
+        body.issued_at = issued_at;
+        body.devices[0].message_layer = declaration;
+        Ok(Publication { record: primary.sign_record(body)?, compacted_ids: None })
+    }
+
+    fn signed_declaration(
+        branch: &BranchCredentials,
+        device: DeviceRef,
+        sequence: u64,
+        issued_at: u64,
+        expires_at: u64,
+    ) -> TestResult<SignedLayerDeclaration> {
+        Ok(super::super::layer_declaration::candidate(
+            &branch.signing,
+            device,
+            ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+            sequence,
+            issued_at,
+            expires_at,
+        )?)
+    }
+
+    fn peer_path(pins: &NodePins, anchor: &str) -> PathBuf {
+        pins.root.join(format!("peer-{anchor}.json"))
     }
 
     #[test]
-    fn peer_layer_pins_survive_persistence_and_reject_restored_rollback()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut layers = super::super::layer_declaration::DeclarationPins::default();
-        layers.observe("anchor", &declaration(8), 12, "head-12")?;
-        let state = PeerPins {
-            pins: ramflux_crypto::custody::AuthorityPins::default(),
-            accepted: None,
-            message_layers: layers,
-        };
-        let bytes = ramflux_protocol::canonical_json_bytes(&state)?;
-        let restored: PeerPins = ramflux_protocol::custody::decode(&bytes, 8 * 1024 * 1024)?;
-        assert_eq!(ramflux_protocol::canonical_json_bytes(&restored)?, bytes);
-        let mut layers = restored.message_layers;
+    fn legacy_peer_pin_bytes_decode_and_reencode_identically() -> TestResult {
+        // Exact pre-message_layers PeerPins serialization from the prior SDK version.
+        const LEGACY: &[u8] = br#"{"pins":{"accounts":{}},"accepted":null}"#;
+        let state: PeerPins = ramflux_protocol::custody::decode(LEGACY, 8 * 1024 * 1024)?;
+        assert!(state.message_layers.is_empty());
+        assert_eq!(serde_json::to_vec(&state)?, LEGACY);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn layer_update_rejects_rollback() -> TestResult {
+        let fixture = Fixture::new("layer-pin-real-wire").await?;
+        let now = crate::custody::network_now()?;
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        let account = load_account(&fixture.root.0, &id, now)?;
+        let original = fixture.manifest.custody.as_ref().ok_or("native manifest")?;
+        let original_publication = original.publication.clone();
+        let device = original.devices[0].device_ref.clone();
+        let bundle = original.devices[0].prekey_bundle.clone();
+        let primary = fixture.vault.primary_for_public_key(
+            &account.record().body.master_certificate.body.self_signing_public_key,
+        )?;
+        let (_, branch) = account.credentials(fixture.vault.as_ref(), &device.device_id, now)?;
+
+        // Sequence two is genuinely branch-signed and endorsed by a higher native head.
+        let issued_at = now + 10;
+        let expires_at = issued_at + 2;
+        let declaration = signed_declaration(&branch, device.clone(), 2, issued_at, expires_at)?;
+        let first =
+            successor(&original_publication, &primary, Some(declaration.clone()), issued_at)?;
+        let pins = NodePins::new(&fixture.root.0, "layer-peer", "unused")?;
+        pins.observe_peer(&first, &device, &bundle, None, issued_at)?;
+        let path = peer_path(&pins, &device.account_anchor);
+        let first_bytes = fs::read(&path)?;
+        let state: PeerPins = read(&path, 8 * 1024 * 1024)?;
+        assert_eq!(
+            serde_json::to_value(&state.message_layers)?["devices"][0]["declaration_sequence"],
+            2
+        );
+
+        // A controlled time after expiry reopens the actual peer file and keeps its floor.
+        let post_expiry_now = expires_at + 1;
+        let reopened = NodePins::new(&fixture.root.0, "layer-peer", "unused")?;
+        reopened.observe_peer(&first, &device, &bundle, None, post_expiry_now)?;
+        let state: PeerPins = read(&path, 8 * 1024 * 1024)?;
+        assert_eq!(
+            serde_json::to_value(&state.message_layers)?["devices"][0]["declaration_sequence"],
+            2
+        );
+
+        // A later endorsed head refreshes the same declaration pin after expiry.
+        let refreshed =
+            successor(&first, &primary, Some(declaration.clone()), post_expiry_now + 1)?;
+        reopened.observe_peer(&refreshed, &device, &bundle, None, post_expiry_now + 1)?;
+        let state: PeerPins = read(&path, 8 * 1024 * 1024)?;
+        assert_eq!(
+            serde_json::to_value(&state.message_layers)?["devices"][0]["native_epoch"],
+            refreshed.record.body.device_set_epoch
+        );
+
+        // A historical restore is refused without changing the durable accepted state.
+        let before_refusal = fs::read(&path)?;
         assert!(matches!(
-            layers.observe("anchor", &declaration(7), 13, "head-13"),
+            reopened.observe_peer(
+                &original_publication,
+                &device,
+                &bundle,
+                None,
+                post_expiry_now + 1
+            ),
+            Err(SdkError::Crypto(ramflux_crypto::CryptoError::IdentityAuthority(
+                "custody epoch rollback"
+            )))
+        ));
+        assert_eq!(fs::read(&path)?, before_refusal);
+
+        // A valid lower sequence is independently refused, also without a partial native pin.
+        let lower = signed_declaration(
+            &branch,
+            device.clone(),
+            1,
+            post_expiry_now + 2,
+            post_expiry_now + 3,
+        )?;
+        let lower_head = successor(&refreshed, &primary, Some(lower), post_expiry_now + 2)?;
+        assert!(matches!(
+            reopened.observe_peer(&lower_head, &device, &bundle, None, post_expiry_now + 2),
             Err(SdkError::CustodyForkFenced)
         ));
+        assert_eq!(fs::read(&path)?, before_refusal);
+
+        // Withdrawal retains the sequence; equal-sequence reappearance is not a renewal.
+        let withdrawn = successor(&refreshed, &primary, None, post_expiry_now + 3)?;
+        reopened.observe_peer(&withdrawn, &device, &bundle, None, post_expiry_now + 3)?;
+        let before_refusal = fs::read(&path)?;
+        let reappeared = successor(&withdrawn, &primary, Some(declaration), post_expiry_now + 4)?;
+        assert!(matches!(
+            reopened.observe_peer(&reappeared, &device, &bundle, None, post_expiry_now + 4),
+            Err(SdkError::CustodyForkFenced)
+        ));
+        assert_eq!(fs::read(&path)?, before_refusal);
+        let state: PeerPins = read(&path, 8 * 1024 * 1024)?;
+        assert_eq!(serde_json::to_value(&state.message_layers)?["devices"][0]["present"], false);
+        assert_eq!(
+            serde_json::to_value(&state.message_layers)?["devices"][0]["native_epoch"],
+            withdrawn.record.body.device_set_epoch
+        );
+        assert_eq!(
+            decode_epoch(withdrawn.record.body.device_set_epoch)?,
+            decode_epoch(state.accepted.as_ref().ok_or("accepted head")?.body.device_set_epoch)?
+        );
+        assert_ne!(first_bytes, before_refusal);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_fork_fence_persists_before_declaration_rejection() -> TestResult {
+        let fixture = Fixture::new("layer-pin-fork-fence").await?;
+        let now = crate::custody::network_now()?;
+        let id = fixture.client.account_db()?.local_account_id.clone();
+        let account = load_account(&fixture.root.0, &id, now)?;
+        let native = fixture.manifest.custody.as_ref().ok_or("native manifest")?;
+        let device = native.devices[0].device_ref.clone();
+        let bundle = native.devices[0].prekey_bundle.clone();
+        let primary = fixture.vault.primary_for_public_key(
+            &account.record().body.master_certificate.body.self_signing_public_key,
+        )?;
+        let (_, branch) = account.credentials(fixture.vault.as_ref(), &device.device_id, now)?;
+        let issued_at = now + 10;
+        let declaration =
+            signed_declaration(&branch, device.clone(), 2, issued_at, issued_at + 60)?;
+        let accepted =
+            successor(&native.publication, &primary, Some(declaration.clone()), issued_at)?;
+        let pins = NodePins::new(&fixture.root.0, "fork-peer", "unused")?;
+        pins.observe_peer(&accepted, &device, &bundle, None, issued_at)?;
+        let path = peer_path(&pins, &device.account_anchor);
+
+        // Same signed epoch, different valid head. Declaration pinning detects the fork too;
+        // AuthorityPins evidence must reach disk before that refusal is returned.
+        let mut fork_body = accepted.record.body.clone();
+        fork_body.profile.display_name.push_str(" fork");
+        let fork = Publication { record: primary.sign_record(fork_body)?, compacted_ids: None };
+        assert!(matches!(
+            pins.observe_peer(&fork, &device, &bundle, None, issued_at),
+            Err(SdkError::CustodyForkFenced)
+        ));
+        let durable: PeerPins = read(&path, 8 * 1024 * 1024)?;
+        let range = decode_epoch(accepted.record.body.device_set_epoch)?.0;
+        assert!(durable.pins.conflict_evidence(&device.account_anchor, range).is_some());
+        let fenced_bytes = fs::read(&path)?;
+
+        // Reopening and replaying the formerly accepted head remains fenced.
+        let reopened = NodePins::new(&fixture.root.0, "fork-peer", "unused")?;
+        assert!(matches!(
+            reopened.observe_peer(&accepted, &device, &bundle, None, issued_at),
+            Err(SdkError::CustodyForkFenced)
+        ));
+        assert_eq!(fs::read(&path)?, fenced_bytes);
         Ok(())
     }
 }

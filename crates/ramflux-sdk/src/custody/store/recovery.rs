@@ -345,6 +345,16 @@ fn persist_intent(
         current.stored.primary_vault_ref.clone_from(&new_primary);
         current.stored.branch_vault_ref.clone_from(&new_branch);
         current.stored.local_device_id = device.into();
+        super::super::layer_declaration::remember_sequences(
+            &mut current.stored.message_layer_sequences,
+            &record.body.account_anchor,
+            &record.body.devices,
+        )?;
+        super::super::layer_declaration::remember_sequences(
+            &mut current.stored.message_layer_sequences,
+            &current.stored.record.body.account_anchor,
+            &current.stored.record.body.devices,
+        )?;
         current.stored.record = record;
         current.stored.pending_branch = false;
         current.stored.state = CreationState::NetworkingPending;
@@ -458,6 +468,10 @@ pub(crate) fn pending_restore(
         compacted_ids: authority.publication.compacted_ids.clone(),
         custodian_publication: authority.custodian_publication.clone().map(Box::new),
         pins,
+        message_layer_sequences: super::super::layer_declaration::sequence_high_water(
+            &authority.publication.record.body.account_anchor,
+            &authority.publication.record.body.devices,
+        )?,
         custodian_account_id: None,
         agent_provisioning_vault_ref: None,
     };

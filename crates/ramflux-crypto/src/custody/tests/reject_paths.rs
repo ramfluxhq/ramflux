@@ -201,6 +201,159 @@ fn message_layer_declaration_requires_branch_proof_and_bounded_validity() -> Res
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn message_layer_reject_paths_are_isolated_and_exact() -> Result {
+    let (_, primary, genesis) = fixture()?;
+    let now = genesis.body.issued_at;
+    let branch = crate::create_device_branch("vector.example", "primary", 1, [3; 32]);
+    let device = DeviceRef {
+        account_anchor: genesis.body.account_anchor.clone(),
+        device_id: "primary".into(),
+        device_epoch: 1,
+    };
+    let sign_declaration = |declaration: LayerDeclaration| -> Result<SignedLayerDeclaration> {
+        let bytes = signing_bytes(domain::CUSTODY_MESSAGE_LAYER_DECLARATION, &declaration)?;
+        Ok(SignedLayerDeclaration {
+            branch_signature: crate::sign_canonical_bytes_with_device_branch(&bytes, &branch),
+            declaration,
+        })
+    };
+    let valid = LayerDeclaration {
+        device: device.clone(),
+        max_layer: MESSAGE_LAYER_FLOOR,
+        declaration_sequence: 1,
+        issued_at: now,
+        expires_at: now + MAX_LAYER_DECLARATION_VALIDITY_SECONDS,
+    };
+    let rejects = |declaration: LayerDeclaration,
+                   record_issued_at: u64,
+                   expected: &'static str|
+     -> Result<()> {
+        let mut body = genesis.body.clone();
+        body.issued_at = record_issued_at;
+        body.devices[0].message_layer = Some(sign_declaration(declaration)?);
+        assert_authority_error(&primary.sign_record(body), expected);
+        Ok(())
+    };
+
+    rejects(
+        LayerDeclaration { declaration_sequence: 0, ..valid.clone() },
+        now,
+        "zero custody counter",
+    )?;
+    rejects(
+        LayerDeclaration {
+            declaration_sequence: ramflux_protocol::MAX_SAFE_JSON_INTEGER + 1,
+            ..valid.clone()
+        },
+        now,
+        "unsafe custody integer",
+    )?;
+    rejects(
+        LayerDeclaration {
+            issued_at: ramflux_protocol::MAX_SAFE_JSON_INTEGER + 1,
+            ..valid.clone()
+        },
+        now,
+        "unsafe custody integer",
+    )?;
+    rejects(
+        LayerDeclaration {
+            expires_at: ramflux_protocol::MAX_SAFE_JSON_INTEGER + 1,
+            ..valid.clone()
+        },
+        now,
+        "unsafe custody integer",
+    )?;
+    rejects(
+        LayerDeclaration { issued_at: now + 1, expires_at: now, ..valid.clone() },
+        now,
+        "message-layer declaration expiry precedes issue time",
+    )?;
+    rejects(
+        LayerDeclaration { expires_at: now, ..valid.clone() },
+        now,
+        "message-layer declaration validity exceeds 24 hours",
+    )?;
+
+    let branch_certificate =
+        genesis.body.devices[0].branch_certificate.as_ref().ok_or("branch certificate")?;
+    rejects(
+        LayerDeclaration {
+            issued_at: branch_certificate.body.not_before - 1,
+            expires_at: branch_certificate.body.not_before,
+            ..valid.clone()
+        },
+        now,
+        "message-layer declaration exceeds branch certificate lease",
+    )?;
+    rejects(
+        LayerDeclaration {
+            issued_at: branch_certificate.body.expires_at - 1,
+            expires_at: branch_certificate.body.expires_at + 1,
+            ..valid.clone()
+        },
+        branch_certificate.body.expires_at + 1,
+        "message-layer declaration exceeds branch certificate lease",
+    )?;
+    rejects(
+        LayerDeclaration { max_layer: MAX_MESSAGE_LAYER + 1, ..valid.clone() },
+        now,
+        "message-layer declaration below the active floor or unsupported",
+    )?;
+    rejects(
+        LayerDeclaration {
+            device: DeviceRef { account_anchor: encode_base64url([93; 32]), ..device.clone() },
+            ..valid.clone()
+        },
+        now,
+        "message-layer declaration device binding mismatch",
+    )?;
+    rejects(
+        LayerDeclaration {
+            device: DeviceRef { device_epoch: 2, ..device.clone() },
+            ..valid.clone()
+        },
+        now,
+        "message-layer declaration device binding mismatch",
+    )?;
+
+    let mut malformed = sign_declaration(valid.clone())?;
+    malformed.branch_signature = "malformed-signature".into();
+    let mut malformed_body = genesis.body.clone();
+    malformed_body.devices[0].message_layer = Some(malformed);
+    assert_authority_error(
+        &primary.sign_record(malformed_body),
+        "noncanonical custody binary length",
+    );
+
+    // Exact inclusive endpoints: sequence and timestamps remain safe integers, declaration
+    // starts at the branch lease start, and its expiry equals both safe-integer and lease end.
+    let endpoint = ramflux_protocol::MAX_SAFE_JSON_INTEGER;
+    let lease_start = endpoint - MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
+    let mut endpoint_body = genesis.body.clone();
+    let mut certificate = endpoint_body.devices[0]
+        .branch_certificate
+        .as_ref()
+        .ok_or("branch certificate")?
+        .body
+        .clone();
+    certificate.not_before = lease_start;
+    certificate.expires_at = endpoint;
+    endpoint_body.devices[0].branch_certificate = Some(primary.certify_branch(certificate)?);
+    endpoint_body.issued_at = endpoint;
+    endpoint_body.devices[0].message_layer = Some(sign_declaration(LayerDeclaration {
+        declaration_sequence: endpoint,
+        issued_at: lease_start,
+        expires_at: endpoint,
+        ..valid
+    })?);
+    let endpoint_record = primary.sign_record(endpoint_body)?;
+    verify_record(&endpoint_record, endpoint, None, None)?;
+    Ok(())
+}
+
+#[test]
 fn compacted_device_cannot_reactivate_in_a_signed_roster() -> Result {
     let (_, primary, genesis) = fixture()?;
     let now = genesis.body.issued_at;
