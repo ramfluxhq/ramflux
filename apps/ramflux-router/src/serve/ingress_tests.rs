@@ -14,6 +14,7 @@ use std::{
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const SOURCE_PATH: &str = "/s9/attachments/renew/source";
 const CAP: usize = 16 * 1024;
+static IJSON_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn openssl(args: &[&str]) -> TestResult {
     if Command::new("openssl").args(args).status()?.success() {
@@ -363,6 +364,34 @@ struct RouteEnvelopeWire {
     duplicate_extension: bool,
 }
 
+struct EphemeralRouteWire {
+    envelope: ramflux_protocol::Envelope,
+    expires_at_ms: u64,
+    created_at: Option<i64>,
+    duplicate_extension: bool,
+}
+
+impl serde::Serialize for EphemeralRouteWire {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry(
+            "envelope",
+            &EnvelopeWire {
+                envelope: &self.envelope,
+                created_at: self.created_at,
+                duplicate_extension: self.duplicate_extension,
+            },
+        )?;
+        map.serialize_entry("expires_at_ms", &self.expires_at_ms)?;
+        map.end()
+    }
+}
+
 impl serde::Serialize for RouteEnvelopeWire {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -457,9 +486,13 @@ async fn mesh_tls_post<T: serde::Serialize + Send + 'static>(
     let endpoint = server.local_addr()?.to_string();
     let worker_router = Arc::clone(router);
     let worker_peer = peer.to_owned();
+    let worker_socket = Arc::new(std::sync::Mutex::new(None));
+    let worker_socket_for_thread = Arc::clone(&worker_socket);
     let worker = std::thread::spawn(move || -> Result<(), String> {
         let mut stream = server.accept().map_err(|error| error.to_string())?;
         let tcp = stream.sock.try_clone().map_err(|error| error.to_string())?;
+        *worker_socket_for_thread.lock().map_err(|_| "mesh worker socket lock poisoned")? =
+            Some(tcp.try_clone().map_err(|error| error.to_string())?);
         let set = ramflux_node_core::ConnectionSet::new(4);
         let guard = set
             .register(&tcp)
@@ -505,8 +538,20 @@ async fn mesh_tls_post<T: serde::Serialize + Send + 'static>(
     let response = task
         .map_err(|error| format!("mesh TLS task {path}: {error:?}"))?
         .map_err(|error| format!("mesh TLS client {path}: {error:?}"))?;
-    worker
-        .join()
+    let joined = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::task::spawn_blocking(move || worker.join()),
+    )
+    .await;
+    if joined.is_err()
+        && let Ok(socket) = worker_socket.lock()
+        && let Some(socket) = socket.as_ref()
+    {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+    }
+    let joined = fixture_wait(joined, "mesh TLS worker join")?;
+    joined
+        .map_err(|error| format!("mesh TLS server worker task {path}: {error}"))?
         .map_err(|_| "mesh TLS server worker panicked")?
         .map_err(|error| format!("mesh TLS server {path}: {error}"))?;
     Ok(response)
@@ -597,12 +642,62 @@ fn fixture_wait<T>(result: Result<T, tokio::time::error::Elapsed>, fixture: &str
     }
 }
 
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+#[derive(Debug, PartialEq, Eq)]
+struct IngressEffects {
+    database: Vec<u8>,
+    seen: bool,
+    pending: usize,
+    replay_checks: u64,
+    replay_writes: u64,
+    submit_started: u64,
+    submit_completed: u64,
+    target_local: u64,
+    target_remote: u64,
+    accepted: u64,
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+fn ingress_effect_snapshot(
+    router: &crate::router_runtime::RouterHandle,
+    db_path: &Path,
+    envelope: &ramflux_protocol::Envelope,
+) -> TestResult<IngressEffects> {
+    let commitment = envelope
+        .ext
+        .ext
+        .get("source_root_commitment")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("envelope missing source root commitment")?;
+    let seen = router.store().has_local_delivery_envelope(
+        commitment,
+        &envelope.envelope_id,
+        &envelope.target_delivery_id,
+        i64::try_from(ramflux_node_core::now_unix_seconds())?,
+    )?;
+    let pending = router.state().resume(&envelope.target_delivery_id, 0, 10).len();
+    let metrics = ramflux_node_core::node_perf_snapshot();
+    Ok(IngressEffects {
+        database: std::fs::read(db_path)?,
+        seen,
+        pending,
+        replay_checks: metrics.router_replay_guard_checks_total,
+        replay_writes: metrics.router_replay_guard_redb_writes_total,
+        submit_started: metrics.router_submit_started_total,
+        submit_completed: metrics.router_submit_completed_total,
+        target_local: metrics.router_submit_target_local_total,
+        target_remote: metrics.router_submit_target_remote_total,
+        accepted: metrics.router_envelope_accepted_total,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines, reason = "one named regression spans every router ingress surface")]
 async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
+    const EXPECTED_BODY: &str = r#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
     use std::time::Duration;
 
-    const EXPECTED_BODY: &str = r#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+    let _serial = IJSON_TEST_LOCK.lock().await;
 
     let pki = pki("ijson-postcard")?;
     let (state, store, db_path) = crate::router_runtime::tests::test_router("ijson-postcard")?;
@@ -703,14 +798,16 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
             created_at,
             duplicate_extension,
         })?;
-        let Err(error) = bridge
-            .submit_raw_envelope(
+        let submit = tokio::time::timeout(
+            Duration::from_secs(15),
+            bridge.submit_raw_envelope(
                 body,
                 Instant::now(),
                 ramflux_node_core::RouterEnvelopeOrigin::Gateway,
-            )
-            .await
-        else {
+            ),
+        )
+        .await;
+        let Err(error) = fixture_wait(submit, "router submit bridge")? else {
             return Err("postcard submit bridge accepted an I-JSON refusal row".into());
         };
         assert!(error.chain().any(ramflux_protocol::is_i_json_rejection));
@@ -726,6 +823,42 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
         ("/mvp0/envelope/forwarded", true),
         ("/mvp10/own-devices/fanout", false),
     ];
+    let expires_at_ms =
+        ramflux_node_core::now_unix_seconds().saturating_add(60).saturating_mul(1_000);
+    let (status, body) = mesh_tls_post(
+        &pki,
+        &router,
+        "/mvp0/envelope-ephemeral",
+        "ramflux-gateway",
+        &pki.gateway,
+        EphemeralRouteWire {
+            envelope: envelope.clone(),
+            expires_at_ms,
+            created_at: Some(9_007_199_254_740_991),
+            duplicate_extension: false,
+        },
+    )
+    .await?;
+    assert_ne!(status, 400, "safe HTTP mesh ephemeral control reaches its handler");
+    assert_ne!(body, EXPECTED_BODY.as_bytes());
+    for (created_at, duplicate_extension) in [(Some(9_007_199_254_740_992), false), (None, true)] {
+        let (status, body) = mesh_tls_post(
+            &pki,
+            &router,
+            "/mvp0/envelope-ephemeral",
+            "ramflux-gateway",
+            &pki.gateway,
+            EphemeralRouteWire {
+                envelope: envelope.clone(),
+                expires_at_ms,
+                created_at,
+                duplicate_extension,
+            },
+        )
+        .await?;
+        assert_eq!(status, 400, "HTTP mesh ephemeral I-JSON refusal");
+        assert_eq!(body, EXPECTED_BODY.as_bytes());
+    }
     for (path, federation_peer) in endpoint_bodies {
         let wrapped_control = serde_json::to_vec(&RouteEnvelopeWire {
             path: path.to_owned(),
@@ -1049,5 +1182,196 @@ fn compio_source_route_cap_is_exact_on_raw_received_bytes_through_real_quic() ->
         .map_err(|_| "the compio listener did not bind within 10 s")??;
     let outcome = runtime.block_on(assert_cap_matrix(&endpoint, &pki));
     let _ = std::fs::remove_file(&db_path);
+    outcome
+}
+
+/// The Linux-only compio listener must reject the original JSON bytes before any router effect,
+/// for both JSON and postcard QUIC requests.
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one live-path regression proves the JSON and postcard wire matrix"
+)]
+fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
+    const EXPECTED_BODY: &[u8] = br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+    let _serial = IJSON_TEST_LOCK.blocking_lock();
+
+    let pki = Arc::new(pki("ijson-compio-live")?);
+    let (state, store, db_path) = crate::router_runtime::tests::test_router("ijson-compio-live")?;
+    let router = Arc::new(crate::router_runtime::RouterHandle::tokio(state, store, None));
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let bridge =
+        super::RouterSubmitBridge { router: Arc::clone(&router), tokio: runtime.handle().clone() };
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    let server_pki = Arc::clone(&pki);
+    std::thread::Builder::new().name("compio-ijson-ingress-test".into()).spawn(move || {
+        let outcome = (|| -> anyhow::Result<()> {
+            let reactor = compio::runtime::Runtime::new()?;
+            reactor.block_on(async move {
+                let server = super::bind_router_async_compio_mesh_quic_server(
+                    0,
+                    "127.0.0.1:0",
+                    &server_pki.router,
+                    1,
+                )
+                .await?;
+                let _ = addr_tx.send(Ok(server.local_addr()?.to_string()));
+                super::router_async_compio_mesh_quic_accept_loop(0, server, bridge, auth()).await;
+                Ok(())
+            })
+        })();
+        if let Err(error) = outcome {
+            tracing::error!(%error, "compio I-JSON ingress test reactor stopped");
+        }
+    })?;
+    let endpoint = addr_rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "the compio I-JSON listener did not bind within 10 s")??;
+
+    let mut envelope =
+        crate::router_runtime::tests::current_envelope("ijson-compio-live", "target_alice")?;
+    envelope.ext.ext.insert("x_probe".into(), serde_json::json!("v"));
+    let mut ephemeral = envelope.clone();
+    ephemeral.ext.ext.insert("delivery_mode".into(), serde_json::json!("ephemeral"));
+
+    let outcome = runtime.block_on(async {
+        for (candidate, created_at, duplicate_extension) in [
+            (&envelope, Some(9_007_199_254_740_992), false),
+            (&ephemeral, Some(9_007_199_254_740_992), false),
+            (&envelope, None, true),
+        ] {
+            let before = ingress_effect_snapshot(&router, &db_path, &envelope)?;
+            let body = serde_json::to_vec(&EnvelopeWire {
+                envelope: candidate,
+                created_at,
+                duplicate_extension,
+            })?;
+            let response = fixture_wait(
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    json_quic_post(
+                        &endpoint,
+                        &pki.gateway,
+                        &pki.ca_pem,
+                        "/mvp0/envelope",
+                        &body,
+                    ),
+                )
+                .await,
+                "compio JSON I-JSON refusal",
+            )??;
+            assert_eq!(response.status, 400);
+            assert_eq!(serde_json::to_vec(&response.body)?, EXPECTED_BODY);
+            assert_eq!(ingress_effect_snapshot(&router, &db_path, &envelope)?, before);
+
+            let before = ingress_effect_snapshot(&router, &db_path, &envelope)?;
+            let response = fixture_wait(
+                tokio::time::timeout(
+                    Duration::from_secs(15),
+                    postcard_post(
+                        &endpoint,
+                        &pki.gateway,
+                        &pki.ca_pem,
+                        candidate,
+                        created_at,
+                        duplicate_extension,
+                    ),
+                )
+                .await,
+                "compio postcard I-JSON refusal",
+            )?;
+            assert!(matches!(
+                response,
+                Err(ramflux_transport::TransportError::Http(ref message))
+                    if message.as_bytes() == [b"HTTP 400: ".as_slice(), EXPECTED_BODY].concat()
+            ), "expected exact compio postcard refusal, got {response:?}");
+            assert_eq!(ingress_effect_snapshot(&router, &db_path, &envelope)?, before);
+        }
+
+        let accepted_json = crate::router_runtime::tests::current_envelope(
+            "ijson-compio-json-control",
+            "target_alice",
+        )?;
+        let accepted_body = serde_json::to_vec(&EnvelopeWire {
+            envelope: &accepted_json,
+            created_at: None,
+            duplicate_extension: false,
+        })?;
+        assert_eq!(
+            ramflux_protocol::decode_signed_envelope_ijson(&accepted_body)?,
+            accepted_json
+        );
+        let response = fixture_wait(
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                json_quic_post(
+                    &endpoint,
+                    &pki.gateway,
+                    &pki.ca_pem,
+                    "/mvp0/envelope",
+                    &accepted_body,
+                ),
+            )
+            .await,
+            "compio JSON accepted control",
+        )??;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["outcome"], "online");
+        assert_eq!(response.body["target_delivery_id"], "target_alice");
+        let response_wire = serde_json::to_vec(&response.body)?;
+        let incarnation_id = router
+            .state()
+            .session_push_status("target_alice")
+            .incarnation_id
+            .ok_or("accepted JSON control did not initialize an inbox")?;
+        let retain_until = accepted_json
+            .created_at
+            .saturating_add(i64::from(accepted_json.ttl));
+        let expected_json_wire = format!(
+            r#"{{"cursor":null,"inbox_seq":1,"incarnation_id":"{incarnation_id}","outcome":"online","retain_until":{retain_until},"target_delivery_id":"target_alice"}}"#
+        );
+        assert_eq!(response_wire, expected_json_wire.as_bytes());
+
+        let accepted_postcard = crate::router_runtime::tests::current_envelope(
+            "ijson-compio-postcard-control",
+            "target_alice",
+        )?;
+        let response = fixture_wait(
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                postcard_post(
+                    &endpoint,
+                    &pki.gateway,
+                    &pki.ca_pem,
+                    &accepted_postcard,
+                    None,
+                    false,
+                ),
+            )
+            .await,
+            "compio postcard accepted control",
+        )??;
+        assert_eq!(response["outcome"], "online");
+        assert_eq!(response["target_delivery_id"], "target_alice");
+        assert_eq!(response["inbox_seq"], 2);
+        let response_wire = serde_json::to_vec(&response)?;
+        let incarnation_id = router
+            .state()
+            .session_push_status("target_alice")
+            .incarnation_id
+            .ok_or("accepted postcard control did not initialize an inbox")?;
+        let retain_until = accepted_postcard
+            .created_at
+            .saturating_add(i64::from(accepted_postcard.ttl));
+        let expected_postcard_wire = format!(
+            r#"{{"cursor":null,"inbox_seq":2,"incarnation_id":"{incarnation_id}","outcome":"online","retain_until":{retain_until},"target_delivery_id":"target_alice"}}"#
+        );
+        assert_eq!(response_wire, expected_postcard_wire.as_bytes());
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+    drop(router);
+    let _ = std::fs::remove_file(db_path);
     outcome
 }
