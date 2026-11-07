@@ -69,6 +69,29 @@ fn bounded_with(
     let _ = std::fs::remove_file(&err);
     result
 }
+/// Like [`bounded`] for commands that print a secret: stdout is an in-memory pipe (never a file)
+/// and the buffer is zeroized on drop. The output is tiny, so the pipe cannot fill and stall.
+fn bounded_secret(
+    command: &mut Command,
+) -> Result<(std::process::ExitStatus, zeroize::Zeroizing<Vec<u8>>), BoxError> {
+    use std::io::Read;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0);
+    let mut child = GroupReaper(command.spawn()?);
+    let end = Instant::now() + DEADLINE;
+    loop {
+        if let Some(status) = child.0.try_wait()? {
+            let mut bytes = zeroize::Zeroizing::new(Vec::new());
+            if let Some(mut out) = child.0.stdout.take() {
+                out.read_to_end(&mut bytes)?;
+            }
+            return Ok((status, bytes));
+        }
+        if Instant::now() >= end {
+            return Err(format!("subprocess timed out after {DEADLINE:?}").into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
 fn bounded(command: &mut Command) -> Result<Output, BoxError> {
     bounded_with(command, DEADLINE, &mut 0)
 }
@@ -285,21 +308,10 @@ async fn linux_vault_secret_service_has_no_headless_fallback()
 #[tokio::test]
 #[ignore = "private D-Bus and real gnome-keyring fixture"]
 async fn linux_vault_primary_branch_and_data_contract() -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::process::Stdio;
-    let mut daemon = Command::new("gnome-keyring-daemon")
-        .args(["--unlock", "--components=secrets"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()?;
-    daemon.stdin.take().ok_or("keyring stdin")?.write_all(b"rf-disposable-fixture-only")?;
-    assert!(daemon.wait()?.success());
-    let ss = dbus_secret_service::SecretService::connect_with_max_prompt_timeout(
-        dbus_secret_service::EncryptionType::Dh,
-        0,
-    )?;
-    let collection = ss.get_default_collection()?;
+    start_keyring()?;
+    let collection_ss = wait_for_secret_service()?;
+    let collection = collection_ss.get_default_collection()?;
     collection.set_label("ramflux-local-vault")?;
     let root = std::path::PathBuf::from(
         std::env::var_os("RF_LINUX_VAULT_FIXTURE_ROOT").ok_or("fixture root")?,
@@ -313,6 +325,64 @@ async fn linux_vault_primary_branch_and_data_contract() -> Result<(), Box<dyn st
     )
     .await?;
     primary_contract(&root, ramflux_sdk::custody::LinuxVaultMode::DesktopSecretService).await
+}
+
+/// Starts the private-bus keyring and waits for it to exit, under the fixture deadline. The
+/// password goes through stdin only; a stalled daemon is killed and reaped, never awaited forever.
+fn start_keyring() -> Result<(), BoxError> {
+    use std::io::Write;
+    let mut child = Command::new("gnome-keyring-daemon")
+        .args(["--unlock", "--components=secrets"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let result = (|| -> Result<(), BoxError> {
+        child.stdin.take().ok_or("keyring stdin")?.write_all(b"rf-disposable-fixture-only")?;
+        let end = Instant::now() + DEADLINE;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("gnome-keyring-daemon failed: {status}").into())
+                };
+            }
+            if Instant::now() >= end {
+                return Err(format!("gnome-keyring-daemon timed out after {DEADLINE:?}").into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+/// The daemon registers `org.freedesktop.secrets` on the private bus after its launcher exits, so
+/// a connection attempt right away can see `ServiceUnknown`. Poll until the service answers and
+/// its default collection is usable, bounded by the fixture deadline; fail loud with the last error.
+fn wait_for_secret_service() -> Result<dbus_secret_service::SecretService, BoxError> {
+    let end = Instant::now() + DEADLINE;
+    loop {
+        let attempt = dbus_secret_service::SecretService::connect_with_max_prompt_timeout(
+            dbus_secret_service::EncryptionType::Dh,
+            0,
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|ss| {
+            ss.get_default_collection().map(drop).map_err(|e| e.to_string())?;
+            Ok(ss)
+        });
+        match attempt {
+            Ok(ss) => return Ok(ss),
+            Err(last) if Instant::now() >= end => {
+                return Err(format!("Secret Service not ready after {DEADLINE:?}: {last}").into());
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
 }
 
 async fn primary_contract(
@@ -357,10 +427,7 @@ async fn primary_contract(
         device_epoch: 1,
     };
     drop(primary.load_branch(&branch, "principal", &device)?);
-    assert!(matches!(
-        primary.load_primary(&ramflux_protocol::encode_base64url([9; 32])),
-        Err(SdkError::CustodyVaultUnavailable)
-    ));
+    reference_binding_contract(root, (mode_name, &paths), &primary, &key, &device).await?;
     for length in [1, 8192] {
         let secret = Zeroizing::new(vec![0x63; length]);
         primary.store_provisioning_secret(&provisioning, &secret)?;
@@ -407,13 +474,70 @@ async fn primary_contract(
     Ok(())
 }
 
+/// Reference binding, one predicate at a time (see the seeding note inside).
+async fn reference_binding_contract(
+    root: &Path,
+    (mode_name, paths): (&str, &ramflux_sdk::custody::LinuxCredentialPaths),
+    primary: &ramflux_sdk::custody::LinuxPrimaryVault,
+    key: &ramflux_crypto::custody::SelfSigningKey,
+    device: &ramflux_protocol::custody::DeviceRef,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ramflux_sdk::SdkError;
+    use ramflux_sdk::custody::{
+        LinuxPrimaryVault, LinuxVaultConfig, LinuxVaultRole as Role, PrimaryVault,
+    };
+    use zeroize::Zeroizing;
+    // Reference binding, one predicate at a time. A second provider bound to another canonical
+    // reference seeds valid entries in the same account; `primary` must refuse each of them by its
+    // binding alone (the entries exist, so "missing" cannot be the reason), and leave them intact.
+    let foreign = ramflux_protocol::encode_base64url([9; 32]);
+    let foreign_branch = format!("branch:{foreign}");
+    let foreign_provisioning = format!("agent-provisioning:{foreign}");
+    let other = LinuxPrimaryVault::open(
+        root.into(),
+        "p06-account".into(),
+        foreign.clone(),
+        LinuxVaultConfig::new(mode_name, Role::AttendedPrimary, paths.clone())?,
+    )
+    .await?;
+    other.store_new(&foreign, key)?;
+    other.store_branch(&foreign_branch, &Zeroizing::new([5; 64]))?;
+    other.store_provisioning_secret(&foreign_provisioning, b"foreign-secret")?;
+    let refused =
+        |result: Result<(), SdkError>| matches!(result, Err(SdkError::CustodyVaultUnavailable));
+    assert!(refused(primary.load_primary(&foreign).map(drop)), "load_primary binding");
+    assert!(refused(primary.load_branch(&foreign_branch, "principal", device).map(drop)));
+    assert!(refused(primary.load_provisioning_secret(&foreign_provisioning).map(drop)));
+    assert!(refused(primary.delete(&foreign)), "delete primary binding");
+    assert!(refused(primary.delete(&foreign_branch)), "delete branch binding");
+    assert!(refused(primary.delete(&foreign_provisioning)), "delete provisioning binding");
+    // Stores of an unseeded foreign reference would succeed without the guard.
+    let unseeded = ramflux_protocol::encode_base64url([10; 32]);
+    assert!(refused(primary.store_new(&unseeded, key)), "store_new binding");
+    assert!(refused(primary.store_branch(&format!("branch:{unseeded}"), &Zeroizing::new([5; 64]))));
+    assert!(refused(
+        primary.store_provisioning_secret(&format!("agent-provisioning:{unseeded}"), b"x")
+    ));
+    assert!(other.load_primary(&unseeded).is_err(), "the refused store created nothing");
+    // Controls: every seeded entry is intact and readable through its own binding.
+    assert_eq!(other.load_primary(&foreign)?.public_key(), key.public_key());
+    drop(other.load_branch(&foreign_branch, "principal", device)?);
+    assert_eq!(
+        other.load_provisioning_secret(&foreign_provisioning)?.as_slice(),
+        b"foreign-secret"
+    );
+    other.delete(&foreign)?;
+    other.delete(&foreign_branch)?;
+    other.delete(&foreign_provisioning)?;
+    Ok(())
+}
+
 fn contract_paths(
     root: &Path,
     mode_name: &str,
 ) -> Result<ramflux_sdk::custody::LinuxCredentialPaths, Box<dyn std::error::Error>> {
     use ramflux_sdk::custody::LinuxCredentialPaths as Paths;
     use std::os::unix::fs::PermissionsExt;
-    use zeroize::Zeroizing;
     let mut paths = Paths::default();
     if mode_name == "systemd-host" {
         let descriptor: serde_json::Value =
@@ -423,14 +547,14 @@ fn contract_paths(
         {
             let name = ["rf-primary-kek", "rf-device-kek", "rf-data-kek"][i];
             let id = descriptor["key_ids"][i].as_str().ok_or("key id")?;
-            let output = Command::new("systemd-creds")
-                .arg("decrypt")
-                .arg(format!("--name={name}"))
-                .arg(root.join(format!("{name}.{id}.cred")))
-                .arg("-")
-                .output()?;
-            let bytes = Zeroizing::new(output.stdout);
-            assert!(output.status.success());
+            let (status, bytes) = bounded_secret(
+                Command::new("systemd-creds")
+                    .arg("decrypt")
+                    .arg(format!("--name={name}"))
+                    .arg(root.join(format!("{name}.{id}.cred")))
+                    .arg("-"),
+            )?;
+            assert!(status.success());
             assert_eq!(bytes.len(), 32);
             let path = root.join(format!("injected-{i}"));
             std::fs::write(&path, bytes.as_slice())?;

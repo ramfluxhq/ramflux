@@ -5,7 +5,7 @@ use super::super::init::Slot;
 use super::super::{cleanup::Secret, codec::Plaintext};
 use super::super::{
     durability::recording::{Op, RecordingOps},
-    test_proc::{run_bounded, run_bounded_pid},
+    test_proc::{BODY_ENV, DEADLINE, run_bounded, run_child, run_in_child},
 };
 use super::*;
 use std::{
@@ -97,7 +97,7 @@ fn observed(
 
 #[test]
 fn linux_vault_file_store_is_insert_only_and_crash_durable() -> TestResult {
-    run_in_child("file_store_body")
+    run_in_child("custody::vault::linux::writer::tests::file_store_body")
 }
 /// Out-of-process body of the file-store test; a no-op unless launched by `run_in_child`.
 #[test]
@@ -203,7 +203,7 @@ fn file_store_is_insert_only_and_crash_durable() -> TestResult {
 /// Durability oracle: the real fsync, rename and unlink steps must occur in D5 order.
 #[test]
 fn linux_vault_publication_call_order_is_durable() -> TestResult {
-    run_in_child("order_oracle_body")
+    run_in_child("custody::vault::linux::writer::tests::order_oracle_body")
 }
 /// Out-of-process body of the order oracle; a no-op unless launched by `run_in_child`.
 #[test]
@@ -255,43 +255,6 @@ fn strace_child() -> TestResult {
     store.apply(remove(n, 4, 1), |_| {})?;
     Ok(())
 }
-/// Set in the child that runs a lock-holding test body.
-const BODY_ENV: &str = "RF_VAULT_TEST_BODY";
-/// Runs a lock-holding test body in its own process (re-exec of this test binary).
-///
-/// `flock` locks belong to the open file description, which a forked child shares with its
-/// parent until it execs. A fixture spawned by another test thread would therefore keep a copy of
-/// a lock held at that instant, and the holder's next lock attempt would see `Busy`. CLOEXEC
-/// cannot close the fork-to-exec window. Bodies that take the realm lock run here, so no other
-/// test's fork can ever see their descriptors, and no timing window or gate is needed. The wait
-/// is bounded, the child is killed and reaped on every path, and its output is propagated.
-fn run_in_child(body: &str) -> TestResult {
-    run_child(body, CHILD_DEADLINE, &mut 0)
-}
-/// CI's nextest slow-timeout is 60 s; the guard must kill and reap the child's process group
-/// well before that SIGTERM, and stay at least as long as the 10 s used for other waits.
-const CHILD_DEADLINE: Duration = Duration::from_secs(30);
-const _: () = assert!(CHILD_DEADLINE.as_secs() >= 10 && CHILD_DEADLINE.as_secs() <= 40);
-fn run_child(body: &str, deadline: Duration, pid: &mut u32) -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let log = dir.path().join("child.log");
-    let out = File::create(&log)?;
-    let status = run_bounded_pid(
-        Command::new(std::env::current_exe()?)
-            .args(["--exact", &format!("custody::vault::linux::writer::tests::{body}")])
-            .arg("--nocapture")
-            .env(BODY_ENV, "1")
-            .stdout(out.try_clone()?)
-            .stderr(out),
-        deadline,
-        pid,
-    )?;
-    if !status.success() {
-        let output = std::fs::read_to_string(&log).unwrap_or_default();
-        return Err(format!("{body} failed ({status}):\n{output}").into());
-    }
-    Ok(())
-}
 /// Body that never returns; used only to prove the guard's stall cleanup.
 #[test]
 fn stalled_body() -> TestResult {
@@ -306,11 +269,15 @@ fn stalled_body() -> TestResult {
 fn stalled_child_is_killed_and_its_group_is_gone() -> TestResult {
     let started = Instant::now();
     let mut leader = 0;
-    let err = run_child("stalled_body", Duration::from_secs(2), &mut leader)
-        .err()
-        .ok_or("a stalled child must fail the run")?;
+    let err = run_child(
+        "custody::vault::linux::writer::tests::stalled_body",
+        Duration::from_secs(2),
+        &mut leader,
+    )
+    .err()
+    .ok_or("a stalled child must fail the run")?;
     assert!(err.to_string().contains("timed out"), "{err}");
-    assert!(started.elapsed() < CHILD_DEADLINE, "stall cleanup must stay inside the deadline");
+    assert!(started.elapsed() < DEADLINE, "stall cleanup must stay inside the deadline");
     let group =
         rustix::process::Pid::from_raw(leader.cast_signed()).ok_or("child pid not recorded")?;
     let end = Instant::now() + GUARD;
