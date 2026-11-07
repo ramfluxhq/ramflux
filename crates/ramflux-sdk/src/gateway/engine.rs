@@ -523,6 +523,9 @@ impl GatewaySessionEngine {
         ack.signed = sdk_device_signed_fields(receiver.device_id(), "");
         ack.signed.signature =
             ramflux_crypto::sign_protocol_object_with_device_branch(branch.as_ref(), &ack)?;
+        if matches!(self.mode, super::session_push::SessionMode::Push { .. }) {
+            return self.push_ack(ack).await;
+        }
         self.write_frame(&GatewayClientFrame::Ack { ack }).await?;
         let ack_cursor = match self.read_reply(super::frame_dispatch::ExpectedReply::Ack).await? {
             GatewayServerFrame::Ack { cursor } => {

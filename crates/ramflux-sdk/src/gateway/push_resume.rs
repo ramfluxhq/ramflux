@@ -92,7 +92,7 @@ impl GatewaySessionEngine {
                     // retires the session (no legacy reply is valid here).
                     self.dispatch_frame(&frame, None)?;
                 }
-                Step::SubmitAccepted(_) => {
+                Step::SubmitAccepted(_) | Step::Reply(_) => {
                     return Err(self.retire("unexpected capable reply while awaiting a page"));
                 }
             }
