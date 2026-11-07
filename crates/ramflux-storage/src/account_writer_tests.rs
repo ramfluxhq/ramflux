@@ -377,15 +377,15 @@ fn removed_account_never_reopens_empty() -> TestResult {
         "acct",
     );
     drop(exclusive);
-    // (b) Closed materialized account: erase is Ok, key cleared, files untouched.
-    let before = file_set(&account_dir)?;
+    // (b) Closed materialized account: erase is Ok and the key is cleared. File absence is
+    // asserted by `account_erase_removes_db_wal_shm`.
     assert_eq!(index.load_wrapped_db_key("acct")?, Some(wrapped_key()));
     index.erase_account_database("acct")?;
     assert_eq!(index.account("acct")?.account_state, "removed");
     assert!(index.load_wrapped_db_key("acct")?.is_none());
-    assert_eq!(file_set(&account_dir)?, before, "4a tombstoning removes no file");
     expect_not_found(&open(&root).map(drop), "acct");
-    assert_eq!(file_set(&account_dir)?, before, "a refused reopen touches no file");
+    let db_file = account_dir.join("ramflux_local.sqlite");
+    assert!(!db_file.exists(), "open must not recreate the DB of a removed account");
     index.erase_account_database("acct")?;
     // (e) Bad and unknown ids.
     for bad in ["", "..", "a/b", "/abs"] {
@@ -527,6 +527,89 @@ fn removed_account_open_barrier_on_unmaterialized_account() -> TestResult {
     );
     expect_not_found(&result, "ghost");
     assert!(!db_file.exists(), "open must not create the DB path of a removed account");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn lock_inode(path: &Path) -> std::io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata(path)?.ino())
+}
+
+#[test]
+fn account_erase_removes_db_wal_shm() -> TestResult {
+    let (root, db) = crate::tests::test_db("account-erase-files")?;
+    let dir = root.join("accounts/acct");
+    let main = dir.join("ramflux_local.sqlite");
+    let (wal, shm) = (dir.join("ramflux_local.sqlite-wal"), dir.join("ramflux_local.sqlite-shm"));
+    db.persist_actor_state("erase/kind", &serde_json::json!({"k": "v"}))?;
+    let segment = db.segment_store()?;
+    drop(segment);
+    let segments = dir.join("ramflux_local.segments");
+    std::fs::write(segments.join("seg-1"), b"segment-bytes")?;
+    std::fs::create_dir_all(dir.join("objects"))?;
+    std::fs::write(dir.join("objects/o-1"), b"object-bytes")?;
+    std::fs::write(dir.join(".backup-generation"), b"hint")?;
+    let (wal_copy, shm_copy) = (std::fs::read(&wal)?, std::fs::read(&shm)?);
+    drop(db);
+    std::fs::write(&wal, &wal_copy)?;
+    std::fs::write(&shm, &shm_copy)?;
+    let journal = dir.join("ramflux_local.sqlite-journal");
+    std::fs::write(&journal, b"journal")?;
+    for path in [&main, &wal, &shm, &journal] {
+        assert!(
+            std::fs::metadata(path)?.len() > 0,
+            "{} must be nonempty before erase",
+            path.display()
+        );
+    }
+    assert!(segments.join("seg-1").exists() && dir.join("objects/o-1").exists());
+    let lock = dir.join(".writer.lock");
+    let inode = lock_inode(&lock)?;
+
+    let index = AccountIndex::open(&root)?;
+    index.erase_account_database("acct")?;
+    for path in [
+        &main,
+        &wal,
+        &shm,
+        &journal,
+        &segments,
+        &dir.join("objects"),
+        &dir.join(".backup-generation"),
+    ] {
+        assert!(!path.exists(), "{} must be erased", path.display());
+    }
+    assert_eq!(lock_inode(&lock)?, inode, "the writer lock inode is kept");
+    assert_eq!(index.account("acct")?.account_state, "removed");
+    // (c) idempotent.
+    index.erase_account_database("acct")?;
+    assert_eq!(lock_inode(&lock)?, inode);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn account_erase_refuses_symlinks_before_any_unlink() -> TestResult {
+    let (root, db) = crate::tests::test_db("account-erase-symlink")?;
+    drop(db);
+    let dir = root.join("accounts/acct");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside)?;
+    std::fs::write(outside.join("keep"), b"keep")?;
+    std::fs::remove_dir_all(dir.join("objects"))?;
+    std::os::unix::fs::symlink(&outside, dir.join("objects"))?;
+    let main = dir.join("ramflux_local.sqlite");
+    assert!(main.exists());
+    let index = AccountIndex::open(&root)?;
+    let result = index.erase_account_database("acct");
+    assert!(
+        matches!(result, Err(StorageError::Integrity("account erase symlink"))),
+        "got {result:?}"
+    );
+    assert!(main.exists(), "nothing is unlinked before the symlink refusal");
+    assert!(dir.join("objects").symlink_metadata()?.file_type().is_symlink());
+    assert_eq!(std::fs::read(outside.join("keep"))?, b"keep");
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
