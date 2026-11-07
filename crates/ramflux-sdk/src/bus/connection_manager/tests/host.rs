@@ -318,3 +318,48 @@ async fn priority_call_cannot_await_writer_apply() -> Result<(), Box<dyn std::er
     handle.stop().await;
     Ok(())
 }
+
+/// (r12) of `sender_outcome_classification`: the outer call deadline expiring after the submit
+/// was written is an uncertain outcome in the outer error, never a typed refusal.
+#[tokio::test(start_paused = true)]
+async fn sender_outcome_call_deadline_after_the_write_is_uncertain() -> Case {
+    super::watchdog(async {
+        let (handle, mut io) = fixture().await?;
+        let envelope: ramflux_protocol::Envelope = serde_json::from_value(serde_json::json!({
+            "schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1",
+            "signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture",
+            "envelope_id":"env-deadline","source_principal_id":"p","source_device_id":"d",
+            "target_delivery_id":"host-target","delivery_class":"opaque_event",
+            "priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque",
+            "payload_hash":"hash-deadline"
+        }))?;
+        let start = Instant::now();
+        let call = {
+            let handle = handle.clone();
+            let envelope = envelope.clone();
+            tokio::spawn(async move {
+                handle
+                    .call(
+                        |engine| Box::pin(engine.submit_envelope_classified(envelope)),
+                        start + Duration::from_secs(7),
+                    )
+                    .await
+            })
+        };
+        // The submit reached the wire, then nothing comes back until the deadline.
+        assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Submit { submit })
+                if submit.envelope == envelope));
+        tokio::time::advance(Duration::from_secs(7)).await;
+        let outcome = call.await?;
+        match outcome {
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "transport error: I/O error: session call deadline expired"
+            ),
+            Ok(inner) => panic!("expected an outer error, got {inner:?}"),
+        }
+        handle.stop().await;
+        Ok(())
+    })
+    .await
+}
