@@ -96,6 +96,7 @@ fn forward_outcome_decoder_rejects_bad_combinations() {
         ("full", false),
         ("unsupported", false),
         ("expired", false),
+        ("invalid", false),
     ] {
         assert!(
             serde_json::from_value::<SessionPushForwardResponse>(

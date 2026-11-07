@@ -133,6 +133,7 @@ pub enum SessionPushForwardOutcome {
     Full,
     Unsupported,
     Expired,
+    Invalid,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SessionPushForwardResponse {

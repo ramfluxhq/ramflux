@@ -428,8 +428,14 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     assert_eq!(applied, 1);
     posted.respond.send((200, json!({"applied": applied}))).map_err(|_| Retired)?;
     assert_online(&router, session_id);
-    crate::ephemeral_forward::reset_wake_count();
-    let accepted = crate::ephemeral_forward::handle(
+    crate::clients::reset_notify_wake_count();
+    fixture.context.hub.set_queue_clock(TARGET, 1_760_000_004_999).await;
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    if let Some(entry) = fixture.context.hub.snapshot().await.get(TARGET) {
+        entry.queue.park_next_write(entered.clone(), release.clone());
+    }
+    let accepted = crate::ephemeral_forward::handle_at(
         &fixture.context.hub,
         crate::ephemeral_forward::GatewayForwardEphemeralRequest {
             source_gateway_id: GATEWAY.into(),
@@ -438,21 +444,26 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
             envelope: restart_envelope(TARGET),
             expires_at_ms: 1_760_000_005_000,
         },
+        1_760_000_004_999,
     )
     .await?;
     assert!(accepted.delivered);
     assert_eq!(accepted.outcome, Some(ramflux_node_core::SessionPushForwardOutcome::Queued));
+    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
     assert_eq!(fixture.context.hub.ephemeral_queued(TARGET).await, 1);
-    assert_eq!(crate::ephemeral_forward::wake_count(), 0);
+    assert_eq!(crate::clients::notify_wake_count(), 0);
+    release.add_permits(1);
     Ok(())
 }
 
 fn restart_envelope(target: &str) -> ramflux_protocol::Envelope {
+    let mut ext = std::collections::BTreeMap::new();
+    ext.insert(ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION.to_owned(), json!("ephemeral"));
     ramflux_protocol::Envelope {
         schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
         version: 1,
         domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
-        ext: ramflux_protocol::Ext::default(),
+        ext: ramflux_protocol::Ext { ext },
         signed: ramflux_protocol::SignedFields {
             signing_key_id: "test-p11-key".to_owned(),
             signature_alg: ramflux_protocol::SignatureAlg::Ed25519,
