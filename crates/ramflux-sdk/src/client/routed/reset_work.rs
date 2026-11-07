@@ -109,6 +109,8 @@ impl RamfluxClient {
                         }
                         let mut work: ResetWork = serde_json::from_value(row)?;
                         work.next_at = work.next_at.max(at.saturating_add(floor));
+                        #[cfg(test)]
+                        capacity_pause::run();
                         db.persist_actor_state(&key, &work)?;
                         Ok(())
                     })?;
@@ -235,6 +237,25 @@ impl RamfluxClient {
                 .await
         {
             tracing::debug!(%error,"encrypted reset acknowledgement will be retried on the next request");
+        }
+    }
+}
+
+/// Test seam: a pause inside the capacity transaction, between the fingerprint recheck and the
+/// update, where a competing writer connection can try to interleave.
+#[cfg(test)]
+pub(super) mod capacity_pause {
+    type Hook = Box<dyn FnOnce()>;
+    thread_local! {
+        static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(in crate::client) fn set(hook: Hook) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+    pub(super) fn run() {
+        let hook = HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
         }
     }
 }

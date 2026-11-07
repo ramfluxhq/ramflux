@@ -321,6 +321,84 @@ async fn late_refusal_row(reason: &str, confirmed: bool) -> TestResult {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum Competing {
+    Clear,
+    Replace,
+}
+
+/// A second same-process writer connection tries to clear or replace the reset work while the
+/// capacity refusal sits INSIDE its transaction (after the fingerprint recheck, before the
+/// update). The single transaction keeps the competing write out until commit; afterwards the
+/// final state is coherent: a cleared row is never recreated and a replacement never receives
+/// the old refusal.
+async fn capacity_interleave_row(competing: Competing) -> TestResult {
+    let _clock = crate::time::FixedClock::set(START);
+    let (alice, bob) = Box::pin(pending()).await?;
+    crate::time::FixedClock::advance_to(START + 61);
+    let local = bob.client.local_device_identity("bob")?;
+    let remote = bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?;
+    assert!(bob.client.begin_pair_recovery(&local, &remote, START + 61)?);
+    let submitted = bob.client.pair_reset_fingerprint(&local, &remote)?.ok_or("reset work")?;
+    assert_eq!(submitted["next_at"], START + 181);
+    let key = RamfluxClient::reset_work_key(&local, &remote)?;
+    // The second writer connection, opened the way the account unlock opens the first.
+    let vault = bob.client.vault_secret_source()?.vault_secret("bob")?;
+    let kek = crate::client::account::account_db_key_encryption_key(&vault, b"routed-test");
+    let wrapped =
+        bob.client.account_index()?.load_wrapped_db_key("bob")?.ok_or("wrapped database key")?;
+    let db_key = crate::prelude::unwrap_with_vault_secret(&kek, &wrapped)?;
+    let index = crate::prelude::AccountIndex::open(bob.client.account_index()?.root())?;
+    let second = std::rc::Rc::new(crate::prelude::AccountDb::open(&index, "bob", &db_key)?);
+    // A replacement is a later reset: a different row whose schedule is earlier than the floor
+    // the old refusal would impose (`now + 1 s` = START + 62).
+    let replacement = serde_json::json!({
+        "local": submitted["local"], "remote": submitted["remote"],
+        "attempts": 3, "next_at": START + 10, "first_at": START,
+    });
+    let during = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    {
+        let (during, key, replacement) = (during.clone(), key.clone(), replacement.clone());
+        let competitor = std::rc::Rc::clone(&second);
+        crate::client::routed::reset_work::capacity_pause::set(Box::new(move || {
+            let attempt = match competing {
+                Competing::Clear => competitor.remove_actor_state(&key),
+                Competing::Replace => competitor.persist_actor_state(&key, &replacement),
+            };
+            during.borrow_mut().push(attempt.is_err());
+        }));
+    }
+    let error = bob.client.pair_control_refused(
+        &local,
+        &remote,
+        PairControlKind::Reset,
+        crate::gateway::session_push::SubmitRefusal::CapacityRetryAfter { retry_after_ms: 1000 },
+        Some(&submitted),
+    )?;
+    assert_eq!(error.to_string(), "gateway session rejected: capacity_retry_after");
+    // The competing write could not interleave: it was refused while the transaction was open.
+    assert_eq!(*during.borrow(), vec![true]);
+    // The refusal had applied to the original row (floor below its own schedule: unchanged).
+    assert_eq!(bob.client.pair_reset_fingerprint(&local, &remote)?, Some(submitted));
+    // The competing write now follows the commit.
+    match competing {
+        Competing::Clear => {
+            second.remove_actor_state(&key)?;
+            assert!(work(&bob.client)?.is_none(), "a cleared row is never recreated");
+        }
+        Competing::Replace => {
+            second.persist_actor_state(&key, &replacement)?;
+            assert_eq!(
+                work(&bob.client)?,
+                Some(replacement),
+                "a replacement never receives the old refusal"
+            );
+        }
+    }
+    drop((alice, second));
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn sender_refusal_policy_reset() -> TestResult {
     for case in Case::ALL {
@@ -329,6 +407,8 @@ async fn sender_refusal_policy_reset() -> TestResult {
     for case in Case::ALL {
         Box::pin(courier_row(case)).await?;
     }
+    Box::pin(capacity_interleave_row(Competing::Clear)).await?;
+    Box::pin(capacity_interleave_row(Competing::Replace)).await?;
     for reason in ["idempotency_conflict", "capacity_retry_after"] {
         Box::pin(late_refusal_row(reason, true)).await?;
         Box::pin(late_refusal_row(reason, false)).await?;
