@@ -45,6 +45,11 @@ pub(crate) struct Readiness {
     ready: AtomicBool,
 }
 impl Readiness {
+    /// Fixtures that own every mesh request keep the discovery probe from starting.
+    #[cfg(test)]
+    pub(crate) fn suppress_discovery_for_test(&self) {
+        self.started.store(true, Ordering::Release);
+    }
     pub(crate) fn start(self: &Arc<Self>, router: &RouterMeshClient) {
         self.start_with_interval(router, DISCOVERY_INTERVAL, DISCOVERY_PROBE_TIMEOUT);
     }
