@@ -45,7 +45,16 @@ impl Default for EphemeralRateLimiter {
     }
 }
 
+/// Idle time after which a bucket has refilled to the full burst, so forgetting it is exact.
+pub(crate) const EPHEMERAL_RATE_FULL_REFILL_MS: u64 =
+    EPHEMERAL_RATE_BURST as u64 * EPHEMERAL_RATE_REFILL_MS;
+
 impl EphemeralRateLimiter {
+    /// True when `now_ms` is far enough past the last refill that the bucket is full again.
+    pub(crate) fn idle_expired(&self, now_ms: u64) -> bool {
+        self.last_ms.is_none_or(|last| now_ms.saturating_sub(last) >= EPHEMERAL_RATE_FULL_REFILL_MS)
+    }
+
     /// Refill from `now_ms` and consume one token.
     pub(crate) fn try_acquire(&mut self, now_ms: u64) -> bool {
         if let Some(last) = self.last_ms {
@@ -72,6 +81,28 @@ impl EphemeralRateLimiter {
 
 /// Session-owned, synchronized bucket: retained across submits and shared by session clones.
 pub(crate) type EphemeralRate = tokio::sync::Mutex<EphemeralRateLimiter>;
+
+/// Volatile buckets keyed by session ID, so a same-session resume keeps its spent tokens.
+///
+/// Expiry is explicit and exact: a bucket idle for [`EPHEMERAL_RATE_FULL_REFILL_MS`] (40 tokens
+/// x 50 ms) would be full again, so it is dropped on the next lookup and a fresh full bucket
+/// is indistinguishable from the refilled one. Nothing here is ever persisted (I-NP).
+#[derive(Default)]
+pub(crate) struct EphemeralRateRegistry {
+    buckets: std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<EphemeralRate>>>,
+}
+
+impl EphemeralRateRegistry {
+    /// The live bucket for `session_id`, created when absent or expired as of `now_ms`.
+    pub(crate) fn bucket(&self, session_id: &str, now_ms: u64) -> std::sync::Arc<EphemeralRate> {
+        let mut buckets = self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A bucket that is locked right now is in use, so it is not idle.
+        buckets.retain(|_, bucket| {
+            bucket.try_lock().map_or(true, |limiter| !limiter.idle_expired(now_ms))
+        });
+        std::sync::Arc::clone(buckets.entry(session_id.to_owned()).or_default())
+    }
+}
 
 pub(crate) trait EphemeralRoute {
     fn route(
@@ -145,6 +176,28 @@ where
     }
 }
 
+/// True for every submit that must not touch durable gateway state: ephemeral and any
+/// unrecognized delivery mode. The session loop classifies with this before it mutates
+/// anything persistent.
+pub(crate) fn is_non_durable(submit: &ramflux_node_core::GatewaySubmitFrame) -> bool {
+    ramflux_protocol::ephemeral::classify_delivery_mode(&submit.envelope)
+        != ramflux_protocol::ephemeral::DeliveryMode::Durable
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only stand-in for the establishment echo that P10 will provide.
+    pub(crate) static NEGOTIATED_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn negotiated() -> bool {
+    #[cfg(test)]
+    if NEGOTIATED_FOR_TEST.with(std::cell::Cell::get) {
+        return true;
+    }
+    GatewaySessionRuntime::ephemeral_negotiated()
+}
+
 /// Session ingress for a non-durable submit: one typed result, never the durable mesh.
 pub(crate) async fn handle_submit(
     send: &GatewaySendHandle,
@@ -156,11 +209,7 @@ pub(crate) async fn handle_submit(
     let mut enqueue = HubEnqueue { hub: &context.hub };
     handle_submit_with(
         send,
-        &SubmitIngress {
-            runtime,
-            negotiated: GatewaySessionRuntime::ephemeral_negotiated(),
-            now_ms: now_ms(),
-        },
+        &SubmitIngress { runtime, negotiated: negotiated(), now_ms: now_ms() },
         submit,
         &mut route,
         &mut enqueue,
@@ -258,7 +307,7 @@ fn frame_bytes(envelope: &Envelope, expires_at_ms: u64) -> Option<Vec<u8>> {
     .ok()
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis());
@@ -326,5 +375,7 @@ impl EphemeralEnqueue for HubEnqueue<'_> {
 
 #[cfg(test)]
 mod handler_tests;
+#[cfg(test)]
+mod session_loop_tests;
 #[cfg(test)]
 mod tests;

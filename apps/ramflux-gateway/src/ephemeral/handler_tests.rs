@@ -11,13 +11,13 @@ use crate::session_push::tests::support::sink;
 use ramflux_protocol::SignedRequest;
 use serde_json::{Value, json};
 
-fn unix_now() -> i64 {
+pub(super) fn unix_now() -> i64 {
     i64::try_from(ramflux_node_core::now_unix_seconds()).unwrap_or(i64::MAX)
 }
 
 /// A correctly signed ephemeral submit from the fixture session; `change` edits the envelope
 /// before it is signed, `tamper` edits the finished frame.
-fn submit(
+pub(super) fn submit(
     runtime: &crate::GatewaySessionRuntime,
     id: &str,
     ttl: u32,
@@ -68,7 +68,7 @@ fn resign(request: &mut SignedRequest) -> TestResult {
 }
 
 /// Persisted and in-memory gateway state, serialized: byte-identical means nothing was written.
-fn snapshot(context: &crate::GatewayQuicContext) -> TestResult<Vec<u8>> {
+pub(super) fn snapshot(context: &crate::GatewayQuicContext) -> TestResult<Vec<u8>> {
     let disk = context.store.load_state()?;
     let memory =
         context.state.lock().map_err(|_| anyhow::anyhow!("gateway state poisoned"))?.clone();
@@ -105,15 +105,15 @@ async fn drive(
     Ok(Outcome { frames, route, enqueue })
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     u64::try_from(unix_now()).unwrap_or(0).saturating_mul(1_000)
 }
 
-fn dropped(id: &str, reason: &str) -> Value {
+pub(super) fn dropped(id: &str, reason: &str) -> Value {
     json!({"frame_type":"ephemeral_result","envelope_id":id,"outcome":"dropped","reason":reason})
 }
 
-fn accepted(id: &str) -> Value {
+pub(super) fn accepted(id: &str) -> Value {
     json!({"frame_type":"ephemeral_result","envelope_id":id,"outcome":"accepted"})
 }
 

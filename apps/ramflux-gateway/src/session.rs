@@ -636,6 +636,9 @@ pub(crate) async fn establish_gateway_session(
         resume_window_seconds,
     };
     crate::session_push::established(send, established, session_push.as_deref()).await?;
+    // Volatile and keyed by session ID: a same-session resume keeps its spent tokens.
+    let ephemeral_rate =
+        context.hub.ephemeral_rates.bucket(&session_id, crate::ephemeral::now_ms());
     Ok(GatewaySessionRuntime {
         session_push,
         push_limit: usize::try_from(open.max_inflight_downstream).unwrap_or(256).clamp(16, 256),
@@ -648,7 +651,7 @@ pub(crate) async fn establish_gateway_session(
         branch_public_key: registered_auth_key.branch_public_key,
         device_epoch: registered_auth_key.device_epoch,
         supports_forward_ack: auth_supports_forward_ack(auth_frame),
-        ephemeral_rate: std::sync::Arc::default(),
+        ephemeral_rate,
     })
 }
 
@@ -744,7 +747,7 @@ pub(crate) async fn run_gateway_session_loop(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_gateway_session_loop_until_closed(
+pub(crate) async fn run_gateway_session_loop_until_closed(
     send: GatewaySendHandle,
     mut recv: Box<dyn ramflux_transport::GatewaySessionFrameSource + Send>,
     context: GatewayQuicContext,
@@ -784,7 +787,11 @@ async fn run_gateway_session_loop_until_closed(
             let Some(_request) = ramflux_node_core::begin_service_request() else {
                 return Ok(());
             };
-            refresh_session_activity(&context, &runtime)?;
+            // An oversized frame cannot be classified, so only recognized session-push
+            // traffic counts as activity; anything else is refused without touching state.
+            if crate::session_push::recognizes(&bytes, runtime.session_push.is_some()) {
+                refresh_session_activity(&context, &runtime)?;
+            }
             crate::session_push::handle_authorized(
                 &send,
                 &context,
@@ -838,7 +845,12 @@ async fn run_gateway_session_loop_until_closed(
             write_gateway_handle(&send, &response).await?;
             return Ok(());
         }
-        refresh_session_activity(&context, &runtime)?;
+        // I-NP: classify before the first persistent mutation. A non-durable submit leaves the
+        // checkpointed session metadata (which any later durable save writes) untouched.
+        if !matches!(&frame, ramflux_node_core::GatewayClientFrame::Submit { submit } if crate::ephemeral::is_non_durable(submit))
+        {
+            refresh_session_activity(&context, &runtime)?;
+        }
         let request_kind = super::session_response::request_kind(&frame);
         let result = async {
             match frame {
