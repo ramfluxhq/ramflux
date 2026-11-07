@@ -4,6 +4,9 @@
 mod admin_http;
 mod attachment_renewal;
 mod discovery;
+#[cfg(test)]
+mod durable_ingress_registry;
+mod durable_mode;
 mod flow;
 mod helpers;
 mod home_migration;

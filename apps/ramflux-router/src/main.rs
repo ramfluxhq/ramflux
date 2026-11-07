@@ -5,6 +5,9 @@ mod attachment_renew_home;
 mod attachment_source;
 mod custody_listener;
 #[cfg(test)]
+mod durable_ingress_registry;
+mod durable_mode;
+#[cfg(test)]
 mod entry_admission_tests;
 mod forward_http;
 mod handlers;

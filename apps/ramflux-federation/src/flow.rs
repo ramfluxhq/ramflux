@@ -75,6 +75,9 @@ pub(crate) fn handle_s8_forward_envelope(
     router: &RouterMeshClient,
     discovery: &FederationDiscoverySurface,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
+    if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+        return Ok(crate::durable_mode::refused_forward(request));
+    }
     let route_decision = if request.target_node_id == discovery.node_id {
         "local_target_rejected"
     } else {
@@ -449,6 +452,9 @@ pub(crate) fn handle_s8_receive_envelope(
     discovery: &FederationDiscoverySurface,
     observability: Option<&FederationMeshObservability>,
 ) -> Result<ramflux_node_core::FederatedEnvelopeForwardResponse, ramflux_node_core::NodeCoreError> {
+    if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+        return Ok(crate::durable_mode::refused_forward(request));
+    }
     let total_started = std::time::Instant::now();
     let step_started = std::time::Instant::now();
     ensure_receive_target_node(request, &discovery.node_id)?;
@@ -486,6 +492,9 @@ where
         &serde_json::Value,
     ) -> Result<serde_json::Value, ramflux_node_core::NodeCoreError>,
 {
+    if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&request.envelope));
+    }
     if request.migration_evidence.is_none() {
         let response = post(
             "/mvp0/envelope",
@@ -530,6 +539,9 @@ where
         &ramflux_node_core::ForwardedEnvelopeRequest,
     ) -> Result<ForwardedRouterResponse, ramflux_node_core::NodeCoreError>,
 {
+    if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&request.envelope));
+    }
     let response = post(
         "/mvp0/envelope/forwarded",
         &ramflux_node_core::ForwardedEnvelopeRequest {

@@ -39,6 +39,9 @@ pub(crate) fn submit_envelope(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&envelope));
+    }
     submit_envelope_mesh(state, store, forward, envelope, total_started, origin)
         .map(|response| response.delivery)
 }
@@ -50,6 +53,9 @@ pub(crate) fn submit_envelope_mesh(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+    }
     ramflux_node_core::publication::capture(|| {
         submit_envelope_mesh_inner(state, store, forward, envelope, total_started, origin)
     })?
@@ -64,6 +70,9 @@ pub(crate) fn submit_envelope_mesh_inner(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+    }
     let target = envelope.target_delivery_id.clone();
     let result =
         (|| match prepare_submission(state, store, forward, envelope, total_started, origin)? {
@@ -333,6 +342,9 @@ pub(crate) async fn submit_envelope_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security(&envelope));
+    }
     submit_envelope_mesh_async(state, store, forward, envelope, total_started, origin)
         .await
         .map(|response| response.delivery)
@@ -345,6 +357,9 @@ pub(crate) async fn submit_envelope_mesh_async(
     total_started: Instant,
     origin: ramflux_node_core::RouterEnvelopeOrigin,
 ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+        return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+    }
     let target = envelope.target_delivery_id.clone();
     let publication = store.publication_core()?;
     let state = std::sync::Arc::clone(state);
@@ -555,6 +570,9 @@ pub(crate) fn own_device_fanout(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
+    if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+        anyhow::bail!("delivery_mode_refused");
+    }
     Ok(ramflux_node_core::publication::capture(|| own_device_fanout_inner(state, store, request))?
         .published_blocking()??
         .resolved_blocking()?)
@@ -565,6 +583,9 @@ pub(crate) fn own_device_fanout_inner(
     store: &ramflux_node_core::RouterRedbStore,
     request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
 ) -> anyhow::Result<ramflux_node_core::PreparedFanout> {
+    if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+        anyhow::bail!("delivery_mode_refused");
+    }
     Ok(state.prepare_sender_fanout(
         store,
         request,

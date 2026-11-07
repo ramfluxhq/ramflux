@@ -1266,6 +1266,10 @@ pub(crate) async fn handle_gateway_submit(
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> anyhow::Result<()> {
+    if ramflux_protocol::ephemeral::require_durable(&submit.envelope).is_err() {
+        write_gateway_handle(send, &crate::durable_mode::nack_frame()).await?;
+        return Ok(());
+    }
     let validated = (|| -> anyhow::Result<ramflux_protocol::Envelope> {
         let envelope = crate::submit_source::bind_source(runtime, &submit.envelope)?;
         validate_gateway_session_signed_request(
@@ -1454,6 +1458,10 @@ pub(crate) async fn handle_gateway_own_device_fanout(
     runtime: &GatewaySessionRuntime,
     fanout: &ramflux_node_core::GatewayOwnDeviceFanoutFrame,
 ) -> anyhow::Result<()> {
+    if ramflux_protocol::ephemeral::require_durable(&fanout.envelope).is_err() {
+        write_gateway_handle(send, &crate::durable_mode::nack_frame()).await?;
+        return Ok(());
+    }
     if let Some(reason) = own_device_fanout_session_rejection(runtime, fanout) {
         write_gateway_handle(
             send,

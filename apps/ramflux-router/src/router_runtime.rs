@@ -133,6 +133,9 @@ impl RouterHandle {
         total_started: Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security(&envelope));
+        }
         match self {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope(
                 runtime.state.as_ref(),
@@ -156,6 +159,9 @@ impl RouterHandle {
         total_started: Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::EnvelopeSubmitResponse> {
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security(&envelope));
+        }
         match self {
             Self::Tokio(runtime) => {
                 crate::router_engine::submit_envelope_async(
@@ -181,6 +187,9 @@ impl RouterHandle {
         total_started: Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+        }
         match self {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope_mesh(
                 runtime.state.as_ref(),
@@ -203,6 +212,9 @@ impl RouterHandle {
         total_started: Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
+            return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
+        }
         match self {
             Self::Tokio(runtime) => {
                 crate::router_engine::submit_envelope_mesh_async(
@@ -279,6 +291,9 @@ impl RouterHandle {
         &self,
         request: &ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest,
     ) -> anyhow::Result<ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse> {
+        if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+            anyhow::bail!("delivery_mode_refused");
+        }
         match self {
             Self::Tokio(runtime) => crate::router_engine::own_device_fanout(
                 runtime.state.as_ref(),
@@ -470,6 +485,11 @@ impl RouterHandle {
         &self,
         request: ramflux_node_core::ForwardedEnvelopeRequest,
     ) -> anyhow::Result<serde_json::Value> {
+        if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+            return Ok(serde_json::to_value(crate::durable_mode::rejected_security(
+                &request.envelope,
+            ))?);
+        }
         let router = self.clone();
         let operation = tokio::task::spawn_blocking(move || {
             let Self::Tokio(runtime) = &router;
@@ -489,6 +509,11 @@ impl RouterHandle {
         &self,
         request: ramflux_node_core::ForwardedEnvelopeRequest,
     ) -> anyhow::Result<serde_json::Value> {
+        if ramflux_protocol::ephemeral::require_durable(&request.envelope).is_err() {
+            return Ok(serde_json::to_value(crate::durable_mode::rejected_security(
+                &request.envelope,
+            ))?);
+        }
         let Self::Tokio(runtime) = self;
         let node = runtime.custody.get().and_then(|s| s.migration_node());
         self.forwarded_reply(

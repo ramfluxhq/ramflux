@@ -174,6 +174,9 @@ pub(crate) fn forward(
     row: &MigrationDrainEntry,
     now: u64,
 ) -> Result<MigrationDrainOutcome, NodeCoreError> {
+    if ramflux_protocol::ephemeral::require_durable(&row.entry.envelope).is_err() {
+        return Ok(MigrationDrainOutcome::Held);
+    }
     let Some(client) = context.client else {
         return Ok(MigrationDrainOutcome::Held);
     };
