@@ -20,6 +20,7 @@ pub use device_address::{
 pub mod dm_fs_v3;
 pub mod domain;
 mod encoding;
+pub mod ephemeral;
 mod error;
 mod events;
 mod group_device_roots;
