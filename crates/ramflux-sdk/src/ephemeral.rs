@@ -65,6 +65,12 @@ pub enum ReceiverDropReason {
     HoldDeadlineOverflow,
     #[error("monotonic early-hold cap elapsed before the signed start")]
     HoldCapExceeded,
+    #[error("ephemeral envelope signature is empty")]
+    Unsigned,
+    #[error("ephemeral envelope source principal does not match")]
+    WrongSource,
+    #[error("ephemeral envelope signature does not verify")]
+    BadSignature,
 }
 
 /// Receiver lifetime decision at one injected clock reading.
@@ -73,6 +79,23 @@ pub enum ReceiverLifetime {
     Drop(ReceiverDropReason),
     Hold(HoldLease),
     Display { expires_at_ms: u64 },
+}
+
+/// Still-encrypted envelope that passed signature and source verification.
+///
+/// The only constructor is [`authenticate`]. An ordinary [`Envelope`] cannot
+/// reach [`admit_authenticated_ciphertext`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedCiphertext<'a> {
+    envelope: &'a Envelope,
+}
+
+impl<'a> AuthenticatedCiphertext<'a> {
+    /// Still-encrypted authenticated envelope.
+    #[must_use]
+    pub fn envelope(self) -> &'a Envelope {
+        self.envelope
+    }
 }
 
 /// Authenticated ciphertext handoff: the envelope is returned still encrypted.
@@ -84,16 +107,46 @@ pub struct ReceiverHandoff<'a> {
     pub ciphertext: Option<&'a Envelope>,
 }
 
-/// Admit an already authenticated ephemeral envelope under injected clocks.
+/// Verify sender signature and source, then wrap the still-encrypted envelope.
+///
+/// # Errors
+/// Returns [`ReceiverDropReason::Unsigned`] when the signature is empty,
+/// [`ReceiverDropReason::WrongSource`] when `source_principal_id` differs from
+/// `expected_source_principal_id`, and [`ReceiverDropReason::BadSignature`] when
+/// canonical sender bytes cannot be formed or the signature does not verify.
+pub fn authenticate<'a>(
+    envelope: &'a Envelope,
+    expected_source_principal_id: &str,
+    signing_public_key: &str,
+) -> Result<AuthenticatedCiphertext<'a>, ReceiverDropReason> {
+    if envelope.signed.signature.is_empty() {
+        return Err(ReceiverDropReason::Unsigned);
+    }
+    if envelope.source_principal_id != expected_source_principal_id {
+        return Err(ReceiverDropReason::WrongSource);
+    }
+    let signed_bytes = ramflux_protocol::envelope_sender_signed_bytes(envelope)
+        .map_err(|_| ReceiverDropReason::BadSignature)?;
+    ramflux_crypto::verify_canonical_signature(
+        &signed_bytes,
+        &envelope.signed.signature,
+        signing_public_key,
+    )
+    .map_err(|_| ReceiverDropReason::BadSignature)?;
+    Ok(AuthenticatedCiphertext { envelope })
+}
+
+/// Admit an authenticated ephemeral envelope under injected clocks.
 ///
 /// `hold` is `None` on first receipt and the prior [`HoldLease`] on a later poll.
 /// The signed interval is never renewed. Exclusive deadline `now_ms < expires_at_ms`.
 /// Refusals are [`ReceiverLifetime::Drop`].
-pub fn admit_authenticated_ciphertext(
-    envelope: &Envelope,
+pub fn admit_authenticated_ciphertext<'a>(
+    ciphertext: &AuthenticatedCiphertext<'a>,
     clock: ReceiverClock,
     hold: Option<HoldLease>,
-) -> ReceiverHandoff<'_> {
+) -> ReceiverHandoff<'a> {
+    let envelope = ciphertext.envelope;
     match admit_lifetime(envelope, clock, hold) {
         lifetime @ ReceiverLifetime::Drop(_) => ReceiverHandoff { lifetime, ciphertext: None },
         lifetime => ReceiverHandoff { lifetime, ciphertext: Some(envelope) },
@@ -188,6 +241,9 @@ fn first_receipt(
 }
 
 fn poll_hold(created_at_ms: i128, clock: ReceiverClock, lease: HoldLease) -> ReceiverLifetime {
+    if clock.monotonic_ms > lease.monotonic_deadline_ms {
+        return ReceiverLifetime::Drop(ReceiverDropReason::HoldCapExceeded);
+    }
     if in_signed_display_window(created_at_ms, clock.local_now_ms, lease.expires_at_ms) {
         return ReceiverLifetime::Display { expires_at_ms: lease.expires_at_ms };
     }
@@ -206,7 +262,7 @@ mod tests {
     use super::{
         HoldLease, MAX_EPHEMERAL_TTL_SECONDS, MIN_EPHEMERAL_TTL_SECONDS, ReceiverClock,
         ReceiverDropReason, ReceiverHandoff, ReceiverLifetime, admit_authenticated_ciphertext,
-        ttl_seconds,
+        authenticate, ttl_seconds,
     };
     use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
     use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
@@ -216,12 +272,27 @@ mod tests {
     const NOW_MS: u64 = 1_000_000;
     const MONOTONIC_MS: u64 = 50_000;
     const CIPHERTEXT: &str = "still-encrypted-ciphertext";
+    const PRINCIPAL: &str = "principal";
+    const SEED: [u8; 32] = [7; 32];
 
     fn clock(local_now_ms: u64, monotonic_ms: u64) -> ReceiverClock {
         ReceiverClock { local_now_ms, monotonic_ms }
     }
 
-    fn valid_envelope() -> Envelope {
+    fn signing_public_key() -> String {
+        ramflux_crypto::public_key_base64url_from_seed(SEED)
+    }
+
+    fn sign_envelope(envelope: &mut Envelope) {
+        let bytes = ramflux_protocol::envelope_sender_signed_bytes(envelope);
+        assert!(bytes.is_ok(), "canonical sender bytes");
+        if let Ok(bytes) = bytes {
+            envelope.signed.signature =
+                ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, SEED);
+        }
+    }
+
+    fn unsigned_envelope() -> Envelope {
         let mut extensions = BTreeMap::new();
         extensions
             .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
@@ -233,10 +304,10 @@ mod tests {
             signed: SignedFields {
                 signing_key_id: "key".to_owned(),
                 signature_alg: SignatureAlg::Ed25519,
-                signature: "signature".to_owned(),
+                signature: String::new(),
             },
             envelope_id: "envelope".to_owned(),
-            source_principal_id: "principal".to_owned(),
+            source_principal_id: PRINCIPAL.to_owned(),
             source_device_id: "device".to_owned(),
             target_delivery_id: "target".to_owned(),
             routing_set_id: None,
@@ -249,9 +320,16 @@ mod tests {
         }
     }
 
+    fn valid_envelope() -> Envelope {
+        let mut envelope = unsigned_envelope();
+        sign_envelope(&mut envelope);
+        envelope
+    }
+
     fn mutated(change: impl FnOnce(&mut Envelope)) -> Envelope {
-        let mut envelope = valid_envelope();
+        let mut envelope = unsigned_envelope();
         change(&mut envelope);
+        sign_envelope(&mut envelope);
         envelope
     }
 
@@ -261,7 +339,16 @@ mod tests {
         monotonic_ms: u64,
         hold: Option<HoldLease>,
     ) -> ReceiverHandoff<'_> {
-        admit_authenticated_ciphertext(envelope, clock(local_now_ms, monotonic_ms), hold)
+        match authenticate(envelope, PRINCIPAL, &signing_public_key()) {
+            Ok(authenticated) => admit_authenticated_ciphertext(
+                &authenticated,
+                clock(local_now_ms, monotonic_ms),
+                hold,
+            ),
+            Err(reason) => {
+                ReceiverHandoff { lifetime: ReceiverLifetime::Drop(reason), ciphertext: None }
+            }
+        }
     }
 
     fn drop_reason(handoff: &ReceiverHandoff<'_>) -> Option<ReceiverDropReason> {
@@ -322,6 +409,12 @@ mod tests {
             drop_reason(&admit(&ttl6, NOW_MS, MONOTONIC_MS, None)),
             Some(ReceiverDropReason::InvalidTtl)
         );
+
+        let ttl_max = mutated(|e| e.ttl = u32::MAX);
+        assert_eq!(
+            drop_reason(&admit(&ttl_max, NOW_MS, MONOTONIC_MS, None)),
+            Some(ReceiverDropReason::InvalidTtl)
+        );
     }
 
     fn own_clock_and_monotonic_hold() {
@@ -354,6 +447,15 @@ mod tests {
         let cap = admit(&early, 998_000, MONOTONIC_MS + 2_000, Some(lease));
         assert_eq!(drop_reason(&cap), Some(ReceiverDropReason::HoldCapExceeded));
         assert!(cap.ciphertext.is_none());
+
+        let rollback_in_window = admit(&early, 1_002_000, 55_000, Some(lease));
+        assert_eq!(drop_reason(&rollback_in_window), Some(ReceiverDropReason::HoldCapExceeded));
+        assert!(rollback_in_window.ciphertext.is_none());
+
+        assert_eq!(
+            drop_reason(&admit(&early, NOW_MS, u64::MAX - 1_999, None)),
+            Some(ReceiverDropReason::HoldDeadlineOverflow)
+        );
     }
 
     fn overflow_display_bridge_handoff() {
@@ -397,20 +499,113 @@ mod tests {
 
         let mut durable = valid_envelope();
         durable.ext.ext.remove(DELIVERY_MODE_EXTENSION);
+        sign_envelope(&mut durable);
         assert_eq!(
             drop_reason(&admit(&durable, NOW_MS, MONOTONIC_MS, None)),
             Some(ReceiverDropReason::NotEphemeral)
         );
 
-        let mut unknown = valid_envelope();
-        unknown
-            .ext
-            .ext
-            .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("Ephemeral".to_owned()));
+        for mode in [
+            Value::String("Ephemeral".to_owned()),
+            Value::String("EPHEMERAL".to_owned()),
+            Value::String(String::new()),
+            Value::Bool(true),
+            Value::from(1_u64),
+            Value::Null,
+            Value::Array(Vec::new()),
+        ] {
+            let unknown = mutated(|e| {
+                e.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), mode);
+            });
+            assert_eq!(
+                drop_reason(&admit(&unknown, NOW_MS, MONOTONIC_MS, None)),
+                Some(ReceiverDropReason::InvalidDeliveryMode)
+            );
+        }
+
+        for priority in [Priority::Normal, Priority::High, Priority::Urgent] {
+            let envelope = mutated(|e| e.priority = priority);
+            assert_eq!(
+                drop_reason(&admit(&envelope, NOW_MS, MONOTONIC_MS, None)),
+                Some(ReceiverDropReason::InvalidPriority)
+            );
+        }
+
+        let negative = mutated(|e| {
+            e.created_at = -2;
+            e.ttl = 1;
+        });
         assert_eq!(
-            drop_reason(&admit(&unknown, NOW_MS, MONOTONIC_MS, None)),
-            Some(ReceiverDropReason::InvalidDeliveryMode)
+            drop_reason(&admit(&negative, NOW_MS, MONOTONIC_MS, None)),
+            Some(ReceiverDropReason::NegativeDeadline)
         );
+    }
+
+    fn signature_and_source() {
+        let envelope = valid_envelope();
+        let authenticated = authenticate(&envelope, PRINCIPAL, &signing_public_key());
+        assert!(authenticated.is_ok());
+        if let Ok(authenticated) = authenticated {
+            let handoff =
+                admit_authenticated_ciphertext(&authenticated, clock(NOW_MS, MONOTONIC_MS), None);
+            assert_eq!(display_expires(&handoff), Some(1_005_000));
+            assert_ciphertext(&handoff, &envelope);
+        }
+
+        let mut tampered = valid_envelope();
+        tampered.signed.signature = "tampered".to_owned();
+        let tampered_handoff = admit(&tampered, NOW_MS, MONOTONIC_MS, None);
+        assert_eq!(drop_reason(&tampered_handoff), Some(ReceiverDropReason::BadSignature));
+        assert!(tampered_handoff.ciphertext.is_none());
+        assert_eq!(
+            authenticate(&tampered, PRINCIPAL, &signing_public_key()),
+            Err(ReceiverDropReason::BadSignature)
+        );
+
+        let mut wrong_source = valid_envelope();
+        wrong_source.source_principal_id = "other".to_owned();
+        assert_eq!(
+            authenticate(&wrong_source, PRINCIPAL, &signing_public_key()),
+            Err(ReceiverDropReason::WrongSource)
+        );
+        assert!(admit(&wrong_source, NOW_MS, MONOTONIC_MS, None).ciphertext.is_none());
+
+        let mut unsigned = valid_envelope();
+        unsigned.signed.signature = String::new();
+        assert_eq!(
+            authenticate(&unsigned, PRINCIPAL, &signing_public_key()),
+            Err(ReceiverDropReason::Unsigned)
+        );
+        assert!(admit(&unsigned, NOW_MS, MONOTONIC_MS, None).ciphertext.is_none());
+
+        let wrong_key = ramflux_crypto::public_key_base64url_from_seed([8; 32]);
+        assert_eq!(
+            authenticate(&envelope, PRINCIPAL, &wrong_key),
+            Err(ReceiverDropReason::BadSignature)
+        );
+    }
+
+    fn received_byte_round_trip() {
+        let envelope = valid_envelope();
+        let encoded = serde_json::to_vec(&envelope);
+        assert!(encoded.is_ok());
+        let Some(bytes) = encoded.ok() else {
+            return;
+        };
+        let decoded = serde_json::from_slice::<Envelope>(&bytes);
+        assert!(decoded.is_ok());
+        let Some(decoded) = decoded.ok() else {
+            return;
+        };
+        let reencoded = serde_json::to_vec(&decoded);
+        assert_eq!(reencoded.as_ref().ok(), Some(&bytes));
+        let handoff = admit(&decoded, NOW_MS, MONOTONIC_MS, None);
+        assert_eq!(display_expires(&handoff), Some(1_005_000));
+        assert_ciphertext(&handoff, &decoded);
+        if let Some(handed) = handoff.ciphertext {
+            let handed_bytes = serde_json::to_vec(handed);
+            assert_eq!(handed_bytes.as_ref().ok(), Some(&bytes));
+        }
     }
 
     #[test]
@@ -418,5 +613,7 @@ mod tests {
         ttl_alias_and_bounds();
         own_clock_and_monotonic_hold();
         overflow_display_bridge_handoff();
+        signature_and_source();
+        received_byte_round_trip();
     }
 }
