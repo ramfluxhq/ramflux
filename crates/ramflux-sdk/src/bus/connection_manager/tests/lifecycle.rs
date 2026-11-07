@@ -287,3 +287,62 @@ async fn engine_is_resident_across_consecutive_network_calls() -> Case {
     })
     .await
 }
+
+/// The submitted envelope as the wire must carry it, in struct order.
+const DEADLINE_ENVELOPE: &str = r#"{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-deadline","source_principal_id":"p","source_device_id":"d","target_delivery_id":"host-target","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-deadline"}"#;
+
+/// (r12) and (r14) of `sender_outcome_classification`: the call deadline expiring after the
+/// submit was written is an uncertain outcome in the outer error, never a typed refusal, and
+/// the retry writes the original envelope byte for byte.
+#[tokio::test(start_paused = true)]
+async fn sender_outcome_call_deadline_after_the_write_is_uncertain() -> Case {
+    watchdog(async {
+        let (handle, mut sessions) = reconnecting_fixture(limits())?;
+        let mut io = connected(&handle, &mut sessions).await?;
+        let generation = handle.generation();
+        let envelope: ramflux_protocol::Envelope = serde_json::from_str(DEADLINE_ENVELOPE)?;
+        let submit = |envelope: ramflux_protocol::Envelope, deadline: Instant| {
+            let caller = handle.clone();
+            tokio::spawn(async move {
+                caller
+                    .call(|engine| Box::pin(engine.submit_envelope_classified(envelope)), deadline)
+                    .await
+            })
+        };
+        let first = submit(envelope.clone(), Instant::now() + Duration::from_secs(7));
+        // The submit reached the wire, then nothing comes back until the deadline.
+        let written = io.raw.recv().await.ok_or("no frame written")?;
+        assert_eq!(
+            super::submitted_envelope_bytes(&written).ok_or("no envelope member")?,
+            DEADLINE_ENVELOPE.as_bytes()
+        );
+        tokio::time::advance(Duration::from_secs(7)).await;
+        match first.await? {
+            Err(error) => assert_eq!(error.to_string(), "TODO-deadline"),
+            Ok(inner) => return Err(format!("expected an outer error, got {inner:?}").into()),
+        }
+        // The next attempt: a fresh session when the host retired this one, else the same.
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let mut next = if handle.snapshot().phase == ConnectionPhase::Backoff {
+            next_session(&handle, &mut sessions, generation).await?
+        } else {
+            io
+        };
+        let retry = submit(envelope, Instant::now() + Duration::from_secs(600));
+        let resent = next.raw.recv().await.ok_or("no frame resent")?;
+        assert_eq!(
+            super::submitted_envelope_bytes(&resent).ok_or("no envelope member")?,
+            DEADLINE_ENVELOPE.as_bytes()
+        );
+        send(&next, &GatewayServerFrame::Nack { reason: "aborted_retry_safe".into() })?;
+        assert!(matches!(
+            retry.await??,
+            Err(crate::gateway::session_push::SubmitRefusal::RetrySafe)
+        ));
+        handle.stop().await;
+        Ok(())
+    })
+    .await
+}
