@@ -145,9 +145,11 @@ fn inbox_incarnation_lifecycle() -> anyhow::Result<()> {
     assert_eq!(legacy["entries"].as_array().map(Vec::len), Some(1));
     let capabilities = call(&router, "GET", "/mvp1/session-push-capabilities", Value::Null)?;
     assert_eq!(
-        capabilities,
-        json!({"capabilities":[ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY]})
+        capabilities["capabilities"],
+        json!([ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY])
     );
+    let boot = capabilities["router_boot_id"].as_str().ok_or_else(|| anyhow::anyhow!("boot"))?;
+    assert!(ramflux_node_core::valid_inbox_incarnation(boot));
     let response = call(
         &router,
         "POST",
@@ -238,6 +240,7 @@ fn session_push_requires_gateway_peer() -> anyhow::Result<()> {
         "/mvp0/issued-seqs",
         "/mvp0/ack-bound-batch",
         "/mvp1/session-push-capabilities",
+        "/mvp0/ephemeral-registrations",
         "/mvp1/inbox-entry/target/1",
         "/mvp1/inbox/target?session_push=1",
     ] {
