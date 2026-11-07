@@ -64,7 +64,7 @@ async fn case() -> Case {
     Ok(())
 }
 
-async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
+pub(super) async fn group_entry(fixture: &mut Fixture) -> Case<GatewayInboxEntry> {
     let member = fixture
         .source
         .client

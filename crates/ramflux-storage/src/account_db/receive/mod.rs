@@ -22,6 +22,7 @@ pub(crate) mod privacy;
 #[cfg(test)]
 mod privacy_tests;
 pub(crate) mod schema;
+mod source_gate;
 pub(crate) mod stage;
 #[cfg(test)]
 mod stage_tests;

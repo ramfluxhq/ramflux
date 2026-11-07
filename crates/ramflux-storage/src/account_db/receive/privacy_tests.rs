@@ -117,6 +117,35 @@ fn erasure_late_stage_and_process() -> Result<(), StorageError> {
     assert!(!footprints(&db)?.iter().any(|(_, at)| *at == locator(11)));
     assert_eq!(erasure_pending(&db)?, 1, "late bind re-arms WAL retirement");
     assert_wal_truncated(&db)?;
+    // (j) A source preparation gate sees the late erase: open before, refused after.
+    let gate = |db: &AccountDb, sequence: u64| {
+        db.receive_transaction(
+            ReceiveExpectation {
+                target: "t",
+                incarnation: "e",
+                cursor: 0,
+                generation: 1,
+                erasure_generation: db.privacy_erasure_generation()?,
+            },
+            1,
+            |tx| tx.require_open_input(sequence),
+        )
+    };
+    db.send_direct_message("thread", "S", "peer", b"secret")?;
+    let source = entry(12, "HS", None);
+    assert_eq!(run(&db, input(&source, 12))?, R::Staged);
+    gate(&db, 12)?;
+    db.delete_direct_message("thread", "S", "local", "delete-s")?;
+    assert_eq!(bind(&db, 12, "S")?, ReceiveBind::Erased);
+    let refused = gate(&db, 12);
+    assert!(
+        matches!(
+            refused,
+            Err(StorageError::Integrity("source effect requires staged receive work"))
+        ),
+        "{:?}",
+        refused.err()
+    );
     // (i) Binding a terminal receipt fails with the exact text.
     let terminal = bind(&db, 11, "A");
     assert!(

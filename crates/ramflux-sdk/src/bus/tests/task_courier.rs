@@ -901,6 +901,9 @@ mod receive_group;
 #[path = "receive_reset.rs"]
 mod receive_reset;
 
+#[path = "receive_w0.rs"]
+mod receive_w0;
+
 #[path = "receive_history.rs"]
 mod receive_history;
 
