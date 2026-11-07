@@ -9,7 +9,7 @@
 //! changes one field.
 use super::routing_tests::{E, capable_deliver, envelope, push};
 use super::split_tests::legacy_unexpected_kinds;
-use super::{KnownLoss, PageEntryRecord, PageReason, PushNackReason, SessionMode};
+use super::{KnownLoss, PageEntryRecord, PageReason, PushMeta, PushNackReason, SessionMode};
 use crate::SdkError;
 use crate::bus::connection_manager::DisconnectReason;
 use crate::gateway::push_resume::{PageReply, ResumePage};
@@ -250,6 +250,45 @@ async fn capable_resume_page_exact_reply() {
         };
         assert!(matches!(&result, Err(SdkError::GatewaySessionRejected(m)) if m == "cursor_ahead"));
         assert!(engine.terminal_reason.is_none());
+    }
+
+    // (p3b) a refusal must not consume buffered deliveries: a locally refused resume
+    // (limit 0) and a matching-E Busy refusal both leave the queue, its push metadata and
+    // its byte accounting intact, on both public entry points.
+    for authoritative in [false, true] {
+        for busy in [false, true] {
+            let frames = if busy {
+                vec![nack(n::SessionPushNackReason::Busy, Some(E.into()))]
+            } else {
+                vec![]
+            };
+            let (mut engine, sent) = session(push(), frames);
+            let meta = PushMeta { incarnation_id: super::routing_tests::id(), retain_until: 5_555 };
+            engine.last_frame_bytes = 7;
+            engine.buffer_capable_delivery(
+                GatewayInboxEntry {
+                    forwarded: false,
+                    inbox_seq: 71,
+                    target_delivery_id: "target-route".into(),
+                    envelope: envelope(),
+                },
+                meta.clone(),
+            );
+            let limit = if busy { 64 } else { 0 };
+            let result = if authoritative {
+                engine.resume_authoritative_after(7, limit).await
+            } else {
+                engine.resume_after(7, limit).await
+            };
+            assert!(matches!(result, Err(SdkError::GatewaySessionRejected(_))));
+            assert!(engine.terminal_reason.is_none());
+            assert_eq!(sent.lock().unwrap().is_empty(), !busy, "a write happens only for busy");
+            assert_eq!(engine.pending_deliveries.len(), 1, "auth={authoritative} busy={busy}");
+            assert_eq!(engine.buffered_bytes, 7, "auth={authoritative} busy={busy}");
+            let kept = engine.take_pending_capable();
+            assert_eq!(kept[0].0.inbox_seq, 71);
+            assert_eq!(kept[0].1, Some(meta));
+        }
     }
 
     // (p4) Legacy `resume_after` and `resume_authoritative_after` write the frozen legacy

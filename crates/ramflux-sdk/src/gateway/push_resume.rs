@@ -158,15 +158,17 @@ impl GatewaySessionEngine {
         }
     }
 
-    /// `resume_after` on a negotiated session: buffered deliveries, then the page.
+    /// `resume_after` on a negotiated session: buffered deliveries, then the page. The buffer
+    /// is untouched when the request is refused.
     pub(crate) async fn push_resume_after(
         &mut self,
         after: u64,
         limit: usize,
     ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
-        let mut delivered = self.take_pending_deliveries();
+        // The buffer is drained only once the page is in hand: a refusal before or during the
+        // request must leave every buffered delivery and its byte accounting intact.
         let page = self.adapted_page(after, limit).await?;
-        delivered.extend(self.take_pending_deliveries());
+        let mut delivered = self.take_pending_deliveries();
         delivered.extend(page);
         Ok(dedup_gateway_entries(delivered))
     }

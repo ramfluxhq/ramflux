@@ -118,8 +118,8 @@ fn frame(wire: &n::SessionPushServerFrame) -> Value {
     serde_json::to_value(wire).unwrap()
 }
 
-/// The legacy submit frame minus `signed_request`, in sorted-key `Value` order.
-const LEGACY_SUBMIT_GOLDEN: &str = r#"{"frame_type":"submit","submit":{"envelope":{"created_at":1,"delivery_class":"opaque_event","domain":"ramflux.envelope.v1","encrypted_payload":"opaque","envelope_id":"env-route","payload_hash":"hash-route","priority":"normal","schema":"ramflux.envelope.v1","signature":"fixture","signature_alg":"ed25519","signing_key_id":"dev","source_device_id":"d","source_principal_id":"p","target_delivery_id":"target-route","ttl":600,"version":1}}}"#;
+/// The complete legacy submit frame as written on the wire (fixed clock, fixed keys).
+const LEGACY_SUBMIT_GOLDEN: &str = r#"{"frame_type":"submit","submit":{"signed_request":{"schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1","signing_key_id":"device:split-device","signature_alg":"ed25519","signature":"dFFLNuZtJZETgi9GVSVFxbzLxJwRUSsBRvxRnwiWPgW6e-8RbTxpN8GU53tBBm9enkYk41CZ75oFRYq2lnSKBg","source_device_id":"split-device","request_id":"req_sdk_test-session_0","method":"POST","path":"/gateway/session/submit","device_proof_hash":"already_authed","body_hash":"ciw0_tgfF9AZeUGAVif6x7pPGdBOxV0yhGiAVebx3Y0","nonce":"Ve-x2xgmgbFpMX-MvNzQkI-YrW1rl-G_veTPkY-MA-4","created_at":1700000000,"expires_at":1700000300},"envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":1,"encrypted_payload":"opaque","payload_hash":"hash-route"}}}"#;
 
 #[tokio::test]
 async fn capable_reply_event_split() {
@@ -169,8 +169,10 @@ async fn capable_reply_event_split() {
     // written submit is a plain legacy submit frame carrying the envelope.
     let legacy = json!({"frame_type":"deliver","entry":{
         "inbox_seq":71,"target_delivery_id":"target-route","envelope":envelope()}});
+    let clock = crate::time::FixedClock::set(1_700_000_000);
     let (mut engine, sent) = scripted(SessionMode::Legacy, vec![legacy]);
     let entry = engine.submit_envelope(submitted("target-route")).await.unwrap();
+    drop(clock);
     assert_eq!((entry.forwarded, entry.inbox_seq), (false, 71));
     assert!(engine.pending_deliveries.is_empty(), "the reply is not duplicated");
     let written = sent.lock().unwrap().clone();
@@ -181,14 +183,11 @@ async fn capable_reply_event_split() {
         }
         other => panic!("not a submit: {other:?}"),
     }
-    // Exact legacy bytes: the signature material varies per run, so the signed request is
-    // removed and the remainder must equal the frozen golden byte for byte.
-    let mut wire: Value = serde_json::from_slice(&written[0]).unwrap();
-    assert!(wire["submit"].as_object_mut().unwrap().remove("signed_request").is_some());
-    assert_eq!(
-        String::from_utf8(serde_json::to_vec(&wire).unwrap()).unwrap(),
-        LEGACY_SUBMIT_GOLDEN
-    );
+    // Exact legacy bytes: the captured original bytes equal the frozen golden, and decoding
+    // then encoding them is the identity (no normalization of the capture).
+    assert_eq!(String::from_utf8(written[0].clone()).unwrap(), LEGACY_SUBMIT_GOLDEN);
+    let decoded: GatewayClientFrame = serde_json::from_slice(&written[0]).unwrap();
+    assert_eq!(serde_json::to_vec(&decoded).unwrap(), written[0]);
 
     // (p4) Push legacy ForwardAck matching: the forwarded result.
     let ack = json!({"frame_type":"forward_ack","ack":{

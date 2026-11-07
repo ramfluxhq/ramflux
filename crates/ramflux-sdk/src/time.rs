@@ -5,6 +5,26 @@
 #![allow(clippy::wildcard_imports)]
 use crate::prelude::*;
 
+/// Pins the wall clock of the current test thread until dropped, so signed bytes are
+/// deterministic.
+#[cfg(test)]
+pub(crate) struct FixedClock;
+
+#[cfg(test)]
+impl FixedClock {
+    pub(crate) fn set(now: i64) -> Self {
+        test_clock::set_frozen(Some(now));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for FixedClock {
+    fn drop(&mut self) {
+        test_clock::set_frozen(None);
+    }
+}
+
 pub(crate) fn now_unix_timestamp() -> i64 {
     #[cfg(test)]
     if let Some(frozen) = test_clock::frozen() {
@@ -26,6 +46,11 @@ pub(crate) mod test_clock {
 
     pub(crate) fn frozen() -> Option<i64> {
         FROZEN.with(Cell::get)
+    }
+
+    /// Pins (or clears) this thread's clock; used by `FixedClock`.
+    pub(crate) fn set_frozen(value: Option<i64>) {
+        FROZEN.with(|cell| cell.set(value));
     }
 
     /// Freezes this thread's clock at the current time until the guard drops.
