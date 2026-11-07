@@ -24,6 +24,8 @@ mod negotiation_tests;
 mod routing_tests;
 #[cfg(test)]
 mod server_tests;
+#[cfg(test)]
+mod split_tests;
 
 /// A 32-character lowercase hexadecimal inbox incarnation identifier.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

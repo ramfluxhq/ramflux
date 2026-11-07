@@ -5,12 +5,27 @@
 
 use super::engine::PendingDelivery;
 use super::frame_dispatch::{ExpectedReply, FrameClass, FrameKind};
-use super::session_push::{CapableEvent, PushMeta};
+use super::session_push::{CapableEvent, CapableServerFrame, PushMeta, SessionMode};
 use super::{GatewayClientFrame, GatewayInboxEntry, GatewayServerFrame, GatewaySessionEngine};
 use crate::SdkError;
 use crate::bus::connection_manager::{DisconnectReason, SessionHub};
 use crate::bus::runtime_limits::{SESSION_BUFFER, SESSION_BUFFER_BYTES};
 use std::sync::Arc;
+
+/// What the caller of a read is waiting for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Wait {
+    /// A legacy reply or event; a capable reply retires the session.
+    Legacy,
+    /// A submit reply: the legacy forms or a capable `submit_accepted`.
+    Submit,
+}
+
+/// A frame returned to the caller of `read_step`.
+pub(crate) enum Step {
+    Legacy(Box<GatewayServerFrame>),
+    SubmitAccepted(Box<CapableServerFrame>),
+}
 
 #[derive(Clone)]
 pub(crate) struct HostFrames {
@@ -123,7 +138,7 @@ impl GatewaySessionEngine {
     pub(crate) async fn idle_read(&mut self) -> Result<(), SdkError> {
         let bytes = self.stream.recv_idle_frame().await?;
         self.last_frame_bytes = bytes.len();
-        if let Some(frame) = self.route_bytes(&bytes, false)? {
+        if let Some(Step::Legacy(frame)) = self.route_bytes(&bytes, false, Wait::Legacy)? {
             self.dispatch_frame(&frame, None)?;
         }
         Ok(())
@@ -198,6 +213,19 @@ impl GatewaySessionEngine {
         &mut self,
         operation: &'static str,
     ) -> Result<GatewayServerFrame, SdkError> {
+        match self.read_step(operation, Wait::Legacy).await? {
+            Step::Legacy(frame) => Ok(*frame),
+            Step::SubmitAccepted(_) => Err(self.retire("capable reply outside a capable wait")),
+        }
+    }
+
+    /// Reads until a frame for the caller arrives. Capable events are carried on the way, and
+    /// only the reply kinds the `wait` names are returned.
+    pub(crate) async fn read_step(
+        &mut self,
+        operation: &'static str,
+        wait: Wait,
+    ) -> Result<Step, SdkError> {
         loop {
             let result = super::engine::frame_timeout(self.frame_timeout, operation, async {
                 self.stream.recv_frame().await.map_err(SdkError::from)
@@ -216,29 +244,39 @@ impl GatewaySessionEngine {
                 }
             };
             self.last_frame_bytes = bytes.len();
-            // `None` means a capable event was queued; keep waiting for the caller's frame.
-            if let Some(frame) = self.route_bytes(&bytes, true)? {
-                return Ok(frame);
+            // `None` means a capable event was carried; keep waiting for the caller's frame.
+            if let Some(step) = self.route_bytes(&bytes, true, wait)? {
+                return Ok(step);
             }
         }
     }
 
-    /// Routes one raw frame. `Some` is a legacy frame for the caller; `None` means a capable
-    /// event was queued. Every other outcome retires the session.
+    /// Routes one raw frame. `None` means a capable event was carried. Every outcome the wait
+    /// does not name retires the session.
     fn route_bytes(
         &mut self,
         bytes: &[u8],
         transport_on_decode_error: bool,
-    ) -> Result<Option<GatewayServerFrame>, SdkError> {
-        use super::session_push::{RouteError, Routed, route};
+        wait: Wait,
+    ) -> Result<Option<Step>, SdkError> {
+        use super::session_push::{CapableServerFrame, RouteError, Routed, route};
         match route(bytes, &self.mode) {
-            Ok(Routed::Legacy(frame)) => Ok(Some(*frame)),
+            Ok(Routed::Legacy(frame)) => Ok(Some(Step::Legacy(frame))),
             Ok(Routed::Capable(frame)) => match CapableEvent::try_from(*frame) {
                 Ok(event) => {
+                    self.check_event(&event)?;
                     self.accept_capable(event);
                     Ok(None)
                 }
-                Err(_reply) => Err(self.retire("capable reply outside a capable wait")),
+                Err(reply) => match (wait, reply) {
+                    (Wait::Submit, accepted @ CapableServerFrame::SubmitAccepted { .. }) => {
+                        Ok(Some(Step::SubmitAccepted(Box::new(accepted))))
+                    }
+                    (Wait::Submit, _) => {
+                        Err(self.retire("unexpected capable reply while awaiting a submit"))
+                    }
+                    (Wait::Legacy, _) => Err(self.retire("capable reply outside a capable wait")),
+                },
             },
             Err(RouteError::Retire(why)) => Err(self.retire(why)),
             Err(RouteError::Capable(_)) => Err(self.retire("malformed capable frame")),
@@ -249,6 +287,26 @@ impl GatewaySessionEngine {
                 Err(SdkError::from(error))
             }
         }
+    }
+
+    /// An event of another incarnation, or a deliver for another target, is never carried.
+    fn check_event(&mut self, event: &CapableEvent) -> Result<(), SdkError> {
+        let SessionMode::Push { incarnation } = &self.mode else {
+            return Ok(());
+        };
+        let (event_incarnation, target) = match event {
+            CapableEvent::Deliver { entry, incarnation_id, .. } => {
+                (incarnation_id, Some(&entry.target_delivery_id))
+            }
+            CapableEvent::Resync { incarnation_id, .. } => (incarnation_id, None),
+        };
+        if event_incarnation != incarnation {
+            return Err(self.retire("capable event with a foreign incarnation"));
+        }
+        if target.is_some_and(|target| *target != self.config.target_delivery_id) {
+            return Err(self.retire("capable deliver for a foreign target"));
+        }
+        Ok(())
     }
 
     /// Buffers a deliver and publishes the event; nothing is dropped silently.
@@ -263,7 +321,7 @@ impl GatewaySessionEngine {
         }
     }
 
-    fn retire(&mut self, why: &str) -> SdkError {
+    pub(crate) fn retire(&mut self, why: &str) -> SdkError {
         self.terminal_reason = Some(DisconnectReason::UnexpectedReply);
         tracing::warn!(%why, "unexpected gateway frame; retiring session");
         SdkError::GatewaySessionRejected(format!("unexpected gateway frame: {why}"))
