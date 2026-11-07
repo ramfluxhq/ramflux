@@ -7,6 +7,8 @@ use crate::{ACCOUNT_DB_FILE, AccountIndex, BACKUP_GENERATION_MARKER, StorageErro
 use rusqlite::params;
 use std::path::Path;
 
+/// Backup generation trees (`generation_<job>`) live beside the root database.
+const GENERATION_PREFIX: &str = "generation_";
 const REMOVED: &str = "removed";
 
 /// Maps a tombstoned account to the same error as an unknown one.
@@ -44,7 +46,7 @@ impl AccountIndex {
     /// the wrapped key unchanged. The tombstone sets `removed` and clears the wrapped key.
     /// The root database, its `-wal`/`-shm`/`-journal` sidecars, the segment tree, `objects/`
     /// and the backup-generation marker are then removed; the `.writer.lock` inode is kept.
-    /// `generation_*` trees are left for P03a-4c. Any symlink in the account directory is
+    /// `generation_*` trees are removed too (inner symlinks are unlinked, never followed). Any symlink in the account directory is
     /// refused with `Integrity("account erase symlink")` before the first unlink, which
     /// happens after the tombstone, so a refused erase still leaves the account `removed`.
     /// The operation is idempotent.
@@ -73,7 +75,7 @@ impl AccountIndex {
 }
 
 /// Every per-account root path this part owns (class inventory). `.writer.lock` is kept on
-/// purpose, and `generation_*` trees belong to P03a-4c.
+/// purpose, and `generation_*` trees are removed by the scan in `remove_root_payload`.
 fn root_files() -> [String; 5] {
     [
         ACCOUNT_DB_FILE.to_owned(),
@@ -107,9 +109,23 @@ fn remove_root_payload(dir: &Path) -> Result<(), StorageError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     }
+    // The pre-scan covers root names and generation trees alike: no symlink survives it.
+    let mut generations = Vec::new();
     for entry in std::fs::read_dir(dir)? {
-        if entry?.file_type()?.is_symlink() {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink() {
             return Err(StorageError::Integrity("account erase symlink"));
+        }
+        if entry.file_name().to_string_lossy().starts_with(GENERATION_PREFIX) {
+            generations.push(entry.path());
+        }
+    }
+    for path in generations {
+        // `remove_dir_all` unlinks inner symlinks without following them.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => ignore_not_found(std::fs::remove_dir_all(&path))?,
+            Ok(_) => ignore_not_found(std::fs::remove_file(&path))?,
+            Err(error) => ignore_not_found(Err(error))?,
         }
     }
     for name in root_files() {

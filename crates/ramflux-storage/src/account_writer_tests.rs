@@ -613,3 +613,91 @@ fn account_erase_refuses_symlinks_before_any_unlink() -> TestResult {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn plant(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)
+}
+
+#[test]
+fn account_erase_generations_and_symlinks() -> TestResult {
+    // (a) generation DB, sidecars and segments are removed; (b) an inner symlink is unlinked,
+    // never followed.
+    let (root, db) = crate::tests::test_db("account-erase-generations")?;
+    drop(db);
+    let dir = root.join("accounts/acct");
+    let outside = root.join("outside");
+    plant(&outside.join("file"), b"keep")?;
+    for name in ["account.db", "account.db-wal", "account.db-shm", "account.segments/seg"] {
+        plant(&dir.join("generation_1").join(name), b"gen")?;
+    }
+    plant(&dir.join("generation_2/x"), b"gen")?;
+    std::os::unix::fs::symlink(outside.join("file"), dir.join("generation_2/link"))?;
+    plant(&dir.join("generation_file"), b"stray")?;
+    plant(&dir.join("generationless"), b"unrelated")?;
+    AccountIndex::open(&root)?.erase_account_database("acct")?;
+    for gone in ["generation_1", "generation_2", "generation_file", "ramflux_local.sqlite"] {
+        assert!(dir.join(gone).symlink_metadata().is_err(), "{gone} must be erased");
+    }
+    assert_eq!(std::fs::read(outside.join("file"))?, b"keep");
+    assert!(dir.join("generationless").exists(), "only the generation_ prefix is owned");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn account_erase_generation_top_level_symlink_refused_before_any_unlink() -> TestResult {
+    // (c)
+    let (root, db) = crate::tests::test_db("account-erase-generation-link")?;
+    drop(db);
+    let dir = root.join("accounts/acct");
+    let outside = root.join("outside_dir");
+    plant(&outside.join("file"), b"keep")?;
+    plant(&dir.join("generation_1/account.db"), b"gen")?;
+    std::os::unix::fs::symlink(&outside, dir.join("generation_3"))?;
+    let result = AccountIndex::open(&root)?.erase_account_database("acct");
+    assert!(
+        matches!(result, Err(StorageError::Integrity("account erase symlink"))),
+        "got {result:?}"
+    );
+    for kept in ["ramflux_local.sqlite", "generation_1/account.db", "objects"] {
+        assert!(dir.join(kept).exists(), "{kept} must survive the refusal");
+    }
+    assert!(dir.join("generation_3").symlink_metadata()?.file_type().is_symlink());
+    assert_eq!(std::fs::read(outside.join("file"))?, b"keep");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn account_erase_resumes_after_crash() -> TestResult {
+    // (d) Crash after the tombstone only: open refuses and files are intact; erase completes.
+    let (root, db) = crate::tests::test_db("account-erase-resume")?;
+    drop(db);
+    let dir = root.join("accounts/acct");
+    plant(&dir.join("generation_1/account.db"), b"gen")?;
+    plant(&dir.join("objects/o"), b"obj")?;
+    let index = AccountIndex::open(&root)?;
+    index.connection.execute(
+        "UPDATE local_account SET account_state='removed', wrapped_key=NULL, wrapped_key_nonce=NULL
+          WHERE local_account_id='acct'",
+        [],
+    )?;
+    let main = dir.join("ramflux_local.sqlite");
+    let before = std::fs::read(&main)?;
+    expect_not_found(&open(&root).map(drop), "acct");
+    assert_eq!(std::fs::read(&main)?, before);
+    assert!(dir.join("generation_1/account.db").exists() && dir.join("objects/o").exists());
+    // Mid-removal crash: some files already gone before the retry.
+    std::fs::remove_file(&main)?;
+    index.erase_account_database("acct")?;
+    for gone in ["generation_1", "objects", "ramflux_local.sqlite"] {
+        assert!(dir.join(gone).symlink_metadata().is_err(), "{gone} must be erased");
+    }
+    expect_not_found(&open(&root).map(drop), "acct");
+    assert!(!main.exists(), "a removed account never reopens empty");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
