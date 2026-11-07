@@ -74,7 +74,13 @@ async fn drive(
                 if waited >= 300 {
                     let rows =
                         reader.task_record_page::<serde_json::Value>("task/", "task/", 40)?;
-                    panic!("{what}: the courier never reached the expected state: {rows:?}");
+                    let keys: Vec<_> = rows
+                        .iter()
+                        .map(|(key, value)| {
+                            (key.clone(), value["attempts"].clone(), value["reason"].clone())
+                        })
+                        .collect();
+                    panic!("{what}: the courier never reached the expected state: {keys:?}");
                 }
                 waited += 1;
                 tokio::time::sleep(Duration::from_millis(50)).await;
