@@ -89,7 +89,9 @@ fn target_ack_request_ijson_predicates() -> Result<(), Box<dyn std::error::Error
         );
         let mut expected = ack_request();
         expected.ack.received_at = timestamp;
-        assert_eq!(ramflux_protocol::parse_i_json::<TargetAckRequest>(&fixture)?, expected);
+        let decoded = ramflux_protocol::parse_i_json::<TargetAckRequest>(&fixture)?;
+        assert_eq!(bytes(&decoded)?, fixture);
+        assert_eq!(decoded, expected);
     }
     for timestamp in [UNSAFE, -UNSAFE] {
         let fixture = patched(
@@ -99,11 +101,19 @@ fn target_ack_request_ijson_predicates() -> Result<(), Box<dyn std::error::Error
         );
         assert_i_json_error(ramflux_protocol::parse_i_json::<TargetAckRequest>(&fixture));
     }
-    assert_eq!(ramflux_protocol::parse_i_json::<TargetAckRequest>(&ack_bytes)?, ack_request());
+    let decoded = ramflux_protocol::parse_i_json::<TargetAckRequest>(&ack_bytes)?;
+    assert_eq!(bytes(&decoded)?, ack_bytes);
+    assert_eq!(decoded, ack_request());
 
     let duplicate_ack_id =
         patched(&ack_bytes, b"\"ack_id\":\"MARKER\"", b"\"ack_id\":\"v\",\"ack_id\":\"v\"");
     assert_i_json_error(ramflux_protocol::parse_i_json::<TargetAckRequest>(&duplicate_ack_id));
+    for replacement in
+        [&b"\\ud800"[..], &[0xff][..], &[0xef, 0xb7, 0x90][..], &[0xef, 0xbf, 0xbe][..]]
+    {
+        let fixture = patched(&ack_bytes, b"MARKER", replacement);
+        assert_i_json_error(ramflux_protocol::parse_i_json::<TargetAckRequest>(&fixture));
+    }
 
     let mut with_ext = ack_request();
     with_ext.ack.ext.ext.insert("x_probe".into(), serde_json::json!("MARKER"));
@@ -121,7 +131,9 @@ fn target_ack_request_ijson_predicates() -> Result<(), Box<dyn std::error::Error
         );
         let mut expected = nack_request();
         expected.nack.received_at = timestamp;
-        assert_eq!(ramflux_protocol::parse_i_json::<TargetNackRequest>(&fixture)?, expected);
+        let decoded = ramflux_protocol::parse_i_json::<TargetNackRequest>(&fixture)?;
+        assert_eq!(bytes(&decoded)?, fixture);
+        assert_eq!(decoded, expected);
     }
     for timestamp in [UNSAFE, -UNSAFE] {
         let fixture = patched(
@@ -131,7 +143,9 @@ fn target_ack_request_ijson_predicates() -> Result<(), Box<dyn std::error::Error
         );
         assert_i_json_error(ramflux_protocol::parse_i_json::<TargetNackRequest>(&fixture));
     }
-    assert_eq!(ramflux_protocol::parse_i_json::<TargetNackRequest>(&nack_bytes)?, nack_request());
+    let decoded = ramflux_protocol::parse_i_json::<TargetNackRequest>(&nack_bytes)?;
+    assert_eq!(bytes(&decoded)?, nack_bytes);
+    assert_eq!(decoded, nack_request());
 
     let mut nack_with_ext = nack_request();
     nack_with_ext.nack.ext.ext.insert("x_probe".into(), serde_json::json!("MARKER"));
@@ -139,5 +153,11 @@ fn target_ack_request_ijson_predicates() -> Result<(), Box<dyn std::error::Error
     let nack_duplicate_ext =
         patched(&nack_ext_bytes, b"\"x_probe\":\"MARKER\"", b"\"x_probe\":\"v\",\"x_probe\":\"v\"");
     assert_i_json_error(ramflux_protocol::parse_i_json::<TargetNackRequest>(&nack_duplicate_ext));
+    for replacement in
+        [&b"\\ud800"[..], &[0xff][..], &[0xef, 0xb7, 0x90][..], &[0xef, 0xbf, 0xbe][..]]
+    {
+        let fixture = patched(&nack_bytes, b"nack-id", replacement);
+        assert_i_json_error(ramflux_protocol::parse_i_json::<TargetNackRequest>(&fixture));
+    }
     Ok(())
 }

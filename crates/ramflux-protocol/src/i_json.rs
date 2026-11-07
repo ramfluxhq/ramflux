@@ -348,7 +348,9 @@ mod tests {
             );
             let mut expected = envelope();
             expected.created_at = timestamp;
-            assert_eq!(decode_signed_envelope_ijson(&fixture)?, expected);
+            let decoded = decode_signed_envelope_ijson(&fixture)?;
+            assert_eq!(bytes(&decoded)?, fixture);
+            assert_eq!(decoded, expected);
         }
         for timestamp in [UNSAFE, -UNSAFE] {
             let fixture = patched(
@@ -358,7 +360,9 @@ mod tests {
             );
             assert_i_json_error(decode_signed_envelope_ijson(&fixture));
         }
-        assert_eq!(decode_signed_envelope_ijson(&envelope_bytes)?, envelope());
+        let decoded = decode_signed_envelope_ijson(&envelope_bytes)?;
+        assert_eq!(bytes(&decoded)?, envelope_bytes);
+        assert_eq!(decoded, envelope());
 
         let ttl_duplicate = patched(&envelope_bytes, b"\"ttl\":60", b"\"ttl\":60,\"ttl\":60");
         assert_i_json_error(decode_signed_envelope_ijson(&ttl_duplicate));
@@ -389,7 +393,9 @@ mod tests {
             );
             let mut expected = ack();
             expected.received_at = timestamp;
-            assert_eq!(decode_signed_ack_ijson(&fixture)?, expected);
+            let decoded = decode_signed_ack_ijson(&fixture)?;
+            assert_eq!(bytes(&decoded)?, fixture);
+            assert_eq!(decoded, expected);
         }
         for timestamp in [UNSAFE, -UNSAFE] {
             let fixture = patched(
@@ -399,7 +405,9 @@ mod tests {
             );
             assert_i_json_error(decode_signed_ack_ijson(&fixture));
         }
-        assert_eq!(decode_signed_ack_ijson(&ack_bytes)?, ack());
+        let decoded = decode_signed_ack_ijson(&ack_bytes)?;
+        assert_eq!(bytes(&decoded)?, ack_bytes);
+        assert_eq!(decoded, ack());
         let ack_ext_bytes = bytes(&ack_with_ext())?;
         let ack_duplicate = patched(
             &ack_ext_bytes,
@@ -407,6 +415,12 @@ mod tests {
             b"\"x_probe\":\"v\",\"x_probe\":\"v\"",
         );
         assert_i_json_error(decode_signed_ack_ijson(&ack_duplicate));
+        for replacement in
+            [&b"\\ud800"[..], &[0xff][..], &[0xef, 0xb7, 0x90][..], &[0xef, 0xbf, 0xbe][..]]
+        {
+            let fixture = patched(&ack_bytes, b"MARKER", replacement);
+            assert_i_json_error(decode_signed_ack_ijson(&fixture));
+        }
 
         let nack_bytes = bytes(&nack())?;
         for timestamp in [SAFE, -SAFE] {
@@ -417,7 +431,9 @@ mod tests {
             );
             let mut expected = nack();
             expected.received_at = timestamp;
-            assert_eq!(decode_signed_nack_ijson(&fixture)?, expected);
+            let decoded = decode_signed_nack_ijson(&fixture)?;
+            assert_eq!(bytes(&decoded)?, fixture);
+            assert_eq!(decoded, expected);
         }
         for timestamp in [UNSAFE, -UNSAFE] {
             let fixture = patched(
@@ -427,7 +443,9 @@ mod tests {
             );
             assert_i_json_error(decode_signed_nack_ijson(&fixture));
         }
-        assert_eq!(decode_signed_nack_ijson(&nack_bytes)?, nack());
+        let decoded = decode_signed_nack_ijson(&nack_bytes)?;
+        assert_eq!(bytes(&decoded)?, nack_bytes);
+        assert_eq!(decoded, nack());
         let nack_ext_bytes = bytes(&nack_with_ext())?;
         let nack_duplicate = patched(
             &nack_ext_bytes,
@@ -435,6 +453,12 @@ mod tests {
             b"\"x_probe\":\"v\",\"x_probe\":\"v\"",
         );
         assert_i_json_error(decode_signed_nack_ijson(&nack_duplicate));
+        for replacement in
+            [&b"\\ud800"[..], &[0xff][..], &[0xef, 0xb7, 0x90][..], &[0xef, 0xbf, 0xbe][..]]
+        {
+            let fixture = patched(&nack_bytes, b"MARKER", replacement);
+            assert_i_json_error(decode_signed_nack_ijson(&fixture));
+        }
 
         assert_eq!(
             i_json_rejection_body(),
