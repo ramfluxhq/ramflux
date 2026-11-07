@@ -16,9 +16,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub(crate) const BYTE_CAP: usize = 4 * 1024 * 1024;
+/// Per-session transient frame occupancy, including the in-flight write.
+pub(crate) const TRANSIENT_FRAME_CAP: usize = 64;
+/// Per-session transient byte occupancy, including the in-flight write.
+pub(crate) const TRANSIENT_BYTE_CAP: usize = 262_144;
 const EMPTY: u64 = u64::MAX;
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
 // Sink admission is queue waiting, with its own bound; only the I/O consumes 15s.
@@ -47,16 +51,29 @@ pub(crate) enum Admission {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransientAdmission {
+    Queued,
+    QueueFull,
+    Closed,
+}
+
 struct Frame {
     bytes: Vec<u8>,
     seq: u64,
     incarnation: Option<String>,
 }
+struct TransientFrame {
+    bytes: Vec<u8>,
+    expires_at_ms: u64,
+}
 struct State {
     durable: VecDeque<Element>,
-    _transient: VecDeque<Frame>,
+    transient: VecDeque<TransientFrame>,
     frames: usize,
     bytes: usize,
+    transient_frames: usize,
+    transient_bytes: usize,
     hint_inflight: bool,
     coverage: crate::issued_probe::Coverage,
     probe: Option<(u64, u64)>,
@@ -65,6 +82,9 @@ struct State {
 impl State {
     fn occupancy(&self) -> (usize, usize) {
         (self.frames, self.bytes)
+    }
+    fn transient_occupancy(&self) -> (usize, usize) {
+        (self.transient_frames, self.transient_bytes)
     }
 }
 
@@ -90,9 +110,12 @@ struct Inner {
     closed: tokio::sync::watch::Sender<bool>,
     #[cfg(test)]
     accesses: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    clock: AtomicU64,
 }
 enum Next {
     Frame(Frame),
+    Transient(TransientFrame),
     Hint(u64, bool),
     Probe(u64, u64),
     Idle,
@@ -110,9 +133,11 @@ impl PushQueue {
                 admission_probe: Mutex::new(None),
                 state: StateMutex::new(State {
                     durable: VecDeque::with_capacity(limit),
-                    _transient: VecDeque::new(),
+                    transient: VecDeque::with_capacity(TRANSIENT_FRAME_CAP),
                     frames: 0,
                     bytes: 0,
+                    transient_frames: 0,
+                    transient_bytes: 0,
                     hint_inflight: false,
                     coverage: crate::issued_probe::Coverage::default(),
                     probe: None,
@@ -129,13 +154,22 @@ impl PushQueue {
                 closed,
                 #[cfg(test)]
                 accesses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                #[cfg(test)]
+                clock: AtomicU64::new(0),
             }),
         }
     }
     pub(crate) fn retire(&self) {
         self.inner.retired.store(true, Ordering::Release);
         let _ = self.inner.closed.send(true);
+        if let Ok(mut state) = self.inner.state.lock() {
+            for frame in std::mem::take(&mut state.transient) {
+                state.transient_frames = state.transient_frames.saturating_sub(1);
+                state.transient_bytes = state.transient_bytes.saturating_sub(frame.bytes.len());
+            }
+        }
         self.inner.wake.notify_one();
+        self.inner.changed.notify_waiters();
     }
     pub(crate) fn prevent_admission(&self) {
         self.inner.retirement_requested.store(true, Ordering::Release);
@@ -224,6 +258,32 @@ impl PushQueue {
         self.inner.wake.notify_one();
         Admission::Queued
     }
+    pub(crate) fn try_push_transient(
+        &self,
+        bytes: Vec<u8>,
+        expires_at_ms: u64,
+    ) -> TransientAdmission {
+        if self.is_closed() || self.inner.retirement_requested.load(Ordering::Acquire) {
+            return TransientAdmission::Closed;
+        }
+        let Ok(mut state) = self.inner.state.lock() else {
+            self.retire();
+            return TransientAdmission::Closed;
+        };
+        if self.is_closed() || self.inner.retirement_requested.load(Ordering::Acquire) {
+            return TransientAdmission::Closed;
+        }
+        let (frames, used) = state.transient_occupancy();
+        if frames >= TRANSIENT_FRAME_CAP || bytes.len() > TRANSIENT_BYTE_CAP.saturating_sub(used) {
+            return TransientAdmission::QueueFull;
+        }
+        state.transient_frames = state.transient_frames.saturating_add(1);
+        state.transient_bytes = state.transient_bytes.saturating_add(bytes.len());
+        state.transient.push_back(TransientFrame { bytes, expires_at_ms });
+        drop(state);
+        self.inner.wake.notify_one();
+        TransientAdmission::Queued
+    }
     fn overflow(&self, seq: u64) -> Admission {
         self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);
         self.inner.slot.fetch_min(seq.saturating_sub(1), Ordering::AcqRel);
@@ -308,7 +368,47 @@ impl PushQueue {
             state.hint_inflight = true;
             return Next::Probe(after.max(state.coverage.prefix), issued);
         }
-        state.durable.pop_front().map_or(Next::Idle, |e| Next::Frame(e.into_frame()))
+        if let Some(frame) = state.durable.pop_front() {
+            return Next::Frame(frame.into_frame());
+        }
+        self.take_transient(&mut state)
+    }
+    fn wall_clock_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+    fn take_transient(&self, state: &mut State) -> Next {
+        let now = {
+            #[cfg(test)]
+            {
+                let forced = self.inner.clock.load(Ordering::Acquire);
+                if forced != 0 { forced } else { Self::wall_clock_ms() }
+            }
+            #[cfg(not(test))]
+            {
+                Self::wall_clock_ms()
+            }
+        };
+        let mut dropped = false;
+        while let Some(front) = state.transient.front() {
+            if now < front.expires_at_ms {
+                let Some(frame) = state.transient.pop_front() else {
+                    break;
+                };
+                return Next::Transient(frame);
+            }
+            let Some(expired) = state.transient.pop_front() else {
+                break;
+            };
+            state.transient_frames = state.transient_frames.saturating_sub(1);
+            state.transient_bytes = state.transient_bytes.saturating_sub(expired.bytes.len());
+            dropped = true;
+        }
+        if dropped {
+            self.inner.changed.notify_waiters();
+        }
+        Next::Idle
     }
     fn complete(&self, frame: Option<&Frame>) {
         if let Ok(mut state) = self.inner.state.lock() {
@@ -320,6 +420,17 @@ impl PushQueue {
             }
         }
         self.inner.changed.notify_waiters();
+    }
+    fn complete_transient(&self, frame: &TransientFrame) {
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.transient_frames = state.transient_frames.saturating_sub(1);
+            state.transient_bytes = state.transient_bytes.saturating_sub(frame.bytes.len());
+        }
+        self.inner.changed.notify_waiters();
+    }
+    #[cfg(test)]
+    pub(crate) fn set_clock_ms(&self, now_ms: u64) {
+        self.inner.clock.store(now_ms, Ordering::Release);
     }
     pub(crate) async fn install(
         &self,
@@ -349,6 +460,12 @@ impl PushQueue {
                         break;
                     }
                     self.complete(Some(&frame));
+                }
+                Next::Transient(frame) => {
+                    if !self.write(&send, &frame.bytes, incarnation.as_deref()).await {
+                        break;
+                    }
+                    self.complete_transient(&frame);
                 }
                 Next::Probe(after, issued) => {
                     if let Some(id) = incarnation.as_ref() {
@@ -408,7 +525,11 @@ impl PushQueue {
         let abandoned = self.inner.state.lock().ok().map(|mut state| {
             state.frames = 0;
             state.bytes = 0;
-            std::mem::take(&mut state.durable)
+            state.transient_frames = 0;
+            state.transient_bytes = 0;
+            let durable = std::mem::take(&mut state.durable);
+            let transient = std::mem::take(&mut state.transient);
+            (durable, transient)
         });
         drop(abandoned);
         self.inner.changed.notify_waiters();
@@ -473,6 +594,7 @@ impl PushQueue {
                 changed.as_mut().enable();
                 let done = self.inner.state.lock().is_ok_and(|s| {
                     s.frames == 0
+                        && s.transient_frames == 0
                         && !s.hint_inflight
                         && s.probe.is_none()
                         && self.inner.slot.load(Ordering::Acquire) == EMPTY
@@ -556,3 +678,5 @@ impl Drop for CancelledWrite {
 mod retirement_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transient_tests;
