@@ -39,6 +39,8 @@ struct Done {
     attempts: Vec<ramflux_protocol::Envelope>,
     gateway: Arc<Mutex<super::fixture::Gateway>>,
     root: PathBuf,
+    /// The storage key of the job under test.
+    key: String,
     _peers: (LocalBusAccountState, LocalBusAccountState),
 }
 
@@ -93,10 +95,10 @@ fn attempts_of(db: &AccountDb, key: &str) -> Result<Option<u64>, SdkError> {
 async fn scenario(row: Row, nack: Option<&str>, nack_after: usize, conflict: bool) -> Case<Done> {
     let fixture = Box::pin(Fixture::new("courier-refusal-policy")).await?;
     let healthy = carrier(&fixture.source, "healthy", "healthy-task")?;
-    let key = row.key();
+    let mut key = row.key().to_owned();
     match row {
-        Row::Ack => ack(&fixture.source, key, &healthy)?,
-        Row::Forward => forward(&fixture.source, key, &healthy)?,
+        Row::Ack => ack(&fixture.source, &key, &healthy)?,
+        Row::Forward => forward(&fixture.source, &key, &healthy)?,
         Row::Request | Row::Decision => {
             // The approval needs the projected task: project it through a forward job, then
             // drop that job so only the approval row is under test.
@@ -110,11 +112,14 @@ async fn scenario(row: Row, nack: Option<&str>, nack_after: usize, conflict: boo
                 approval::Payload::Decision { request, approved: false, grant_signature: None }
             };
             let packet = fixture.source.client.sign_task_approval(payload)?;
+            if row == Row::Decision {
+                key = crate::client::task::key("approval_decision_out", &packet.id()?);
+            }
             fixture
                 .source
                 .client
                 .account_db()?
-                .persist_actor_state(key, &approval::Job { packet, attempts: 0, next_at: 0 })?;
+                .persist_actor_state(&key, &approval::Job { packet, attempts: 0, next_at: 0 })?;
         }
     }
     {
@@ -124,18 +129,19 @@ async fn scenario(row: Row, nack: Option<&str>, nack_after: usize, conflict: boo
     }
     let Fixture { root, source, peer, sibling, gateway, .. } = fixture;
     let terminal_decision = row == Row::Decision && conflict;
+    let watched = key.clone();
     let done: Box<dyn Fn(&AccountDb) -> Result<bool, SdkError>> = if conflict && !terminal_decision
     {
-        Box::new(move |db| Ok(!db.actor_state_exists(key)?))
+        Box::new(move |db| Ok(!db.actor_state_exists(&watched)?))
     } else if terminal_decision {
-        Box::new(move |db| Ok(attempts_of(db, key)? == Some(8)))
+        Box::new(move |db| Ok(attempts_of(db, &watched)? == Some(8)))
     } else {
-        Box::new(move |db| Ok(attempts_of(db, key)?.is_some_and(|n| n >= 1)))
+        Box::new(move |db| Ok(attempts_of(db, &watched)?.is_some_and(|n| n >= 1)))
     };
     let mut account = drive(source, &root, Some(done)).await?;
     reopen(&mut account)?;
     let attempts = gateway.lock().map_err(|_| "gateway")?.attempts.clone();
-    Ok(Done { account, attempts, gateway, root, _peers: (peer, sibling) })
+    Ok(Done { account, attempts, gateway, root, key, _peers: (peer, sibling) })
 }
 
 /// After a reopen, a second actor run against a gateway that accepts everything writes nothing.
@@ -229,7 +235,7 @@ async fn conflict_rows() -> Case {
     let mut done = Box::pin(scenario(Row::Decision, Some("idempotency_conflict"), 0, true)).await?;
     let db = done.account.client.account_db()?;
     let job: approval::Job =
-        db.load_actor_state(Row::Decision.key())?.ok_or("the decision job was dropped")?;
+        db.load_actor_state(&done.key)?.ok_or("the decision job was dropped")?;
     assert_eq!(job.attempts, 8);
     let rows = done.account.client.task_approval_decision_rows()?;
     assert_eq!(rows.len(), 1);
@@ -249,17 +255,15 @@ async fn conflict_rows() -> Case {
         done.account.client.decide_task_approval(&format!("task_approval_{id}"), false)?;
     assert_eq!(retried["delivery_state"], "pending");
     let again: approval::Job =
-        done.account.client.account_db()?.load_actor_state(Row::Decision.key())?.ok_or("job")?;
+        done.account.client.account_db()?.load_actor_state(&done.key)?.ok_or("job")?;
     assert_eq!(again.attempts, 0);
     assert_eq!(serde_json::to_value(&again.packet)?, serde_json::to_value(&job.packet)?);
     reopen(&mut done.account)?;
     let account = std::mem::replace(&mut done.account, placeholder()?);
-    done.account = drive(
-        account,
-        &done.root,
-        Some(Box::new(|db| Ok(!db.actor_state_exists(Row::Decision.key())?))),
-    )
-    .await?;
+    let watched = done.key.clone();
+    done.account =
+        drive(account, &done.root, Some(Box::new(move |db| Ok(!db.actor_state_exists(&watched)?))))
+            .await?;
     assert_eq!(done.gateway.lock().map_err(|_| "gateway")?.attempts.len(), 2);
     // (a3d) the opposite choice is refused as consumed.
     let refused = done.account.client.decide_task_approval(&format!("task_approval_{id}"), true);
