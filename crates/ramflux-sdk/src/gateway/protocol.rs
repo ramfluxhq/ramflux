@@ -104,6 +104,9 @@ pub struct GatewaySessionConfig {
     pub push_route_retry: super::PushRouteRetry,
     /// Last push route control sequence (milliseconds, strictly increasing).
     pub push_route_last_seq: u64,
+    /// Advertise the session-push capability in the signed scope. Off until activation (P24);
+    /// only test constructors turn it on.
+    pub(crate) session_push_advertise: bool,
 }
 
 impl GatewaySessionConfig {
@@ -208,7 +211,15 @@ impl GatewaySessionConfig {
             push_route_clear_pending: false,
             push_route_retry: super::PushRouteRetry::default(),
             push_route_last_seq: 0,
+            session_push_advertise: false,
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_session_push_advertise(mut self, advertise: bool) -> Self {
+        self.session_push_advertise = advertise;
+        self
     }
 
     pub(crate) fn refresh_auth_window(&mut self) {
