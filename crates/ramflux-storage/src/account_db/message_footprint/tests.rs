@@ -939,7 +939,7 @@ fn archive_footprint_triggers_renewed_on_open_registers_existing_rows() -> Resul
     insert_archived(&db, "legacy/replay/committed/existing", "live")?;
     // A pre-fix database has never run the completing migration.
     db.connection.execute(
-        "DELETE FROM projection_checkpoint WHERE projection_name LIKE 'footprint_replay_migration:v1%'",
+        "DELETE FROM message_footprint_migration WHERE name LIKE 'footprint_replay_migration:v1%'",
         [],
     )?;
     let db = reopen(&root, db)?;

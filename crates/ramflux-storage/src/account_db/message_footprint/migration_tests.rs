@@ -14,7 +14,7 @@ fn checkpoint(db: &AccountDb, name: &str) -> Result<Option<String>, StorageError
     Ok(db
         .connection
         .query_row(
-            "SELECT last_event_id FROM projection_checkpoint WHERE projection_name=?1",
+            "SELECT value FROM message_footprint_migration WHERE name=?1",
             params![name],
             |row| row.get(0),
         )
@@ -68,7 +68,7 @@ fn pre_fix_fixture(name: &str) -> Result<(std::path::PathBuf, AccountDb), Storag
             )?;
         }
         db.connection.execute(
-            "DELETE FROM projection_checkpoint WHERE projection_name LIKE 'footprint_replay_migration:v1%'",
+            "DELETE FROM message_footprint_migration WHERE name LIKE 'footprint_replay_migration:v1%'",
             [],
         )?;
         Ok(())
@@ -109,6 +109,11 @@ fn replay_footprint_migration_completes_on_open() -> Result<(), StorageError> {
         assert_eq!(cursor, Some(i64::MAX.to_string()), "{table}");
     }
     assert_eq!(audit(&db)?, Vec::<String>::new());
+    // Migration bookkeeping never reaches the domain outbox.
+    assert_eq!(
+        count(&db, "SELECT count(*) FROM runtime_outbox WHERE table_name='projection_checkpoint'")?,
+        0
+    );
     // (b) Every candidate, no-op rows included, is visited exactly once.
     assert_eq!(count(&db, "SELECT count(*) FROM footprint_migration_test_visits")?, 2500);
     assert_eq!(
@@ -174,11 +179,11 @@ fn replay_footprint_migration_marker_gates_deletion_and_merge() -> Result<(), St
     let (root, db) = crate::tests::test_db("footprint-migration-refusal")?;
     db.send_direct_message("thread", "message", "peer", b"secret")?;
     db.connection
-        .execute("DELETE FROM projection_checkpoint WHERE projection_name=?1", params![MARKER])?;
+        .execute("DELETE FROM message_footprint_migration WHERE name=?1", params![MARKER])?;
     let error = db.delete_direct_message("thread", "message", "local", "delete");
     assert!(matches!(error, Err(StorageError::FootprintMigrationIncomplete)), "{error:?}");
     db.connection.execute(
-        "INSERT INTO projection_checkpoint VALUES(?1,1,'complete',NULL,0)",
+        "INSERT INTO message_footprint_migration VALUES(?1,'complete')",
         params![MARKER],
     )?;
     db.delete_direct_message("thread", "message", "local", "delete")?;
@@ -197,9 +202,7 @@ fn replay_footprint_migration_marker_gates_deletion_and_merge() -> Result<(), St
     let path = root.join("merged.db");
     let target = local.write_backup_snapshot(&path)?;
     let mut merged = crate::BackupDatabase::open(&path, &target.key)?;
-    merged
-        .db
-        .execute("DELETE FROM projection_checkpoint WHERE projection_name=?1", params![MARKER])?;
+    merged.db.execute("DELETE FROM message_footprint_migration WHERE name=?1", params![MARKER])?;
     let error = merged.merge_backup(&incoming, &snapshot.key, || Ok(()));
     assert!(matches!(error, Err(StorageError::FootprintMigrationIncomplete)), "{:?}", error.err());
     drop(merged);
@@ -237,7 +240,7 @@ fn replay_footprint_migration_merge_erases_late_owner_and_registers_imported_row
         )?;
     }
     local.connection.execute(
-        "DELETE FROM projection_checkpoint WHERE projection_name LIKE 'footprint_replay_migration:v1%'",
+        "DELETE FROM message_footprint_migration WHERE name LIKE 'footprint_replay_migration:v1%'",
         [],
     )?;
     drop(local);
@@ -294,6 +297,50 @@ fn replay_footprint_migration_merge_erases_late_owner_and_registers_imported_row
     drop(reopened);
     drop(local);
     drop(source);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn replay_footprint_merge_pass_cost_is_independent_of_local_history() -> Result<(), StorageError> {
+    let root = crate::tests::temp_root("footprint-migration-merge-cost");
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let local_index = AccountIndex::open(root.join("local"))?;
+    source_index.create_account("account", "root")?;
+    local_index.create_account("account", "root")?;
+    let source = AccountDb::open(&source_index, "account", &AccountDbKey::generate()?)?;
+    let local = AccountDb::open(&local_index, "account", &AccountDbKey::generate()?)?;
+    // A large local backlog of unregistrable replay values, and nothing incoming.
+    local.write_transaction(|| -> Result<(), StorageError> {
+        for n in 0..2000 {
+            local.connection.execute(
+                "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2)",
+                params![format!("legacy/replay/a2i/n{n}"), serde_json::to_vec(&json!({"e": n}))?],
+            )?;
+        }
+        Ok(())
+    })?;
+    let incoming = root.join("incoming.db");
+    let snapshot = source.write_backup_snapshot(&incoming)?;
+    let path = root.join("merged.db");
+    let target = local.write_backup_snapshot(&path)?;
+    let mut merged = crate::BackupDatabase::open(&path, &target.key)?;
+    merged.merge_backup(&incoming, &snapshot.key, || Ok(()))?;
+    // Only rows the merge itself wrote were recorded; the 2,000 local rows were never visited.
+    let recorded: i64 =
+        merged
+            .db
+            .query_row("SELECT count(*) FROM temp.footprint_merge_imported", [], |r| r.get(0))?;
+    assert!(recorded < 100, "recorded {recorded} rows for a merge with no incoming rows");
+    let triggers: i64 = merged.db.query_row(
+        "SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name LIKE 'footprint_merge_track%'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(triggers, 0);
+    drop(merged);
+    drop(source);
+    drop(local);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

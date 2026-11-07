@@ -33,6 +33,11 @@ pub(super) const FENCE_PROJECTION: &str =
              (SELECT message_id FROM message_footprint WHERE kind='actor' AND locator=?1)";
 
 pub(crate) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    // Migration bookkeeping lives outside `projection_checkpoint`, so it never reaches the
+    // domain outbox.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS message_footprint_migration(name TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL);",
+    )?;
     super::object_retention::install(db)?;
     schema::install(db)
 }

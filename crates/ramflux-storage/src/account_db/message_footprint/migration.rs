@@ -18,22 +18,14 @@ struct Store {
     table: &'static str,
     kind: &'static str,
     locator: &'static str,
-    /// Primary-key expression; row identity is never a rowid, which SQLite reuses.
-    key: &'static str,
 }
 
 const STORES: [Store; 2] = [
-    Store {
-        table: "runtime_actor_state",
-        kind: "actor",
-        locator: "t.state_kind",
-        key: "t.state_kind",
-    },
+    Store { table: "runtime_actor_state", kind: "actor", locator: "t.state_kind" },
     Store {
         table: "backup_archived_actor_state",
         kind: "archived_actor",
         locator: "CAST(t.rowid AS TEXT)",
-        key: "t.source||char(31)||t.state_kind",
     },
 ];
 
@@ -44,7 +36,7 @@ fn cursor_name(store: &Store) -> String {
 fn checkpoint(db: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
     use rusqlite::OptionalExtension;
     db.query_row(
-        "SELECT COALESCE(last_event_id,'') FROM projection_checkpoint WHERE projection_name=?1",
+        "SELECT value FROM message_footprint_migration WHERE name=?1",
         params![name],
         |row| row.get(0),
     )
@@ -53,8 +45,8 @@ fn checkpoint(db: &Connection, name: &str) -> rusqlite::Result<Option<String>> {
 
 fn write_checkpoint(db: &Connection, name: &str, value: &str) -> rusqlite::Result<()> {
     db.execute(
-        "INSERT INTO projection_checkpoint(projection_name,projection_version,last_event_id,updated_at) \
-         VALUES(?1,1,?2,0) ON CONFLICT(projection_name) DO UPDATE SET last_event_id=excluded.last_event_id",
+        "INSERT INTO message_footprint_migration(name,value) VALUES(?1,?2) \
+         ON CONFLICT(name) DO UPDATE SET value=excluded.value",
         params![name, value],
     )?;
     Ok(())
@@ -72,30 +64,19 @@ fn conversion(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
-/// Pending candidate rows in rowid order. The rowid only pages the scan; with `skip_seen` rows
-/// identical (same primary key and bytes) to a pre-merge unregistered row are not candidates.
+/// Pending candidate rows in rowid order; the rowid only pages the scan.
 fn candidates(
     db: &Connection,
     store: &Store,
     after: i64,
     limit: usize,
-    skip_seen: bool,
 ) -> rusqlite::Result<Vec<(i64, String, Vec<u8>)>> {
     let envelope = super::schema::envelope_sql_for("t.state_json");
-    let seen = if skip_seen {
-        format!(
-            "AND NOT EXISTS(SELECT 1 FROM temp.footprint_merge_seen s WHERE s.table_name='{}' \
-             AND s.row_key={} AND s.body=CAST(t.state_json AS BLOB)) ",
-            store.table, store.key
-        )
-    } else {
-        String::new()
-    };
     let mut query = db.prepare(&format!(
         "SELECT t.rowid,t.state_kind,CAST(t.state_json AS BLOB) FROM {table} t \
          WHERE t.rowid>?1 AND (t.state_kind GLOB 'legacy/replay/*' OR COALESCE({envelope},0)) \
          AND NOT EXISTS(SELECT 1 FROM message_footprint f WHERE f.kind=?2 AND f.locator={locator}) \
-         {seen}ORDER BY t.rowid LIMIT ?3",
+         ORDER BY t.rowid LIMIT ?3",
         table = store.table,
         locator = store.locator
     ))?;
@@ -190,7 +171,7 @@ pub(crate) fn complete(db: &Connection) -> rusqlite::Result<()> {
                 transaction.commit()?;
                 break;
             }
-            let rows = candidates(db, store, cursor, CHUNK, false)?;
+            let rows = candidates(db, store, cursor, CHUNK)?;
             for (rowid, key, body) in &rows {
                 #[cfg(test)]
                 test_visit(db, store, *rowid)?;
@@ -219,8 +200,8 @@ pub(crate) fn complete(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Records the rows that are already unregistered before a merge (no-op replay values), by
-/// primary key and bytes, so the merge pass can tell exactly which rows the merge brought in.
+/// Starts recording, by primary key, every `runtime_actor_state` row the merge inserts or
+/// rewrites. Work is bounded by the merge's own writes, never by local history.
 ///
 /// # Errors
 /// Returns `FootprintMigrationIncomplete` without the marker, or SQLite errors.
@@ -228,61 +209,64 @@ pub(crate) fn begin_merge(db: &Connection) -> Result<(), StorageError> {
     if !is_complete(db)? {
         return Err(StorageError::FootprintMigrationIncomplete);
     }
+    end_merge_tracking(db)?;
     db.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS footprint_merge_seen(
-            table_name TEXT NOT NULL,row_key TEXT NOT NULL,body BLOB NOT NULL);
-         DELETE FROM temp.footprint_merge_seen;",
+        "CREATE TEMP TABLE IF NOT EXISTS footprint_merge_imported(
+            row_key TEXT NOT NULL UNIQUE);
+         DELETE FROM temp.footprint_merge_imported;
+         CREATE TEMP TRIGGER footprint_merge_track_insert AFTER INSERT ON main.runtime_actor_state
+         BEGIN INSERT OR IGNORE INTO footprint_merge_imported VALUES(NEW.state_kind); END;
+         CREATE TEMP TRIGGER footprint_merge_track_update
+         AFTER UPDATE OF state_json ON main.runtime_actor_state
+         BEGIN INSERT OR IGNORE INTO footprint_merge_imported VALUES(NEW.state_kind); END;",
     )?;
-    let envelope = super::schema::envelope_sql_for("t.state_json");
-    for store in STORES {
-        if super::schema::exists(db, store.table)? {
-            db.execute(
-                &format!(
-                    "INSERT INTO temp.footprint_merge_seen \
-                     SELECT ?1,{key},CAST(t.state_json AS BLOB) FROM main.{table} t \
-                     WHERE (t.state_kind GLOB 'legacy/replay/*' OR COALESCE({envelope},0)) \
-                     AND NOT EXISTS(SELECT 1 FROM message_footprint f \
-                                    WHERE f.kind=?2 AND f.locator={locator})",
-                    key = store.key,
-                    table = store.table,
-                    locator = store.locator
-                ),
-                params![store.table, store.kind],
-            )?;
-        }
-    }
     Ok(())
 }
 
-/// Registers every unfootprinted candidate the merge brought in (anything not recorded by
-/// `begin_merge`); unbounded, inside the merge transaction, so imported pre-fix rows are owned
-/// before tombstones and reconcile run.
+fn end_merge_tracking(db: &Connection) -> rusqlite::Result<()> {
+    db.execute_batch(
+        "DROP TRIGGER IF EXISTS temp.footprint_merge_track_insert;
+         DROP TRIGGER IF EXISTS temp.footprint_merge_track_update;",
+    )
+}
+
+/// Registers every recorded row that still holds an unregistered candidate. Archived copies
+/// are registered by the archive triggers (renewed before the first write) and by relocation.
+/// Runs unbounded inside the merge transaction, after relocation and before tombstones.
 ///
 /// # Errors
 /// Returns SQLite errors.
 pub(crate) fn register_imported(db: &Connection) -> rusqlite::Result<()> {
     let armed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='footprint_merge_seen')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_temp_master WHERE type='table' AND name='footprint_merge_imported')",
         [],
         |row| row.get(0),
     )?;
     if !armed {
         return Ok(());
     }
-    for store in STORES {
-        if !super::schema::exists(db, store.table)? {
-            continue;
+    end_merge_tracking(db)?;
+    let store = &STORES[0];
+    let envelope = super::schema::envelope_sql_for("t.state_json");
+    let mut after = 0_i64;
+    loop {
+        let mut query = db.prepare(&format!(
+            "SELECT m.rowid,t.state_kind,CAST(t.state_json AS BLOB) \
+             FROM temp.footprint_merge_imported m JOIN main.runtime_actor_state t ON t.state_kind=m.row_key \
+             WHERE m.rowid>?1 AND (t.state_kind GLOB 'legacy/replay/*' OR COALESCE({envelope},0)) \
+             AND NOT EXISTS(SELECT 1 FROM message_footprint f WHERE f.kind='actor' AND f.locator=t.state_kind) \
+             ORDER BY m.rowid LIMIT ?2"
+        ))?;
+        let limit = i64::try_from(CHUNK).unwrap_or(i64::MAX);
+        let rows: Vec<(i64, String, Vec<u8>)> = query
+            .query_map(params![after, limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (_, key, body) in &rows {
+            register_row(db, store, 0, key, body)?;
         }
-        let mut after = 0;
-        loop {
-            let rows = candidates(db, &store, after, CHUNK, true)?;
-            for (rowid, key, body) in &rows {
-                register_row(db, &store, *rowid, key, body)?;
-            }
-            match rows.last() {
-                Some(last) if rows.len() == CHUNK => after = last.0,
-                _ => break,
-            }
+        match rows.last() {
+            Some(last) if rows.len() == CHUNK => after = last.0,
+            _ => break,
         }
     }
     Ok(())
@@ -297,7 +281,7 @@ impl AccountDb {
     /// Refuses deletion on a database whose footprint migration has not completed.
     pub(in crate::account_db) fn require_footprint_migration(&self) -> Result<(), StorageError> {
         let complete: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projection_checkpoint WHERE projection_name=?1 AND last_event_id='complete')",
+            "SELECT EXISTS(SELECT 1 FROM message_footprint_migration WHERE name=?1 AND value='complete')",
             params![MARKER],
             |row| row.get(0),
         )?;
