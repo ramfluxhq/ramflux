@@ -209,7 +209,10 @@ async fn push_reader_routes_shared_and_capable_frames() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].0.inbox_seq, 71);
     assert_eq!(pending[0].1, Some(PushMeta { incarnation_id: id(), retain_until: 7_777 }));
-    match resyncs.recv().await {
+    let first = tokio::time::timeout(std::time::Duration::from_secs(10), resyncs.recv())
+        .await
+        .expect("the resync is published within 10 s");
+    match first {
         Some(SessionEvent::Capable { event, .. }) => match &*event {
             CapableEvent::Resync {
                 incarnation_id,
@@ -252,8 +255,11 @@ async fn push_reader_routes_shared_and_capable_frames() {
     let pending = engine.take_pending_capable();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].1, Some(PushMeta { incarnation_id: id(), retain_until: 7_777 }));
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(10), resyncs.recv())
+        .await
+        .expect("the resync is published within 10 s");
     assert!(matches!(
-        resyncs.recv().await,
+        seen,
         Some(SessionEvent::Capable { event, .. })
             if matches!(&*event, CapableEvent::Resync { after_inbox_seq: 72, .. })
     ));
@@ -261,7 +267,6 @@ async fn push_reader_routes_shared_and_capable_frames() {
     // (p13b) frozen legacy submit vectors (the `gateway::submit_tests` shapes) as literal
     // bytes: node-core produces exactly these bytes, every mode routes them legacy, and the
     // decoded frame re-encodes byte for byte.
-    let migrated = ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON;
     let frozen: Vec<(Vec<u8>, Vec<u8>)> = vec![
         (
             br#"{"frame_type":"forward_ack","ack":{"envelope_id":"forwarded-envelope","target_delivery_id":"remote-target","inbox_seq":7}}"#.to_vec(),
@@ -280,8 +285,11 @@ async fn push_reader_routes_shared_and_capable_frames() {
                 .unwrap(),
         ),
         (
-            format!(r#"{{"frame_type":"nack","reason":"{migrated}"}}"#).into_bytes(),
-            serde_json::to_vec(&n::GatewayServerFrame::Nack { reason: migrated.into() }).unwrap(),
+            br#"{"frame_type":"nack","reason":"forwarded_home_node_migrated"}"#.to_vec(),
+            serde_json::to_vec(&n::GatewayServerFrame::Nack {
+                reason: ramflux_protocol::GATEWAY_FORWARDED_HOME_NODE_MIGRATED_REASON.into(),
+            })
+            .unwrap(),
         ),
     ];
     for (literal, node_bytes) in frozen {

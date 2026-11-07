@@ -118,6 +118,9 @@ fn frame(wire: &n::SessionPushServerFrame) -> Value {
     serde_json::to_value(wire).unwrap()
 }
 
+/// The legacy submit frame minus `signed_request`, in sorted-key `Value` order.
+const LEGACY_SUBMIT_GOLDEN: &str = r#"{"frame_type":"submit","submit":{"envelope":{"created_at":1,"delivery_class":"opaque_event","domain":"ramflux.envelope.v1","encrypted_payload":"opaque","envelope_id":"env-route","payload_hash":"hash-route","priority":"normal","schema":"ramflux.envelope.v1","signature":"fixture","signature_alg":"ed25519","signing_key_id":"dev","source_device_id":"d","source_principal_id":"p","target_delivery_id":"target-route","ttl":600,"version":1}}}"#;
+
 #[tokio::test]
 async fn capable_reply_event_split() {
     // (p1) Push self-target submit: the result comes from `submit_accepted`; the recipient
@@ -178,6 +181,14 @@ async fn capable_reply_event_split() {
         }
         other => panic!("not a submit: {other:?}"),
     }
+    // Exact legacy bytes: the signature material varies per run, so the signed request is
+    // removed and the remainder must equal the frozen golden byte for byte.
+    let mut wire: Value = serde_json::from_slice(&written[0]).unwrap();
+    assert!(wire["submit"].as_object_mut().unwrap().remove("signed_request").is_some());
+    assert_eq!(
+        String::from_utf8(serde_json::to_vec(&wire).unwrap()).unwrap(),
+        LEGACY_SUBMIT_GOLDEN
+    );
 
     // (p4) Push legacy ForwardAck matching: the forwarded result.
     let ack = json!({"frame_type":"forward_ack","ack":{
@@ -185,6 +196,31 @@ async fn capable_reply_event_split() {
     let (mut engine, _) = scripted(push(), vec![ack]);
     let entry = engine.submit_envelope(submitted("target-route")).await.unwrap();
     assert_eq!((entry.forwarded, entry.inbox_seq), (true, 9));
+
+    // (p4b) boundary: a matching ForwardAck with inbox_seq 1 succeeds.
+    let ack = json!({"frame_type":"forward_ack","ack":{
+        "envelope_id":"env-route","target_delivery_id":"target-route","inbox_seq":1}});
+    let (mut engine, _) = scripted(push(), vec![ack]);
+    let entry = engine.submit_envelope(submitted("target-route")).await.unwrap();
+    assert_eq!((entry.forwarded, entry.inbox_seq), (true, 1));
+    // (p4c)/(p4d) isolated single-field mismatches of the same valid ack, exact errors.
+    for (env, target, text) in [
+        ("env-other", "target-route", "env-other target target-route"),
+        ("env-route", "target-other", "env-route target target-other"),
+    ] {
+        let ack = json!({"frame_type":"forward_ack","ack":{
+            "envelope_id":env,"target_delivery_id":target,"inbox_seq":1}});
+        let (mut engine, _) = scripted(push(), vec![ack]);
+        match engine.submit_envelope(submitted("target-route")).await {
+            Err(SdkError::GatewaySessionRejected(message)) => {
+                assert_eq!(
+                    message,
+                    format!("forward acknowledgement mismatch for envelope {text}")
+                );
+            }
+            other => panic!("expected a mismatch refusal, got {other:?}"),
+        }
+    }
 
     // (p5) a keyless legacy nack is a submit error and the session stays alive.
     let (mut engine, _) =
