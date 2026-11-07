@@ -293,12 +293,12 @@ impl LinuxVaultInstallation {
         let slot = Slot::acquire()?;
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            Self::read_credential(&path)
+            Self::read_credential(&path).map(drop)
         })
         .await
         .map_err(|_| Error::Io)?
     }
-    fn read_credential(path: &Path) -> Result<(), Error> {
+    fn read_credential(path: &Path) -> Result<Secret<32>, Error> {
         if !path.is_absolute() {
             return Err(Error::Metadata);
         }
@@ -345,7 +345,9 @@ impl LinuxVaultInstallation {
         if len != 32 {
             return Err(Error::Length);
         }
-        Ok(())
+        let mut result = Secret::new("p06-credential");
+        result.bytes_mut().copy_from_slice(&key.bytes()[..32]);
+        Ok(result)
     }
 
     /// Initialize/resume an operator-owned existing private root; retain all published keys.
@@ -521,4 +523,78 @@ async fn create_systemd_key(
     publish(dir, name, &blob.bytes()[..len], plan.ops, cut)?;
     cut("realm-durable");
     Ok(())
+}
+
+/// Read only the role's realms under the installation lock, never initialize.
+pub(super) async fn material(
+    root: PathBuf,
+    config: super::LinuxVaultConfig,
+) -> Result<Material, Error> {
+    let slot = Slot::acquire()?;
+    let (sender, cancel) = watch::channel(false);
+    let _cancel = Cancel(sender);
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        runtime.block_on(async {
+            let dir = root_fd(&root)?;
+            let lock = open(&dir, ".init.lock", OFlags::RDWR)?;
+            fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|_| Error::Busy)?;
+            if optional(&dir, "init.pending", 4096)?.is_some() {
+                return Err(Error::Pending);
+            }
+            let manifest = parse(&read(&dir, "descriptor.json", 4096)?, &root, config.mode())?;
+            let decode = |id: &str| -> Result<[u8; 16], Error> {
+                let mut out = [0; 16];
+                for (i, byte) in out.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&id[i * 2..i * 2 + 2], 16)
+                        .map_err(|_| Error::Corrupt)?;
+                }
+                Ok(out)
+            };
+            let mut result = Material {
+                vault_id: decode(&manifest.vault_id)?,
+                key_ids: [[0; 16]; 3],
+                keys: std::array::from_fn(|_| None),
+            };
+            let deadline = Instant::now() + Duration::from_secs(90);
+            for i in 0..3 {
+                result.key_ids[i] = decode(&manifest.key_ids[i])?;
+                if (i == 0 && config.role() != super::LinuxVaultRole::AttendedPrimary)
+                    || (i == 1 && config.role() == super::LinuxVaultRole::DataOnly)
+                {
+                    continue;
+                }
+                let key = if config.mode() == LinuxVaultMode::DesktopSecretService {
+                    secret_service::obtain(
+                        &manifest.key_ids[i],
+                        i,
+                        false,
+                        &cancel,
+                        deadline,
+                        &|_| {},
+                    )?
+                } else {
+                    let path = match i {
+                        0 => &config.credentials().primary,
+                        1 => &config.credentials().device,
+                        _ => &config.credentials().data,
+                    };
+                    LinuxVaultInstallation::read_credential(path.as_deref().ok_or(Error::Missing)?)?
+                };
+                if *cancel.borrow() {
+                    return Err(Error::Cancelled);
+                }
+                result.keys[i] = Some(key);
+            }
+            Ok(result)
+        })
+    })
+    .await
+    .map_err(|_| Error::Io)?
+}
+pub(super) struct Material {
+    pub vault_id: [u8; 16],
+    pub key_ids: [[u8; 16]; 3],
+    pub keys: [Option<Secret<32>>; 3],
 }

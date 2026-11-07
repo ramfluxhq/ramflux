@@ -75,7 +75,7 @@ async fn linux_vault_owned_buffers_clear_on_all_exits() -> TestResult {
     sample.bytes_mut().fill(0x62);
     std::fs::write(&injected, sample.bytes())?;
     std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o400))?;
-    LinuxVaultInstallation::read_credential(&injected)?;
+    credential(&injected)?;
     drop(sample);
     let observations = observer::take();
     for label in [
@@ -135,6 +135,10 @@ fn manifest_bounds_and_cross_fields() -> TestResult {
     Ok(())
 }
 
+/// The credential reader returns a guarded secret in P06; only the refusal class matters here.
+fn credential(path: &Path) -> Result<(), Error> {
+    LinuxVaultInstallation::read_credential(path).map(drop)
+}
 fn private_dir() -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
@@ -266,66 +270,36 @@ fn init_root_and_credential_metadata_predicates_are_exact() -> TestResult {
     assert!(matches!(root_fd(Path::new("/")), Err(Error::Metadata)));
     // Credential reader: exactly one regular 0400 single-link 32-byte file.
     put(base, "key", &[7; 32], 0o400)?;
-    assert_eq!(LinuxVaultInstallation::read_credential(&base.join("key")), Ok(()));
+    assert_eq!(credential(&base.join("key")), Ok(()));
     for len in [0, 31, 33, 4096] {
         put(base, "len", &vec![7; len], 0o400)?;
-        assert_eq!(
-            LinuxVaultInstallation::read_credential(&base.join("len")),
-            Err(Error::Length),
-            "length {len}"
-        );
+        assert_eq!(credential(&base.join("len")), Err(Error::Length), "length {len}");
     }
     for bad in [0o600, 0o440, 0o444] {
         put(base, "perm", &[7; 32], bad)?;
-        assert_eq!(
-            LinuxVaultInstallation::read_credential(&base.join("perm")),
-            Err(Error::Metadata),
-            "credential mode {bad:o}"
-        );
+        assert_eq!(credential(&base.join("perm")), Err(Error::Metadata), "credential mode {bad:o}");
     }
     // A credential the process cannot even open is an I/O refusal, not a metadata one.
     put(base, "unreadable", &[7; 32], 0o200)?;
-    assert_eq!(LinuxVaultInstallation::read_credential(&base.join("unreadable")), Err(Error::Io));
+    assert_eq!(credential(&base.join("unreadable")), Err(Error::Io));
     std::fs::hard_link(base.join("key"), base.join("key-twin"))?;
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.join("key")),
-        Err(Error::Metadata),
-        "link count 2"
-    );
+    assert_eq!(credential(&base.join("key")), Err(Error::Metadata), "link count 2");
     std::os::unix::fs::symlink("key", base.join("key-link"))?;
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.join("key-link")),
-        Err(Error::Metadata),
-        "symlink credential"
-    );
+    assert_eq!(credential(&base.join("key-link")), Err(Error::Metadata), "symlink credential");
     std::os::unix::fs::symlink(base, base.join("dir-link"))?;
     assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.join("dir-link/key")),
+        credential(&base.join("dir-link/key")),
         Err(Error::Metadata),
         "symlink directory component"
     );
     let fd = root_fd(base)?;
     fs::mknodat(&fd, "fifo-key", fs::FileType::Fifo, Mode::RUSR, 0)?;
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.join("fifo-key")),
-        Err(Error::Metadata),
-        "fifo credential"
-    );
+    assert_eq!(credential(&base.join("fifo-key")), Err(Error::Metadata), "fifo credential");
     std::fs::create_dir(base.join("dir-key"))?;
     std::fs::set_permissions(base.join("dir-key"), std::fs::Permissions::from_mode(0o400))?;
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.join("dir-key")),
-        Err(Error::Metadata),
-        "directory credential"
-    );
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(&base.join("missing-key")),
-        Err(Error::Missing)
-    );
-    assert_eq!(
-        LinuxVaultInstallation::read_credential(Path::new("relative")),
-        Err(Error::Metadata)
-    );
+    assert_eq!(credential(&base.join("dir-key")), Err(Error::Metadata), "directory credential");
+    assert_eq!(credential(&base.join("missing-key")), Err(Error::Missing));
+    assert_eq!(credential(Path::new("relative")), Err(Error::Metadata));
     Ok(())
 }
 
