@@ -386,7 +386,7 @@ impl RouterCore {
         *lock_unpoisoned(&self.local_home_node_id) = node_id;
     }
 
-    fn local_home_node_id(&self) -> Option<String> {
+    pub(crate) fn local_home_node_id(&self) -> Option<String> {
         lock_unpoisoned(&self.local_home_node_id).clone()
     }
 
