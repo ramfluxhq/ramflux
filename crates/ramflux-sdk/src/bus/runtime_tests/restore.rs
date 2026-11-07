@@ -30,7 +30,7 @@ pub(super) fn subscribe_restore(supervisor: &Supervisor) -> mpsc::Receiver<Local
 pub(super) async fn restore_event(
     receiver: &mut mpsc::Receiver<LocalBusFrame>,
 ) -> Result<LocalBusFrame, SdkError> {
-    tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+    tokio::time::timeout(HANG, receiver.recv())
         .await
         .map_err(|_| failure("restore must finish"))?
         .ok_or_else(|| failure("restore event channel must stay open"))
@@ -57,7 +57,7 @@ async fn explicit_unlock_and_startup_restore_race_succeeds_in_both_orders() -> R
                 let mut background = tokio::task::JoinSet::new();
                 supervisor.hydrate(&mut background)?;
                 if let Some(control) = &restore_control {
-                    tokio::time::timeout(Duration::from_secs(5), control.entered())
+                    tokio::time::timeout(HANG, control.entered())
                         .await
                         .map_err(|_| failure("startup restore must enter its test gate"))?;
                 }
@@ -115,7 +115,7 @@ async fn failed_startup_restore_cannot_replace_an_explicitly_unlocked_account_st
             let mut events = subscribe_restore(&supervisor);
             let mut background = tokio::task::JoinSet::new();
             supervisor.hydrate(&mut background)?;
-            tokio::time::timeout(Duration::from_secs(5), control.entered())
+            tokio::time::timeout(HANG, control.entered())
                 .await
                 .map_err(|_| failure("startup restore must enter its test gate"))?;
 
@@ -185,7 +185,7 @@ async fn startup_restore_failure_emits_structured_error_and_allows_retry() -> Re
                 .await?;
             let mut background = tokio::task::JoinSet::new();
             supervisor.hydrate(&mut background)?;
-            let event = tokio::time::timeout(Duration::from_secs(5), client.next_event())
+            let event = tokio::time::timeout(HANG, client.next_event())
                 .await
                 .map_err(|_| failure("restore event timed out"))??;
             assert_eq!(event.method, "account.restore.finished");

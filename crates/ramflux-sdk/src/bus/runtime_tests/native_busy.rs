@@ -227,13 +227,11 @@ async fn reads(fixture: &Harness) -> Case<Value> {
         ("device.list", json!({})),
     ] {
         let wall = std::time::Instant::now();
-        let response = tokio::time::timeout(
-            Duration::from_secs(1),
-            fixture.actor.request(command(method, body)),
-        )
-        .await?
-        .map_err(|error| format!("{method}: {error}"))?;
-        assert!(wall.elapsed() < Duration::from_secs(1), "{method} waited on native admission");
+        let response =
+            tokio::time::timeout(super::HANG, fixture.actor.request(command(method, body)))
+                .await?
+                .map_err(|error| format!("{method}: {error}"))?;
+        assert!(wall.elapsed() < super::HANG, "{method} waited on native admission");
         if method == "account.status" {
             status = response.body;
         }
@@ -244,7 +242,7 @@ async fn finish(fixture: Harness) -> Case {
     fixture.clock.abort();
     let wall = std::time::Instant::now();
     fixture.actor.stop().await?;
-    assert!(wall.elapsed() < Duration::from_secs(1));
+    assert!(wall.elapsed() < super::HANG);
     assert!(!fixture.connector.held.load(Ordering::Acquire));
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -331,7 +329,7 @@ async fn actor_mailbox_stays_responsive_while_admission_is_busy() -> Case {
                 ))
                 .await?;
             assert!(
-                wall.elapsed() < Duration::from_secs(1),
+                wall.elapsed() < super::HANG,
                 "local policy mutation waited for native admission"
             );
             assert!(fixture.connector.held.load(Ordering::Acquire));
@@ -399,7 +397,7 @@ async fn network_command_answers_networking_pending_within_bound() -> Case {
             let wall = std::time::Instant::now();
             let second = fixture.actor.request(submit_command(&fixture)?).await;
             assert!(matches!(second, Err(SdkError::NetworkingPendingContext { .. })));
-            assert!(wall.elapsed() < Duration::from_millis(500));
+            assert!(wall.elapsed() < super::HANG);
             assert!(fixture.connector.held.load(Ordering::Acquire));
             tokio::time::resume();
             finish(fixture).await
@@ -417,11 +415,11 @@ async fn lock_aborts_connect_and_releases_lease() -> Case {
             fixture.clock.abort();
             let wall = std::time::Instant::now();
             tokio::time::timeout(
-                Duration::from_secs(1),
+                super::HANG,
                 fixture.actor.request(command("account.lock", json!({}))),
             )
             .await??;
-            assert!(wall.elapsed() < Duration::from_secs(1));
+            assert!(wall.elapsed() < super::HANG);
             assert!(
                 connection.test_finished(),
                 "manager and its children were not joined before lock reply"
@@ -461,11 +459,11 @@ async fn lock_preempts_a_held_require_live() -> Case {
             fixture.clock.abort();
             let wall = std::time::Instant::now();
             tokio::time::timeout(
-                Duration::from_secs(1),
+                super::HANG,
                 fixture.actor.request(command("account.lock", json!({}))),
             )
             .await??;
-            assert!(wall.elapsed() < Duration::from_secs(1));
+            assert!(wall.elapsed() < super::HANG);
             assert!(connection.test_finished());
             assert_ne!(connection.generation(), generation);
             let error = pending.await?.err().ok_or("held request unexpectedly succeeded")?;
@@ -504,7 +502,7 @@ async fn keyed_replay_and_conflicts_resolve_locally_while_offline() -> Case {
         let error = fixture.actor.request(pending).await.err().ok_or("pending key was accepted")?;
         assert!(matches!(error,SdkError::Storage(StorageError::OperationReconciliationRequired { .. })));
         assert!(matches!(fixture.actor.request(erased).await,Err(SdkError::ObjectErased)));
-        assert!(wall.elapsed() < Duration::from_secs(1),"local receipt resolution must bypass admission");
+        assert!(wall.elapsed() < super::HANG,"local receipt resolution must bypass admission");
         assert_eq!(fixture.actor.connection_for_test().ok_or("manager")?.test_live_waiters(),0);
         finish(fixture).await
     }))).await

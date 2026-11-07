@@ -95,7 +95,7 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
         bus.request_frame(request("create","alice","group.create",serde_json::json!({
             "group_id":"group","conversation_id":"group-thread","creator_id":"device-alice","name":"Checklist"
         }))).await.map_err(|error|failure(&format!("initial group create: {error}")))?;
-        tokio::time::timeout(Duration::from_secs(5),receiving).await
+        tokio::time::timeout(HANG,receiving).await
             .map_err(|_|failure("background group receive did not start"))?
             .map_err(|_|failure("receive fixture stopped"))?;
         let queued = tokio::task::spawn_local(async move {
@@ -111,7 +111,7 @@ async fn group_command_queued_during_receive_gets_a_typed_error_without_stopping
         let error=result.err().ok_or_else(||failure("invalid group add succeeded"))?;
         assert!(matches!(&error,SdkError::LocalBusRefused {code,..} if code=="ValidationFailed"),"{error}");
         assert!(!error.to_string().contains("account actor stopped"),"{error}");
-        tokio::time::timeout(Duration::from_secs(5),faulted).await
+        tokio::time::timeout(HANG,faulted).await
             .map_err(|_|failure("receive fault was not inserted"))?
             .map_err(|_|failure("receive fault injection stopped"))?;
         // The queued invalid command may finish before receive is released. This valid

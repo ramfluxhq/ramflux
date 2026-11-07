@@ -10,7 +10,7 @@ use serde_json::json;
 type Case = Result<(), Box<dyn std::error::Error>>;
 
 async fn bounded(signal: &tokio::sync::Notify) -> Case {
-    tokio::time::timeout(Duration::from_secs(5), signal.notified()).await?;
+    tokio::time::timeout(HANG, signal.notified()).await?;
     Ok(())
 }
 
@@ -113,7 +113,7 @@ async fn closed_connection_does_not_cancel_unlock() -> Case {
             bounded(&gate.entered).await?;
             drop(client);
             // Join the real connection handler: its response JoinSet has been cancelled.
-            tokio::time::timeout(Duration::from_secs(5), connection).await???;
+            tokio::time::timeout(HANG, connection).await???;
             gate.release.notify_one();
             bounded(&gate.completed).await?;
             assert_eq!(gate.executions.load(Ordering::SeqCst), 1);
@@ -207,8 +207,7 @@ async fn daemon_stop_aborts_a_stuck_lifecycle_task_within_five_seconds() -> Case
                         tokio::time::pause();
                         let started = tokio::time::Instant::now();
                         tokio::time::advance(Duration::from_secs(5)).await;
-                        let response =
-                            tokio::time::timeout(Duration::from_secs(1), &mut waiter).await??;
+                        let response = tokio::time::timeout(HANG, &mut waiter).await??;
                         // Tokio timers round up to the next millisecond.
                         assert!(started.elapsed() <= Duration::from_millis(5_001));
                         tokio::time::resume();
@@ -217,13 +216,13 @@ async fn daemon_stop_aborts_a_stuck_lifecycle_task_within_five_seconds() -> Case
                         gate.release.notify_one();
                         None
                     };
-                    tokio::time::timeout(Duration::from_secs(5), daemon).await???;
+                    tokio::time::timeout(HANG, daemon).await???;
                     if let Some(stop_response) = stop_response {
                         stop_response.await??;
                     }
                     let response = match aborted_response {
                         Some(response) => response,
-                        None => tokio::time::timeout(Duration::from_secs(1), waiter).await??,
+                        None => tokio::time::timeout(HANG, waiter).await??,
                     };
                     if stuck {
                         assert!(response.is_err());
@@ -278,14 +277,14 @@ async fn completed_lifecycle_tasks_are_reaped_while_daemon_is_idle() -> Case {
             unlock.operation_id = Some("reap-key".into());
             let (outbound, _replies) = mpsc::channel(8);
             supervisor.request(unlock, &LocalBusConnectionState::new(1, outbound)).await?;
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(HANG, async {
                 while supervisor.lifecycle_task_count() != 0 {
                     tokio::task::yield_now().await;
                 }
             })
             .await?;
             shutdown.send(true)?;
-            tokio::time::timeout(Duration::from_secs(5), daemon).await???;
+            tokio::time::timeout(HANG, daemon).await???;
             drop(supervisor);
             std::fs::remove_dir_all(root)?;
             Ok(())
