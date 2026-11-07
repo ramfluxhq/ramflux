@@ -74,13 +74,15 @@ pub(crate) struct GatewaySessionRuntime {
     pub(crate) branch_public_key: String,
     pub(crate) device_epoch: u64,
     pub(crate) supports_forward_ack: bool,
+    /// Session-owned ephemeral admission bucket, shared by every clone of this session.
+    pub(crate) ephemeral_rate: Arc<crate::ephemeral::EphemeralRate>,
 }
 
 impl GatewaySessionRuntime {
-    /// P10 reads the establishment echo of `gateway.ephemeral.v1` from this session.
+    /// Dormant gate: P10 replaces this with the establishment echo of `gateway.ephemeral.v1`
+    /// once the session carries that state.
     #[must_use]
-    #[allow(clippy::unused_self)]
-    pub(crate) fn ephemeral_negotiated(&self) -> bool {
+    pub(crate) const fn ephemeral_negotiated() -> bool {
         false
     }
 }

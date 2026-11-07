@@ -51,6 +51,7 @@ fn runtime() -> anyhow::Result<GatewaySessionRuntime> {
         branch_public_key: ramflux_crypto::public_key_base64url_from_seed([2; 32]),
         device_epoch: 1,
         supports_forward_ack: false,
+        ephemeral_rate: std::sync::Arc::default(),
     })
 }
 #[tokio::test]

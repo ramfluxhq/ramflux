@@ -7,7 +7,7 @@ use crate::push_queue::TransientAdmission;
 use crate::{GatewayQuicContext, GatewaySendHandle, GatewaySessionRuntime};
 use ramflux_protocol::Envelope;
 use ramflux_protocol::ephemeral::{
-    EphemeralDropReason, EphemeralModeError, EphemeralSubmitOutcome, deadline,
+    EphemeralDropReason, EphemeralModeError, EphemeralSubmitResult, deadline,
 };
 
 /// Whole G→C `ephemeral` frame cap, inclusive (32,768 accepted, 32,769 refused).
@@ -70,6 +70,9 @@ impl EphemeralRateLimiter {
     }
 }
 
+/// Session-owned, synchronized bucket: retained across submits and shared by session clones.
+pub(crate) type EphemeralRate = tokio::sync::Mutex<EphemeralRateLimiter>;
+
 pub(crate) trait EphemeralRoute {
     fn route(
         &mut self,
@@ -92,7 +95,7 @@ pub(crate) struct Admission<'a, R, E> {
     pub now_ms: u64,
     pub envelope: &'a Envelope,
     pub source: SourceCheck,
-    pub rate: &'a mut EphemeralRateLimiter,
+    pub rate: &'a EphemeralRate,
     pub route: &'a mut R,
     pub enqueue: &'a mut E,
 }
@@ -123,7 +126,7 @@ where
     if bytes.len() > EPHEMERAL_FRAME_CAP {
         return dropped(envelope_id, EphemeralDropReason::Invalid);
     }
-    if !input.rate.try_acquire(input.now_ms) {
+    if !input.rate.lock().await.try_acquire(input.now_ms) {
         return dropped(envelope_id, EphemeralDropReason::RateLimited);
     }
 
@@ -149,7 +152,45 @@ pub(crate) async fn handle_submit(
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> anyhow::Result<()> {
-    if !runtime.ephemeral_negotiated() {
+    let mut route = MeshRoute { context };
+    let mut enqueue = HubEnqueue { hub: &context.hub };
+    handle_submit_with(
+        send,
+        &SubmitIngress {
+            runtime,
+            negotiated: GatewaySessionRuntime::ephemeral_negotiated(),
+            now_ms: now_ms(),
+        },
+        submit,
+        &mut route,
+        &mut enqueue,
+    )
+    .await
+}
+
+/// Inputs fixed by the caller of [`handle_submit_with`]: the clock instant and the negotiation.
+pub(crate) struct SubmitIngress<'a> {
+    pub runtime: &'a GatewaySessionRuntime,
+    pub negotiated: bool,
+    pub now_ms: u64,
+}
+
+/// [`handle_submit`] with the route, enqueue, clock and negotiation injected.
+///
+/// Authentication is read-only (I-NP): no replay record, no store write. Replay of an
+/// ephemeral is bounded by the router's volatile set (D3), never by gateway durable state.
+pub(crate) async fn handle_submit_with<R, E>(
+    send: &GatewaySendHandle,
+    ingress: &SubmitIngress<'_>,
+    submit: &ramflux_node_core::GatewaySubmitFrame,
+    route: &mut R,
+    enqueue: &mut E,
+) -> anyhow::Result<()>
+where
+    R: EphemeralRoute,
+    E: EphemeralEnqueue,
+{
+    if !ingress.negotiated {
         crate::session::write_gateway_handle(
             send,
             &ramflux_node_core::GatewayServerFrame::Nack { reason: "unsupported".to_owned() },
@@ -157,32 +198,29 @@ pub(crate) async fn handle_submit(
         .await?;
         return Ok(());
     }
+    let runtime = ingress.runtime;
     let (envelope, source) = match crate::submit_source::bind_source(runtime, &submit.envelope) {
         Ok(envelope) => (envelope, SourceCheck::Ok),
         Err(_) => (submit.envelope.clone(), SourceCheck::Rejected),
     };
-    let source = match crate::session::validate_gateway_session_signed_request(
-        context,
+    let source = match crate::session::verify_gateway_session_signed_request(
         runtime,
         &submit.signed_request,
         "POST",
         "/gateway/session/submit",
         &submit.envelope,
     ) {
-        Ok(()) => source,
+        Ok(_) => source,
         Err(_) => SourceCheck::Rejected,
     };
-    let mut rate = EphemeralRateLimiter::default();
-    let mut route = MeshRoute { context };
-    let mut enqueue = HubEnqueue { hub: &context.hub };
     let frame = admit(Admission {
         negotiated: true,
-        now_ms: now_ms(),
+        now_ms: ingress.now_ms,
         envelope: &envelope,
         source,
-        rate: &mut rate,
-        route: &mut route,
-        enqueue: &mut enqueue,
+        rate: &runtime.ephemeral_rate,
+        route,
+        enqueue,
     })
     .await;
     crate::session::write_gateway_handle(send, &frame).await
@@ -198,8 +236,7 @@ fn mode_reason(error: EphemeralModeError) -> EphemeralDropReason {
 fn accepted(envelope_id: String) -> ramflux_node_core::GatewayServerFrame {
     ramflux_node_core::GatewayServerFrame::EphemeralResult {
         envelope_id,
-        outcome: EphemeralSubmitOutcome::Accepted,
-        reason: None,
+        result: EphemeralSubmitResult::accepted(),
     }
 }
 
@@ -209,8 +246,7 @@ fn dropped(
 ) -> ramflux_node_core::GatewayServerFrame {
     ramflux_node_core::GatewayServerFrame::EphemeralResult {
         envelope_id,
-        outcome: EphemeralSubmitOutcome::Dropped,
-        reason: Some(reason),
+        result: EphemeralSubmitResult::dropped(reason),
     }
 }
 
@@ -288,5 +324,7 @@ impl EphemeralEnqueue for HubEnqueue<'_> {
     }
 }
 
+#[cfg(test)]
+mod handler_tests;
 #[cfg(test)]
 mod tests;

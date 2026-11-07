@@ -284,11 +284,15 @@ pub enum GatewayServerFrame {
     },
     EphemeralResult {
         envelope_id: String,
-        outcome: ramflux_protocol::ephemeral::EphemeralSubmitOutcome,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<ramflux_protocol::ephemeral::EphemeralDropReason>,
+        /// Outcome and reason, coupled when the received bytes are decoded.
+        #[serde(flatten)]
+        result: ramflux_protocol::ephemeral::EphemeralSubmitResult,
     },
     Close {
         reason: String,
     },
 }
+
+#[cfg(test)]
+#[path = "gateway_frames_ephemeral_tests.rs"]
+mod ephemeral_result_tests;

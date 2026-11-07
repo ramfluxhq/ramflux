@@ -77,6 +77,68 @@ pub enum EphemeralSubmitOutcome {
     Dropped,
 }
 
+/// Typed `ephemeral_result` body: `reason` is present if and only if the outcome is dropped.
+///
+/// The coupling is enforced when received bytes are decoded, so an invalid combination can
+/// never become a value in either gateway frame type.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "EphemeralSubmitResultWire")]
+pub struct EphemeralSubmitResult {
+    outcome: EphemeralSubmitOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<EphemeralDropReason>,
+}
+
+#[derive(Deserialize)]
+struct EphemeralSubmitResultWire {
+    outcome: EphemeralSubmitOutcome,
+    #[serde(default)]
+    reason: Option<EphemeralDropReason>,
+}
+
+/// Refusal text for a received `ephemeral_result` whose outcome and reason disagree.
+pub const RESULT_DROPPED_WITHOUT_REASON: &str = "ephemeral_result dropped requires a reason";
+/// Refusal text for a received accepted `ephemeral_result` that carries a reason.
+pub const RESULT_ACCEPTED_WITH_REASON: &str = "ephemeral_result accepted forbids a reason";
+
+impl TryFrom<EphemeralSubmitResultWire> for EphemeralSubmitResult {
+    type Error = &'static str;
+
+    fn try_from(wire: EphemeralSubmitResultWire) -> Result<Self, Self::Error> {
+        match (wire.outcome, wire.reason) {
+            (EphemeralSubmitOutcome::Dropped, None) => Err(RESULT_DROPPED_WITHOUT_REASON),
+            (EphemeralSubmitOutcome::Accepted, Some(_)) => Err(RESULT_ACCEPTED_WITH_REASON),
+            (outcome, reason) => Ok(Self { outcome, reason }),
+        }
+    }
+}
+
+impl EphemeralSubmitResult {
+    /// The accepted result (no reason).
+    #[must_use]
+    pub const fn accepted() -> Self {
+        Self { outcome: EphemeralSubmitOutcome::Accepted, reason: None }
+    }
+
+    /// A dropped result with its mandatory reason.
+    #[must_use]
+    pub const fn dropped(reason: EphemeralDropReason) -> Self {
+        Self { outcome: EphemeralSubmitOutcome::Dropped, reason: Some(reason) }
+    }
+
+    /// The outcome.
+    #[must_use]
+    pub const fn outcome(&self) -> EphemeralSubmitOutcome {
+        self.outcome
+    }
+
+    /// The drop reason; `Some` if and only if the outcome is dropped.
+    #[must_use]
+    pub const fn reason(&self) -> Option<EphemeralDropReason> {
+        self.reason
+    }
+}
+
 /// Classify `ext.delivery_mode`: absent and `durable` are durable, while an
 /// unrecognized value is invalid rather than silently falling back to durable.
 #[must_use]

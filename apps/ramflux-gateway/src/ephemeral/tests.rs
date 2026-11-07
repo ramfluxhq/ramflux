@@ -4,12 +4,12 @@
 //! Named S6c P09 admission rows: validate-before-route, rate, one result.
 
 use super::{
-    Admission, EPHEMERAL_FRAME_CAP, EPHEMERAL_RATE_BURST, EphemeralEnqueue, EphemeralRateLimiter,
+    Admission, EPHEMERAL_FRAME_CAP, EPHEMERAL_RATE_BURST, EphemeralEnqueue, EphemeralRate,
     EphemeralRoute, RouteDecision, SourceCheck, admit, frame_bytes,
 };
 use crate::push_queue::{TRANSIENT_BYTE_CAP, TransientAdmission};
 use ramflux_protocol::ephemeral::{
-    DELIVERY_MODE_EXTENSION, EphemeralDropReason, EphemeralSubmitOutcome,
+    DELIVERY_MODE_EXTENSION, EphemeralDropReason, EphemeralSubmitOutcome, EphemeralSubmitResult,
     MAX_EPHEMERAL_TTL_SECONDS, MIN_EPHEMERAL_TTL_SECONDS,
 };
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
@@ -17,14 +17,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-const NOW_MS: u64 = 1_000_000;
-const DEADLINE_MS: u64 = 1_005_000;
+pub(super) const NOW_MS: u64 = 1_000_000;
+pub(super) const DEADLINE_MS: u64 = 1_005_000;
 
-type TestResult<T = ()> = anyhow::Result<T>;
+pub(super) type TestResult<T = ()> = anyhow::Result<T>;
 
-struct RouteRecorder {
-    calls: Vec<(String, u64)>,
-    decision: RouteDecision,
+pub(super) struct RouteRecorder {
+    pub(super) calls: Vec<(String, u64)>,
+    pub(super) decision: RouteDecision,
 }
 
 impl Default for RouteRecorder {
@@ -44,10 +44,10 @@ impl EphemeralRoute for RouteRecorder {
     }
 }
 
-struct EnqueueRecorder {
-    calls: usize,
-    admission: TransientAdmission,
-    last_bytes: Option<Vec<u8>>,
+pub(super) struct EnqueueRecorder {
+    pub(super) calls: usize,
+    pub(super) admission: TransientAdmission,
+    pub(super) last_bytes: Option<Vec<u8>>,
 }
 
 impl Default for EnqueueRecorder {
@@ -69,7 +69,7 @@ impl EphemeralEnqueue for EnqueueRecorder {
     }
 }
 
-fn valid_envelope() -> Envelope {
+pub(super) fn valid_envelope() -> Envelope {
     let mut extensions = BTreeMap::new();
     extensions.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
     Envelope {
@@ -96,35 +96,36 @@ fn valid_envelope() -> Envelope {
     }
 }
 
-fn mutated(change: impl FnOnce(&mut Envelope)) -> Envelope {
+pub(super) fn mutated(change: impl FnOnce(&mut Envelope)) -> Envelope {
     let mut envelope = valid_envelope();
     change(&mut envelope);
     envelope
 }
 
-fn dropped_frame(
+pub(super) fn dropped_frame(
     frame: &ramflux_node_core::GatewayServerFrame,
     envelope_id: &str,
     reason: EphemeralDropReason,
 ) -> bool {
     matches!(
         frame,
-        ramflux_node_core::GatewayServerFrame::EphemeralResult {
-            envelope_id: id,
-            outcome: EphemeralSubmitOutcome::Dropped,
-            reason: Some(got),
-        } if id == envelope_id && *got == reason
+        ramflux_node_core::GatewayServerFrame::EphemeralResult { envelope_id: id, result }
+            if id == envelope_id
+                && result.outcome() == EphemeralSubmitOutcome::Dropped
+                && result.reason() == Some(reason)
     )
 }
 
-fn accepted_frame(frame: &ramflux_node_core::GatewayServerFrame, envelope_id: &str) -> bool {
+pub(super) fn accepted_frame(
+    frame: &ramflux_node_core::GatewayServerFrame,
+    envelope_id: &str,
+) -> bool {
     matches!(
         frame,
-        ramflux_node_core::GatewayServerFrame::EphemeralResult {
-            envelope_id: id,
-            outcome: EphemeralSubmitOutcome::Accepted,
-            reason: None,
-        } if id == envelope_id
+        ramflux_node_core::GatewayServerFrame::EphemeralResult { envelope_id: id, result }
+            if id == envelope_id
+                && result.outcome() == EphemeralSubmitOutcome::Accepted
+                && result.reason().is_none()
     )
 }
 
@@ -135,7 +136,7 @@ async fn refuse_before_route(
     negotiated: bool,
     reason: EphemeralDropReason,
 ) -> TestResult {
-    let mut rate = EphemeralRateLimiter::default();
+    let rate = EphemeralRate::default();
     let mut route = RouteRecorder::default();
     let mut enqueue = EnqueueRecorder::default();
     let frame = admit(Admission {
@@ -143,7 +144,7 @@ async fn refuse_before_route(
         now_ms,
         envelope,
         source,
-        rate: &mut rate,
+        rate: &rate,
         route: &mut route,
         enqueue: &mut enqueue,
     })
@@ -174,7 +175,7 @@ fn pad_to_frame_size(target: usize) -> TestResult<Envelope> {
     Ok(envelope)
 }
 
-async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
+pub(super) async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
     let finished = tokio::time::timeout(Duration::from_secs(10), future).await;
     assert!(finished.is_ok(), "{what} did not finish within 10s");
     match finished {
@@ -193,6 +194,7 @@ async fn ephemeral_admission_result() -> TestResult {
     row_source_and_mode_negatives().await?;
     row_priority_ttl_clock_negatives().await?;
     row_size_and_session_negatives().await?;
+    row_positive_ttl_and_future_boundaries().await?;
     Ok(())
 }
 
@@ -208,8 +210,7 @@ async fn ephemeral_deadline() -> TestResult {
 fn wire_result_bytes() -> TestResult {
     let dropped = ramflux_node_core::GatewayServerFrame::EphemeralResult {
         envelope_id: "e1".to_owned(),
-        outcome: EphemeralSubmitOutcome::Dropped,
-        reason: Some(EphemeralDropReason::RateLimited),
+        result: EphemeralSubmitResult::dropped(EphemeralDropReason::RateLimited),
     };
     assert_eq!(
         serde_json::to_vec(&dropped)?,
@@ -217,8 +218,7 @@ fn wire_result_bytes() -> TestResult {
     );
     let accepted = ramflux_node_core::GatewayServerFrame::EphemeralResult {
         envelope_id: "e1".to_owned(),
-        outcome: EphemeralSubmitOutcome::Accepted,
-        reason: None,
+        result: EphemeralSubmitResult::accepted(),
     };
     assert_eq!(
         serde_json::to_vec(&accepted)?,
@@ -230,7 +230,7 @@ fn wire_result_bytes() -> TestResult {
 async fn admit_ok(
     envelope: &Envelope,
     now_ms: u64,
-    rate: &mut EphemeralRateLimiter,
+    rate: &EphemeralRate,
     route: &mut RouteRecorder,
     enqueue: &mut EnqueueRecorder,
 ) -> ramflux_node_core::GatewayServerFrame {
@@ -247,24 +247,24 @@ async fn admit_ok(
 }
 
 async fn row_burst_then_refill() -> TestResult {
-    let mut rate = EphemeralRateLimiter::default();
+    let rate = EphemeralRate::default();
     let mut route = RouteRecorder::default();
     let mut enqueue = EnqueueRecorder::default();
     for n in 0..EPHEMERAL_RATE_BURST {
         let envelope = mutated(|e| e.envelope_id = format!("burst-{n}"));
-        let frame = admit_ok(&envelope, NOW_MS, &mut rate, &mut route, &mut enqueue).await;
+        let frame = admit_ok(&envelope, NOW_MS, &rate, &mut route, &mut enqueue).await;
         anyhow::ensure!(accepted_frame(&frame, &envelope.envelope_id), "burst {n}: {frame:?}");
     }
     anyhow::ensure!(route.calls.len() == EPHEMERAL_RATE_BURST as usize);
     let limited = mutated(|e| e.envelope_id = "burst-41".to_owned());
-    let frame = admit_ok(&limited, NOW_MS, &mut rate, &mut route, &mut enqueue).await;
+    let frame = admit_ok(&limited, NOW_MS, &rate, &mut route, &mut enqueue).await;
     anyhow::ensure!(dropped_frame(&frame, "burst-41", EphemeralDropReason::RateLimited));
     anyhow::ensure!(
         route.calls.len() == EPHEMERAL_RATE_BURST as usize,
         "41st submit must not call the router"
     );
     let refill = mutated(|e| e.envelope_id = "burst-refill".to_owned());
-    let frame = admit_ok(&refill, NOW_MS + 50, &mut rate, &mut route, &mut enqueue).await;
+    let frame = admit_ok(&refill, NOW_MS + 50, &rate, &mut route, &mut enqueue).await;
     anyhow::ensure!(accepted_frame(&frame, "burst-refill"), "{frame:?}");
     anyhow::ensure!(route.calls.len() == EPHEMERAL_RATE_BURST as usize + 1);
     Ok(())
@@ -297,7 +297,7 @@ async fn row_accepted_then_expired_no_second_reply() -> TestResult {
     let (send, frames) = sink();
     queue.install(&send, Some(ID.into())).await?;
     let envelope = valid_envelope();
-    let mut rate = EphemeralRateLimiter::default();
+    let rate = EphemeralRate::default();
     let mut route = RouteRecorder::default();
     let mut enqueue = QueueEnqueue { queue: queue.clone() };
     let frame = admit(Admission {
@@ -305,7 +305,7 @@ async fn row_accepted_then_expired_no_second_reply() -> TestResult {
         now_ms: NOW_MS,
         envelope: &envelope,
         source: SourceCheck::Ok,
-        rate: &mut rate,
+        rate: &rate,
         route: &mut route,
         enqueue: &mut enqueue,
     })
@@ -418,10 +418,10 @@ async fn row_size_and_session_negatives() -> TestResult {
     refuse_before_route(&oversized, NOW_MS, SourceCheck::Ok, true, EphemeralDropReason::Invalid)
         .await?;
     let at_cap = pad_to_frame_size(EPHEMERAL_FRAME_CAP)?;
-    let mut rate = EphemeralRateLimiter::default();
+    let rate = EphemeralRate::default();
     let mut route = RouteRecorder::default();
     let mut enqueue = EnqueueRecorder::default();
-    let frame = admit_ok(&at_cap, NOW_MS, &mut rate, &mut route, &mut enqueue).await;
+    let frame = admit_ok(&at_cap, NOW_MS, &rate, &mut route, &mut enqueue).await;
     anyhow::ensure!(accepted_frame(&frame, &at_cap.envelope_id));
     anyhow::ensure!(route.calls.len() == 1);
     anyhow::ensure!(enqueue.last_bytes.as_ref().is_some_and(|b| b.len() == EPHEMERAL_FRAME_CAP));
@@ -459,6 +459,7 @@ fn bind_source_mismatch_and_bad_signature() -> TestResult {
         branch_public_key: authority.branch_public_key.clone(),
         device_epoch: 1,
         supports_forward_ack: false,
+        ephemeral_rate: std::sync::Arc::default(),
     };
     let mut envelope = valid_envelope();
     envelope.source_principal_id = "alice".into();
@@ -497,10 +498,10 @@ async fn row_stale_refused_before_route() -> TestResult {
 
 async fn row_deadline_exact_on_route() -> TestResult {
     let envelope = valid_envelope();
-    let mut rate = EphemeralRateLimiter::default();
+    let rate = EphemeralRate::default();
     let mut route = RouteRecorder::default();
     let mut enqueue = EnqueueRecorder::default();
-    let frame = admit_ok(&envelope, NOW_MS, &mut rate, &mut route, &mut enqueue).await;
+    let frame = admit_ok(&envelope, NOW_MS, &rate, &mut route, &mut enqueue).await;
     anyhow::ensure!(accepted_frame(&frame, "envelope"));
     anyhow::ensure!(route.calls == vec![("envelope".to_owned(), DEADLINE_MS)]);
     Ok(())
@@ -518,4 +519,27 @@ async fn row_now_equals_deadline_expires() -> TestResult {
         EphemeralDropReason::Expired,
     )
     .await
+}
+
+/// ttl 1 is the smallest accepted lifetime and `created_at` may lead the clock by exactly 2000 ms.
+async fn row_positive_ttl_and_future_boundaries() -> TestResult {
+    let one_second = mutated(|e| {
+        e.created_at = 1_000;
+        e.ttl = 1;
+    });
+    let (mut route, mut enqueue) = (RouteRecorder::default(), EnqueueRecorder::default());
+    let rate = EphemeralRate::default();
+    let frame = admit_ok(&one_second, NOW_MS, &rate, &mut route, &mut enqueue).await;
+    anyhow::ensure!(accepted_frame(&frame, "envelope"), "{frame:?}");
+    anyhow::ensure!(route.calls == vec![("envelope".to_owned(), 1_001_000)], "{:?}", route.calls);
+
+    // created_at 1,000 s is 1,000,000 ms: exactly now + 2000 ms is accepted, +2001 is refused.
+    let (mut route, mut enqueue) = (RouteRecorder::default(), EnqueueRecorder::default());
+    let rate = EphemeralRate::default();
+    let at_tolerance = valid_envelope();
+    let frame = admit_ok(&at_tolerance, 998_000, &rate, &mut route, &mut enqueue).await;
+    anyhow::ensure!(accepted_frame(&frame, "envelope"), "{frame:?}");
+    anyhow::ensure!(route.calls.len() == 1);
+    refuse_before_route(&at_tolerance, 997_999, SourceCheck::Ok, true, EphemeralDropReason::Invalid)
+        .await
 }
