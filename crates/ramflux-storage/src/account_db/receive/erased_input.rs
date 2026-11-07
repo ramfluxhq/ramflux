@@ -114,3 +114,51 @@ impl AccountDb {
         Ok(false)
     }
 }
+
+/// Unions the incoming snapshot's live tombstones into the merged database, inside the merge
+/// transaction and before publication or install. Keyed by selector with the maximum expiry; an
+/// unknown bundle or a bundle mismatch on an equal selector refuses the whole merge. Every
+/// merge also drops all expired local rows (sweep S2).
+///
+/// # Errors
+/// Returns `Integrity` for an unknown or mismatched bundle, or SQLite errors.
+pub(crate) fn merge_from(db: &rusqlite::Connection, schema: &str) -> Result<(), StorageError> {
+    if schema != "incoming" {
+        return Err(StorageError::AuthorizationRejected);
+    }
+    let now = crate::unix_now();
+    let present: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='receive_erased_input')",
+        [],
+        |row| row.get(0),
+    )?;
+    if present {
+        let unknown: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM incoming.receive_erased_input r WHERE r.expires_at>?1 \
+             AND r.bundle_id NOT IN (SELECT bundle_id FROM main.account_mac_bundle))",
+            params![now],
+            |row| row.get(0),
+        )?;
+        if unknown {
+            return Err(StorageError::Integrity("erased-input bundle unknown to the merged set"));
+        }
+        let mismatch: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM incoming.receive_erased_input r \
+             JOIN main.receive_erased_input l ON l.selector=r.selector \
+             WHERE r.expires_at>?1 AND l.bundle_id<>r.bundle_id)",
+            params![now],
+            |row| row.get(0),
+        )?;
+        if mismatch {
+            return Err(StorageError::Integrity("erased-input bundle mismatch"));
+        }
+        db.execute(
+            "INSERT INTO main.receive_erased_input(selector,bundle_id,expires_at) \
+             SELECT selector,bundle_id,expires_at FROM incoming.receive_erased_input WHERE expires_at>?1 \
+             ON CONFLICT(selector) DO UPDATE SET expires_at=max(expires_at,excluded.expires_at)",
+            params![now],
+        )?;
+    }
+    db.execute("DELETE FROM main.receive_erased_input WHERE expires_at<=?1", params![now])?;
+    Ok(())
+}
