@@ -406,18 +406,8 @@ async fn run_registered_gateway_session(
     native: Option<super::custody::GatewayGrant>,
 ) -> anyhow::Result<()> {
     let target_delivery_id = runtime.target_delivery_id.clone();
-    let session_id = runtime.session_id.clone();
     let send: GatewaySendHandle = Arc::new(AsyncMutex::new(send));
-    let registration = context
-        .hub
-        .register_with_limit(
-            target_delivery_id.clone(),
-            session_id,
-            Arc::clone(&send),
-            runtime.session_push.clone(),
-            runtime.push_limit,
-        )
-        .await?;
+    let registration = context.hub.register_runtime(&runtime, Arc::clone(&send)).await?;
     let result = run_gateway_session_loop_until_closed(
         send,
         recv,
@@ -607,7 +597,7 @@ pub(crate) async fn establish_gateway_session(
         push_alias_hash: None,
         lifecycle: ramflux_node_core::SessionLifecycle::Live,
     };
-    let session_push = crate::session_push::negotiate(context, auth_frame, &descriptor).await?;
+    let negotiated = crate::session_push::negotiate(context, auth_frame, &descriptor).await?;
     let resume_token = {
         let mut gateway = gateway_state(&context.state)?;
         let resume = gateway.issue_resume_token(ramflux_node_core::GatewayResumeIssueInput {
@@ -637,12 +627,19 @@ pub(crate) async fn establish_gateway_session(
         resume_token: resume_token.clone(),
         resume_window_seconds,
     };
-    crate::session_push::established(send, established, session_push.as_deref()).await?;
+    crate::session_push::established(
+        send,
+        established,
+        negotiated.incarnation_id.as_deref(),
+        negotiated.ephemeral,
+    )
+    .await?;
     // Volatile and keyed by session ID: a same-session resume keeps its spent tokens.
     let ephemeral_rate =
         context.hub.ephemeral_rates.bucket(&session_id, crate::ephemeral::now_ms());
     Ok(GatewaySessionRuntime {
-        session_push,
+        session_push: negotiated.incarnation_id,
+        ephemeral: negotiated.ephemeral,
         push_limit: usize::try_from(open.max_inflight_downstream).unwrap_or(256).clamp(16, 256),
         source_identity,
         session_id,
@@ -2153,6 +2150,7 @@ pub(crate) mod tests {
     fn own_device_fanout_session_rejects_cross_principal_or_source_device() -> anyhow::Result<()> {
         let runtime = crate::GatewaySessionRuntime {
             session_push: None,
+            ephemeral: false,
             push_limit: 256,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root("principal_a", [1; 32]),
@@ -2444,6 +2442,7 @@ pub(crate) mod tests {
     ) -> anyhow::Result<crate::GatewaySessionRuntime> {
         Ok(crate::GatewaySessionRuntime {
             session_push: None,
+            ephemeral: false,
             push_limit: 256,
             source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
                 &ramflux_crypto::create_identity_root(&branch.principal_id, [0x91; 32]),

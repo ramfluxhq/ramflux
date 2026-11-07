@@ -69,6 +69,9 @@ impl<V> Index<V> {
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.rows.iter().map(|(_, v)| v)
     }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &V)> {
+        self.rows.iter().map(|(key, value)| (key.text.as_str(), value))
+    }
 }
 #[cfg(test)]
 mod tests {

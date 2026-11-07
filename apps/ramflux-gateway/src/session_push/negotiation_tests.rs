@@ -46,10 +46,13 @@ async fn registration(
     let mut reply = serde_json::to_value(self::descriptor())?;
     if capable {
         assert_eq!(req.body["session_push"], true);
+        assert_eq!(req.body["ephemeral"], false);
         reply["incarnation_id"] = json!(ID);
     }
     req.respond.send((200, reply)).map_err(|_| Retired)?;
-    tokio::time::timeout(Duration::from_secs(10), task).await??
+    let binding = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    assert!(!binding.ephemeral);
+    Ok(binding.incarnation_id)
 }
 async fn ready(fixture: &Fixture, expected: bool) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -63,7 +66,11 @@ async fn ready(fixture: &Fixture, expected: bool) -> anyhow::Result<()> {
 #[tokio::test]
 async fn session_push_capability_negotiation() -> anyhow::Result<()> {
     let mut fixture = Fixture::new("push-negotiation")?;
-    fixture.context.hub.readiness.start(&fixture.context.router);
+    fixture.context.hub.readiness.start_with_hub(
+        &fixture.context.router,
+        &fixture.context.hub,
+        &fixture.context.gateway_id,
+    );
     let discovery = fixture.next().await?;
     assert_eq!(discovery.path, "/mvp1/session-push-capabilities");
     // A held discovery request cannot delay signed clients falling back to the old upsert.
@@ -89,6 +96,7 @@ async fn session_push_capability_negotiation() -> anyhow::Result<()> {
             resume_window_seconds: 300,
         },
         selected.as_deref(),
+        false,
     )
     .await?;
     let rows = frames.lock().map_err(|_| Retired)?.clone();
@@ -143,12 +151,16 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
                 &fixture.context.router,
                 retry_interval,
                 probe_timeout,
+                None,
+                None,
             );
         } else {
             fixture.context.hub.readiness.start_with_interval(
                 &fixture.context.router,
                 DISCOVERY_INTERVAL,
                 probe_timeout,
+                None,
+                None,
             );
         }
         let req = fixture.next().await?;

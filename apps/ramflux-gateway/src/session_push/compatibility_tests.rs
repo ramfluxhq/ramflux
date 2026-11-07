@@ -33,7 +33,7 @@ fn session() -> ramflux_node_core::GatewaySessionEstablishedFrame {
 async fn legacy_established_raw_bytes() -> anyhow::Result<()> {
     let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut sink = RawSink(frames.clone());
-    established(&mut sink, session(), None).await?;
+    established(&mut sink, session(), None, false).await?;
     assert_eq!(frames.lock().map_err(|_|Retired)?[0],br#"{"frame_type":"session_established","session":{"session_id":"session","gateway_id":"gateway","accepted_cursor":null,"resume_token":"resume","resume_window_seconds":300}}"#);
     Ok(())
 }
@@ -53,7 +53,7 @@ impl GatewaySessionFrameSink for Broken {
 #[tokio::test]
 async fn establishment_write_errors_keep_client_mapping() -> anyhow::Result<()> {
     for id in [None, Some(ID)] {
-        let error = established(&mut Broken, session(), id).await.err().ok_or(Retired)?;
+        let error = established(&mut Broken, session(), id, false).await.err().ok_or(Retired)?;
         assert!(error.downcast_ref::<crate::session_response::ClientWriteFailure>().is_some());
     }
     Ok(())
@@ -118,9 +118,16 @@ async fn initial_registration_readiness_scope() -> anyhow::Result<()> {
         let mode = tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .map_err(|_| anyhow::anyhow!("negotiation guard elapsed"))???;
-        assert_eq!(mode, None);
+        assert_eq!(mode.incarnation_id, None);
+        assert!(!mode.ephemeral);
         let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
-        established(&mut RawSink(frames.clone()), session(), mode.as_deref()).await?;
+        established(
+            &mut RawSink(frames.clone()),
+            session(),
+            mode.incarnation_id.as_deref(),
+            mode.ephemeral,
+        )
+        .await?;
         let value: Value = serde_json::from_slice(&frames.lock().map_err(|_| Retired)?[0])?;
         assert!(value["session"].get("capabilities").is_none());
         assert!(value["session"].get("inbox_incarnation_id").is_none());

@@ -127,6 +127,7 @@ async fn authenticated_principal_lookup_uses_router_json_ingress_and_returns_a_m
     };
     let runtime = crate::GatewaySessionRuntime {
         session_push: None,
+        ephemeral: false,
         push_limit: 256,
         source_identity: ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(
             &ramflux_crypto::create_identity_root("alice", [1; 32]),
