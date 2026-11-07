@@ -1180,6 +1180,7 @@ mod tests {
                 branch_public_key,
                 target_delivery_id: format!("target_{device_id}"),
                 branch_proof: Some(branch_proof),
+                message_layer: None,
                 prekey_bundle,
                 branch_authorized_event_id: format!("device.branch_authorized:{device_id}:1"),
             }],

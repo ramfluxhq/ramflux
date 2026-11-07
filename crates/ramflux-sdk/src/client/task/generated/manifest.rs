@@ -19,6 +19,11 @@ impl RamfluxClient {
         &self,
         native: &SdkDeviceManifestResponse,
     ) -> Result<Vec<u8>, SdkError> {
+        if native.custody.is_none()
+            && native.devices.iter().any(|device| device.message_layer.is_some())
+        {
+            return Err(invalid("message-layer declaration requires native custody evidence"));
+        }
         let generated = g::NativeDeviceManifest {
             custody: native
                 .custody
@@ -106,6 +111,11 @@ impl RamfluxClient {
         if manifest.principal_id != expected_principal {
             return Err(invalid("task manifest principal mismatch"));
         }
+        let native_custody = manifest
+            .custody
+            .as_ref()
+            .map(|value| canonical::<ramflux_protocol::custody::CustodyManifest>(&value.canonical))
+            .transpose()?;
         let native = SdkDeviceManifestResponse {
             custody: manifest
                 .custody
@@ -131,6 +141,16 @@ impl RamfluxClient {
                         device_epoch: device.device_epoch,
                         branch_public_key: device.branch_public_key.clone(),
                         target_delivery_id: device.target_delivery_id.clone(),
+                        message_layer: native_custody.as_ref().and_then(|custody| {
+                            custody
+                                .publication
+                                .record
+                                .body
+                                .devices
+                                .iter()
+                                .find(|native| native.device_id == device.device_id)
+                                .and_then(|native| native.message_layer.clone())
+                        }),
                         branch_proof: device
                             .branch_proof
                             .as_ref()

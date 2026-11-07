@@ -18,6 +18,8 @@ pub(crate) struct SdkDeviceManifestEntry {
     pub(crate) target_delivery_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) branch_proof: Option<BranchProofDocument>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message_layer: Option<ramflux_protocol::custody::SignedLayerDeclaration>,
     pub(crate) prekey_bundle: ramflux_crypto::PrekeyBundle,
     pub(crate) branch_authorized_event_id: String,
 }
@@ -80,6 +82,7 @@ impl SdkDeviceManifestResponse {
                 branch_public_key: certificate.body.branch_signing_public_key.clone(),
                 target_delivery_id: device.target_delivery_id.clone(),
                 branch_proof: None,
+                message_layer: device.message_layer.clone(),
                 prekey_bundle: bundle,
                 branch_authorized_event_id: object_hash(certificate)?,
             });

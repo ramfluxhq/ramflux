@@ -176,6 +176,8 @@ impl NodePins {
 struct PeerPins {
     pins: ramflux_crypto::custody::AuthorityPins,
     accepted: Option<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>>,
+    #[serde(default)]
+    message_layers: super::layer_declaration::DeclarationPins,
 }
 impl NodePins {
     fn observe_authority(
@@ -187,9 +189,21 @@ impl NodePins {
         let path = self.root.join(format!("peer-{}.json", verified.envelope().body.account_anchor));
         let mut state: PeerPins =
             if path.try_exists()? { read(&path, 8 * 1024 * 1024)? } else { PeerPins::default() };
+        let record = verified.envelope();
+        let native_head = ramflux_protocol::custody::object_hash(record)?;
+        let mut message_layers = state.message_layers.clone();
+        message_layers.observe_roster(
+            &record.body.account_anchor,
+            &record.body.devices,
+            record.body.device_set_epoch,
+            &native_head,
+        )?;
         let outcome = state.pins.observe_with_previous(verified, state.accepted.as_ref())?;
         if outcome == PinOutcome::Advanced {
             state.accepted = Some(verified.envelope().clone());
+        }
+        if !matches!(outcome, PinOutcome::Fenced(_)) {
+            state.message_layers = message_layers;
         }
         let temp = self.root.join(format!(
             ".peer-{}",
@@ -234,4 +248,60 @@ pub(super) fn log_unbound(root: &Path) -> Result<(), SdkError> {
     writeln!(file, "{} no_channel_binding explicit_client_opt_in", super::network::now()?)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ramflux_protocol::custody::{
+        Device, DeviceRef, LayerDeclaration, MigrationState, SignedLayerDeclaration,
+    };
+
+    fn declaration(sequence: u64) -> Device {
+        Device {
+            device_id: "phone".into(),
+            device_epoch: 3,
+            signing_key_commitment: "signing".into(),
+            agreement_key_commitment: "agreement".into(),
+            status: ramflux_protocol::DeviceSetStatus::Active,
+            revoked_at: None,
+            branch_certificate: None,
+            message_layer: Some(SignedLayerDeclaration {
+                declaration: LayerDeclaration {
+                    device: DeviceRef {
+                        account_anchor: "anchor".into(),
+                        device_id: "phone".into(),
+                        device_epoch: 3,
+                    },
+                    max_layer: ramflux_protocol::custody::MESSAGE_LAYER_FLOOR,
+                    declaration_sequence: sequence,
+                    issued_at: 1,
+                    expires_at: 2,
+                },
+                branch_signature: format!("signature-{sequence}"),
+            }),
+            migration_state: MigrationState::Native,
+        }
+    }
+
+    #[test]
+    fn peer_layer_pins_survive_persistence_and_reject_restored_rollback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut layers = super::super::layer_declaration::DeclarationPins::default();
+        layers.observe("anchor", &declaration(8), 12, "head-12")?;
+        let state = PeerPins {
+            pins: ramflux_crypto::custody::AuthorityPins::default(),
+            accepted: None,
+            message_layers: layers,
+        };
+        let bytes = ramflux_protocol::canonical_json_bytes(&state)?;
+        let restored: PeerPins = ramflux_protocol::custody::decode(&bytes, 8 * 1024 * 1024)?;
+        assert_eq!(ramflux_protocol::canonical_json_bytes(&restored)?, bytes);
+        let mut layers = restored.message_layers;
+        assert!(matches!(
+            layers.observe("anchor", &declaration(7), 13, "head-13"),
+            Err(SdkError::CustodyForkFenced)
+        ));
+        Ok(())
+    }
 }
