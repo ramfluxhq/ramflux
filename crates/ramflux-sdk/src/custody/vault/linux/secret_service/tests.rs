@@ -401,6 +401,117 @@ fn clean_manifest(
     Ok(())
 }
 
+/// The initializer's own `create_item` reaches the provider and succeeds, but its reply is lost
+/// (uncertain error after the real create). The installation stays pending, and the retry adopts
+/// the one created item: no second create, the original key retained.
+#[test]
+#[ignore = "private unlocked gnome-keyring fixture"]
+fn linux_vault_secret_service_lost_create_reply_is_adopted_exactly_once() -> TestResult {
+    prepare()?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let dir = root()?;
+    let mode = LinuxVaultMode::DesktopSecretService;
+    LOSE_CREATE_REPLY.store(true, std::sync::atomic::Ordering::SeqCst);
+    let lost = rt.block_on(Vault::initialize(dir.path().into(), mode));
+    assert!(!LOSE_CREATE_REPLY.load(std::sync::atomic::Ordering::SeqCst), "seam was used");
+    assert_eq!(lost, Err(Error::Timeout), "uncertain outcome surfaces, never success");
+    assert!(dir.path().join("init.pending").exists(), "intent retained");
+    assert!(!dir.path().join("descriptor.json").exists());
+    assert!(!dir.path().join("init.progress").exists(), "an unconfirmed realm is not progress");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("init.pending"))?)?;
+    let vault = manifest["vault_id"].as_str().ok_or("vault id")?.to_owned();
+    let keys: Vec<String> = manifest["key_ids"]
+        .as_array()
+        .ok_or("key ids")?
+        .iter()
+        .map(|k| k.as_str().unwrap_or_default().to_owned())
+        .collect();
+    let ss = service()?;
+    let collection = collection(&ss)?;
+    let created = find(&collection, &vault, &keys[0], 0)?;
+    assert_eq!(created.len(), 1, "the initializer's create happened exactly once");
+    let original = read(&created[0])?;
+    let path = created[0].path.clone();
+    assert_eq!(rt.block_on(Vault::status(dir.path().into(), mode)), Err(Error::Pending));
+    rt.block_on(Vault::initialize(dir.path().into(), mode))?;
+    rt.block_on(Vault::status(dir.path().into(), mode))?;
+    let after = find(&collection, &vault, &keys[0], 0)?;
+    assert_eq!(after.len(), 1, "retry did not create a second item");
+    assert!(after[0].path == path, "same item");
+    assert!(read(&after[0])?.bytes() == original.bytes(), "the original key was retained");
+    for (realm, key) in keys.iter().enumerate() {
+        assert_eq!(find(&collection, &vault, key, realm)?.len(), 1, "realm {realm}");
+    }
+    clean_manifest(&collection, &vault, &keys)?;
+    Ok(())
+}
+
+/// Corrupt progress with every provider item present and consistent: only the malformed record
+/// can cause the refusal. Valid bytes are the control.
+#[test]
+#[ignore = "private unlocked gnome-keyring fixture"]
+fn linux_vault_secret_service_corrupt_progress_is_refused_with_valid_provider_state() -> TestResult
+{
+    prepare()?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let dir = root()?;
+    let mode = LinuxVaultMode::DesktopSecretService;
+    let (signal, mut stopping) = watch::channel(false);
+    let stopped = rt.block_on(super::super::init::attempt(
+        dir.path(),
+        mode,
+        true,
+        &mut stopping,
+        Instant::now() + Duration::from_secs(30),
+        &|event| {
+            if event == "ss-progress" {
+                let _ = signal.send(true);
+            }
+        },
+    ));
+    assert_eq!(stopped, Err(Error::Cancelled));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("init.pending"))?)?;
+    let vault = manifest["vault_id"].as_str().ok_or("vault id")?.to_owned();
+    let key = manifest["key_ids"][0].as_str().ok_or("key id")?.to_owned();
+    let keys: Vec<String> = manifest["key_ids"]
+        .as_array()
+        .ok_or("key ids")?
+        .iter()
+        .map(|k| k.as_str().unwrap_or_default().to_owned())
+        .collect();
+    let ss = service()?;
+    let collection = collection(&ss)?;
+    assert_eq!(find(&collection, &vault, &key, 0)?.len(), 1, "realm 0 item present");
+    let progress = dir.path().join("init.progress");
+    for (what, bytes) in [
+        ("wrong prefix", &b"xsp1:100"[..]),
+        ("truncated", b"ssp1:10"),
+        ("extra flag", b"ssp1:1000"),
+        ("invalid flag", b"ssp1:1x0"),
+        ("no prefix", b"100"),
+    ] {
+        let _ = std::fs::remove_file(&progress);
+        std::fs::write(&progress, bytes)?;
+        std::fs::set_permissions(&progress, std::fs::Permissions::from_mode(0o600))?;
+        assert_eq!(
+            rt.block_on(Vault::initialize(dir.path().into(), mode)),
+            Err(Error::Corrupt),
+            "{what}"
+        );
+        assert_eq!(find(&collection, &vault, &key, 0)?.len(), 1, "{what}: nothing created");
+    }
+    // Control: the same state with a valid record completes.
+    let _ = std::fs::remove_file(&progress);
+    std::fs::write(&progress, b"ssp1:100")?;
+    std::fs::set_permissions(&progress, std::fs::Permissions::from_mode(0o600))?;
+    rt.block_on(Vault::initialize(dir.path().into(), mode))?;
+    rt.block_on(Vault::status(dir.path().into(), mode))?;
+    clean_manifest(&collection, &vault, &keys)?;
+    Ok(())
+}
+
 /// Durable realm progress: an acknowledged item that disappears before the descriptor commit is a
 /// refusal, never a silently regenerated KEK under the same identity.
 #[test]
@@ -440,13 +551,6 @@ fn linux_vault_secret_service_missing_completed_realm_never_regenerates() -> Tes
     assert_eq!(rt.block_on(Vault::initialize(dir.path().into(), mode)), Err(Error::Corrupt));
     assert!(find(&collection, &vault, &key, 0)?.is_empty(), "no replacement was generated");
     assert_eq!(std::fs::read(dir.path().join("init.progress"))?, b"ssp1:100");
-    // Corrupt progress is refused too.
-    std::fs::write(dir.path().join("init.progress"), b"ssp1:1x0")?;
-    std::fs::set_permissions(
-        dir.path().join("init.progress"),
-        std::fs::Permissions::from_mode(0o600),
-    )?;
-    assert_eq!(rt.block_on(Vault::initialize(dir.path().into(), mode)), Err(Error::Corrupt));
     Ok(())
 }
 
