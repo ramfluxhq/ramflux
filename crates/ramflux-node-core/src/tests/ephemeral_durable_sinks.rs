@@ -60,6 +60,45 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
         "crate::router_store::incarnation::new_id",
         "boot id from OS randomness only (no storage; not the whole incarnation module)",
     ),
+    ("crate::GatewayQuicContext", "gateway QUIC context type, crate root re-export (type only)"),
+    ("crate::GatewaySendHandle", "gateway send handle type, crate root re-export (type only)"),
+    (
+        "crate::GatewaySessionRuntime",
+        "gateway session runtime type, crate root re-export (type only)",
+    ),
+    ("crate::GatewaySessionHub", "gateway session hub type, crate root re-export (type only)"),
+    (
+        "crate::push_queue::TransientAdmission",
+        "P08 bounded volatile FIFO admission result enum (one type, not the module)",
+    ),
+    (
+        "crate::router_post_json_async",
+        "gateway-to-router network hand-off for ephemeral routing; no local durable write",
+    ),
+    (
+        "crate::session::verify_gateway_session_signed_request",
+        "signature check of a gateway session request (no I/O)",
+    ),
+    (
+        "crate::session::write_gateway_handle",
+        "network write of one frame to a client handle; no local durable write",
+    ),
+    (
+        "crate::submit_source::bind_source",
+        "binds a submit to the authenticated session source (no I/O)",
+    ),
+    (
+        "ramflux_node_core::GatewayServerFrame",
+        "gateway wire frame enum from node-core (type; variants covered)",
+    ),
+    (
+        "ramflux_node_core::GatewaySubmitFrame",
+        "gateway submit frame type from node-core (type only)",
+    ),
+    ("serde_json::json", "JSON literal macro (no I/O)"),
+    ("std::future::Future", "async trait (no I/O)"),
+    ("tokio::sync::Mutex", "async mutex (no I/O)"),
+    ("anyhow::Result", "error result alias (no I/O)"),
 ];
 
 /// Primitive type names. Their associated functions (`i64::try_from`) cannot
@@ -974,7 +1013,10 @@ fn allow_list_excludes_persistence_prefixes() {
         "std::process",
         "std::env",
         "std::path",
-        "tokio",
+        "tokio::fs",
+        "tokio::io",
+        "tokio::net",
+        "tokio::process",
         "redb",
         "rusqlite",
         "sqlx",
