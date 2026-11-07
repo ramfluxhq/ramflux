@@ -521,3 +521,117 @@ async fn h2_submit_envelope(
     }
     Ok(ramflux_protocol::parse_i_json(&bytes)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    fn submit_request() -> Result<SubmitEnvelopeRequest, serde_json::Error> {
+        serde_json::from_value(serde_json::json!({
+            "signed_request": {
+                "schema": "ramflux.signed_request.v1",
+                "version": 1,
+                "domain": "ramflux.signed_request",
+                "signing_key_id": "key",
+                "signature_alg": "ed25519",
+                "signature": "signature",
+                "source_device_id": "device",
+                "request_id": "request",
+                "method": "POST",
+                "path": "/submit",
+                "device_proof_hash": "proof",
+                "body_hash": "body",
+                "nonce": "nonce",
+                "created_at": 1,
+                "expires_at": 2
+            },
+            "envelope": {
+                "schema": "ramflux.envelope.v1",
+                "version": 1,
+                "domain": "ramflux.envelope",
+                "ext": {},
+                "signing_key_id": "key",
+                "signature_alg": "ed25519",
+                "signature": "signature",
+                "envelope_id": "envelope",
+                "source_principal_id": "principal",
+                "source_device_id": "device",
+                "target_delivery_id": "delivery",
+                "delivery_class": "opaque_event",
+                "priority": "normal",
+                "ttl": 60,
+                "created_at": 1,
+                "encrypted_payload": "payload",
+                "payload_hash": "hash"
+            }
+        }))
+    }
+
+    fn submit_response(created_at: u64, nested_duplicate: bool) -> Vec<u8> {
+        let ext = if nested_duplicate {
+            r#""ext":{"x_probe":{"inner":null,"inner":null}},"#
+        } else {
+            r#""ext":{},"#
+        };
+        format!(
+            r#"{{"backend":"GrpcH2","signed_request_canonical":[],"envelope_canonical":[],"envelope":{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope",{ext}"signing_key_id":"key","signature_alg":"ed25519","signature":"signature","envelope_id":"envelope","source_principal_id":"principal","source_device_id":"device","target_delivery_id":"delivery","delivery_class":"opaque_event","priority":"normal","ttl":60,"created_at":{created_at},"encrypted_payload":"payload","payload_hash":"hash"}}}}"#
+        )
+        .into_bytes()
+    }
+
+    async fn serve_h2_response(
+        listener: tokio::net::TcpListener,
+        response_body: Vec<u8>,
+    ) -> Result<(), String> {
+        let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+        let mut connection =
+            h2::server::handshake(stream).await.map_err(|error| error.to_string())?;
+        let Some(request) = connection.accept().await else {
+            return Err("missing HTTP/2 request".to_owned());
+        };
+        let (request, mut respond) = request.map_err(|error| error.to_string())?;
+        let mut request_body = request.into_body();
+        while let Some(chunk) = request_body.data().await {
+            let _ = chunk.map_err(|error| error.to_string())?;
+        }
+        let response =
+            http::Response::builder().status(200).body(()).map_err(|error| error.to_string())?;
+        let mut body = respond.send_response(response, false).map_err(|error| error.to_string())?;
+        body.send_data(Bytes::from(response_body), true).map_err(|error| error.to_string())?;
+        while connection.accept().await.is_some() {}
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn h2_backend_response_reader_enforces_ijson_at_the_request_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = submit_request()?;
+        for (body, rejected_reason) in [
+            (submit_response(1, true), Some("duplicate I-JSON member")),
+            (submit_response(9_007_199_254_740_992, false), Some("unsafe exact JSON integer")),
+            (submit_response(9_007_199_254_740_991, false), None),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let endpoint = listener.local_addr()?;
+            let server = tokio::spawn(serve_h2_response(listener, body));
+            let result = h2_submit_envelope(endpoint, "/submit", &request).await;
+            server
+                .await
+                .map_err(|error| format!("HTTP/2 server task failed: {error}"))?
+                .map_err(|error| format!("HTTP/2 server failed: {error}"))?;
+            match rejected_reason {
+                Some(reason) => match result {
+                    Err(TransportError::Protocol(ramflux_protocol::ProtocolError::IJson(
+                        source,
+                    ))) => {
+                        assert!(source.to_string().contains(reason), "{source}");
+                    }
+                    other => return Err(format!("expected I-JSON refusal, got {other:?}").into()),
+                },
+                None => assert_eq!(result?.envelope.created_at, 9_007_199_254_740_991),
+            }
+        }
+        Ok(())
+    }
+}

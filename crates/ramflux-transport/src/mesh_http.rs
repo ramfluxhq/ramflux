@@ -958,7 +958,7 @@ pub fn write_mesh_text_response(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -969,14 +969,122 @@ mod tests {
     use std::process::Command;
 
     use crate::{MeshTlsConfig, MeshTlsServer, MeshTlsServerStream};
+    use ramflux_protocol::ProtocolError;
 
     use super::{
         MeshHttpClient, MeshHttpClientRequest, MeshHttpTimeouts, MeshResolver, ResolverPool,
         connect_mesh_tcp, mesh_http_get_json, mesh_http_json_request_with_timeouts,
-        mesh_http_pool_key, mesh_http_post_json_with_peer_ca_pems, mesh_http_request_bytes,
-        read_mesh_http_request, read_mesh_http_response_from_reader,
+        mesh_http_pool_key, mesh_http_post_json, mesh_http_post_json_with_peer_ca_pems,
+        mesh_http_request_bytes, read_mesh_http_request, read_mesh_http_response_from_reader,
         read_mesh_http_status_and_body, system_resolve, write_mesh_json_response,
     };
+
+    fn assert_mesh_http_reader_rows(
+        reader: impl Fn(
+            &str,
+            &MeshTlsConfig,
+            &str,
+            &[String],
+        ) -> Result<serde_json::Value, crate::TransportError>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (r#"{"outer":{"x_probe":null,"x_probe":null}}"#, Some("duplicate I-JSON member")),
+            (r#"{"created_at":9007199254740992}"#, Some("unsafe exact JSON integer")),
+            (r#"{"created_at":9007199254740991}"#, None),
+        ];
+        for (body, rejected_reason) in cases {
+            let server_tls = test_mesh_tls_config("router")?;
+            let server = MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
+            let endpoint = server.local_addr()?.to_string();
+            let response_body = body.as_bytes().to_vec();
+            let server_thread = thread::spawn(move || -> Result<(), String> {
+                let mut accepted =
+                    server.accept_authenticated().map_err(|error| error.to_string())?.stream;
+                read_mesh_http_request(&mut accepted)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing HTTP request".to_owned())?;
+                write!(
+                    accepted,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .map_err(|error| error.to_string())?;
+                accepted.write_all(&response_body).map_err(|error| error.to_string())?;
+                accepted.flush().map_err(|error| error.to_string())
+            });
+            let client_tls = test_mesh_tls_config("gateway")?;
+            let peer_roots = [std::fs::read_to_string(&server_tls.ca_cert)?];
+            let result = reader(&endpoint, &client_tls, "ramflux-router", &peer_roots);
+            server_thread.join().map_err(|_| "mesh response server panicked")??;
+            match rejected_reason {
+                Some(reason) => match result {
+                    Err(crate::TransportError::Protocol(ProtocolError::IJson(source))) => {
+                        assert!(source.to_string().contains(reason), "{source}");
+                    }
+                    other => return Err(format!("expected I-JSON rejection, got {other:?}").into()),
+                },
+                None => assert_eq!(
+                    result?,
+                    serde_json::json!({"created_at": 9_007_199_254_740_991_i64})
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_http_json_readers_enforce_ijson_at_each_entry_point()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, _| {
+            MeshHttpClient::new().post_json(
+                endpoint,
+                "/probe",
+                tls,
+                server_name,
+                &serde_json::json!({}),
+            )
+        })?;
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, _| {
+            MeshHttpClient::new().get_json(endpoint, "/probe", tls, server_name)
+        })?;
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, roots| {
+            MeshHttpClient::new().post_json_with_peer_ca_pems(
+                endpoint,
+                "/probe",
+                tls,
+                server_name,
+                roots,
+                &serde_json::json!({}),
+            )
+        })?;
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, _| {
+            MeshHttpClient::new().post_json_with_deadline(
+                endpoint,
+                "/probe",
+                tls,
+                server_name,
+                &serde_json::json!({}),
+                Instant::now() + Duration::from_secs(5),
+            )
+        })?;
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, _| {
+            mesh_http_post_json(endpoint, "/probe", tls, server_name, &serde_json::json!({}))
+        })?;
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, roots| {
+            mesh_http_post_json_with_peer_ca_pems(
+                endpoint,
+                "/probe",
+                tls,
+                server_name,
+                roots,
+                &serde_json::json!({}),
+            )
+        })?;
+        assert_mesh_http_reader_rows(|endpoint, tls, server_name, _| {
+            mesh_http_get_json(endpoint, "/probe", tls, server_name)
+        })?;
+        Ok(())
+    }
 
     #[test]
     fn mesh_request_builder_preserves_endpoint_host_port() -> Result<(), Box<dyn std::error::Error>>
