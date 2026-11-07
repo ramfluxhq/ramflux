@@ -8,6 +8,7 @@ use ramflux_node_core::{
     SessionPushSessionRequest, gateway_resume_token_hash,
 };
 use ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY;
+use std::sync::Arc;
 use support::{Fixture, ID, runtime, sink};
 
 const TARGET: &str = "target";
@@ -372,6 +373,7 @@ async fn real_resume_rewrites_ephemeral_capability() -> TestResult {
 
 #[tokio::test]
 async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
+    row_late_hub_insert_reasserts_after_boot_change().await?;
     let mut fixture = Fixture::new("p10-boot-reassert")?;
     let router = RouterCore::new();
     let session_id = "session-live";
@@ -426,5 +428,88 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     assert_eq!(applied, 1);
     posted.respond.send((200, json!({"applied": applied}))).map_err(|_| Retired)?;
     assert_online(&router, session_id);
+    Ok(())
+}
+
+fn seed_live(router: &RouterCore, target: &str, session_id: &str) -> TestResult {
+    let live = SessionDescriptor {
+        target_delivery_id: target.into(),
+        device_id: "device".into(),
+        gateway_id: GATEWAY.into(),
+        session_id: session_id.into(),
+        device_epoch: 1,
+        session_seq: 1,
+        last_cursor: None,
+        push_alias_hash: None,
+        lifecycle: ramflux_node_core::SessionLifecycle::Live,
+    };
+    router.upsert_session(live)?;
+    router.mark_live(target)?;
+    Ok(())
+}
+
+async fn drive_reassert(fixture: &mut Fixture, router: &RouterCore, boot: &str) -> TestResult {
+    let readiness = Arc::clone(&fixture.context.hub.readiness);
+    let mesh = fixture.context.router.clone();
+    let hub = Arc::clone(&fixture.context.hub);
+    let gateway_id = fixture.context.gateway_id.clone();
+    let boot_owned = boot.to_owned();
+    let task = tokio::spawn(async move {
+        readiness.reassert_boot(&mesh, &hub, &gateway_id, &boot_owned).await;
+    });
+    tokio::pin!(task);
+    tokio::select! {
+        req = fixture.requests.recv() => {
+            let posted = req.ok_or_else(|| anyhow::anyhow!("mesh closed"))?;
+            assert_eq!(posted.path, "/mvp0/ephemeral-registrations");
+            assert_eq!(posted.body["router_boot_id"], boot);
+            let items: Vec<EphemeralRegistrationItem> =
+                serde_json::from_value(posted.body["items"].clone())?;
+            let applied = router.reassert_ephemeral_registrations(boot, &items)?;
+            posted.respond.send((200, json!({"applied": applied}))).map_err(|_| Retired)?;
+            task.await?;
+            Ok(())
+        }
+        join = &mut task => {
+            join?;
+            anyhow::bail!("reassert returned without posting");
+        }
+    }
+}
+
+async fn row_late_hub_insert_reasserts_after_boot_change() -> TestResult {
+    const OTHER: &str = "target-other";
+    const OTHER_SESSION: &str = "session-other";
+    let mut fixture = Fixture::new("p10-late-hub-insert")?;
+    seed_echo(&fixture, true, true);
+    let router_a = RouterCore::new();
+    let (runtime, _, path) = establish(&mut fixture, &router_a, None, None).await?;
+    assert_eq!(path, "/s1/session");
+    assert!(runtime.ephemeral);
+    assert_online(&router_a, &runtime.session_id);
+    assert_eq!(fixture.context.hub.ephemeral_flag(TARGET).await, None);
+    let (other_send, _) = sink();
+    fixture
+        .context
+        .hub
+        .register_ephemeral(OTHER.into(), OTHER_SESSION.into(), other_send, Some(ID.into()), 32)
+        .await?;
+    let router_b = RouterCore::new();
+    seed_live(&router_b, OTHER, OTHER_SESSION)?;
+    seed_live(&router_b, TARGET, &runtime.session_id)?;
+    assert_unsupported(&router_b);
+    assert_eq!(router_b.route_gate(OTHER), EphemeralRouteGate::RecipientUnsupported);
+    let boot_b = router_b.router_boot_id().to_owned();
+    drive_reassert(&mut fixture, &router_b, &boot_b).await?;
+    assert_eq!(
+        router_b.route_gate(OTHER),
+        EphemeralRouteGate::Online { gateway_id: GATEWAY.into(), session_id: OTHER_SESSION.into() }
+    );
+    assert_unsupported(&router_b);
+    let (late_send, _) = sink();
+    fixture.context.hub.register_runtime(&runtime, late_send).await?;
+    assert_eq!(fixture.context.hub.ephemeral_flag(TARGET).await, Some(true));
+    drive_reassert(&mut fixture, &router_b, &boot_b).await?;
+    assert_online(&router_b, &runtime.session_id);
     Ok(())
 }
