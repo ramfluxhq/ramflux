@@ -9,6 +9,7 @@ pub(crate) mod frame_dispatch;
 pub mod helpers;
 pub(crate) mod host_frames;
 pub mod protocol;
+pub(crate) mod push_resume;
 pub mod push_route;
 pub(crate) mod push_submit;
 pub(crate) mod session_push;

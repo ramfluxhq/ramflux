@@ -568,6 +568,9 @@ impl GatewaySessionEngine {
         after_inbox_seq: u64,
         limit: usize,
     ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
+        if matches!(self.mode, super::session_push::SessionMode::Push { .. }) {
+            return self.push_resume_after(after_inbox_seq, limit).await;
+        }
         let resume = GatewayResumeFrame {
             target_delivery_id: self.config.target_delivery_id.clone(),
             after_inbox_seq,
@@ -604,6 +607,9 @@ impl GatewaySessionEngine {
         after_inbox_seq: u64,
         limit: usize,
     ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
+        if matches!(self.mode, super::session_push::SessionMode::Push { .. }) {
+            return self.push_resume_authoritative(after_inbox_seq, limit).await;
+        }
         let resume = GatewayResumeFrame {
             target_delivery_id: self.config.target_delivery_id.clone(),
             after_inbox_seq,

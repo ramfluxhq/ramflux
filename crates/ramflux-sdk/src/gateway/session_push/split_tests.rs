@@ -310,7 +310,7 @@ async fn refusal_rows() {
 }
 
 /// Every legacy reply kind outside the submit set, with the exact retirement it must give.
-fn legacy_unexpected_kinds() -> Vec<(&'static str, Value, String)> {
+pub(super) fn legacy_unexpected_kinds() -> Vec<(&'static str, Value, String)> {
     let reply = |kind: &str| format!("unexpected gateway reply: {kind}");
     let keyless = |why: &str| format!("unexpected gateway frame: {why}");
     let cursor = json!({"target_delivery_id":"t","inbox_seq":1,"last_envelope_id":null,

@@ -19,12 +19,17 @@ pub(crate) enum Wait {
     Legacy,
     /// A submit reply: the legacy forms or a capable `submit_accepted`.
     Submit,
+    /// A `resume_page`, or a keyed refusal for this session.
+    ResumePage,
 }
 
 /// A frame returned to the caller of `read_step`.
 pub(crate) enum Step {
     Legacy(Box<GatewayServerFrame>),
     SubmitAccepted(Box<CapableServerFrame>),
+    ResumePage(Box<CapableServerFrame>),
+    /// A capable `nack` keyed to this session's incarnation.
+    Refused(super::session_push::PushNackReason),
 }
 
 #[derive(Clone)]
@@ -36,6 +41,21 @@ pub(crate) struct HostFrames {
 }
 
 impl GatewaySessionEngine {
+    /// Writes a negotiated client frame; it can only exist if its constructor accepted it.
+    pub(crate) async fn write_capable_frame(
+        &mut self,
+        frame: &super::session_push::CapableClientFrame,
+    ) -> Result<(), SdkError> {
+        self.wire_writes = self.wire_writes.wrapping_add(1);
+        let result = ramflux_transport::write_gateway_session_json(&mut *self.stream, frame)
+            .await
+            .map_err(SdkError::from);
+        if result.is_err() {
+            self.terminal_reason = Some(DisconnectReason::Transport);
+        }
+        result
+    }
+
     pub(crate) async fn write_frame(&mut self, frame: &GatewayClientFrame) -> Result<(), SdkError> {
         // Even a partial failed write makes the uncorrelated reply stream unsafe to reuse.
         self.wire_writes = self.wire_writes.wrapping_add(1);
@@ -215,7 +235,9 @@ impl GatewaySessionEngine {
     ) -> Result<GatewayServerFrame, SdkError> {
         match self.read_step(operation, Wait::Legacy).await? {
             Step::Legacy(frame) => Ok(*frame),
-            Step::SubmitAccepted(_) => Err(self.retire("capable reply outside a capable wait")),
+            Step::SubmitAccepted(_) | Step::ResumePage(_) | Step::Refused(_) => {
+                Err(self.retire("capable reply outside a capable wait"))
+            }
         }
     }
 
@@ -274,6 +296,23 @@ impl GatewaySessionEngine {
                     }
                     (Wait::Submit, _) => {
                         Err(self.retire("unexpected capable reply while awaiting a submit"))
+                    }
+                    (Wait::ResumePage, page @ CapableServerFrame::ResumePage { .. }) => {
+                        Ok(Some(Step::ResumePage(Box::new(page))))
+                    }
+                    (
+                        Wait::ResumePage,
+                        CapableServerFrame::Nack { reason, incarnation_id: Some(id) },
+                    ) => {
+                        if matches!(&self.mode, SessionMode::Push { incarnation } if *incarnation == id)
+                        {
+                            Ok(Some(Step::Refused(reason)))
+                        } else {
+                            Err(self.retire("capable nack with a foreign incarnation"))
+                        }
+                    }
+                    (Wait::ResumePage, _) => {
+                        Err(self.retire("unexpected capable reply while awaiting a page"))
                     }
                     (Wait::Legacy, _) => Err(self.retire("capable reply outside a capable wait")),
                 },
