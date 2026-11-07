@@ -4,7 +4,98 @@
 //! Real hosted-Linux fixture smoke only; this does not accept a vault provider.
 #![cfg(target_os = "linux")]
 
-use std::{os::unix::fs::MetadataExt, path::Path, process::Command};
+use std::{
+    os::unix::{fs::MetadataExt, process::CommandExt},
+    path::Path,
+    process::{Child, Command, Output, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
+
+type BoxError = Box<dyn std::error::Error>;
+/// Every fixture subprocess is bounded below CI's 60 s nextest slow-timeout and fails loudly.
+const DEADLINE: Duration = Duration::from_secs(30);
+const _: () = assert!(DEADLINE.as_secs() >= 10 && DEADLINE.as_secs() <= 40);
+
+/// Kills the child's whole process group and reaps the leader on every exit path.
+struct GroupReaper(Child);
+impl Drop for GroupReaper {
+    fn drop(&mut self) {
+        if let Some(pid) = rustix::process::Pid::from_raw(self.0.id().cast_signed()) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+/// Runs `command` in its own process group under `deadline`, capturing output through private
+/// files (a full pipe cannot stall the child). Records the group id in `leader`.
+fn bounded_with(
+    command: &mut Command,
+    deadline: Duration,
+    leader: &mut u32,
+) -> Result<Output, BoxError> {
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    let stem = std::env::temp_dir().join(format!(
+        "rf-vault-proc-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::SeqCst)
+    ));
+    let (out, err) = (stem.with_extension("out"), stem.with_extension("err"));
+    let result = (|| -> Result<Output, BoxError> {
+        command
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&out)?)
+            .stderr(std::fs::File::create(&err)?)
+            .process_group(0);
+        let mut child = GroupReaper(command.spawn()?);
+        *leader = child.0.id();
+        let end = Instant::now() + deadline;
+        loop {
+            if let Some(status) = child.0.try_wait()? {
+                return Ok(Output {
+                    status,
+                    stdout: std::fs::read(&out)?,
+                    stderr: std::fs::read(&err)?,
+                });
+            }
+            if Instant::now() >= end {
+                return Err(format!("subprocess timed out after {deadline:?}").into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })();
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&err);
+    result
+}
+fn bounded(command: &mut Command) -> Result<Output, BoxError> {
+    bounded_with(command, DEADLINE, &mut 0)
+}
+
+#[test]
+fn bounded_subprocess_kills_and_reaps_a_stalled_group() -> Result<(), BoxError> {
+    let started = Instant::now();
+    let mut leader = 0;
+    let err =
+        bounded_with(Command::new("sleep").arg("60"), Duration::from_millis(300), &mut leader)
+            .err()
+            .ok_or("a stalled subprocess must fail loudly")?;
+    assert!(err.to_string().contains("timed out"), "{err}");
+    assert!(started.elapsed() < DEADLINE);
+    let group = rustix::process::Pid::from_raw(leader.cast_signed()).ok_or("pid")?;
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        match rustix::process::test_kill_process_group(group) {
+            Err(rustix::io::Errno::SRCH) => break,
+            _ if Instant::now() >= end => return Err("stalled group still alive".into()),
+            _ => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let early = bounded(Command::new("sh").args(["-c", "exit 3"]))?;
+    assert_eq!(early.status.code(), Some(3));
+    Ok(())
+}
 
 #[test]
 #[ignore = "requires scripts/linux-vault-ci.sh private Linux user and D-Bus fixture"]
@@ -30,20 +121,18 @@ fn linux_vault_platform_fixture_is_private() -> Result<(), Box<dyn std::error::E
         .ok_or("missing bus socket")?;
     assert!(Path::new(socket).starts_with(&root));
     assert!(
-        Command::new("dbus-send")
-            .args([
-                "--session",
-                "--print-reply",
-                "--reply-timeout=5000",
-                "--dest=org.freedesktop.DBus",
-                "/org/freedesktop/DBus",
-                "org.freedesktop.DBus.ListNames",
-            ])
-            .output()?
-            .status
-            .success()
+        bounded(Command::new("dbus-send").args([
+            "--session",
+            "--print-reply",
+            "--reply-timeout=5000",
+            "--dest=org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.ListNames",
+        ]))?
+        .status
+        .success()
     );
-    let version = Command::new("systemd-creds").arg("--version").output()?;
+    let version = bounded(Command::new("systemd-creds").arg("--version"))?;
     assert!(version.status.success());
     let text = std::str::from_utf8(&version.stdout)?;
     let number: u32 = text.split_whitespace().nth(1).ok_or("missing systemd version")?.parse()?;
@@ -60,7 +149,7 @@ fn linux_vault_platform_fixture_is_private() -> Result<(), Box<dyn std::error::E
         std::path::PathBuf::from(env!("CARGO_BIN_EXE_rf"))
     };
     assert!(rf.is_file(), "archive must retain its own compile-time rf binary");
-    assert!(Command::new(&rf).arg("--help").output()?.status.success());
+    assert!(bounded(Command::new(&rf).arg("--help"))?.status.success());
     Ok(())
 }
 
@@ -82,13 +171,14 @@ async fn linux_vault_systemd_credential_roundtrip_and_mode_refusal()
     let trace = fixture.join("init-exec.trace");
     let rf = Path::new(env!("CARGO_BIN_EXE_rf"));
     for expected in [3, 0] {
-        let output = Command::new("strace")
-            .args(["-qq", "-f", "-e", "execve", "-o"])
-            .arg(&trace)
-            .arg(rf)
-            .args(["vault", "init", "--mode", "systemd-host", "--vault-root"])
-            .arg(&root)
-            .output()?;
+        let output = bounded(
+            Command::new("strace")
+                .args(["-qq", "-f", "-e", "execve", "-o"])
+                .arg(&trace)
+                .arg(rf)
+                .args(["vault", "init", "--mode", "systemd-host", "--vault-root"])
+                .arg(&root),
+        )?;
         assert!(output.status.success(), "real rf bootstrap refused");
         assert_eq!(
             std::fs::read_to_string(&trace)?
@@ -112,20 +202,21 @@ async fn linux_vault_systemd_credential_roundtrip_and_mode_refusal()
         let blob = root.join(format!("{name}.{id}.cred"));
         let unit = format!("rfv-p04-{}-{i}", std::process::id());
         // Use a fixed shell script with public credential id as an argument; no KEK output.
-        let probe = |loaded: &str| -> Result<std::process::Output, std::io::Error> {
-            Command::new("systemd-run")
-                .args(["--quiet", "--wait", "--pipe", "--collect"])
-                .arg(format!("--unit={unit}"))
-                .arg(format!("--property=LoadCredentialEncrypted={loaded}:{}", blob.display()))
-                .args([
-                    "--property=RuntimeMaxSec=30s",
-                    "/bin/sh",
-                    "-ec",
-                    "test \"$(wc -c < \"$CREDENTIALS_DIRECTORY/$1\")\" -eq 32",
-                    "probe",
-                    loaded,
-                ])
-                .output()
+        let probe = |loaded: &str| -> Result<Output, BoxError> {
+            bounded(
+                Command::new("systemd-run")
+                    .args(["--quiet", "--wait", "--pipe", "--collect"])
+                    .arg(format!("--unit={unit}"))
+                    .arg(format!("--property=LoadCredentialEncrypted={loaded}:{}", blob.display()))
+                    .args([
+                        "--property=RuntimeMaxSec=30s",
+                        "/bin/sh",
+                        "-ec",
+                        "test \"$(wc -c < \"$CREDENTIALS_DIRECTORY/$1\")\" -eq 32",
+                        "probe",
+                        loaded,
+                    ]),
+            )
         };
         let positive = probe(name)?;
         assert!(positive.status.success(), "systemd matched-name load failed");

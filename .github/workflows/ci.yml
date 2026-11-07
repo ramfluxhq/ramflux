@@ -348,7 +348,8 @@ jobs:
         run: sudo --preserve-env=PATH bash scripts/linux-vault-ci.sh rest.tar.zst
       - name: Real systemd init crash and owned-pipe cleanup proofs
         run: |
-          sudo --preserve-env=PATH cargo-nextest nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
+          NEXTEST=$(command -v cargo-nextest)
+          sudo --preserve-env=PATH "$NEXTEST" nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
 
 
   # The C ABI smoke test (crates/ramflux-sdk/tests/c_abi_smoke.rs) is excluded from PR CI below:
