@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 mod ack_candidate;
+#[cfg(test)]
+mod ijson_tests;
 mod pending_rows;
 #[cfg(test)]
 mod settlement_tests;
