@@ -187,6 +187,10 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
         };
         let federation_store = FederationRedbStore::open(temp_store_path("registry_federation")?)?;
         let router = RouterCore::new();
+        router_store.bootstrap_router(&router)?;
+        // One shared foreign device keeps every marked authority identical, so the peer
+        // device-set floor observes a single epoch-1 record rather than conflicting ones.
+        register_marked_source(&router, "foreign_registry")?;
         let mut ordinal = 0_u64;
         for (entry, class) in DURABLE_INGRESS {
             if *class != Class::Ingress {
@@ -202,9 +206,10 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
                     "registry_target",
                     DeliveryClass::OpaqueEvent,
                 );
-                marked.source_device_id = format!("foreign_registry_{ordinal}");
+                marked.source_device_id = "foreign_registry".into();
                 marked.priority = Priority::Low;
-                marked.ttl = 50;
+                // The protocol caps envelope TTL at 7 days, so the fixture uses that maximum.
+                marked.ttl = 604_800;
                 marked.ext.ext.insert("delivery_mode".into(), mode.clone());
                 let marked = forwarded_source_envelope(marked)?;
                 let control = without_delivery_mode(&marked)?;
@@ -274,10 +279,33 @@ fn exercise_ingress_control(
     Ok(())
 }
 
+/// Returns a copy of a control envelope with `created_at` re-stamped and its sender signature
+/// recomputed in the form the verifier checks, so only the timestamp differs.
+fn with_created_at(
+    envelope: &Envelope,
+    created_at: i64,
+) -> Result<Envelope, Box<dyn std::error::Error>> {
+    let mut fresh = envelope.clone();
+    fresh.created_at = created_at;
+    let authority = fresh.ext.ext.remove("source_device_authority");
+    fresh.signed.signature = ramflux_crypto::sign_protocol_object(&fresh)?;
+    if let Some(authority) = authority {
+        fresh.ext.ext.insert("source_device_authority".into(), authority);
+    }
+    Ok(fresh)
+}
+
 fn without_delivery_mode(envelope: &Envelope) -> Result<Envelope, Box<dyn std::error::Error>> {
     let mut control = envelope.clone();
     control.ext.ext.remove("delivery_mode");
+    // The sender signature covers the envelope without the forwarded authority, which the
+    // verifier strips before checking it. Re-sign in that same form or the control fails
+    // source authentication instead of reaching admission.
+    let authority = control.ext.ext.remove("source_device_authority");
     control.signed.signature = ramflux_crypto::sign_protocol_object(&control)?;
+    if let Some(authority) = authority {
+        control.ext.ext.insert("source_device_authority".into(), authority);
+    }
     Ok(control)
 }
 
@@ -340,14 +368,16 @@ fn exercise_custody_ingress(
         .ext
         .ext
         .insert("source_root_commitment".into(), serde_json::json!(source.root_commitment()));
-    valid.signed.signature =
-        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &valid)?;
     valid.ext.ext.insert(
         "delivery_mode".into(),
         envelope.ext.ext.get("delivery_mode").cloned().ok_or("marked mode absent")?,
     );
+    valid.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &valid)?;
     let mut control = valid.clone();
     control.ext.ext.remove("delivery_mode");
+    control.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_device_branch(&branch, &control)?;
     let session = ramflux_protocol::custody::CustodySession {
         session_id: format!("session_{ordinal}"),
         device_ref: driver.reference.clone(),
@@ -453,21 +483,23 @@ fn exercise_federation_control(
     );
     forward.envelope.clone_from(envelope);
     match entry {
-        "federation_store.rs:spool_outbound_forward" => assert_not_mode_refused(
-            store.spool_outbound_forward("peer", &forward, 1_760_000_010, 5),
-            entry,
-        ),
-        "federation_store.rs:accept_inbound_forward_once" => assert_not_mode_refused(
+        "federation_store.rs:spool_outbound_forward" => {
+            assert_admitted(
+                store.spool_outbound_forward("peer", &forward, 1_760_000_010, 5),
+                entry,
+            );
+        }
+        "federation_store.rs:accept_inbound_forward_once" => assert_admitted(
             store.accept_inbound_forward_once(source, &forward, 1_760_000_010),
             entry,
         ),
-        "federation_store.rs:deliver_inbound_forward_once" => assert_not_mode_refused(
+        "federation_store.rs:deliver_inbound_forward_once" => assert_reached_delivery(
             store.deliver_inbound_forward_once(source, &forward, 1_760_000_010, || {
                 Err(NodeCoreError::Unauthorized("next-stage control".into()))
             }),
             entry,
         ),
-        "federation_store.rs:deliver_inbound_forward_once_with_lease" => assert_not_mode_refused(
+        "federation_store.rs:deliver_inbound_forward_once_with_lease" => assert_reached_delivery(
             store.deliver_inbound_forward_once_with_lease(
                 source,
                 &forward,
@@ -534,16 +566,16 @@ fn exercise_forwarded_control(
         migration_evidence: None,
     };
     match entry {
-        "forwarded_delivery.rs:submit_forwarded_envelope" => assert_not_mode_refused(
+        "forwarded_delivery.rs:submit_forwarded_envelope" => assert_admitted(
             router.submit_forwarded_envelope(store, None, request(), 1_760_000_010),
             entry,
         ),
-        "forwarded_delivery.rs:prepare_forwarded_envelope" => assert_not_mode_refused(
+        "forwarded_delivery.rs:prepare_forwarded_envelope" => assert_admitted(
             router.prepare_forwarded_envelope(store, None, request(), 1_760_000_010),
             entry,
         ),
         "forwarded_delivery.rs:prepare_forwarded_envelope_with_metadata" => {
-            assert_not_mode_refused(
+            assert_admitted(
                 router.prepare_forwarded_envelope_with_metadata(
                     store,
                     None,
@@ -647,6 +679,10 @@ fn exercise_router_ingress(
     Ok(())
 }
 
+const ALLOCATION: &str = "redb operation failed: allocation requires publication scope";
+const FANOUT_SCOPE: &str = "redb operation failed: fanout requires publication scope";
+const EVIDENCE: &str = "home migration refused: EvidenceRequired";
+
 fn exercise_router_control(
     entry: &str,
     router: &RouterCore,
@@ -659,50 +695,71 @@ fn exercise_router_control(
         source_device_id: envelope.source_device_id.clone(),
         envelope: envelope.clone(),
     };
+    let wall_now = i64::try_from(crate::now_unix_seconds())?;
+    // Expected values: `None` means the control succeeds; `Some(msg)` means it stops at the exact
+    // post-mode-check stage named by `msg`. Either way the delivery-mode guard let it through.
     match entry {
         "router.rs:mvp10_own_device_fanout" => {
-            assert_not_mode_refused(router.mvp10_own_device_fanout(request()), entry);
+            // `mvp10_own_device_fanout` judges expiry at wall-clock time, so re-stamp the control.
+            let fresh = with_created_at(envelope, wall_now)?;
+            let fresh_request = ItestMvp10OwnDeviceFanoutRequest {
+                principal_id: fresh.source_principal_id.clone(),
+                source_device_id: fresh.source_device_id.clone(),
+                envelope: fresh,
+            };
+            assert_stage(stage_of(router.mvp10_own_device_fanout(fresh_request)), None, entry);
         }
-        "router.rs:mvp10_own_device_fanout_at" => assert_not_mode_refused(
-            router.mvp10_own_device_fanout_at(request(), 1_760_000_010),
+        "router.rs:mvp10_own_device_fanout_at" => assert_stage(
+            stage_of(router.mvp10_own_device_fanout_at(request(), 1_760_000_010)),
+            None,
             entry,
         ),
-        "router.rs:accept_envelope_replay" => assert_not_mode_refused(
-            router.accept_envelope_replay(source, envelope.clone(), 1_760_000_010),
+        "router.rs:accept_envelope_replay" => assert_stage(
+            stage_of(router.accept_envelope_replay(source, envelope.clone(), 1_760_000_010)),
+            None,
             entry,
         ),
-        "router.rs:submit_replay_accepted_envelope" => {
-            assert_submit_control(
-                router.submit_replay_accepted_envelope(
-                    ReplayAcceptedEnvelope { envelope: envelope.clone() },
-                    1_760_000_010,
-                ),
-                entry,
-            );
-        }
-        "router.rs:accept_own_device_fanout_replay" => assert_not_mode_refused(
-            router.accept_own_device_fanout_replay(request(), 1_760_000_010),
+        "router.rs:submit_replay_accepted_envelope" => assert_stage(
+            submit_stage(router.submit_replay_accepted_envelope(
+                ReplayAcceptedEnvelope { envelope: envelope.clone() },
+                1_760_000_010,
+            )),
+            Some(ALLOCATION),
             entry,
         ),
-        "router.rs:accept_leased_fanout" => assert_not_mode_refused(
-            router.accept_leased_fanout(request(), store, 1_760_000_010),
+        "router.rs:accept_own_device_fanout_replay" => assert_stage(
+            stage_of(router.accept_own_device_fanout_replay(request(), 1_760_000_010)),
+            None,
+            entry,
+        ),
+        "router.rs:accept_leased_fanout" => assert_stage(
+            stage_of(router.accept_leased_fanout(request(), store, 1_760_000_010)),
+            Some(FANOUT_SCOPE),
             entry,
         ),
         "router.rs:submit_envelope" => {
-            assert_submit_control(router.submit_envelope(source, envelope.clone()), entry);
+            // `submit_envelope` judges expiry at wall-clock time, so re-stamp the control there.
+            let fresh = with_created_at(envelope, wall_now)?;
+            assert_stage(
+                submit_stage(router.submit_envelope(source, fresh)),
+                Some(ALLOCATION),
+                entry,
+            );
         }
-        "router.rs:submit_envelope_at" => assert_submit_control(
-            router.submit_envelope_at(source, envelope.clone(), 1_760_000_010),
+        "router.rs:submit_envelope_at" => assert_stage(
+            submit_stage(router.submit_envelope_at(source, envelope.clone(), 1_760_000_010)),
+            Some(ALLOCATION),
             entry,
         ),
-        "router.rs:submit_envelope_with_home_node_forward_at" => assert_submit_control(
-            router.submit_envelope_with_home_node_forward_at(
+        "router.rs:submit_envelope_with_home_node_forward_at" => assert_stage(
+            submit_stage(router.submit_envelope_with_home_node_forward_at(
                 source,
                 envelope.clone(),
                 1_760_000_010,
                 RouterEnvelopeOrigin::Federation,
                 |_| Err(NodeCoreError::Unauthorized("next-stage control".into())),
-            ),
+            )),
+            Some(ALLOCATION),
             entry,
         ),
         "router.rs:prepare_envelope_with_home_node_forward_at" => match router
@@ -713,21 +770,26 @@ fn exercise_router_control(
                 RouterEnvelopeOrigin::Federation,
                 10,
             ) {
-            RouterForwardPreparation::Complete(outcome) => assert_submit_control(*outcome, entry),
+            RouterForwardPreparation::Complete(outcome) => {
+                assert_stage(submit_stage(*outcome), Some(ALLOCATION), entry);
+            }
+            // Reserved a home-node forward: the control reached the forward stage.
             RouterForwardPreparation::Forward(_) => {}
         },
-        "router/committed_forward.rs:prepare_committed_home_forward" => assert_not_mode_refused(
-            router.prepare_committed_home_forward(
+        "router/committed_forward.rs:prepare_committed_home_forward" => assert_stage(
+            stage_of(router.prepare_committed_home_forward(
                 store,
                 source,
                 envelope.clone(),
                 1_760_000_010,
                 10,
-            ),
+            )),
+            Some(EVIDENCE),
             entry,
         ),
-        "router/sender_fanout.rs:prepare_sender_fanout" => assert_not_mode_refused(
-            router.prepare_sender_fanout(store, &request(), 1_760_000_010),
+        "router/sender_fanout.rs:prepare_sender_fanout" => assert_stage(
+            stage_of(router.prepare_sender_fanout(store, &request(), 1_760_000_010)),
+            None,
             entry,
         ),
         _ => return Err(format!("unknown router ingress {entry}").into()),
@@ -735,10 +797,117 @@ fn exercise_router_control(
     Ok(())
 }
 
-fn assert_not_mode_refused<T>(result: Result<T, NodeCoreError>, entry: &str) {
-    let mode_refused =
-        result.err().is_some_and(|error| error.to_string() == "delivery_mode_refused");
-    assert!(!mode_refused, "control rejected at mode check: {entry}");
+/// Reduces a fallible stage result to its error text, or `Ok` when the stage succeeded.
+fn stage_of<T>(result: Result<T, NodeCoreError>) -> Result<(), String> {
+    result.map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// Reduces a submit outcome to `Ok` when admitted for delivery, else the refusal reason.
+fn submit_stage(outcome: RouterSubmitOutcome) -> Result<(), String> {
+    match outcome {
+        RouterSubmitOutcome::Online(_) | RouterSubmitOutcome::OfflineQueued(_) => Ok(()),
+        RouterSubmitOutcome::RejectedSecurity { reason, .. } => Err(reason),
+        other => Err(format!("{other:?}")),
+    }
+}
+
+/// Asserts a control stopped exactly where expected after the mode check.
+fn assert_stage(result: Result<(), String>, expected: Option<&str>, entry: &str) {
+    assert_eq!(result.err().as_deref(), expected, "control stage mismatch at {entry}");
+}
+
+/// A control must be fully valid: it has to succeed at this entry point, not merely avoid the
+/// mode check, so any error here is a fixture defect.
+#[allow(clippy::panic, reason = "control fixtures fail loudly on a fixture defect")]
+fn assert_admitted<T>(result: Result<T, NodeCoreError>, entry: &str) {
+    if let Err(error) = result {
+        panic!("control not admitted at {entry}: {error}");
+    }
+}
+
+/// A control that is admitted past every pre-delivery check must stop at the delivery closure,
+/// which the fixture makes return this exact marker error.
+#[allow(clippy::panic, reason = "control fixtures fail loudly on a fixture defect")]
+fn assert_reached_delivery<T: std::fmt::Debug>(result: Result<T, NodeCoreError>, entry: &str) {
+    match result {
+        Err(NodeCoreError::Unauthorized(reason)) if reason == "next-stage control" => {}
+        other => panic!("control did not reach the delivery stage at {entry}: {other:?}"),
+    }
+}
+
+/// Registers the principal device that `forwarded_source_envelope` embeds as its authority,
+/// so the control envelope resolves to a live registered device at every router entry.
+fn register_marked_source(
+    router: &RouterCore,
+    device: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+    let branch = ramflux_crypto::create_device_branch(
+        "alice",
+        device,
+        1,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    );
+    let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
+    let keys = ramflux_crypto::device_key_commitments(
+        &ramflux_crypto::fixture_public_key_base64url(),
+        &ramflux_protocol::encode_base64url(agreement.public),
+    )?;
+    let proof = ramflux_crypto::authorize_device_branch_v2(
+        &root,
+        &branch,
+        ramflux_crypto::BranchAuthorization {
+            audience: IDENTITY_BIND_AUDIENCE,
+            capability_scope: vec![IDENTITY_BIND_CAPABILITY.into()],
+            issued_at: 1_760_000_000,
+            expires_at: 1_760_003_600,
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            agreement_identity_public_key: agreement.public,
+        },
+    )?;
+    let commitment = ramflux_crypto::identity_root_commitment(&root.signing_key.verifying_key());
+    let previous = router.signed_device_set(&commitment);
+    let mut entries = previous.as_ref().map_or_else(Vec::new, |set| set.devices.clone());
+    entries.retain(|entry| entry.device_id != device);
+    entries.push(ramflux_protocol::SignedDeviceSetEntry {
+        device_id: device.into(),
+        device_epoch: 1,
+        signing_key_commitment: keys.0,
+        agreement_key_commitment: keys.1,
+        status: ramflux_protocol::DeviceSetStatus::Active,
+        revoked_at: None,
+    });
+    let device_set = ramflux_crypto::sign_device_set(
+        &root,
+        ramflux_crypto::DeviceSetSigningInput {
+            principal_kind: ramflux_protocol::PrincipalKind::Human,
+            device_set_epoch: previous.map_or(1, |set| set.device_set_epoch + 1),
+            devices: entries,
+        },
+    )?;
+    let root_public_key =
+        ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes());
+    let root_bytes = ramflux_protocol::decode_base64url(&root_public_key)?;
+    router.mvp1_register_identity(&IdentityRegisterRequest {
+        device_set: Some(device_set),
+        principal_commitment: ramflux_crypto::blake3_256_base64url(
+            "ramflux.identity.root_public_key.commitment.v1",
+            &root_bytes,
+        ),
+        root_public_key,
+        branch_public_key: ramflux_protocol::encode_base64url(
+            branch.signing_key.verifying_key().to_bytes(),
+        ),
+        proof,
+        target_delivery_id: format!("target_{device}"),
+        gateway_id: "ramflux-gateway".to_owned(),
+        session_id: format!("session_{device}"),
+        push_alias_hash: Some(format!("push_{device}")),
+        now: 1_760_000_010,
+        registration_pow: None,
+        source_ip_hash: Some(source_ip_hash("registry-fixture")),
+    })?;
+    Ok(())
 }
 
 fn assert_delivery_mode_refused<T>(result: Result<T, NodeCoreError>, entry: &str) {
@@ -746,13 +915,6 @@ fn assert_delivery_mode_refused<T>(result: Result<T, NodeCoreError>, entry: &str
         result.err().map(|error| error.to_string()).as_deref(),
         Some("delivery_mode_refused"),
         "{entry}"
-    );
-}
-
-fn assert_submit_control(outcome: RouterSubmitOutcome, entry: &str) {
-    assert!(
-        !matches!(outcome, RouterSubmitOutcome::RejectedSecurity { reason, .. } if reason == "delivery_mode_refused"),
-        "control rejected at mode check: {entry}"
     );
 }
 
@@ -854,7 +1016,9 @@ fn assert_registry_scan_matches(
 ) -> Result<(), String> {
     let mut sorted_listed = listed.to_vec();
     sorted_listed.sort();
-    if listed.len() != sorted_listed.len() {
+    let mut deduped = sorted_listed.clone();
+    deduped.dedup();
+    if deduped.len() != sorted_listed.len() {
         return Err("duplicate durable ingress registry entries".into());
     }
     let scanned = scan_public_envelope_functions(sources).map_err(|error| error.to_string())?;
@@ -868,16 +1032,29 @@ fn assert_registry_scan_matches(
 fn durable_ingress_registry_scanner_rejects_drift_fixtures() {
     let unlisted =
         vec![("registry.rs".to_owned(), "pub fn newly_exposed(envelope: Envelope) {}".to_owned())];
-    assert!(assert_registry_scan_matches(&unlisted, &[]).is_err());
+    assert_eq!(
+        assert_registry_scan_matches(&unlisted, &[]),
+        Err("scanner matches differ: [\"registry.rs:newly_exposed\"] != []".to_owned())
+    );
 
     let no_longer_matching =
         vec![("registry.rs".to_owned(), "pub fn previously_listed() {}".to_owned())];
-    assert!(
+    assert_eq!(
         assert_registry_scan_matches(
             &no_longer_matching,
             &["registry.rs:previously_listed".to_owned()]
-        )
-        .is_err()
+        ),
+        Err("scanner matches differ: [] != [\"registry.rs:previously_listed\"]".to_owned())
+    );
+
+    let duplicated =
+        vec![("registry.rs".to_owned(), "pub fn duplicated(envelope: Envelope) {}".to_owned())];
+    assert_eq!(
+        assert_registry_scan_matches(
+            &duplicated,
+            &["registry.rs:duplicated".to_owned(), "registry.rs:duplicated".to_owned()]
+        ),
+        Err("duplicate durable ingress registry entries".to_owned())
     );
 }
 
