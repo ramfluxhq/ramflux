@@ -1291,27 +1291,22 @@ fn relay_device_hash(device_id: &str) -> String {
     )
 }
 
-/// Delivery-mode dispatch: `Durable` continues on the durable path; `Ephemeral` on a session
-/// that negotiated it goes to the ephemeral handler; everything else gets P03's live refusal.
-/// Returns `true` when the submit was fully handled here.
+/// Non-durable dispatch: `Ephemeral` on a session that negotiated it goes to the ephemeral
+/// handler; everything else (not negotiated, unknown string, non-string) gets P03's live refusal.
 async fn route_non_durable_submit(
     send: &GatewaySendHandle,
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<()> {
     use ramflux_protocol::ephemeral::{DeliveryMode, classify_delivery_mode};
-    match classify_delivery_mode(&submit.envelope) {
-        DeliveryMode::Durable => Ok(false),
-        DeliveryMode::Ephemeral if crate::ephemeral::negotiated() => {
-            crate::ephemeral::handle_submit(send, context, runtime, submit).await?;
-            Ok(true)
-        }
-        _ => {
-            write_gateway_handle(send, &crate::durable_mode::nack_frame()).await?;
-            Ok(true)
-        }
+    if classify_delivery_mode(&submit.envelope) == DeliveryMode::Ephemeral
+        && crate::ephemeral::negotiated()
+    {
+        return crate::ephemeral::handle_submit(send, context, runtime, submit).await;
     }
+    write_gateway_handle(send, &crate::durable_mode::nack_frame()).await?;
+    Ok(())
 }
 
 pub(crate) async fn handle_gateway_submit(
@@ -1320,8 +1315,8 @@ pub(crate) async fn handle_gateway_submit(
     runtime: &GatewaySessionRuntime,
     submit: &ramflux_node_core::GatewaySubmitFrame,
 ) -> anyhow::Result<()> {
-    if route_non_durable_submit(send, context, runtime, submit).await? {
-        return Ok(());
+    if ramflux_protocol::ephemeral::require_durable(&submit.envelope).is_err() {
+        return route_non_durable_submit(send, context, runtime, submit).await;
     }
     let validated = (|| -> anyhow::Result<ramflux_protocol::Envelope> {
         let envelope = crate::submit_source::bind_source(runtime, &submit.envelope)?;
