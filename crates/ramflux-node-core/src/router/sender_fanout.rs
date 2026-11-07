@@ -112,6 +112,7 @@ impl RouterCore {
         request: &ItestMvp10OwnDeviceFanoutRequest,
         now: i64,
     ) -> Result<PreparedFanout, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         match self.prepare_sender_fanout_inner(store, request, now) {
             Ok(prepared) => Ok(prepared),
             Err(

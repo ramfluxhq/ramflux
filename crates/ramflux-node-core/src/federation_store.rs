@@ -24,6 +24,9 @@ const INBOUND_FORWARD_ATTEMPT_LEASE_SECONDS: u64 = 20;
 
 mod attachment_authority;
 pub use attachment_authority::{AuthorityHistory, MAX_AUTHORITY_NODES};
+#[cfg(test)]
+pub(crate) type DurableIngressSnapshot = (u64, [u8; 32], u64, u64, u64, u64);
+
 mod dead_letters;
 mod retention;
 pub use dead_letters::FederationOutboundDeadLetter;
@@ -31,6 +34,8 @@ pub use dead_letters::FederationOutboundDeadLetter;
 pub struct FederationRedbStore {
     db: redb::Database,
     foreign_authority_writes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    path: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -75,6 +80,56 @@ enum InboundForwardAdmission {
 }
 
 impl FederationRedbStore {
+    #[cfg(test)]
+    pub(crate) fn durable_ingress_snapshot(&self) -> Result<DurableIngressSnapshot, NodeCoreError> {
+        use redb::ReadableTableMetadata;
+        const FEDERATION_FOREIGN_FENCES: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("federation_foreign_set_fences_v1");
+        const FEDERATION_FOREIGN_SETS: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("federation_foreign_full_sets_v1");
+        const FEDERATION_NEW_ROOT_BUDGET: TableDefinition<&str, &[u8]> =
+            TableDefinition::new("federation_new_root_budget_v1");
+        let txn = self.db.begin_read().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let redb_contents =
+            fs::read(&self.path).map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let redb_bytes = u64::try_from(redb_contents.len())
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let redb_digest =
+            ramflux_crypto::blake3_256("ramflux.test.durable_ingress_snapshot.v1", &redb_contents);
+        let spool = txn
+            .open_table(FEDERATION_OUTBOUND_SPOOL_TABLE)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            .len()
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let seen = txn
+            .open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            .len()
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let fences = txn
+            .open_table(FEDERATION_FOREIGN_FENCES)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let fence_count = fences.len().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        drop(fences);
+        let sets = txn
+            .open_table(FEDERATION_FOREIGN_SETS)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let set_count = sets.len().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        let budget_count = match txn.open_table(FEDERATION_NEW_ROOT_BUDGET) {
+            Ok(budget) => budget.len().map_err(|error| NodeCoreError::Redb(error.to_string()))?,
+            Err(redb::TableError::TableDoesNotExist(_)) => 0,
+            Err(error) => return Err(NodeCoreError::Redb(error.to_string())),
+        };
+        Ok((
+            redb_bytes,
+            redb_digest,
+            spool,
+            seen,
+            fence_count.saturating_add(set_count),
+            budget_count.saturating_add(self.foreign_authority_write_count()),
+        ))
+    }
+
     /// Successful per-root authority transactions; unchanged forwards do not rewrite a head.
     #[must_use]
     pub fn foreign_authority_write_count(&self) -> u64 {
@@ -83,7 +138,8 @@ impl FederationRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
-        let db = open_redb_with_table(path, FEDERATION_STATE_TABLE)?;
+        let path = path.as_ref().to_path_buf();
+        let db = open_redb_with_table(&path, FEDERATION_STATE_TABLE)?;
         let write_txn =
             db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         {
@@ -102,7 +158,12 @@ impl FederationRedbStore {
             crate::foreign_device_store::Namespace::Federation,
             None,
         )?;
-        let store = Self { db, foreign_authority_writes: std::sync::atomic::AtomicU64::new(0) };
+        let store = Self {
+            db,
+            foreign_authority_writes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            path,
+        };
         store.initialize_dead_letters()?;
         store.initialize_attachment_authority()?;
         Ok(store)
@@ -229,6 +290,7 @@ impl FederationRedbStore {
         enqueued_at: u64,
         ttl_seconds: u64,
     ) -> Result<FederationOutboundSpoolEntry, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&forward.envelope)?;
         let write_txn =
             self.db.begin_write().map_err(|source| NodeCoreError::Redb(source.to_string()))?;
         let entry = {
@@ -426,6 +488,7 @@ impl FederationRedbStore {
         request: &crate::FederatedEnvelopeForwardRequest,
         now: u64,
     ) -> Result<bool, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let InboundForwardAdmission::Acquired { attempt_id } = self.begin_inbound_forward(
             source,
             request,
@@ -446,6 +509,7 @@ impl FederationRedbStore {
         now: u64,
         attempt_lease_seconds: u64,
     ) -> Result<InboundForwardAdmission, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let expires_at = inbound_forward_expires_at(request)?;
         if expires_at <= now {
             return Err(NodeCoreError::TtlExpired {
@@ -588,6 +652,7 @@ impl FederationRedbStore {
     where
         F: FnOnce() -> Result<crate::EnvelopeSubmitResponse, NodeCoreError>,
     {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         self.deliver_inbound_forward_once_with_lease(
             source,
             request,
@@ -610,6 +675,7 @@ impl FederationRedbStore {
     where
         F: FnOnce() -> Result<crate::EnvelopeSubmitResponse, NodeCoreError>,
     {
+        ramflux_protocol::ephemeral::require_durable(&request.envelope)?;
         let attempt_id =
             match self.begin_inbound_forward(source, request, now, attempt_lease_seconds)? {
                 InboundForwardAdmission::Committed => return Ok(None),

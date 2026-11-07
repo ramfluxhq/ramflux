@@ -28,6 +28,7 @@ impl RouterCore {
         store: &RouterRedbStore,
         origin: crate::RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         let _pin_admission =
             crate::forwarded_delivery::FOREIGN_PIN_ADMISSION.lock().map_err(storage)?;
         self.authenticated_native_forwarded_source_from_peer(
@@ -49,6 +50,7 @@ impl RouterCore {
         store: &RouterRedbStore,
         origin: crate::RouterEnvelopeOrigin,
     ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        ramflux_protocol::ephemeral::require_durable(envelope)?;
         if origin != crate::RouterEnvelopeOrigin::Federation || floors.len() > 64 {
             return Err(NodeCoreError::Unauthorized(
                 "invalid forwarded floor provenance or count".into(),

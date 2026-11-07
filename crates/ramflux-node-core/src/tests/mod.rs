@@ -48,4 +48,5 @@ pub(crate) mod custody_sessions;
 
 mod sender_fanout;
 
+mod durable_ingress_registry;
 mod fanout_entry_bound;
