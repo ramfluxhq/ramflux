@@ -15,6 +15,16 @@ const MAX_FRAME: usize = 32_768;
 
 type TestResult<T = ()> = anyhow::Result<T>;
 
+/// Hang guard: fails the test (assertion panic) if `future` does not finish within 10 s.
+async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
+    let finished = tokio::time::timeout(Duration::from_secs(10), future).await;
+    assert!(finished.is_ok(), "{what} did not finish within 10s");
+    match finished {
+        Ok(output) => output,
+        Err(_) => unreachable!("guarded by the assert above"),
+    }
+}
+
 fn queue() -> PushQueue {
     let (closed, _) = tokio::sync::watch::channel(false);
     let queue = PushQueue::new(16, closed);
@@ -24,6 +34,14 @@ fn queue() -> PushQueue {
 
 fn transient_bytes(n: u32) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&json!({"frame_type":"ephemeral","n":n}))?)
+}
+
+fn max_frame_bytes() -> anyhow::Result<Vec<u8>> {
+    let base = serde_json::to_vec(&json!({"frame_type":"ephemeral","pad":""}))?.len();
+    let bytes =
+        serde_json::to_vec(&json!({"frame_type":"ephemeral","pad":"x".repeat(MAX_FRAME - base)}))?;
+    anyhow::ensure!(bytes.len() == MAX_FRAME, "fixture is {} bytes", bytes.len());
+    Ok(bytes)
 }
 
 fn durable_bytes(seq: u64) -> anyhow::Result<Vec<u8>> {
@@ -147,19 +165,82 @@ async fn row_inflight_sink_write_still_occupies() -> TestResult {
         let Next::Transient(frame) = writer.next() else {
             anyhow::bail!("expected transient");
         };
-        let wrote = writer.write(&sink, &frame.bytes, Some(ID)).await;
+        let wrote = writer.write(&sink, &frame.bytes, Some(ID), Some(frame.expires_at_ms)).await;
         writer.complete_transient(&frame);
         Ok(wrote)
     });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("writer sink barrier", entered.notified()).await;
     assert_eq!(occupancy(&queue).0, TRANSIENT_FRAME_CAP);
     assert_eq!(
         queue.try_push_transient(transient_bytes(99)?, LIVE_MS),
         TransientAdmission::QueueFull
     );
     release.add_permits(1);
-    let wrote = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let wrote = guard_10s("writer task", task).await??;
     assert!(wrote);
+    Ok(())
+}
+
+/// M2: one 32,768-byte write held in flight plus seven queued maximum frames fill the byte cap;
+/// the ninth admission is an exact `QueueFull`, and the in-flight frame still occupies.
+async fn row_inflight_max_write_seven_queued_ninth_queue_full() -> TestResult {
+    let (queue, send, frames) = installed().await?;
+    for _ in 0..8 {
+        assert_eq!(
+            queue.try_push_transient(max_frame_bytes()?, LIVE_MS),
+            TransientAdmission::Queued
+        );
+    }
+    assert_eq!(occupancy(&queue), (8, TRANSIENT_BYTE_CAP));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    queue.park_next_write(entered.clone(), release.clone());
+    let writer = queue.clone();
+    let sink = send.clone();
+    let task = tokio::spawn(async move {
+        let Next::Transient(frame) = writer.next() else {
+            anyhow::bail!("expected transient");
+        };
+        let wrote = writer.write(&sink, &frame.bytes, Some(ID), Some(frame.expires_at_ms)).await;
+        writer.complete_transient(&frame);
+        Ok(wrote)
+    });
+    guard_10s("in-flight sink barrier", entered.notified()).await;
+    assert_eq!(occupancy(&queue), (8, TRANSIENT_BYTE_CAP));
+    assert_eq!(
+        queue.try_push_transient(max_frame_bytes()?, LIVE_MS),
+        TransientAdmission::QueueFull
+    );
+    assert_eq!(occupancy(&queue), (8, TRANSIENT_BYTE_CAP));
+    release.add_permits(1);
+    let wrote = guard_10s("in-flight writer task", task).await??;
+    assert!(wrote);
+    assert_eq!(frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
+    assert_eq!(occupancy(&queue), (7, 7 * MAX_FRAME));
+    Ok(())
+}
+
+/// M1: a frame selected at D-1 that waits on the sink mutex past D is dropped silently.
+async fn row_expired_while_waiting_for_sink_not_written() -> TestResult {
+    let (queue, send, frames) = installed().await?;
+    let deadline = NOW_MS + 10;
+    assert_eq!(queue.try_push_transient(transient_bytes(1)?, deadline), TransientAdmission::Queued);
+    queue.set_clock_ms(deadline - 1);
+    let Next::Transient(frame) = queue.next() else {
+        anyhow::bail!("expected transient at D-1");
+    };
+    let held = send.lock().await;
+    let writer = queue.clone();
+    let sink = send.clone();
+    let task = tokio::spawn(async move {
+        writer.write(&sink, &frame.bytes, Some(ID), Some(frame.expires_at_ms)).await
+    });
+    queue.set_clock_ms(deadline);
+    drop(held);
+    let wrote = guard_10s("expired writer task", task).await?;
+    assert!(wrote, "expiry is a silent drop, not a sink failure");
+    assert!(frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.is_empty());
+    assert_eq!(occupancy(&queue), (1, transient_bytes(1)?.len()));
     Ok(())
 }
 
@@ -254,7 +335,12 @@ async fn row_writer_priority_resync_durable_transient() -> TestResult {
         };
         queue.complete(Some(&frame));
     }
-    assert_eq!(queue.try_push_transient(transient_bytes(1)?, LIVE_MS), TransientAdmission::Queued);
+    for n in 1..=3 {
+        assert_eq!(
+            queue.try_push_transient(transient_bytes(n)?, LIVE_MS),
+            TransientAdmission::Queued
+        );
+    }
     let worker = queue.clone();
     let handle = send.clone();
     tokio::spawn(async move {
@@ -265,22 +351,23 @@ async fn row_writer_priority_resync_durable_transient() -> TestResult {
     anyhow::ensure!(!wire.is_empty(), "empty sink");
     assert_eq!(wire[0]["frame_type"], "resync");
     let mut saw_deliver = false;
-    let mut saw_ephemeral = false;
+    let mut ephemerals = Vec::new();
     for frame in &wire[1..] {
         match frame["frame_type"].as_str() {
             Some("deliver") => {
-                anyhow::ensure!(!saw_ephemeral, "durable after transient");
+                anyhow::ensure!(ephemerals.is_empty(), "durable after transient");
                 saw_deliver = true;
             }
             Some("ephemeral") => {
                 anyhow::ensure!(saw_deliver, "transient before durable");
-                saw_ephemeral = true;
+                ephemerals.push(frame["n"].as_u64());
             }
             Some("resync") => anyhow::bail!("second resync"),
             other => anyhow::bail!("unexpected {other:?}"),
         }
     }
-    assert!(saw_deliver && saw_ephemeral);
+    assert!(saw_deliver);
+    assert_eq!(ephemerals, vec![Some(1), Some(2), Some(3)], "transients in FIFO order");
     assert_eq!(occupancy(&queue), (0, 0));
     Ok(())
 }
@@ -319,5 +406,7 @@ async fn transient_queue_bounds_and_priority() -> TestResult {
     row_retire_drops_queued_transients().await?;
     row_writer_priority_resync_durable_transient().await?;
     row_durable_before_transient_without_resync().await?;
+    row_inflight_max_write_seven_queued_ninth_queue_full().await?;
+    row_expired_while_waiting_for_sink_not_written().await?;
     Ok(())
 }

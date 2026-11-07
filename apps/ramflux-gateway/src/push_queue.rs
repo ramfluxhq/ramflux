@@ -22,6 +22,7 @@ pub(crate) const BYTE_CAP: usize = 4 * 1024 * 1024;
 /// Per-session transient frame occupancy, including the in-flight write.
 pub(crate) const TRANSIENT_FRAME_CAP: usize = 64;
 /// Per-session transient byte occupancy, including the in-flight write.
+#[cfg(test)]
 pub(crate) const TRANSIENT_BYTE_CAP: usize = 262_144;
 const EMPTY: u64 = u64::MAX;
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
@@ -51,6 +52,7 @@ pub(crate) enum Admission {
     Closed,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransientAdmission {
     Queued,
@@ -83,6 +85,7 @@ impl State {
     fn occupancy(&self) -> (usize, usize) {
         (self.frames, self.bytes)
     }
+    #[cfg(test)]
     fn transient_occupancy(&self) -> (usize, usize) {
         (self.transient_frames, self.transient_bytes)
     }
@@ -110,7 +113,6 @@ struct Inner {
     closed: tokio::sync::watch::Sender<bool>,
     #[cfg(test)]
     accesses: Arc<std::sync::atomic::AtomicUsize>,
-    #[cfg(test)]
     clock: AtomicU64,
 }
 enum Next {
@@ -154,7 +156,6 @@ impl PushQueue {
                 closed,
                 #[cfg(test)]
                 accesses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                #[cfg(test)]
                 clock: AtomicU64::new(0),
             }),
         }
@@ -258,6 +259,8 @@ impl PushQueue {
         self.inner.wake.notify_one();
         Admission::Queued
     }
+    // Test-only until the P09 gateway ephemeral ingress gives it a production caller.
+    #[cfg(test)]
     pub(crate) fn try_push_transient(
         &self,
         bytes: Vec<u8>,
@@ -378,18 +381,13 @@ impl PushQueue {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
+    /// Forced clock (tests only, 0 = unset) or wall clock; production never sets the forced clock.
+    fn clock_ms(&self) -> u64 {
+        let forced = self.inner.clock.load(Ordering::Acquire);
+        if forced != 0 { forced } else { Self::wall_clock_ms() }
+    }
     fn take_transient(&self, state: &mut State) -> Next {
-        let now = {
-            #[cfg(test)]
-            {
-                let forced = self.inner.clock.load(Ordering::Acquire);
-                if forced != 0 { forced } else { Self::wall_clock_ms() }
-            }
-            #[cfg(not(test))]
-            {
-                Self::wall_clock_ms()
-            }
-        };
+        let now = self.clock_ms();
         let mut dropped = false;
         while let Some(front) = state.transient.front() {
             if now < front.expires_at_ms {
@@ -456,13 +454,14 @@ impl PushQueue {
                 Next::Idle => notified.await,
                 Next::Frame(frame) => {
                     tracing::trace!(inbox_seq = frame.seq, "writing queued delivery");
-                    if !self.write(&send, &frame.bytes, frame.incarnation.as_deref()).await {
+                    if !self.write(&send, &frame.bytes, frame.incarnation.as_deref(), None).await {
                         break;
                     }
                     self.complete(Some(&frame));
                 }
                 Next::Transient(frame) => {
-                    if !self.write(&send, &frame.bytes, incarnation.as_deref()).await {
+                    let deadline = Some(frame.expires_at_ms);
+                    if !self.write(&send, &frame.bytes, incarnation.as_deref(), deadline).await {
                         break;
                     }
                     self.complete_transient(&frame);
@@ -504,7 +503,7 @@ impl PushQueue {
                         let Ok(wire) = wire else {
                             break;
                         };
-                        if !self.write(&send, &wire, incarnation.as_deref()).await {
+                        if !self.write(&send, &wire, incarnation.as_deref(), None).await {
                             break;
                         }
                     }
@@ -553,11 +552,15 @@ impl PushQueue {
         }
         true
     }
+    /// Writes one frame under the sink mutex. `expires_at_ms` is the transient deadline:
+    /// it is re-checked after the mutex is acquired, so a frame selected before its deadline
+    /// that waited for the sink past it is dropped silently (`true`, nothing written).
     async fn write(
         &self,
         send: &GatewaySendHandle,
         bytes: &[u8],
         incarnation: Option<&str>,
+        expires_at_ms: Option<u64>,
     ) -> bool {
         #[cfg(test)]
         {
@@ -581,6 +584,9 @@ impl PushQueue {
         if incarnation != expected {
             self.retire();
             return false;
+        }
+        if expires_at_ms.is_some_and(|expires| self.clock_ms() >= expires) {
+            return true;
         }
         tokio::time::timeout(WRITE_DEADLINE, sink.send_frame(bytes)).await.is_ok_and(|r| r.is_ok())
     }

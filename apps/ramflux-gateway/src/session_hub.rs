@@ -289,7 +289,8 @@ impl GatewaySessionHub {
     }
     /// Enqueue a transient frame on the live registration for `target_delivery_id`.
     /// Transients never touch the Resync slot or durable coverage (D4).
-    #[allow(dead_code)] // Deliberately dormant until P09 gateway ephemeral ingress.
+    // Test-only until the P09 gateway ephemeral ingress gives it a production caller.
+    #[cfg(test)]
     pub(crate) async fn try_push_transient(
         &self,
         target_delivery_id: &str,
