@@ -57,6 +57,7 @@ async fn drive(
     account: LocalBusAccountState,
     root: &std::path::Path,
     done: Option<Box<dyn Fn(&AccountDb) -> Result<bool, SdkError>>>,
+    what: &str,
 ) -> Case<LocalBusAccountState> {
     let reader = account.client.account_db()?.open_reader()?;
     let (mut actor, _sender, stop, mut events) = runtime(account, &root.join("source"));
@@ -70,7 +71,7 @@ async fn drive(
         if let Some(done) = done {
             let mut waited = 0;
             while !done(&reader)? {
-                assert!(waited < 300, "the courier never reached the expected state");
+                assert!(waited < 300, "{what}: the courier never reached the expected state");
                 waited += 1;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -138,7 +139,8 @@ async fn scenario(row: Row, nack: Option<&str>, nack_after: usize, conflict: boo
     } else {
         Box::new(move |db| Ok(attempts_of(db, &watched)?.is_some_and(|n| n >= 1)))
     };
-    let mut account = drive(source, &root, Some(done)).await?;
+    let mut account =
+        drive(source, &root, Some(done), &format!("scenario {nack:?} after {nack_after}")).await?;
     reopen(&mut account)?;
     let attempts = gateway.lock().map_err(|_| "gateway")?.attempts.clone();
     Ok(Done { account, attempts, gateway, root, key, _peers: (peer, sibling) })
@@ -151,7 +153,7 @@ async fn assert_no_resend(done: &mut Done, expected: usize) -> Case {
         gateway.nack_submit = None;
     }
     let account = std::mem::replace(&mut done.account, placeholder()?);
-    done.account = drive(account, &done.root, None).await?;
+    done.account = drive(account, &done.root, None, "linger").await?;
     assert_eq!(done.gateway.lock().map_err(|_| "gateway")?.attempts.len(), expected);
     Ok(())
 }
@@ -261,9 +263,13 @@ async fn conflict_rows() -> Case {
     reopen(&mut done.account)?;
     let account = std::mem::replace(&mut done.account, placeholder()?);
     let watched = done.key.clone();
-    done.account =
-        drive(account, &done.root, Some(Box::new(move |db| Ok(!db.actor_state_exists(&watched)?))))
-            .await?;
+    done.account = drive(
+        account,
+        &done.root,
+        Some(Box::new(move |db| Ok(!db.actor_state_exists(&watched)?))),
+        "manual retry delivery",
+    )
+    .await?;
     assert_eq!(done.gateway.lock().map_err(|_| "gateway")?.attempts.len(), 2);
     // (a3d) the opposite choice is refused as consumed.
     let refused = done.account.client.decide_task_approval(&format!("task_approval_{id}"), true);
