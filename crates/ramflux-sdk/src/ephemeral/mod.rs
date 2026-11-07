@@ -13,5 +13,5 @@ pub use lifetime::{
 pub use receiver::{
     EphemeralReceiver, LedgerProbe, RECEIVER_CHANNEL_BYTES, RECEIVER_CHANNEL_FRAMES,
     RECEIVER_DEDUP_BOUND, RECEIVER_DEDUP_BUDGET_BYTES, RECEIVER_DEDUP_ENTRY_BYTES,
-    RECEIVER_MAX_FRAME_BYTES, ReceiverAdmit,
+    RECEIVER_MAX_FRAME_BYTES, ReceiverAdmit, ReceiverDequeue,
 };
