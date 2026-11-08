@@ -52,10 +52,12 @@ impl ReceiveTransaction<'_> {
     /// Commits loss, unpublished gap outbox, optional intent/cleanup and C together.
     ///
     /// # Errors
-    /// Refuses inverted/overflowed intervals, more than 64 boundaries, gaps that overlap a
-    /// receipt or fall outside `(C, sequence]`, stale writer authority, and storage failures.
+    /// Refuses a retired incarnation, inverted/overflowed intervals, more than 64 boundaries,
+    /// gaps that overlap a receipt or fall outside `(C, sequence]`, stale writer authority,
+    /// and storage failures.
     pub fn cover(&self, input: ReceiveCover<'_>) -> Result<ReceiveCoverResult, StorageError> {
         self.require_writer()?;
+        self.refuse_retired()?;
         let gaps = merge_gaps(input.gaps)?;
         let live = match input.kind {
             ReceiveCoverKind::GapOnly => usize::from(gaps.is_empty()),

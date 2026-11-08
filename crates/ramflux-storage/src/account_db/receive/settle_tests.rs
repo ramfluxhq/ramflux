@@ -50,7 +50,17 @@ fn cover(
     sequence: u64,
     kind: ReceiveCoverKind,
 ) -> Result<ReceiveCoverResult, StorageError> {
-    db.receive_transaction(expect(db, "e", cursor)?, 1, |tx| {
+    cover_as(db, "e", cursor, sequence, kind)
+}
+
+fn cover_as(
+    db: &AccountDb,
+    incarnation: &str,
+    cursor: u64,
+    sequence: u64,
+    kind: ReceiveCoverKind,
+) -> Result<ReceiveCoverResult, StorageError> {
+    db.receive_transaction(expect(db, incarnation, cursor)?, 1, |tx| {
         tx.cover(ReceiveCover { sequence, kind, gaps: &[] })
     })
 }
@@ -343,11 +353,53 @@ fn above_cursor_delegates_and_inactive_is_local() -> Result<(), StorageError> {
     assert_eq!(intent_seqs(&snap(&db, "e")?), vec![2, 3, 4]);
 
     put_row(&db, "old", 5, "staged", true)?;
-    assert_integrity(
-        settle(&db, "old", 4, 5, Kind::Terminal),
-        "inactive incarnation allows local recovery only",
+    assert_eq!(due(&db, "old", 4, 64)?, vec![5], "retired due_retained ignores the active C");
+    assert_eq!(
+        settle(&db, "old", 4, 5, Kind::Terminal)?,
+        Out::Settled,
+        "retired E with s>C still cleans up locally"
     );
+    let retired_above = snap(&db, "old")?;
+    assert_eq!(retired_above.cursor, 4, "retired E never writes C");
+    assert_eq!(intent_seqs(&retired_above), Vec::<u64>::new());
+    assert_eq!(retired_above.work, Vec::<u64>::new());
+    assert_eq!(retired_above.receipts, Vec::<(u64, String)>::new());
     assert_eq!(snap(&db, "e")?.cursor, 4);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn retired_incarnation_refuses_cover_and_stage() -> Result<(), StorageError> {
+    let (root, db) = setup("ws-retired-fence")?;
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET retired_incarnations=?1 WHERE target_delivery_id='t'",
+        params![serde_json::to_vec(&["old"])?],
+    )?;
+    put_row(&db, "old", 1, "staged", true)?;
+    let before = snap(&db, "old")?;
+    match cover_as(&db, "old", 0, 1, ReceiveCoverKind::Terminal) {
+        Err(StorageError::Integrity(super::RETIRED_INCARNATION)) => {}
+        other => panic!("cover under retired E: {other:?}"),
+    }
+    assert_eq!(snap(&db, "old")?, before, "retired cover writes nothing");
+    assert_eq!(snap(&db, "e")?.cursor, 0, "retired cover must not move C");
+    assert_eq!(intent_seqs(&snap(&db, "e")?), Vec::<u64>::new());
+
+    let wire = bytes(2);
+    let mut page = input(&wire, 2);
+    page.incarnation = "old";
+    match db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.stage(page)) {
+        Err(StorageError::Integrity(super::RETIRED_INCARNATION)) => {}
+        other => panic!("stage under retired E: {other:?}"),
+    }
+    assert_eq!(snap(&db, "old")?.work, vec![1], "retired stage writes no new work");
+
+    match db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.require_open_input(1)) {
+        Err(StorageError::Integrity(super::RETIRED_INCARNATION)) => {}
+        other => panic!("source gate under retired E: {other:?}"),
+    }
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -432,6 +484,11 @@ fn settle_negatives_and_due_cap() -> Result<(), StorageError> {
     db.set_projection_checkpoint("gateway_receive_cursor:t", "1")?;
     assert_integrity(settle(&db, "e", 1, 1, Kind::Terminal), "settle requires retained work");
     assert_integrity(settle(&db, "e", 1, 1, Kind::Held), "settle requires retained work");
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET retired_incarnations=?1 WHERE target_delivery_id='t'",
+        params![serde_json::to_vec(&["old"])?],
+    )?;
+    assert_integrity(settle(&db, "old", 1, 1, Kind::Terminal), "settle requires retained work");
 
     db.set_projection_checkpoint("gateway_receive_cursor:t", "65")?;
     for sequence in 1..=65 {

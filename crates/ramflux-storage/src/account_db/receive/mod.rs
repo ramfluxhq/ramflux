@@ -57,7 +57,12 @@ pub struct ReceiveTransaction<'a> {
     db: &'a AccountDb,
     target: &'a str,
     incarnation: &'a str,
+    /// True when the fence admitted a name in `retired_incarnations`, not the live E.
+    retired: bool,
 }
+
+/// Cover, stage and the source gate refuse a retired incarnation with this exact error.
+pub(crate) const RETIRED_INCARNATION: &str = "retired incarnation is local recovery only";
 
 impl ReceiveTransaction<'_> {
     /// Confirms that authority is still inside the account writer transaction.
@@ -66,6 +71,17 @@ impl ReceiveTransaction<'_> {
     pub fn require_writer(&self) -> Result<(), StorageError> {
         if self.db.connection.is_autocommit()? {
             return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(())
+    }
+
+    /// Cover, stage and the source gate refuse a retired incarnation.
+    ///
+    /// # Errors
+    /// Returns the exact retired-incarnation integrity error.
+    pub(crate) fn refuse_retired(&self) -> Result<(), StorageError> {
+        if self.retired {
+            return Err(StorageError::Integrity(RETIRED_INCARNATION));
         }
         Ok(())
     }
@@ -109,6 +125,7 @@ impl AccountDb {
                 db: self,
                 target: expected.target,
                 incarnation: expected.incarnation,
+                retired: expected.incarnation != incarnation,
             };
             let value = write(&authority)?;
             authority.require_writer()?;

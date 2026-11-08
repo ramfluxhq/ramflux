@@ -3,8 +3,9 @@
 
 //! WS below-C settlement. Indexed local redrive: terminal intent+cleanup or a preserved
 //! hold, never a C write. Above-C delegates to ordered W2 (`cover`). A retired incarnation
-//! is local cleanup only (no ACK intent). Compat U (`incarnation_verified=0`) stays live.
-//! Dormant until the actor wires it in P20. The typed `inbox_receive_failure` event is
+//! is local cleanup of any sequence (no ACK intent, no C write, no cover). Compat U
+//! (`incarnation_verified=0`) stays live. Cover, stage and the source gate refuse a retired
+//! E. Dormant until the actor wires it in P20. The typed `inbox_receive_failure` event is
 //! written by P07/P08 in the same caller transaction.
 use super::ReceiveTransaction;
 use super::cover::{ReceiveCover, ReceiveCoverKind, ReceiveCoverResult};
@@ -39,27 +40,24 @@ pub enum ReceiveSettleResult {
 
 impl ReceiveTransaction<'_> {
     /// Settles retained work at `sequence`. `s<=C` is WS (C frozen). `s=C+1` is W2 cover.
+    /// A retired E skips the C comparison and never delegates to cover.
     ///
     /// # Errors
-    /// Refuses a zero sequence, missing retained work, a retired-E cover, a jump over C,
+    /// Refuses a zero sequence, missing retained work, a jump over C on the live E,
     /// stale writer authority, and storage failures.
     pub fn settle(&self, input: ReceiveSettle) -> Result<ReceiveSettleResult, StorageError> {
         self.require_writer()?;
         if input.sequence == 0 {
             return Err(StorageError::Integrity("receive sequence must be positive"));
         }
-        let cursor = self.cursor()?;
-        let retired = self.is_retired()?;
-        if input.sequence > cursor {
-            if retired {
-                return Err(StorageError::Integrity(
-                    "inactive incarnation allows local recovery only",
-                ));
+        if !self.retired {
+            let cursor = self.cursor()?;
+            if input.sequence > cursor {
+                return self.delegate_cover(input);
             }
-            return self.delegate_cover(input);
         }
         match input.kind {
-            ReceiveSettleKind::Terminal => self.finish_below_cursor(input.sequence, retired)?,
+            ReceiveSettleKind::Terminal => self.finish_below_cursor(input.sequence)?,
             ReceiveSettleKind::Held => self.keep_held(input.sequence)?,
         }
         before_commit()?;
@@ -69,7 +67,8 @@ impl ReceiveTransaction<'_> {
         })
     }
 
-    /// Held/quarantined/staged work and erased receipts at or below C, oldest first.
+    /// Held/quarantined/staged work and erased receipts, oldest first. Live E is at or
+    /// below C; a retired E lists every retained or erased row of that incarnation.
     ///
     /// # Errors
     /// Returns SQL errors.
@@ -77,6 +76,7 @@ impl ReceiveTransaction<'_> {
         self.require_writer()?;
         let cursor = self.cursor()?.to_be_bytes();
         let cap = i64::from(limit.min(DUE_LIMIT));
+        let retired = i64::from(self.retired);
         let mut query = self.db.connection.prepare(
             "SELECT r.inbox_seq FROM gateway_receive_receipt r
              LEFT JOIN gateway_receive_work w
@@ -84,17 +84,17 @@ impl ReceiveTransaction<'_> {
               AND w.incarnation_id=r.incarnation_id
               AND w.inbox_seq=r.inbox_seq
              WHERE r.target_delivery_id=?1 AND r.incarnation_id=?2
-               AND r.inbox_seq<=?3
+               AND (r.inbox_seq<=?3 OR ?4=1)
                AND (
                  (r.disposition IN ('held','quarantined','staged') AND w.inbox_seq IS NOT NULL)
                  OR r.disposition='erased'
                )
-             ORDER BY r.inbox_seq LIMIT ?4",
+             ORDER BY r.inbox_seq LIMIT ?5",
         )?;
-        let rows = query
-            .query_map(params![self.target, self.incarnation, cursor.as_slice(), cap], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })?;
+        let rows = query.query_map(
+            params![self.target, self.incarnation, cursor.as_slice(), retired, cap],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let bytes = row?;
@@ -114,16 +114,6 @@ impl ReceiveTransaction<'_> {
             .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))
     }
 
-    fn is_retired(&self) -> Result<bool, StorageError> {
-        let (active, retired_blob): (String, Vec<u8>) = self.db.connection.query_row(
-            "SELECT incarnation_id, retired_incarnations FROM gateway_receive_epoch WHERE target_delivery_id=?1",
-            params![self.target],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let retired = super::retired_incarnations(&retired_blob)?;
-        Ok(self.incarnation != active || retired.iter().any(|was| was == self.incarnation))
-    }
-
     fn delegate_cover(&self, input: ReceiveSettle) -> Result<ReceiveSettleResult, StorageError> {
         let kind = match input.kind {
             ReceiveSettleKind::Terminal => ReceiveCoverKind::Terminal,
@@ -138,12 +128,12 @@ impl ReceiveTransaction<'_> {
         }
     }
 
-    fn finish_below_cursor(&self, sequence: u64, retired: bool) -> Result<(), StorageError> {
-        if retired {
-            if self.receipt_exists(sequence)? || self.work_exists(sequence)? {
-                self.cleanup_settled(sequence)?;
+    fn finish_below_cursor(&self, sequence: u64) -> Result<(), StorageError> {
+        if self.retired {
+            if !self.receipt_exists(sequence)? && !self.work_exists(sequence)? {
+                return Err(StorageError::Integrity("settle requires retained work"));
             }
-            return Ok(());
+            return self.cleanup_settled(sequence);
         }
         if !self.work_exists(sequence)? && !self.erased_receipt(sequence)? {
             if self.intent_exists(sequence)? {

@@ -46,7 +46,8 @@ impl ReceiveTransaction<'_> {
     /// Reserves work and potential terminal intent before any processing can start.
     /// Duplicate bytes preserve the first work, including its original deadline/key.
     /// # Errors
-    /// Rejects invalid normalized input, stale transaction authority and storage failures.
+    /// Rejects a retired incarnation, invalid normalized input, stale transaction authority
+    /// and storage failures.
     pub fn stage(&self, input: ReceiveStage<'_>) -> Result<ReceiveStageResult, StorageError> {
         self.stage_at(input, crate::unix_now())
     }
@@ -58,6 +59,7 @@ impl ReceiveTransaction<'_> {
         now: i64,
     ) -> Result<ReceiveStageResult, StorageError> {
         self.require_writer()?;
+        self.refuse_retired()?;
         self.db.write_transaction(|| self.stage_inner(input, now))
     }
 
