@@ -232,7 +232,7 @@ fn registry_guard_rejects_class_a_or_b_without_a_strict_call()
     write_source(
         &root,
         "apps/ramflux-router/src/handlers.rs",
-        "fn ingress(b: &[u8]) { let _: Envelope = serde_json::from_slice(b).unwrap(); let _ = ramflux_protocol::parse_i_json::<Envelope>(b); }",
+        "fn ingress(b: &[u8]) { let _ = ramflux_protocol::parse_i_json::<Envelope>(b); let _: Envelope = serde_json::from_slice(b).unwrap(); }",
     )?;
     let sites = scan_tree(&root)?;
     let site =
@@ -254,6 +254,24 @@ fn registry_guard_rejects_class_a_or_b_without_a_strict_call()
         ),
         "a lenient A call has the stable strictness verdict"
     );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn crate_root_test_modules_resolve_from_the_src_directory() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = temp_tree("crate-root-module")?;
+    write_source(&root, "apps/demo/src/main.rs", "#[cfg(test)] mod durable_ingress_registry;")?;
+    write_source(
+        &root,
+        "apps/demo/src/durable_ingress_registry.rs",
+        "fn fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }",
+    )?;
+
+    let sites = scan_tree(&root)?;
+    assert!(sites.is_empty(), "crate-root test module decoder must be exempt");
+
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -304,7 +322,10 @@ fn test_module_paths(parsed: &[(String, syn::File)]) -> BTreeSet<String> {
     for (path, file) in parsed {
         let file_path = Path::new(path);
         let parent = file_path.parent().unwrap_or_else(|| Path::new(""));
-        let module_dir = if file_path.file_stem().is_some_and(|stem| stem == "mod") {
+        let module_dir = if file_path
+            .file_stem()
+            .is_some_and(|stem| stem == "mod" || stem == "main" || stem == "lib")
+        {
             parent.to_path_buf()
         } else {
             parent.join(file_path.file_stem().unwrap_or_default())
@@ -823,14 +844,7 @@ fn validate_registry(sites: &[Site], rows: &BTreeMap<Key, RegistryRow>) -> Resul
                 display_key(&site.key)
             ));
         }
-        if matches!(row.class, 'A' | 'B')
-            && !sites.iter().any(|candidate| {
-                candidate.key.path == site.key.path
-                    && candidate.key.function == site.key.function
-                    && candidate.key.ordinal <= site.key.ordinal
-                    && candidate.strict
-            })
-        {
+        if matches!(row.class, 'A' | 'B') && !site.strict {
             errors.push(format!(
                 "class {} lacks strict parse_i_json call: {} ({})",
                 row.class,
