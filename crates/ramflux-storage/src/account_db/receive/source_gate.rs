@@ -49,6 +49,46 @@ impl crate::AccountDb {
         Ok(())
     }
 
+    /// Test support: every row of the durable effect tables, rendered column by column and
+    /// sorted, so a before/after comparison covers values, not just key names or counts.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn durable_rows_for_test(&self) -> Result<Vec<String>, StorageError> {
+        const TABLES: [&str; 8] = [
+            "runtime_actor_state",
+            "message_copy_binding",
+            "message_footprint",
+            "direct_message_projection",
+            "object_key_slot",
+            "group_sender_key_counter_seen",
+            "gateway_receive_receipt",
+            "gateway_receive_work",
+        ];
+        let mut rows = Vec::new();
+        for table in TABLES {
+            let columns = self
+                .connection
+                .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // quote() renders NULL, integers, reals, text and blobs unambiguously in one string.
+            let cells = columns
+                .iter()
+                .map(|column| format!("quote(\"{column}\")"))
+                .collect::<Vec<_>>()
+                .join("||'|'||");
+            rows.extend(
+                self.connection
+                    .prepare(&format!("SELECT '{table}|'||{cells} FROM {table}"))?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            );
+        }
+        rows.sort();
+        Ok(rows)
+    }
+
     /// Test support: the receipt disposition and the work-row count of the whole ledger.
     ///
     /// # Errors

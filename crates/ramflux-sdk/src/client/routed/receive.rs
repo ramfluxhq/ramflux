@@ -342,9 +342,10 @@ impl RamfluxClient {
         let Finish { opened, body, plaintext, refs, import, background, consume_erased } = finish;
         // Durable pair-secret retirement runs at the end of `commit_routed_projection` /
         // `commit_contact_request_bootstrap` after that writer transaction commits (a WAL
-        // checkpoint cannot run while the transaction is open). RAM-only after commit:
-        // `voice_calls`, `voice_transition`, and `object_store.tombstone` (rebuilt on load /
-        // session). Network post-commit (pair-reset reply, attachment import) is P17 / P16;
+        // checkpoint cannot run while the transaction is open). After commit, `voice_calls`,
+        // `voice_transition`, and `object_store.tombstone` are RAM-only (rebuilt on load /
+        // session). The call refresh (`refresh_call_control` -> `retire_call_without_keys`)
+        // persists its call row durably; `dispatch::call::recover` rebuilds it at startup. Network post-commit (pair-reset reply, attachment import) is P17 / P16;
         // the seen early-return stays for those.
         let pair_reply = if background {
             match self.prepare_received_pair_reply(engine.config(), &opened, &body) {
@@ -593,8 +594,6 @@ impl RamfluxClient {
         local: &str,
     ) -> Result<Delivery, SdkError> {
         let delivery = self.account_db()?.write_transaction(|| {
-            #[cfg(test)]
-            commit_fault::take(commit_fault::Kind::Bootstrap)?;
             // Candidate authentication supplies receipt scope without resurrecting requester caches.
             let source = Self::device_identity_from_manifest(manifest,&entry.envelope.source_device_id)?;
             let packet = decode(&entry.envelope)?;
@@ -646,6 +645,9 @@ impl RamfluxClient {
                 receipt: &receipt,
                 consume_erased: false,
             })?;
+            // Fault after the marker and every effect, so the rollback must undo both.
+            #[cfg(test)]
+            commit_fault::take(commit_fault::Kind::Bootstrap)?;
             Ok(Delivery { routing: Some(opened.routing), plaintext: None, call_control: false, pair_reply: None })
 
         })?;
@@ -658,8 +660,6 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<(), SdkError> {
-        #[cfg(test)]
-        commit_fault::take(commit_fault::Kind::Pair)?;
         if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
             || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
         {
@@ -720,8 +720,6 @@ impl RamfluxClient {
             references,
             consume_erased,
         } = context;
-        #[cfg(test)]
-        commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
             && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
         {
@@ -796,6 +794,13 @@ impl RamfluxClient {
             )?;
         }
         self.persist_routed_marker(opened, entry, body, receipt)?;
+        // Faults land after the marker, the last write before commit, so a rollback must undo
+        // the effects and the marker together.
+        #[cfg(test)]
+        {
+            commit_fault::take(commit_fault::Kind::Pair)?;
+            commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
+        }
         Ok((plaintext, admitted))
     }
 
@@ -866,6 +871,7 @@ pub(crate) mod commit_fault {
         Pair,
         GroupControl,
         Content,
+        Control,
     }
 
     thread_local! {
@@ -875,9 +881,8 @@ pub(crate) mod commit_fault {
     pub(crate) fn projection(kind: &super::Kind) -> Kind {
         match kind {
             super::Kind::Direct | super::Kind::GroupMessage => Kind::Content,
-            super::Kind::GroupControl | super::Kind::Control | super::Kind::Receipt => {
-                Kind::GroupControl
-            }
+            super::Kind::Control => Kind::Control,
+            super::Kind::GroupControl | super::Kind::Receipt => Kind::GroupControl,
         }
     }
 

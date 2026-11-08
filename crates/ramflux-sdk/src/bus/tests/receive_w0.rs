@@ -410,18 +410,20 @@ async fn history(fixture: &mut Fixture) -> Case {
         account.client.check_own_history_fetch(&fetch)?;
         account.client.authorize_fetch_ack(&fetch.input)
     })?;
-    if ack {
-        for index in 0..fetch.input.manifest.total_chunks {
-            if fetch.input.confirmed.contains(&index) {
-                continue;
-            }
-            let db = account.client.account_db()?;
-            gate(db)?.effect(db, S, || {
-                account.client.check_own_history_fetch(&fetch)?;
-                account.client.persist_received_attachment_ack(&fetch.input.reference, index)
-            })?;
+    assert!(ack, "per-chunk ACK checkpoint must authorize for the staged fetch");
+    let mut acks = 0_u32;
+    for index in 0..fetch.input.manifest.total_chunks {
+        if fetch.input.confirmed.contains(&index) {
+            continue;
         }
+        let db = account.client.account_db()?;
+        gate(db)?.effect(db, S, || {
+            account.client.check_own_history_fetch(&fetch)?;
+            account.client.persist_received_attachment_ack(&fetch.input.reference, index)
+        })?;
+        acks += 1;
     }
+    assert!(acks > 0, "per-chunk ACK loop must write at least one ACK");
     reopen(account)?;
     assert_eq!(state(account, S)?, (Some("staged".to_owned()), 1));
     let db = account.client.account_db()?;

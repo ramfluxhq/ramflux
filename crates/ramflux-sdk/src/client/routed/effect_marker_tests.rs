@@ -17,12 +17,16 @@ use ramflux_storage::{ReceiveExpectation, ReceiveStage, ReceiveStageResult};
 use std::time::Duration;
 
 const FAULT: &str = "routed commit fault";
+/// Standalone runs take about 7 s; the guard only has to catch hangs under the full parallel suite.
+const HANG_GUARD: Duration = Duration::from_secs(120);
 
+/// Value-level snapshot: every durable effect row (sender-key, slot, owner, watermark,
+/// committed/seen markers, DM rows) plus the decoded direct messages and the receive ledger.
 #[derive(Debug, PartialEq, Eq)]
 struct Snap {
     seen: bool,
-    keys: Vec<String>,
-    messages: usize,
+    rows: Vec<String>,
+    messages: Vec<DirectMessageRecord>,
     work: i64,
     disposition: Option<String>,
 }
@@ -38,10 +42,12 @@ async fn hang<T>(future: impl Future<Output = Result<T, SdkError>>) -> Result<T,
     let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         if matches!(
-            cancelled.recv_timeout(Duration::from_secs(30)),
+            cancelled.recv_timeout(HANG_GUARD),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
-            panic!("30-second hang guard expired");
+            // A panic here would only end this detached thread and let the test hang or pass.
+            eprintln!("hang guard expired after {HANG_GUARD:?}; aborting the test binary");
+            std::process::abort();
         }
     });
     let _guard = HangGuard(Some(cancel));
@@ -80,15 +86,14 @@ fn snap(
 ) -> Result<Snap, SdkError> {
     let db = client.account_db()?;
     let (disposition, work) = db.receive_state_for_test(entry.inbox_seq)?;
-    let mut keys = Vec::new();
-    for prefix in ["routed/committed/", "routed/seen/", "dm-pair/", "routed/message-metadata/"] {
-        keys.extend(db.actor_state_keys(prefix)?);
-    }
-    keys.sort();
+    // The v3 replay migration marker commits in its own transaction before the receive ledger
+    // (replay_migration.rs), is idempotent, and is not a receive effect, so it is excluded.
+    let mut rows = db.durable_rows_for_test()?;
+    rows.retain(|row| !row.contains("identity/replay-upgrade/"));
     Ok(Snap {
         seen: client.routed_seen_marker(entry)?.is_some(),
-        keys,
-        messages: client.direct_messages(conversation).map_or(0, |rows| rows.len()),
+        rows,
+        messages: client.direct_messages(conversation)?,
         work,
         disposition,
     })
@@ -222,7 +227,7 @@ async fn cut(
     assert!(post.seen, "{kind:?} missing seen after commit");
     assert_eq!(post.work, 1);
     assert_eq!(post.disposition.as_deref(), Some("staged"));
-    assert_ne!(post.keys, pre.keys, "{kind:?} wrote no durable effect");
+    assert_ne!(post.rows, pre.rows, "{kind:?} wrote no durable effect");
     reopen(&mut receiver.client, &receiver.id, b"routed-test")?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, post);
     Ok(())
@@ -251,6 +256,18 @@ async fn atomic() -> Result<(), SdkError> {
     let entry =
         seal(&sender, &receiver, message("pair-committed", "pair-conversation"), b"pair body")?;
     cut(&mut receiver, &entry, "pair-conversation", commit_fault::Kind::Pair).await?;
+
+    let sender = Fixture::new("alice", 161)?;
+    let mut receiver = Fixture::new("bob", 171)?;
+    friend(&mut receiver, &sender)?;
+    let entry = seal_as(
+        &sender,
+        &receiver,
+        message("control-reset", "control-conversation"),
+        br#"{"type":"pair.session.reset.v1"}"#,
+        Route::control(),
+    )?;
+    cut(&mut receiver, &entry, "control-conversation", commit_fault::Kind::Control).await?;
 
     let sender = Fixture::new("alice", 241)?;
     let mut receiver = Fixture::new("bob", 251)?;
@@ -308,7 +325,7 @@ async fn bootstrap(kind: commit_fault::Kind) -> Result<(), SdkError> {
     assert!(post.seen);
     assert_eq!(post.work, 1);
     assert_eq!(post.disposition.as_deref(), Some("staged"));
-    assert_ne!(post.keys, pre.keys);
+    assert_ne!(post.rows, pre.rows);
     let request = target
         .client
         .account_db()?
