@@ -10,7 +10,9 @@ pub(crate) use receive::{ReceiveApplied, ReceiveEntry, ReceivePlan, ReceiveTrigg
 mod account_work;
 mod background_children;
 mod metadata_child;
-pub(crate) use account_work::{AccountWork, ReceiveTurn};
+pub(crate) use account_work::AccountWork;
+#[cfg(test)]
+pub(crate) use account_work::ReceiveTurn;
 mod client;
 pub(crate) use client::SessionClient;
 pub(crate) mod session_host;

@@ -274,7 +274,9 @@ impl AccountDb {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(query);
         for id in ids {
-            if !self.try_settle_admission(&id, ReceiveFailureReason::HeldExpired, at)? {
+            if !self.try_settle_admission(&id, ReceiveFailureReason::HeldExpired, at)?
+                && !self.has_staged_only_admission(&id)?
+            {
                 self.connection
                     .execute("DELETE FROM runtime_unrouted WHERE envelope_id=?1", params![id])?;
             }
@@ -311,6 +313,20 @@ impl AccountDb {
             return Ok(false);
         }
         self.settle_admission(key, reason, at)
+    }
+
+    /// True when `key` has ledger work but none of it is held or quarantined (only staged work).
+    /// Hold expiry and unrouted trim must leave such keys untouched.
+    pub(crate) fn has_staged_only_admission(&self, key: &str) -> Result<bool, StorageError> {
+        if !self.receive_ledger_present()? {
+            return Ok(false);
+        }
+        let any: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM gateway_receive_work WHERE admission_key=?1)",
+            params![key],
+            |row| row.get(0),
+        )?;
+        Ok(any && self.admission_work(key, true)?.is_empty())
     }
 
     fn admission_work(

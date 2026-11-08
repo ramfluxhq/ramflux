@@ -45,14 +45,6 @@ fn expected(
     })
 }
 
-fn hold(
-    db: &AccountDb,
-    incarnation: &'static str,
-    cursor: u64,
-) -> Result<SourceHold<'static>, StorageError> {
-    Ok(SourceHold { expected: expected(db, incarnation, cursor)?, generation: 1 })
-}
-
 fn wire(seq: u64) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({"inbox_seq":seq,"target_delivery_id":"t","envelope":{
         "schema":"test","version":1,"domain":"test","signing_key_id":"key","signature_alg":"ed25519","signature":"sig",
@@ -101,9 +93,8 @@ fn admit(
         "payload_hash": format!("hash-{sequence}"),
         "inbox_seq": sequence,
     });
-    let adapter = hold(db, incarnation, cursor)?;
     db.receive_transaction(expected(db, incarnation, cursor)?, 1, |tx| {
-        adapter.admit_in(
+        SourceHold::admit_in(
             tx,
             ReceiveHold {
                 sequence,

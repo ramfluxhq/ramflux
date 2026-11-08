@@ -102,7 +102,7 @@ fn hold_then_advance(db: &AccountDb) -> Result<ReceiveLedgerSnap, StorageError> 
     assert_eq!(advanced.intents, vec![2]);
     assert_eq!(advanced.receipts, vec![(1, "held".into())]);
     assert_eq!(
-        db.receive_transaction(expected(db, 2)?, 1, |tx| ws(db, 2)?.due_retained_in(tx, 64))?,
+        db.receive_transaction(expected(db, 2)?, 1, |tx| SourceWs::due_retained_in(tx, 64))?,
         vec![1]
     );
     Ok(advanced)
@@ -151,9 +151,8 @@ fn retry_settlement_atomic() -> TestResult {
     let harness = open()?;
     let db = &harness.db;
     let pre = hold_then_advance(db)?;
-    let source = ws(db, 2)?;
     let aborted: Result<(), StorageError> = db.receive_transaction(expected(db, 2)?, 1, |tx| {
-        source.settle_in(tx, ReceiveSettle { sequence: 1, kind: ReceiveSettleKind::Terminal })?;
+        SourceWs::settle_in(tx, ReceiveSettle { sequence: 1, kind: ReceiveSettleKind::Terminal })?;
         Err(StorageError::Integrity("caller abort before commit"))
     });
     assert!(

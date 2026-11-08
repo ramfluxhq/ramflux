@@ -117,6 +117,24 @@ impl AccountRuntime {
         Ok(())
     }
 
+    /// Test seam: forwards one `SettleRetained` input into the real receive-turn arm.
+    #[cfg(test)]
+    pub(crate) async fn settle_retained_for_test(
+        &mut self,
+        generation: u64,
+        turn: crate::bus::connection_manager::ReceiveTurn,
+        sequence: u64,
+        reply: tokio::sync::oneshot::Sender<Result<(), SdkError>>,
+    ) -> Result<(), SdkError> {
+        self.apply_connection_work(AccountWork::SettleRetained {
+            generation,
+            turn: Box::new(turn),
+            sequence,
+            reply,
+        })
+        .await
+    }
+
     async fn apply_connection_work_inner(&mut self, work: AccountWork) -> Result<bool, SdkError> {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Ok(false);
@@ -266,13 +284,9 @@ impl AccountRuntime {
                 }
                 let db = account.client.account_db()?;
                 let expected = turn.expected();
-                let source = crate::bus::sync_driver::source::ws::SourceWs {
-                    expected,
-                    generation: handle.generation(),
-                };
                 let result =
                     super::lifecycle_fence::commit(db, handle.generation(), expected, |tx| {
-                        match source.settle_in(
+                        match crate::bus::sync_driver::source::ws::SourceWs::settle_in(
                             tx,
                             ramflux_storage::ReceiveSettle {
                                 sequence,

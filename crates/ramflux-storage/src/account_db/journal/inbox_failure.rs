@@ -17,6 +17,9 @@ impl AccountDb {
                 if self.settle_admission(&key, crate::ReceiveFailureReason::HeldExpired, at)? {
                     continue;
                 }
+                if self.has_staged_only_admission(&key)? {
+                    continue;
+                }
                 self.insert_inbox_dead_letter(&key,&entry,&serde_json::json!({"retry_key":key,"error_code":"retry_expired"}),at)?;
             }
             self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key IN (SELECT envelope_key FROM runtime_inbox_policy WHERE expires_at<=?1)",params![at])?;

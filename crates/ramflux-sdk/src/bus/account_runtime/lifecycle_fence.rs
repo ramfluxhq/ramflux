@@ -10,9 +10,6 @@
 
 use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveTransaction, StorageError};
 
-use crate::SdkError;
-use crate::bus::connection_manager::ReceiveTurn;
-
 /// Actor commit. `handle_generation` is S2's current generation; `expected.generation`
 /// is the generation captured when the turn was prepared. A mismatch, wrong E, stale
 /// cursor, or erasure generation refuses before `write`.
@@ -23,19 +20,4 @@ pub(crate) fn commit<T>(
     write: impl FnOnce(&ReceiveTransaction<'_>) -> Result<T, StorageError>,
 ) -> Result<T, StorageError> {
     db.receive_transaction(expected, handle_generation, write)
-}
-
-/// Settle one retained sequence under the commit fence. No network.
-pub(crate) fn settle_retained(
-    db: &AccountDb,
-    handle_generation: u64,
-    turn: &ReceiveTurn,
-    sequence: u64,
-) -> Result<(), SdkError> {
-    commit(db, handle_generation, turn.expected(), |tx| {
-        tx.require_writer()?;
-        let _ = sequence;
-        Ok(())
-    })
-    .map_err(SdkError::from)
 }

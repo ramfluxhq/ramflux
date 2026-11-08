@@ -85,11 +85,9 @@ impl SourceHold<'_> {
     /// # Errors
     /// Returns the storage refusal from [`ReceiveTransaction::admit_hold`].
     pub(crate) fn admit_in(
-        &self,
         tx: &ReceiveTransaction<'_>,
         input: ReceiveHold<'_>,
     ) -> Result<HoldDisposition, ramflux_storage::StorageError> {
-        let _ = self;
         Ok(match tx.admit_hold(input)? {
             ReceiveHoldResult::Held { evicted } => HoldDisposition::HeldLocal { evicted },
             ReceiveHoldResult::Paused => HoldDisposition::Paused,
@@ -101,6 +99,6 @@ impl SourceHold<'_> {
         db: &AccountDb,
         input: ReceiveHold<'_>,
     ) -> Result<HoldDisposition, SdkError> {
-        Ok(db.receive_transaction(self.expected, self.generation, |tx| self.admit_in(tx, input))?)
+        Ok(db.receive_transaction(self.expected, self.generation, |tx| Self::admit_in(tx, input))?)
     }
 }

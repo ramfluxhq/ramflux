@@ -756,3 +756,74 @@ fn trusted_vs_unverified_failure_policy() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn dead_letters_for(db: &AccountDb, key: &str) -> Result<i64, StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT count(*) FROM runtime_inbox_dead_letter WHERE envelope_key=?1",
+        params![key],
+        |row| row.get(0),
+    )?)
+}
+
+#[test]
+fn staged_only_key_survives_expiry_and_unrouted_trim() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-staged-only")?;
+    let wire = stage(&db, 0, 1, "stg")?;
+    db.hold_unrouted("stg", 1, &wire, 1)?;
+    db.defer_inbox_entry("stg", &wire, 1)?;
+    // Expiry at 700_000 is past the policy window and the 7-day unrouted cutoff.
+    db.expire_inbox_holds(700_000)?;
+    assert_eq!(unrouted_for(&db, "stg")?, 1, "staged-only key keeps its unrouted row");
+    assert_eq!(dead_letters_for(&db, "stg")?, 0, "no retry_expired diagnostic for staged work");
+    let staged_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='stg'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(staged_work, 1, "staged work is not settled by hold expiry");
+    let disposition: String = db.connection.query_row(
+        "SELECT disposition FROM gateway_receive_receipt WHERE target_delivery_id='t' AND incarnation_id='e' AND inbox_seq=?1",
+        params![1u64.to_be_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(disposition, "staged", "receipt stays staged");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn verified_attempt_limits_are_exact() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-attempt-limits")?;
+    let packet = long_entry();
+    let source = pin_source("principal", "device")?;
+    assert!(db.set_verified_inbox_failure_policy(
+        "tr",
+        &packet,
+        InboxFailurePolicy {
+            verified_source: Some(&source),
+            trusted: true,
+            dependency: ("none", ""),
+            at: 1,
+        },
+    )?);
+    assert_eq!(policy_window(&db, "tr")?, (1, 601, "none".into(), String::new()));
+    for attempt in 1..=8u32 {
+        assert_eq!(db.defer_inbox_entry("tr", &packet, 1)?, attempt, "trusted attempt {attempt}");
+    }
+    assert_eq!(db.defer_inbox_entry("tr", &packet, 1)?, 0, "trusted 9th attempt refused");
+
+    assert!(db.set_verified_inbox_failure_policy("un", &packet, unverified(1))?);
+    assert_eq!(policy_window(&db, "un")?, (0, 31, "none".into(), String::new()));
+    for attempt in 1..=3u32 {
+        assert_eq!(
+            db.defer_inbox_entry("un", &packet, 1)?,
+            attempt,
+            "unverified attempt {attempt}"
+        );
+    }
+    assert_eq!(db.defer_inbox_entry("un", &packet, 1)?, 0, "unverified 4th attempt refused");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

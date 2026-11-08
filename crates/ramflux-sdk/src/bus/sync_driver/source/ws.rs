@@ -29,11 +29,9 @@ impl SourceWs<'_> {
     /// # Errors
     /// Returns the storage refusal from [`ReceiveTransaction::settle`].
     pub(crate) fn settle_in(
-        &self,
         tx: &ReceiveTransaction<'_>,
         input: ReceiveSettle,
     ) -> Result<ReceiveSettleResult, ramflux_storage::StorageError> {
-        let _ = self;
         tx.settle(input)
     }
 
@@ -42,11 +40,9 @@ impl SourceWs<'_> {
     /// # Errors
     /// Returns SQL errors from [`ReceiveTransaction::due_retained`].
     pub(crate) fn due_retained_in(
-        &self,
         tx: &ReceiveTransaction<'_>,
         limit: u32,
     ) -> Result<Vec<u64>, ramflux_storage::StorageError> {
-        let _ = self;
         tx.due_retained(limit)
     }
 
@@ -59,7 +55,8 @@ impl SourceWs<'_> {
         db: &AccountDb,
         input: ReceiveSettle,
     ) -> Result<ReceiveSettleResult, SdkError> {
-        Ok(db.receive_transaction(self.expected, self.generation, |tx| self.settle_in(tx, input))?)
+        Ok(db
+            .receive_transaction(self.expected, self.generation, |tx| Self::settle_in(tx, input))?)
     }
 
     /// Sequences at or below C that still have held/quarantined/staged work.
@@ -68,7 +65,7 @@ impl SourceWs<'_> {
     /// Returns SQL errors from the fenced due query.
     pub(crate) fn due_retained(&self, db: &AccountDb, limit: u32) -> Result<Vec<u64>, SdkError> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| {
-            self.due_retained_in(tx, limit)
+            Self::due_retained_in(tx, limit)
         })?)
     }
 }
