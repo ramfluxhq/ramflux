@@ -247,6 +247,7 @@ async fn apply_entry(
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::ApplyPage {
         generation,
+        turn: None,
         entry: Box::new(entry),
         source,
         backpressure,

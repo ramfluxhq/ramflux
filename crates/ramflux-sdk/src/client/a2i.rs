@@ -167,6 +167,10 @@ impl RamfluxClient {
         local_device: &str,
         entry: &GatewayInboxEntry,
     ) -> Result<bool, SdkError> {
+        #[cfg(test)]
+        if let Some(forced) = take_unbound_answer() {
+            return Ok(forced);
+        }
         let expected = a2i_control_conversation_id(&entry.envelope.source_device_id, local_device);
         Ok(self.legacy_routing_binding(local_device, entry)?.as_deref() != Some(expected.as_str()))
     }
@@ -286,4 +290,26 @@ pub(crate) fn reject_legacy_a2i_payload_reuse(
         return Err(SdkError::InboundRejected("legacy A2I envelope id reused".to_owned()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNBOUND_QUEUE: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_unbound_answer() -> Option<bool> {
+    UNBOUND_QUEUE.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        if queue.is_empty() { None } else { Some(queue.remove(0)) }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn queue_unbound_answers(answers: impl IntoIterator<Item = bool>) {
+    UNBOUND_QUEUE.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        queue.clear();
+        queue.extend(answers);
+    });
 }

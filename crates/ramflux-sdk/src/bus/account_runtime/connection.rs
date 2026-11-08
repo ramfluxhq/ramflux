@@ -215,18 +215,41 @@ impl AccountRuntime {
                 );
                 let _ = reply.send(result);
             }
-            AccountWork::ApplyPage { generation, entry, source, backpressure, reply } => {
+            AccountWork::ApplyPage { generation, turn, entry, source, backpressure, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
                     return Ok(false);
                 }
-                let active = super::super::push_receiver::apply_w1::is_active(
-                    account.client.account_db()?,
-                    &entry.entry.target_delivery_id,
-                )?;
+                let target = entry.entry.target_delivery_id.clone();
+                let generation_now = handle.generation();
+                let (active, turn) = {
+                    let db = account.client.account_db()?;
+                    let active = match account.receive_active_cache {
+                        Some((cached, active)) if cached == generation_now => active,
+                        _ => match super::super::push_receiver::apply_w1::is_active(db, &target) {
+                            Ok(active) => {
+                                account.receive_active_cache = Some((generation_now, active));
+                                active
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                return Ok(false);
+                            }
+                        },
+                    };
+                    let turn = match turn {
+                        Some(turn) => *turn,
+                        None => super::super::push_receiver::apply_w1::capture_turn(
+                            db, generation, &target,
+                        )?,
+                    };
+                    (active, turn)
+                };
                 if active {
+                    let current = handle.clone();
                     let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
                         account,
-                        handle.generation(),
+                        &turn,
+                        &|| current.generation(),
                         *entry,
                         source,
                         backpressure,

@@ -279,6 +279,26 @@ impl RamfluxClient {
         )?;
         gate.recover(db, sequence, || self.begin_pair_recovery(&local, &remote, now))
     }
+
+    /// Same recovery cut as [`Self::recover_own_copy_w1`], joining an already-open receive
+    /// transaction under `lifecycle_fence`.
+    pub(crate) fn recover_own_copy_w1_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        entry: &crate::GatewayInboxEntry,
+        expected: ReceiveExpectation<'_>,
+        sequence: u64,
+        now: i64,
+    ) -> Result<bool, SdkError> {
+        let generation = expected.generation;
+        let gate = OwnCopyW1 { expected, generation };
+        let local = self.owned_device_identity()?;
+        let remote = self.authenticated_device_identity(
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            entry,
+        )?;
+        gate.recover_in(tx, sequence, || self.begin_pair_recovery(&local, &remote, now))
+    }
 }
 
 #[cfg(test)]

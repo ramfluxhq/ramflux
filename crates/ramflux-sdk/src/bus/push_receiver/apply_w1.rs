@@ -6,7 +6,7 @@
 
 use super::apply::cover_held_in;
 use crate::bus::account_runtime::lifecycle_fence;
-use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry};
+use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::PreparedSource;
 use crate::prelude::*;
@@ -15,90 +15,128 @@ use ramflux_storage::{
     StorageError,
 };
 
+/// Bounded redrive of `LegacyBindingChanged` before a typed give-up.
+const BINDING_ATTEMPTS: u32 = 3;
+const BINDING_GIVE_UP: &str = "legacy binding changed after 3 attempts";
+const ROUTED_REFUSED: &str = "receive ledger refuses live routed apply";
+
 /// True when `target` has a receive-epoch row. Missing table or row is the live unactivated path.
 pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> {
     Ok(db.receive_epoch(target)?.is_some())
 }
 
+/// Prepare-time coordinates for one `ApplyPage`: message generation plus DB cursor/E/erase.
+pub(crate) fn capture_turn(
+    db: &AccountDb,
+    generation: u64,
+    target: &str,
+) -> Result<ReceiveTurn, SdkError> {
+    let incarnation = db.receive_epoch(target)?.unwrap_or_default();
+    Ok(ReceiveTurn {
+        target: target.to_owned(),
+        incarnation,
+        cursor: read_cursor(db, target)?,
+        generation,
+        erasure_generation: db.privacy_erasure_generation()?,
+    })
+}
+
 /// W1 + held W2 for one `ApplyPage` entry. No ACK intent (WA is P21).
+///
+/// `turn` is the prepare-time expectation. `handle_generation` is read at each commit
+/// (after any await) from S2/handle state.
 pub(crate) async fn apply_page(
     account: &mut LocalBusAccountState,
-    generation: u64,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
     prepared: ReceiveEntry,
     source: PreparedSource,
     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
 ) -> Result<ReceiveApplied, SdkError> {
     let mut source = source.map(|prepared| *prepared).transpose()?;
-    match Box::pin(apply_once(account, generation, &prepared, source.as_mut())).await {
-        Err(SdkError::LegacyBindingChanged) => {
-            Box::pin(apply_once(account, generation, &prepared, source.as_mut())).await?;
+    let mut attempts = 0;
+    loop {
+        match Box::pin(apply_once(account, turn, handle_generation, &prepared, source.as_mut()))
+            .await
+        {
+            Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
+            Err(SdkError::PairRecoveryRequired) => {
+                recover_own_copy(account, turn, handle_generation(), &prepared.entry)?;
+                break;
+            }
+            Err(error) => return Err(error),
+            Ok(()) => break,
         }
-        Err(SdkError::PairRecoveryRequired) => {
-            recover_own_copy(account, generation, &prepared.entry)?;
-        }
-        Err(error) => return Err(error),
-        Ok(()) => {}
     }
     Ok((None, backpressure))
 }
 
 async fn apply_once(
     account: &mut LocalBusAccountState,
-    generation: u64,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
     prepared: &ReceiveEntry,
     source: Option<&mut crate::client::routed::PreparedInbound>,
 ) -> Result<(), SdkError> {
+    #[cfg(test)]
+    cross_await().await;
     let entry = &prepared.entry;
     let sequence = entry.inbox_seq;
-    let target = entry.target_delivery_id.clone();
     let local_device = account.gateway_config.device_id.clone();
     let kind = classify(account, entry, source).await?;
-    let held = kind.is_held(account, entry, &local_device)?;
+    #[cfg(test)]
+    after_classify();
     match kind {
-        Kind::Routed => {
-            let mut engine = account.live_session_client()?;
-            let pool = account.relay_quic_pool()?;
-            account.client.apply_routed_entry(&mut engine, &pool, entry, false).await?;
-            account.apply_session_metadata(engine);
-        }
+        Kind::Routed => Err(SdkError::InboundRejected(ROUTED_REFUSED.into())),
         Kind::OwnCopy(manifest) => {
             let message = entry.envelope.envelope_id.clone();
             let client = &account.client;
-            run_fenced(client.account_db()?, generation, &target, |tx, expected| {
+            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 client.apply_own_copy_w1_in(tx, entry, &manifest, expected, sequence, &message)?;
-                cover_if_held(tx, sequence, held)
+                Ok(false)
             })?;
+            Ok(())
         }
         Kind::LegacyDm { conversation } => {
             let client = &account.client;
-            run_fenced(client.account_db()?, generation, &target, |tx, expected| {
+            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 client.apply_legacy_success_w1_in(
                     tx,
                     entry,
                     &local_device,
                     &conversation,
                     expected,
-                    generation,
+                    handle_generation(),
                 )?;
-                cover_if_held(tx, sequence, held)
+                Ok(false)
             })?;
+            Ok(())
         }
         Kind::LegacyA2i => {
             let client = &account.client;
-            run_fenced(client.account_db()?, generation, &target, |tx, expected| {
-                client.apply_legacy_a2i_w1_in(tx, entry, &local_device, expected, generation)?;
-                cover_if_held(tx, sequence, held)
+            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
+                let held = client.apply_legacy_a2i_w1_in(
+                    tx,
+                    entry,
+                    &local_device,
+                    expected,
+                    handle_generation(),
+                )?;
+                cover_if_held(tx, sequence, held)?;
+                Ok(held)
             })?;
+            Ok(())
         }
         Kind::LegacyHold => {
             let client = &account.client;
-            run_fenced(client.account_db()?, generation, &target, |tx, expected| {
-                client.apply_legacy_group_hold_w1_in(tx, entry, expected, generation)?;
-                cover_if_held(tx, sequence, held)
+            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
+                client.apply_legacy_group_hold_w1_in(tx, entry, expected, handle_generation())?;
+                cover_if_held(tx, sequence, true)?;
+                Ok(true)
             })?;
+            Ok(())
         }
     }
-    Ok(())
 }
 
 enum Kind {
@@ -107,21 +145,6 @@ enum Kind {
     LegacyDm { conversation: String },
     LegacyA2i,
     LegacyHold,
-}
-
-impl Kind {
-    fn is_held(
-        &self,
-        account: &LocalBusAccountState,
-        entry: &GatewayInboxEntry,
-        local_device: &str,
-    ) -> Result<bool, SdkError> {
-        Ok(match self {
-            Self::LegacyHold => true,
-            Self::LegacyA2i => account.client.legacy_a2i_is_unbound(local_device, entry)?,
-            Self::OwnCopy(_) | Self::Routed | Self::LegacyDm { .. } => false,
-        })
-    }
 }
 
 async fn classify(
@@ -133,6 +156,8 @@ async fn classify(
         return Ok(Kind::OwnCopy(Box::new(manifest)));
     }
     if let Some(root) = account.client.own_device_receive_manifest_request(entry)? {
+        #[cfg(test)]
+        cross_await().await;
         let manifest = account
             .client
             .cache_verified_device_manifest(
@@ -165,37 +190,48 @@ async fn classify(
 
 fn recover_own_copy(
     account: &LocalBusAccountState,
-    generation: u64,
+    turn: &ReceiveTurn,
+    handle_generation: u64,
     entry: &GatewayInboxEntry,
 ) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
-    let incarnation = owned_incarnation(db, &entry.target_delivery_id)?;
-    let expected = expectation(db, generation, &entry.target_delivery_id, &incarnation)?;
-    account.client.recover_own_copy_w1(entry, expected, entry.inbox_seq, now_unix_timestamp())?;
+    run_fenced(db, handle_generation, turn, |tx, expected| {
+        account.client.recover_own_copy_w1_in(
+            tx,
+            entry,
+            expected,
+            entry.inbox_seq,
+            now_unix_timestamp(),
+        )?;
+        Ok(false)
+    })?;
     Ok(())
 }
 
 fn run_fenced(
     db: &AccountDb,
-    generation: u64,
-    target: &str,
-    write: impl FnOnce(&ReceiveTransaction<'_>, ReceiveExpectation<'_>) -> Result<(), SdkError>,
-) -> Result<(), SdkError> {
-    let incarnation = owned_incarnation(db, target)?;
-    let expected = expectation(db, generation, target, &incarnation)?;
+    handle_generation: u64,
+    turn: &ReceiveTurn,
+    write: impl FnOnce(&ReceiveTransaction<'_>, ReceiveExpectation<'_>) -> Result<bool, SdkError>,
+) -> Result<bool, SdkError> {
+    let expected = turn.expected();
     let mut outcome = None;
     let fenced =
-        lifecycle_fence::commit(db, generation, expected, |tx| match write(tx, expected) {
-            Ok(()) => Ok(()),
+        lifecycle_fence::commit(db, handle_generation, expected, |tx| match write(tx, expected) {
+            Ok(held) => {
+                outcome = Some(Ok(held));
+                Ok(())
+            }
             Err(error) => {
-                outcome = Some(error);
+                outcome = Some(Err(error));
                 Err(StorageError::Integrity("apply page w1 failed"))
             }
         });
     match (fenced, outcome) {
-        (_, Some(error)) => Err(error),
+        (_, Some(Err(error))) => Err(error),
         (Err(error), _) => Err(error.into()),
-        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(Ok(held))) => Ok(held),
+        (Ok(()), None) => Err(SdkError::LocalBus("apply page w1 did not run".into())),
     }
 }
 
@@ -208,25 +244,83 @@ fn cover_if_held(tx: &ReceiveTransaction<'_>, sequence: u64, held: bool) -> Resu
     }
 }
 
-fn owned_incarnation(db: &AccountDb, target: &str) -> Result<String, SdkError> {
-    db.receive_epoch(target)?
-        .ok_or_else(|| SdkError::LocalBus("receive epoch missing for dormant apply".into()))
+fn note_binding_changed(attempts: &mut u32) -> Result<(), SdkError> {
+    *attempts += 1;
+    if *attempts >= BINDING_ATTEMPTS {
+        Err(SdkError::InboundRejected(BINDING_GIVE_UP.into()))
+    } else {
+        Ok(())
+    }
 }
 
-fn expectation<'a>(
-    db: &'a AccountDb,
-    generation: u64,
-    target: &'a str,
-    incarnation: &'a str,
-) -> Result<ReceiveExpectation<'a>, SdkError> {
-    let cursor = db
+fn read_cursor(db: &AccountDb, target: &str) -> Result<u64, SdkError> {
+    Ok(db
         .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
-        .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?;
-    Ok(ReceiveExpectation {
-        target,
-        incarnation,
-        cursor,
-        generation,
-        erasure_generation: db.privacy_erasure_generation()?,
-    })
+        .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CROSS_AWAIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static AFTER_CLASSIFY: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+async fn cross_await() {
+    tokio::task::yield_now().await;
+    if let Some(hook) = CROSS_AWAIT.with(std::cell::Cell::take) {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn after_classify() {
+    if let Some(hook) = AFTER_CLASSIFY.with(std::cell::Cell::take) {
+        hook();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_cross_await(hook: fn()) {
+    CROSS_AWAIT.with(|cell| cell.set(Some(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_classify(hook: fn()) {
+    AFTER_CLASSIFY.with(|cell| cell.set(Some(hook)));
+}
+
+#[cfg(test)]
+pub(crate) const fn binding_give_up() -> &'static str {
+    BINDING_GIVE_UP
+}
+
+#[cfg(test)]
+pub(crate) const fn routed_refused() -> &'static str {
+    ROUTED_REFUSED
+}
+
+#[cfg(test)]
+pub(crate) fn retry_binding_until(
+    mut attempt: impl FnMut() -> Result<(), SdkError>,
+) -> Result<(), SdkError> {
+    let mut attempts = 0;
+    loop {
+        match attempt() {
+            Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
+            other => return other,
+        }
+    }
+}
+
+/// Awaits once (the same yield the manifest fetch uses), then commits `write` under the fence.
+#[cfg(test)]
+pub(crate) async fn commit_after_await(
+    db: &AccountDb,
+    turn: &ReceiveTurn,
+    handle_generation: impl Fn() -> u64,
+    write: impl FnOnce(&ReceiveTransaction<'_>, ReceiveExpectation<'_>) -> Result<bool, SdkError>,
+) -> Result<bool, SdkError> {
+    cross_await().await;
+    run_fenced(db, handle_generation(), turn, write)
 }

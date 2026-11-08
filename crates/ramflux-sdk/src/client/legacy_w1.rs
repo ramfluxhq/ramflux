@@ -326,6 +326,9 @@ impl RamfluxClient {
     }
 
     /// Same cut as [`Self::apply_legacy_a2i_w1`], joining an already-open receive transaction.
+    ///
+    /// Returns `true` when the in-transaction binding check held the entry, `false` when it
+    /// applied. Callers cover from this value so held vs applied is one decision.
     pub(crate) fn apply_legacy_a2i_w1_in(
         &self,
         tx: &ReceiveTransaction<'_>,
@@ -333,19 +336,21 @@ impl RamfluxClient {
         local_device: &str,
         expected: ReceiveExpectation<'_>,
         generation: u64,
-    ) -> Result<(), SdkError> {
+    ) -> Result<bool, SdkError> {
         let gate = LegacyW1 { expected, generation };
         let sequence = entry.inbox_seq;
         if self.legacy_a2i_is_unbound(local_device, entry)? {
-            return gate.effect_in(tx, sequence, None, || {
+            gate.effect_in(tx, sequence, None, || {
                 self.commit_unbound_legacy_a2i(local_device, entry)
-            });
+            })?;
+            return Ok(true);
         }
         if self.load_legacy_a2i_receipt(entry)?.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let opened = self.decrypt_bound_legacy_a2i(local_device, entry)?;
-        gate.effect_in(tx, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))
+        gate.effect_in(tx, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))?;
+        Ok(false)
     }
 
     fn commit_unbound_legacy_a2i(

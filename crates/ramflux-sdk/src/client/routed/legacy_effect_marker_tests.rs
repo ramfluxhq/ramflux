@@ -12,7 +12,9 @@
 )]
 use super::selector_reopen::Case;
 use super::*;
+use crate::bus::push_receiver::apply::cover_held_in;
 use crate::bus::sync_driver::source::w0::SourceW0;
+use crate::client::a2i::queue_unbound_answers;
 use crate::client::dm::LegacyReceive;
 use crate::client::legacy_w1::{self, Fault, LegacyW1};
 use crate::dm::SdkDmAttachmentEnvelope;
@@ -536,6 +538,11 @@ fn legacy_w1_binding_appeared_redrives() -> Result<(), SdkError> {
 }
 
 #[test]
+fn legacy_w1_binding_flip_one_disposition() -> Result<(), SdkError> {
+    hang(cut_binding_flip)
+}
+
+#[test]
 fn legacy_w1_dm_erased_attachment_completes() -> Result<(), SdkError> {
     hang(cut_erased_dm_row)
 }
@@ -552,11 +559,6 @@ fn legacy_w1_generation_erasure_cursor_fences() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_stage_redrive() -> Result<(), SdkError> {
-    hang(redrive)
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn receive_stage_redrive_legacy() -> Result<(), SdkError> {
     hang(redrive)
 }
 
@@ -772,6 +774,81 @@ fn cut_binding_appeared() -> Result<(), SdkError> {
     let post = snap(&receiver.client, &entry, "held-a2i")?;
     assert!(post.held > pre.held, "redrive without the hook must hold unbound A2I");
     assert_eq!(post.a2i, 0, "held A2I must not persist a receipt");
+    Ok(())
+}
+
+fn cut_binding_flip() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 70)?;
+    let mut receiver = Fixture::new("bob", 72)?;
+    let target = receiver.id.clone();
+    let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let db = receiver.client.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
+    let mut held = None;
+    let mut apply_error = None;
+    db.receive_transaction(gate.expected, 1, |tx| {
+        match receiver.client.apply_legacy_a2i_w1_in(tx, &entry, &receiver.id, gate.expected, 1) {
+            Ok(is_held) => {
+                if is_held {
+                    cover_held_in(tx, entry.inbox_seq)?;
+                }
+                held = Some(is_held);
+                Ok(())
+            }
+            Err(error) => {
+                apply_error = Some(error);
+                Err(StorageError::Integrity("binding flip apply failed"))
+            }
+        }
+    })?;
+    assert!(apply_error.is_none(), "unbound A2I must hold: {apply_error:?}");
+    assert_eq!(held, Some(true), "in-tx unbound check holds");
+    let held_snap = snap(&receiver.client, &entry, "held-a2i")?;
+    assert!(held_snap.held > 0, "held cover matches the in-tx hold");
+    assert_eq!(held_snap.a2i, 0, "held path must not also apply a receipt");
+
+    let sender = Fixture::new("alice", 74)?;
+    let mut receiver = Fixture::new("bob", 76)?;
+    let target = receiver.id.clone();
+    let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let pre = snap(&receiver.client, &entry, "held-a2i")?;
+    queue_unbound_answers([false]);
+    let db = receiver.client.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
+    let mut apply_error = None;
+    let mut flipped = None;
+    let fenced = db.receive_transaction(gate.expected, 1, |tx| {
+        match receiver.client.apply_legacy_a2i_w1_in(tx, &entry, &receiver.id, gate.expected, 1) {
+            Ok(is_held) => {
+                if is_held {
+                    cover_held_in(tx, entry.inbox_seq)?;
+                }
+                flipped = Some(is_held);
+                Ok(())
+            }
+            Err(error) => {
+                apply_error = Some(error);
+                Err(StorageError::Integrity("binding flip apply failed"))
+            }
+        }
+    });
+    let post = snap(&receiver.client, &entry, "held-a2i")?;
+    match (fenced, flipped, apply_error) {
+        (Ok(()), Some(true), None) => {
+            assert!(post.held > pre.held, "held disposition covers");
+            assert_eq!(post.a2i, pre.a2i, "held must not also apply a receipt");
+        }
+        (Ok(()), Some(false), None) => {
+            assert_eq!(post.held, pre.held, "applied disposition must not issue held cover");
+            assert!(post.a2i > pre.a2i, "applied A2I writes a receipt");
+        }
+        (Err(_), None, Some(_)) => {
+            assert_eq!(post, pre, "failed inner apply rolls back");
+        }
+        other => panic!("mixed or unexpected flip outcome: {other:?} snap={post:?}"),
+    }
     Ok(())
 }
 

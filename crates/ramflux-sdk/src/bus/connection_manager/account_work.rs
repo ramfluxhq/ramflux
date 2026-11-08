@@ -49,6 +49,9 @@ pub(crate) enum AccountWork {
     },
     ApplyPage {
         generation: u64,
+        /// Prepare-time expectation. `None` on the live sender; the actor captures it
+        /// before any await. Tests may supply a turn to pin cursor/E/generation.
+        turn: Option<Box<ReceiveTurn>>,
         entry: Box<super::receive::ReceiveEntry>,
         source: crate::bus::sync_driver::source::PreparedSource,
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,

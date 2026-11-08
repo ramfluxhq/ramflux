@@ -114,13 +114,6 @@ async fn own_copy_ack_binding() -> Case {
         .await
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn receive_stage_redrive_own_copy() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(case()))))
-        .await
-}
-
 async fn case() -> Case {
     let mut fixture = Box::pin(Fixture::new("own-copy-ack-binding")).await?;
     ledger(&fixture.source, TARGET)?;
