@@ -186,7 +186,7 @@ fn raw_copy_limits_accept_inclusive_boundaries_and_reject_overages() -> TestResu
         ));
     }
     for (owner, source, copy) in [
-        ("o".repeat(257), "source", "copy".to_owned()),
+        ("o".repeat(257), "source".to_owned(), "copy".to_owned()),
         ("owner".to_owned(), "s".repeat(257), "copy".to_owned()),
         ("owner".to_owned(), "source".to_owned(), "c".repeat(257)),
         ("owner\u{7f}".to_owned(), "source".to_owned(), "copy".to_owned()),
