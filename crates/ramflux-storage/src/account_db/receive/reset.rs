@@ -151,7 +151,10 @@ impl ReceiveTransaction<'_> {
         }
         let cursor = self.db.receive_cursor(self.target)?;
         let verified = self.incarnation_verified()?;
-        let initialize = !verified && cursor == 0;
+        // Only an EMPTY unverified U with C=0 initializes silently (design §2.5).
+        let initialize = !verified && cursor == 0 && self.old_namespace_empty()?;
+        let reason =
+            if verified { input.reason } else { ReceiveResetReason::IncarnationFirstVerified };
         self.release_terminal_compat()?;
         self.db.connection.execute(
             "DELETE FROM gateway_ack_intent WHERE target_delivery_id=?1 AND incarnation_id=?2",
@@ -185,7 +188,7 @@ impl ReceiveTransaction<'_> {
                 "old_incarnation": self.incarnation,
                 "new_incarnation": input.new_incarnation,
                 "old_cursor": cursor,
-                "reason": input.reason.as_str(),
+                "reason": reason.as_str(),
                 "classification": "legacy_unverified",
             });
             let source = format!(
@@ -252,6 +255,19 @@ impl ReceiveTransaction<'_> {
             params![self.target, self.incarnation],
             |row| row.get(0),
         )?)
+    }
+
+    fn old_namespace_empty(&self) -> Result<bool, StorageError> {
+        let rows: i64 = self.db.connection.query_row(
+            "SELECT
+               (SELECT count(*) FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2)
+             + (SELECT count(*) FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND incarnation_id=?2)
+             + (SELECT count(*) FROM gateway_ack_intent WHERE target_delivery_id=?1 AND incarnation_id=?2)
+             + (SELECT count(*) FROM gateway_inbox_loss WHERE target_delivery_id=?1 AND incarnation_id=?2)",
+            params![self.target, self.incarnation],
+            |row| row.get(0),
+        )?;
+        Ok(rows == 0)
     }
 
     fn incarnation_verified(&self) -> Result<bool, StorageError> {
