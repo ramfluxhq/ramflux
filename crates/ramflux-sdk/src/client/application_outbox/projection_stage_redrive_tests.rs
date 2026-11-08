@@ -9,36 +9,17 @@
     clippy::needless_pass_by_value
 )]
 
-use super::projection_write_failure::{self, Fixture};
+use super::projection_write_failure::{self, Fixture, hang_guard};
 use super::{Admit, AdmitRequest, ApplicationOutbox, Fault, OUTBOX, run};
 use crate::prelude::*;
 use ramflux_storage::{ReceiveExpectation, StorageError};
-use std::time::Duration;
 
 const BEFORE: &str = "application projection before-commit";
-const AUTH: &str = "routed/committed/redrive-auth";
-const MESSAGE: &str = "projection-owner";
-
-struct HangGuard(Option<std::sync::mpsc::Sender<()>>);
-impl Drop for HangGuard {
-    fn drop(&mut self) {
-        drop(self.0.take());
-    }
-}
 
 /// Kill before/after the projection W1, redrive, one event, W0 staged.
 /// Folded into `receive_stage_redrive` (P13 is on main).
 pub(crate) fn projection_stage_redrive() -> Result<(), SdkError> {
-    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        if matches!(
-            cancelled.recv_timeout(Duration::from_secs(30)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ) {
-            panic!("30-second hang guard expired");
-        }
-    });
-    let _hang = HangGuard(Some(cancel));
+    let _hang = hang_guard();
     let mut fixture = Fixture::new()?;
     redrive(&mut fixture, 11, "redrive-a")?;
     redrive(&mut fixture, 12, "redrive-b")?;
@@ -47,9 +28,9 @@ pub(crate) fn projection_stage_redrive() -> Result<(), SdkError> {
 
 fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkError> {
     let entry = projection_write_failure::inbox(env, sequence);
-    let auth = format!("{AUTH}-{sequence}");
     projection_write_failure::stage(&fixture.client, sequence)?;
-    projection_write_failure::persist_receipt(&fixture.client, &entry, &auth, MESSAGE)?;
+    let auth =
+        projection_write_failure::persist_receipt(&fixture.client, &entry, "projection-owner")?;
     fixture.client.persist_routed_seen(&entry)?;
     let db = fixture.client.account_db()?;
     let gate = ApplicationOutbox {
@@ -65,13 +46,7 @@ fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkErr
     match run(Fault::BeforeCommit, || {
         gate.admit(
             db,
-            &AdmitRequest {
-                sequence,
-                auth_key: &auth,
-                entry: &entry,
-                message: Some(MESSAGE),
-                client: &fixture.client,
-            },
+            &AdmitRequest { sequence, auth_key: &auth, entry: &entry, client: &fixture.client },
         )
     }) {
         Err(SdkError::Storage(StorageError::Integrity(text))) if text == BEFORE => {}
@@ -101,13 +76,7 @@ fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkErr
     assert_eq!(
         gate.admit(
             db,
-            &AdmitRequest {
-                sequence,
-                auth_key: &auth,
-                entry: &entry,
-                message: Some(MESSAGE),
-                client: &fixture.client,
-            },
+            &AdmitRequest { sequence, auth_key: &auth, entry: &entry, client: &fixture.client },
         )?,
         Admit::Admitted
     );
@@ -130,13 +99,7 @@ fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkErr
     assert_eq!(
         gate.admit(
             db,
-            &AdmitRequest {
-                sequence,
-                auth_key: &auth,
-                entry: &entry,
-                message: Some(MESSAGE),
-                client: &fixture.client,
-            },
+            &AdmitRequest { sequence, auth_key: &auth, entry: &entry, client: &fixture.client },
         )?,
         Admit::Duplicate
     );

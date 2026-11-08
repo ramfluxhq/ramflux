@@ -113,6 +113,23 @@ impl ReceiveTransaction<'_> {
         }
         Ok(())
     }
+
+    /// Marks staged recovery input held without advancing C. Capacity refusal uses this so W0
+    /// stays until a later W2/WS.
+    ///
+    /// # Errors
+    /// Requires the writer transaction; returns SQL errors.
+    pub fn hold_receipt(&self, sequence: u64) -> Result<(), StorageError> {
+        self.require_writer()?;
+        let seq = sequence.to_be_bytes();
+        self.db.connection.execute(
+            "UPDATE gateway_receive_receipt SET disposition='held'
+             WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3
+               AND disposition IN ('staged','held')",
+            rusqlite::params![self.target, self.incarnation, seq.as_slice()],
+        )?;
+        Ok(())
+    }
 }
 
 impl AccountDb {

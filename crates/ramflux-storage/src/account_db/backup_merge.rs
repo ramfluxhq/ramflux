@@ -650,6 +650,7 @@ impl BackupDatabase {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         super::backup_retirement::archive_outbound_state(&self.db)?;
         super::backup_retirement::strip_own_copy_locators(&self.db)?;
+        super::backup_retirement::strip_gateway_actor_state(&self.db)?;
         transaction.commit()?;
         Ok(())
     }

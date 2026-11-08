@@ -10,7 +10,10 @@
     clippy::needless_pass_by_value
 )]
 
-use super::{Admit, AdmitRequest, ApplicationEvent, ApplicationOutbox, Fault, OUTBOX, replay, run};
+use super::{
+    Admit, AdmitRequest, ApplicationEvent, ApplicationOutbox, Fault, MAX_OUTBOX, OUTBOX, PUBLISHED,
+    replay, run,
+};
 use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::Envelope;
@@ -27,25 +30,25 @@ const INTEGRITY: &str = "source effect requires staged receive work";
 const TARGET: &str = "t";
 const INCARNATION: &str = "e";
 const SEQ: u64 = 1;
-const AUTH: &str = "routed/committed/projection-auth";
 const MESSAGE: &str = "projection-owner";
 const ERASE: &str = "erase-owner";
 
-struct HangGuard(Option<std::sync::mpsc::Sender<()>>);
+pub(super) struct HangGuard(Option<std::sync::mpsc::Sender<()>>);
 impl Drop for HangGuard {
     fn drop(&mut self) {
         drop(self.0.take());
     }
 }
 
-fn hang_guard() -> HangGuard {
+pub(super) fn hang_guard() -> HangGuard {
     let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         if matches!(
-            cancelled.recv_timeout(Duration::from_secs(30)),
+            cancelled.recv_timeout(Duration::from_secs(120)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
-            panic!("30-second hang guard expired");
+            eprintln!("120-second hang guard expired");
+            std::process::abort();
         }
     });
     HangGuard(Some(cancel))
@@ -105,6 +108,10 @@ pub(crate) fn inbox(id: &str, sequence: u64) -> GatewayInboxEntry {
         target_delivery_id: TARGET.to_owned(),
         envelope: envelope(id),
     }
+}
+
+pub(super) fn auth_key(entry: &GatewayInboxEntry) -> String {
+    format!("routed/committed/{}", entry.envelope.envelope_id)
 }
 
 pub(super) struct Fixture {
@@ -175,9 +182,9 @@ pub(super) fn stage(client: &RamfluxClient, sequence: u64) -> Result<(), SdkErro
 pub(super) fn persist_receipt(
     client: &RamfluxClient,
     entry: &GatewayInboxEntry,
-    key: &str,
     message: &str,
-) -> Result<(), SdkError> {
+) -> Result<String, SdkError> {
+    let key = auth_key(entry);
     let receipt = Committed {
         routing: Routing {
             kind: Kind::Direct,
@@ -190,29 +197,34 @@ pub(super) fn persist_receipt(
         entry: entry.clone(),
         projected: false,
     };
-    client.account_db()?.persist_actor_state(key, &receipt)?;
-    Ok(())
+    client.account_db()?.persist_actor_state(&key, &receipt)?;
+    Ok(key)
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct Snap {
-    outbox: bool,
+    outbox: Option<ApplicationEvent>,
     projected: bool,
     work: i64,
     disposition: Option<String>,
     ack: bool,
 }
 
-fn snap(client: &RamfluxClient, auth_key: &str, sequence: u64) -> Result<Snap, SdkError> {
+fn snap(
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+) -> Result<Snap, SdkError> {
     let db = client.account_db()?;
-    let stored = format!("{OUTBOX}{auth_key}");
+    let key = auth_key(entry);
+    let stored = format!("{OUTBOX}{key}");
     let event: Option<ApplicationEvent> = db.load_actor_state(&stored)?;
     let projected =
-        db.load_actor_state::<Committed>(auth_key)?.is_some_and(|receipt| receipt.projected);
+        db.load_actor_state::<Committed>(&key)?.is_some_and(|receipt| receipt.projected);
     let (disposition, work) = db.receive_state_for_test(sequence)?;
     let receiver = client.owned_device_identity()?;
     Ok(Snap {
-        outbox: event.is_some(),
+        outbox: event,
         projected,
         work,
         disposition,
@@ -231,11 +243,10 @@ fn assert_integrity(result: Result<Admit, SdkError>, text: &str) {
 fn req<'a>(
     client: &'a RamfluxClient,
     sequence: u64,
-    auth_key: &'a str,
+    key: &'a str,
     entry: &'a GatewayInboxEntry,
-    message: Option<&'a str>,
 ) -> AdmitRequest<'a> {
-    AdmitRequest { sequence, auth_key, entry, message, client }
+    AdmitRequest { sequence, auth_key: key, entry, client }
 }
 
 fn fail_and_hold(
@@ -244,22 +255,21 @@ fn fail_and_hold(
     fault: Fault,
     text: &str,
 ) -> Result<(), SdkError> {
-    let pre = snap(&fixture.client, AUTH, SEQ)?;
-    assert!(!pre.outbox);
+    let pre = snap(&fixture.client, entry, SEQ)?;
+    assert!(pre.outbox.is_none());
     assert!(!pre.projected);
     assert_eq!(pre.work, 1);
     assert!(!pre.ack);
+    let key = auth_key(entry);
     assert_integrity(
         run(fault, || {
-            gate(fixture.client.account_db()?)?.admit(
-                fixture.client.account_db()?,
-                &req(&fixture.client, SEQ, AUTH, entry, Some(MESSAGE)),
-            )
+            gate(fixture.client.account_db()?)?
+                .admit(fixture.client.account_db()?, &req(&fixture.client, SEQ, &key, entry))
         }),
         text,
     );
     reopen(&mut fixture.client)?;
-    let held = snap(&fixture.client, AUTH, SEQ)?;
+    let held = snap(&fixture.client, entry, SEQ)?;
     assert_eq!(held, pre, "failed projection must retain held work and write nothing");
     assert!(!held.ack, "failed projection must not ACK");
     assert_eq!(held.disposition.as_deref(), Some("staged"));
@@ -273,18 +283,17 @@ fn projection_write_failure() -> Result<(), SdkError> {
     let _hang = hang_guard();
     let mut fixture = Fixture::new()?;
     let entry = inbox("proj-env", SEQ);
+    let key = auth_key(&entry);
 
-    let missing = gate(fixture.client.account_db()?)?.admit(
-        fixture.client.account_db()?,
-        &req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
-    );
+    let missing = gate(fixture.client.account_db()?)?
+        .admit(fixture.client.account_db()?, &req(&fixture.client, SEQ, &key, &entry));
     match missing {
         Err(SdkError::Storage(StorageError::Integrity(text))) if text == INTEGRITY => {}
         other => panic!("expected Integrity({INTEGRITY:?}), got {other:?}"),
     }
 
     stage(&fixture.client, SEQ)?;
-    persist_receipt(&fixture.client, &entry, AUTH, MESSAGE)?;
+    persist_receipt(&fixture.client, &entry, MESSAGE)?;
     fixture.client.persist_routed_seen(&entry)?;
     assert!(
         fixture.client.routed_seen_marker(&entry)?.is_some(),
@@ -296,16 +305,22 @@ fn projection_write_failure() -> Result<(), SdkError> {
     fail_and_hold(&mut fixture, &entry, Fault::BeforeCommit, BEFORE)?;
 
     assert_eq!(
-        gate(fixture.client.account_db()?)?.admit(
-            fixture.client.account_db()?,
-            &req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
-        )?,
+        gate(fixture.client.account_db()?)?
+            .admit(fixture.client.account_db()?, &req(&fixture.client, SEQ, &key, &entry))?,
         Admit::Admitted,
         "seen marker must not skip projection as Completed"
     );
     reopen(&mut fixture.client)?;
-    let once = snap(&fixture.client, AUTH, SEQ)?;
-    assert!(once.outbox, "retry creates one durable application event");
+    let once = snap(&fixture.client, &entry, SEQ)?;
+    assert_eq!(
+        once.outbox.as_ref(),
+        Some(&ApplicationEvent {
+            envelope_id: "proj-env".into(),
+            payload_hash: "Pproj-env".into(),
+            committed_key: key.clone(),
+        }),
+        "retry creates one durable application event with receipt identity"
+    );
     assert!(once.projected);
     assert_eq!(once.work, 1, "W0 remains until W2");
     assert_eq!(once.disposition.as_deref(), Some("staged"));
@@ -315,80 +330,91 @@ fn projection_write_failure() -> Result<(), SdkError> {
     replay(fixture.client.account_db()?, &mut ram)?;
     assert_eq!(ram.len(), 1);
     assert_eq!(ram[0].envelope.envelope_id, "proj-env");
+    assert!(
+        !fixture.client.account_db()?.actor_state_exists(&format!("{OUTBOX}{key}"))?,
+        "replay acknowledges the published row"
+    );
     replay(fixture.client.account_db()?, &mut ram)?;
-    assert_eq!(ram.len(), 1, "RAM publish is at-least-once and envelope-deduped");
+    assert_eq!(ram.len(), 1, "acknowledged row is never published again");
 
     assert_eq!(
-        gate(fixture.client.account_db()?)?.admit(
-            fixture.client.account_db()?,
-            &req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
-        )?,
+        gate(fixture.client.account_db()?)?
+            .admit(fixture.client.account_db()?, &req(&fixture.client, SEQ, &key, &entry))?,
         Admit::Duplicate
     );
-    let again = snap(&fixture.client, AUTH, SEQ)?;
-    assert_eq!(again.outbox, once.outbox);
+    let again = snap(&fixture.client, &entry, SEQ)?;
+    assert!(again.outbox.is_none(), "duplicate after ack must not rewrite the outbox");
     assert_eq!(again.projected, once.projected);
 
     drain_without_outbox(&mut fixture.client)?;
     erase_bound_row(&fixture.client)?;
     join_stage_and_admit(&mut fixture.client)?;
+    drain_seventy(&mut fixture.client)?;
+    cap_full(&mut fixture.client)?;
     Ok(())
 }
 
 fn drain_without_outbox(client: &mut RamfluxClient) -> Result<(), SdkError> {
     const DRAIN_SEQ: u64 = 2;
-    const DRAIN: &str = "routed/committed/drain-auth";
     let entry = inbox("drain-env", DRAIN_SEQ);
     stage(client, DRAIN_SEQ)?;
-    persist_receipt(client, &entry, DRAIN, MESSAGE)?;
+    let key = persist_receipt(client, &entry, MESSAGE)?;
     let db = client.account_db()?;
-    client.write_inbox_projection_claim_at(db, DRAIN, &entry)?;
-    assert!(
-        client.account_db()?.load_actor_state::<Committed>(DRAIN)?.is_some_and(|r| r.projected)
-    );
-    assert!(!client.account_db()?.actor_state_exists(&format!("{OUTBOX}{DRAIN}"))?);
+    client.write_inbox_projection_claim_at(db, &key, &entry)?;
+    assert!(client.account_db()?.load_actor_state::<Committed>(&key)?.is_some_and(|r| r.projected));
+    assert!(!client.account_db()?.actor_state_exists(&format!("{OUTBOX}{key}"))?);
     assert_eq!(
         gate(client.account_db()?)?
-            .admit(client.account_db()?, &req(client, DRAIN_SEQ, DRAIN, &entry, Some(MESSAGE)),)?,
+            .admit(client.account_db()?, &req(client, DRAIN_SEQ, &key, &entry))?,
         Admit::Duplicate,
         "projected-without-outbox must still drain the unfinished projection"
     );
-    assert!(client.account_db()?.actor_state_exists(&format!("{OUTBOX}{DRAIN}"))?);
+    assert!(client.account_db()?.actor_state_exists(&format!("{OUTBOX}{key}"))?);
     Ok(())
 }
 
 fn erase_bound_row(client: &RamfluxClient) -> Result<(), SdkError> {
     const ESEQ: u64 = 6;
-    const KEY: &str = "routed/committed/erase-auth";
     let entry = inbox("erase-env", ESEQ);
     stage(client, ESEQ)?;
-    persist_receipt(client, &entry, KEY, ERASE)?;
+    let key = persist_receipt(client, &entry, ERASE)?;
     let db = client.account_db()?;
     db.send_direct_message("thread", ERASE, "peer", b"secret")?;
     let outbox = gate(db)?;
     db.receive_transaction(outbox.expected, outbox.generation, |tx| {
-        outbox.admit_in(tx, &req(client, ESEQ, KEY, &entry, Some(ERASE))).map_err(|error| {
-            match error {
-                SdkError::Storage(storage) => storage,
-                _ => StorageError::Integrity("erase admit"),
-            }
+        outbox.admit_in(tx, &req(client, ESEQ, &key, &entry)).map_err(|error| match error {
+            SdkError::Storage(storage) => storage,
+            _ => StorageError::Integrity("erase admit"),
         })?;
         Ok(())
     })?;
-    assert!(db.actor_state_exists(&format!("{OUTBOX}{KEY}"))?);
+    assert!(db.actor_state_exists(&format!("{OUTBOX}{key}"))?);
     db.delete_direct_message("thread", ERASE, "local", "delete-projection")?;
     assert!(
-        !db.actor_state_exists(&format!("{OUTBOX}{KEY}"))?,
+        !db.actor_state_exists(&format!("{OUTBOX}{key}"))?,
         "erase of the bound message must drop the application outbox row"
+    );
+    assert!(
+        !db.actor_state_exists(&format!("{PUBLISHED}{key}"))?,
+        "erase of the bound message must drop the published marker"
+    );
+    let readmit = gate(db)?.admit(db, &req(client, ESEQ, &key, &entry));
+    match readmit {
+        Ok(Admit::Admitted | Admit::Duplicate) | Err(_) => {}
+        Ok(Admit::OutboxFull) => panic!("readmit after erase must not fill the outbox"),
+    }
+    assert!(
+        !db.actor_state_exists(&format!("{OUTBOX}{key}"))?,
+        "re-admitting a deleted message must leave the outbox row absent"
     );
     Ok(())
 }
 
 fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
     const JSEQ: u64 = 3;
-    const KEY: &str = "routed/committed/join-auth";
     let entry = inbox("join-env", JSEQ);
-    persist_receipt(client, &entry, KEY, MESSAGE)?;
+    let key = auth_key(&entry);
+    persist_receipt(client, &entry, MESSAGE)?;
     let wire = serde_json::to_vec(&entry)?;
     {
         let db = client.account_db()?;
@@ -397,12 +423,12 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
             run(Fault::BeforeCommit, || {
                 db.receive_transaction(outbox.expected, outbox.generation, |tx| {
                     tx.stage(staged(&wire, JSEQ))?;
-                    outbox.admit_in(tx, &req(client, JSEQ, KEY, &entry, Some(MESSAGE))).map_err(
-                        |error| match error {
+                    outbox.admit_in(tx, &req(client, JSEQ, &key, &entry)).map_err(|error| {
+                        match error {
                             SdkError::Storage(storage) => storage,
                             _ => StorageError::Integrity("join admit"),
-                        },
-                    )?;
+                        }
+                    })?;
                     Ok(())
                 })?;
                 Ok(Admit::Admitted)
@@ -411,27 +437,96 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
         );
     }
     reopen(client)?;
-    let rolled = snap(client, KEY, JSEQ)?;
-    assert!(!rolled.outbox, "joined W1+admit rolls back together");
+    let rolled = snap(client, &entry, JSEQ)?;
+    assert!(rolled.outbox.is_none(), "joined W1+admit rolls back together");
     assert_eq!(rolled.disposition, None);
-    persist_receipt(client, &entry, KEY, MESSAGE)?;
+    persist_receipt(client, &entry, MESSAGE)?;
     {
         let db = client.account_db()?;
         let outbox = gate(db)?;
         db.receive_transaction(outbox.expected, outbox.generation, |tx| {
             tx.stage(staged(&wire, JSEQ))?;
-            outbox.admit_in(tx, &req(client, JSEQ, KEY, &entry, Some(MESSAGE))).map_err(
-                |error| match error {
-                    SdkError::Storage(storage) => storage,
-                    _ => StorageError::Integrity("join admit"),
-                },
-            )?;
+            outbox.admit_in(tx, &req(client, JSEQ, &key, &entry)).map_err(|error| match error {
+                SdkError::Storage(storage) => storage,
+                _ => StorageError::Integrity("join admit"),
+            })?;
             Ok(())
         })?;
     }
-    let joined = snap(client, KEY, JSEQ)?;
-    assert!(joined.outbox);
+    let joined = snap(client, &entry, JSEQ)?;
+    assert!(joined.outbox.is_some());
     assert!(joined.projected);
     assert_eq!(joined.disposition.as_deref(), Some("staged"));
+    Ok(())
+}
+
+fn drain_seventy(client: &mut RamfluxClient) -> Result<(), SdkError> {
+    const BASE: u64 = 20;
+    stage(client, BASE)?;
+    let before = client.account_db()?.actor_state_usage(OUTBOX)?.0;
+    for index in 0..70u32 {
+        let entry = inbox(&format!("burst-{index}"), BASE);
+        persist_receipt(client, &entry, MESSAGE)?;
+        let key = auth_key(&entry);
+        assert_eq!(
+            gate(client.account_db()?)?
+                .admit(client.account_db()?, &req(client, BASE, &key, &entry))?,
+            Admit::Admitted
+        );
+    }
+    assert_eq!(client.account_db()?.actor_state_usage(OUTBOX)?.0, before + 70);
+    let mut ram = Vec::new();
+    replay(client.account_db()?, &mut ram)?;
+    assert_eq!(
+        client.account_db()?.actor_state_usage(OUTBOX)?.0,
+        0,
+        "every pending outbox row including the 70 is acknowledged"
+    );
+    assert!(ram.len() <= 64);
+    let mut again = ram.clone();
+    replay(client.account_db()?, &mut again)?;
+    assert_eq!(again, ram, "republish after ack publishes nothing");
+    let first = inbox("burst-0", BASE);
+    let key = auth_key(&first);
+    assert!(
+        !client.account_db()?.actor_state_exists(&format!("{OUTBOX}{key}"))?,
+        "acknowledged first row stays gone"
+    );
+    Ok(())
+}
+
+fn cap_full(client: &mut RamfluxClient) -> Result<(), SdkError> {
+    const CAP_SEQ: u64 = 30;
+    stage(client, CAP_SEQ)?;
+    for index in 0..MAX_OUTBOX {
+        let entry = inbox(&format!("cap-{index}"), CAP_SEQ);
+        persist_receipt(client, &entry, MESSAGE)?;
+        let key = auth_key(&entry);
+        assert_eq!(
+            gate(client.account_db()?)?
+                .admit(client.account_db()?, &req(client, CAP_SEQ, &key, &entry))?,
+            Admit::Admitted
+        );
+    }
+    assert_eq!(client.account_db()?.actor_state_usage(OUTBOX)?.0, u64::from(MAX_OUTBOX));
+    let extra = inbox("cap-extra", CAP_SEQ);
+    persist_receipt(client, &extra, MESSAGE)?;
+    let extra_key = auth_key(&extra);
+    let pre = snap(client, &extra, CAP_SEQ)?;
+    assert_eq!(
+        gate(client.account_db()?)?
+            .admit(client.account_db()?, &req(client, CAP_SEQ, &extra_key, &extra))?,
+        Admit::OutboxFull
+    );
+    let held = snap(client, &extra, CAP_SEQ)?;
+    assert!(held.outbox.is_none(), "the 257th row must not be admitted");
+    assert!(!held.projected);
+    assert_eq!(held.work, pre.work.max(1));
+    assert!(
+        matches!(held.disposition.as_deref(), Some("staged" | "held")),
+        "W0 stays on OutboxFull, got {:?}",
+        held.disposition
+    );
+    assert!(!held.ack, "OutboxFull must not ACK");
     Ok(())
 }

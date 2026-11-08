@@ -23,6 +23,10 @@ fn seed(db: &AccountDb) -> Result<(), StorageError> {
         &format!("{OUTBOX}row"),
         &json!({"envelope_id": "e1", "payload_hash": "p", "committed_key": "routed/committed/k"}),
     )?;
+    db.persist_actor_state(
+        "gateway/application-published/row",
+        &json!({"envelope_id": "e1", "payload_hash": "p", "committed_key": "routed/committed/k"}),
+    )?;
     db.persist_actor_state("surface/application-outbox/leaked", &json!({"envelope_id": "leak"}))?;
     Ok(())
 }
@@ -39,6 +43,17 @@ fn application_outbox_backup_exclusion() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("application-outbox-backup")?;
     seed(&db)?;
     assert_eq!(db.actor_state_usage(OUTBOX)?.0, 1, "live outbox must exist before backup");
+    db.retire_outbound_for_recovery("recovery-head")?;
+    assert_eq!(
+        db.actor_state_usage(OUTBOX)?.0,
+        1,
+        "live recovery must keep pending application outbox rows"
+    );
+    assert_eq!(
+        db.actor_state_usage("gateway/application-published/")?.0,
+        1,
+        "live recovery must keep the published marker"
+    );
 
     let incoming = root.join("incoming.db");
     let snapshot = db.write_backup_snapshot(&incoming)?;

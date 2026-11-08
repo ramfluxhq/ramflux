@@ -192,12 +192,10 @@ pub(crate) fn project_committed_message(
     // The durable authenticated claim above owns authorization and exactly-once projection.
     // RAM cache membership compares immutable wire bytes; reauthenticating every cached
     // envelope here makes draining a page quadratic in signatures and payload size.
-    if !account.pending_deliveries.iter().any(|pending| pending.envelope == entry.envelope) {
-        account.pending_deliveries.push(entry.clone());
-        if account.pending_deliveries.len() > 64 {
-            account.pending_deliveries.remove(0);
-        }
-    }
+    crate::client::application_outbox::publish_application_entry(
+        &mut account.pending_deliveries,
+        entry,
+    );
     #[cfg(test)]
     if let Some(handle) = &account.connection {
         handle.test_record_receive("projection", started.elapsed());
