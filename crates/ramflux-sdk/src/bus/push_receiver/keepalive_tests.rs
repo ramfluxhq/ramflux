@@ -209,8 +209,9 @@ async fn keepalive_survives_queue_full() -> Case {
             wait_client_frame(&mut io.output).await,
             GatewayClientFrame::Cursor { .. }
         ));
+        // Exchange drops the in-flight bulk place at dequeue, so CALL_QUEUE extras fill it.
         let mut extra = Vec::new();
-        for _ in 0..CALL_QUEUE.saturating_sub(1) {
+        for _ in 0..CALL_QUEUE {
             extra.push(spawn_cursor(&handle));
             tokio::task::yield_now().await;
         }
@@ -230,6 +231,7 @@ async fn keepalive_survives_queue_full() -> Case {
         }
         send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
         first.await??;
+        wait_bulk_held(&handle, 0).await;
 
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::time::advance(KEEPALIVE_IDLE).await;
@@ -300,8 +302,9 @@ async fn keepalive_skips_ping_queued_behind_a_reply() -> Case {
             wait_client_frame(&mut io.output).await,
             GatewayClientFrame::Cursor { .. }
         ));
+        // In-flight exchange already dropped its place; held=1 means keepalive is queued behind it.
         tokio::time::advance(KEEPALIVE_IDLE).await;
-        wait_bulk_held(&handle, 2).await;
+        wait_bulk_held(&handle, 1).await;
 
         send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
         cursor.await??;
