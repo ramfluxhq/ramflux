@@ -169,8 +169,8 @@ pub(crate) fn fallback_deadline(
     let router_cap = add_ts(router_accepted_at, ttl_cap)?;
     let from_seen = add_ts(add_ts(first_seen, TTL_CAP_SECS)?, CLOCK_SKEW_SECS)?;
     let expires_at = router_cap.min(from_seen);
-    let lag = first_seen
-        .checked_sub(router_accepted_at)
+    let lag = router_accepted_at
+        .checked_sub(first_seen)
         .ok_or_else(|| SdkError::LocalBus("compat timestamp overflow".into()))?;
     let unverified = lag > CLOCK_SKEW_SECS;
     Ok(FallbackDeadline {
@@ -195,6 +195,10 @@ pub(crate) fn on_legacy_frame(
 ) -> FrameOutcome {
     if let Some(reason) = session.paused_reason {
         return FrameOutcome::Pause { reason };
+    }
+    if session.limit == FRAME_LIMIT_FALLBACK && entries > 1 {
+        session.paused_reason = Some("legacy_frame_protocol");
+        return FrameOutcome::Pause { reason: "legacy_frame_protocol" };
     }
     if bytes <= FRAME_MAX_BYTES {
         return FrameOutcome::Accept { limit: session.limit };

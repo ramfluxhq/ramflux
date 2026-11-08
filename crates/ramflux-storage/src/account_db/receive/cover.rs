@@ -118,8 +118,10 @@ impl ReceiveTransaction<'_> {
                 ReceiveCoverKind::Held => {
                     matches!(disposition.as_deref(), Some("staged" | "held" | "quarantined"))
                 }
+                ReceiveCoverKind::CompatTerminal => {
+                    disposition.as_deref() == Some("staged") && self.work_present(input.sequence)?
+                }
                 ReceiveCoverKind::Terminal
-                | ReceiveCoverKind::CompatTerminal
                 | ReceiveCoverKind::GapOnly
                 | ReceiveCoverKind::Oversize => disposition.is_some(),
             };
@@ -175,6 +177,16 @@ impl ReceiveTransaction<'_> {
             params![self.target, self.incarnation, seq.as_slice()],
             |row| row.get(0),
         ).optional()?)
+    }
+
+    fn work_present(&self, sequence: u64) -> Result<bool, StorageError> {
+        let seq = sequence.to_be_bytes();
+        let found: i64 = self.db.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3)",
+            params![self.target, self.incarnation, seq.as_slice()],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
     }
 
     fn intent_slots(&self, sequence: u64) -> Result<i64, StorageError> {

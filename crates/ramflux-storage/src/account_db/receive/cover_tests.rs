@@ -515,6 +515,10 @@ fn refuses_exact_interval_errors() -> Result<(), StorageError> {
     insert_receipt(&db, 6, "completed")?;
     assert_refused(&db, 5, 6, Kind::Held, &[], "receive cover requires a receipt")?;
     assert_refused(&db, 5, 5, Kind::CompatTerminal, &[], "receive cover interval outside page")?;
+    // L1: compat terminal only from a staged receipt with registered work.
+    insert_receipt(&db, 9, "held")?;
+    assert_refused(&db, 5, 9, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
+    assert_refused(&db, 5, 7, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

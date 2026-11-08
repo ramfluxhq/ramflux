@@ -266,17 +266,27 @@ fn compat_intent_transition() -> Result<(), SdkError> {
 #[test]
 fn legacy_deadline_clock_skew() -> Result<(), SdkError> {
     let _hang = hang_guard();
+    // ttl = 604800 so the first_seen+604800+120 term is the binding one when the
+    // client clock is slow.
     let accepted = 1_000;
-    let ttl = 100;
+    let ttl = 604_800;
     let router_cap = accepted + ttl;
-    let at_lag = fallback_deadline(accepted, ttl, accepted + CLOCK_SKEW_SECS, None)?;
+    // Client slow by exactly 120 s: fallback equals router cap, not flagged.
+    let at_lag = fallback_deadline(accepted, ttl, accepted - CLOCK_SKEW_SECS, None)?;
     assert_eq!(at_lag.expires_at, router_cap, "lag 120s fallback is not earlier than router cap");
     assert!(!at_lag.fallback_clock_unverified);
     assert!(at_lag.guaranteed_retirement);
 
-    let over = fallback_deadline(accepted, ttl, accepted + CLOCK_SKEW_SECS + 1, None)?;
+    // Client slow by 121 s: flagged, no guaranteed retirement.
+    let over = fallback_deadline(accepted, ttl, accepted - CLOCK_SKEW_SECS - 1, None)?;
     assert!(over.fallback_clock_unverified);
     assert!(!over.guaranteed_retirement, "lag>120s never claims guaranteed retirement");
+
+    // Delayed delivery with correct clocks (first_seen well after acceptance): not flagged.
+    let delayed = fallback_deadline(accepted, ttl, accepted + 3_600, None)?;
+    assert!(!delayed.fallback_clock_unverified, "delivery delay is not clock skew");
+    assert_eq!(delayed.expires_at, router_cap);
+    assert!(delayed.guaranteed_retirement);
 
     let first_seen = 1_000i64;
     let bound = fallback_deadline(first_seen + CLOCK_SKEW_SECS, 604_800, first_seen, None)?;
@@ -332,6 +342,16 @@ fn compat_frame_limit_fallback() -> Result<(), SdkError> {
         FrameOutcome::Pause { reason: "legacy_frame_protocol" },
         "paused_reason blocks a later Accept"
     );
+
+    // L3: limit-1 frame under F with multiple entries is an exact protocol error.
+    let mut under_size = start_session();
+    on_legacy_frame(&mut under_size, oversize_page, 64, 0);
+    assert_eq!(
+        on_legacy_frame(&mut under_size, 1_024, 2, 0),
+        FrameOutcome::Pause { reason: "legacy_frame_protocol" }
+    );
+    assert_eq!(under_size.paused_reason, Some("legacy_frame_protocol"));
+    assert_eq!(under_size.reconnects, 1, "protocol error does not reconnect");
 
     let harness = open()?;
     let db = &harness.db;
