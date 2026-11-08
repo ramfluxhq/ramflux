@@ -232,7 +232,8 @@ fn collapse_key_and_tag_match_independent_hkdf_hmac() -> Result<(), CryptoError>
     let sk = [0x11_u8; 32];
     let pair_binding = b"pair-binding";
     let expected_key = independent_collapse_key(&sk, pair_binding);
-    assert_eq!(collapse_key(&sk, pair_binding)?, expected_key);
+    let actual_key = collapse_key(&sk, pair_binding)?;
+    assert_eq!(&actual_key[..], &expected_key[..]);
     let expected_tag = independent_collapse_tag(&expected_key, b"vector", b"device-ref");
     assert_eq!(collapse_tag(&expected_key, b"vector", b"device-ref")?, expected_tag);
     Ok(())

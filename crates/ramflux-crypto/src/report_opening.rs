@@ -271,7 +271,7 @@ pub fn verify_report_opening(
 /// Returns HKDF/HMAC failures from the shared extractor.
 pub fn collapse_key(sk: &[u8], pair_binding: &[u8]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     let mut key = Zeroizing::new([0_u8; 32]);
-    hkdf_sha256(pair_binding, sk, COLLAPSE_KEY_INFO.as_bytes(), &mut key)?;
+    hkdf_sha256(pair_binding, sk, COLLAPSE_KEY_INFO.as_bytes(), &mut key[..])?;
     Ok(key)
 }
 
