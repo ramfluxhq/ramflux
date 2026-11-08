@@ -126,6 +126,12 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("anyhow::anyhow", "error-construction macro (no I/O)"),
     ("crate::ephemeral::lifetime", "same-crate lifetime types and helpers (no I/O)"),
     ("crate::ephemeral::receiver", "same-crate receiver types and bounds (no I/O)"),
+    ("crate::ephemeral::send", "same-crate submit codec and D5 local unsupported (no I/O)"),
+    ("ramflux_protocol::parse_i_json", "strict I-JSON decode from memory (no I/O)"),
+    (
+        "ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY",
+        "session-push capability identifier (no I/O)",
+    ),
     ("blake3::Hasher", "in-memory digest hasher (no I/O)"),
     ("blake3::hash", "in-memory digest of one payload (no I/O)"),
     ("serde_json::from_slice", "JSON decode from memory (no I/O)"),

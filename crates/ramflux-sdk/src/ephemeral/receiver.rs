@@ -7,7 +7,7 @@ use super::lifetime::{
     HoldLease, ReceiverClock, ReceiverDropReason, ReceiverLifetime, admit_authenticated_ciphertext,
     authenticate, poll_stored_hold,
 };
-use ramflux_protocol::Envelope;
+use ramflux_protocol::{Envelope, parse_i_json};
 use serde::Deserialize;
 #[cfg(test)]
 use serde::Serialize;
@@ -218,7 +218,7 @@ impl EphemeralReceiver {
         if !self.sizes_reserialized() && bytes.len() > RECEIVER_MAX_FRAME_BYTES {
             return ReceiverAdmit::DroppedNew;
         }
-        let frame = match serde_json::from_slice::<CompleteReceivedFrame>(bytes) {
+        let frame = match parse_i_json::<CompleteReceivedFrame>(bytes) {
             Ok(frame) if frame.frame_type == "ephemeral" => frame,
             _ => return ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode),
         };
@@ -1172,6 +1172,19 @@ mod tests {
         let bytes = frame_builds(&envelope, u64::MAX)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.dedup_len(), 0);
+        Ok(())
+    }
+
+    fn row_received_deadline_wrong_refused() -> TestResult {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| e.envelope_id = "dl-wrong".to_owned());
+        let bytes = frame_builds(&envelope, EXPIRES_AT_MS + 1)?;
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
         );
         assert_eq!(rx.occupancy(), (0, 0));
@@ -1220,6 +1233,24 @@ mod tests {
             e.ttl = 1;
         });
         let bytes = frame_builds(&envelope, u64::MAX)?;
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.dedup_len(), 0);
+        Ok(())
+    }
+
+    fn row_hold_received_deadline_wrong_refused() -> TestResult {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| {
+            e.envelope_id = "hold-dl-wrong".to_owned();
+            e.created_at = 1_002;
+            e.ttl = 1;
+        });
+        let bytes = frame_builds(&envelope, 1_003_001)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
@@ -1271,9 +1302,11 @@ mod tests {
         row_pop_rechecks_signed_start_after_promotion()?;
         row_received_deadline_zero_refused()?;
         row_received_deadline_max_refused()?;
+        row_received_deadline_wrong_refused()?;
         row_received_deadline_match_pop_returns_verified_d()?;
         row_hold_received_deadline_zero_refused()?;
         row_hold_received_deadline_max_refused()?;
+        row_hold_received_deadline_wrong_refused()?;
         row_hold_received_deadline_match_held()?;
         Ok(())
     }
