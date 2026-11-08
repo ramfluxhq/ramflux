@@ -269,6 +269,7 @@ impl RamfluxClient {
         target_delivery_id: &str,
         inbox_seq: u64,
     ) -> Result<(), SdkError> {
+        self.account_db()?.refuse_legacy_receive()?;
         self.set_projection_checkpoint(
             &gateway_receive_cursor_checkpoint_name(target_delivery_id),
             &inbox_seq.max(self.gateway_receive_cursor(target_delivery_id)?).to_string(),
@@ -567,6 +568,41 @@ mod tests {
             );
         }
         drop(actor);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn persist_gateway_receive_cursor_refuses_activated_ledger() -> Result<(), SdkError> {
+        let root = temp_root("receive-activation-legacy-cursor");
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("acct", "principal")?;
+        client.unlock_account("acct", b"secret")?;
+        const { assert!(!ramflux_storage::FIRST_ACTIVATION_DEFAULT) };
+        client.persist_gateway_receive_cursor("t", 1)?;
+        assert_eq!(
+            client.account_db()?.activate_receive_ledger(ramflux_storage::ReceiveMigrate {
+                target: "t",
+                incarnation: "e",
+            })?,
+            ramflux_storage::ReceiveMigrateResult::Migrated
+        );
+        assert_eq!(
+            client.account_db()?.receive_activation()?,
+            ramflux_storage::ReceiveActivation::Activated
+        );
+        let refused = client.persist_gateway_receive_cursor("t", 2);
+        assert!(
+            matches!(
+                refused,
+                Err(SdkError::Storage(StorageError::Integrity(
+                    ramflux_storage::LEGACY_RECEIVE_ACTIVATED
+                )))
+            ),
+            "{refused:?}"
+        );
+        drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -4,6 +4,7 @@
 //! `ledger_privacy_restore`: published backups, merged generations and restore installs carry
 //! tombstones and bindings, never the five gateway tables, receive C/E or receive-work footprints.
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
+use super::activation::{ACTIVATION_KEY, ReceiveActivation};
 use super::erased_capture_tests::current;
 use super::erased_input_union_tests::pair;
 use super::privacy::ReceiveBind;
@@ -60,6 +61,11 @@ fn assert_stripped(db: &rusqlite::Connection, where_from: &str) -> rusqlite::Res
     assert_eq!(c.epochs, 0, "{where_from} epochs");
     assert_eq!(c.work_footprints, 0, "{where_from} receive_work footprints");
     assert_eq!(c.checkpoints, 0, "{where_from} receive checkpoints");
+    let activation: i64 = count(
+        db,
+        "SELECT count(*) FROM projection_checkpoint WHERE projection_name='gateway_receive_activation'",
+    )?;
+    assert_eq!(activation, 0, "{where_from} activation discriminator");
     Ok(())
 }
 
@@ -184,6 +190,7 @@ fn privacy_restore_strips_unstripped_inputs() -> Result<(), StorageError> {
     p.local.send_direct_message("thread", "keep", "peer", b"x")?;
     p.source.send_direct_message("thread", "keep", "peer", b"x")?;
     seed_ledger(&p.local, now)?;
+    seed_checkpoints(&p.local)?;
     put_tombstone(&p.local, "ap", "ad", "payload-a", now + 3_900)?;
     put_tombstone(&p.local, "bp", "bd", "payload-b", now + 3_900)?;
 
@@ -317,6 +324,11 @@ fn seed_checkpoints(db: &AccountDb) -> Result<(), StorageError> {
          VALUES('gateway_receive_pause:t',1,'retired_incarnation_fence',1)",
         [],
     )?;
+    db.connection.execute(
+        "INSERT INTO projection_checkpoint(projection_name,projection_version,last_event_id,updated_at) \
+         VALUES(?1,1,'activated',1)",
+        params![ACTIVATION_KEY],
+    )?;
     Ok(())
 }
 
@@ -397,6 +409,11 @@ fn ledger_privacy_restore() -> Result<(), StorageError> {
     let restored_index = install(&p.root, "restored", &private, &snapshot.key)?;
     let restored = AccountDb::open(&restored_index, "account", &snapshot.key)?;
     assert_stripped_account(&restored, "restored install")?;
+    assert_eq!(
+        restored.receive_activation()?,
+        ReceiveActivation::Inactive,
+        "activation does not survive restore; first-activate afresh"
+    );
     let tuples: Vec<Tuple> = vec![
         ("ap".to_owned(), "ad".to_owned(), "payload-a".to_owned()),
         ("bp".to_owned(), "bd".to_owned(), "payload-b".to_owned()),

@@ -4,8 +4,9 @@
 //! Commit-time generation / E / erase / expected-state fence for receive actor turns.
 //!
 //! Live unactivated accounts have no epoch row and keep today's prepare/apply/ack
-//! bodies. Activated (test-seeded) turns fail late inputs inside `receive_transaction`
-//! before any write or ACK. Activation remains P24/P25.
+//! bodies. Activated accounts persist `gateway_receive_activation` in receive metadata;
+//! first activation stays default-off until P25. Legacy C writers
+//! (`persist_gateway_receive_cursor`) refuse once Activated. Shared-ledger routing is P24b2.
 #![allow(dead_code)]
 
 use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveTransaction, StorageError};

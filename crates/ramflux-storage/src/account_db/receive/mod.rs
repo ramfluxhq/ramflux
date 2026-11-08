@@ -5,6 +5,9 @@
 pub(crate) mod ack;
 #[cfg(test)]
 mod ack_tests;
+pub(crate) mod activation;
+#[cfg(test)]
+mod activation_tests;
 #[cfg(test)]
 mod application_outbox_backup_tests;
 #[cfg(test)]

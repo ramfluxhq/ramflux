@@ -35,6 +35,9 @@ pub use account_db::receive::ack::{
     ACK_BATCH_MAX, ACK_FLUSH_COUNT, ACK_FLUSH_SECS, ReceiveAckApply, ReceiveAckApplyResult,
     ReceiveAckOutcome, ReceiveAckResult,
 };
+pub use account_db::receive::activation::{
+    FIRST_ACTIVATION_DEFAULT, LEGACY_RECEIVE_ACTIVATED, ReceiveActivation,
+};
 pub use account_db::receive::cover::{
     ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveGap,
 };
