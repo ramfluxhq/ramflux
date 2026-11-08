@@ -67,13 +67,6 @@ fn gap_count(result: &ReceiveReconcileResult) -> Result<u64, StorageError> {
     Ok(total)
 }
 
-fn covers(result: &ReceiveReconcileResult, seq: u64) -> bool {
-    result
-        .prefix()
-        .iter()
-        .any(|step| step.gaps.iter().any(|gap| seq >= gap.from_seq && seq <= gap.to_seq))
-}
-
 fn reconcile(
     db: &AccountDb,
     cursor: u64,
@@ -101,6 +94,41 @@ fn cursor(db: &AccountDb) -> Result<u64, StorageError> {
         .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))
 }
 
+fn redrive(db: &AccountDb, sequence: u64, disposition: &str) -> Result<(), StorageError> {
+    db.connection.execute(
+        "UPDATE gateway_receive_receipt SET disposition=?1 WHERE inbox_seq=?2",
+        params![disposition, sequence.to_be_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+fn receipt_rows(db: &AccountDb) -> Result<Vec<(u64, String)>, StorageError> {
+    let mut receipts = Vec::new();
+    let mut query = db.connection.prepare(
+        "SELECT inbox_seq,disposition FROM gateway_receive_receipt WHERE target_delivery_id='t' ORDER BY inbox_seq",
+    )?;
+    for row in query.query_map([], |row| Ok((be(row.get(0)?), row.get::<_, String>(1)?)))? {
+        receipts.push(row?);
+    }
+    Ok(receipts)
+}
+
+fn intent_rows(db: &AccountDb) -> Result<Vec<u64>, StorageError> {
+    let mut query = db.connection.prepare(
+        "SELECT inbox_seq FROM gateway_ack_intent WHERE incarnation_id='e' ORDER BY inbox_seq",
+    )?;
+    query
+        .query_map([], |row| Ok(be(row.get(0)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(StorageError::from)
+}
+
+fn work_count(db: &AccountDb) -> Result<i64, StorageError> {
+    db.connection
+        .query_row("SELECT count(*) FROM gateway_receive_work", [], |r| r.get(0))
+        .map_err(StorageError::from)
+}
+
 #[test]
 fn receipt_reconciles_absent_range() -> Result<(), StorageError> {
     let (root, db) = setup("w2-receipt-gap")?;
@@ -111,14 +139,54 @@ fn receipt_reconciles_absent_range() -> Result<(), StorageError> {
     erase(&db, 6)?;
     let expired = [ReceiveKnownLoss { from_seq: 1, to_seq: 10, reason: "expired" }];
     let page = view(&expired, &[]);
+
+    // Staged 2 is not finished: the plan covers 1 and stops before it, changing nothing else.
     let plan = reconcile(&db, 0, page)?;
-    assert_eq!(gap_count(&plan)?, 7, "staged/held/erased receipts are not losses");
-    assert!(!covers(&plan, 2) && !covers(&plan, 4) && !covers(&plan, 6));
+    match &plan {
+        ReceiveReconcileResult::NeedStage { sequence, prefix } => {
+            assert_eq!(*sequence, 2);
+            assert_eq!(prefix.len(), 1);
+        }
+        other @ ReceiveReconcileResult::Plan(_) => {
+            panic!("staged receipt must stop the plan, got {other:?}")
+        }
+    }
+    assert_eq!(gap_count(&plan)?, 1);
     let plan_skip = with_skip(ReconcileFault::SkipReceipts, || reconcile(&db, 0, page))?;
     assert_eq!(gap_count(&plan_skip)?, 10, "skipping receipts infers every missing seq as loss");
+    assert_eq!(db.apply_receive_plan(expect(&db, 0)?, 1, plan.prefix())?, Out::Covered);
+    assert_eq!(cursor(&db)?, 1);
+    assert_eq!(
+        receipt_rows(&db)?,
+        vec![(2, "staged".into()), (4, "held".into()), (6, "erased".into())]
+    );
+    assert_eq!(intent_rows(&db)?, Vec::<u64>::new(), "a staged sequence gets no ACK intent");
+    assert_eq!(work_count(&db)?, 2, "staged and held work survive; erased work was cleaned");
 
-    let expected = expect(&db, 0)?;
-    assert_eq!(db.apply_receive_plan(expected, 1, plan.prefix())?, Out::Covered);
+    // W1 completes 2: it is covered, the hole 3 is a loss, then held 4 stops the plan again.
+    redrive(&db, 2, "completed")?;
+    let trimmed = [ReceiveKnownLoss { from_seq: 2, to_seq: 10, reason: "expired" }];
+    let page = ReceivePageView { after: 1, covered: 10, entries: &[], known_losses: &trimmed };
+    let plan = reconcile(&db, 1, page)?;
+    match &plan {
+        ReceiveReconcileResult::NeedStage { sequence, .. } => assert_eq!(*sequence, 4),
+        other @ ReceiveReconcileResult::Plan(_) => {
+            panic!("held receipt must stop the plan, got {other:?}")
+        }
+    }
+    assert_eq!(db.apply_receive_plan(expect(&db, 1)?, 1, plan.prefix())?, Out::Covered);
+    assert_eq!(cursor(&db)?, 3);
+    assert_eq!(intent_rows(&db)?, vec![2]);
+    assert_eq!(work_count(&db)?, 1);
+
+    // Finished receipts (rejected 4, erased 6) cover; the holes 5 and 7..10 are losses.
+    redrive(&db, 4, "rejected")?;
+    let trimmed = [ReceiveKnownLoss { from_seq: 4, to_seq: 10, reason: "expired" }];
+    let page = ReceivePageView { after: 3, covered: 10, entries: &[], known_losses: &trimmed };
+    let plan = reconcile(&db, 3, page)?;
+    assert!(matches!(plan, ReceiveReconcileResult::Plan(_)), "{plan:?}");
+    assert_eq!(gap_count(&plan)?, 5);
+    assert_eq!(db.apply_receive_plan(expect(&db, 3)?, 1, plan.prefix())?, Out::Covered);
     assert_eq!(cursor(&db)?, 10);
     assert_eq!(
         losses(&db)?,
@@ -129,24 +197,9 @@ fn receipt_reconciles_absent_range() -> Result<(), StorageError> {
             (7, 10, 4, "expired".into()),
         ]
     );
-    let mut receipts = Vec::new();
-    let mut query = db.connection.prepare(
-        "SELECT inbox_seq,disposition FROM gateway_receive_receipt WHERE target_delivery_id='t' ORDER BY inbox_seq",
-    )?;
-    for row in query.query_map([], |row| Ok((be(row.get(0)?), row.get::<_, String>(1)?)))? {
-        receipts.push(row?);
-    }
-    assert_eq!(receipts, vec![(4, "held".into())], "held keeps work; staged/erased settle");
-    let intents: Vec<u64> = {
-        let mut query = db.connection.prepare(
-            "SELECT inbox_seq FROM gateway_ack_intent WHERE incarnation_id='e' ORDER BY inbox_seq",
-        )?;
-        query.query_map([], |row| Ok(be(row.get(0)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    assert_eq!(intents, vec![2, 6]);
-    let work: i64 =
-        db.connection.query_row("SELECT count(*) FROM gateway_receive_work", [], |r| r.get(0))?;
-    assert_eq!(work, 1);
+    assert_eq!(receipt_rows(&db)?, Vec::<(u64, String)>::new());
+    assert_eq!(intent_rows(&db)?, vec![2, 4, 6]);
+    assert_eq!(work_count(&db)?, 0);
     let explain: String = db.connection.query_row(
         "EXPLAIN QUERY PLAN SELECT inbox_seq,disposition FROM gateway_receive_receipt \
          WHERE target_delivery_id='t' AND incarnation_id='e' AND inbox_seq>=?1 AND inbox_seq<=?2 \
@@ -155,6 +208,101 @@ fn receipt_reconciles_absent_range() -> Result<(), StorageError> {
         |r| r.get(3),
     )?;
     assert!(explain.contains("PRIMARY KEY"), "{explain}");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn reconcile_never_paints_beyond_covered() -> Result<(), StorageError> {
+    let (root, db) = setup("w2-paint-beyond")?;
+    let beyond = [ReceiveKnownLoss { from_seq: 5, to_seq: 15, reason: "expired" }];
+    let page = view(&beyond, &[]);
+    assert!(matches!(
+        reconcile(&db, 0, page),
+        Err(StorageError::Integrity("receive cover interval outside page"))
+    ));
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn reconcile_refuses_bad_bounds_exactly() -> Result<(), StorageError> {
+    let (root, db) = setup("w2-bad-bounds")?;
+    let cases: [(u64, u64, &[ReceiveKnownLoss<'_>], &str); 5] = [
+        (11, 10, &[], "receive page after exceeds covered"),
+        (
+            3,
+            10,
+            &[ReceiveKnownLoss { from_seq: 2, to_seq: 4, reason: "expired" }],
+            "receive cover interval outside page",
+        ),
+        (
+            0,
+            10,
+            &[
+                ReceiveKnownLoss { from_seq: 1, to_seq: 5, reason: "expired" },
+                ReceiveKnownLoss { from_seq: 3, to_seq: 8, reason: "expired" },
+            ],
+            "receive cover interval overlap",
+        ),
+        (
+            0,
+            10,
+            &[ReceiveKnownLoss { from_seq: 1, to_seq: 5, reason: "" }],
+            "receive cover interval missing reason",
+        ),
+        (
+            0,
+            10,
+            &[ReceiveKnownLoss { from_seq: 1, to_seq: 11, reason: "expired" }],
+            "receive cover interval outside page",
+        ),
+    ];
+    for (after, covered, losses_in, message) in cases {
+        let result = reconcile(
+            &db,
+            0,
+            ReceivePageView { after, covered, entries: &[], known_losses: losses_in },
+        );
+        match result {
+            Err(StorageError::Integrity(got)) => assert_eq!(got, message),
+            other => panic!("expected {message}, got {other:?}"),
+        }
+    }
+    assert_eq!(cursor(&db)?, 0, "refused reconciles write nothing");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn reconcile_inclusive_boundaries_are_accepted() -> Result<(), StorageError> {
+    let (root, db) = setup("w2-boundaries")?;
+    // Entry at after+1 is the first live sequence and stops the plan with no prefix gap.
+    let plan = reconcile(
+        &db,
+        0,
+        ReceivePageView { after: 0, covered: 10, entries: &[1], known_losses: &[] },
+    )?;
+    assert!(matches!(plan, ReceiveReconcileResult::NeedStage { sequence: 1, .. }), "{plan:?}");
+    // Entry at covered is the last live sequence: the prefix covers 1..9 as one gap.
+    let plan = reconcile(
+        &db,
+        0,
+        ReceivePageView { after: 0, covered: 10, entries: &[10], known_losses: &[] },
+    )?;
+    assert!(matches!(plan, ReceiveReconcileResult::NeedStage { sequence: 10, .. }), "{plan:?}");
+    assert_eq!(gap_count(&plan)?, 9);
+    // A loss spanning exactly (after, covered] is accepted.
+    let whole = [ReceiveKnownLoss { from_seq: 1, to_seq: 10, reason: "expired" }];
+    let plan = reconcile(
+        &db,
+        0,
+        ReceivePageView { after: 0, covered: 10, entries: &[], known_losses: &whole },
+    )?;
+    assert_eq!(gap_count(&plan)?, 10);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

@@ -58,7 +58,8 @@ pub struct ReceiveCoverStep {
     pub retain_until: i64,
 }
 
-/// Reconcile either yields a full plan or stops at the first unstaged live entry.
+/// Reconcile either yields a full plan or stops at the first live sequence that is not yet
+/// finished (unreceipted, staged, held or quarantined). The caller must stage or redrive it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiveReconcileResult {
     Plan(Vec<ReceiveCoverStep>),
@@ -145,6 +146,8 @@ struct ReceiptSpan {
     from_seq: u64,
     to_seq: u64,
     kind: ReceiveCoverKind,
+    /// Only completed, rejected and erased receipts are finished; the plan stops at the rest.
+    finished: bool,
 }
 
 fn load_receipts(
@@ -173,9 +176,9 @@ fn load_receipts(
         if seq < from || seq > to {
             return Err(StorageError::Integrity("receive reconcile beyond covered"));
         }
-        let kind = match disposition.as_str() {
-            "held" | "quarantined" => ReceiveCoverKind::Held,
-            "staged" | "completed" | "rejected" | "erased" => ReceiveCoverKind::Terminal,
+        let (kind, finished) = match disposition.as_str() {
+            "completed" | "rejected" | "erased" => (ReceiveCoverKind::Terminal, true),
+            "staged" | "held" | "quarantined" => (ReceiveCoverKind::Held, false),
             _ => return Err(StorageError::Integrity("receive cover requires a receipt")),
         };
         if let Some(last) = spans.last_mut() {
@@ -183,12 +186,12 @@ fn load_receipts(
                 .to_seq
                 .checked_add(1)
                 .ok_or(StorageError::Integrity("receive cover interval overflow"))?;
-            if adjacent == seq && last.kind == kind {
+            if adjacent == seq && last.kind == kind && last.finished == finished {
                 last.to_seq = seq;
                 continue;
             }
         }
-        spans.push(ReceiptSpan { from_seq: seq, to_seq: seq, kind });
+        spans.push(ReceiptSpan { from_seq: seq, to_seq: seq, kind, finished });
     }
     Ok(spans)
 }
@@ -334,8 +337,14 @@ fn plan(
     #[derive(Clone)]
     enum Event {
         Gap(ReceiveGapOwned),
-        Live { sequence: u64, kind: ReceiveCoverKind },
-        Stage { sequence: u64 },
+        Live {
+            sequence: u64,
+            kind: ReceiveCoverKind,
+        },
+        /// Unreceipted, staged, held or quarantined: stop before this sequence.
+        Stage {
+            sequence: u64,
+        },
     }
     let receipt_at = |seq: u64| -> Option<ReceiveCoverKind> {
         receipts
@@ -347,6 +356,11 @@ fn plan(
         events.push((g.from_seq, Event::Gap(g)));
     }
     for span in receipts {
+        if !span.finished {
+            // Unfinished receipts stop the plan at their first sequence; W1 must settle them.
+            events.push((span.from_seq, Event::Stage { sequence: span.from_seq }));
+            continue;
+        }
         let mut seq = span.from_seq;
         loop {
             events.push((seq, Event::Live { sequence: seq, kind: span.kind }));

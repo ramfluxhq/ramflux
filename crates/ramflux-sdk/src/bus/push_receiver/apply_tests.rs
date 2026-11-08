@@ -91,6 +91,7 @@ fn snap(db: &AccountDb) -> Result<ReceiveLedgerSnap, StorageError> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn stale_page_suffix_progress() -> Result<(), ApplyError> {
     let harness = open()?;
     let db = &harness.db;
@@ -114,7 +115,25 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
     );
     assert_eq!(snap(db)?, before, "rejecting a stale-C page leaves the suffix unapplied");
 
-    assert_eq!(apply_page(db, expected(db, 10)?, 1, stale)?, ApplyOutcome::Covered { cursor: 20 });
+    // Staged 12 is not finished: the page stops before it, keeps its receipt and work, and
+    // writes no ACK intent. Only the W1 outcome (here completed) lets the same page finish.
+    assert_eq!(
+        apply_page(db, expected(db, 10)?, 1, stale)?,
+        ApplyOutcome::NeedStage { sequence: 12, cursor: 11 }
+    );
+    let held_back = snap(db)?;
+    assert_eq!(held_back.cursor, 11);
+    assert_eq!(
+        held_back.losses,
+        vec![(1, 10, 10, "expired".into()), (11, 11, 1, "expired".into())]
+    );
+    assert_eq!(held_back.receipts, vec![(12, "staged".into())]);
+    assert_eq!(held_back.intents, Vec::<u64>::new());
+    assert_eq!(held_back.work, 1);
+    assert!(!held_back.outbox.is_empty(), "the snapshot carries the gap outbox rows");
+
+    db.set_receipt_disposition_for_test(12, "completed")?;
+    assert_eq!(apply_page(db, expected(db, 11)?, 1, stale)?, ApplyOutcome::Covered { cursor: 20 });
     let once = snap(db)?;
     assert_eq!(once.cursor, 20);
     assert_eq!(
@@ -128,6 +147,7 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
     assert_eq!(once.receipts, Vec::<(u64, String)>::new());
     assert_eq!(once.intents, vec![12]);
     assert_eq!(once.work, 0);
+    assert!(once.outbox.len() > held_back.outbox.len(), "the completed step adds gap outbox rows");
     assert_eq!(
         apply_page(db, expected(db, 20)?, 1, stale)?,
         ApplyOutcome::AlreadyCovered { cursor: 20 }
@@ -147,19 +167,21 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
         validate_point(
             21,
             "t",
-            &ApplyPoint::Gone { seq: 21, observed_issued: 20, reason: "expired" }
+            "e",
+            &ApplyPoint::Gone { seq: 21, observed_issued: 20, reason: "expired", incarnation: "e" }
         ),
         Err(ApplyError::Protocol("receive point gone observed below sequence"))
     ));
     assert!(matches!(
-        validate_point(21, "t", &ApplyPoint::Entry { seq: 22, target: "t" }),
+        validate_point(21, "t", "e", &ApplyPoint::Entry { seq: 22, target: "t", incarnation: "e" }),
         Err(ApplyError::Protocol("receive point sequence mismatch"))
     ));
     assert!(matches!(
         validate_point(
             21,
             "t",
-            &ApplyPoint::Gone { seq: 21, observed_issued: 30, reason: "bogus" }
+            "e",
+            &ApplyPoint::Gone { seq: 21, observed_issued: 30, reason: "bogus", incarnation: "e" }
         ),
         Err(ApplyError::Protocol("receive point gone reason invalid"))
     ));
@@ -169,7 +191,7 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
             expected(db, 20)?,
             1,
             21,
-            ApplyPoint::TooLarge { seq: 21, retain_until: 9_000 },
+            ApplyPoint::TooLarge { seq: 21, retain_until: 9_000, incarnation: "e" },
         )?,
         ApplyOutcome::Covered { cursor: 21 }
     );
@@ -183,7 +205,7 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
             expected(db, 21)?,
             1,
             22,
-            ApplyPoint::Gone { seq: 22, observed_issued: 30, reason: "unknown" },
+            ApplyPoint::Gone { seq: 22, observed_issued: 30, reason: "unknown", incarnation: "e" },
         )?,
         ApplyOutcome::Covered { cursor: 22 }
     );
@@ -191,5 +213,137 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
     assert_eq!(gone.cursor, 22);
     assert!(gone.losses.iter().any(|row| row.0 == 22 && row.3 == "unknown"));
     assert_eq!(gone.intents, vec![12, 21], "gone writes no intent");
+    Ok(())
+}
+
+fn refuses(page: &ApplyPage<'_>, message: &str) {
+    match validate_page(page) {
+        Err(ApplyError::Protocol(got)) => assert_eq!(got, message),
+        other => panic!("expected {message}, got {other:?}"),
+    }
+}
+
+fn loss(from_seq: u64, to_seq: u64, reason: &str) -> ApplyLoss<'_> {
+    ApplyLoss { from_seq, to_seq, reason }
+}
+
+#[test]
+fn validate_page_refuses_each_bound_exactly() {
+    refuses(&page(5, 4, 10, &[], &[], None), "receive page after exceeds covered");
+    refuses(&page(0, 10, 5, &[], &[], None), "receive page covered exceeds issued");
+    refuses(
+        &ApplyPage { settled: 11, ..page(0, 10, 10, &[], &[], None) },
+        "receive page settled exceeds issued",
+    );
+    refuses(&page(0, 10, 10, &[0], &[], None), "receive page entry outside coverage");
+    refuses(&page(0, 10, 10, &[11], &[], None), "receive page entry outside coverage");
+    refuses(&page(1, 10, 10, &[1], &[], None), "receive page entry outside coverage");
+    refuses(&page(0, 10, 10, &[3, 3], &[], None), "receive page entry not sorted unique");
+    refuses(&page(0, 10, 10, &[4, 3], &[], None), "receive page entry not sorted unique");
+    refuses(
+        &page(0, 10, 10, &[], &[loss(0, 3, "expired")], None),
+        "receive page loss outside coverage",
+    );
+    refuses(
+        &page(0, 10, 10, &[], &[loss(1, 11, "expired")], None),
+        "receive page loss outside coverage",
+    );
+    refuses(
+        &page(3, 10, 10, &[], &[loss(3, 4, "expired")], None),
+        "receive page loss outside coverage",
+    );
+    refuses(&page(0, 10, 10, &[], &[loss(5, 4, "expired")], None), "receive page loss inverted");
+    refuses(
+        &page(0, 10, 10, &[], &[loss(1, 5, "expired"), loss(5, 8, "expired")], None),
+        "receive page loss overlap",
+    );
+    refuses(
+        &page(0, 10, 10, &[3], &[loss(1, 5, "expired")], None),
+        "receive page entry overlaps loss",
+    );
+    refuses(
+        &page(0, 10, 10, &[], &[loss(1, 5, "bogus")], None),
+        "receive page loss reason invalid",
+    );
+    refuses(&page(0, 10, 20, &[], &[], Some(12)), "receive page marker invalid");
+    refuses(&page(0, 10, 10, &[], &[], Some(11)), "receive page marker invalid");
+    refuses(
+        &ApplyPage { more: false, ..page(0, 10, 20, &[], &[], None) },
+        "receive page more mismatch",
+    );
+}
+
+#[test]
+fn validate_page_inclusive_boundaries_are_accepted() {
+    assert!(validate_page(&page(0, 1, 5, &[1], &[], None)).is_ok(), "entry at after+1");
+    assert!(validate_page(&page(0, 10, 10, &[10], &[], None)).is_ok(), "entry at covered");
+    let whole = [loss(1, 10, "expired")];
+    assert!(
+        validate_page(&page(0, 10, 10, &[], &whole, None)).is_ok(),
+        "loss exactly (after, covered]"
+    );
+    assert!(
+        validate_point(
+            21,
+            "t",
+            "e",
+            &ApplyPoint::Gone { seq: 21, observed_issued: 21, reason: "expired", incarnation: "e" }
+        )
+        .is_ok(),
+        "observed_issued equal to the requested sequence"
+    );
+}
+
+#[test]
+fn validate_point_refuses_each_mismatch_exactly() {
+    assert!(matches!(
+        validate_point(1, "t", "e", &ApplyPoint::Entry { seq: 1, target: "u", incarnation: "e" }),
+        Err(ApplyError::Protocol("receive point target mismatch"))
+    ));
+    assert!(matches!(
+        validate_point(
+            1,
+            "t",
+            "e",
+            &ApplyPoint::TooLarge { seq: 2, retain_until: 9, incarnation: "e" }
+        ),
+        Err(ApplyError::Protocol("receive point sequence mismatch"))
+    ));
+    assert!(matches!(
+        validate_point(
+            1,
+            "t",
+            "e",
+            &ApplyPoint::Gone { seq: 1, observed_issued: 1, reason: "expired", incarnation: "x" }
+        ),
+        Err(ApplyError::Protocol("receive point incarnation mismatch"))
+    ));
+}
+
+#[test]
+fn point_and_page_mismatches_write_nothing() -> Result<(), ApplyError> {
+    let harness = open()?;
+    let db = &harness.db;
+    let before = snap(db)?;
+    let entry = ApplyPoint::Entry { seq: 1, target: "t", incarnation: "x" };
+    let large = ApplyPoint::TooLarge { seq: 1, retain_until: 9, incarnation: "x" };
+    let gone = ApplyPoint::Gone { seq: 1, observed_issued: 1, reason: "expired", incarnation: "x" };
+    for point in [entry, large, gone] {
+        assert!(matches!(
+            apply_point(db, expected(db, 0)?, 1, 1, point),
+            Err(ApplyError::Protocol("receive point incarnation mismatch"))
+        ));
+    }
+    let wrong_e = ApplyPage { incarnation: "x", ..page(0, 1, 1, &[], &[], None) };
+    assert!(matches!(
+        apply_page(db, expected(db, 0)?, 1, wrong_e),
+        Err(ApplyError::Protocol("receive page incarnation mismatch"))
+    ));
+    let wrong_target = ApplyPage { target: "u", ..page(0, 1, 1, &[], &[], None) };
+    assert!(matches!(
+        apply_page(db, expected(db, 0)?, 1, wrong_target),
+        Err(ApplyError::Protocol("receive page target mismatch"))
+    ));
+    assert_eq!(snap(db)?, before, "refused replies write nothing");
     Ok(())
 }

@@ -189,7 +189,17 @@ impl crate::AccountDb {
             params![target],
             |row| row.get(0),
         )?;
-        Ok(ReceiveLedgerSnap { cursor, losses, receipts, intents, work })
+        // Every runtime_outbox row (gap outbox included), so duplicate effects are visible.
+        let mut outbox = Vec::new();
+        let mut query = self.connection.prepare(
+            "SELECT table_name,change_kind,published,keys_json FROM runtime_outbox ORDER BY keys_json,table_name,change_kind",
+        )?;
+        for row in
+            query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        {
+            outbox.push(row?);
+        }
+        Ok(ReceiveLedgerSnap { cursor, losses, receipts, intents, work, outbox })
     }
 }
 
@@ -202,6 +212,8 @@ pub struct ReceiveLedgerSnap {
     pub receipts: Vec<(u64, String)>,
     pub intents: Vec<u64>,
     pub work: i64,
+    /// `(table_name, change_kind, published, keys_json)` for every `runtime_outbox` row.
+    pub outbox: Vec<(String, String, i64, String)>,
 }
 
 #[cfg(any(test, feature = "test-instrumentation"))]

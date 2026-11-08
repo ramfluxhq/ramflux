@@ -44,12 +44,17 @@ pub(crate) struct ApplyPage<'a> {
 }
 
 /// Exact `FetchEntry` outcome. Reason strings are the wire `snake_case` codes.
+/// Every variant carries the reply's incarnation E, checked against the transaction's E.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApplyPoint<'a> {
-    Entry { seq: u64, target: &'a str },
-    TooLarge { seq: u64, retain_until: i64 },
-    Gone { seq: u64, observed_issued: u64, reason: &'a str },
+    Entry { seq: u64, target: &'a str, incarnation: &'a str },
+    TooLarge { seq: u64, retain_until: i64, incarnation: &'a str },
+    Gone { seq: u64, observed_issued: u64, reason: &'a str, incarnation: &'a str },
 }
+
+/// Known-loss reasons a page may carry; the same allow-list W2 cover enforces.
+const PAGE_LOSS_REASONS: &[&str] =
+    &["expired", "ack_window_overflow", "nacked", "aborted", "oversize", "unknown"];
 
 /// Durable result of one ApplyPage/ApplyPoint call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +96,9 @@ pub(crate) fn validate_page(page: &ApplyPage<'_>) -> Result<(), ApplyError> {
         if loss.to_seq < loss.from_seq {
             return Err(ApplyError::Protocol("receive page loss inverted"));
         }
+        if !PAGE_LOSS_REASONS.contains(&loss.reason) {
+            return Err(ApplyError::Protocol("receive page loss reason invalid"));
+        }
         if loss.from_seq <= last_to {
             return Err(ApplyError::Protocol("receive page loss overlap"));
         }
@@ -125,26 +133,28 @@ pub(crate) fn validate_page(page: &ApplyPage<'_>) -> Result<(), ApplyError> {
 pub(crate) fn validate_point(
     requested: u64,
     target: &str,
+    incarnation: &str,
     point: &ApplyPoint<'_>,
 ) -> Result<(), ApplyError> {
+    let (seq, got_e) = match *point {
+        ApplyPoint::Entry { seq, incarnation, .. }
+        | ApplyPoint::TooLarge { seq, incarnation, .. }
+        | ApplyPoint::Gone { seq, incarnation, .. } => (seq, incarnation),
+    };
+    if seq != requested {
+        return Err(ApplyError::Protocol("receive point sequence mismatch"));
+    }
+    if got_e != incarnation {
+        return Err(ApplyError::Protocol("receive point incarnation mismatch"));
+    }
     match *point {
-        ApplyPoint::Entry { seq, target: got } => {
-            if seq != requested {
-                return Err(ApplyError::Protocol("receive point sequence mismatch"));
-            }
+        ApplyPoint::Entry { target: got, .. } => {
             if got != target {
                 return Err(ApplyError::Protocol("receive point target mismatch"));
             }
         }
-        ApplyPoint::TooLarge { seq, .. } => {
-            if seq != requested {
-                return Err(ApplyError::Protocol("receive point sequence mismatch"));
-            }
-        }
-        ApplyPoint::Gone { seq, observed_issued, reason } => {
-            if seq != requested {
-                return Err(ApplyError::Protocol("receive point sequence mismatch"));
-            }
+        ApplyPoint::TooLarge { .. } => {}
+        ApplyPoint::Gone { observed_issued, reason, .. } => {
             if observed_issued < seq {
                 return Err(ApplyError::Protocol("receive point gone observed below sequence"));
             }
@@ -235,7 +245,7 @@ pub(crate) fn apply_point(
     requested: u64,
     point: ApplyPoint<'_>,
 ) -> Result<ApplyOutcome, ApplyError> {
-    validate_point(requested, expected.target, &point)?;
+    validate_point(requested, expected.target, expected.incarnation, &point)?;
     if expected.cursor.checked_add(1) != Some(requested) {
         return Err(ApplyError::Protocol("receive point sequence mismatch"));
     }
