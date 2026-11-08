@@ -361,6 +361,7 @@ fn pauses_when_slots_are_held_by_other_sequences() -> Result<(), StorageError> {
     assert_eq!(slots(&db)?, 1025, "1,024 other intents plus the covered receipt");
     let pre = snap(&db)?;
     assert_eq!(cover(&db, 1023, 1025, Kind::Terminal, &[gap(1024, 1024)])?, Out::Paused);
+    assert_eq!(cover(&db, 1023, 1025, Kind::CompatTerminal, &[gap(1024, 1024)])?, Out::Paused);
     assert_eq!(snap(&db)?, pre, "paused cover writes no loss, outbox, intent, work, receipt or C");
     assert_eq!(slots(&db)?, 1025, "pause keeps the slot count");
     drop(db);
@@ -450,6 +451,7 @@ fn covers_63_gaps_and_one_live() -> Result<(), StorageError> {
 
 fn refuses_exact_interval_errors() -> Result<(), StorageError> {
     let (root, db) = setup("w2-refusals")?;
+    assert_refused(&db, 0, 1, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
     assert_refused(
         &db,
         0,
@@ -512,6 +514,7 @@ fn refuses_exact_interval_errors() -> Result<(), StorageError> {
     assert_refused(&db, 5, 0, Kind::GapOnly, &[], "receive sequence must be positive")?;
     insert_receipt(&db, 6, "completed")?;
     assert_refused(&db, 5, 6, Kind::Held, &[], "receive cover requires a receipt")?;
+    assert_refused(&db, 5, 5, Kind::CompatTerminal, &[], "receive cover interval outside page")?;
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

@@ -9,8 +9,8 @@
 
 use crate::prelude::*;
 use ramflux_storage::{
-    AccountDb, ProjectionStore, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult,
-    ReceiveExpectation, ReceiveStage, ReceiveStageResult, ReceiveTransaction, StorageError,
+    AccountDb, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveExpectation,
+    ReceiveStage, ReceiveStageResult, ReceiveTransaction, StorageError,
 };
 
 /// Authoritative compat lookup is always `Resume(after=s-1, limit=1)`.
@@ -29,11 +29,9 @@ pub(crate) const FRAME_MAX_BYTES: usize = 1_048_576;
 pub(crate) const CLOCK_SKEW_SECS: i64 = 120;
 const TTL_CAP_SECS: i64 = 604_800;
 const SUSPEND: &str = "gateway/compat-suspended/";
-const PROOF: &str = "gateway/compat-proof/";
 
 /// Envelope identity already on the registered work copy. No extra plaintext.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ContentProof {
     pub envelope_id: String,
     pub payload_hash: String,
@@ -83,13 +81,8 @@ pub(crate) struct CompatExecutor<'a> {
     pub generation: u64,
 }
 
-pub(crate) struct AdmitRequest<'a> {
+pub(crate) struct AdmitRequest {
     pub sequence: u64,
-    pub entry_json: &'a [u8],
-    pub admission_key: &'a str,
-    pub retain_until: i64,
-    pub first_seen: i64,
-    pub proof: ContentProof,
     pub now: i64,
 }
 
@@ -104,10 +97,11 @@ impl CompatExecutor<'_> {
 
     /// W0 must already be open. W1 is the caller's effect; this W2 writes the compat
     /// terminal intent and keeps the registered work as the equality proof.
+    #[allow(clippy::unused_self)]
     pub(crate) fn admit_in(
         &self,
         tx: &ReceiveTransaction<'_>,
-        request: &AdmitRequest<'_>,
+        request: &AdmitRequest,
     ) -> Result<ReceiveCoverResult, SdkError> {
         tx.require_writer()?;
         tx.require_open_input(request.sequence)?;
@@ -120,9 +114,6 @@ impl CompatExecutor<'_> {
             },
             request.now,
         )?;
-        if result == ReceiveCoverResult::Covered {
-            persist_proof(tx.account(), self.expected.target, self.expected.incarnation, request)?;
-        }
         before_commit_fault()?;
         Ok(result)
     }
@@ -130,7 +121,7 @@ impl CompatExecutor<'_> {
     pub(crate) fn admit(
         &self,
         db: &AccountDb,
-        request: &AdmitRequest<'_>,
+        request: &AdmitRequest,
     ) -> Result<ReceiveCoverResult, SdkError> {
         let mut outcome = None;
         let fenced = db.receive_transaction(self.expected, self.generation, |tx| {
@@ -151,50 +142,42 @@ impl CompatExecutor<'_> {
     }
 }
 
-fn persist_proof(
-    db: &AccountDb,
-    target: &str,
-    incarnation: &str,
-    request: &AdmitRequest<'_>,
-) -> Result<(), SdkError> {
-    db.persist_actor_state(&proof_key(target, incarnation, request.sequence), &request.proof)?;
-    Ok(())
-}
-
-fn proof_key(target: &str, incarnation: &str, sequence: u64) -> String {
-    format!("{PROOF}{target}/{incarnation}/{sequence}")
-}
-
 fn suspend_key(target: &str, incarnation: &str, sequence: u64) -> String {
     format!("{SUSPEND}{target}/{incarnation}/{sequence}")
 }
 
+fn add_ts(base: i64, delta: i64) -> Result<i64, SdkError> {
+    base.checked_add(delta).ok_or_else(|| SdkError::LocalBus("compat timestamp overflow".into()))
+}
+
 /// Conservative `retain_until` when the old node omitted the router deadline (§2.3).
+/// Clock lag is local receive time minus router acceptance time.
 pub(crate) fn fallback_deadline(
-    created_at: i64,
+    router_accepted_at: i64,
     envelope_ttl: i64,
     first_seen: i64,
-    now: i64,
     router_retain: Option<i64>,
-) -> FallbackDeadline {
+) -> Result<FallbackDeadline, SdkError> {
     if let Some(expires_at) = router_retain {
-        return FallbackDeadline {
+        return Ok(FallbackDeadline {
             expires_at,
             fallback_clock_unverified: false,
             guaranteed_retirement: true,
-        };
+        });
     }
     let ttl_cap = envelope_ttl.clamp(0, TTL_CAP_SECS);
-    let router_cap = created_at.saturating_add(ttl_cap);
-    let from_seen = first_seen.saturating_add(TTL_CAP_SECS).saturating_add(CLOCK_SKEW_SECS);
+    let router_cap = add_ts(router_accepted_at, ttl_cap)?;
+    let from_seen = add_ts(add_ts(first_seen, TTL_CAP_SECS)?, CLOCK_SKEW_SECS)?;
     let expires_at = router_cap.min(from_seen);
-    let lag = now.saturating_sub(created_at);
+    let lag = first_seen
+        .checked_sub(router_accepted_at)
+        .ok_or_else(|| SdkError::LocalBus("compat timestamp overflow".into()))?;
     let unverified = lag > CLOCK_SKEW_SECS;
-    FallbackDeadline {
+    Ok(FallbackDeadline {
         expires_at,
         fallback_clock_unverified: unverified,
         guaranteed_retirement: !unverified && expires_at >= router_cap,
-    }
+    })
 }
 
 pub(crate) fn start_session() -> CompatSession {
@@ -202,13 +185,17 @@ pub(crate) fn start_session() -> CompatSession {
 }
 
 /// Frame-size fallback: 64 → retire session → sticky limit 1. A single entry still
-/// over F pauses with `legacy_entry_too_large` and does not reconnect.
+/// over F pauses with `legacy_entry_too_large` and does not reconnect. Limit-1 with
+/// more than one entry is a protocol error and blocks later Accept.
 pub(crate) fn on_legacy_frame(
     session: &mut CompatSession,
     bytes: usize,
     entries: u32,
     _cursor: u64,
 ) -> FrameOutcome {
+    if let Some(reason) = session.paused_reason {
+        return FrameOutcome::Pause { reason };
+    }
     if bytes <= FRAME_MAX_BYTES {
         return FrameOutcome::Accept { limit: session.limit };
     }
@@ -221,7 +208,8 @@ pub(crate) fn on_legacy_frame(
         session.paused_reason = Some("legacy_entry_too_large");
         return FrameOutcome::Pause { reason: "legacy_entry_too_large" };
     }
-    FrameOutcome::RetryFresh { limit: FRAME_LIMIT_FALLBACK }
+    session.paused_reason = Some("legacy_frame_protocol");
+    FrameOutcome::Pause { reason: "legacy_frame_protocol" }
 }
 
 /// Proof-gated legacy ACK. Sequence equality alone never authorizes.
@@ -236,12 +224,14 @@ pub(crate) fn authorize_legacy_ack(
     if sequence_alone() {
         return Ok(AckDecision::Authorize);
     }
+    let local = load_proof(db, target, incarnation, sequence)?;
     match lookup {
         LookupReply::Timeout | LookupReply::FrameTooLarge { .. } => Ok(AckDecision::RetainBackoff),
         LookupReply::Empty { first_seq } => {
-            if capable_e == Some(incarnation) && first_seq.is_none_or(|first| first > sequence) {
+            let first_after = first_seq.is_none_or(|first| first > sequence);
+            if first_after && (local.is_some() || capable_e == Some(incarnation)) {
                 Ok(AckDecision::SettleAbsent)
-            } else if capable_e.is_none() {
+            } else if local.is_none() && capable_e.is_none() {
                 suspend(db, target, incarnation, sequence)?;
                 Ok(AckDecision::Suspend)
             } else {
@@ -252,7 +242,6 @@ pub(crate) fn authorize_legacy_ack(
             if *seq != sequence {
                 return Ok(AckDecision::RetainBackoff);
             }
-            let local = load_proof(db, target, incarnation, sequence)?;
             let e_ok =
                 capable_e == Some(incarnation) || reply_e.is_some_and(|got| got == incarnation);
             match local {
@@ -278,23 +267,9 @@ fn load_proof(
     incarnation: &str,
     sequence: u64,
 ) -> Result<Option<ContentProof>, SdkError> {
-    if let Some(proof) = db.load_actor_state(&proof_key(target, incarnation, sequence))? {
-        return Ok(Some(proof));
-    }
-    let Some(bytes) = db.receive_work_json(target, incarnation, sequence)? else {
-        return Ok(None);
-    };
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| StorageError::Integrity("compat work encoding"))?;
-    let envelope = value.get("envelope").unwrap_or(&value);
-    let envelope_id = envelope.get("envelope_id").and_then(serde_json::Value::as_str);
-    let payload_hash = envelope.get("payload_hash").and_then(serde_json::Value::as_str);
-    match (envelope_id, payload_hash) {
-        (Some(envelope_id), Some(payload_hash)) => Ok(Some(ContentProof {
-            envelope_id: envelope_id.to_owned(),
-            payload_hash: payload_hash.to_owned(),
-        })),
-        _ => Ok(None),
+    match db.receive_work_content_proof(target, incarnation, sequence)? {
+        Some((envelope_id, payload_hash)) => Ok(Some(ContentProof { envelope_id, payload_hash })),
+        None => Ok(None),
     }
 }
 
@@ -311,21 +286,6 @@ pub(crate) fn resume_same_e(
     sequence: u64,
 ) -> Result<(), SdkError> {
     db.remove_actor_state(&suspend_key(target, incarnation, sequence))?;
-    Ok(())
-}
-
-/// First-leg U→E / new-E: drop terminal compat rows. Held work without intent stays.
-/// Caller supplies settled S; C is written here as the local subset P10 later owns.
-pub(crate) fn reset_compat_incarnation(
-    tx: &ReceiveTransaction<'_>,
-    target: &str,
-    settled: u64,
-) -> Result<(), StorageError> {
-    tx.release_compat_on_reset()?;
-    tx.account().set_projection_checkpoint(
-        &format!("gateway_receive_cursor:{target}"),
-        &settled.to_string(),
-    )?;
     Ok(())
 }
 

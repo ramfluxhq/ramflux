@@ -144,6 +144,19 @@ impl crate::AccountDb {
         Ok(())
     }
 
+    /// Test support: drop the registered work copy (erasure) without touching the receipt.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn erase_receive_work_for_test(&self, sequence: u64) -> Result<(), StorageError> {
+        let seq = sequence.to_be_bytes();
+        self.connection.execute(
+            "DELETE FROM gateway_receive_work WHERE inbox_seq=?1",
+            params![seq.as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// Test support: overwrite staged work `byte_len` without a multi-MiB payload.
     ///
     /// # Errors
@@ -156,6 +169,23 @@ impl crate::AccountDb {
         self.connection.execute(
             "UPDATE gateway_receive_work SET entry_json=zeroblob(?1), byte_len=?1 WHERE inbox_seq=?2",
             params![byte_len, sequence.to_be_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Test support: replace stored work bytes so proof parsing can be refused.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn overwrite_receive_work_json_for_test(
+        &self,
+        entry_json: &[u8],
+    ) -> Result<(), StorageError> {
+        let byte_len = i64::try_from(entry_json.len())
+            .map_err(|_| StorageError::Integrity("compat work encoding"))?;
+        self.connection.execute(
+            "UPDATE gateway_receive_work SET entry_json=?1, byte_len=?2",
+            params![entry_json, byte_len],
         )?;
         Ok(())
     }
@@ -203,6 +233,21 @@ impl crate::AccountDb {
             params![live],
         )?;
         self.set_projection_checkpoint(&format!("gateway_receive_cursor:{target}"), "0")?;
+        Ok(())
+    }
+
+    /// Test support: mark the live epoch as unverified U for a U→E reset.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn mark_receive_incarnation_unverified_for_test(
+        &self,
+        target: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE gateway_receive_epoch SET incarnation_verified=0 WHERE target_delivery_id=?1",
+            params![target],
+        )?;
         Ok(())
     }
 

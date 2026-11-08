@@ -242,13 +242,20 @@ impl ReceiveTransaction<'_> {
         self.cleanup_settled(sequence)
     }
 
-    /// Compat W2: intent without releasing the proof copy (work + receipt stay until WA/reset).
+    /// Compat W2: intent + terminal receipt, keep the work copy until WA or P10 reset.
     pub(crate) fn finish_compat_terminal(
         &self,
         sequence: u64,
         now: i64,
     ) -> Result<(), StorageError> {
-        self.insert_ack_intent(sequence, now, now.saturating_add(604_800))
+        self.insert_ack_intent(sequence, now, now.saturating_add(604_800))?;
+        let seq = sequence.to_be_bytes();
+        self.db.connection.execute(
+            "UPDATE gateway_receive_receipt SET disposition='completed'
+             WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+            params![self.target, self.incarnation, seq.as_slice()],
+        )?;
+        Ok(())
     }
 
     fn insert_ack_intent(
@@ -470,26 +477,39 @@ impl crate::AccountDb {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(StorageError::from)
     }
 
-    /// Registered receive-work bytes used as the compat content-equality proof.
+    /// Envelope identity on the registered work copy. Missing work is `None`; a present
+    /// row without `envelope.envelope_id` and `envelope.payload_hash` is a protocol error.
     ///
     /// # Errors
-    /// Returns SQL errors.
-    pub fn receive_work_json(
+    /// Returns SQL errors and `compat work encoding` when the stored bytes are not a
+    /// wrapped envelope identity.
+    pub fn receive_work_content_proof(
         &self,
         target: &str,
         incarnation: &str,
         sequence: u64,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
+    ) -> Result<Option<(String, String)>, StorageError> {
         let seq = sequence.to_be_bytes();
-        Ok(self
+        let found = self
             .connection
             .query_row(
-                "SELECT entry_json FROM gateway_receive_work
+                "SELECT json_extract(CAST(entry_json AS TEXT),'$.envelope.envelope_id'),
+                        json_extract(CAST(entry_json AS TEXT),'$.envelope.payload_hash')
+                 FROM gateway_receive_work
                  WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
                 params![target, incarnation, seq.as_slice()],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
             )
-            .optional()?)
+            .optional()?;
+        match found {
+            None => Ok(None),
+            Some((Some(envelope_id), Some(payload_hash)))
+                if !envelope_id.is_empty() && !payload_hash.is_empty() =>
+            {
+                Ok(Some((envelope_id, payload_hash)))
+            }
+            Some(_) => Err(StorageError::Integrity("compat work encoding")),
+        }
     }
 }
 

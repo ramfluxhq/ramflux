@@ -19,17 +19,13 @@ fn count(db: &rusqlite::Connection, prefix: &str) -> Result<i64, StorageError> {
 }
 
 fn seed(db: &AccountDb) -> Result<(), StorageError> {
-    db.persist_actor_state(
-        &format!("{PROOF}t/e/1"),
-        &json!({"envelope_id": "e1", "payload_hash": "p"}),
-    )?;
     db.persist_actor_state(&format!("{SUSPEND}t/e/1"), &json!("incarnation_unverified"))?;
     db.persist_actor_state("surface/compat-proof/leaked", &json!({"envelope_id": "leak"}))?;
     Ok(())
 }
 
 fn assert_absent(db: &rusqlite::Connection, label: &str) -> Result<(), StorageError> {
-    assert_eq!(count(db, PROOF)?, 0, "{label} must strip compat proof");
+    assert_eq!(count(db, PROOF)?, 0, "{label} must not carry a compat proof copy");
     assert_eq!(count(db, SUSPEND)?, 0, "{label} must strip compat suspend");
     Ok(())
 }
@@ -38,15 +34,16 @@ fn assert_absent(db: &rusqlite::Connection, label: &str) -> Result<(), StorageEr
 fn compat_backup_exclusion() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("compat-backup")?;
     seed(&db)?;
-    assert_eq!(db.actor_state_usage(PROOF)?.0, 1);
+    assert_eq!(db.actor_state_usage(PROOF)?.0, 0, "executor never writes a second proof copy");
     db.retire_outbound_for_recovery("recovery-head")?;
-    assert_eq!(db.actor_state_usage(PROOF)?.0, 1, "live recovery keeps pending compat proof");
+    assert_eq!(db.actor_state_usage(PROOF)?.0, 0, "live recovery still has no proof copy");
     assert_eq!(db.actor_state_usage(SUSPEND)?.0, 1, "live recovery keeps suspend markers");
 
     let incoming = root.join("incoming.db");
     let snapshot = db.write_backup_snapshot(&incoming)?;
     let file = BackupDatabase::open(&incoming, &snapshot.key)?;
-    assert_eq!(count(&file.db, PROOF)?, 1, "page copy still holds the proof");
+    assert_eq!(count(&file.db, PROOF)?, 0, "page copy has no second proof copy");
+    assert_eq!(count(&file.db, SUSPEND)?, 1, "page copy still holds the suspend marker");
     drop(file);
 
     let published = root.join("published.db");

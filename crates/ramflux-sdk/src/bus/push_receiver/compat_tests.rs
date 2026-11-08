@@ -5,15 +5,16 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use super::{
-    AckDecision, AdmitRequest, CLOCK_SKEW_SECS, CompatExecutor, ContentProof, FRAME_LIMIT_FALLBACK,
+    AckDecision, AdmitRequest, CLOCK_SKEW_SECS, CompatExecutor, FRAME_LIMIT_FALLBACK,
     FRAME_LIMIT_INITIAL, FRAME_MAX_BYTES, FrameOutcome, LOOKUP_LIMIT, LookupReply, SWEEP_SECS,
-    TURN_INTENTS, authorize_legacy_ack, fallback_deadline, on_legacy_frame,
-    reset_compat_incarnation, resume_same_e, start_session,
+    TURN_INTENTS, authorize_legacy_ack, fallback_deadline, on_legacy_frame, resume_same_e,
+    start_session,
 };
 use crate::prelude::SdkError;
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult,
-    ReceiveExpectation, ReceiveLedgerSnap, ReceiveStage, ReceiveStageResult, StorageError,
+    ReceiveExpectation, ReceiveLedgerSnap, ReceiveReset, ReceiveResetReason, ReceiveResetResult,
+    ReceiveStage, ReceiveStageResult, StorageError,
 };
 use std::time::Duration;
 
@@ -78,10 +79,6 @@ fn wire(seq: u64, envelope_id: &str) -> Vec<u8> {
     .expect("entry")
 }
 
-fn proof(envelope_id: &str) -> ContentProof {
-    ContentProof { envelope_id: envelope_id.to_owned(), payload_hash: "hash".into() }
-}
-
 fn stage(
     db: &AccountDb,
     cursor: u64,
@@ -104,17 +101,8 @@ fn stage(
     Ok(())
 }
 
-fn admit(db: &AccountDb, cursor: u64, sequence: u64, envelope_id: &str) -> Result<(), SdkError> {
-    let bytes = wire(sequence, envelope_id);
-    let request = AdmitRequest {
-        sequence,
-        entry_json: &bytes,
-        admission_key: "authenticated-key",
-        retain_until: 100,
-        first_seen: 1,
-        proof: proof(envelope_id),
-        now: 10,
-    };
+fn admit(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), SdkError> {
+    let request = AdmitRequest { sequence, now: 10 };
     let result = executor(db, cursor)?.admit(db, &request)?;
     assert_eq!(result, ReceiveCoverResult::Covered);
     Ok(())
@@ -124,54 +112,53 @@ fn snap(db: &AccountDb) -> Result<ReceiveLedgerSnap, StorageError> {
     db.receive_ledger_snap_for_test("t")
 }
 
-#[test]
-fn compat_intent_transition() -> Result<(), SdkError> {
-    let _hang = hang_guard();
-    assert_eq!(LOOKUP_LIMIT, 1);
-    assert_eq!(TURN_INTENTS, 16);
-    assert_eq!(SWEEP_SECS, 5);
+fn due_retained(db: &AccountDb, cursor: u64) -> Result<Vec<u64>, StorageError> {
+    db.receive_transaction(expected(db, cursor)?, 1, |tx| tx.due_retained(64))
+}
 
-    let harness = open()?;
-    let db = &harness.db;
+fn proof_rows(db: &AccountDb) -> Result<u64, StorageError> {
+    Ok(db.actor_state_usage("gateway/compat-proof/")?.0)
+}
+
+fn entry<'a>(seq: u64, envelope_id: &'a str, payload_hash: &'a str) -> LookupReply<'a> {
+    LookupReply::Entry { seq, envelope_id, payload_hash, incarnation: None }
+}
+
+fn cut_admit_ack(db: &AccountDb) -> Result<(), SdkError> {
     stage(db, 0, 1, "env-1")?;
-    admit(db, 0, 1, "env-1")?;
+    admit(db, 0, 1)?;
     let after_admit = snap(db)?;
     assert_eq!(after_admit.cursor, 1);
     assert_eq!(after_admit.work, 1, "compat W2 keeps the registered proof copy");
-    assert_eq!(after_admit.receipts.len(), 1);
+    assert_eq!(after_admit.receipts, vec![(1, "completed".into())]);
     assert_eq!(after_admit.intents, vec![1]);
-
-    let lookup = LookupReply::Entry {
-        seq: 1,
-        envelope_id: "env-1",
-        payload_hash: "hash",
-        incarnation: None,
-    };
+    assert!(due_retained(db, 1)?.is_empty(), "WS skips terminal compat rows");
+    assert_eq!(proof_rows(db)?, 0, "equality proof is the work row, not actor state");
     assert_eq!(
-        authorize_legacy_ack(db, "t", "e", 1, None, &lookup)?,
+        authorize_legacy_ack(db, "t", "e", 1, None, &entry(1, "env-1", "hash"))?,
         AckDecision::Authorize,
         "content equality authorizes"
     );
     assert_eq!(snap(db)?, after_admit, "ACK before WA retains work, receipt, intent and C");
-
-    let reused = LookupReply::Entry {
-        seq: 1,
-        envelope_id: "env-reused",
-        payload_hash: "other",
-        incarnation: None,
-    };
     assert_eq!(
-        authorize_legacy_ack(db, "t", "e", 1, None, &reused)?,
+        authorize_legacy_ack(db, "t", "e", 1, None, &entry(1, "env-reused", "other"))?,
         AckDecision::RefuseSequenceAlone,
         "sequence alone never ACKs unseen reused content"
     );
-
+    assert_eq!(
+        authorize_legacy_ack(db, "t", "e", 1, None, &LookupReply::Empty { first_seq: None })?,
+        AckDecision::SettleAbsent,
+        "crash after ACK: empty lookup with local proof settles absent"
+    );
     assert_eq!(
         authorize_legacy_ack(db, "t", "e", 1, Some("e"), &LookupReply::Empty { first_seq: None })?,
         AckDecision::SettleAbsent,
         "same-E empty lookup settles absence"
     );
+    Ok(())
+}
 
+fn cut_reset_releases_terminal(db: &AccountDb) -> Result<(), SdkError> {
     stage(db, 1, 2, "env-2")?;
     db.receive_transaction(expected(db, 1)?, 1, |tx| {
         tx.cover(ReceiveCover {
@@ -181,44 +168,78 @@ fn compat_intent_transition() -> Result<(), SdkError> {
             retain_until: 0,
         })
     })?;
-    let before_reset = snap(db)?;
-    assert_eq!(before_reset.work, 2, "held work plus terminal proof");
-    db.receive_transaction(expected(db, 2)?, 1, |tx| reset_compat_incarnation(tx, "t", 30))?;
+    assert_eq!(snap(db)?.work, 2, "held work plus terminal proof");
+    db.mark_receive_incarnation_unverified_for_test("t")?;
+    let reset_out = db.receive_transaction(expected(db, 2)?, 1, |tx| {
+        tx.reset(ReceiveReset {
+            new_incarnation: "e2",
+            settled: 30,
+            issued: 30,
+            after: 0,
+            reason: ReceiveResetReason::IncarnationFirstVerified,
+        })
+    })?;
+    assert_eq!(reset_out, ReceiveResetResult::Reset);
     let after_reset = snap(db)?;
     assert!(after_reset.intents.is_empty(), "reset drops terminal intents");
     assert_eq!(after_reset.work, 1, "held work retained");
-    assert_eq!(after_reset.receipts.len(), 1, "held receipt retained");
+    assert_eq!(
+        after_reset.receipts,
+        vec![(2, "held".into())],
+        "P10 reset releases terminal compat"
+    );
     assert_eq!(after_reset.cursor, 30, "reset C=S");
+    Ok(())
+}
 
+fn cut_erasure_refuses_ack() -> Result<(), SdkError> {
+    let harness = open()?;
+    let db = &harness.db;
+    stage(db, 0, 1, "env-1")?;
+    admit(db, 0, 1)?;
+    db.erase_receive_work_for_test(1)?;
+    assert_eq!(
+        authorize_legacy_ack(db, "t", "e", 1, None, &entry(1, "env-1", "hash"))?,
+        AckDecision::Suspend,
+        "legacy ACK after erasure is refused"
+    );
+    Ok(())
+}
+
+fn cut_strict_proof_parse() -> Result<(), SdkError> {
+    let harness = open()?;
+    let db = &harness.db;
+    stage(db, 0, 1, "env-1")?;
+    admit(db, 0, 1)?;
+    db.overwrite_receive_work_json_for_test(br#"{"envelope_id":"x","payload_hash":"y"}"#)?;
+    match authorize_legacy_ack(db, "t", "e", 1, None, &entry(1, "x", "y")) {
+        Err(SdkError::Storage(StorageError::Integrity("compat work encoding"))) => {}
+        other => panic!("strict proof parse, got {other:?}"),
+    }
+    Ok(())
+}
+
+fn cut_turn_scan() -> Result<(), SdkError> {
     let harness = open()?;
     let db = &harness.db;
     for seq in 1..=17 {
         stage(db, seq - 1, seq, &format!("env-{seq}"))?;
-        admit(db, seq - 1, seq, &format!("env-{seq}"))?;
+        admit(db, seq - 1, seq)?;
     }
     let due = db.due_ack_intents("t", "e", 10, TURN_INTENTS)?;
     assert_eq!(due.len(), 16, "one turn scans 16");
     assert_eq!(due[0], 1);
     assert_eq!(due[15], 16);
-    let rest = db.due_ack_intents("t", "e", 10, 32)?;
-    assert_eq!(rest.len(), 17);
+    assert_eq!(db.due_ack_intents("t", "e", 10, 32)?.len(), 17);
+    assert!(due_retained(db, 17)?.is_empty(), "seventeen terminal compat rows are not WS work");
+    Ok(())
+}
 
+fn cut_proofless_suspend() -> Result<(), SdkError> {
     let harness = open()?;
     let db = &harness.db;
     assert_eq!(
-        authorize_legacy_ack(
-            db,
-            "t",
-            "e",
-            9,
-            None,
-            &LookupReply::Entry {
-                seq: 9,
-                envelope_id: "ghost",
-                payload_hash: "hash",
-                incarnation: None
-            }
-        )?,
+        authorize_legacy_ack(db, "t", "e", 9, None, &entry(9, "ghost", "hash"))?,
         AckDecision::Suspend
     );
     resume_same_e(db, "t", "e", 9)?;
@@ -227,56 +248,108 @@ fn compat_intent_transition() -> Result<(), SdkError> {
 }
 
 #[test]
-fn legacy_deadline_clock_skew() {
+fn compat_intent_transition() -> Result<(), SdkError> {
     let _hang = hang_guard();
-    let created = 1_000;
+    assert_eq!(LOOKUP_LIMIT, 1);
+    assert_eq!(TURN_INTENTS, 16);
+    assert_eq!(SWEEP_SECS, 5);
+    let harness = open()?;
+    cut_admit_ack(&harness.db)?;
+    cut_reset_releases_terminal(&harness.db)?;
+    cut_erasure_refuses_ack()?;
+    cut_strict_proof_parse()?;
+    cut_turn_scan()?;
+    cut_proofless_suspend()?;
+    Ok(())
+}
+
+#[test]
+fn legacy_deadline_clock_skew() -> Result<(), SdkError> {
+    let _hang = hang_guard();
+    let accepted = 1_000;
     let ttl = 100;
-    let first_seen = 1_000;
-    let router_cap = created + ttl;
-    let at_lag = fallback_deadline(created, ttl, first_seen, created + CLOCK_SKEW_SECS, None);
+    let router_cap = accepted + ttl;
+    let at_lag = fallback_deadline(accepted, ttl, accepted + CLOCK_SKEW_SECS, None)?;
     assert_eq!(at_lag.expires_at, router_cap, "lag 120s fallback is not earlier than router cap");
     assert!(!at_lag.fallback_clock_unverified);
     assert!(at_lag.guaranteed_retirement);
 
-    let over = fallback_deadline(created, ttl, first_seen, created + CLOCK_SKEW_SECS + 1, None);
+    let over = fallback_deadline(accepted, ttl, accepted + CLOCK_SKEW_SECS + 1, None)?;
     assert!(over.fallback_clock_unverified);
     assert!(!over.guaranteed_retirement, "lag>120s never claims guaranteed retirement");
 
-    let supplied = fallback_deadline(created, ttl, first_seen, created + 1_000, Some(9_999));
+    let first_seen = 1_000i64;
+    let bound = fallback_deadline(first_seen + CLOCK_SKEW_SECS, 604_800, first_seen, None)?;
+    assert_eq!(
+        bound.expires_at,
+        first_seen + 604_800 + CLOCK_SKEW_SECS,
+        "first_seen+604800+120 is the binding minimum"
+    );
+
+    let supplied = fallback_deadline(accepted, ttl, accepted + 1_000, Some(9_999))?;
     assert_eq!(supplied.expires_at, 9_999);
     assert!(!supplied.fallback_clock_unverified);
     assert!(supplied.guaranteed_retirement);
+
+    assert!(
+        fallback_deadline(i64::MAX, 1, i64::MAX, None).is_err(),
+        "checked add refuses overflow"
+    );
+    Ok(())
 }
 
 #[test]
-fn compat_frame_limit_fallback() {
+fn compat_frame_limit_fallback() -> Result<(), SdkError> {
     let _hang = hang_guard();
     let mut session = start_session();
-    let covered = 7u64;
     assert_eq!(session.limit, FRAME_LIMIT_INITIAL);
     let oversize_page = FRAME_MAX_BYTES + 1;
     assert_eq!(
-        on_legacy_frame(&mut session, oversize_page, 64, covered),
+        on_legacy_frame(&mut session, oversize_page, 64, 0),
         FrameOutcome::RetryFresh { limit: FRAME_LIMIT_FALLBACK }
     );
     assert_eq!(session.limit, FRAME_LIMIT_FALLBACK);
     assert_eq!(session.reconnects, 1);
     assert_eq!(
-        on_legacy_frame(&mut session, 1_024, 1, covered),
+        on_legacy_frame(&mut session, 1_024, 1, 0),
         FrameOutcome::Accept { limit: FRAME_LIMIT_FALLBACK }
     );
 
-    let mut stuck = start_session();
+    let mut protocol = start_session();
     assert_eq!(
-        on_legacy_frame(&mut stuck, oversize_page, 64, covered),
+        on_legacy_frame(&mut protocol, oversize_page, 64, 0),
         FrameOutcome::RetryFresh { limit: FRAME_LIMIT_FALLBACK }
     );
-    let before = stuck.reconnects;
+    let before = protocol.reconnects;
     assert_eq!(
-        on_legacy_frame(&mut stuck, oversize_page, 1, covered),
+        on_legacy_frame(&mut protocol, oversize_page, 2, 0),
+        FrameOutcome::Pause { reason: "legacy_frame_protocol" }
+    );
+    assert_eq!(protocol.paused_reason, Some("legacy_frame_protocol"));
+    assert_eq!(protocol.reconnects, before, "protocol error does not reconnect");
+    assert_eq!(
+        on_legacy_frame(&mut protocol, 1_024, 1, 0),
+        FrameOutcome::Pause { reason: "legacy_frame_protocol" },
+        "paused_reason blocks a later Accept"
+    );
+
+    let harness = open()?;
+    let db = &harness.db;
+    for seq in 1..=7 {
+        stage(db, seq - 1, seq, &format!("env-{seq}"))?;
+        admit(db, seq - 1, seq)?;
+    }
+    assert_eq!(snap(db)?.cursor, 7);
+    let mut stuck = start_session();
+    assert_eq!(
+        on_legacy_frame(&mut stuck, oversize_page, 64, 7),
+        FrameOutcome::RetryFresh { limit: FRAME_LIMIT_FALLBACK }
+    );
+    assert_eq!(
+        on_legacy_frame(&mut stuck, oversize_page, 1, 7),
         FrameOutcome::Pause { reason: "legacy_entry_too_large" }
     );
     assert_eq!(stuck.paused_reason, Some("legacy_entry_too_large"));
-    assert_eq!(stuck.reconnects, before, "paused single entry does not reconnect");
-    assert_eq!(covered, 7, "pause keeps C fixed");
+    assert_eq!(snap(db)?.cursor, 7, "pause keeps C fixed");
+    Ok(())
 }
