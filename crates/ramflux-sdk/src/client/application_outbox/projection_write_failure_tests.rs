@@ -350,7 +350,9 @@ fn projection_write_failure() -> Result<(), SdkError> {
     erase_bound_row(&fixture.client)?;
     join_stage_and_admit(&mut fixture.client)?;
     drain_seventy(&mut fixture.client)?;
-    cap_full(&mut fixture.client)?;
+    // Fresh fixture: `work` counts every receive row, so the cap check needs an isolated account.
+    let mut cap = Fixture::new()?;
+    cap_full(&mut cap.client)?;
     Ok(())
 }
 
@@ -398,11 +400,10 @@ fn erase_bound_row(client: &RamfluxClient) -> Result<(), SdkError> {
         !db.actor_state_exists(&format!("{PUBLISHED}{key}"))?,
         "erase of the bound message must drop the published marker"
     );
-    let readmit = gate(db)?.admit(db, &req(client, ESEQ, &key, &entry));
-    match readmit {
-        Ok(Admit::Admitted | Admit::Duplicate) | Err(_) => {}
-        Ok(Admit::OutboxFull) => panic!("readmit after erase must not fill the outbox"),
-    }
+    assert_integrity(
+        gate(db)?.admit(db, &req(client, ESEQ, &key, &entry)),
+        "application projection receipt missing",
+    );
     assert!(
         !db.actor_state_exists(&format!("{OUTBOX}{key}"))?,
         "re-admitting a deleted message must leave the outbox row absent"
@@ -463,7 +464,9 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
 fn drain_seventy(client: &mut RamfluxClient) -> Result<(), SdkError> {
     const BASE: u64 = 20;
     stage(client, BASE)?;
-    let before = client.account_db()?.actor_state_usage(OUTBOX)?.0;
+    // Rows left by earlier rows of this test are published to a scratch page so the counts below are exact.
+    replay(client.account_db()?, &mut Vec::new())?;
+    assert_eq!(client.account_db()?.actor_state_usage(OUTBOX)?.0, 0);
     for index in 0..70u32 {
         let entry = inbox(&format!("burst-{index}"), BASE);
         persist_receipt(client, &entry, MESSAGE)?;
@@ -474,15 +477,30 @@ fn drain_seventy(client: &mut RamfluxClient) -> Result<(), SdkError> {
             Admit::Admitted
         );
     }
-    assert_eq!(client.account_db()?.actor_state_usage(OUTBOX)?.0, before + 70);
+    assert_eq!(client.account_db()?.actor_state_usage(OUTBOX)?.0, 70);
     let mut ram = Vec::new();
     replay(client.account_db()?, &mut ram)?;
+    assert_eq!(ram.len(), 64, "first replay publishes only the free page capacity");
+    assert_eq!(
+        client.account_db()?.actor_state_usage(OUTBOX)?.0,
+        6,
+        "the 6 rows beyond the page stay durable"
+    );
+    let mut published: Vec<String> = ram.iter().map(|e| e.envelope.envelope_id.clone()).collect();
+    ram.clear(); // the consumer drains the RAM page
+    replay(client.account_db()?, &mut ram)?;
+    assert_eq!(ram.len(), 6, "second replay publishes the remaining 6");
     assert_eq!(
         client.account_db()?.actor_state_usage(OUTBOX)?.0,
         0,
-        "every pending outbox row including the 70 is acknowledged"
+        "every pending outbox row is acknowledged once published"
     );
-    assert!(ram.len() <= 64);
+    published.extend(ram.iter().map(|e| e.envelope.envelope_id.clone()));
+    let expected: std::collections::BTreeSet<String> =
+        (0..70u32).map(|index| format!("burst-{index}")).collect();
+    let got: std::collections::BTreeSet<String> = published.iter().cloned().collect();
+    assert_eq!(published.len(), 70, "no event is duplicated");
+    assert_eq!(got, expected, "no event is lost");
     let mut again = ram.clone();
     replay(client.account_db()?, &mut again)?;
     assert_eq!(again, ram, "republish after ack publishes nothing");
@@ -512,7 +530,6 @@ fn cap_full(client: &mut RamfluxClient) -> Result<(), SdkError> {
     let extra = inbox("cap-extra", CAP_SEQ);
     persist_receipt(client, &extra, MESSAGE)?;
     let extra_key = auth_key(&extra);
-    let pre = snap(client, &extra, CAP_SEQ)?;
     assert_eq!(
         gate(client.account_db()?)?
             .admit(client.account_db()?, &req(client, CAP_SEQ, &extra_key, &extra))?,
@@ -521,12 +538,8 @@ fn cap_full(client: &mut RamfluxClient) -> Result<(), SdkError> {
     let held = snap(client, &extra, CAP_SEQ)?;
     assert!(held.outbox.is_none(), "the 257th row must not be admitted");
     assert!(!held.projected);
-    assert_eq!(held.work, pre.work.max(1));
-    assert!(
-        matches!(held.disposition.as_deref(), Some("staged" | "held")),
-        "W0 stays on OutboxFull, got {:?}",
-        held.disposition
-    );
+    assert_eq!(held.disposition.as_deref(), Some("held"), "OutboxFull holds W0");
+    assert_eq!(held.work, 1, "OutboxFull keeps exactly one held receive");
     assert!(!held.ack, "OutboxFull must not ACK");
     Ok(())
 }

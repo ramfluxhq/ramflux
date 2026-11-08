@@ -35,6 +35,8 @@ pub(crate) const MAX_OUTBOX: u32 = 256;
 pub(crate) const OUTBOX: &str = "gateway/application-outbox/";
 /// Survives `acknowledge` so a drained event is never admitted again.
 pub(crate) const PUBLISHED: &str = "gateway/application-published/";
+/// RAM page capacity. Replay never publishes past it, so no durable row is dropped from RAM.
+const RAM_PAGE_CAP: usize = 64;
 
 /// Envelope identity already persisted on the committed receipt. No extra plaintext.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -200,8 +202,10 @@ fn transfer(
     if newly { Ok(Admit::Admitted) } else { Ok(Admit::Duplicate) }
 }
 
-/// Rebuilds the RAM page from durable outbox rows. Each published row is acknowledged in its
-/// own small transaction so a later replay never republishes it.
+/// Rebuilds the RAM page from durable outbox rows, in key order, publishing at most
+/// `RAM_PAGE_CAP - pending.len()` events. Rows beyond the free capacity stay durable for the
+/// next replay. Each published row is acknowledged in its own small transaction so a later
+/// replay never republishes it.
 pub(crate) fn replay(db: &AccountDb, pending: &mut Vec<GatewayInboxEntry>) -> Result<(), SdkError> {
     let mut after = String::new();
     loop {
@@ -210,6 +214,9 @@ pub(crate) fn replay(db: &AccountDb, pending: &mut Vec<GatewayInboxEntry>) -> Re
             break;
         }
         for key in keys {
+            if pending.len() >= RAM_PAGE_CAP {
+                return Ok(());
+            }
             after.clone_from(&key);
             let event: ApplicationEvent = db
                 .load_actor_state(&key)?
@@ -244,7 +251,7 @@ pub(crate) fn publish_application_entry(
         return;
     }
     pending.push(entry.clone());
-    if pending.len() > 64 {
+    if pending.len() > RAM_PAGE_CAP {
         pending.remove(0);
     }
 }
