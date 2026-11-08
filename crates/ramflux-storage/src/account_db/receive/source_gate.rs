@@ -73,6 +73,23 @@ impl crate::AccountDb {
         Ok((disposition, work))
     }
 
+    /// Test support: set receipt disposition without touching the work row (P12 L2 pin).
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn set_receipt_disposition_for_test(
+        &self,
+        sequence: u64,
+        disposition: &str,
+    ) -> Result<(), StorageError> {
+        let seq = sequence.to_be_bytes();
+        self.connection.execute(
+            "UPDATE gateway_receive_receipt SET disposition=?1 WHERE inbox_seq=?2",
+            params![disposition, seq.as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// Test support: advances the private-erasure generation as an erase would.
     ///
     /// # Errors

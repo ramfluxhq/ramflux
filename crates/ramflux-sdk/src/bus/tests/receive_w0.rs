@@ -55,7 +55,7 @@ fn staged(entry: &[u8], sequence: u64) -> ReceiveStage<'_> {
         sequence,
         entry_json: entry,
         admission_key: "authenticated-key",
-        retain_until: 300,
+        retain_until: now_unix_timestamp() + 300,
         first_seen: 1,
     }
 }
@@ -293,6 +293,41 @@ async fn expiry() -> Case {
     Ok(())
 }
 
+/// Pins `disposition IN ('staged','held')`: a terminal receipt with a lingering work row
+/// must refuse. Dropping the clause would let the JOIN succeed.
+#[tokio::test(flavor = "current_thread")]
+async fn source_gate_refuses_terminal_receipt_with_lingering_work() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            terminal_receipt_with_work(),
+        ))))
+        .await
+}
+
+async fn terminal_receipt_with_work() -> Case {
+    let mut fixture = Box::pin(Fixture::new("source-gate-terminal-work")).await?;
+    ledger(&fixture.source)?;
+    let entry = wire(9);
+    let db = fixture.source.client.account_db()?;
+    assert_eq!(gate(db)?.stage(db, staged(&entry, 9))?, ReceiveStageResult::Staged);
+    assert_eq!(state(&fixture.source, 9)?, (Some("staged".to_owned()), 1));
+    db.set_receipt_disposition_for_test(9, "erased")?;
+    assert_eq!(state(&fixture.source, 9)?, (Some("erased".to_owned()), 1));
+    let called = Cell::new(0_u32);
+    let refused = gate(db)?.effect(db, 9, || {
+        called.set(1);
+        Ok(())
+    });
+    assert_no_input("terminal+work", refused);
+    assert_eq!(called.get(), 0);
+    reopen(&mut fixture.source)?;
+    assert_eq!(state(&fixture.source, 9)?, (Some("erased".to_owned()), 1));
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 #[cfg(feature = "itest-local-mint")]
 async fn history(fixture: &mut Fixture) -> Case {
     use super::receive_history_relay::prepare;
@@ -367,6 +402,26 @@ async fn history(fixture: &mut Fixture) -> Case {
     assert_eq!(state(account, S)?, (Some("staged".to_owned()), 1));
     gate(account.client.account_db()?)?
         .effect_mut(&mut account.client, S, |c| c.import_own_history_cipher(&fetch, &cipher))?;
+    reopen(account)?;
+    assert_eq!(state(account, S)?, (Some("staged".to_owned()), 1));
+    // Per-chunk ACK checkpoint through the adapter (history.rs:124-147).
+    let db = account.client.account_db()?;
+    let ack = gate(db)?.effect(db, S, || {
+        account.client.check_own_history_fetch(&fetch)?;
+        account.client.authorize_fetch_ack(&fetch.input)
+    })?;
+    if ack {
+        for index in 0..fetch.input.manifest.total_chunks {
+            if fetch.input.confirmed.contains(&index) {
+                continue;
+            }
+            let db = account.client.account_db()?;
+            gate(db)?.effect(db, S, || {
+                account.client.check_own_history_fetch(&fetch)?;
+                account.client.persist_received_attachment_ack(&fetch.input.reference, index)
+            })?;
+        }
+    }
     reopen(account)?;
     assert_eq!(state(account, S)?, (Some("staged".to_owned()), 1));
     let db = account.client.account_db()?;

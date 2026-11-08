@@ -60,10 +60,10 @@ impl SourceW0<'_> {
     }
 
     /// The same gate for an effect that needs `&mut RamfluxClient` and therefore cannot run
-    /// inside the receive transaction (the client owns the database handle). The fence holds
-    /// before the effect, and is re-checked after it so a concurrent erase or retirement is
-    /// reported instead of looking like success; the effect's own functions carry the erase
-    /// fence for the writes themselves.
+    /// inside the receive transaction (the client owns the database handle). The fence is a
+    /// pre-check and a post-check only: a concurrent erase or retirement is reported instead of
+    /// looking like success. The post-check cannot undo a write the effect already committed.
+    /// P20 runs `prepare_own_history_receive` inside the receive transaction.
     pub(crate) fn effect_mut<T>(
         &self,
         client: &mut RamfluxClient,
