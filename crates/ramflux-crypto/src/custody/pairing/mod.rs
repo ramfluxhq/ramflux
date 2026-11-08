@@ -11,7 +11,7 @@ mod tests;
 pub use cleanup::{HpkeSecrets, PairingSecrets};
 #[cfg(test)]
 pub use cleanup::{last_wiped_pairing_bytes, take_pairing_secret_cleanups};
-pub use hpke::{HpkeReceiver, HpkeSender, MAX_HPKE_PLAINTEXT, TransferHpkeAad};
+pub use hpke::{HpkeReceiver, HpkeSender, MAX_HPKE_AEAD_TAG, MAX_HPKE_PLAINTEXT, TransferHpkeAad};
 pub use sas::{
     EstablishedSas, PairingRole, PendingSas, SAS_EMOJI, SasEmoji, commit, emoji_from_indices,
 };

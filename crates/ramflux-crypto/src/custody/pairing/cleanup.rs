@@ -106,15 +106,21 @@ impl PairingSecrets {
     }
 }
 
-/// Owned HPKE Auth secret. Ephemeral KEM DH and AES context stay inside the hpke crate.
+/// Owned HPKE Auth X25519 seed. Taken by move into setup and wiped on every setup exit.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HpkeSecrets {
     sk: [u8; 32],
 }
 
 impl HpkeSecrets {
-    pub(super) fn new(sk: [u8; 32]) -> Self {
+    /// Wrap a 32-byte X25519 seed. The adapter takes this type by move and keeps no spare copy.
+    #[must_use]
+    pub fn new(sk: [u8; 32]) -> Self {
         Self { sk }
+    }
+
+    pub(super) fn as_bytes(&self) -> &[u8; 32] {
+        &self.sk
     }
 
     /// Wipe the owned HPKE secret and record the explicit cleanup. Drop still zeroizes if this is skipped.
