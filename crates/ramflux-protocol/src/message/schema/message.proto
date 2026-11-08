@@ -182,8 +182,11 @@ enum ServiceAction {
   SERVICE_MEMBER_ADDED = 1;
   SERVICE_MEMBER_REMOVED = 2;
   SERVICE_NAME_CHANGED = 3;
-  SERVICE_PIN_CHANGED = 4;
+  reserved 4;
+  reserved "SERVICE_PIN_CHANGED";
   SERVICE_KEY_CHANGED = 5;
+  SERVICE_PIN_ADDED = 6;
+  SERVICE_PIN_REMOVED = 7;
 }
 message Service {
   ServiceAction action = 1;

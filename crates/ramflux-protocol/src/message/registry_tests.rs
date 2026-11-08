@@ -130,6 +130,45 @@ fn populated(descriptor: &prost_reflect::MessageDescriptor, depth: usize) -> Dyn
 }
 
 #[test]
+fn service_pin_changed_number_is_reserved() -> TestResult {
+    let pool = descriptors()?;
+    let enumeration =
+        pool.get_enum_by_name("ramflux.message.v1.ServiceAction").ok_or("ServiceAction absent")?;
+    assert!(enumeration.get_value(4).is_none(), "retired SERVICE_PIN_CHANGED reused");
+    assert!(enumeration.get_value(6).is_some(), "SERVICE_PIN_ADDED missing");
+    assert!(enumeration.get_value(7).is_some(), "SERVICE_PIN_REMOVED missing");
+    let proto = enumeration.enum_descriptor_proto();
+    assert!(
+        proto.reserved_range.iter().any(|range| range.start == Some(4) && range.end == Some(4))
+    );
+    assert!(proto.reserved_name.iter().any(|name| name == "SERVICE_PIN_CHANGED"));
+    Ok(())
+}
+
+#[test]
+fn service_pin_kinds_require_target_and_round_trip() -> TestResult {
+    let target = MessageRef { id: vec![7], conversation_id: "c".into(), author_anchor: "a".into() };
+    for action in [6, 7] {
+        let service = Service { action, target: Some(target.clone()), ..Default::default() };
+        let content = Content { value: Some(content::Value::Service(service.clone())) };
+        let (kind, bytes) = encode_body(&content)?;
+        assert_eq!(kind, 2);
+        assert_eq!(decode_body(kind, &bytes, 2)?, content);
+        assert_eq!(scan_message("Service", &bytes, 2)?, ScanOutcome::Supported);
+        let (_, encoded) = encode_body(&decode_body(kind, &bytes, 2)?)?;
+        assert_eq!(encoded, bytes, "canonical decode/encode identity");
+    }
+    for action in [6, 7] {
+        let service = Service { action, ..Default::default() };
+        let content = Content { value: Some(content::Value::Service(service.clone())) };
+        assert_eq!(validate_content(&content), Err(ValidationError::Content));
+        let (kind, bytes) = encode_body(&content)?;
+        assert_eq!(decode_body(kind, &bytes, 2), Err(ValidationError::Content));
+    }
+    Ok(())
+}
+
+#[test]
 fn all_kind_binding_round_trip() -> TestResult {
     let reference =
         MessageRef { id: vec![1], conversation_id: "c".into(), author_anchor: "a".into() };

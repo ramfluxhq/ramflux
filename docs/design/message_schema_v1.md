@@ -456,6 +456,13 @@ Forward creates a fresh id and an optional provenance assertion; it never copies
 another sender's authority. Service actions are independently authorized native
 membership/name/pin changes; a cosmetic service row cannot execute a group change.
 
+Pin changes are explicit service kinds, not an ambiguous "changed" marker.
+`SERVICE_PIN_ADDED` and `SERVICE_PIN_REMOVED` each name exactly one pinned or
+unpinned message in `target`; multiple pins are allowed, and each add or remove
+is its own action. A Service with either kind and no target is rejected with
+`ValidationError::Content`. The retired `SERVICE_PIN_CHANGED` number 4 is reserved
+permanently and is never reused.
+
 Delete scope LOCAL erases only local copies and syncs that choice to own devices.
 EVERYONE creates an authenticated replicated tombstone: sender principal can
 delete its own message across its active devices; a current group moderator may
@@ -685,8 +692,11 @@ enum ServiceAction {
   SERVICE_MEMBER_ADDED = 1;
   SERVICE_MEMBER_REMOVED = 2;
   SERVICE_NAME_CHANGED = 3;
-  SERVICE_PIN_CHANGED = 4;
+  reserved 4;
+  reserved "SERVICE_PIN_CHANGED";
   SERVICE_KEY_CHANGED = 5;
+  SERVICE_PIN_ADDED = 6;
+  SERVICE_PIN_REMOVED = 7;
 }
 message Service {
   ServiceAction action = 1;

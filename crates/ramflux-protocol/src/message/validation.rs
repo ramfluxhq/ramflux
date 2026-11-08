@@ -5,7 +5,7 @@
 //! Native field value sets and proof validation stay with the named §3.1 owners:
 //! Surface P15, Call P16, Task P17, own-history P18 and `SelfSync` P19. No result
 //! from this module authorizes side effects or ACK; authenticated retention is P10.
-use super::{Content, Message, content, registry};
+use super::{Content, Message, Service, ServiceAction, content, registry};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum complete exact Inner bytes.
@@ -138,6 +138,7 @@ pub fn validate_content(content: &Content) -> Result<(), ValidationError> {
             validate_message(edit.replacement.as_ref().ok_or(ValidationError::Content)?)
         }
         content::Value::Reaction(reaction) => validate_reaction_token(&reaction.token),
+        content::Value::Service(service) => validate_service(service),
         content::Value::Control(control) => {
             use prost::Message as _;
             let encoded = control.encode_to_vec();
@@ -150,6 +151,18 @@ pub fn validate_content(content: &Content) -> Result<(), ValidationError> {
         }
         _ => Ok(()),
     }
+}
+
+/// Pin add/remove names exactly one target message; the target is never inferred.
+/// # Errors
+/// Returns an error when a pin service kind has no target.
+pub fn validate_service(service: &Service) -> Result<(), ValidationError> {
+    let pin = service.action == ServiceAction::ServicePinAdded as i32
+        || service.action == ServiceAction::ServicePinRemoved as i32;
+    if pin && service.target.is_none() {
+        return Err(ValidationError::Content);
+    }
+    Ok(())
 }
 
 /// Validate Unicode-scalar entity ranges in one pass over text plus entity rows.

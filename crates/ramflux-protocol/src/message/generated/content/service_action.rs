@@ -12,8 +12,9 @@ pub enum ServiceAction {
     ServiceMemberAdded = 1,
     ServiceMemberRemoved = 2,
     ServiceNameChanged = 3,
-    ServicePinChanged = 4,
     ServiceKeyChanged = 5,
+    ServicePinAdded = 6,
+    ServicePinRemoved = 7,
 }
 impl ServiceAction {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -26,8 +27,9 @@ impl ServiceAction {
             Self::ServiceMemberAdded => "SERVICE_MEMBER_ADDED",
             Self::ServiceMemberRemoved => "SERVICE_MEMBER_REMOVED",
             Self::ServiceNameChanged => "SERVICE_NAME_CHANGED",
-            Self::ServicePinChanged => "SERVICE_PIN_CHANGED",
             Self::ServiceKeyChanged => "SERVICE_KEY_CHANGED",
+            Self::ServicePinAdded => "SERVICE_PIN_ADDED",
+            Self::ServicePinRemoved => "SERVICE_PIN_REMOVED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -37,8 +39,9 @@ impl ServiceAction {
             "SERVICE_MEMBER_ADDED" => Some(Self::ServiceMemberAdded),
             "SERVICE_MEMBER_REMOVED" => Some(Self::ServiceMemberRemoved),
             "SERVICE_NAME_CHANGED" => Some(Self::ServiceNameChanged),
-            "SERVICE_PIN_CHANGED" => Some(Self::ServicePinChanged),
             "SERVICE_KEY_CHANGED" => Some(Self::ServiceKeyChanged),
+            "SERVICE_PIN_ADDED" => Some(Self::ServicePinAdded),
+            "SERVICE_PIN_REMOVED" => Some(Self::ServicePinRemoved),
             _ => None,
         }
     }
@@ -54,8 +57,9 @@ impl serde::Serialize for ServiceAction {
             Self::ServiceMemberAdded => "SERVICE_MEMBER_ADDED",
             Self::ServiceMemberRemoved => "SERVICE_MEMBER_REMOVED",
             Self::ServiceNameChanged => "SERVICE_NAME_CHANGED",
-            Self::ServicePinChanged => "SERVICE_PIN_CHANGED",
             Self::ServiceKeyChanged => "SERVICE_KEY_CHANGED",
+            Self::ServicePinAdded => "SERVICE_PIN_ADDED",
+            Self::ServicePinRemoved => "SERVICE_PIN_REMOVED",
         };
         serializer.serialize_str(variant)
     }
@@ -71,8 +75,9 @@ impl<'de> serde::Deserialize<'de> for ServiceAction {
             "SERVICE_MEMBER_ADDED",
             "SERVICE_MEMBER_REMOVED",
             "SERVICE_NAME_CHANGED",
-            "SERVICE_PIN_CHANGED",
             "SERVICE_KEY_CHANGED",
+            "SERVICE_PIN_ADDED",
+            "SERVICE_PIN_REMOVED",
         ];
         struct GeneratedVisitor;
         impl serde::de::Visitor<'_> for GeneratedVisitor {
@@ -105,8 +110,9 @@ impl<'de> serde::Deserialize<'de> for ServiceAction {
                     "SERVICE_MEMBER_ADDED" => Ok(ServiceAction::ServiceMemberAdded),
                     "SERVICE_MEMBER_REMOVED" => Ok(ServiceAction::ServiceMemberRemoved),
                     "SERVICE_NAME_CHANGED" => Ok(ServiceAction::ServiceNameChanged),
-                    "SERVICE_PIN_CHANGED" => Ok(ServiceAction::ServicePinChanged),
                     "SERVICE_KEY_CHANGED" => Ok(ServiceAction::ServiceKeyChanged),
+                    "SERVICE_PIN_ADDED" => Ok(ServiceAction::ServicePinAdded),
+                    "SERVICE_PIN_REMOVED" => Ok(ServiceAction::ServicePinRemoved),
                     _ => Err(serde::de::Error::unknown_variant(value, FIELDS)),
                 }
             }
