@@ -295,7 +295,9 @@ impl AccountDb {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(query);
         for id in ids {
-            if !self.try_settle_admission(&id, ReceiveFailureReason::HeldEvicted, at)? {
+            if !self.try_settle_admission(&id, ReceiveFailureReason::HeldEvicted, at)?
+                && !self.has_staged_only_admission(&id)?
+            {
                 self.connection
                     .execute("DELETE FROM runtime_unrouted WHERE envelope_id=?1", params![id])?;
             }

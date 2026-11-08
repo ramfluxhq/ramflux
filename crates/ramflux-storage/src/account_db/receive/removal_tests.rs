@@ -787,6 +787,23 @@ fn staged_only_key_survives_expiry_and_unrouted_trim() -> Result<(), StorageErro
         |row| row.get(0),
     )?;
     assert_eq!(disposition, "staged", "receipt stays staged");
+    // Overflow: trim runs before each insert, so 65 newer non-staged rows push the 64-cap past
+    // the oldest staged-only key (the eviction boundary falls on it at the last insert).
+    for index in 0..65u64 {
+        let wire = bytes(100 + index);
+        db.hold_unrouted(
+            &format!("ov{index}"),
+            100 + index,
+            &wire,
+            1_000 + i64::try_from(index).expect("at"),
+        )?;
+    }
+    assert_eq!(unrouted_for(&db, "stg")?, 1, "staged-only key survives overflow trim");
+    assert_eq!(unrouted_for(&db, "ov0")?, 0, "oldest non-staged key is evicted instead");
+    assert_eq!(unrouted_for(&db, "ov64")?, 1, "newest non-staged key is kept");
+    assert_eq!(db.unrouted_count()?, 65, "64 non-staged rows plus the staged-only row");
+    assert_eq!(dead_letters_for(&db, "ov0")?, 0, "no retry_expired written for evicted key");
+    assert_eq!(dead_letters_for(&db, "stg")?, 0, "no retry_expired diagnostic for staged work");
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
