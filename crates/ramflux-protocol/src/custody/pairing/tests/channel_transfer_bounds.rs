@@ -9,6 +9,21 @@ const MAX_CHUNK: usize = 8192;
 const MAX_HPKE: u64 = 819_200;
 const MAX_CANDIDATE: u64 = 524_288;
 
+fn hash() -> String {
+    encode_base64url([1; 32])
+}
+
+#[allow(clippy::needless_pass_by_value)] // JSON builders deliberately take owned fixture values.
+fn signed(value: Value) -> Value {
+    json!({"body":value,"signature":encode_base64url([7;64])})
+}
+
+fn obj(name: &str, mut value: Value) -> Value {
+    value["schema"] = json!(format!("ramflux.pairing.{name}.v2"));
+    value["version"] = json!(2);
+    value
+}
+
 fn maxima() -> TestResult<Value> {
     Ok(serde_json::from_str(include_str!(
         "../../../../fixtures/pairing_v2/channel_local/maxima.json"
@@ -51,6 +66,7 @@ fn transfer_payload(common: &Value, digest: &str) -> Value {
     })
 }
 
+#[allow(clippy::needless_pass_by_value)] // JSON builders deliberately take owned fixture values.
 fn channel(common: &Value, digest: &str, payload: Value) -> Value {
     obj(
         "Channel",
@@ -86,12 +102,12 @@ fn context<'a>(
 #[test]
 fn pairing_channel_transfer_bounds_and_contexts() -> TestResult {
     let all = maxima()?;
-    transfer_payload_bounds(&all)?;
-    transfer_contexts(&all)?;
-    channel_chunk_bounds(&all)?;
-    channel_contexts(&all)?;
-    preservation_contexts(&all)?;
-    binding_and_hpke_contexts(&all)?;
+    transfer_payload_bounds(&all).map_err(|e| format!("transfer payload bounds: {e}"))?;
+    transfer_contexts(&all).map_err(|e| format!("transfer contexts: {e}"))?;
+    channel_chunk_bounds(&all).map_err(|e| format!("channel chunk bounds: {e}"))?;
+    channel_contexts(&all).map_err(|e| format!("channel contexts: {e}"))?;
+    preservation_contexts(&all).map_err(|e| format!("preservation contexts: {e}"))?;
+    binding_and_hpke_contexts(&all).map_err(|e| format!("binding and HPKE contexts: {e}"))?;
     Ok(())
 }
 
@@ -162,21 +178,20 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
     // the closed field grammar and the above maxima are smaller than each cap.
     field::<TransferPayload>(
         &full,
-        "/group_restriction_summary/0/group_id",
+        "/group_restriction_summary/63/group_id",
         json!(format!(
             "{}x",
-            full["group_restriction_summary"][0]["group_id"].as_str().ok_or("group id")?
+            full["group_restriction_summary"][63]["group_id"].as_str().ok_or("group id")?
         )),
         "group_id",
     )?;
     field::<TransferPayload>(
         &full,
-        "/optional_data_keys/0/key_id",
-        json!(format!("{}x", full["optional_data_keys"][0]["key_id"].as_str().ok_or("key id")?)),
+        "/optional_data_keys/31/key_id",
+        json!(format!("{}x", full["optional_data_keys"][31]["key_id"].as_str().ok_or("key id")?)),
         "key_id",
     )?;
-    let mut ninth = full.clone();
-    let mut hashes = ninth["group_restriction_summary"][0]["restriction_hashes"]
+    let mut hashes = full["group_restriction_summary"][0]["restriction_hashes"]
         .as_array()
         .ok_or("restriction hashes")?
         .clone();
@@ -236,7 +251,7 @@ fn transfer_contexts(all: &Value) -> TestResult {
     ]);
     decode_value::<TransferPayload>(&consent)?.validate_context(&selected, &digest)?;
     for (path, value) in [
-        ("/optional_data_keys/0/key_id", json!("history-x")),
+        ("/optional_data_keys/0/key_id", json!("history-a0")),
         ("/optional_data_keys/0/purpose", json!("attachment")),
     ] {
         let mut wrong = consent.clone();
@@ -272,6 +287,7 @@ fn channel_chunk_bounds(all: &Value) -> TestResult {
             count: actual_count,
             total_bytes,
             bytes: encoded,
+            ..
         } = typed.payload
         else {
             return Err("fixture is not an artifact chunk".into());
@@ -313,13 +329,15 @@ fn channel_chunk_bounds(all: &Value) -> TestResult {
     // largest reachable encoding; cap+1 is covered by from_wire_bytes below.
     let hpke = all["Channel_hpke"]["wire"].as_str().ok_or("hpke wire")?;
     assert!(hpke.len() < Channel::LIMIT);
-    let mut over = vec![b' '; Channel::LIMIT + 1];
+    let mut over = hpke.as_bytes().to_vec();
+    over.resize(Channel::LIMIT + 1, b' ');
     assert_eq!(Channel::from_wire_bytes(&over).err(), Some(WireError::Size));
     over.truncate(Channel::LIMIT);
     assert_eq!(Channel::from_wire_bytes(&over).err(), Some(WireError::NonCanonical));
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keep the per-arm context-binding regression matrix together.
 fn channel_contexts(all: &Value) -> TestResult {
     let fixture_values = fixture()?;
     let source = &fixture_values["transcript"];
@@ -426,14 +444,12 @@ fn channel_contexts(all: &Value) -> TestResult {
     );
     let mut c = context(&transcript, &digest, "initiator", "mutually_confirmed", None, None);
     decode_value::<Channel>(&hpke_chunk)?.validate_context(&c)?;
-    for (path, value) in [("/payload/object_id", json!(encode_base64url([2; 32])))] {
-        let mut wrong = hpke_chunk.clone();
-        *wrong.pointer_mut(path).ok_or("artifact field")? = value;
-        assert_eq!(
-            decode_value::<Channel>(&wrong)?.validate_context(&c),
-            Err(WireError::Field("artifact_context"))
-        );
-    }
+    let mut wrong = hpke_chunk.clone();
+    wrong["payload"]["object_id"] = json!(encode_base64url([2; 32]));
+    assert_eq!(
+        decode_value::<Channel>(&wrong)?.validate_context(&c),
+        Err(WireError::Field("artifact_context"))
+    );
     c.sender = "responder";
     assert_eq!(
         decode_value::<Channel>(&hpke_chunk)?.validate_context(&c),
@@ -461,7 +477,7 @@ fn channel_contexts(all: &Value) -> TestResult {
         Err(WireError::Field("artifact_context"))
     );
 
-    let mut approval = channel(
+    let approval = channel(
         common,
         &digest,
         json!({"kind":"approval","proposal_hash":digest,"base_record_hash":common["record_hash"],"base_epoch":common["device_set_epoch"],"approved":true}),
@@ -660,11 +676,19 @@ fn preservation_contexts(all: &Value) -> TestResult {
     ] {
         let mut wrong = ready.clone();
         *wrong.pointer_mut(path).ok_or("preservation field")? = value;
-        assert_eq!(
-            decode_value::<Channel>(&wrong)?.validate_context(&c),
-            Err(WireError::Field(error)),
-            "{path}"
-        );
+        if matches!(error, "preservation_binding" | "preservation_transcript") {
+            assert_eq!(
+                decode_value::<Channel>(&wrong).err(),
+                Some(WireError::Field(error)),
+                "{path}"
+            );
+        } else {
+            assert_eq!(
+                decode_value::<Channel>(&wrong)?.validate_context(&c),
+                Err(WireError::Field(error)),
+                "{path}"
+            );
+        }
     }
     c.phase = "proposal_pending";
     assert_eq!(
@@ -692,10 +716,12 @@ fn preservation_contexts(all: &Value) -> TestResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keep independent envelope-bound and context cases together.
 fn binding_and_hpke_contexts(all: &Value) -> TestResult {
     let fixture_values = fixture()?;
     let mut source = fixture_values["transcript"].clone();
-    source["initiator"]["common"]["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
+    source["initiator"]["common"]["expires_at"] = json!(MAX_SAFE_JSON_INTEGER - 1);
+    source["initiator"]["common"]["device_set_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
     source["responder"]["common"] = source["initiator"]["common"].clone();
     let (transcript_value, transcript) = transfer_transcript(&source)?;
     let common = &transcript_value["initiator"]["common"];
@@ -710,8 +736,8 @@ fn binding_and_hpke_contexts(all: &Value) -> TestResult {
         "sender_device_ref":transcript_value["initiator"]["device_ref"],
         "sender_hpke_key":transcript_value["initiator"]["hpke_key"],
         "recipient_hpke_key":transcript_value["responder"]["hpke_key"],
-        "issued_at":MAX_SAFE_JSON_INTEGER - 300,
-        "expires_at":MAX_SAFE_JSON_INTEGER
+        "issued_at":MAX_SAFE_JSON_INTEGER - 301,
+        "expires_at":MAX_SAFE_JSON_INTEGER - 1
     });
     let envelope = json!({
         "schema":"ramflux.identity.transfer.hpke.v1",
@@ -737,11 +763,11 @@ fn binding_and_hpke_contexts(all: &Value) -> TestResult {
         json!(MAX_SAFE_JSON_INTEGER - 301),
         "binding_lifetime",
     )?;
-    field::<TransferBinding>(
+    invalid::<TransferBinding>(
         &late["sender_binding"]["body"],
         "/expires_at",
         json!(MAX_SAFE_JSON_INTEGER + 1),
-        "expires_at",
+        WireError::Json,
     )?;
 
     for (path, binding_path, value) in [
@@ -786,14 +812,23 @@ fn binding_and_hpke_contexts(all: &Value) -> TestResult {
     ] {
         let mut wrong = envelope.clone();
         *wrong.pointer_mut(path).ok_or("binding context")? = value;
-        assert_eq!(
-            decode_value::<HpkeEnvelope>(&wrong)?.validate_context(&transcript, &digest),
-            Err(WireError::Field(error)),
-            "{path}"
-        );
+        if error == "hpke_binding" {
+            assert_eq!(
+                decode_value::<HpkeEnvelope>(&wrong).err(),
+                Some(WireError::Field(error)),
+                "{path}"
+            );
+        } else {
+            assert_eq!(
+                decode_value::<HpkeEnvelope>(&wrong)?.validate_context(&transcript, &digest),
+                Err(WireError::Field(error)),
+                "{path}"
+            );
+        }
     }
     let mut beyond = envelope.clone();
-    beyond["sender_binding"]["body"]["expires_at"] = json!(MAX_SAFE_JSON_INTEGER - 301);
+    beyond["sender_binding"]["body"]["issued_at"] = json!(MAX_SAFE_JSON_INTEGER - 300);
+    beyond["sender_binding"]["body"]["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
     assert_eq!(
         decode_value::<HpkeEnvelope>(&beyond)?.validate_context(&transcript, &digest),
         Err(WireError::Field("hpke_expiry"))
