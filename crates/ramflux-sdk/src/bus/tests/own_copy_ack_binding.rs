@@ -1,0 +1,315 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+#![allow(
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::needless_pass_by_value
+)]
+//! First leg of `own_copy_ack_binding` (S6b P14): W1 registers an erased/backup-safe (T,E,s)
+//! locator; erasure before WA leaves no binding/content; kill-around-commit for the own-copy
+//! transaction and the recovery W1 cut. WA legs are P21.
+
+use super::fixture::{Case, Fixture};
+use super::receive_own_copy::own_copy;
+use crate::client::own_device_copy::w1::{
+    self, Fault, OwnCopyW1, locator_key, run, with_omit_locator,
+};
+use crate::prelude::*;
+use ramflux_storage::{ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError};
+use serde_json::json;
+
+const INTEGRITY: &str = "source effect requires staged receive work";
+const BEFORE: &str = "own-copy w1 before-commit";
+const TARGET: &str = "sender";
+const INCARNATION: &str = "e";
+const MESSAGE: &str = "incoming-sibling-envelope";
+const SEQUENCE: u64 = 1;
+const RECOVERY_SEQ: u64 = 2;
+
+fn gate(db: &AccountDb) -> Result<OwnCopyW1<'static>, SdkError> {
+    Ok(OwnCopyW1 {
+        expected: ReceiveExpectation {
+            target: TARGET,
+            incarnation: INCARNATION,
+            cursor: 0,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        generation: 1,
+    })
+}
+
+fn staged(entry: &[u8], sequence: u64) -> ReceiveStage<'_> {
+    ReceiveStage {
+        target: TARGET,
+        incarnation: INCARNATION,
+        sequence,
+        entry_json: entry,
+        admission_key: "authenticated-own-copy",
+        retain_until: now_unix_timestamp().saturating_add(300),
+        first_seen: 1,
+    }
+}
+
+fn unique_entry(sequence: u64, payload_hash: &str) -> Result<Vec<u8>, SdkError> {
+    Ok(serde_json::to_vec(&json!({
+        "inbox_seq": sequence,
+        "target_delivery_id": TARGET,
+        "envelope": {
+            "schema": "test",
+            "version": 1,
+            "domain": "test",
+            "signing_key_id": "key",
+            "signature_alg": "ed25519",
+            "signature": "sig",
+            "envelope_id": format!("env-{sequence}"),
+            "source_principal_id": "source",
+            "source_device_id": "device",
+            "target_delivery_id": TARGET,
+            "delivery_class": "opaque_event",
+            "priority": "normal",
+            "ttl": 60,
+            "created_at": 1,
+            "encrypted_payload": "cipher",
+            "payload_hash": payload_hash
+        }
+    }))?)
+}
+
+fn wire(entry: &GatewayInboxEntry) -> Result<Vec<u8>, SdkError> {
+    Ok(serde_json::to_vec(&json!({
+        "inbox_seq": entry.inbox_seq,
+        "target_delivery_id": entry.target_delivery_id,
+        "envelope": entry.envelope,
+    }))?)
+}
+
+fn ledger(account: &LocalBusAccountState, target: &str) -> Case {
+    let db = account.client.account_db()?;
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(target, INCARNATION)?;
+    Ok(())
+}
+
+fn reopen(account: &mut LocalBusAccountState) -> Case {
+    account.client.active_account_db = None;
+    account.client.unlock_account("sender", b"actor-test-secret")?;
+    Ok(())
+}
+
+fn locator_present(account: &LocalBusAccountState, message: &str) -> Result<bool, SdkError> {
+    Ok(account.client.account_db()?.actor_state_exists(&locator_key(message))?)
+}
+
+fn reset_work_present(account: &LocalBusAccountState) -> Result<bool, SdkError> {
+    Ok(!account.client.account_db()?.actor_state_keys("dm-pair/reset-work/")?.is_empty())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn own_copy_ack_binding() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(case()))))
+        .await
+}
+
+async fn case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("own-copy-ack-binding")).await?;
+    ledger(&fixture.source, TARGET)?;
+    let entry = own_copy(&fixture)?;
+    let bytes = wire(&entry)?;
+    let root = fixture.sibling.client.owned_device_identity()?.root_commitment().to_owned();
+    let manifest: crate::SdkDeviceManifestResponse = serde_json::from_value(
+        fixture
+            .gateway
+            .lock()
+            .map_err(|_| "gateway")?
+            .manifests
+            .get(&root)
+            .cloned()
+            .ok_or("manifest")?,
+    )?;
+    fixture.source.client.account_db()?.send_direct_message(
+        "healthy",
+        MESSAGE,
+        "peer",
+        b"own-copy-locator-owner",
+    )?;
+
+    let db = fixture.source.client.account_db()?;
+    let refused = gate(db)?.effect(db, SEQUENCE, MESSAGE, || Ok(()));
+    assert!(
+        matches!(&refused, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == INTEGRITY),
+        "{refused:?}"
+    );
+    assert!(!locator_present(&fixture.source, MESSAGE)?);
+
+    assert_eq!(gate(db)?.stage(db, staged(&bytes, SEQUENCE))?, ReceiveStageResult::Staged);
+    let expected = gate(db)?.expected;
+    assert!(
+        fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE,)?
+    );
+    assert!(locator_present(&fixture.source, MESSAGE)?);
+    let locator = fixture
+        .source
+        .client
+        .account_db()?
+        .load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?
+        .ok_or("locator")?;
+    assert_eq!(locator.target, TARGET);
+    assert_eq!(locator.incarnation, INCARNATION);
+    assert_eq!(locator.sequence, SEQUENCE);
+    assert_eq!(
+        fixture.source.client.account_db()?.receive_state_for_test(SEQUENCE)?,
+        (Some("staged".to_owned()), 1)
+    );
+
+    reopen(&mut fixture.source)?;
+    assert!(locator_present(&fixture.source, MESSAGE)?);
+    let db = fixture.source.client.account_db()?;
+    let expected = gate(db)?.expected;
+    assert!(
+        fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE,)?
+    );
+    assert_eq!(
+        fixture.source.client.account_db()?.actor_state_keys("own-device/sequence-locator/")?.len(),
+        1,
+        "re-drive stays a single locator"
+    );
+
+    let db = fixture.source.client.account_db()?;
+    db.advance_erasure_generation_for_test()?;
+    db.send_direct_message("healthy", "kill-before", "peer", b"before")?;
+    let kill_bytes = unique_entry(3, "kill-before-hash")?;
+    let expected = ReceiveExpectation {
+        target: TARGET,
+        incarnation: INCARNATION,
+        cursor: 0,
+        generation: 1,
+        erasure_generation: db.privacy_erasure_generation()?,
+    };
+    assert_eq!(
+        OwnCopyW1 { expected, generation: 1 }.stage(db, staged(&kill_bytes, 3))?,
+        ReceiveStageResult::Staged
+    );
+    let rolled = run(Fault::BeforeCommit, || {
+        OwnCopyW1 { expected, generation: 1 }.effect(db, 3, "kill-before", || {
+            crate::client::own_device_copy::receipts::remember(
+                db,
+                "own-device/committed-packet/kill-before",
+                "kill-before-fp",
+                now_unix_timestamp().saturating_add(900),
+                false,
+                now_unix_timestamp(),
+            )
+        })
+    });
+    assert!(
+        matches!(&rolled, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
+        "{rolled:?}"
+    );
+    assert!(!db.actor_state_exists(&locator_key("kill-before"))?);
+    assert!(!db.actor_state_exists("own-device/committed-packet/kill-before")?);
+    assert_eq!(db.receive_state_for_test(3)?, (Some("staged".to_owned()), 2));
+
+    let after_state = {
+        OwnCopyW1 { expected, generation: 1 }.effect(db, 3, "kill-before", || {
+            crate::client::own_device_copy::receipts::remember(
+                db,
+                "own-device/committed-packet/kill-before",
+                "kill-before-fp",
+                now_unix_timestamp().saturating_add(900),
+                false,
+                now_unix_timestamp(),
+            )
+        })?;
+        (
+            db.actor_state_exists(&locator_key("kill-before"))?,
+            db.actor_state_exists("own-device/committed-packet/kill-before")?,
+            db.receive_state_for_test(3)?,
+        )
+    };
+    reopen(&mut fixture.source)?;
+    let db = fixture.source.client.account_db()?;
+    assert_eq!(
+        (
+            db.actor_state_exists(&locator_key("kill-before"))?,
+            db.actor_state_exists("own-device/committed-packet/kill-before")?,
+            db.receive_state_for_test(3)?,
+        ),
+        after_state
+    );
+
+    db.delete_direct_message("healthy", MESSAGE, "local", "erase-before-wa")?;
+    assert!(!locator_present(&fixture.source, MESSAGE)?, "erase before WA must drop the locator");
+    assert!(
+        db.actor_state_keys("own-device/sequence-locator/")?
+            .iter()
+            .all(|key| key != &locator_key(MESSAGE)),
+        "erased message must not keep its locator"
+    );
+
+    let recovery_bytes = unique_entry(RECOVERY_SEQ, "recovery-hash")?;
+    let expected = gate(db)?.expected;
+    assert_eq!(
+        gate(db)?.stage(db, staged(&recovery_bytes, RECOVERY_SEQ))?,
+        ReceiveStageResult::Staged
+    );
+    let now = now_unix_timestamp();
+    let rolled = run(Fault::BeforeCommit, || {
+        fixture.source.client.recover_own_copy_w1(&entry, expected, RECOVERY_SEQ, now)
+    });
+    assert!(
+        matches!(&rolled, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
+        "{rolled:?}"
+    );
+    assert!(!reset_work_present(&fixture.source)?);
+    assert!(fixture.source.client.recover_own_copy_w1(&entry, expected, RECOVERY_SEQ, now)?);
+    assert!(reset_work_present(&fixture.source)?);
+    reopen(&mut fixture.source)?;
+    assert!(reset_work_present(&fixture.source)?);
+
+    fixture.source.client.account_db()?.send_direct_message(
+        "healthy",
+        "omit-locator",
+        "peer",
+        b"omit",
+    )?;
+    let omit_bytes = unique_entry(4, "omit-hash")?;
+    let db = fixture.source.client.account_db()?;
+    let expected = ReceiveExpectation {
+        target: TARGET,
+        incarnation: INCARNATION,
+        cursor: 0,
+        generation: 1,
+        erasure_generation: db.privacy_erasure_generation()?,
+    };
+    assert_eq!(
+        OwnCopyW1 { expected, generation: 1 }.stage(db, staged(&omit_bytes, 4))?,
+        ReceiveStageResult::Staged
+    );
+    with_omit_locator(|| {
+        OwnCopyW1 { expected, generation: 1 }.effect(db, 4, "omit-locator", || {
+            crate::client::own_device_copy::receipts::remember(
+                db,
+                "own-device/committed-packet/omit-locator",
+                "omit-fp",
+                now_unix_timestamp().saturating_add(900),
+                false,
+                now_unix_timestamp(),
+            )
+        })
+    })?;
+    assert!(db.actor_state_exists(&locator_key("omit-locator"))?);
+    db.delete_direct_message("healthy", "omit-locator", "local", "erase-omit")?;
+    assert!(
+        db.actor_state_exists(&locator_key("omit-locator"))?,
+        "omit locator footprint: erase leaves the unbound row (first-leg assertion fails)"
+    );
+
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

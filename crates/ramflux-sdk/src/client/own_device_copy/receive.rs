@@ -155,35 +155,81 @@ impl RamfluxClient {
             now,
         )?;
         db.write_transaction(|| {
-            // The packet signature and root-signed active set above authenticate this source;
-            // generic envelope signatures are not the own-device packet's signature scheme.
-            let source_identity =
-                self.device_identity_for_root(&root, &entry.envelope.source_device_id)?;
-            super::receipts::remember(
+            self.commit_own_copy_writes(OwnCopyCommit {
                 db,
-                &replay.key,
-                &replay.fingerprint,
-                context.expires_at,
-                false,
-                now,
-            )?;
-            let scope = self.apply_own_device_control(
                 entry,
-                &source_identity,
-                &context,
-                &body,
-                &local.device_id,
-            )?;
-            self.commit_inline_pair_key_slot(&slot, &key)?;
-            self.persist_own_device_receipt(
-                &receipt_key,
-                &context,
+                replay: &replay,
+                receipt_key: &receipt_key,
                 fingerprint,
-                scope,
-                &source_identity,
-            )?;
-            Ok::<_, SdkError>(())
+                root: &root,
+                context: &context,
+                body: &body,
+                slot: &slot,
+                key: &key,
+                local_device_id: &local.device_id,
+                now,
+            })
         })?;
         Ok(true)
     }
+
+    fn commit_own_copy_writes(&self, work: OwnCopyCommit<'_>) -> Result<(), SdkError> {
+        // The packet signature and root-signed active set above authenticate this source;
+        // generic envelope signatures are not the own-device packet's signature scheme.
+        let source_identity =
+            self.device_identity_for_root(work.root, &work.entry.envelope.source_device_id)?;
+        super::receipts::remember(
+            work.db,
+            &work.replay.key,
+            &work.replay.fingerprint,
+            work.context.expires_at,
+            false,
+            work.now,
+        )?;
+        let scope = self.apply_own_device_control(
+            work.entry,
+            &source_identity,
+            work.context,
+            work.body,
+            work.local_device_id,
+        )?;
+        self.commit_inline_pair_key_slot(work.slot, work.key)?;
+        self.persist_own_device_receipt(
+            work.receipt_key,
+            work.context,
+            work.fingerprint,
+            scope,
+            &source_identity,
+        )?;
+        Ok(())
+    }
+
+    /// Decrypts a pending own-copy packet and runs the durable writes (joins an open writer).
+    #[cfg(test)]
+    pub(super) fn commit_own_copy_from_entry(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: &SdkDeviceManifestResponse,
+    ) -> Result<bool, SdkError> {
+        match self.prepare_own_receive(entry)? {
+            Check::Other => Ok(false),
+            Check::Duplicate => Ok(true),
+            Check::Pending(pending) => self.apply_own_receive(entry, *pending, manifest),
+        }
+    }
+}
+
+struct OwnCopyCommit<'a> {
+    db: &'a ramflux_storage::AccountDb,
+    entry: &'a GatewayInboxEntry,
+    replay: &'a super::receipts::Replay,
+    receipt_key: &'a str,
+    fingerprint: String,
+    root: &'a str,
+    context: &'a super::PrivateContext,
+    body: &'a [u8],
+    slot: &'a crate::SdkObjectKeySlot,
+    key: &'a [u8; 32],
+    local_device_id: &'a str,
+    now: i64,
 }

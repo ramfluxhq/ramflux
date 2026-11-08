@@ -68,7 +68,7 @@ async fn case() -> Case {
     Ok(())
 }
 
-fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
+pub(super) fn own_copy(fixture: &Fixture) -> Case<GatewayInboxEntry> {
     let sibling = &fixture.sibling.client;
     let identity = sibling.owned_device_identity()?;
     let mut config = fixture.source.gateway_config.clone().with_account_identity(sibling)?;

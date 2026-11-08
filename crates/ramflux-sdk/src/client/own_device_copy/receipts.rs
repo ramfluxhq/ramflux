@@ -67,7 +67,7 @@ pub(super) fn committed(
     Ok(true)
 }
 
-pub(super) fn remember(
+pub(crate) fn remember(
     db: &AccountDb,
     key: &str,
     fingerprint: &str,
@@ -100,7 +100,7 @@ pub(super) fn remember(
     })
 }
 
-pub(super) struct Replay {
+pub(crate) struct Replay {
     pub key: String,
     pub fingerprint: String,
     pub committed: bool,

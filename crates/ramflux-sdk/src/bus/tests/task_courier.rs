@@ -895,6 +895,9 @@ mod receive_source;
 #[path = "receive_own_copy.rs"]
 mod receive_own_copy;
 
+#[path = "own_copy_ack_binding.rs"]
+mod own_copy_ack_binding;
+
 #[path = "receive_group.rs"]
 mod receive_group;
 

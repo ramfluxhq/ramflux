@@ -15,9 +15,10 @@ pub(crate) const DOMAIN: &str = "ramflux.sdk.own_device_message.v2";
 pub(crate) const PREFIX: &[u8] = b"ramflux.own_device_message.v2\n";
 pub(crate) const MAX_PACKET_BYTES: usize = 512 * 1024;
 pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
-mod receipts;
+pub(crate) mod receipts;
 pub(crate) use receipts::MAX_DELIVERY_ROWS;
 mod receive;
+pub(crate) mod w1;
 const RECEIPTS: &str = "own-device/message-receipt/";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

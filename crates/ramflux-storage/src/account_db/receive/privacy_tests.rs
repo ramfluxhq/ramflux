@@ -146,6 +146,7 @@ fn erasure_late_stage_and_process() -> Result<(), StorageError> {
         "{:?}",
         refused.err()
     );
+    own_copy_late_w1_locator(&db)?;
     // (i) Binding a terminal receipt fails with the exact text.
     let terminal = bind(&db, 11, "A");
     assert!(
@@ -160,6 +161,71 @@ fn erasure_late_stage_and_process() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
     fresh_sequence_replay_of_an_erased_tuple()?;
     already_seen_unprojected_collision_stays_staged()
+}
+
+/// (p) P14 own-copy locator: W1 binds the locator to the message; a late erase removes it.
+fn own_copy_late_w1_locator(db: &AccountDb) -> Result<(), StorageError> {
+    db.send_direct_message("thread", "P", "peer", b"secret")?;
+    let own_copy = entry(13, "HP", None);
+    assert_eq!(run(db, input(&own_copy, 13))?, R::Staged);
+    assert_eq!(bind(db, 13, "P")?, ReceiveBind::Bound);
+    db.persist_message_actor_state(
+        "P",
+        "own-device/sequence-locator/P",
+        &json!({"target":"t","incarnation":"e","sequence":13}),
+    )?;
+    assert!(db.actor_state_exists("own-device/sequence-locator/P")?);
+    db.delete_direct_message("thread", "P", "local", "delete-p")?;
+    assert!(
+        !db.actor_state_exists("own-device/sequence-locator/P")?,
+        "late erase must drop the own-copy sequence locator"
+    );
+    assert_eq!(receipt_state(db, 13)?.as_deref(), Some("erased"));
+    own_copy_locator_backup_exclusion()
+}
+
+/// Decrypted native backup contains neither ledger rows nor the own-copy sequence locator.
+fn own_copy_locator_backup_exclusion() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("w1-own-copy-backup")?;
+    db.send_direct_message("thread", "B", "peer", b"secret")?;
+    db.persist_message_actor_state(
+        "B",
+        "own-device/sequence-locator/B",
+        &json!({"target":"t","incarnation":"e","sequence":1}),
+    )?;
+    db.persist_actor_state(
+        "directory/conversation/seq-locator",
+        &json!({"target":"t","incarnation":"e","sequence":1}),
+    )?;
+    let incoming = root.join("incoming.db");
+    let snapshot = db.write_backup_snapshot(&incoming)?;
+    let local_index = crate::AccountIndex::open(root.join("local"))?;
+    local_index.create_account("acct", "principal")?;
+    let local_key = crate::AccountDbKey::derive("acct", b"storage-test-secret");
+    let local = AccountDb::open(&local_index, "acct", &local_key)?;
+    let target = root.join("merged.db");
+    let copied = local.write_backup_snapshot(&target)?;
+    let mut merged = crate::BackupDatabase::open(&target, &copied.key)?;
+    merged.merge_native_backup(&incoming, &snapshot.key, || Ok(()))?;
+    let locator: i64 = merged.db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'own-device/sequence-locator/%'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(locator, 0, "decrypted native backup must not contain the own-copy locator");
+    let leaked: i64 = merged.db.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind='directory/conversation/seq-locator'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        leaked, 1,
+        "omit own-device backup exclusion: a conversation-prefixed locator is imported"
+    );
+    drop(db);
+    drop(local);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 /// A work entry whose authenticated tuple is exactly (principal, device, key, payload) and whose
