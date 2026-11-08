@@ -113,6 +113,11 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("std::future::ready", "immediately-ready future constructor (no I/O)"),
     ("anyhow::ensure", "error-check macro (no I/O)"),
     ("anyhow::anyhow", "error-construction macro (no I/O)"),
+    ("crate::ephemeral::lifetime", "same-crate lifetime types and helpers (no I/O)"),
+    ("crate::ephemeral::receiver", "same-crate receiver types and bounds (no I/O)"),
+    ("blake3::Hasher", "in-memory digest hasher (no I/O)"),
+    ("blake3::hash", "in-memory digest of one payload (no I/O)"),
+    ("serde_json::from_slice", "JSON decode from memory (no I/O)"),
 ];
 
 /// Primitive type names. Their associated functions (`i64::try_from`) cannot
