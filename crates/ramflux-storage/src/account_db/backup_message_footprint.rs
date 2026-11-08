@@ -98,15 +98,32 @@ impl BackupDatabase {
             )?;
             super::raw_inner::quota::validate_all(&self.db)?;
         }
-        self.db.execute_batch(
-            "INSERT OR IGNORE INTO message_footprint SELECT f.message_id,f.kind,f.locator
+        self.db.execute(
+            "INSERT OR IGNORE INTO message_footprint
+             SELECT f.message_id,'archived_actor',CAST(a.rowid AS TEXT)
              FROM incoming.message_footprint f
-             WHERE f.kind IN ('prepared','history_container','operation');
-             INSERT OR IGNORE INTO message_copy_binding SELECT b.copy_id,b.message_id
-             FROM incoming.message_copy_binding b
-             WHERE b.copy_id GLOB 'prepared:*' OR b.copy_id GLOB 'history_container:*'
-                OR b.copy_id GLOB 'operation:*';",
+             JOIN backup_archived_actor_state a
+               ON a.state_kind=f.locator AND a.source=?1
+             WHERE f.kind IN ('prepared','history_container')",
+            params![source],
         )?;
+        let nested: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='backup_archived_actor_state')",
+            [],
+            |row| row.get(0),
+        )?;
+        if nested {
+            self.db.execute(
+                "INSERT OR IGNORE INTO message_footprint
+                 SELECT f.message_id,'archived_actor',CAST(a.rowid AS TEXT)
+                 FROM incoming.message_footprint f
+                 JOIN incoming.backup_archived_actor_state r ON r.state_kind=f.locator
+                 JOIN backup_archived_actor_state a
+                   ON a.source=?1||'/'||r.source AND a.state_kind=r.state_kind
+                 WHERE f.kind IN ('prepared','history_container')",
+                params![source],
+            )?;
+        }
         Ok(super::message_footprint::migration::register_imported(&self.db)?)
     }
 

@@ -155,4 +155,36 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+
+    #[test]
+    fn keyed_delete_and_send_complete_after_the_message_is_already_deleted()
+    -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("keyed-delete-complete")?;
+        db.send_direct_message("thread", "m", "peer", b"private-content")?;
+        db.reserve_operation("op-delete", "fp-op")?;
+        db.reserve_operation("idem-delete", "fp-idem")?;
+        db.reserve_operation("send-race", "fp-send")?;
+        db.delete_direct_message("thread", "m", "local", "delete")?;
+        let delete_body = json!({
+            "tombstone_id": "tombstone:thread:m",
+            "conversation_id": "thread",
+            "message_id": "m",
+            "delete_scope": "local"
+        });
+        db.complete_operation("op-delete", &delete_body)?;
+        db.complete_operation("idem-delete", &delete_body)?;
+        db.complete_operation("send-race", &json!({"message_id":"m","preview":"send-body"}))?;
+        for (id, fingerprint) in
+            [("op-delete", "fp-op"), ("idem-delete", "fp-idem"), ("send-race", "fp-send")]
+        {
+            let replay = db.reserve_operation(id, fingerprint);
+            assert!(
+                matches!(&replay, Ok(Some(body)) if body.get("message_id").and_then(serde_json::Value::as_str) == Some("m")),
+                "{id} replayed as {replay:?}"
+            );
+        }
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

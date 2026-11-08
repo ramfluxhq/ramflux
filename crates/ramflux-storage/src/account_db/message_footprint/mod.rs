@@ -307,10 +307,8 @@ fn collect_generic_references(value: &Value, registration: &mut ActorRegistratio
     match value {
         Value::Object(fields) => {
             for (name, value) in fields {
-                if matches!(
-                    name.as_str(),
-                    "message_id" | "own_copy_message_id" | "target_message_id"
-                ) && let Some(message) = value.as_str()
+                if schema::is_json_message_id_key(name)
+                    && let Some(message) = value.as_str()
                 {
                     registration.message_ids.insert(message.to_owned());
                 } else if name == "payload_hash"

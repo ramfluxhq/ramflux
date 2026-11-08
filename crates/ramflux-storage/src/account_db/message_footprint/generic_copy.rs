@@ -85,6 +85,9 @@ impl AccountDb {
     }
 
     /// Registers an operation receipt that holds a message copy, in the caller's transaction.
+    /// A response that names an already-deleted message is treated as erased: the receipt
+    /// is recorded and the id is skipped, so a keyed delete or a send racing a local delete
+    /// can complete and replay.
     ///
     /// # Errors
     /// Rejects autocommit or SQLite failures.
@@ -99,7 +102,7 @@ impl AccountDb {
         collect_message_ids(response, &mut messages);
         for message in messages {
             if self.message_is_deleted(&message)? {
-                return Err(StorageError::AuthorizationRejected);
+                continue;
             }
             register_kind(self, &message, "operation", operation_id)?;
         }
@@ -165,10 +168,12 @@ fn register_kind(
     kind: &str,
     locator: &str,
 ) -> Result<(), StorageError> {
-    db.connection.execute(
-        "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
-        params![format!("{kind}:{locator}"), message],
-    )?;
+    for copy_id in [format!("{kind}:{locator}"), format!("actor:{locator}")] {
+        db.connection.execute(
+            "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
+            params![copy_id, message],
+        )?;
+    }
     db.connection.execute(
         "INSERT OR IGNORE INTO message_footprint VALUES(?1,?2,?3)",
         params![message, kind, locator],
@@ -192,14 +197,12 @@ fn history_body(value: &impl Serialize, included: &[&str]) -> Result<Value, Stor
     Ok(stored)
 }
 
-fn collect_message_ids(value: &Value, output: &mut BTreeSet<String>) {
+pub(super) fn collect_message_ids(value: &Value, output: &mut BTreeSet<String>) {
     match value {
         Value::Object(fields) => {
             for (name, child) in fields {
-                if matches!(
-                    name.as_str(),
-                    "message_id" | "own_copy_message_id" | "target_message_id"
-                ) && let Some(message) = child.as_str()
+                if super::schema::is_json_message_id_key(name)
+                    && let Some(message) = child.as_str()
                 {
                     output.insert(message.to_owned());
                 }

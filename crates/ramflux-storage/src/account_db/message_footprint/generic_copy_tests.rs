@@ -2,13 +2,16 @@
 // Copyright (c) 2026 Span Brain
 
 //! T11 generic absence across active/archive/restore and history-container any-owner invalidation.
+use super::generic_copy::collect_message_ids;
 use super::*;
 use crate::{
-    AccountDbKey, AccountIndex, BackupDatabase, ObjectReferenceAdmission, ObjectReferenceOwner,
-    ObjectWrite,
+    AccountDbKey, AccountIndex, BackupDatabase, BackupIndexInstall, ObjectReferenceAdmission,
+    ObjectReferenceOwner, ObjectWrite, WrappedAccountDbKey,
 };
 use rusqlite::params;
 use serde_json::json;
+use std::collections::BTreeSet;
+use std::path::Path;
 
 const SECRETS: [&str; 6] = [
     "actor-secret-body",
@@ -51,7 +54,7 @@ fn seed_registered_copies(db: &AccountDb) -> Result<(), StorageError> {
         db.put_prepared_message_copy(
             "projection-id",
             "copy-1",
-            &json!({"message_id":"projection-id","payload":"prepared-envelope-secret"}),
+            &json!({"payload":"prepared-envelope-secret"}),
         )?;
         db.put_history_container(
             "xfer-1",
@@ -148,6 +151,7 @@ fn scan_table(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn raw_inner_generic_absence_across_active_archive_and_restore() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("p11-generic-absence")?;
     seed_registered_copies(&db)?;
@@ -172,8 +176,41 @@ fn raw_inner_generic_absence_across_active_archive_and_restore() -> Result<(), S
     scan_tables(&merged.db, "projection-id", &forbidden)?;
     drop(merged);
     drop(db);
+    let source = BackupDatabase::open(&content, &content_snap.key)?;
+    let restored = install_pre_erase_snapshot(&root.join("fresh"), &source)?;
+    drop(source);
+    restored.delete_direct_message("thread", "projection-id", "local", "delete")?;
+    assert_generic_absence(&restored, "projection-id", &forbidden)?;
+    drop(restored);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn install_pre_erase_snapshot(
+    root: &Path,
+    source: &BackupDatabase,
+) -> Result<AccountDb, StorageError> {
+    let index = AccountIndex::open(root)?;
+    let path = "accounts/acct/generation-restored/account.db";
+    std::fs::create_dir_all(root.join("accounts/acct/generation-restored"))?;
+    let key = AccountDbKey::generate()?;
+    source.copy_to(&root.join(path), &key)?;
+    let (nonce, wrapped_key) = crate::wrap_with_vault_secret(&[9; 32], key.bytes())?;
+    index.install_backup_generation(&BackupIndexInstall {
+        account_id: "acct",
+        principal_commitment: "principal",
+        db_relative_path: path,
+        object_relative_path: "accounts/acct/generation-restored",
+        manifest_json: b"{}",
+        wrapped_key: &WrappedAccountDbKey {
+            key_wrapping_provider: "local-vault".into(),
+            key_wrapping_ref: "test".into(),
+            nonce,
+            wrapped_key,
+        },
+    })?;
+    drop(index);
+    AccountDb::open(&AccountIndex::open(root)?, "acct", &key)
 }
 
 #[test]
@@ -198,7 +235,7 @@ fn omitting_prepared_copy_registration_is_detected_as_an_erasure_residual()
         db.put_prepared_message_copy(
             "projection-id",
             "copy-1",
-            &json!({"message_id":"projection-id","payload":"prepared-envelope-secret"}),
+            &json!({"payload":"prepared-envelope-secret"}),
         )
     })?;
     db.delete_direct_message("thread", "projection-id", "local", "delete")?;
@@ -277,6 +314,43 @@ fn history_container_any_owner_invalidates_without_erasing_shared_object()
         |row| row.get(0),
     )?;
     assert_eq!(groups, 1);
+    db.delete_direct_message("thread", "m2", "local", "delete-m2")?;
+    let leftover: i64 = db.connection.query_row(
+        "SELECT count(*) FROM object_index WHERE object_id='shared-wire' AND length(ciphertext)>0",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(leftover, 0, "shared object last-owner payload survived");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn json_copy_trigger_and_collect_message_ids_share_one_key_set() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("p11-shared-message-id-keys")?;
+    let sql: String = db.connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='footprint_runtime_operation_INSERT'",
+        [],
+        |row| row.get(0),
+    )?;
+    let keys = super::schema::json_message_id_keys_sql();
+    assert!(sql.contains(&format!("t.key IN ({keys})")), "{sql}");
+    let mut ids = BTreeSet::new();
+    collect_message_ids(
+        &json!({
+            "message_id": "a",
+            "own_copy_message_id": "b",
+            "target_message_id": "c",
+            "message": {"id": "d"},
+            "unrelated": "e"
+        }),
+        &mut ids,
+    );
+    assert_eq!(
+        ids,
+        BTreeSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()])
+    );
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

@@ -183,10 +183,24 @@ pub(super) fn actor_guard() -> String {
     format!("(({ACTOR_PREFIX_GUARD}) OR ({}))", envelope_sql("state_json"))
 }
 
+/// JSON object keys that confer message ownership. Shared with `collect_message_ids`.
+pub(super) const JSON_MESSAGE_ID_KEYS: &[&str] =
+    &["message_id", "own_copy_message_id", "target_message_id"];
+
+pub(super) fn json_message_id_keys_sql() -> String {
+    JSON_MESSAGE_ID_KEYS.iter().map(|key| format!("'{key}'")).collect::<Vec<_>>().join(",")
+}
+
+pub(super) fn is_json_message_id_key(name: &str) -> bool {
+    JSON_MESSAGE_ID_KEYS.contains(&name)
+}
+
 const ACTOR_LINKS: &str = r"
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1)),'{kind}',{locator} FROM (SELECT 1) LEFT JOIN message_copy_binding b ON b.copy_id='object:'||substr(substr(NEW.state_kind,18),1,instr(substr(NEW.state_kind,18),'/')-1) WHERE NEW.state_kind GLOB 'attachment/chunk/*/*' ON CONFLICT DO NOTHING;
 
  INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_copy_binding WHERE copy_id='actor:'||NEW.state_kind ON CONFLICT DO NOTHING;
+ INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_copy_binding WHERE copy_id='prepared:'||NEW.state_kind ON CONFLICT DO NOTHING;
+ INSERT INTO message_footprint SELECT message_id,'{kind}',{locator} FROM message_copy_binding WHERE copy_id='history_container:'||NEW.state_kind ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT substr(NEW.state_kind,21),'{kind}',{locator} WHERE NEW.state_kind GLOB 'group-message/alias/*' ON CONFLICT DO NOTHING;
  INSERT INTO message_copy_binding SELECT 'actor:delivery-receipt/status/'||json_extract(CAST(NEW.state_json AS TEXT),'$.status_id'),json_extract(CAST(NEW.state_json AS TEXT),'$.message') WHERE NEW.state_kind GLOB 'delivery-receipt/pending/*' AND json_type(CAST(NEW.state_json AS TEXT),'$.status_id')='text' AND json_type(CAST(NEW.state_json AS TEXT),'$.message')='text' ON CONFLICT DO NOTHING;
 
@@ -230,6 +244,7 @@ fn json_copy(db: &Connection, store: CopyStore<'_>) -> rusqlite::Result<()> {
         db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS footprint_{table}_removed AFTER DELETE ON {table} BEGIN DELETE FROM message_footprint WHERE kind='{kind}' AND locator={old_locator}; END;"))?;
     }
     let extra = extra.replace("{kind}", kind).replace("{locator}", locator);
+    let keys = json_message_id_keys_sql();
     let actor_guard = actor_guard();
     for operation in ["INSERT", "UPDATE"] {
         // BEFORE registration makes ownership available to every AFTER invalidation trigger,
@@ -270,7 +285,7 @@ WHEN ({guard}) {insert_guard} AND json_valid(CAST(NEW.{column} AS TEXT))
  AND COALESCE(json_extract(CAST(NEW.{column} AS TEXT),'$.message.deleted'),0)!=1 BEGIN
  {reset}
  {extra}
- INSERT INTO message_footprint SELECT t.value,'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t WHERE t.type='text' AND t.key IN ('message_id','own_copy_message_id','target_message_id') ON CONFLICT DO NOTHING;
+ INSERT INTO message_footprint SELECT t.value,'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t WHERE t.type='text' AND t.key IN ({keys}) ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT t.value,'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t WHERE t.type='text' AND t.key='id' AND t.path='$.message' ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:payload:'||t.value),'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t LEFT JOIN message_copy_binding b ON b.copy_id='payload:'||t.value WHERE t.key='payload_hash' AND t.type='text' ON CONFLICT DO NOTHING;
  INSERT INTO message_footprint SELECT COALESCE(b.message_id,'copy:object:'||t.value),'{kind}',{locator} FROM json_tree(CAST(NEW.{column} AS TEXT)) t LEFT JOIN message_copy_binding b ON b.copy_id='object:'||t.value WHERE t.type='text' AND t.key='object_id' ON CONFLICT DO NOTHING;
