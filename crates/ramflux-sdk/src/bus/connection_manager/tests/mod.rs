@@ -154,10 +154,8 @@ pub(crate) async fn wait_bulk_held(handle: &ConnectionHandle, held: usize) {
         }
         tokio::task::yield_now().await;
     }
-    panic!(
-        "bulk places held {}, want {held}",
-        super::CALL_QUEUE.saturating_sub(handle.places.available_permits())
-    );
+    let actual = super::CALL_QUEUE.saturating_sub(handle.places.available_permits());
+    assert_eq!(actual, held, "bulk places held {actual}, want {held}");
 }
 
 pub(crate) fn send(

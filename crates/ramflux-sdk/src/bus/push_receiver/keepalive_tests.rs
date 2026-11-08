@@ -372,7 +372,6 @@ async fn keepalive_stops_on_lock_and_restarts_without_duplicate_connected() -> C
                 Ok(ConnectionEvent::Connected { generation: g, .. }) if g == next => {
                     connected += 1;
                 }
-                Ok(ConnectionEvent::Connected { .. }) => {}
                 Ok(_) => {}
                 Err(_) if connected == 0 => tokio::task::yield_now().await,
                 Err(_) => break,
