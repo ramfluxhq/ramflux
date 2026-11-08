@@ -259,8 +259,18 @@ fn handle_admin_forward_request(
     admin_token: Option<&str>,
 ) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
     let request: ramflux_node_core::FederatedEnvelopeForwardRequest =
-        serde_json::from_slice(&request.body)
-            .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+        match ramflux_protocol::parse_i_json(&request.body) {
+            Ok(request) => request,
+            Err(source) => {
+                tracing::debug!(%source, "federation admin forward rejected by I-JSON");
+                return Ok(HttpResponse::raw_json(
+                    "400 Bad Request",
+                    serde_json::to_vec(&ramflux_protocol::i_json_rejection_body()).map_err(
+                        |source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()),
+                    )?,
+                ));
+            }
+        };
     require_admin_token(admin_token, &request.admin_token)?;
     log_admin_forward_request(&request);
     let response = handle_s8_forward_envelope(
@@ -279,8 +289,19 @@ fn handle_home_node_forward_request(
     context: &FederationAdminHttpContext,
     admin_token: Option<&str>,
 ) -> Result<HttpResponse, ramflux_node_core::NodeCoreError> {
-    let request: HomeNodeMigrationForwardLocalRequest = serde_json::from_slice(&request.body)
-        .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
+    let request: HomeNodeMigrationForwardLocalRequest =
+        match ramflux_protocol::parse_i_json(&request.body) {
+            Ok(request) => request,
+            Err(source) => {
+                tracing::debug!(%source, "home-node forward rejected by I-JSON");
+                return Ok(HttpResponse::raw_json(
+                    "400 Bad Request",
+                    serde_json::to_vec(&ramflux_protocol::i_json_rejection_body()).map_err(
+                        |source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()),
+                    )?,
+                ));
+            }
+        };
     require_admin_token(admin_token, &request.admin_token)?;
     log_home_node_forward_request(&request.forward);
     let response = handle_s8_forward_envelope(

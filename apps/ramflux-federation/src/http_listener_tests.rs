@@ -48,6 +48,21 @@ fn request(
     Ok(response)
 }
 
+fn federation_forward_body(created_at: &str, ext_members: &str, admin_token: &str) -> String {
+    format!(
+        r#"{{"admin_token":"{admin_token}","source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","signing_key_id":"node-b","signature_alg":"ed25519","signature":"sig","envelope":{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{{{ext_members}}},"signing_key_id":"device","signature_alg":"ed25519","signature":"sig","envelope_id":"federated-forward","source_principal_id":"alice","source_device_id":"phone","target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":3600,"created_at":{created_at},"encrypted_payload":"opaque","payload_hash":"hash"}}}}"#
+    )
+}
+
+fn assert_http_response(response: &str, status: &str, body: Option<&[u8]>) -> TestResult {
+    let (headers, actual_body) = response.split_once("\r\n\r\n").ok_or("missing HTTP body")?;
+    assert!(headers.starts_with(&format!("HTTP/1.1 {status}\r\n")), "{response}");
+    if let Some(body) = body {
+        assert_eq!(actual_body.as_bytes(), body);
+    }
+    Ok(())
+}
+
 pub(super) fn context(
     root: &std::path::Path,
 ) -> Result<FederationAdminHttpContext, Box<dyn std::error::Error>> {
@@ -139,6 +154,67 @@ fn migration_local_rpc_returns_one_bounded_response_for_valid_and_malformed_bodi
         }
     }
     drop(admin);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn federation_ijson_ingress_refuses_unsafe_integer() -> TestResult {
+    const EXPECTED_BODY: &[u8] = br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+    let root = temp_cert_root("federation-ijson-admin")?;
+    let context = context(&root)?;
+
+    for (path, wrap_forward) in
+        [("/s8/federation/forward", false), ("/internal/home-node-migration/forward", true)]
+    {
+        let make_body = |created_at: &str, ext: &str, token: &str| {
+            let forward = federation_forward_body(created_at, ext, token);
+            if wrap_forward {
+                format!(r#"{{"admin_token":"{token}","forward":{forward}}}"#)
+            } else {
+                forward
+            }
+        };
+        for (created_at, ext, rejected) in [
+            ("9007199254740991", r#""x_probe":"v","x_probe":"v""#, true),
+            ("9007199254740992", r#""x_probe":"v""#, true),
+            ("9007199254740991", r#""x_probe":"v""#, false),
+        ] {
+            let body = make_body(created_at, ext, "secret");
+            let request_context = context.clone();
+            let response = request("POST", path, &body, move |stream| {
+                crate::admin_http::handle_admin_connection_with_limits(
+                    stream,
+                    &request_context,
+                    crate::http_limits::defaults(false),
+                    std::time::Instant::now(),
+                );
+                Ok(())
+            })?;
+            if rejected {
+                assert_http_response(&response, "400 Bad Request", Some(EXPECTED_BODY))?;
+            } else {
+                assert_http_response(&response, "500 Internal Server Error", None)?;
+                assert!(!response.ends_with(std::str::from_utf8(EXPECTED_BODY)?));
+            }
+        }
+
+        let unauthenticated = make_body("9007199254740991", r#""x_probe":"v""#, "wrong");
+        let request_context = context.clone();
+        let response = request("POST", path, &unauthenticated, move |stream| {
+            crate::admin_http::handle_admin_connection_with_limits(
+                stream,
+                &request_context,
+                crate::http_limits::defaults(false),
+                std::time::Instant::now(),
+            );
+            Ok(())
+        })?;
+        assert_http_response(&response, "500 Internal Server Error", None)?;
+        assert!(!response.ends_with(std::str::from_utf8(EXPECTED_BODY)?));
+    }
+
+    drop(context);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

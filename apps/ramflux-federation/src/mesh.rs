@@ -468,19 +468,18 @@ fn handle_s8_inbound_envelope_request(
         "federation inbound envelope body read; decoding request"
     );
     let request: ramflux_node_core::FederatedEnvelopeForwardRequest =
-        match serde_json::from_slice(body_bytes) {
+        match ramflux_protocol::parse_i_json(body_bytes) {
             Ok(request) => request,
             Err(source) => {
-                let body = format!("inbound envelope decode failed: {source}");
                 tracing::error!(
                     body_len,
                     error = %source,
                     "federation inbound envelope request decode failed"
                 );
-                ramflux_transport::write_mesh_text_response(
+                ramflux_transport::write_mesh_json_response(
                     stream,
-                    "500 Internal Server Error",
-                    &body,
+                    "400 Bad Request",
+                    &ramflux_protocol::i_json_rejection_body(),
                 )
                 .map_err(|error| mesh_transport_error(&error))?;
                 return Ok(());
@@ -941,6 +940,174 @@ mod tests {
     }
 
     #[test]
+    fn federation_ijson_ingress_refuses_unsafe_integer() -> Result<(), Box<dyn std::error::Error>> {
+        const EXPECTED_BODY: &[u8] =
+            br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+        let root = temp_cert_root("federation-ijson-mesh-http")?;
+        let (server_tls, client_tls, ca_pem) = issue_rsa_mesh_certificates(&root)?;
+
+        for (created_at, duplicate, rejected) in [
+            (9_007_199_254_740_991, true, true),
+            (9_007_199_254_740_992, false, true),
+            (9_007_199_254_740_991, false, false),
+        ] {
+            let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
+            let endpoint = server.local_addr()?.to_string();
+            let (mut context, store_path) = test_mesh_server_context("federation-ijson-mesh-http")?;
+            let router_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            router_listener.set_nonblocking(true)?;
+            Arc::make_mut(&mut context.router).endpoint = router_listener.local_addr()?.to_string();
+            let store = Arc::clone(&context.store);
+            let pending_before = store.list_pending_outbound(100)?;
+            let roots = vec![ca_pem.clone()];
+            let accepted_server_tls = server_tls.clone();
+            let worker = std::thread::spawn(move || -> Result<(), String> {
+                let mut stream = server
+                    .accept_authenticated_with_pem_roots(&accepted_server_tls, &roots)
+                    .map_err(|error| error.to_string())?
+                    .stream;
+                let request = ramflux_transport::read_mesh_http_request(&mut stream)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing mesh request".to_owned())?;
+                if request.path != "/s8/federation/envelope" {
+                    return Err(format!("unexpected mesh path {}", request.path));
+                }
+                handle_s8_inbound_envelope_request(&mut stream, None, &request.body, &context)
+                    .map_err(|error| error.to_string())
+            });
+
+            let (status, body) = ramflux_transport::mesh_http_post_status_body(
+                &endpoint,
+                "/s8/federation/envelope",
+                &client_tls,
+                "ramflux-federation",
+                &RawForward { created_at, duplicate_ext: duplicate },
+            )?;
+            worker.join().map_err(|_| "mesh HTTP worker panicked")??;
+            if rejected {
+                assert_eq!(status, 400);
+                assert_eq!(body, EXPECTED_BODY);
+            } else {
+                assert_eq!(status, 500);
+                assert_ne!(body, EXPECTED_BODY);
+            }
+            assert_eq!(store.list_pending_outbound(100)?, pending_before);
+            assert!(matches!(
+                router_listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+            drop(store);
+            cleanup_store(&store_path);
+        }
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn issue_rsa_mesh_certificates(
+        root: &Path,
+    ) -> Result<
+        (ramflux_transport::MeshTlsConfig, ramflux_transport::MeshTlsConfig, String),
+        Box<dyn std::error::Error>,
+    > {
+        use std::process::Command;
+
+        let ca_key = root.join("mesh-ca-key.pem");
+        let ca_cert = root.join("mesh-ca.pem");
+        let ca_config = root.join("mesh-ca.cnf");
+        std::fs::write(
+            &ca_config,
+            "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=v3_ca\n[dn]\nCN=Ramflux I-JSON Test CA\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n",
+        )?;
+        let ca_status = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                ca_key.to_str().ok_or("invalid CA key path")?,
+                "-out",
+                ca_cert.to_str().ok_or("invalid CA cert path")?,
+                "-days",
+                "2",
+                "-config",
+                ca_config.to_str().ok_or("invalid CA config path")?,
+            ])
+            .status()?;
+        if !ca_status.success() {
+            return Err(format!("OpenSSL CA generation failed: {ca_status}").into());
+        }
+
+        let issue_service = |name: &str,
+                             service: &str|
+         -> Result<
+            ramflux_transport::MeshTlsConfig,
+            Box<dyn std::error::Error>,
+        > {
+            let service_dir = root.join(name);
+            std::fs::create_dir_all(&service_dir)?;
+            let key = service_dir.join("service-key.pem");
+            let csr = service_dir.join("service.csr");
+            let cert = service_dir.join("service.pem");
+            let extensions = service_dir.join("service.ext");
+            let key_path = key.to_str().ok_or("invalid service key path")?;
+            let csr_path = csr.to_str().ok_or("invalid service CSR path")?;
+            let cert_path = cert.to_str().ok_or("invalid service cert path")?;
+            let subject = format!("/CN={service}");
+            let status = Command::new("openssl")
+                .args([
+                    "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", key_path, "-out",
+                    csr_path, "-subj", &subject,
+                ])
+                .status()?;
+            if !status.success() {
+                return Err(format!("OpenSSL service key generation failed: {status}").into());
+            }
+            std::fs::write(
+                &extensions,
+                format!(
+                    "subjectAltName = DNS:localhost, DNS:{service}, URI:spiffe://{name}/{service}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature, keyEncipherment\n"
+                ),
+            )?;
+            let status = Command::new("openssl")
+                .args([
+                    "x509",
+                    "-req",
+                    "-in",
+                    csr_path,
+                    "-CA",
+                    ca_cert.to_str().ok_or("invalid CA cert path")?,
+                    "-CAkey",
+                    ca_key.to_str().ok_or("invalid CA key path")?,
+                    "-CAcreateserial",
+                    "-out",
+                    cert_path,
+                    "-days",
+                    "2",
+                    "-extfile",
+                    extensions.to_str().ok_or("invalid extension path")?,
+                ])
+                .status()?;
+            if !status.success() {
+                return Err(format!("OpenSSL service certificate signing failed: {status}").into());
+            }
+            Ok(ramflux_transport::MeshTlsConfig {
+                ca_cert: ca_cert.clone(),
+                service_cert: cert,
+                service_key: key,
+            })
+        };
+
+        Ok((
+            issue_service("node-a", "ramflux-federation")?,
+            issue_service("node-b", "ramflux-router")?,
+            std::fs::read_to_string(ca_cert)?,
+        ))
+    }
+
+    #[test]
     fn federation_quic_peer_service_id_comes_from_spiffe_uri() {
         assert_eq!(
             mesh_peer_service_id(Some("spiffe://node-a/ramflux-retention")).as_deref(),
@@ -995,6 +1162,86 @@ mod tests {
                 dry_run: false,
             })
             .unwrap_or_else(|error| serde_json::json!({ "error": error.to_string() })),
+        }
+    }
+
+    struct RawForward {
+        created_at: i64,
+        duplicate_ext: bool,
+    }
+
+    impl serde::Serialize for RawForward {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(8))?;
+            map.serialize_entry("source_node_id", "node-b")?;
+            map.serialize_entry("target_node_id", "node-a")?;
+            map.serialize_entry("delivery_class", "opaque_event")?;
+            map.serialize_entry("required_capability", "opaque_delivery")?;
+            map.serialize_entry("signing_key_id", "node-b")?;
+            map.serialize_entry("signature_alg", "ed25519")?;
+            map.serialize_entry("signature", "sig")?;
+            map.serialize_entry(
+                "envelope",
+                &RawEnvelope { created_at: self.created_at, duplicate_ext: self.duplicate_ext },
+            )?;
+            map.end()
+        }
+    }
+
+    struct RawEnvelope {
+        created_at: i64,
+        duplicate_ext: bool,
+    }
+
+    impl serde::Serialize for RawEnvelope {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(19))?;
+            map.serialize_entry("schema", "ramflux.envelope.v1")?;
+            map.serialize_entry("version", &1)?;
+            map.serialize_entry("domain", "ramflux.envelope.v1")?;
+            map.serialize_entry("ext", &RawExt { duplicate: self.duplicate_ext })?;
+            map.serialize_entry("signing_key_id", "device")?;
+            map.serialize_entry("signature_alg", "ed25519")?;
+            map.serialize_entry("signature", "sig")?;
+            map.serialize_entry("envelope_id", "federated-forward")?;
+            map.serialize_entry("source_principal_id", "alice")?;
+            map.serialize_entry("source_device_id", "phone")?;
+            map.serialize_entry("target_delivery_id", "peer")?;
+            map.serialize_entry("routing_set_id", &Option::<String>::None)?;
+            map.serialize_entry("delivery_class", "opaque_event")?;
+            map.serialize_entry("priority", "normal")?;
+            map.serialize_entry("ttl", &3600)?;
+            map.serialize_entry("created_at", &self.created_at)?;
+            map.serialize_entry("encrypted_payload", "opaque")?;
+            map.serialize_entry("payload_hash", "hash")?;
+            map.end()
+        }
+    }
+
+    struct RawExt {
+        duplicate: bool,
+    }
+
+    impl serde::Serialize for RawExt {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(Some(if self.duplicate { 2 } else { 1 }))?;
+            map.serialize_entry("x_probe", "v")?;
+            if self.duplicate {
+                map.serialize_entry("x_probe", "v")?;
+            }
+            map.end()
         }
     }
 

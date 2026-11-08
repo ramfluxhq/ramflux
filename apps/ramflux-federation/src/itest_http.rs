@@ -279,9 +279,18 @@ fn handle_itest_request(
         }
         ("POST", "/mvp8/federation/friend-request") => {
             let request: ramflux_node_core::FederatedFriendRequestEnvelope =
-                serde_json::from_slice(&request.body).map_err(|source| {
-                    ramflux_node_core::NodeCoreError::ItestJson(source.to_string())
-                })?;
+                match ramflux_protocol::parse_i_json(&request.body) {
+                    Ok(request) => request,
+                    Err(source) => {
+                        tracing::debug!(%source, "federation friend request rejected by I-JSON");
+                        ramflux_node_core::write_itest_json_response(
+                            stream,
+                            "400 Bad Request",
+                            &ramflux_protocol::i_json_rejection_body(),
+                        )?;
+                        return Ok(());
+                    }
+                };
             let response = handle_mvp8_friend_request(&request, state, router)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
@@ -293,7 +302,7 @@ fn handle_itest_request(
                 "federation forward body read; decoding request"
             );
             let request: ramflux_node_core::FederatedEnvelopeForwardRequest =
-                match serde_json::from_slice(&request.body) {
+                match ramflux_protocol::parse_i_json(&request.body) {
                     Ok(request) => request,
                     Err(source) => {
                         tracing::error!(
@@ -301,16 +310,11 @@ fn handle_itest_request(
                             error = %source,
                             "federation forward request decode failed"
                         );
-                        let body = format!("forward decode failed: {source}");
-                        tracing::info!(
-                            status = "500 Internal Server Error",
-                            body_len = body.len(),
-                            "federation forward responding"
-                        );
-                        ramflux_node_core::write_itest_text_response(
+                        tracing::info!(status = "400 Bad Request", "federation forward responding");
+                        ramflux_node_core::write_itest_json_response(
                             stream,
-                            "500 Internal Server Error",
-                            &body,
+                            "400 Bad Request",
+                            &ramflux_protocol::i_json_rejection_body(),
                         )?;
                         return Ok(());
                     }
@@ -367,6 +371,114 @@ fn handle_itest_request(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "itest-http"))]
+mod i_json_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn envelope(created_at: &str, ext_members: &str) -> String {
+        format!(
+            r#"{{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","ext":{{{ext_members}}},"signing_key_id":"device","signature_alg":"ed25519","signature":"sig","envelope_id":"federated-forward","source_principal_id":"alice","source_device_id":"phone","target_delivery_id":"peer","routing_set_id":null,"delivery_class":"opaque_event","priority":"normal","ttl":3600,"created_at":{created_at},"encrypted_payload":"opaque","payload_hash":"hash"}}"#
+        )
+    }
+
+    fn response(path: &str, body: &str, context: ItestHttpContext) -> TestResult<String> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        client.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let (mut server, _) = listener.accept()?;
+        server.set_read_timeout(Some(Duration::from_secs(5)))?;
+        server.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let connections = ramflux_node_core::ConnectionSet::new(1);
+        let guard = connections.register(&server)?.ok_or("test connection refused")?;
+        let worker = std::thread::spawn(move || {
+            handle_itest_connection(&mut server, &context, &guard);
+        });
+        write!(
+            client,
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        worker.join().map_err(|_| "itest HTTP worker panicked")?;
+        Ok(response)
+    }
+
+    fn context(root: &std::path::Path) -> Result<ItestHttpContext, Box<dyn std::error::Error>> {
+        let admin = crate::http_listener_tests::context(root)?;
+        Ok(ItestHttpContext {
+            state: admin.state,
+            store: admin.store,
+            router: admin.router,
+            discovery: admin.discovery,
+            mesh_observability: admin.mesh_observability,
+        })
+    }
+
+    fn assert_reply(response: &str, status: &str, expected_body: Option<&[u8]>) -> TestResult {
+        let (headers, body) = response.split_once("\r\n\r\n").ok_or("missing HTTP body")?;
+        assert!(headers.starts_with(&format!("HTTP/1.1 {status}\r\n")), "{response}");
+        if let Some(expected_body) = expected_body {
+            assert_eq!(body.as_bytes(), expected_body);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn federation_ijson_ingress_refuses_unsafe_integer() -> TestResult {
+        const FRIEND_BODY: &[u8] =
+            br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+        const FORWARD_BODY: &[u8] =
+            br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+        let root = crate::test_certificates::temp_cert_root("federation-ijson-itest")?;
+
+        for (path, friend) in
+            [("/mvp8/federation/friend-request", true), ("/s8/federation/forward", false)]
+        {
+            for (created_at, ext, rejected) in [
+                ("9007199254740991", r#""x_probe":"v","x_probe":"v""#, true),
+                ("9007199254740992", r#""x_probe":"v""#, true),
+                ("9007199254740991", r#""x_probe":"v""#, false),
+            ] {
+                let envelope = envelope(created_at, ext);
+                let body = if friend {
+                    format!(
+                        r#"{{"source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","envelope":{envelope}}}"#
+                    )
+                } else {
+                    format!(
+                        r#"{{"admin_token":"","source_node_id":"node-b","target_node_id":"node-a","delivery_class":"opaque_event","required_capability":"opaque_delivery","signing_key_id":"node-b","signature_alg":"ed25519","signature":"sig","envelope":{envelope}}}"#
+                    )
+                };
+                let reply = response(path, &body, context(&root)?)?;
+                if rejected {
+                    assert_reply(
+                        &reply,
+                        "400 Bad Request",
+                        Some(if friend { FRIEND_BODY } else { FORWARD_BODY }),
+                    )?;
+                } else {
+                    assert_reply(&reply, "500 Internal Server Error", None)?;
+                    assert!(!reply.ends_with(std::str::from_utf8(if friend {
+                        FRIEND_BODY
+                    } else {
+                        FORWARD_BODY
+                    })?));
+                }
+            }
+        }
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "itest-http")]
