@@ -350,7 +350,11 @@ fn refused(row: &str, mut vector: Value, mutate: impl FnOnce(&mut Value), expect
     mutate(&mut vector);
     let outcome = decode_server_frame(&serde_json::to_vec(&vector).unwrap());
     let line = match outcome {
-        Err(error) if without_location(&error.to_string()) == expected => return,
+        Err(ramflux_protocol::ProtocolError::IJson(error))
+            if without_location(&error.to_string()) == expected =>
+        {
+            return;
+        }
         Err(error) => format!("{row}: expected {expected:?}, got {:?}", error.to_string()),
         Ok(frame) => format!("{row}: expected {expected:?}, but it decoded to {frame:?}"),
     };

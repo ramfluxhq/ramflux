@@ -293,8 +293,8 @@ async fn capable_point_and_ack_exact_reply_sets() {
             assert!(engine.terminal_reason.is_none());
         }
     }
-    // Sequence bounds: 1 and u64::MAX are sent; 0 is refused before any write.
-    for seq in [1, u64::MAX] {
+    // Sequence bounds: 1 and the largest interoperable JSON integer are sent; 0 is refused.
+    for seq in [1, ramflux_protocol::MAX_SAFE_JSON_INTEGER] {
         let (mut engine, sent) = session(push(), vec![typed(&entry_frame(seq))]);
         assert_eq!(
             engine.fetch_entry(seq).await.unwrap(),
@@ -554,7 +554,8 @@ async fn refusal_rows() {
     // (r21) a single ACK reply that carries `results` is malformed (no fallback).
     let bytes = mutate(&ack_frame(), |v| v["results"] = json!([]));
     let (result, engine) = single(vec![bytes]).await;
-    retired_with(result, &engine, "unexpected gateway frame: malformed capable frame", "r21");
+    assert!(matches!(result, Err(SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)))));
+    assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)), "r21");
 
     // (r13)-(r16) the result list against the requested [1, 2, 3].
     let mismatch =

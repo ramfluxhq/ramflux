@@ -27,14 +27,23 @@ const GENERATION: u64 = 7;
 pub(super) fn attach_host(
     engine: &mut GatewaySessionEngine,
 ) -> (Arc<SessionHub>, Arc<ResyncState>) {
+    let (hub, resync, _) = attach_host_with_dispatch_counter(engine);
+    (hub, resync)
+}
+
+pub(super) fn attach_host_with_dispatch_counter(
+    engine: &mut GatewaySessionEngine,
+) -> (Arc<SessionHub>, Arc<ResyncState>, Arc<std::sync::atomic::AtomicUsize>) {
     let hub = Arc::new(SessionHub::new(GENERATION));
     let resync = Arc::new(ResyncState::default());
+    let dispatch_count = Arc::default();
     engine.host = Some(HostFrames {
         hub: Arc::clone(&hub),
         resync_needed: Arc::clone(&resync),
         buffer_stats: Arc::default(),
+        dispatch_count: Arc::clone(&dispatch_count),
     });
-    (hub, resync)
+    (hub, resync, dispatch_count)
 }
 
 fn entry(seq: u64) -> GatewayInboxEntry {

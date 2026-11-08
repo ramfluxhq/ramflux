@@ -320,7 +320,8 @@ async fn capable_resume_page_exact_reply() {
 
     // (p6) bounds, inclusive at both ends: limit 1 and the cursor extremes are sent and
     // echoed; limit 0 is refused before any write.
-    for (after, limit) in [(0, 1), (u64::MAX, 1), (u64::MAX, 256)] {
+    let max_safe = ramflux_protocol::MAX_SAFE_JSON_INTEGER;
+    for (after, limit) in [(0, 1), (max_safe, 1), (max_safe, 256)] {
         let (mut engine, sent) = session(push(), vec![typed(&page(after))]);
         assert_eq!(engine.resume_page(after, limit).await.unwrap(), expected(after));
         assert_eq!(*sent.lock().unwrap(), vec![golden(after, limit)]);

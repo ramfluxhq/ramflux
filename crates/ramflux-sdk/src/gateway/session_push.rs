@@ -294,10 +294,12 @@ pub(crate) enum CapableServerFrame {
 /// Decodes one capable server frame from its wire bytes.
 ///
 /// # Errors
-/// Returns the decode error for malformed JSON, unknown tags or fields, missing fields,
-/// grammar violations and coupling violations.
-pub(crate) fn decode_server_frame(bytes: &[u8]) -> Result<CapableServerFrame, serde_json::Error> {
-    serde_json::from_slice(bytes)
+/// Returns [`ramflux_protocol::ProtocolError::IJson`] for malformed JSON, unknown tags or fields,
+/// missing fields, grammar violations, coupling violations or other I-JSON failures.
+pub(crate) fn decode_server_frame(
+    bytes: &[u8],
+) -> Result<CapableServerFrame, ramflux_protocol::ProtocolError> {
+    ramflux_protocol::parse_i_json::<CapableServerFrame>(bytes)
 }
 /// How a session was negotiated. Frozen at establishment; a reconnect negotiates again.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -380,15 +382,16 @@ pub(crate) enum Routed {
     Capable(Box<CapableServerFrame>),
 }
 
-/// Why a frame could not be routed. Everything except `Legacy` retires the session.
+/// Why a frame could not be routed. `Retire` is a policy rejection; decode failures keep their
+/// protocol error so callers can classify I-JSON refusals.
 #[derive(Debug)]
 pub(crate) enum RouteError {
     /// The frame is not allowed in this mode; the text names the arm.
     Retire(&'static str),
     /// A capable frame failed its strict decode. It is never re-read as legacy.
-    Capable(serde_json::Error),
-    /// A legacy frame failed to decode, exactly as before routing existed.
-    Legacy(serde_json::Error),
+    Capable(ramflux_protocol::ProtocolError),
+    /// A legacy frame failed its strict decode.
+    Legacy(ramflux_protocol::ProtocolError),
 }
 
 /// Frames only a negotiated gateway sends; each always carries `incarnation_id`.
@@ -405,7 +408,7 @@ const CAPABLE_ONLY: [&str; 7] = [
 const SHARED: [&str; 4] = ["deliver", "ack", "cursor", "nack"];
 
 fn legacy(bytes: &[u8]) -> Result<Routed, RouteError> {
-    serde_json::from_slice(bytes)
+    ramflux_protocol::parse_i_json::<GatewayServerFrame>(bytes)
         .map(|frame| Routed::Legacy(Box::new(frame)))
         .map_err(RouteError::Legacy)
 }

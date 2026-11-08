@@ -430,6 +430,8 @@ fn announce_live(
         resync_needed: Arc::clone(&handle.shared.resync_needed),
         #[cfg(test)]
         buffer_stats: Arc::clone(&handle.shared.buffer_stats),
+        #[cfg(test)]
+        dispatch_count: Arc::default(),
     });
     publish_metadata(handle, resident);
     update(handle, |snapshot| {

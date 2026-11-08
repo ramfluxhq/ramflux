@@ -48,6 +48,15 @@ pub(crate) struct HostFrames {
     pub resync_needed: Arc<crate::bus::connection_manager::resync::ResyncState>,
     #[cfg(test)]
     pub buffer_stats: Arc<std::sync::Mutex<BufferStats>>,
+    #[cfg(test)]
+    pub dispatch_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl HostFrames {
+    #[cfg(test)]
+    pub(crate) fn record_dispatch(&self) {
+        self.dispatch_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl GatewaySessionEngine {
@@ -208,6 +217,8 @@ impl GatewaySessionEngine {
                     self.buffer_delivery(entry.clone());
                 }
                 if let Some(host) = &self.host {
+                    #[cfg(test)]
+                    host.record_dispatch();
                     host.hub.publish(frame.clone());
                 }
                 Ok(false)
@@ -341,12 +352,11 @@ impl GatewaySessionEngine {
                 },
             },
             Err(RouteError::Retire(why)) => Err(self.retire(why)),
-            Err(RouteError::Capable(_)) => Err(self.retire("malformed capable frame")),
-            Err(RouteError::Legacy(error)) => {
+            Err(RouteError::Capable(error) | RouteError::Legacy(error)) => {
                 if transport_on_decode_error {
                     self.terminal_reason = Some(DisconnectReason::Transport);
                 }
-                Err(SdkError::from(error))
+                Err(SdkError::Protocol(error))
             }
         }
     }
@@ -379,6 +389,8 @@ impl GatewaySessionEngine {
             self.buffer_capable_delivery(entry.clone(), meta);
         }
         if let Some(host) = &self.host {
+            #[cfg(test)]
+            host.record_dispatch();
             host.hub.publish_capable(event);
         }
     }

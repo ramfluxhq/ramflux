@@ -328,14 +328,89 @@ async fn push_reader_routes_shared_and_capable_frames() {
     refusal_rows().await;
 }
 
+#[tokio::test]
+async fn sdk_ijson_receive_refuses_unsafe_integer() {
+    use ramflux_protocol::ProtocolError;
+
+    for (mode, capable) in [(SessionMode::Legacy, false), (push(), true)] {
+        for bytes in [
+            deliver_frame_bytes(capable, "9007199254740992", false),
+            deliver_frame_bytes(capable, "9007199254740991", true),
+        ] {
+            let mut engine = scripted_raw(
+                mode.clone(),
+                vec![bytes, br#"{"frame_type":"heartbeat","now":5}"#.to_vec()],
+            );
+            let (_, _, dispatch_count) =
+                super::carrier_tests::attach_host_with_dispatch_counter(&mut engine);
+            let result = engine.read_reply(ExpectedReply::Heartbeat).await;
+            match result {
+                Err(error @ SdkError::Protocol(ProtocolError::IJson(_))) => {
+                    assert_eq!(
+                        crate::client::inbox_failure::deterministic(&error),
+                        Some("i_json_rejected")
+                    );
+                }
+                other => panic!(
+                    "expected an exact I-JSON protocol refusal, got {other:?}; dispatch count={}",
+                    dispatch_count.load(std::sync::atomic::Ordering::Relaxed)
+                ),
+            }
+            assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)));
+            assert!(engine.pending_deliveries.is_empty());
+            assert_eq!(dispatch_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+
+        let mut engine = scripted_raw(
+            mode,
+            vec![
+                deliver_frame_bytes(capable, "9007199254740991", false),
+                br#"{"frame_type":"heartbeat","now":5}"#.to_vec(),
+            ],
+        );
+        let (_, _, dispatch_count) =
+            super::carrier_tests::attach_host_with_dispatch_counter(&mut engine);
+        match read(&mut engine).await {
+            Ok(frame) => assert_eq!(frame, GatewayServerFrame::Heartbeat { now: 5 }),
+            Err(error) => panic!("safe I-JSON delivery failed: {error}"),
+        }
+        assert_eq!(engine.pending_deliveries.len(), 1);
+        assert_eq!(dispatch_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    assert_eq!(
+        crate::client::inbox_failure::deterministic(&SdkError::Protocol(
+            ProtocolError::InvalidIdentityRecord("invalid envelope schema")
+        )),
+        Some("schema_invalid")
+    );
+}
+
+fn deliver_frame_bytes(capable: bool, created_at: &str, duplicate_extension_key: bool) -> Vec<u8> {
+    let mut bytes = br#"{"frame_type":"deliver","entry":{"inbox_seq":71,"target_delivery_id":"target-route","envelope":{"schema":"ramflux.envelope.v1","version":1,"domain":"ramflux.envelope.v1","signing_key_id":"dev","signature_alg":"ed25519","signature":"fixture","envelope_id":"env-route","source_principal_id":"p","source_device_id":"d","target_delivery_id":"target-route","delivery_class":"opaque_event","priority":"normal","ttl":600,"created_at":"#.to_vec();
+    bytes.extend_from_slice(created_at.as_bytes());
+    bytes.extend_from_slice(br#", "encrypted_payload":"opaque","payload_hash":"hash-route""#);
+    if duplicate_extension_key {
+        bytes.extend_from_slice(br#", "ext":{"x_probe":"v","x_probe":"v"}"#);
+    }
+    bytes.extend_from_slice(b"}}");
+    if capable {
+        bytes.extend_from_slice(
+            br#", "incarnation_id":"0123456789abcdef0123456789abcdef","retain_until":7777"#,
+        );
+    }
+    bytes.push(b'}');
+    bytes
+}
+
 async fn refusal_rows() {
-    // (r1) a malformed capable deliver (missing retain_until) retires and is NOT read as a
-    // legacy Deliver.
+    // (r1) a malformed capable deliver (missing retain_until) is surfaced as a protocol
+    // decode failure and is NOT read as a legacy Deliver.
     let mut malformed = capable_deliver();
     malformed.as_object_mut().unwrap().remove("retain_until");
     let mut engine = scripted(push(), vec![malformed]);
     let result = read(&mut engine).await;
-    retired(result, &engine, "malformed capable frame");
+    protocol_decode_error(&result, &engine);
     // (r2) Push deliver without the key, (r3) Push ack without the key.
     let mut engine = engine_of(push(), legacy_deliver());
     let result = read(&mut engine).await;
@@ -390,13 +465,13 @@ async fn refusal_rows() {
     unknown["reason"] = json!("zz");
     let mut engine = engine_of(push(), unknown);
     let result = read(&mut engine).await;
-    retired(result, &engine, "malformed capable frame");
+    protocol_decode_error(&result, &engine);
     // (r10) a keyed nack whose E has 31 characters: retired, no fallback to the keyless shape.
     let mut short = capable_nack(Some(E));
     short["incarnation_id"] = json!(&E[..31]);
     let mut engine = engine_of(push(), short);
     let result = read(&mut engine).await;
-    retired(result, &engine, "malformed capable frame");
+    protocol_decode_error(&result, &engine);
     // (r11) a keyed cursor during an idle read (no outstanding request).
     let keyed_cursor =
         capable(&n::SessionPushServerFrame::Cursor { incarnation_id: E.into(), cursor: None });
@@ -406,6 +481,15 @@ async fn refusal_rows() {
     // A capable decode failure is a RouteError::Capable, never Legacy.
     let bytes = serde_json::to_vec(&capable_deliver_missing()).unwrap();
     assert!(matches!(route(&bytes, &push()), Err(RouteError::Capable(_))));
+}
+
+fn protocol_decode_error(
+    result: &Result<GatewayServerFrame, SdkError>,
+    engine: &GatewaySessionEngine,
+) {
+    assert!(matches!(result, Err(SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)))));
+    assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)));
+    assert!(engine.pending_deliveries.is_empty());
 }
 
 fn engine_of(mode: SessionMode, frame: Value) -> GatewaySessionEngine {
