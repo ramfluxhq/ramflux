@@ -16,16 +16,19 @@ use super::hooks;
 use super::inventory::{SCAN_SYMBOLS, SITES, WriterClass};
 use super::managed_ack::{MANAGED_ACK_CODE, managed_public_ack};
 use crate::bus::io::local_bus_error_code;
-use crate::bus::protocol::LocalBusMessageAckRequest;
+use crate::bus::protocol::{LocalBusFrame, LocalBusMessageAckRequest};
 use crate::prelude::*;
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ReceiveBind, ReceiveCover, ReceiveCoverKind,
-    ReceiveCoverResult, ReceiveExpectation, ReceiveResetResult, ReceiveSettle, ReceiveSettleKind,
-    ReceiveSettleResult, ReceiveStage, ReceiveStageResult, StorageError,
+    ReceiveCoverResult, ReceiveExpectation, ReceiveReset, ReceiveResetReason, ReceiveResetResult,
+    ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult, ReceiveStage, ReceiveStageResult,
+    StorageError,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const CURSOR_NOT_INCREASING: &str = "receive cursor is not strictly increasing";
 
@@ -315,6 +318,25 @@ fn assert_constructor_grep() {
         }
     }
     assert!(bad.is_empty(), "token constructors outside conversion: {bad:?}");
+    assert_constructor_visibility();
+}
+
+fn assert_constructor_visibility() {
+    let authority =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bus/push_receiver/executor/authority.rs");
+    let src = fs::read_to_string(&authority).expect("authority.rs");
+    for name in ["w2", "reset", "wa", "ws", "erasure"] {
+        let decl = format!("pub(super) const fn {name}(");
+        assert!(src.contains(&decl), "authority constructor must be declared pub(super): {decl}");
+        for wider in [format!("pub const fn {name}("), format!("pub(crate) const fn {name}(")] {
+            assert!(!src.contains(&wider), "authority constructor widened: {wider}");
+        }
+    }
+    assert_eq!(
+        src.matches("pub(super) const fn").count(),
+        5,
+        "exactly the five authority constructors are pub(super)"
+    );
 }
 
 fn assert_storage_result_tokens() {
@@ -559,6 +581,145 @@ fn assert_settle_outcomes(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), S
     }
     assert_eq!(hooks::take_acks().len(), 0);
     Ok(())
+}
+
+/// Positive paths through real storage. W2 mints from `cover_in`, which already writes C in the
+/// same transaction, so a later W2 persist at that sequence must refuse (exact-C rule). The
+/// positive persist write is exercised through a Reset token from the real `reset_in`.
+#[test]
+fn real_storage_positive_paths() -> Result<(), SdkError> {
+    let h = open()?;
+    let exec = LedgerExecutor::bind_standalone("acct-p19-real")?;
+    hooks::clear();
+    stage(&h.db, 0, 1)?;
+    let first = cover(&exec, &h.db, 0, 1, ReceiveCoverKind::Terminal)?;
+    assert_eq!(first.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    assert_eq!(exec.load_startup_cursor(&h.db, "t")?.cursor, 1, "cover wrote C=1");
+    hooks::clear();
+
+    stage(&h.db, 1, 2)?;
+    h.db.receive_transaction(expected(&h.db, 1)?, 1, |tx| {
+        let minted = exec
+            .cover_in(
+                tx,
+                ReceiveCover {
+                    sequence: 2,
+                    kind: ReceiveCoverKind::Terminal,
+                    gaps: &[],
+                    retain_until: 0,
+                },
+            )
+            .map_err(into_storage)?;
+        let token = minted.authority.expect("covered W2 mints a token");
+        assert_eq!(tx.receive_cursor()?, 2);
+        match exec.persist_receive_checkpoint_in(tx, token, 2).map_err(into_storage) {
+            Err(StorageError::Integrity(CURSOR_NOT_INCREASING)) => Ok(()),
+            other => panic!("storage already wrote C=2; W2 persist must refuse, got {other:?}"),
+        }
+    })?;
+    assert_eq!(exec.load_startup_cursor(&h.db, "t")?.cursor, 2, "exact C after cover");
+    let sql = hooks::take_sql();
+    assert_eq!(sql.len(), 1, "only the cover hook fired: {sql:?}");
+    assert_eq!((sql[0].seq, sql[0].kind), (2, AuthorityKind::W2));
+
+    hooks::clear();
+    h.db.receive_transaction(expected(&h.db, 2)?, 1, |tx| {
+        let reset = exec
+            .reset_in(
+                tx,
+                ReceiveReset {
+                    new_incarnation: "e2",
+                    settled: 2,
+                    issued: 2,
+                    after: 0,
+                    reason: ReceiveResetReason::RouterReset,
+                },
+            )
+            .map_err(into_storage)?;
+        assert_eq!(reset.result, ReceiveResetResult::Reset);
+        let token = reset.authority.expect("real reset mints a Reset token");
+        exec.persist_receive_checkpoint_in(tx, token, 2).map_err(into_storage)
+    })?;
+    assert_eq!(exec.load_startup_cursor(&h.db, "t")?.incarnation, "e2", "reset committed E");
+    assert_eq!(exec.load_startup_cursor(&h.db, "t")?.cursor, 2, "reset kept C=S");
+    let sql = hooks::take_sql();
+    assert_eq!(sql.len(), 1, "persist hook fired once: {sql:?}");
+    assert_eq!((sql[0].seq, sql[0].kind), (2, AuthorityKind::Reset));
+
+    // Real bind: message already deleted, so the staged work is erased and an Erasure token
+    // deletes the joined hold row.
+    let e = open()?;
+    stage(&e.db, 0, 1)?;
+    e.db.send_direct_message("thread", "A", "peer", b"secret")?;
+    e.db.delete_direct_message("thread", "A", "local", "delete-a")?;
+    e.db.hold_unrouted("hold-erase", 1, b"{}", 1)?;
+    hooks::clear();
+    e.db.receive_transaction(expected(&e.db, 0)?, 1, |tx| {
+        let bound = exec.bind_logical_in(tx, 1, "A").map_err(into_storage)?;
+        assert_eq!(bound.result, ReceiveBind::Erased);
+        let token = bound.authority.expect("erased bind mints an Erasure token");
+        exec.remove_unrouted_in(tx, token, "hold-erase").map_err(into_storage)
+    })?;
+    assert_eq!(e.db.unrouted_count()?, 0, "erasure token deleted the hold row");
+    let deletes = hooks::take_deletes();
+    assert!(
+        deletes
+            .iter()
+            .any(|row| row.id == "hold-erase" && row.kind == Some(AuthorityKind::Erasure)),
+        "delete hook records Erasure: {deletes:?}"
+    );
+    Ok(())
+}
+
+/// L1: the managed `message.ack` branch, dispatched for an account whose schema 15 is installed.
+/// Asserts the refusal code (no legacy engine call is reachable on this branch).
+#[tokio::test(flavor = "current_thread")]
+async fn managed_message_ack_refuses_at_dispatch_with_schema_15() -> Result<(), SdkError> {
+    let root = crate::bus::runtime_tests::root("p19-r4-managed-ack");
+    let id = "acct-p19-ack";
+    let account =
+        crate::bus::runtime_tests::account(&root, id, None, Arc::new(AtomicBool::new(false)))?;
+    {
+        let db = account.client.account_db()?;
+        assert!(!db.receive_ledger_installed()?, "fixture starts without schema 15");
+        db.install_receive_ledger_schema()?;
+        assert!(db.receive_ledger_installed()?, "schema 15 installed");
+    }
+    let mut state = LocalBusDaemonState {
+        account_index: None,
+        nodes: crate::node::NodeStore::load(&root, &[])?,
+        config: LocalBusConfig::new(root.join("bus.sock"), &root),
+        accounts: BTreeMap::new(),
+        active_account_id: None,
+        attended_accounts: BTreeSet::new(),
+        subscribers: BTreeMap::new(),
+    };
+    state.accounts.insert(id.to_owned(), account);
+    let (outbound, _) = mpsc::channel(1);
+    let connection = LocalBusConnectionState::new(1, outbound);
+    let request = LocalBusFrame::request(
+        "ack",
+        Some(id.to_owned()),
+        "test",
+        "message.ack",
+        serde_json::json!({
+            "envelope_id": "env-1",
+            "receiver_device_id": "device-acct-p19-ack",
+            "received_at": 42,
+        }),
+    );
+    let result =
+        crate::bus::dispatch::dispatch_message_bus_request(&request, &mut state, &connection).await;
+    let outcome = match result {
+        Err(SdkError::InboundRejected(ref code)) if code == MANAGED_ACK_CODE => Ok(()),
+        Err(other) => {
+            Err(format!("managed ACK must refuse with {MANAGED_ACK_CODE}, got {other:?}"))
+        }
+        Ok(_) => Err("managed ACK must not succeed".to_owned()),
+    };
+    drop(state);
+    let _ = std::fs::remove_dir_all(&root);
+    outcome.map_err(SdkError::LocalBus)
 }
 
 #[test]
