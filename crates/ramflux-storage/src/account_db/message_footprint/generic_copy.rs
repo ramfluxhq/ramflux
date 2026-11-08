@@ -69,15 +69,15 @@ impl AccountDb {
             }
         }
         let locator = history_container_locator(transfer_id, page);
-        persist_copy_bytes(self, &locator, &history_body(value, included_message_ids)?)?;
         self.connection.execute(
-            "DELETE FROM message_footprint WHERE kind='history_container' AND locator=?1",
+            "DELETE FROM message_footprint WHERE kind IN ('history_container','actor') AND locator=?1",
             params![locator],
         )?;
         self.connection.execute(
-            "DELETE FROM message_copy_binding WHERE copy_id=?1",
-            params![format!("history_container:{locator}")],
+            "DELETE FROM message_copy_binding WHERE copy_id IN (?1,?2)",
+            params![format!("history_container:{locator}"), format!("actor:{locator}")],
         )?;
+        persist_copy_bytes(self, &locator, &history_body(value, included_message_ids)?)?;
         for message in included_message_ids {
             register_kind(self, message, "history_container", &locator)?;
         }
@@ -168,10 +168,14 @@ fn register_kind(
     kind: &str,
     locator: &str,
 ) -> Result<(), StorageError> {
-    for copy_id in [format!("{kind}:{locator}"), format!("actor:{locator}")] {
+    db.connection.execute(
+        "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
+        params![format!("{kind}:{locator}"), message],
+    )?;
+    if matches!(kind, "prepared" | "history_container") {
         db.connection.execute(
             "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
-            params![copy_id, message],
+            params![format!("actor:{locator}"), message],
         )?;
     }
     db.connection.execute(

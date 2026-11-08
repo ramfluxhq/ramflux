@@ -107,23 +107,6 @@ impl BackupDatabase {
              WHERE f.kind IN ('prepared','history_container')",
             params![source],
         )?;
-        let nested: bool = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='backup_archived_actor_state')",
-            [],
-            |row| row.get(0),
-        )?;
-        if nested {
-            self.db.execute(
-                "INSERT OR IGNORE INTO message_footprint
-                 SELECT f.message_id,'archived_actor',CAST(a.rowid AS TEXT)
-                 FROM incoming.message_footprint f
-                 JOIN incoming.backup_archived_actor_state r ON r.state_kind=f.locator
-                 JOIN backup_archived_actor_state a
-                   ON a.source=?1||'/'||r.source AND a.state_kind=r.state_kind
-                 WHERE f.kind IN ('prepared','history_container')",
-                params![source],
-            )?;
-        }
         Ok(super::message_footprint::migration::register_imported(&self.db)?)
     }
 

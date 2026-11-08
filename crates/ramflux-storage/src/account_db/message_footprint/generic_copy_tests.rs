@@ -355,3 +355,149 @@ fn json_copy_trigger_and_collect_message_ids_share_one_key_set() -> Result<(), S
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+fn envelope_with_secret(secret: &str) -> serde_json::Value {
+    json!({
+        "source_principal_id": "p",
+        "source_device_id": "d",
+        "signing_key_id": "k",
+        "payload_hash": "h",
+        "created_at": 1,
+        "ttl": 1,
+        "pair": secret
+    })
+}
+
+fn archive_kinds(db: &AccountDb, source: &str, glob: &str) -> Result<(), StorageError> {
+    let source = source.to_owned();
+    let glob = glob.to_owned();
+    db.connection.call(move |raw| {
+        super::ensure_archive_actor_table(raw)?;
+        raw.execute(
+            "INSERT OR IGNORE INTO backup_archived_actor_state
+             SELECT ?1,state_kind,state_json FROM runtime_actor_state WHERE state_kind GLOB ?2",
+            params![source, glob],
+        )?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn secret_rows(db: &AccountDb, table: &str, secret: &str) -> Result<i64, StorageError> {
+    let sql = format!("SELECT count(*) FROM {table} WHERE instr(CAST(state_json AS TEXT), ?1)>0");
+    Ok(db.connection.query_row(&sql, params![secret], |row| row.get(0))?)
+}
+
+#[test]
+fn operation_receipt_does_not_claim_actor_rows_that_share_its_key() -> Result<(), StorageError> {
+    let kind = "dm-pair/session/peer";
+    let (root, db) = crate::tests::test_db("p11-operation-actor-collision")?;
+    db.send_direct_message("thread", "m", "peer", b"private-content")?;
+    db.persist_actor_state(kind, &envelope_with_secret("pair-session-secret"))?;
+    db.reserve_operation(kind, "fp")?;
+    db.complete_operation(kind, &json!({"message_id":"m","preview":"op-preview-secret"}))?;
+    db.persist_actor_state(kind, &envelope_with_secret("pair-session-secret"))?;
+    archive_kinds(&db, "archive", kind)?;
+    let actor_binds: i64 = db.connection.query_row(
+        "SELECT count(*) FROM message_copy_binding WHERE copy_id=?1",
+        params![format!("actor:{kind}")],
+        |row| row.get(0),
+    )?;
+    assert_eq!(actor_binds, 0, "operation receipts must not bind actor rows");
+    db.delete_direct_message("thread", "m", "local", "delete")?;
+    assert_eq!(secret_rows(&db, "runtime_actor_state", "pair-session-secret")?, 1);
+    assert_eq!(secret_rows(&db, "backup_archived_actor_state", "pair-session-secret")?, 1);
+    let receipt: String = db.connection.query_row(
+        "SELECT response_json FROM runtime_operation WHERE operation_id=?1",
+        params![kind],
+        |row| row.get(0),
+    )?;
+    assert!(!receipt.contains("op-preview-secret"), "{receipt}");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn history_page_rewrite_drops_former_owner_archive_claim() -> Result<(), StorageError> {
+    let locator = "own-device/history-container/xfer-rw/0";
+    let (root, db) = crate::tests::test_db("p11-history-rewrite-owner")?;
+    for message in ["m1", "m2"] {
+        db.send_direct_message("thread", message, "peer", b"private-content")?;
+    }
+    db.write_transaction(|| {
+        db.put_history_container("xfer-rw", 0, &["m1"], &json!({"body":"history-page-v1"}))
+    })?;
+    archive_kinds(&db, "first", "own-device/history-container/*")?;
+    db.write_transaction(|| {
+        db.put_history_container("xfer-rw", 0, &["m2"], &json!({"body":"history-page-secret"}))
+    })?;
+    archive_kinds(&db, "second", "own-device/history-container/*")?;
+    db.delete_direct_message("thread", "m1", "local", "delete-m1")?;
+    let rewritten: Vec<u8> = db.connection.query_row(
+        "SELECT state_json FROM backup_archived_actor_state WHERE source='second' AND state_kind=?1",
+        params![locator],
+        |row| row.get(0),
+    )?;
+    assert!(
+        String::from_utf8_lossy(&rewritten).contains("history-page-secret"),
+        "former owner deleted the rewritten page"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn merge_does_not_claim_other_sources_nested_archive_rows() -> Result<(), StorageError> {
+    let locator = "own-copy/prepared/copy-1";
+    let nested = serde_json::to_vec(&json!({"payload":"other-source-secret"}))?;
+    let (root, db) = crate::tests::test_db("p11-nested-archive-claim")?;
+    db.connection.call(move |raw| {
+        super::ensure_archive_actor_table(raw)?;
+        raw.execute(
+            "INSERT INTO backup_archived_actor_state VALUES('other',?1,?2)",
+            params![locator, nested],
+        )?;
+        Ok(())
+    })?;
+    db.send_direct_message("thread", "m", "peer", b"private-content")?;
+    db.write_transaction(|| {
+        db.put_prepared_message_copy("m", "copy-1", &json!({"payload":"prepared-envelope-secret"}))
+    })?;
+    let incoming = root.join("incoming.db");
+    let incoming_snap = db.write_backup_snapshot(&incoming)?;
+    drop(db);
+    let local_root = root.join("local");
+    let local_index = AccountIndex::open(&local_root)?;
+    local_index.create_account("acct", "principal")?;
+    let local = AccountDb::open(&local_index, "acct", &AccountDbKey::generate()?)?;
+    local.send_direct_message("thread", "unrelated", "peer", b"local-body")?;
+    let target = root.join("target.db");
+    let local_snap = local.write_backup_snapshot(&target)?;
+    let mut merged = BackupDatabase::open(&target, &local_snap.key)?;
+    merged.merge_backup(&incoming, &incoming_snap.key, || Ok(()))?;
+    let changed = merged.db.execute(
+        "UPDATE direct_message_projection SET deleted=1 WHERE message_id='m' AND deleted=0",
+        [],
+    )?;
+    assert_eq!(changed, 1);
+    let nested_left: i64 = merged.db.query_row(
+        "SELECT count(*) FROM backup_archived_actor_state
+         WHERE instr(CAST(state_json AS TEXT),'other-source-secret')>0",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(nested_left, 1, "nested archive from another source was claimed");
+    let prepared_left: i64 = merged.db.query_row(
+        "SELECT count(*) FROM backup_archived_actor_state
+         WHERE instr(CAST(state_json AS TEXT),'prepared-envelope-secret')>0",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(prepared_left, 0, "incoming live prepared copy survived delete");
+    drop(merged);
+    drop(local);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

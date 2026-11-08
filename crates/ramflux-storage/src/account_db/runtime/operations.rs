@@ -174,14 +174,14 @@ mod tests {
         db.complete_operation("op-delete", &delete_body)?;
         db.complete_operation("idem-delete", &delete_body)?;
         db.complete_operation("send-race", &json!({"message_id":"m","preview":"send-body"}))?;
-        for (id, fingerprint) in
-            [("op-delete", "fp-op"), ("idem-delete", "fp-idem"), ("send-race", "fp-send")]
-        {
-            let replay = db.reserve_operation(id, fingerprint);
-            assert!(
-                matches!(&replay, Ok(Some(body)) if body.get("message_id").and_then(serde_json::Value::as_str) == Some("m")),
-                "{id} replayed as {replay:?}"
-            );
+        let fenced = json!({"message_id":"m","deleted":true});
+        for (id, fingerprint, expected) in [
+            ("op-delete", "fp-op", delete_body.clone()),
+            ("idem-delete", "fp-idem", delete_body),
+            ("send-race", "fp-send", fenced),
+        ] {
+            let replay = db.reserve_operation(id, fingerprint)?;
+            assert_eq!(replay, Some(expected), "{id}");
         }
         drop(db);
         std::fs::remove_dir_all(root)?;
