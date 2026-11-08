@@ -46,6 +46,15 @@ impl AccountDb {
         entry: &[u8],
         policy: InboxFailurePolicy<'_>,
     ) -> Result<bool, StorageError> {
+        self.write_transaction(|| self.apply_inbox_failure_policy(key, entry, policy))
+    }
+    /// Applies policy inside the caller's transaction (P08 admission).
+    pub(crate) fn apply_inbox_failure_policy(
+        &self,
+        key: &str,
+        entry: &[u8],
+        policy: InboxFailurePolicy<'_>,
+    ) -> Result<bool, StorageError> {
         let InboxFailurePolicy { verified_source, trusted, dependency: (class, subject), at } =
             policy;
         let trusted = trusted && verified_source.is_some();
@@ -54,67 +63,73 @@ impl AccountDb {
             |source| source.storage_key().to_owned(),
         );
         let value: serde_json::Value = serde_json::from_slice(entry).unwrap_or_default();
-        self.write_transaction(|| {
-            self.release_expired_legacy_inbox(at)?;
-            if self.legacy_inbox_parked(key)? { return Ok(false); }
-            let exists: bool = self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE envelope_key=?1)",
-                params![key],
-                |r| r.get(0),
-            )?;
-            if exists {
-                if verified_source.is_some() {
-                    let count: i64 = self.connection.query_row("SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND envelope_key!=?2 AND expires_at>?3",params![source,key,at],|r|r.get(0))?;
-                    if count >= if trusted { 8 } else { 2 } { return Ok(false); }
-                    if trusted {
-                        self.connection.execute("UPDATE runtime_inbox_retry SET next_at=?2 WHERE envelope_key=?1 AND EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE envelope_key=?1 AND trusted=0)",params![key,at])?;
-                    }
-                    self.connection.execute("UPDATE runtime_inbox_policy SET source=?2 WHERE envelope_key=?1",params![key,source])?;
+        self.release_expired_legacy_inbox(at)?;
+        if self.legacy_inbox_parked(key)? {
+            return Ok(false);
+        }
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE envelope_key=?1)",
+            params![key],
+            |r| r.get(0),
+        )?;
+        if exists {
+            if verified_source.is_some() {
+                let count: i64 = self.connection.query_row("SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND envelope_key!=?2 AND expires_at>?3",params![source,key,at],|r|r.get(0))?;
+                if count >= if trusted { 8 } else { 2 } {
+                    return Ok(false);
                 }
                 if trusted {
-                    self.connection.execute("UPDATE runtime_inbox_policy SET source=?2,trusted=1,expires_at=min(first_seen+600,?3) WHERE envelope_key=?1 AND trusted=0",params![key,source,value["envelope"]["created_at"].as_i64().zip(value["envelope"]["ttl"].as_i64()).map_or(i64::MAX, |(created, ttl)| created.saturating_add(ttl))])?;
+                    self.connection.execute("UPDATE runtime_inbox_retry SET next_at=?2 WHERE envelope_key=?1 AND EXISTS(SELECT 1 FROM runtime_inbox_policy WHERE envelope_key=?1 AND trusted=0)",params![key,at])?;
                 }
-                if class != "none" { self.connection.execute("UPDATE runtime_inbox_policy SET failure_class=?2,subject=?3,last_revision=coalesce((SELECT revision FROM runtime_inbox_changes WHERE kind=?2 AND subject=?3),0) WHERE envelope_key=?1",params![key,class,subject])?; }
-                return Ok(true);
+                self.connection.execute(
+                    "UPDATE runtime_inbox_policy SET source=?2 WHERE envelope_key=?1",
+                    params![key, source],
+                )?;
             }
-            let count: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND expires_at>?2",
-                params![source,at],
-                |r| r.get(0),
-            )?;
-            let total: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_inbox_policy WHERE expires_at>?1",
-                params![at],
-                |r| r.get(0),
-            )?;
-            let strangers: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_inbox_policy WHERE trusted=0 AND expires_at>?1",
-                params![at],
-                |r| r.get(0),
-            )?;
-            if count >= if trusted { 8 } else { 2 } || total >= 128 || (!trusted && strangers >= 16)
-            {
-                return Ok(false);
+            if trusted {
+                self.connection.execute("UPDATE runtime_inbox_policy SET source=?2,trusted=1,expires_at=min(first_seen+600,?3) WHERE envelope_key=?1 AND trusted=0",params![key,source,value["envelope"]["created_at"].as_i64().zip(value["envelope"]["ttl"].as_i64()).map_or(i64::MAX, |(created, ttl)| created.saturating_add(ttl))])?;
             }
-            let window = if trusted { 600 } else { 30 };
-            let wire_expiry = value["envelope"]["created_at"]
-                .as_i64()
-                .zip(value["envelope"]["ttl"].as_i64())
-                .map_or(i64::MAX, |(created, ttl)| created.saturating_add(ttl));
-            self.connection.execute(
-                "INSERT INTO runtime_inbox_policy VALUES(?1,?2,?3,?4,?5,0,?6,?7,0,coalesce((SELECT revision FROM runtime_inbox_changes WHERE kind=?6 AND subject=?7),0))",
-                params![
-                    key,
-                    source,
-                    trusted,
-                    at,
-                    at.saturating_add(window).min(wire_expiry),
-                    class,
-                    subject
-                ],
-            )?;
-            Ok(true)
-        })
+            if class != "none" {
+                self.connection.execute("UPDATE runtime_inbox_policy SET failure_class=?2,subject=?3,last_revision=coalesce((SELECT revision FROM runtime_inbox_changes WHERE kind=?2 AND subject=?3),0) WHERE envelope_key=?1",params![key,class,subject])?;
+            }
+            return Ok(true);
+        }
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM runtime_inbox_policy WHERE source=?1 AND expires_at>?2",
+            params![source, at],
+            |r| r.get(0),
+        )?;
+        let total: i64 = self.connection.query_row(
+            "SELECT count(*) FROM runtime_inbox_policy WHERE expires_at>?1",
+            params![at],
+            |r| r.get(0),
+        )?;
+        let strangers: i64 = self.connection.query_row(
+            "SELECT count(*) FROM runtime_inbox_policy WHERE trusted=0 AND expires_at>?1",
+            params![at],
+            |r| r.get(0),
+        )?;
+        if count >= if trusted { 8 } else { 2 } || total >= 128 || (!trusted && strangers >= 16) {
+            return Ok(false);
+        }
+        let window = if trusted { 600 } else { 30 };
+        let wire_expiry = value["envelope"]["created_at"]
+            .as_i64()
+            .zip(value["envelope"]["ttl"].as_i64())
+            .map_or(i64::MAX, |(created, ttl)| created.saturating_add(ttl));
+        self.connection.execute(
+            "INSERT INTO runtime_inbox_policy VALUES(?1,?2,?3,?4,?5,0,?6,?7,0,coalesce((SELECT revision FROM runtime_inbox_changes WHERE kind=?6 AND subject=?7),0))",
+            params![
+                key,
+                source,
+                trusted,
+                at,
+                at.saturating_add(window).min(wire_expiry),
+                class,
+                subject
+            ],
+        )?;
+        Ok(true)
     }
     pub(super) fn ensure_inbox_policy(
         &self,
@@ -125,12 +140,7 @@ impl AccountDb {
         self.set_inbox_failure_policy(key, entry, InboxFailureSource::Unverified, ("none", ""), at)
     }
     pub(super) fn cleanup_inbox_policy(&self) -> Result<(), StorageError> {
-        let has_receive_work: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_receive_work')",
-            [],
-            |row| row.get(0),
-        )?;
-        if has_receive_work {
+        if self.receive_ledger_present()? {
             self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_retry UNION SELECT envelope_key FROM runtime_inbox_dead_letter) AND NOT EXISTS(SELECT 1 FROM gateway_receive_work WHERE admission_key=runtime_inbox_policy.envelope_key)",[])?;
         } else {
             self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_retry UNION SELECT envelope_key FROM runtime_inbox_dead_letter)",[])?;

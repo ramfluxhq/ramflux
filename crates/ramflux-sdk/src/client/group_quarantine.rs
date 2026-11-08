@@ -156,3 +156,40 @@ impl RamfluxClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_group_key_is_stable_for_the_same_envelope() -> Result<(), SdkError> {
+        let entry = GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: "t".into(),
+            envelope: ramflux_protocol::Envelope {
+                schema: "ramflux.envelope.v1".into(),
+                version: 1,
+                domain: "test".into(),
+                ext: ramflux_protocol::Ext::default(),
+                signed: crate::prelude::sdk_device_signed_fields("device", ""),
+                envelope_id: "env".into(),
+                source_principal_id: "source".into(),
+                source_device_id: "device".into(),
+                target_delivery_id: "t".into(),
+                routing_set_id: None,
+                delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+                priority: ramflux_protocol::Priority::Normal,
+                ttl: 60,
+                created_at: 1,
+                encrypted_payload: "cipher".into(),
+                payload_hash: "hash".into(),
+            },
+        };
+        let first = legacy_key(&entry)?;
+        let second = legacy_key(&entry)?;
+        assert_eq!(first, second);
+        assert!(first.starts_with("legacy:"));
+        Ok(())
+    }
+}

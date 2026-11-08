@@ -214,9 +214,20 @@ impl ReceiveTransaction<'_> {
         self.cleanup_settled(sequence)
     }
 
-    /// Deletes work and receipt so the reserved slot is released.
+    /// Deletes work and receipt so the reserved slot is released. Also drops matching
+    /// retry and unrouted rows for that admission key (P04 L4 / P08).
     pub(crate) fn cleanup_settled(&self, sequence: u64) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
+        let key: Option<String> = self
+            .db
+            .connection
+            .query_row(
+                "SELECT admission_key FROM gateway_receive_work
+                 WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+                params![self.target, self.incarnation, seq.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
         self.db.connection.execute(
             "DELETE FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
             params![self.target, self.incarnation, seq.as_slice()],
@@ -225,6 +236,14 @@ impl ReceiveTransaction<'_> {
             "DELETE FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
             params![self.target, self.incarnation, seq.as_slice()],
         )?;
+        if let Some(key) = key {
+            self.db
+                .connection
+                .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![&key])?;
+            self.db
+                .connection
+                .execute("DELETE FROM runtime_unrouted WHERE envelope_id=?1", params![&key])?;
+        }
         Ok(())
     }
 

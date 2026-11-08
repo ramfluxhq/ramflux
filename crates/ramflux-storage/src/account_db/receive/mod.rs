@@ -39,6 +39,9 @@ pub(crate) mod privacy;
 mod privacy_restore_tests;
 #[cfg(test)]
 mod privacy_tests;
+pub(crate) mod removal;
+#[cfg(test)]
+mod removal_tests;
 pub(crate) mod reset;
 #[cfg(test)]
 mod reset_tests;

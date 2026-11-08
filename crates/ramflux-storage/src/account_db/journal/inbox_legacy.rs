@@ -90,9 +90,14 @@ impl AccountDb {
         Ok(())
     }
     pub(super) fn cleanup_legacy_inbox_holds(&self) -> Result<(), StorageError> {
-        self.connection.execute("DELETE FROM runtime_inbox_retry WHERE envelope_key IN (SELECT substr(state_kind,19) FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted))", [])?;
-        self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key IN (SELECT substr(state_kind,19) FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted)) AND envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_dead_letter)", [])?;
-        self.connection.execute("DELETE FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted)", [])?;
+        let work_guard = if self.receive_ledger_present()? {
+            " AND substr(state_kind,19) NOT IN (SELECT admission_key FROM gateway_receive_work)"
+        } else {
+            ""
+        };
+        self.connection.execute(&format!("DELETE FROM runtime_inbox_retry WHERE envelope_key IN (SELECT substr(state_kind,19) FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted){work_guard})"), [])?;
+        self.connection.execute(&format!("DELETE FROM runtime_inbox_policy WHERE envelope_key IN (SELECT substr(state_kind,19) FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted){work_guard}) AND envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_dead_letter)"), [])?;
+        self.connection.execute(&format!("DELETE FROM runtime_actor_state WHERE substr(state_kind,1,18)='inbox/legacy-held/' AND substr(state_kind,19) NOT IN (SELECT envelope_id FROM runtime_unrouted){work_guard}"), [])?;
         Ok(())
     }
 }

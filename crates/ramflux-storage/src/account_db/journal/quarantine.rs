@@ -45,12 +45,19 @@ impl AccountDb {
             |row| row.get(0),
         )?;
         if legacy_trim {
-            self.connection.execute(
-                "DELETE FROM runtime_unrouted WHERE received_at<?1",
-                params![at.saturating_sub(7 * 24 * 60 * 60)],
-            )?;
-            if existed_before == 0 {
-                self.connection.execute("DELETE FROM runtime_unrouted WHERE envelope_id IN (SELECT envelope_id FROM runtime_unrouted ORDER BY received_at DESC,inbox_seq DESC,envelope_id DESC LIMIT -1 OFFSET 63)",[])?;
+            if self.receive_ledger_present()? {
+                self.trim_expired_unrouted(at)?;
+                if existed_before == 0 {
+                    self.trim_overflow_unrouted(at)?;
+                }
+            } else {
+                self.connection.execute(
+                    "DELETE FROM runtime_unrouted WHERE received_at<?1",
+                    params![at.saturating_sub(7 * 24 * 60 * 60)],
+                )?;
+                if existed_before == 0 {
+                    self.connection.execute("DELETE FROM runtime_unrouted WHERE envelope_id IN (SELECT envelope_id FROM runtime_unrouted ORDER BY received_at DESC,inbox_seq DESC,envelope_id DESC LIMIT -1 OFFSET 63)",[])?;
+                }
             }
         }
         let exists_after_trim: i64 = self.connection.query_row(
@@ -86,6 +93,8 @@ impl AccountDb {
     /// # Errors
     /// Returns SQL errors.
     pub fn remove_unrouted(&self, id: &str) -> Result<(), StorageError> {
+        // Success cleanup of ledger work is W2/WS (`cleanup_settled`). This only drops the
+        // quarantine row; a still-held receipt keeps its work.
         self.connection
             .execute("DELETE FROM runtime_unrouted WHERE envelope_id=?1", params![id])?;
         Ok(())

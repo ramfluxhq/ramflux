@@ -915,6 +915,9 @@ mod receive_hold;
 #[path = "receive_incarnation.rs"]
 mod receive_incarnation;
 
+#[path = "receive_failure.rs"]
+mod receive_failure;
+
 #[path = "receive_history.rs"]
 mod receive_history;
 

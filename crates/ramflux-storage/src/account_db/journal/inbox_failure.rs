@@ -13,9 +13,14 @@ impl AccountDb {
             let mut q=self.connection.prepare("SELECT r.envelope_key,r.entry_json FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE p.expires_at<=?1 AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind='inbox/legacy-held/'||p.envelope_key)")?;
             let rows=q.query_map(params![at],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             drop(q);
-            for (key,entry) in rows { self.insert_inbox_dead_letter(&key,&entry,&serde_json::json!({"retry_key":key,"error_code":"retry_expired"}),at)?; }
+            for (key,entry) in rows {
+                if self.settle_admission(&key, crate::ReceiveFailureReason::HeldExpired, at)? {
+                    continue;
+                }
+                self.insert_inbox_dead_letter(&key,&entry,&serde_json::json!({"retry_key":key,"error_code":"retry_expired"}),at)?;
+            }
             self.connection.execute("DELETE FROM runtime_inbox_dead_letter WHERE envelope_key IN (SELECT envelope_key FROM runtime_inbox_policy WHERE expires_at<=?1)",params![at])?;
-            self.connection.execute("DELETE FROM runtime_unrouted WHERE received_at<?1",params![at.saturating_sub(7 * 24 * 60 * 60)])?;
+            self.trim_expired_unrouted(at)?;
             self.cleanup_legacy_inbox_holds()?;
             self.cleanup_inbox_policy()
         })
@@ -30,9 +35,14 @@ impl AccountDb {
         metadata: &serde_json::Value,
         at: i64,
     ) -> Result<(), StorageError> {
-        self.write_transaction(|| self.insert_inbox_dead_letter(key, entry, metadata, at))
+        self.write_transaction(|| {
+            if self.settle_admission(key, crate::ReceiveFailureReason::PolicyRejected, at)? {
+                return Ok(());
+            }
+            self.insert_inbox_dead_letter(key, entry, metadata, at)
+        })
     }
-    fn insert_inbox_dead_letter(
+    pub(crate) fn insert_inbox_dead_letter(
         &self,
         key: &str,
         entry: &[u8],
@@ -102,24 +112,41 @@ impl AccountDb {
         if entry.len() > 1024 * 1024 {
             return Err(StorageError::AuthorizationRejected);
         }
-        self.write_transaction(|| {
-            if let Some(marker) = self.inbox_envelope_marker(entry)?
-                && self.actor_state_exists(&marker)?
-                // Initial ACK failure may retain a live committed receipt. Deletion removes it.
-                && !(key.starts_with("routed/committed/") && self.actor_state_exists(key)?)
-            {
-                return Ok(0);
-            }
-            if !self.ensure_inbox_policy(key,entry,at)? {return Ok(0);}
-            let allowed:bool=self.connection.query_row("SELECT expires_at>?2 AND attempts<CASE WHEN trusted=1 THEN 8 ELSE 3 END FROM runtime_inbox_policy WHERE envelope_key=?1",params![key,at],|r|r.get(0))?;
-            let count:i64=self.connection.query_row("SELECT count(*) FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE r.envelope_key!=?1 AND p.expires_at>?2 AND r.next_at<9223372036854775807",params![key,at],|r|r.get(0))?;
-            if !allowed || count>=64 {return Ok(0);}
-            self.connection.execute("UPDATE runtime_inbox_policy SET attempts=attempts+1 WHERE envelope_key=?1",params![key])?;
-            self.connection.execute("INSERT INTO runtime_inbox_retry SELECT envelope_key,?2,attempts,?3+min(64,(1<<min(attempts,6))),first_seen FROM runtime_inbox_policy WHERE envelope_key=?1 ON CONFLICT(envelope_key) DO UPDATE SET attempts=excluded.attempts,next_at=excluded.next_at",params![key,entry,at])?;
-            let attempts: u32 = self.connection.query_row("SELECT attempts FROM runtime_inbox_policy WHERE envelope_key=?1",params![key],|r|r.get(0))?;
-            self.release_expired_legacy_inbox(at)?;
-            Ok(attempts)
-        })
+        self.write_transaction(|| self.defer_inbox_entry_inner(key, entry, at))
+    }
+    pub(crate) fn defer_inbox_entry_inner(
+        &self,
+        key: &str,
+        entry: &[u8],
+        at: i64,
+    ) -> Result<u32, StorageError> {
+        if let Some(marker) = self.inbox_envelope_marker(entry)?
+            && self.actor_state_exists(&marker)?
+            // Initial ACK failure may retain a live committed receipt. Deletion removes it.
+            && !(key.starts_with("routed/committed/") && self.actor_state_exists(key)?)
+        {
+            return Ok(0);
+        }
+        if !self.ensure_inbox_policy(key, entry, at)? {
+            return Ok(0);
+        }
+        let allowed:bool=self.connection.query_row("SELECT expires_at>?2 AND attempts<CASE WHEN trusted=1 THEN 8 ELSE 3 END FROM runtime_inbox_policy WHERE envelope_key=?1",params![key,at],|r|r.get(0))?;
+        let count:i64=self.connection.query_row("SELECT count(*) FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE r.envelope_key!=?1 AND p.expires_at>?2 AND r.next_at<9223372036854775807",params![key,at],|r|r.get(0))?;
+        if !allowed || count >= 64 {
+            return Ok(0);
+        }
+        self.connection.execute(
+            "UPDATE runtime_inbox_policy SET attempts=attempts+1 WHERE envelope_key=?1",
+            params![key],
+        )?;
+        self.connection.execute("INSERT INTO runtime_inbox_retry SELECT envelope_key,?2,attempts,?3+min(64,(1<<min(attempts,6))),first_seen FROM runtime_inbox_policy WHERE envelope_key=?1 ON CONFLICT(envelope_key) DO UPDATE SET attempts=excluded.attempts,next_at=excluded.next_at",params![key,entry,at])?;
+        let attempts: u32 = self.connection.query_row(
+            "SELECT attempts FROM runtime_inbox_policy WHERE envelope_key=?1",
+            params![key],
+            |r| r.get(0),
+        )?;
+        self.release_expired_legacy_inbox(at)?;
+        Ok(attempts)
     }
     /// Checks backoff even when the gateway redelivers pending work.
     /// # Errors

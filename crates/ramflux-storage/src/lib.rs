@@ -42,6 +42,9 @@ pub use account_db::receive::page::{
     ReceiveCoverStep, ReceiveGapOwned, ReceiveKnownLoss, ReceivePageView, ReceiveReconcileResult,
 };
 pub use account_db::receive::privacy::ReceiveBind;
+pub use account_db::receive::removal::{
+    ReceiveFailure, ReceiveFailureKind, ReceiveFailureReason, ReceiveFailureResult,
+};
 pub use account_db::receive::reset::{
     CURSOR_AHEAD, RETIRED_FENCE_CAP, ReceiveIssued, ReceiveReset, ReceiveResetReason,
     ReceiveResetResult,

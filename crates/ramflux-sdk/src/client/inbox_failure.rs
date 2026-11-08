@@ -140,3 +140,19 @@ pub(crate) fn defer_entry(
     Ok(set_failure_policy(client, local, entry, key, bytes, at)?
         && client.account_db()?.defer_inbox_entry(key, bytes, at)? != 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_refusal_codes_are_stable() {
+        assert_eq!(deterministic(&SdkError::ReplayMismatch), Some("replay_mismatch"));
+        assert_eq!(
+            deterministic(&SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed)),
+            Some("authentication_failed")
+        );
+        assert_eq!(deterministic(&SdkError::InboundRejected("x".into())), Some("routing_rejected"));
+        assert_eq!(deterministic(&SdkError::IdentityRootMissing), None);
+    }
+}

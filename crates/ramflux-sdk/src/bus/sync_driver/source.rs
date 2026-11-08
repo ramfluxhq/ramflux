@@ -7,6 +7,7 @@ use crate::bus::{
     connection_manager::ReceiveEntry, contact_backpressure::Backpressure, couriers::writer::Writer,
 };
 use crate::client::routed::PreparedInbound;
+pub(crate) mod failure;
 mod group;
 mod history;
 pub(crate) mod hold;
