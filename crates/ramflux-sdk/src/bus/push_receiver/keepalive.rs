@@ -3,8 +3,17 @@
 
 //! Session-child keepalive: Heartbeat after 25 s idle, 10 s call, retire at 35 s.
 
+use crate::SdkError;
 use crate::bus::connection_manager::SessionContext;
+use std::time::Duration;
 use tokio::time::{Instant, sleep_until};
+
+const TRANSIENT_BACKOFF: Duration = Duration::from_secs(1);
+
+fn stop_on_error(context: &SessionContext, error: &SdkError) -> bool {
+    context.generation != context.connection_generation()
+        || matches!(error, SdkError::NetworkingPendingContext { .. } | SdkError::NetworkingPending)
+}
 
 pub(crate) async fn run(context: SessionContext) {
     let mut cancel = context.cancel.clone();
@@ -21,8 +30,18 @@ pub(crate) async fn run(context: SessionContext) {
         if Instant::now() < context.last_read_at() + context.keepalive_idle() {
             continue;
         }
-        if context.keepalive_heartbeat().await.is_err() {
-            return;
+        match context.keepalive_heartbeat().await {
+            Ok(()) => {}
+            Err(error) if stop_on_error(&context, &error) => return,
+            Err(_) => {
+                let retry = (context.last_read_at() + context.keepalive_idle())
+                    .max(Instant::now() + TRANSIENT_BACKOFF);
+                tokio::select! {
+                    biased;
+                    _ = cancel.changed() => return,
+                    () = sleep_until(retry) => {}
+                }
+            }
         }
     }
 }

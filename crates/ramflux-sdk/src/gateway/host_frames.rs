@@ -71,7 +71,7 @@ impl ReadClock {
 
     pub(crate) fn reset_to_now(&self) {
         let ms = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-        self.last_ms.store(ms, Ordering::Release);
+        self.last_ms.fetch_max(ms, Ordering::AcqRel);
     }
 
     #[must_use]

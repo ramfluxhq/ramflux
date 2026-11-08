@@ -228,7 +228,12 @@ impl SessionContext {
 
     #[must_use]
     pub(crate) fn last_read_at(&self) -> Instant {
-        self.connection.shared.read_clock.last_read_at()
+        self.connection.last_read_at()
+    }
+
+    #[must_use]
+    pub(crate) fn connection_generation(&self) -> u64 {
+        self.connection.generation()
     }
 
     #[must_use]
@@ -238,9 +243,18 @@ impl SessionContext {
 
     pub(crate) async fn keepalive_heartbeat(&self) -> Result<(), SdkError> {
         let timeout = self.connection.shared.timeouts.keepalive_call;
+        let idle = self.keepalive_idle();
+        let handle = self.connection.clone();
         self.connection
             .call_class_generation(
-                |engine| Box::pin(engine.heartbeat()),
+                move |engine| {
+                    Box::pin(async move {
+                        if Instant::now() < handle.last_read_at() + idle {
+                            return Ok(());
+                        }
+                        engine.heartbeat().await
+                    })
+                },
                 Instant::now() + timeout,
                 self.generation,
                 CallClass::Bulk,
@@ -267,6 +281,11 @@ impl ConnectionHandle {
             cancel: self.stop.subscribe(),
             connection: self.clone(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn last_read_at(&self) -> Instant {
+        self.shared.read_clock.last_read_at()
     }
 
     #[cfg(test)]
