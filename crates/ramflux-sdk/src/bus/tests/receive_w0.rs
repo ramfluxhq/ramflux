@@ -16,11 +16,12 @@
 //! the SDK level: P20 wires the adapter into the actor.
 use super::fixture::{Case, Fixture};
 use crate::bus::connection_manager::ReceiveTurn;
-use crate::bus::sync_driver::source::w0::SourceW0;
+use crate::bus::sync_driver::source::w0::{SourceW0, actor_turn, prepare_receive_turn};
 use crate::client::identity_authority::test_support::public_manifest;
+use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{
-    ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
+    ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, RecoveryInput, StorageError,
 };
 use serde_json::json;
 use std::cell::Cell;
@@ -617,4 +618,143 @@ async fn history_atomic() -> Case {
     drop(fixture);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
+
+fn activate_push(account: &mut LocalBusAccountState) -> Case {
+    let target = account.target_delivery_id.clone();
+    let db = account.client.account_db()?;
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(&target, PUSH_E)?;
+    let engine = account.engine.as_mut().ok_or("fixture engine")?;
+    engine.mode = SessionMode::Push {
+        incarnation: IncarnationId::try_from(PUSH_E.to_owned()).map_err(std::io::Error::other)?,
+    };
+    Ok(())
+}
+
+fn stage_on_target(account: &LocalBusAccountState, sequence: u64, generation: u64) -> Case {
+    let target = account.target_delivery_id.clone();
+    let db = account.client.account_db()?;
+    let expected = ReceiveExpectation {
+        target: &target,
+        incarnation: PUSH_E,
+        cursor: 0,
+        generation,
+        erasure_generation: db.privacy_erasure_generation()?,
+    };
+    let entry = serde_json::to_vec(
+        &json!({"inbox_seq":sequence,"target_delivery_id":target,"envelope":{
+            "schema":"test","version":1,"domain":"test","signing_key_id":"key","signature_alg":"ed25519","signature":"sig",
+            "envelope_id":format!("env-{sequence}"),"source_principal_id":"source","source_device_id":"device","target_delivery_id":target,
+            "delivery_class":"opaque_event","priority":"normal","ttl":60,"created_at":1,"encrypted_payload":"cipher","payload_hash":format!("H{sequence}")
+        }}),
+    )?;
+    db.receive_transaction(expected, generation, |tx| {
+        tx.stage(ReceiveStage {
+            target: &target,
+            incarnation: PUSH_E,
+            sequence,
+            entry_json: &entry,
+            admission_key: "authenticated-key",
+            retain_until: now_unix_timestamp() + 300,
+            first_seen: 1,
+        })
+    })?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prepare_receive_turn_uses_actor_turn() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            prepare_uses_actor(),
+        ))))
+        .await
+}
+
+async fn prepare_uses_actor() -> Case {
+    let mut fixture = Box::pin(Fixture::new("w0-prepare-actor")).await?;
+    activate_push(&mut fixture.source)?;
+    stage_on_target(&fixture.source, 7, 1)?;
+    let plan = prepare_receive_turn(&fixture.source, 1, 1)?;
+    assert_eq!(plan.limit, 64);
+    let turn = actor_turn(&fixture.source, 1)?.ok_or("activated Push turn")?;
+    assert_eq!(turn.target, fixture.source.target_delivery_id);
+    assert_eq!(turn.incarnation, PUSH_E);
+    assert_eq!(turn.generation, 1);
+    let recovered =
+        SourceW0::from_actor(&turn, 1).recover_from_disk(fixture.source.client.account_db()?)?;
+    assert_eq!(
+        recovered,
+        vec![RecoveryInput { sequence: 7, disposition: "staged".into() }],
+        "prepare_receive_turn SourceW0 must recover staged work from disk"
+    );
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn from_actor_generation_mismatch_is_reachable() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            mismatch_reachable(),
+        ))))
+        .await
+}
+
+async fn mismatch_reachable() -> Case {
+    let mut fixture = Box::pin(Fixture::new("w0-from-actor-mismatch")).await?;
+    activate_push(&mut fixture.source)?;
+    let plan = prepare_receive_turn(&fixture.source, 1, 2)?;
+    assert_eq!(plan.limit, 64, "live plan must survive from_actor mismatch");
+    let turn = actor_turn(&fixture.source, 1)?.ok_or("activated Push turn")?;
+    let refused =
+        SourceW0::from_actor(&turn, 2).recover_from_disk(fixture.source.client.account_db()?);
+    assert!(
+        matches!(refused, Err(SdkError::Storage(StorageError::AuthorizationRejected))),
+        "from_actor mismatch must be reachable: {refused:?}"
+    );
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_prepare_survives_extra_read_path() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            live_unactivated(),
+        ))))
+        .await
+}
+
+async fn live_unactivated() -> Case {
+    let mut fixture = Box::pin(Fixture::new("w0-live-unactivated")).await?;
+    let engine = fixture.source.engine.as_mut().ok_or("fixture engine")?;
+    engine.mode = SessionMode::Push {
+        incarnation: IncarnationId::try_from(PUSH_E.to_owned()).map_err(std::io::Error::other)?,
+    };
+    assert!(actor_turn(&fixture.source, 1)?.is_none(), "no epoch row skips extra DB reads");
+    let plan = prepare_receive_turn(&fixture.source, 1, 1)?;
+    assert_eq!(plan.limit, 64, "live PrepareReceive must succeed without epoch reads");
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn catch_up_yields_after_sixteen_pages() {
+    use crate::bus::connection_manager::receive::{
+        RECEIVE_PAGE_LIMIT, RECEIVE_YIELD_AFTER_PAGES, catch_up_yields,
+    };
+    assert_eq!(RECEIVE_PAGE_LIMIT, 64);
+    assert_eq!(RECEIVE_YIELD_AFTER_PAGES, 16);
+    assert!(!catch_up_yields(15));
+    assert!(catch_up_yields(16));
 }

@@ -59,7 +59,7 @@ pub use account_db::receive::reset::{
 };
 pub use account_db::receive::settle::{ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult};
 pub use account_db::receive::stage::{ReceiveStage, ReceiveStageResult};
-pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction};
+pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction, RecoveryInput};
 mod encryption;
 mod error;
 mod event_store;

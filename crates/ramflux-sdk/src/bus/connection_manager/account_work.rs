@@ -87,7 +87,6 @@ pub(crate) enum AccountWork {
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
         reply: oneshot::Sender<Result<super::receive::ReceiveAcked, SdkError>>,
     },
-    #[allow(dead_code, reason = "P20a dormant; live senders arrive in later P20 parts")]
     ReceiveObservation {
         generation: u64,
         event: super::ConnectionEvent,
@@ -95,6 +94,7 @@ pub(crate) enum AccountWork {
     Metadata {
         metadata: Box<SessionMetadata>,
     },
+    #[allow(dead_code, reason = "kept for networking_expiry and task_courier tests")]
     Observation {
         event: super::ConnectionEvent,
     },

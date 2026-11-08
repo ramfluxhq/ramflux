@@ -10,6 +10,17 @@ use tokio::{
     time::{Instant, timeout},
 };
 
+/// Catch-up page size (§7).
+pub(crate) const RECEIVE_PAGE_LIMIT: usize = 64;
+/// Catch-up pages before the receive child yields so other accounts run (§7).
+pub(crate) const RECEIVE_YIELD_AFTER_PAGES: u32 = 16;
+
+/// True when this catch-up has taken 16 pages and must yield.
+#[must_use]
+pub(crate) const fn catch_up_yields(pages: u32) -> bool {
+    pages >= RECEIVE_YIELD_AFTER_PAGES
+}
+
 pub(crate) struct ReceivePlan {
     pub cursor: u64,
     pub limit: usize,
@@ -248,10 +259,12 @@ async fn catch_up(
     let mut retries: std::collections::BTreeMap<_, _> =
         plan.retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
     let mut active = false;
+    let limit = plan.limit.min(RECEIVE_PAGE_LIMIT);
+    let mut pages = 0_u32;
     loop {
         let entries = handle
             .call(
-                move |engine| Box::pin(engine.resume_authoritative_after(cursor, plan.limit)),
+                move |engine| Box::pin(engine.resume_authoritative_after(cursor, limit)),
                 Instant::now() + call_timeout,
             )
             .await?;
@@ -271,6 +284,11 @@ async fn catch_up(
             .await?;
             active |= accepted;
             backpressure = next;
+        }
+        pages = pages.saturating_add(1);
+        if catch_up_yields(pages) {
+            tokio::task::yield_now().await;
+            pages = 0;
         }
         // A gateway can return a short page at its byte limit. Only an empty page
         // (or a non-advancing cursor) proves this bounded pass has caught up.
@@ -316,7 +334,7 @@ async fn rescan(
     let Some((cursor, until)) = scan else { return Ok((false, backpressure)) };
     let mut page = handle
         .call(
-            move |engine| Box::pin(engine.resume_authoritative_after(cursor, 64)),
+            move |engine| Box::pin(engine.resume_authoritative_after(cursor, RECEIVE_PAGE_LIMIT)),
             Instant::now() + call_timeout,
         )
         .await?;
@@ -515,6 +533,7 @@ pub(crate) async fn test_redrive(
                         .await,
                     );
                 }
+                AccountWork::ReceiveObservation { .. } | AccountWork::Observation { .. } => {}
                 AccountWork::AckResults { state, cursor, mut backpressure, reply, .. } => {
                     let result = crate::bus::sync_driver::finish_prepared_ack(
                         account,

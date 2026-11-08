@@ -3,7 +3,9 @@
 
 //! Account task registration and joinable observation/receive ownership.
 
-use super::{AccountWork, ConnectionHandle, RuntimeTimeouts, metadata_child, receive};
+use super::{
+    AccountWork, ConnectionEvent, ConnectionHandle, RuntimeTimeouts, metadata_child, receive,
+};
 use std::sync::Arc;
 use tokio::{
     sync::{broadcast, mpsc, watch},
@@ -99,7 +101,8 @@ pub(super) fn start(
                         tokio::select! {biased;_=stop.changed()=>break,event=events.recv()=>event};
                     match event {
                         Ok(event) => {
-                            tokio::select! {biased;_=stop.changed()=>break,result=work.send(AccountWork::Observation {event})=>{if result.is_err(){break;}}}
+                            let generation = event_generation(&event);
+                            tokio::select! {biased;_=stop.changed()=>break,result=work.send(AccountWork::ReceiveObservation {generation,event})=>{if result.is_err(){break;}}}
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -130,4 +133,12 @@ fn register_courier<F, R>(
     let _ = handle.spawn_session_child(name, move |context| {
         Box::pin(crate::bus::couriers::runner::run(context, work.clone(), name, pass))
     });
+}
+
+fn event_generation(event: &ConnectionEvent) -> u64 {
+    match event {
+        ConnectionEvent::Connected { generation, .. }
+        | ConnectionEvent::Disconnected { generation, .. }
+        | ConnectionEvent::AttemptFailed { generation, .. } => *generation,
+    }
 }

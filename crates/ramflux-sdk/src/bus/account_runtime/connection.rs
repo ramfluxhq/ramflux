@@ -273,7 +273,9 @@ impl AccountRuntime {
                 }
                 tracing::trace!(?trigger, generation, "preparing stored receive cursor");
                 let result = super::super::sync_driver::source::w0::prepare_receive_turn(
-                    account, generation,
+                    account,
+                    generation,
+                    handle.generation(),
                 );
                 let _ = reply.send(result);
             }
@@ -323,6 +325,21 @@ impl AccountRuntime {
             AccountWork::ReceiveObservation { generation, event } => {
                 if generation != handle.generation() {
                     return Ok(false);
+                }
+                if matches!(
+                    event,
+                    crate::bus::connection_manager::ConnectionEvent::Connected { .. }
+                ) {
+                    match super::lifecycle_fence::recover_account(
+                        account.client.account_db()?,
+                        &account.target_delivery_id,
+                        handle.generation(),
+                    ) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::debug!(%error, "receive disk recovery deferred");
+                        }
+                    }
                 }
                 return Ok(record_observation(
                     account,

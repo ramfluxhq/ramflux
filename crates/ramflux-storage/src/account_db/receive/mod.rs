@@ -88,6 +88,13 @@ pub struct ReceiveExpectation<'a> {
     pub erasure_generation: i64,
 }
 
+/// One open W0/W1 recovery input (staged or held receipt plus its work row).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryInput {
+    pub sequence: u64,
+    pub disposition: String,
+}
+
 /// Unforgeable authority scoped to an account's immediate writer transaction.
 pub struct ReceiveTransaction<'a> {
     db: &'a AccountDb,
@@ -183,6 +190,37 @@ impl ReceiveTransaction<'_> {
     pub fn remove_unrouted(&self, id: &str) -> Result<(), StorageError> {
         self.require_writer()?;
         self.db.remove_unrouted(id)
+    }
+
+    /// Open staged or held receipt+work rows for this (T,E). Disk is the only recovery source.
+    ///
+    /// # Errors
+    /// Requires the writer transaction; returns SQL and sequence-encoding errors.
+    pub fn recovery_inputs(&self) -> Result<Vec<RecoveryInput>, StorageError> {
+        self.require_writer()?;
+        let mut statement = self.db.connection.prepare(
+            "SELECT r.inbox_seq, r.disposition FROM gateway_receive_receipt r
+             JOIN gateway_receive_work w
+               ON w.target_delivery_id=r.target_delivery_id
+              AND w.incarnation_id=r.incarnation_id
+              AND w.inbox_seq=r.inbox_seq
+             WHERE r.target_delivery_id=?1 AND r.incarnation_id=?2
+               AND r.disposition IN ('staged','held')
+             ORDER BY r.inbox_seq",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![self.target, self.incarnation], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })?;
+        let mut inputs = Vec::new();
+        for row in rows {
+            let (seq, disposition) = row?;
+            let sequence = u64::from_be_bytes(
+                seq.try_into().map_err(|_| StorageError::Integrity("receive sequence encoding"))?,
+            );
+            inputs.push(RecoveryInput { sequence, disposition });
+        }
+        Ok(inputs)
     }
 }
 

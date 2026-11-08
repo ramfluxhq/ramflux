@@ -105,6 +105,15 @@ impl SourceW0<'_> {
             tx.bind_logical_message(sequence, message)
         })?)
     }
+
+    /// Resume open W0/W1 work from disk under this fence. RAM held pages are ignored.
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    pub(crate) fn recover_from_disk(
+        &self,
+        db: &AccountDb,
+    ) -> Result<Vec<ramflux_storage::RecoveryInput>, SdkError> {
+        Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.recovery_inputs())?)
+    }
 }
 
 /// Refuse the legacy receive path on an activated ledger.
@@ -122,25 +131,35 @@ pub(crate) fn refuse_legacy_receive_unless_ledger_turn(
     Ok(account.client.account_db()?.refuse_legacy_receive()?)
 }
 
-/// Actor `PrepareReceive` entry. Constructs [`SourceW0`] from the actor's generation and,
-/// when the session is Push, its incarnation. The live cursor plan is unchanged until P24.
+/// Actor `PrepareReceive` entry. The live cursor plan is computed first so extra dormant
+/// reads cannot fail live receive. When the ledger is activated, [`SourceW0::from_actor`]
+/// builds the fence (`turn.generation` vs S2 `handle_generation`) and recovers open work
+/// from disk.
 pub(crate) fn prepare_receive_turn(
     account: &LocalBusAccountState,
-    generation: u64,
+    turn_generation: u64,
+    handle_generation: u64,
 ) -> Result<ReceivePlan, SdkError> {
-    refuse_legacy_receive_unless_ledger_turn(account, generation)?;
-    if let Some(turn) = actor_turn(account, generation)? {
-        let source = SourceW0::from_actor(&turn, generation);
-        debug_assert_eq!(source.generation, generation);
-        debug_assert_eq!(source.expected.generation, turn.generation);
+    refuse_legacy_receive_unless_ledger_turn(account, turn_generation)?;
+    let plan = crate::bus::sync_driver::prepare_receive(account, turn_generation)?;
+    if let Ok(Some(turn)) = actor_turn(account, turn_generation) {
+        let source = SourceW0::from_actor(&turn, handle_generation);
+        let _ = source.recover_from_disk(account.client.account_db()?);
     }
-    crate::bus::sync_driver::prepare_receive(account, generation)
+    Ok(plan)
 }
 
-fn actor_turn(
+/// Push-session coordinates from S2's engine plus disk cursor/erase. `None` when the
+/// ledger is unactivated or the session is not Push. Extra DB reads stay behind that
+/// dormant switch so live `PrepareReceive` cannot fail on them.
+pub(crate) fn actor_turn(
     account: &LocalBusAccountState,
     generation: u64,
 ) -> Result<Option<ReceiveTurn>, SdkError> {
+    let db = account.client.account_db()?;
+    if db.receive_epoch(&account.target_delivery_id)?.is_none() {
+        return Ok(None);
+    }
     let Some(engine) = account.engine.as_ref() else {
         return Ok(None);
     };
@@ -149,13 +168,12 @@ fn actor_turn(
     };
     let target = account.target_delivery_id.clone();
     let cursor = account.client.gateway_receive_cursor(&target)?;
-    let erasure_generation = account.client.account_db()?.privacy_erasure_generation()?;
     Ok(Some(ReceiveTurn {
         target,
         incarnation: incarnation.as_str().to_owned(),
         cursor,
         generation,
-        erasure_generation,
+        erasure_generation: db.privacy_erasure_generation()?,
     }))
 }
 
