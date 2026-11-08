@@ -182,15 +182,15 @@ impl LoopbackBackend {
 }
 
 fn decode_envelope(bytes: &[u8]) -> Result<Envelope, TransportError> {
-    Ok(serde_json::from_slice(bytes)?)
+    Ok(ramflux_protocol::parse_i_json(bytes)?)
 }
 
 fn decode_ack(bytes: &[u8]) -> Result<Ack, TransportError> {
-    Ok(serde_json::from_slice(bytes)?)
+    Ok(ramflux_protocol::parse_i_json(bytes)?)
 }
 
 fn decode_nack(bytes: &[u8]) -> Result<Nack, TransportError> {
-    Ok(serde_json::from_slice(bytes)?)
+    Ok(ramflux_protocol::parse_i_json(bytes)?)
 }
 
 fn decode_cursor(bytes: &[u8]) -> Result<Cursor, TransportError> {
