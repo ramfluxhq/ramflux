@@ -220,11 +220,12 @@ fn dump(db: &AccountDb, sql: &str) -> Result<Vec<Vec<u8>>, StorageError> {
 fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageError> {
     db.checkpoint_retired_secrets()?;
     let forbidden = forbidden.to_vec();
-    db.connection.call(move |raw| {
+    let (residuals, footprint_count) = db.connection.call(move |raw| {
     let mut q=raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")?;
     let tables =
         q.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(q);
+    let mut residuals = Vec::new();
     for table in tables {
         // Only independent account authority, contact, and membership state is exempt.
         // The matching outbox invalidations are exempt by named source or identity actor key.
@@ -282,24 +283,24 @@ fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageErro
             let context = row.clone();
             for (name, value) in names.iter().zip(row) {
                 for secret in &forbidden {
-                    assert!(
-                        !value.contains(secret),
-                        "residual in {table}.{name}: {secret}; row={context:?}"
-                    );
+                    if value.contains(secret) {
+                        residuals.push(format!(
+                            "residual in {table}.{name}: {secret}; row={context:?}"
+                        ));
+                    }
                 }
             }
         }
     }
-    assert_eq!(
-        raw.query_row(
-            "SELECT count(*) FROM message_footprint WHERE message_id='projection-id'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )?,
-        0
-    );
-    Ok(())
+    let footprint_count = raw.query_row(
+        "SELECT count(*) FROM message_footprint WHERE message_id='projection-id'",
+        [],
+        |r| r.get::<_, i64>(0)
+    )?;
+    Ok((residuals, footprint_count))
     })?;
+    assert!(residuals.is_empty(), "{}", residuals.join("\n"));
+    assert_eq!(footprint_count, 0);
     Ok(())
 }
 
@@ -331,15 +332,21 @@ fn footprint_registration_rolls_back_and_late_copies_cannot_recreate_deleted_con
 fn dropping_explicit_registration_is_detected_as_an_erasure_residual() -> Result<(), StorageError> {
     const MUTATION: &str = "RAMFLUX_TEST_DROP_MESSAGE_REGISTRATION";
     if std::env::var_os(MUTATION).is_none() {
-        let status = std::process::Command::new(std::env::current_exe()?)
+        let output = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
                 "account_db::message_footprint::tests::dropping_explicit_registration_is_detected_as_an_erasure_residual",
                 "--nocapture",
             ])
             .env(MUTATION, "1")
-            .status()?;
-        assert!(!status.success(), "the erasure audit accepted a missing registration");
+            .output()?;
+        assert!(!output.status.success(), "the erasure audit accepted a missing registration");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("residual in runtime_actor_state.state_json: private-source"),
+            "the erasure audit failed for an unexpected reason: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         return Ok(());
     }
     let (root, db) = crate::tests::test_db("footprint-registration-mutation")?;
