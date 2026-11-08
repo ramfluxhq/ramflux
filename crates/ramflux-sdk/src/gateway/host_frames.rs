@@ -10,7 +10,11 @@ use super::{GatewayClientFrame, GatewayInboxEntry, GatewayServerFrame, GatewaySe
 use crate::SdkError;
 use crate::bus::connection_manager::{DisconnectReason, SessionHub};
 use crate::bus::runtime_limits::{SESSION_BUFFER, SESSION_BUFFER_BYTES};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::time::{Duration, Instant};
 
 /// What the caller of a read is waiting for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,10 +46,51 @@ pub(crate) enum Step {
     Refused(super::session_push::PushNackReason),
 }
 
+/// Monotonic last complete-frame read, shared with the keepalive child.
+pub(crate) struct ReadClock {
+    origin: Instant,
+    last_ms: AtomicU64,
+    reads: AtomicU64,
+}
+
+impl ReadClock {
+    #[must_use]
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            origin: Instant::now(),
+            last_ms: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn note(&self) {
+        let ms = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_ms.fetch_max(ms, Ordering::AcqRel);
+        self.reads.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn reset_to_now(&self) {
+        let ms = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_ms.store(ms, Ordering::Release);
+    }
+
+    #[must_use]
+    pub(crate) fn last_read_at(&self) -> Instant {
+        self.origin + Duration::from_millis(self.last_ms.load(Ordering::Acquire))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn read_count(&self) -> u64 {
+        self.reads.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct HostFrames {
     pub hub: Arc<SessionHub>,
     pub resync_needed: Arc<crate::bus::connection_manager::resync::ResyncState>,
+    pub clock: Arc<ReadClock>,
     #[cfg(test)]
     pub buffer_stats: Arc<std::sync::Mutex<BufferStats>>,
     #[cfg(test)]
@@ -83,6 +128,13 @@ impl GatewaySessionEngine {
             self.terminal_reason = Some(DisconnectReason::Transport);
         }
         result
+    }
+
+    /// One activity source: every complete idle, reply, and heartbeat frame, before dispatch.
+    fn note_complete_frame(&mut self) {
+        if let Some(host) = &self.host {
+            host.clock.note();
+        }
     }
 
     pub(crate) fn buffer_delivery(&mut self, entry: GatewayInboxEntry) {
@@ -177,6 +229,7 @@ impl GatewaySessionEngine {
     pub(crate) async fn idle_read(&mut self) -> Result<(), SdkError> {
         let bytes = self.stream.recv_idle_frame().await?;
         self.last_frame_bytes = bytes.len();
+        self.note_complete_frame();
         if let Some(Step::Legacy(frame)) = self.route_bytes(&bytes, false, Wait::Legacy)? {
             self.dispatch_frame(&frame, None)?;
         }
@@ -287,6 +340,7 @@ impl GatewaySessionEngine {
                 }
             };
             self.last_frame_bytes = bytes.len();
+            self.note_complete_frame();
             // `None` means a capable event was carried; keep waiting for the caller's frame.
             if let Some(step) = self.route_bytes(&bytes, true, wait)? {
                 return Ok(step);

@@ -21,6 +21,9 @@ pub(crate) mod apply_w1;
 mod apply_w1_tests;
 #[cfg(test)]
 mod guard_tests;
+pub(crate) mod keepalive;
+#[cfg(test)]
+mod keepalive_tests;
 pub(crate) mod reorder;
 #[cfg(test)]
 mod reorder_tests;

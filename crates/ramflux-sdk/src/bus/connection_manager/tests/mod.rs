@@ -121,6 +121,8 @@ fn limits() -> RuntimeTimeouts {
     limits.receive_max = held;
     limits.sync = held;
     limits.fetch = held;
+    limits.keepalive_idle = held;
+    limits.keepalive_call = held;
     assert_eq!(limits.retry_budget, held, "the fixture must not introduce a competing retry timer");
     limits
 }
@@ -130,7 +132,7 @@ pub(crate) async fn fixture() -> Result<(ConnectionHandle, SessionIo), Box<dyn s
     handle.require_live(Duration::from_secs(600)).await?;
     Ok((handle, io))
 }
-fn reconnecting_fixture(
+pub(crate) fn reconnecting_fixture(
     limits: RuntimeTimeouts,
 ) -> Result<(ConnectionHandle, mpsc::UnboundedReceiver<SessionIo>), Box<dyn std::error::Error>> {
     let (sessions, receive) = mpsc::unbounded_channel();

@@ -116,6 +116,7 @@ struct Shared {
     buffer_stats: Arc<std::sync::Mutex<crate::gateway::host_frames::BufferStats>>,
     retirement: std::sync::Mutex<Option<(u64, DisconnectReason)>>,
     retirement_changed: Notify,
+    read_clock: Arc<crate::gateway::host_frames::ReadClock>,
     #[cfg(test)]
     live_waiters: std::sync::atomic::AtomicUsize,
 }
@@ -224,6 +225,29 @@ impl SessionContext {
     {
         self.connection.call_generation(operation, deadline, self.generation).await
     }
+
+    #[must_use]
+    pub(crate) fn last_read_at(&self) -> Instant {
+        self.connection.shared.read_clock.last_read_at()
+    }
+
+    #[must_use]
+    pub(crate) fn keepalive_idle(&self) -> std::time::Duration {
+        self.connection.shared.timeouts.keepalive_idle
+    }
+
+    pub(crate) async fn keepalive_heartbeat(&self) -> Result<(), SdkError> {
+        let timeout = self.connection.shared.timeouts.keepalive_call;
+        self.connection
+            .call_class_generation(
+                |engine| Box::pin(engine.heartbeat()),
+                Instant::now() + timeout,
+                self.generation,
+                CallClass::Bulk,
+                Some(timeout),
+            )
+            .await
+    }
 }
 
 impl ConnectionHandle {
@@ -243,6 +267,12 @@ impl ConnectionHandle {
             cancel: self.stop.subscribe(),
             connection: self.clone(),
         }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn test_read_count(&self) -> u64 {
+        self.shared.read_clock.read_count()
     }
 
     pub(crate) fn start_with(
@@ -298,6 +328,7 @@ impl ConnectionHandle {
             )),
             retirement: std::sync::Mutex::new(None),
             retirement_changed: Notify::new(),
+            read_clock: crate::gateway::host_frames::ReadClock::new(),
         });
         let (calls, receive) = mpsc::channel(2 * CALL_QUEUE);
         let (children, registrations) = mpsc::channel(32);

@@ -18,6 +18,9 @@ pub(super) fn start(
     stopping: &watch::Receiver<bool>,
 ) -> Vec<JoinHandle<()>> {
     let mut auxiliary = Vec::new();
+    let _ = handle.spawn_session_child("keepalive", |context| {
+        Box::pin(crate::bus::push_receiver::keepalive::run(context))
+    });
     if let Some(work) = handle.shared.account_work.clone() {
         let task_writer = work.clone();
         let task_requests = Arc::new(tokio::sync::Mutex::new(task_requests));

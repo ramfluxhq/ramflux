@@ -40,6 +40,7 @@ pub(super) fn attach_host_with_dispatch_counter(
     engine.host = Some(HostFrames {
         hub: Arc::clone(&hub),
         resync_needed: Arc::clone(&resync),
+        clock: crate::gateway::host_frames::ReadClock::new(),
         buffer_stats: Arc::default(),
         dispatch_count: Arc::clone(&dispatch_count),
     });

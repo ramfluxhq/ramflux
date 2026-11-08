@@ -59,6 +59,8 @@ async fn fixture(post_claim: Duration) -> Result<Fixture, Box<dyn std::error::Er
         receive_max: held,
         sync: held,
         fetch: held,
+        keepalive_idle: held,
+        keepalive_call: held,
         post_claim,
         #[cfg(feature = "itest-local-mint")]
         relay_http: held,

@@ -425,9 +425,11 @@ fn announce_live(
     let hub = Arc::new(SessionHub::new(generation));
     *handle.shared.hub.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
         Arc::clone(&hub);
+    handle.shared.read_clock.reset_to_now();
     resident.host = Some(HostFrames {
         hub,
         resync_needed: Arc::clone(&handle.shared.resync_needed),
+        clock: Arc::clone(&handle.shared.read_clock),
         #[cfg(test)]
         buffer_stats: Arc::clone(&handle.shared.buffer_stats),
         #[cfg(test)]

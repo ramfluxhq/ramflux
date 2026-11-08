@@ -16,6 +16,8 @@ pub(crate) const SESSION_BUFFER: usize = 256;
 pub(crate) const SESSION_BUFFER_BYTES: usize = 8 * ramflux_transport::MAX_GATEWAY_FRAME_BYTES;
 pub(crate) const TRANSFER_SLOTS: usize = 2;
 pub(crate) const TRANSFER_QUEUE: usize = 16;
+pub(crate) const KEEPALIVE_IDLE: Duration = Duration::from_secs(25);
+pub(crate) const KEEPALIVE_CALL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeTimeouts {
@@ -38,6 +40,8 @@ pub(crate) struct RuntimeTimeouts {
     pub receive_max: Duration,
     pub sync: Duration,
     pub fetch: Duration,
+    pub keepalive_idle: Duration,
+    pub keepalive_call: Duration,
 }
 
 impl Default for RuntimeTimeouts {
@@ -62,6 +66,8 @@ impl Default for RuntimeTimeouts {
             receive_max: Duration::from_secs(5),
             sync: Duration::from_secs(20),
             fetch: Duration::from_secs(20),
+            keepalive_idle: KEEPALIVE_IDLE,
+            keepalive_call: KEEPALIVE_CALL,
         }
     }
 }
@@ -94,6 +100,8 @@ impl RuntimeTimeouts {
             receive_max: held,
             sync: held,
             fetch: held,
+            keepalive_idle: held,
+            keepalive_call: held,
             #[cfg(feature = "itest-local-mint")]
             relay_http: held,
         }
