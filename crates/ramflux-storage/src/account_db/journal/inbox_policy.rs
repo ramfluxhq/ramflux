@@ -4,7 +4,7 @@
 //! Source-isolated admission and original-lifetime bounds for retained ciphertext.
 use super::*;
 /// Authenticated identity scope and dependency for a retained inbox failure.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct InboxFailurePolicy<'a> {
     /// An independently verified source scope; absent for unauthenticated claims.
     pub verified_source: Option<&'a ramflux_crypto::RootQualifiedDeviceRef>,

@@ -5,13 +5,13 @@
 #![allow(clippy::expect_used, clippy::panic)]
 use super::cover::{ReceiveCover, ReceiveCoverKind, ReceiveCoverResult};
 use super::removal::{
-    FaultKind, ReceiveFailure, ReceiveFailureKind as FailKind, ReceiveFailureResult as FailOut,
-    run as with_fault,
+    FaultKind, ReceiveFailure, ReceiveFailureKind as FailKind, ReceiveFailureReason,
+    ReceiveFailureResult as FailOut, run as with_fault,
 };
 use super::stage::{ReceiveStage, ReceiveStageResult};
 use super::stage_tests::{bytes, setup};
 use super::*;
-use crate::{ProjectionStore, StorageError};
+use crate::{InboxFailurePolicy, ProjectionStore, StorageError};
 use rusqlite::params;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,10 +22,33 @@ struct Snap {
     receipts: Vec<(u64, String)>,
 }
 
+fn unverified(at: i64) -> InboxFailurePolicy<'static> {
+    InboxFailurePolicy { verified_source: None, trusted: false, dependency: ("none", ""), at }
+}
+
+fn pin_source(
+    owner: &str,
+    name: &str,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, StorageError> {
+    let seed = ramflux_crypto::blake3_256("ramflux.storage.test.pin.v1", owner.as_bytes());
+    Ok(ramflux_crypto::RootQualifiedDeviceRef::for_owned_account_device(
+        &ramflux_crypto::create_identity_root(owner, seed),
+        name,
+    )?)
+}
+
 fn expect(db: &AccountDb, cursor: u64) -> Result<ReceiveExpectation<'static>, StorageError> {
+    expect_for(db, "e", cursor)
+}
+
+fn expect_for<'a>(
+    db: &AccountDb,
+    incarnation: &'a str,
+    cursor: u64,
+) -> Result<ReceiveExpectation<'a>, StorageError> {
     Ok(ReceiveExpectation {
         target: "t",
-        incarnation: "e",
+        incarnation,
         cursor,
         generation: 1,
         erasure_generation: db.privacy_erasure_generation()?,
@@ -50,7 +73,16 @@ fn stage(db: &AccountDb, cursor: u64, sequence: u64, key: &str) -> Result<Vec<u8
 }
 
 fn cover_held(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), StorageError> {
-    let out = db.receive_transaction(expect(db, cursor)?, 1, |tx| {
+    cover_held_for(db, "e", cursor, sequence)
+}
+
+fn cover_held_for(
+    db: &AccountDb,
+    incarnation: &str,
+    cursor: u64,
+    sequence: u64,
+) -> Result<(), StorageError> {
+    let out = db.receive_transaction(expect_for(db, incarnation, cursor)?, 1, |tx| {
         tx.cover(ReceiveCover {
             sequence,
             kind: ReceiveCoverKind::Held,
@@ -124,6 +156,26 @@ fn retry_count(db: &AccountDb, key: &str) -> Result<i64, StorageError> {
     )?)
 }
 
+fn unrouted_for(db: &AccountDb, key: &str) -> Result<i64, StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT count(*) FROM runtime_unrouted WHERE envelope_id=?1",
+        params![key],
+        |row| row.get(0),
+    )?)
+}
+
+fn policy_window(db: &AccountDb, key: &str) -> Result<(i64, i64, String, String), StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT trusted,expires_at,failure_class,subject FROM runtime_inbox_policy WHERE envelope_key=?1",
+        params![key],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?)
+}
+
+fn long_entry() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({"envelope":{"created_at":1,"ttl":3600}})).expect("entry")
+}
+
 fn reopen(root: &std::path::Path) -> Result<AccountDb, StorageError> {
     AccountDb::open(
         &crate::AccountIndex::open(root)?,
@@ -160,6 +212,8 @@ fn held_local_expiry_and_eviction_crash() -> Result<(), StorageError> {
     dead_letter_cut()?;
     contact_expiry_cut()?;
     retired_expiry_cut()?;
+    router_retain_until_leaves_staged_and_held()?;
+    retired_settle_keeps_live_retry_and_unrouted()?;
     Ok(())
 }
 
@@ -284,6 +338,10 @@ fn retired_expiry_cut() -> Result<(), StorageError> {
     stage(&db, 0, 1, "ret")?;
     cover_held(&db, 0, 1)?;
     db.connection.execute(
+        "INSERT INTO runtime_inbox_policy VALUES('ret','root/device',1,1,10,0,'none','',0,0)",
+        [],
+    )?;
+    db.connection.execute(
         "UPDATE gateway_receive_epoch SET incarnation_id='live', retired_incarnations=?1 WHERE target_delivery_id='t'",
         params![serde_json::to_vec(&["e"])?],
     )?;
@@ -291,9 +349,9 @@ fn retired_expiry_cut() -> Result<(), StorageError> {
     assert_eq!(pre.cursor, 1);
     assert_eq!(pre.work, vec![1]);
     assert_eq!(pre.intents, Vec::<u64>::new());
-    assert_fault(with_fault(FaultKind::BeforeCommit, || expire_tx(&db, 1, 200)));
+    assert_fault(with_fault(FaultKind::BeforeCommit, || expire_tx(&db, 1, 20)));
     assert_eq!(snap(&db)?, pre, "retired expiry pause keeps work and writes no intent");
-    assert_eq!(expire_tx(&db, 1, 200)?, vec![1]);
+    assert_eq!(expire_tx(&db, 1, 20)?, vec![1]);
     let done = snap(&db)?;
     assert_eq!(done.cursor, 1, "retired E never writes C");
     assert_eq!(done.work, Vec::<u64>::new());
@@ -307,11 +365,82 @@ fn retired_expiry_cut() -> Result<(), StorageError> {
     Ok(())
 }
 
+fn router_retain_until_leaves_staged_and_held() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-retain")?;
+    stage(&db, 0, 1, "held-k")?;
+    cover_held(&db, 0, 1)?;
+    stage(&db, 1, 2, "staged-k")?;
+    db.connection.execute(
+        "UPDATE gateway_receive_receipt SET first_seen=0 WHERE incarnation_id='e' AND inbox_seq=?1",
+        params![2u64.to_be_bytes().as_slice()],
+    )?;
+    let pre = snap(&db)?;
+    assert_eq!(pre.work, vec![1, 2]);
+    assert_eq!(pre.receipts, vec![(1, "held".into()), (2, "staged".into())]);
+    assert_eq!(expire_tx(&db, 1, 604_800)?, Vec::<u64>::new());
+    assert_eq!(snap(&db)?, pre, "router retain_until does not expire staged or held work");
+    assert_eq!(failure_count(&db, "held_expired")?, 0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn retired_settle_keeps_live_retry_and_unrouted() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-live-e")?;
+    let wire = stage(&db, 0, 1, "shared")?;
+    cover_held(&db, 0, 1)?;
+    db.hold_unrouted("shared", 1, &wire, 1)?;
+    db.defer_inbox_entry("shared", &wire, 1)?;
+    assert_eq!(retry_count(&db, "shared")?, 1);
+    assert_eq!(unrouted_for(&db, "shared")?, 1);
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET incarnation_id='e2', retired_incarnations=?1 WHERE target_delivery_id='t'",
+        params![serde_json::to_vec(&["e"])?],
+    )?;
+    db.set_projection_checkpoint("gateway_receive_cursor:t", "0")?;
+    let live = bytes(1);
+    let staged = db.receive_transaction(expect_for(&db, "e2", 0)?, 1, |tx| {
+        tx.stage(ReceiveStage {
+            target: "t",
+            incarnation: "e2",
+            sequence: 1,
+            entry_json: &live,
+            admission_key: "shared",
+            retain_until: 100,
+            first_seen: 1,
+        })
+    })?;
+    assert!(matches!(staged, ReceiveStageResult::Staged | ReceiveStageResult::Existing));
+    cover_held_for(&db, "e2", 0, 1)?;
+    db.receive_transaction(expect(&db, 1)?, 1, |tx| {
+        tx.settle_failure(1, ReceiveFailureReason::HeldExpired, 20)
+    })?;
+    let old: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e'",
+        [],
+        |row| row.get(0),
+    )?;
+    let live_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e2'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(old, 0, "retired E work is settled");
+    assert_eq!(live_work, 1, "live E work remains");
+    assert_eq!(retry_count(&db, "shared")?, 1, "live redelivery keeps the retry row");
+    assert_eq!(unrouted_for(&db, "shared")?, 1, "live redelivery keeps the unrouted row");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 #[test]
 fn failure_policy_stage_crash() -> Result<(), StorageError> {
     retryable_cut()?;
     deterministic_cut()?;
     exhausted_cut()?;
+    identity_missing_cut()?;
+    trusted_vs_unverified_failure_policy()?;
     Ok(())
 }
 
@@ -328,6 +457,7 @@ fn retryable_cut() -> Result<(), StorageError> {
         kind: FailKind::Retryable,
         error_code: "directory_miss",
         at: 1,
+        policy: unverified(1),
     };
     assert_fault(with_fault(FaultKind::BeforeCommit, || admit(&db, 0, input)));
     assert_eq!(snap(&db)?, pre, "W0 survives a failed retryable admission");
@@ -359,6 +489,7 @@ fn deterministic_cut() -> Result<(), StorageError> {
         kind: FailKind::Deterministic,
         error_code: "authentication_failed",
         at: 1,
+        policy: unverified(1),
     };
     assert_fault(with_fault(FaultKind::BeforeCommit, || admit(&db, 0, input)));
     assert_eq!(snap(&db)?, pre);
@@ -379,6 +510,7 @@ fn deterministic_cut() -> Result<(), StorageError> {
 fn exhausted_cut() -> Result<(), StorageError> {
     let (root, db) = setup("p08-exh")?;
     let wire = stage(&db, 0, 1, "exh")?;
+    let pre = snap(&db)?;
     let input = ReceiveFailure {
         sequence: 1,
         admission_key: "exh",
@@ -386,13 +518,160 @@ fn exhausted_cut() -> Result<(), StorageError> {
         kind: FailKind::Exhausted,
         error_code: "retry_exhausted",
         at: 1,
+        policy: unverified(1),
     };
+    assert_fault(with_fault(FaultKind::BeforeCommit, || admit(&db, 0, input)));
+    assert_eq!(snap(&db)?, pre, "W0 survives a failed exhausted admission");
     assert_eq!(admit(&db, 0, input)?, FailOut::Rejected);
     let done = snap(&db)?;
     assert_eq!(done.cursor, 1);
     assert_eq!(done.work, Vec::<u64>::new());
     assert_eq!(done.intents, vec![1]);
     assert_eq!(failure_count(&db, "policy_rejected")?, 1);
+    assert_eq!(retry_count(&db, "exh")?, 0);
+    drop(db);
+    let db = reopen(&root)?;
+    assert_eq!(snap(&db)?, done);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn identity_missing_cut() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-id")?;
+    let wire = stage(&db, 0, 1, "id")?;
+    let missing_seq = admit(
+        &db,
+        0,
+        ReceiveFailure {
+            sequence: 0,
+            admission_key: "id",
+            entry: &wire,
+            kind: FailKind::Retryable,
+            error_code: "directory_miss",
+            at: 1,
+            policy: unverified(1),
+        },
+    );
+    assert!(matches!(
+        missing_seq,
+        Err(StorageError::Integrity("receive failure identity missing"))
+    ));
+    let missing_key = admit(
+        &db,
+        0,
+        ReceiveFailure {
+            sequence: 1,
+            admission_key: "",
+            entry: &wire,
+            kind: FailKind::Retryable,
+            error_code: "directory_miss",
+            at: 1,
+            policy: unverified(1),
+        },
+    );
+    assert!(matches!(
+        missing_key,
+        Err(StorageError::Integrity("receive failure identity missing"))
+    ));
+    assert_eq!(snap(&db)?.work, vec![1]);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn trusted_vs_unverified_failure_policy() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-policy")?;
+    let packet = long_entry();
+    stage(&db, 0, 1, "unv")?;
+    assert_eq!(
+        admit(
+            &db,
+            0,
+            ReceiveFailure {
+                sequence: 1,
+                admission_key: "unv",
+                entry: &packet,
+                kind: FailKind::Retryable,
+                error_code: "directory_miss",
+                at: 1,
+                policy: unverified(1),
+            }
+        )?,
+        FailOut::Held
+    );
+    assert_eq!(policy_window(&db, "unv")?, (0, 31, "none".into(), String::new()));
+
+    stage(&db, 1, 2, "tr")?;
+    let source = pin_source("principal", "device")?;
+    assert_eq!(
+        admit(
+            &db,
+            1,
+            ReceiveFailure {
+                sequence: 2,
+                admission_key: "tr",
+                entry: &packet,
+                kind: FailKind::Retryable,
+                error_code: "directory_miss",
+                at: 1,
+                policy: InboxFailurePolicy {
+                    verified_source: Some(&source),
+                    trusted: true,
+                    dependency: ("group", "g"),
+                    at: 1,
+                },
+            }
+        )?,
+        FailOut::Held
+    );
+    assert_eq!(policy_window(&db, "tr")?, (1, 601, "group".into(), "g".into()));
+
+    for index in 0..16 {
+        let key = format!("stranger-{index}");
+        assert!(db.set_verified_inbox_failure_policy(&key, &packet, unverified(100))?);
+    }
+    stage(&db, 2, 3, "cap")?;
+    assert_eq!(
+        admit(
+            &db,
+            2,
+            ReceiveFailure {
+                sequence: 3,
+                admission_key: "cap",
+                entry: &packet,
+                kind: FailKind::Retryable,
+                error_code: "directory_miss",
+                at: 100,
+                policy: unverified(100),
+            }
+        )?,
+        FailOut::Rejected,
+        "16-untrusted cap rejects a further unverified admission"
+    );
+    stage(&db, 3, 4, "cap-t")?;
+    assert_eq!(
+        admit(
+            &db,
+            3,
+            ReceiveFailure {
+                sequence: 4,
+                admission_key: "cap-t",
+                entry: &packet,
+                kind: FailKind::Retryable,
+                error_code: "directory_miss",
+                at: 100,
+                policy: InboxFailurePolicy {
+                    verified_source: Some(&source),
+                    trusted: true,
+                    dependency: ("none", ""),
+                    at: 100,
+                },
+            }
+        )?,
+        FailOut::Held,
+        "trusted senders are outside the 16-untrusted cap"
+    );
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

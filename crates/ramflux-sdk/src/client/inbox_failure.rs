@@ -56,14 +56,34 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn set_failure_policy(
+/// Owned verified-sender policy; pass `.policy()` into `ReceiveFailure`.
+pub(crate) struct VerifiedInboxFailure {
+    verified_source: Option<ramflux_crypto::RootQualifiedDeviceRef>,
+    trusted: bool,
+    class: &'static str,
+    subject: String,
+    at: i64,
+}
+
+impl VerifiedInboxFailure {
+    #[must_use]
+    pub(crate) fn policy(&self) -> ramflux_storage::InboxFailurePolicy<'_> {
+        ramflux_storage::InboxFailurePolicy {
+            verified_source: self.verified_source.as_ref(),
+            trusted: self.trusted,
+            dependency: (self.class, self.subject.as_str()),
+            at: self.at,
+        }
+    }
+}
+
+/// Builds the verified sender policy used by both client retry admission and the P08 adapter.
+pub(crate) fn verified_failure_policy(
     client: &RamfluxClient,
     local: &str,
     entry: &GatewayInboxEntry,
-    key: &str,
-    bytes: &[u8],
     at: i64,
-) -> Result<bool, SdkError> {
+) -> Result<VerifiedInboxFailure, SdkError> {
     let verified_source =
         client.authenticated_device_identity(HeadUse::NewAuthorization, entry).ok();
     let authenticated = verified_source.is_some();
@@ -106,26 +126,35 @@ pub(crate) fn set_failure_policy(
     let (class, subject) = if !authenticated || missing_manifest {
         (
             "manifest",
-            verified_source.as_ref().map_or(
-                entry.envelope.source_device_id.as_str(),
-                ramflux_crypto::RootQualifiedDeviceRef::storage_key,
+            verified_source.as_ref().map_or_else(
+                || entry.envelope.source_device_id.clone(),
+                |source| source.storage_key().to_owned(),
             ),
         )
     } else if let Some(group) = group {
-        ("group", group)
+        ("group", group.to_owned())
     } else {
-        ("none", "")
+        ("none", String::new())
     };
-    Ok(client.account_db()?.set_verified_inbox_failure_policy(
-        key,
-        bytes,
-        ramflux_storage::InboxFailurePolicy {
-            verified_source: verified_source.as_ref(),
-            trusted: authenticated && related,
-            dependency: (class, subject),
-            at,
-        },
-    )?)
+    Ok(VerifiedInboxFailure {
+        verified_source,
+        trusted: authenticated && related,
+        class,
+        subject,
+        at,
+    })
+}
+
+pub(crate) fn set_failure_policy(
+    client: &RamfluxClient,
+    local: &str,
+    entry: &GatewayInboxEntry,
+    key: &str,
+    bytes: &[u8],
+    at: i64,
+) -> Result<bool, SdkError> {
+    let built = verified_failure_policy(client, local, entry, at)?;
+    Ok(client.account_db()?.set_verified_inbox_failure_policy(key, bytes, built.policy())?)
 }
 
 /// Admits a retry under the verified source's budget without charging a fallback claimed identity.

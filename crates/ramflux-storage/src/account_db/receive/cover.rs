@@ -214,8 +214,8 @@ impl ReceiveTransaction<'_> {
         self.cleanup_settled(sequence)
     }
 
-    /// Deletes work and receipt so the reserved slot is released. Also drops matching
-    /// retry and unrouted rows for that admission key (P04 L4 / P08).
+    /// Deletes work and receipt so the reserved slot is released. Drops retry and unrouted
+    /// rows for that admission key only when no other live work uses it (P07 helper).
     pub(crate) fn cleanup_settled(&self, sequence: u64) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
         let key: Option<String> = self
@@ -237,12 +237,7 @@ impl ReceiveTransaction<'_> {
             params![self.target, self.incarnation, seq.as_slice()],
         )?;
         if let Some(key) = key {
-            self.db
-                .connection
-                .execute("DELETE FROM runtime_inbox_retry WHERE envelope_key=?1", params![&key])?;
-            self.db
-                .connection
-                .execute("DELETE FROM runtime_unrouted WHERE envelope_id=?1", params![&key])?;
+            self.delete_retry_and_unrouted_if_unheld(&key)?;
         }
         Ok(())
     }

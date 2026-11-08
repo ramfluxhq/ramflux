@@ -22,6 +22,7 @@ pub(crate) struct SourceFailure<'a> {
 
 impl SourceFailure<'_> {
     /// Failure-policy/retry admission inside the caller's expected generation.
+    /// Callers set `input.policy` from `crate::client::inbox_failure::verified_failure_policy`.
     pub(crate) fn admit(
         &self,
         db: &AccountDb,
@@ -30,7 +31,7 @@ impl SourceFailure<'_> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.admit_failure(input))?)
     }
 
-    /// Local hold expiry (policy, `retain_until`, or contact) through WS/W2.
+    /// Local hold expiry (policy `expires_at` or the class 7-day max from `first_seen`) through WS/W2.
     pub(crate) fn expire_holds(&self, db: &AccountDb, at: i64) -> Result<Vec<u64>, SdkError> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.expire_holds(at))?)
     }

@@ -5,8 +5,10 @@
 //! `finish_terminal` / `cleanup_settled`. Dormant until the actor wires it in P20.
 use super::ReceiveTransaction;
 use super::settle::{ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult};
-use crate::{AccountDb, ProjectionStore, StorageError};
-use rusqlite::{OptionalExtension, params};
+use crate::{AccountDb, InboxFailurePolicy, ProjectionStore, StorageError};
+use rusqlite::params;
+
+const HOLD_EXPIRY_MAX: i64 = 604_800;
 
 /// Local terminal loss reason stored as `inbox.receive_failure`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +48,8 @@ pub struct ReceiveFailure<'a> {
     pub kind: ReceiveFailureKind,
     pub error_code: &'a str,
     pub at: i64,
+    /// Verified sender policy from the SDK helper; never inferred as unverified here.
+    pub policy: InboxFailurePolicy<'a>,
 }
 
 /// `Held` keeps work; `Rejected` is the terminal W-path.
@@ -95,16 +99,7 @@ impl ReceiveTransaction<'_> {
         if input.sequence == 0 || input.admission_key.is_empty() {
             return Err(StorageError::Integrity("receive failure identity missing"));
         }
-        if !self.db.apply_inbox_failure_policy(
-            input.admission_key,
-            input.entry,
-            crate::InboxFailurePolicy {
-                verified_source: None,
-                trusted: false,
-                dependency: ("none", ""),
-                at: input.at,
-            },
-        )? {
+        if !self.db.apply_inbox_failure_policy(input.admission_key, input.entry, input.policy)? {
             return self.reject_failure(input.sequence, input.at);
         }
         match input.kind {
@@ -142,7 +137,8 @@ impl ReceiveTransaction<'_> {
         }
     }
 
-    /// Expires held work whose policy or `retain_until` is due, including contact holds.
+    /// Expires held/quarantined work whose local policy `expires_at` or 7-day class max
+    /// from `first_seen` is due. Router `retain_until` never selects a row.
     ///
     /// # Errors
     /// Returns settle or SQL errors.
@@ -181,15 +177,16 @@ impl ReceiveTransaction<'_> {
     }
 
     fn due_failure_holds(&self, at: i64) -> Result<Vec<u64>, StorageError> {
-        let mut query = self.db.connection.prepare(
+        let sql = format!(
             "SELECT w.inbox_seq FROM gateway_receive_work w
              JOIN gateway_receive_receipt r USING(target_delivery_id,incarnation_id,inbox_seq)
              LEFT JOIN runtime_inbox_policy p ON p.envelope_key=w.admission_key
              WHERE w.target_delivery_id=?1 AND w.incarnation_id=?2
-               AND r.disposition IN ('held','quarantined','staged')
-               AND (r.retain_until<=?3 OR (p.expires_at IS NOT NULL AND p.expires_at<=?3))
-             ORDER BY r.first_seen,w.inbox_seq",
-        )?;
+               AND r.disposition IN ('held','quarantined')
+               AND COALESCE(p.expires_at, r.first_seen + {HOLD_EXPIRY_MAX}) <= ?3
+             ORDER BY r.first_seen,w.inbox_seq"
+        );
+        let mut query = self.db.connection.prepare(&sql)?;
         let rows = query.query_map(params![self.target, self.incarnation, at], |row| {
             row.get::<_, Vec<u8>>(0)
         })?;
@@ -218,7 +215,8 @@ impl AccountDb {
         Ok(found != 0)
     }
 
-    /// Settles ledger work for `admission_key` through WS/W2. Returns false when none exists.
+    /// Settles every `(target, incarnation, sequence)` row for `admission_key` through WS/W2.
+    /// Local GC fences on expected cursor and erasure generation; the actor generation fence is P20.
     ///
     /// # Errors
     /// Returns settle, fence or SQL errors.
@@ -228,32 +226,35 @@ impl AccountDb {
         reason: ReceiveFailureReason,
         at: i64,
     ) -> Result<bool, StorageError> {
-        let Some((target, incarnation, sequence)) = self.admission_work(key)? else {
+        let rows = self.admission_work(key)?;
+        if rows.is_empty() {
             return Ok(false);
-        };
-        let cursor = self
-            .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
-            .map_or(Ok(0), |value| {
+        }
+        for (target, incarnation, sequence) in rows {
+            let cursor = self
+                .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
+                .map_or(Ok(0), |value| {
                 value.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected)
             })?;
-        let expected = crate::ReceiveExpectation {
-            target: &target,
-            incarnation: &incarnation,
-            cursor,
-            generation: 1,
-            erasure_generation: self.privacy_erasure_generation()?,
-        };
-        self.receive_transaction(expected, 1, |tx| {
-            match tx.settle_failure(sequence, reason, at)? {
-                ReceiveSettleResult::Settled => Ok(()),
-                ReceiveSettleResult::Paused => {
-                    Err(StorageError::Integrity("hold removal coverage paused"))
+            let expected = crate::ReceiveExpectation {
+                target: &target,
+                incarnation: &incarnation,
+                cursor,
+                generation: 1,
+                erasure_generation: self.privacy_erasure_generation()?,
+            };
+            self.receive_transaction(expected, 1, |tx| {
+                match tx.settle_failure(sequence, reason, at)? {
+                    ReceiveSettleResult::Settled => Ok(()),
+                    ReceiveSettleResult::Paused => {
+                        Err(StorageError::Integrity("hold removal coverage paused"))
+                    }
+                    ReceiveSettleResult::Held => {
+                        Err(StorageError::Integrity("hold removal did not settle"))
+                    }
                 }
-                ReceiveSettleResult::Held => {
-                    Err(StorageError::Integrity("hold removal did not settle"))
-                }
-            }
-        })?;
+            })?;
+        }
         Ok(true)
     }
 
@@ -307,26 +308,27 @@ impl AccountDb {
         self.settle_admission(key, reason, at)
     }
 
-    fn admission_work(&self, key: &str) -> Result<Option<(String, String, u64)>, StorageError> {
+    fn admission_work(&self, key: &str) -> Result<Vec<(String, String, u64)>, StorageError> {
         if !self.receive_ledger_present()? {
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        let row: Option<(String, String, Vec<u8>)> = self
-            .connection
-            .query_row(
-                "SELECT target_delivery_id,incarnation_id,inbox_seq FROM gateway_receive_work
-                 WHERE admission_key=?1",
-                params![key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let Some((target, incarnation, seq)) = row else {
-            return Ok(None);
-        };
-        let sequence = u64::from_be_bytes(
-            seq.try_into().map_err(|_| StorageError::Integrity("receive sequence encoding"))?,
-        );
-        Ok(Some((target, incarnation, sequence)))
+        let mut query = self.connection.prepare(
+            "SELECT target_delivery_id,incarnation_id,inbox_seq FROM gateway_receive_work
+             WHERE admission_key=?1
+             ORDER BY target_delivery_id,incarnation_id,inbox_seq",
+        )?;
+        let rows = query.query_map(params![key], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (target, incarnation, seq) = row?;
+            let sequence = u64::from_be_bytes(
+                seq.try_into().map_err(|_| StorageError::Integrity("receive sequence encoding"))?,
+            );
+            out.push((target, incarnation, sequence));
+        }
+        Ok(out)
     }
 }
 

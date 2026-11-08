@@ -37,6 +37,13 @@ impl AccountDb {
     ) -> Result<(), StorageError> {
         self.write_transaction(|| {
             if self.settle_admission(key, crate::ReceiveFailureReason::PolicyRejected, at)? {
+                self.insert_journal(
+                    &format!("undeliverable:{key}"),
+                    "message.undeliverable",
+                    metadata,
+                    at,
+                    None,
+                )?;
                 return Ok(());
             }
             self.insert_inbox_dead_letter(key, entry, metadata, at)

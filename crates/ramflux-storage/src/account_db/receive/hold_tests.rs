@@ -988,16 +988,149 @@ fn hold_byte_boundaries_are_inclusive() -> Result<(), StorageError> {
     std::fs::remove_dir_all(root)?;
 
     let (root, db) = super::stage_tests::setup("hold-aggregate-over")?;
+    let mut cursor = 0;
+    for sequence in 1..=4 {
+        let key = format!("agg-{sequence}");
+        let source = format!("root-agg-{sequence}/device");
+        let wire = entry(sequence, 32);
+        stage(&db, cursor, sequence, &key, &wire)?;
+        set_verified_source(&db, &key, &source)?;
+        set_work_bytes(&db, "e", sequence, SOURCE)?;
+        assert!(matches!(
+            admit(&db, cursor, sequence, &key, Class::Policy, None, false)?,
+            ReceiveHoldResult::Held { .. }
+        ));
+        cursor = sequence;
+    }
+    let wire = entry(5, 32);
+    stage(&db, cursor, 5, "agg-5", &wire)?;
+    set_verified_source(&db, "agg-5", "root-agg-5/device")?;
+    set_work_bytes(&db, "e", 5, 1)?;
+    assert!(matches!(
+        admit(&db, cursor, 5, "agg-5", Class::Policy, None, false)?,
+        ReceiveHoldResult::Held { evicted } if evicted == vec![1]
+    ));
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn policy_hold_eviction_drops_retry() -> Result<(), StorageError> {
+    let (root, db) = super::stage_tests::setup("hold-policy-retry-evict")?;
+    let source = "root-pol/device";
     let wire = entry(1, 32);
-    stage(&db, 0, 1, "agg-over", &wire)?;
-    set_verified_source(&db, "agg-over", "root-huge/device")?;
-    set_work_bytes(&db, "e", 1, AGGREGATE + 1)?;
-    let w0 = snap(&db)?;
+    stage(&db, 0, 1, "admission-1", &wire)?;
+    set_verified_source(&db, "admission-1", source)?;
+    assert!(matches!(
+        admit(&db, 0, 1, "admission-1", Class::Policy, None, false)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    db.defer_inbox_entry("admission-1", &wire, 1)?;
     assert_eq!(
-        admit(&db, 0, 1, "agg-over", Class::Policy, None, false)?,
-        ReceiveHoldResult::Paused
+        db.connection.query_row(
+            "SELECT count(*) FROM runtime_inbox_retry WHERE envelope_key='admission-1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        1
     );
-    assert_eq!(snap(&db)?, w0);
+    let mut cursor = 1u64;
+    for sequence in 2..=8 {
+        assert!(matches!(
+            put_hold(&db, cursor, sequence, Class::Policy, Some(source), None, 32)?,
+            ReceiveHoldResult::Held { .. }
+        ));
+        cursor = sequence;
+    }
+    assert!(matches!(
+        put_hold(&db, cursor, 9, Class::Policy, Some(source), None, 32)?,
+        ReceiveHoldResult::Held { evicted } if evicted == vec![1]
+    ));
+    let retry: i64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_inbox_retry WHERE envelope_key='admission-1'",
+        [],
+        |row| row.get(0),
+    )?;
+    let policy: i64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_inbox_policy WHERE envelope_key='admission-1'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(retry, 0, "evicted policy hold drops its retry row");
+    assert_eq!(policy, 0, "evicted policy hold drops its policy row");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn policy_hold_eviction_keeps_retry_on_live_redelivery() -> Result<(), StorageError> {
+    let source = "root-pol/device";
+    let (root, db) = super::stage_tests::setup("hold-policy-retry-keep")?;
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "shared", &wire)?;
+    set_verified_source(&db, "shared", source)?;
+    assert!(matches!(
+        admit(&db, 0, 1, "shared", Class::Policy, None, false)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    db.defer_inbox_entry("shared", &wire, 1)?;
+    db.connection
+        .execute("UPDATE gateway_receive_receipt SET first_seen=0 WHERE incarnation_id='e'", [])?;
+    retire_active_incarnation(&db)?;
+    let live = entry(1, 32);
+    stage_for(&db, "e2", 0, 1, "shared", &live)?;
+    assert!(matches!(
+        admit_for(&db, "e2", 0, 1, "shared", Class::Policy, None, false)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    let mut cursor = 1u64;
+    for sequence in 2..=7 {
+        assert!(matches!(
+            put_hold_for(
+                &db,
+                "e2",
+                "fill",
+                cursor,
+                sequence,
+                Class::Policy,
+                Some(source),
+                None,
+                32
+            )?,
+            ReceiveHoldResult::Held { evicted } if evicted.is_empty()
+        ));
+        cursor = sequence;
+    }
+    assert!(matches!(
+        put_hold_for(&db, "e2", "fill", cursor, 8, Class::Policy, Some(source), None, 32)?,
+        ReceiveHoldResult::Held { evicted } if evicted == vec![1]
+    ));
+    let retry: i64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_inbox_retry WHERE envelope_key='shared'",
+        [],
+        |row| row.get(0),
+    )?;
+    let policy: i64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_inbox_policy WHERE envelope_key='shared'",
+        [],
+        |row| row.get(0),
+    )?;
+    let old: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e'",
+        [],
+        |row| row.get(0),
+    )?;
+    let live_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e2'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(old, 0, "retired policy hold was evicted");
+    assert_eq!(live_work, 1);
+    assert_eq!(retry, 1, "live redelivery keeps the retry row");
+    assert_eq!(policy, 1, "live redelivery keeps the policy row");
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
