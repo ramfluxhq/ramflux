@@ -68,7 +68,6 @@ impl RouterCore {
     }
 
     /// C1: capability-gated route for `T`. Lazily drops a stale map entry.
-    #[must_use]
     pub fn route_gate(&self, target: &str) -> EphemeralRouteGate {
         self.ephemeral_view().route_gate(target)
     }

@@ -1264,7 +1264,7 @@ fn std_fs_import_is_refused() -> TestResult {
 
 /// Reviewer r7 M1: `crate::RouterCore` plus publication traversal is refused
 /// by the allow-list (the view type does not expose `target_shard`).
-const R7_PUBLICATION_SINK: &str = r#"
+const R7_PUBLICATION_SINK: &str = r"
 fn sink(router: &crate::RouterCore, target: &str) {
     let shard = router.target_shard(target);
     if let (Some(core), Some(id)) =
@@ -1273,7 +1273,7 @@ fn sink(router: &crate::RouterCore, target: &str) {
         let _ = core.reserve(target, id, &[]);
     }
 }
-"#;
+";
 
 #[test]
 fn router_core_publication_sink_is_refused() -> TestResult {
