@@ -1752,7 +1752,7 @@ fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-async fn dispatch_offline_wake(
+pub(crate) async fn dispatch_offline_wake(
     context: &GatewayQuicContext,
     target_delivery_id: &str,
     envelope: &ramflux_protocol::Envelope,
@@ -2596,6 +2596,7 @@ pub(crate) mod tests {
                 endpoint: "http://127.0.0.1:18085".to_owned(),
                 signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x42; 32]),
                 mesh: None,
+                wake_calls: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             },
             #[cfg(feature = "itest-local-mint")]
             relay_service_key: b"relay-service-key-test".to_vec(),

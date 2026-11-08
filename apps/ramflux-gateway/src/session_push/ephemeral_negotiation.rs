@@ -426,7 +426,7 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     assert_eq!(applied, 1);
     posted.respond.send((200, json!({"applied": applied}))).map_err(|_| Retired)?;
     assert_online(&router, session_id);
-    crate::clients::reset_notify_wake_count();
+    let wake_before = fixture.context.notify.wake_count();
     fixture.context.hub.set_queue_clock(TARGET, 1_760_000_004_999).await;
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
@@ -449,7 +449,7 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     assert_eq!(accepted.outcome, Some(ramflux_node_core::SessionPushForwardOutcome::Queued));
     tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
     assert_eq!(fixture.context.hub.ephemeral_queued(TARGET).await, 1);
-    assert_eq!(crate::clients::notify_wake_count(), 0);
+    assert_eq!(fixture.context.notify.wake_count(), wake_before);
     release.add_permits(1);
     Ok(())
 }

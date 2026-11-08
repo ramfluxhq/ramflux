@@ -1,26 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-#[cfg(test)]
-use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use crate::{NotifyHttpClient, NotifyMeshClient, RouterAsyncMeshClient, RouterMeshClient};
-
-#[cfg(test)]
-thread_local! {
-    static NOTIFY_WAKE_CALLS: Cell<u64> = const { Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn notify_wake_count() -> u64 {
-    NOTIFY_WAKE_CALLS.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn reset_notify_wake_count() {
-    NOTIFY_WAKE_CALLS.with(|calls| calls.set(0));
-}
 
 const ROUTER_ASYNC_ENDPOINT_ENV: &str = "RAMFLUX_ROUTER_ASYNC_ENDPOINT";
 const ROUTER_ASYNC_SERVER_NAME_ENV: &str = "RAMFLUX_ROUTER_ASYNC_SERVER_NAME";
@@ -82,6 +65,8 @@ pub(crate) fn notify_http_client(
             .unwrap_or_else(|_| "http://ramflux-notify:18083".to_owned()),
         signer: ramflux_node_core::require_node_service_signing_key(config)?,
         mesh: notify_mesh_client(config)?,
+        #[cfg(test)]
+        wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     })
 }
 
@@ -495,7 +480,7 @@ pub(crate) fn notify_offline_wake(
     envelope: &ramflux_protocol::Envelope,
 ) -> anyhow::Result<()> {
     #[cfg(test)]
-    NOTIFY_WAKE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    notify.wake_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let encrypted_hint = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::NOTIFICATION_WAKE,
         envelope.encrypted_payload.as_bytes(),
@@ -619,6 +604,7 @@ pub(crate) mod tests {
             endpoint: format!("http://{endpoint}"),
             signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x51; 32]),
             mesh: None,
+            wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         notify_offline_wake(&client, target_delivery_id, envelope)?;
         received
@@ -689,6 +675,7 @@ pub(crate) mod tests {
                 tls: gateway.tls,
                 peer_ca_pems: vec![notify.ca_pem],
             }),
+            wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let envelope = test_envelope("env_notify_mesh");
 
@@ -724,6 +711,7 @@ pub(crate) mod tests {
                 tls: gateway.tls,
                 peer_ca_pems: vec![notify.ca_pem],
             }),
+            wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let envelope = test_envelope("env_notify_mesh_fallback");
 

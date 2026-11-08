@@ -3,11 +3,10 @@
 
 use super::{
     EphemeralEnqueueOutcome, FRAME_BYTE_CAP, GatewayForwardEphemeralRequest, PATH, frame_bytes,
-    handle_at, map_forward, set_skip_deadline_equality,
+    handle_at, map_forward,
 };
 use crate::GatewaySessionHub;
-use crate::clients::{notify_wake_count, reset_notify_wake_count};
-use crate::push_queue::{TRANSIENT_BYTE_CAP, TRANSIENT_FRAME_CAP, set_bypass_transient_bound};
+use crate::push_queue::{TRANSIENT_BYTE_CAP, TRANSIENT_FRAME_CAP};
 use crate::session_push::tests::support::{ID, sink};
 use ramflux_node_core::{
     EphemeralRouteGate, RouterCore, SessionDescriptor, SessionLifecycle, SessionPushForwardOutcome,
@@ -112,21 +111,21 @@ async fn capable_hub_frames(
     target: &str,
 ) -> Fallible<(Arc<GatewaySessionHub>, Arc<Mutex<Vec<Value>>>)> {
     let hub = Arc::new(GatewaySessionHub::default());
+    hub.set_skip_deadline_equality(false);
     let (send, frames) = sink();
     hub.register_ephemeral(target.to_owned(), SESSION.to_owned(), send, Some(ID.into()), 32)
         .await?;
     anyhow::ensure!(hub.ephemeral_flag(target).await == Some(true));
     hub.set_queue_clock(target, NOW_LIVE_MS).await;
+    if let Some(entry) = hub.snapshot().await.get(target) {
+        entry.queue.set_bypass_transient_bound(false);
+    }
     Ok((hub, frames))
 }
 
 async fn capable_hub(target: &str) -> Fallible<Arc<GatewaySessionHub>> {
     let (hub, _) = capable_hub_frames(target).await?;
     Ok(hub)
-}
-
-fn assert_no_wake() {
-    assert_eq!(notify_wake_count(), 0);
 }
 
 fn assert_unsupported(outcome: EphemeralEnqueueOutcome) {
@@ -178,17 +177,30 @@ async fn park_hub_write(
     Ok((entered, release))
 }
 
-fn row_durable_wake_positive_control() -> TestResult {
-    reset_notify_wake_count();
-    crate::clients::tests::durable_notify_wake_once(&envelope(TARGET, "env-wake"), TARGET)?;
-    assert_eq!(notify_wake_count(), 1);
-    reset_notify_wake_count();
-    assert_no_wake();
+async fn row_durable_wake_positive_control() -> TestResult {
+    let woken = crate::session::tests::test_gateway_context()?;
+    crate::session::dispatch_offline_wake(&woken, TARGET, &envelope(TARGET, "env-wake")).await?;
+    assert_eq!(woken.notify.wake_count(), 1);
+    let idle = crate::session::tests::test_gateway_context()?;
+    assert_eq!(idle.notify.wake_count(), 0);
+    Ok(())
+}
+
+async fn row_ephemeral_forward_does_not_wake() -> TestResult {
+    let context = crate::session::tests::test_gateway_context()?;
+    let (send, _frames) = sink();
+    context
+        .hub
+        .register_ephemeral(TARGET.into(), SESSION.into(), send, Some(ID.into()), 32)
+        .await?;
+    context.hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
+    let reply = handle_at(&context.hub, request(TARGET, TARGET, "env-nowake"), NOW_LIVE_MS).await?;
+    assert!(reply.delivered);
+    assert_eq!(context.notify.wake_count(), 0);
     Ok(())
 }
 
 async fn row_writer_emits_transient() -> TestResult {
-    reset_notify_wake_count();
     let (hub, frames) = capable_hub_frames(TARGET).await?;
     let reply =
         handle_at(&hub, decode_request(&request(TARGET, TARGET, "env-ok"))?, NOW_LIVE_MS).await?;
@@ -202,12 +214,10 @@ async fn row_writer_emits_transient() -> TestResult {
     )?;
     assert_eq!(recorded, vec![expected]);
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_sixty_fifth_frame_queue_full() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let (entered, release) = park_hub_write(&hub, TARGET).await?;
     let first = handle_at(&hub, request(TARGET, TARGET, "env-f0"), NOW_LIVE_MS).await?;
@@ -224,13 +234,11 @@ async fn row_sixty_fifth_frame_queue_full() -> TestResult {
     assert_eq!(overflow.outcome, Some(SessionPushForwardOutcome::Full));
     assert_eq!(EphemeralEnqueueOutcome::QueueFull.to_string(), QUEUE_FULL);
     assert_eq!(hub.ephemeral_queued(TARGET).await, TRANSIENT_FRAME_CAP);
-    assert_no_wake();
     release.add_permits(1);
     Ok(())
 }
 
 async fn row_byte_cap_ninth_max_frame_queue_full() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let (entered, release) = park_hub_write(&hub, TARGET).await?;
     let first = handle_at(
@@ -261,13 +269,11 @@ async fn row_byte_cap_ninth_max_frame_queue_full() -> TestResult {
     assert_eq!(overflow.outcome, Some(SessionPushForwardOutcome::Full));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 8);
     assert_eq!(8 * FRAME_BYTE_CAP, TRANSIENT_BYTE_CAP);
-    assert_no_wake();
     release.add_permits(1);
     Ok(())
 }
 
 async fn row_forward_target_differs_from_hub() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let bytes = frame_bytes(&request(OTHER, TARGET, "env-hub-mismatch").envelope, EXPIRES_AT_MS)
         .ok_or_else(|| anyhow::anyhow!("encode"))?;
@@ -275,12 +281,10 @@ async fn row_forward_target_differs_from_hub() -> TestResult {
     assert_unsupported(outcome);
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub.ephemeral_queued(OTHER).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_forward_target_differs_from_envelope() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let reply =
         handle_at(&hub, request(TARGET, OTHER, "env-envelope-mismatch"), NOW_LIVE_MS).await?;
@@ -288,12 +292,10 @@ async fn row_forward_target_differs_from_envelope() -> TestResult {
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Unsupported));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub.ephemeral_queued(OTHER).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_capability_absent() -> TestResult {
-    reset_notify_wake_count();
     let hub = Arc::new(GatewaySessionHub::default());
     let (send, _) = sink();
     hub.register_session(TARGET.to_owned(), SESSION.to_owned(), send, Some(ID.into())).await?;
@@ -302,12 +304,10 @@ async fn row_capability_absent() -> TestResult {
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Unsupported));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_capable_token_replaced_after_c1() -> TestResult {
-    reset_notify_wake_count();
     let router = RouterCore::new();
     seed_live(&router, TARGET, SESSION, GATEWAY_A)?;
     router.bind_ephemeral_capability(TARGET, GATEWAY_A, SESSION);
@@ -327,12 +327,10 @@ async fn row_capable_token_replaced_after_c1() -> TestResult {
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Unsupported));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_no_hub_entry_offline() -> TestResult {
-    reset_notify_wake_count();
     let hub = Arc::new(GatewaySessionHub::default());
     let bytes = frame_bytes(&request(TARGET, TARGET, "env-missing").envelope, EXPIRES_AT_MS)
         .ok_or_else(|| anyhow::anyhow!("encode"))?;
@@ -342,12 +340,10 @@ async fn row_no_hub_entry_offline() -> TestResult {
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::NoSession));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
-    reset_notify_wake_count();
     let router = RouterCore::new();
     seed_live(&router, TARGET, SESSION, GATEWAY_A)?;
     router.bind_ephemeral_capability(TARGET, GATEWAY_A, SESSION);
@@ -387,12 +383,10 @@ async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
     assert_eq!(recorded_b, Vec::<Value>::new());
     assert_eq!(hub_a.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub_b.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_held_forward_drops_when_a_closed() -> TestResult {
-    reset_notify_wake_count();
     let router = RouterCore::new();
     seed_live(&router, TARGET, SESSION, GATEWAY_A)?;
     router.bind_ephemeral_capability(TARGET, GATEWAY_A, SESSION);
@@ -429,24 +423,20 @@ async fn row_held_forward_drops_when_a_closed() -> TestResult {
     assert_eq!(hub_b.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub_a.ephemeral_queued(OTHER).await, 0);
     assert_eq!(hub_b.ephemeral_queued(OTHER).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_expired_at_d() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let reply = handle_at(&hub, request(TARGET, TARGET, "env-expired"), NOW_EXPIRED_MS).await?;
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Expired));
     assert_eq!(EphemeralEnqueueOutcome::Expired.to_string(), EXPIRED);
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_held_forward_refused_when_clock_reaches_d() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -463,12 +453,10 @@ async fn row_held_forward_refused_when_clock_reaches_d() -> TestResult {
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Expired));
     assert_eq!(EphemeralEnqueueOutcome::Expired.to_string(), EXPIRED);
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_held_forward_queued_before_d() -> TestResult {
-    reset_notify_wake_count();
     let (hub, frames) = capable_hub_frames(TARGET).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -485,12 +473,10 @@ async fn row_held_forward_queued_before_d() -> TestResult {
     hub.flushed(TARGET).await?;
     let recorded = frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.clone();
     assert_eq!(recorded.len(), 1);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_deadline_mismatch_invalid() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let mut req = request(TARGET, TARGET, "env-mismatch");
     req.expires_at_ms = 1_760_000_004_000;
@@ -499,12 +485,10 @@ async fn row_deadline_mismatch_invalid() -> TestResult {
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Invalid));
     assert_eq!(EphemeralEnqueueOutcome::Invalid.to_string(), INVALID);
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_durable_mode_invalid() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let mut req = request(TARGET, TARGET, "env-durable");
     req.envelope.ext = Ext::default();
@@ -512,12 +496,10 @@ async fn row_durable_mode_invalid() -> TestResult {
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Invalid));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_frame_32768_accepted_32769_invalid() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let (entered, release) = park_hub_write(&hub, TARGET).await?;
     let accepted = handle_at(
@@ -543,12 +525,10 @@ async fn row_frame_32768_accepted_32769_invalid() -> TestResult {
     assert!(!over.delivered);
     assert_eq!(over.outcome, Some(SessionPushForwardOutcome::Invalid));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_marker_required_exact_error() -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let mut req = request(TARGET, TARGET, "env-marker");
     req.forwarded = false;
@@ -556,12 +536,10 @@ async fn row_marker_required_exact_error() -> TestResult {
     let error = handle_at(&hub, decoded, NOW_LIVE_MS).await.err().map(|e| e.to_string());
     assert_eq!(error.as_deref(), Some("forward marker required"));
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
-    assert_no_wake();
     Ok(())
 }
 
 async fn row_id_bounds_exact_errors_and_inclusive_positives() -> TestResult {
-    reset_notify_wake_count();
     let empty = request(TARGET, TARGET, "env-id-empty");
     let mut empty = empty;
     empty.source_gateway_id.clear();
@@ -618,7 +596,6 @@ async fn row_id_bounds_exact_errors_and_inclusive_positives() -> TestResult {
     assert!(reply.delivered);
     hub_max.flushed(&max).await?;
     assert_eq!(frames_max.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
-    assert_no_wake();
     Ok(())
 }
 
@@ -626,7 +603,6 @@ async fn assert_forward_invalid(
     change: impl FnOnce(&mut GatewayForwardEphemeralRequest),
     envelope_id: &str,
 ) -> TestResult {
-    reset_notify_wake_count();
     let hub = capable_hub(TARGET).await?;
     let mut req = request(TARGET, TARGET, envelope_id);
     change(&mut req);
@@ -634,7 +610,6 @@ async fn assert_forward_invalid(
     assert!(!reply.delivered, "{envelope_id}");
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Invalid), "{envelope_id}");
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0, "{envelope_id}");
-    assert_no_wake();
     Ok(())
 }
 
@@ -725,11 +700,10 @@ fn row_map_queue_full() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn final_registration_capability() -> TestResult {
-    set_bypass_transient_bound(false);
-    set_skip_deadline_equality(false);
     row_path_is_same_node_forward();
     row_map_queue_full();
-    row_durable_wake_positive_control()?;
+    row_durable_wake_positive_control().await?;
+    row_ephemeral_forward_does_not_wake().await?;
     row_writer_emits_transient().await?;
     row_sixty_fifth_frame_queue_full().await?;
     row_byte_cap_ninth_max_frame_queue_full().await?;
