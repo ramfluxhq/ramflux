@@ -103,6 +103,9 @@ impl ReceiveTransaction<'_> {
         {
             return Ok(ReceiveCoverResult::Paused);
         }
+        if self.loss_backpressure(&gaps)? {
+            return Ok(ReceiveCoverResult::Paused);
+        }
         let now = crate::unix_now();
         for gap in &gaps {
             self.write_gap(gap, now)?;
@@ -170,24 +173,10 @@ impl ReceiveTransaction<'_> {
                 gap.classification
             ],
         )?;
-        let source = format!(
-            "receive-gap:{}:{}:{}:{}",
-            self.target, self.incarnation, gap.from_seq, gap.to_seq
-        );
-        let keys = serde_json::json!({
-            "source_key": source,
-            "target": self.target,
-            "incarnation": self.incarnation,
-            "from_seq": gap.from_seq,
-            "to_seq": gap.to_seq,
-            "count": count,
-            "reason": gap.reason,
-            "classification": gap.classification,
-        });
-        let keys_json = serde_json::to_string(&keys)?;
+        let keys_json = super::loss::gap_keys_json(self.target, self.incarnation, gap, count)?;
         // Loss rows are append-only and keyed by (target, incarnation, from, to), the same
-        // identity as `source`. The loss INSERT above refuses a duplicate gap before this runs,
-        // so no scan of runtime_outbox is needed.
+        // identity as the gap source_key. The loss INSERT above refuses a duplicate gap
+        // before this runs, so no scan of runtime_outbox is needed.
         self.db.connection.execute(
             "INSERT INTO runtime_outbox(table_name,change_kind,row_id,published,keys_json)
              VALUES('gateway_inbox_loss','insert',0,0,?1)",

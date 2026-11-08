@@ -13,8 +13,8 @@ use crate::{ProjectionStore, StorageError};
 use rusqlite::params;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Snap {
-    cursor: u64,
+pub(super) struct Snap {
+    pub(super) cursor: u64,
     losses: Vec<(u64, u64, u64, String, i64, String)>,
     outbox: Vec<String>,
     intents: Vec<(u64, i64, i64, i64)>,
@@ -22,7 +22,7 @@ struct Snap {
     receipts: Vec<(u64, String)>,
 }
 
-fn gap(from: u64, to: u64) -> ReceiveGap<'static> {
+pub(super) fn gap(from: u64, to: u64) -> ReceiveGap<'static> {
     ReceiveGap { from_seq: from, to_seq: to, reason: "expired", classification: "unavailable" }
 }
 
@@ -80,7 +80,7 @@ fn assert_refused(
     Ok(())
 }
 
-fn alternating(from: u64, count: usize) -> Vec<ReceiveGap<'static>> {
+pub(super) fn alternating(from: u64, count: usize) -> Vec<ReceiveGap<'static>> {
     const REASONS: [&str; 2] = ["expired", "nacked"];
     (0..count)
         .map(|i| {
@@ -95,7 +95,7 @@ fn alternating(from: u64, count: usize) -> Vec<ReceiveGap<'static>> {
         .collect()
 }
 
-fn cover(
+pub(super) fn cover(
     db: &AccountDb,
     cursor: u64,
     sequence: u64,
@@ -134,7 +134,7 @@ fn stage(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), StorageError>
     }
 }
 
-fn snap(db: &AccountDb) -> Result<Snap, StorageError> {
+pub(super) fn snap(db: &AccountDb) -> Result<Snap, StorageError> {
     let cursor = db
         .projection_checkpoint("gateway_receive_cursor:t")?
         .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?;

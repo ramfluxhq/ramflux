@@ -126,13 +126,12 @@ impl AccountDb {
         self.write_transaction(|| {
             let mut result = Vec::new();
             for (index, (topic, body, subject)) in events.iter().enumerate() {
-                result.push(self.insert_journal(
-                    &format!("outbox:{sequence}:{index}"),
-                    topic,
-                    body,
-                    at,
-                    subject.as_deref(),
-                )?);
+                let source = body
+                    .get("source_key")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|key| !key.is_empty())
+                    .map_or_else(|| format!("outbox:{sequence}:{index}"), str::to_owned);
+                result.push(self.insert_journal(&source, topic, body, at, subject.as_deref())?);
             }
             self.mark_outbox_published(sequence)?;
             Ok(result)

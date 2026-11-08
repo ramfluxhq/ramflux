@@ -22,6 +22,9 @@ mod erased_input_tests;
 #[cfg(test)]
 mod erased_input_union_tests;
 pub(crate) mod ledger_backup;
+pub(crate) mod loss;
+#[cfg(test)]
+mod loss_tests;
 pub(crate) mod privacy;
 #[cfg(test)]
 mod privacy_restore_tests;

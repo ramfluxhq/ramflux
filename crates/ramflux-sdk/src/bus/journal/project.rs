@@ -13,6 +13,9 @@ pub(crate) fn project(
     let db = client.account_db()?;
     let keys = &entry.keys;
     let mut events = Vec::new();
+    if let Some(projected) = project_loss(entry) {
+        return Ok(projected);
+    }
     if let Some(projected) = project_account_job(db, entry)? {
         return Ok(projected);
     }
@@ -298,6 +301,29 @@ fn project_contact(
     Ok(())
 }
 
+fn project_loss(entry: &AccountOutboxEntry) -> Option<Vec<Projection>> {
+    if entry.table_name != "gateway_inbox_loss" {
+        return None;
+    }
+    Some(vec![(
+        "receive.gap".to_owned(),
+        metadata(
+            &entry.keys,
+            &[
+                "source_key",
+                "target",
+                "incarnation",
+                "from_seq",
+                "to_seq",
+                "count",
+                "reason",
+                "classification",
+            ],
+        ),
+        None,
+    )])
+}
+
 fn project_account_job(
     db: &ramflux_storage::AccountDb,
     entry: &AccountOutboxEntry,
@@ -350,6 +376,48 @@ mod removal_tests {
         assert_eq!(events[0].1["removed"], true);
         assert!(events[0].1.get("snapshot").is_none());
         assert!(events[0].1.get("fallback_text").is_none());
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn loss_outbox_projects_compact_gap_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "rf-loss-project-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        let mut client = RamfluxClient::new();
+        client.open_account_index(&root)?;
+        client.create_account("a", "root")?;
+        client.unlock_account("a", b"test")?;
+        let entry = AccountOutboxEntry {
+            sequence: 1,
+            table_name: "gateway_inbox_loss".into(),
+            change_kind: "insert".into(),
+            row_id: 0,
+            keys: json!({
+                "source_key":"receive-gap:t:e:1:1",
+                "target":"t",
+                "incarnation":"e",
+                "from_seq":1,
+                "to_seq":1,
+                "count":1,
+                "reason":"expired",
+                "classification":"unavailable",
+                "pad":"x".repeat(32)
+            }),
+        };
+        let events = project(&client, &entry)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "receive.gap");
+        assert_eq!(events[0].1["source_key"], "receive-gap:t:e:1:1");
+        assert_eq!(events[0].1["target"], "t");
+        assert_eq!(events[0].1["incarnation"], "e");
+        assert_eq!(events[0].1["from_seq"], 1);
+        assert_eq!(events[0].1["reason"], "expired");
+        assert!(events[0].1.get("pad").is_none());
         drop(client);
         std::fs::remove_dir_all(root)?;
         Ok(())
