@@ -37,6 +37,10 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
     ("session.rs:handle_gateway_submit", Class::Edge),
     ("session.rs:handle_gateway_own_device_fanout", Class::Edge),
     (
+        "session.rs:dispatch_offline_wake",
+        Class::NonIngress("offline wake via spawn_blocking; no envelope persist"),
+    ),
+    (
         "session_push.rs:submit_reply",
         Class::NonIngress("session-push reply framing; no envelope persist"),
     ),
@@ -63,7 +67,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
     let edge_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Edge).count();
-    assert_eq!((non_ingress_count, edge_count), (5, 4));
+    assert_eq!((non_ingress_count, edge_count), (6, 4));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
