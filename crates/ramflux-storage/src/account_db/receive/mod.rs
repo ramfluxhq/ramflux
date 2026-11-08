@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant receive-ledger schema and transaction authority; activation is a separate step.
+pub(crate) mod cover;
+#[cfg(test)]
+mod cover_tests;
 pub(crate) mod erased_capture;
 #[cfg(test)]
 mod erased_capture_tests;
