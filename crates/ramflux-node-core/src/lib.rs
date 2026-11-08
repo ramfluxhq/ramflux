@@ -189,6 +189,9 @@ pub use session::*;
 pub use shutdown::*;
 pub use signaling::*;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 #[cfg(test)]
 mod tests;
 

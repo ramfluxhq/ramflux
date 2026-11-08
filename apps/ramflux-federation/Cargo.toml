@@ -34,6 +34,8 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 socket2 = { workspace = true }
 redb = { workspace = true }
+ramflux-node-core = { workspace = true, features = ["test-support"] }
+ramflux-transport = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

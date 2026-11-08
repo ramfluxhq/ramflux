@@ -3,6 +3,9 @@
 
 use super::*;
 
+pub(super) use crate::test_support::federation_fixtures::{
+    envelope, gateway_open_frame, gateway_registered_key, signed_fields, test_federation_ca_pem,
+};
 pub(super) fn replay_source(
     device: &str,
 ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, ramflux_crypto::CryptoError> {
@@ -37,45 +40,6 @@ pub(super) fn signed_registered_envelope(
         ramflux_crypto::sign_protocol_object_with_seed(&envelope, seed_from_nonce(0x41, nonce))?;
     Ok(envelope)
 }
-pub(super) fn gateway_registered_key(
-    open: &GatewayOpenFrame,
-) -> Result<DeviceAuthKeyResponse, ramflux_crypto::CryptoError> {
-    let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
-    let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
-    let keys = ramflux_crypto::device_key_commitments(
-        &ramflux_crypto::fixture_public_key_base64url(),
-        &ramflux_protocol::encode_base64url(agreement.public),
-    )?;
-    let set = ramflux_crypto::sign_device_set(
-        &root,
-        ramflux_crypto::DeviceSetSigningInput {
-            principal_kind: ramflux_protocol::PrincipalKind::Human,
-            device_set_epoch: 1,
-            devices: vec![ramflux_protocol::SignedDeviceSetEntry {
-                device_id: open.device_id.clone(),
-                device_epoch: 1,
-                signing_key_commitment: keys.0,
-                agreement_key_commitment: keys.1,
-                status: ramflux_protocol::DeviceSetStatus::Active,
-                revoked_at: None,
-            }],
-        },
-    )?;
-    Ok(DeviceAuthKeyResponse {
-        custody_authority: None,
-        root_public_key: Some(ramflux_protocol::encode_base64url(
-            root.signing_key.verifying_key().to_bytes(),
-        )),
-        signed_device_set: Some(set),
-        principal_id: "alice".into(),
-        device_id: open.device_id.clone(),
-        device_epoch: 1,
-        branch_public_key: ramflux_crypto::fixture_public_key_base64url(),
-        target_delivery_id: open.target_delivery_id.clone(),
-        revoked: false,
-    })
-}
-
 pub(super) fn forwarded_source_envelope(
     mut envelope: Envelope,
 ) -> Result<Envelope, Box<dyn std::error::Error>> {
@@ -307,31 +271,6 @@ pub(super) fn seed_from_nonce(prefix: u8, nonce: u64) -> [u8; 32] {
     seed
 }
 
-pub(super) fn envelope(
-    envelope_id: &str,
-    target_delivery_id: &str,
-    delivery_class: DeliveryClass,
-) -> Envelope {
-    Envelope {
-        schema: "ramflux.envelope.v1".to_owned(),
-        version: 1,
-        domain: "ramflux.envelope.v1".to_owned(),
-        ext: Ext::default(),
-        signed: signed_fields(),
-        envelope_id: envelope_id.to_owned(),
-        source_principal_id: "alice".to_owned(),
-        source_device_id: "alice_device".to_owned(),
-        target_delivery_id: target_delivery_id.to_owned(),
-        routing_set_id: None,
-        delivery_class,
-        priority: Priority::Normal,
-        ttl: 3_600,
-        created_at: 1_760_000_000,
-        encrypted_payload: "ciphertext".to_owned(),
-        payload_hash: "payload_hash".to_owned(),
-    }
-}
-
 pub(super) fn ack(envelope_id: &str) -> Ack {
     Ack {
         schema: "ramflux.ack.v1".to_owned(),
@@ -362,14 +301,6 @@ pub(super) fn nack(envelope_id: &str, reason: NackReason) -> Nack {
         retry_after: Some(30),
         proof_hash: None,
         new_home_node_hint: None,
-    }
-}
-
-pub(super) fn signed_fields() -> SignedFields {
-    SignedFields {
-        signing_key_id: "fixture".to_owned(),
-        signature_alg: SignatureAlg::Ed25519,
-        signature: "sig".to_owned(),
     }
 }
 
@@ -548,27 +479,6 @@ pub(super) fn federation_server_record(node_id: &str, endpoint: &str) -> Federat
     }
 }
 
-// A self-contained, committed test CA certificate. The federation admission
-// logic treats `*_ca_cert_pem` as opaque pinning data (non-empty check + string
-// equality only — never parsed as X.509), so a static public cert is sufficient
-// and keeps the test suite compilable in clean checkouts. The previous
-// `include_str!` of `deploy/certs/ca.pem` broke CI because that cert is issued at
-// realnet startup and intentionally git-ignored, so it is absent in CI checkouts.
-const TEST_FEDERATION_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBVTCCAQegAwIBAgIUUKW1inJxPZdXqkdecz2mcSAm9/swBQYDK2VwMCAxHjAc\n\
-BgNVBAMMFVJhbWZsdXggTG9jYWwgTWVzaCBDQTAeFw0yNjA2MjkwNDQ1MDlaFw0z\n\
-NjA2MjYwNDQ1MDlaMCAxHjAcBgNVBAMMFVJhbWZsdXggTG9jYWwgTWVzaCBDQTAq\n\
-MAUGAytlcAMhAA3XGSY9j10c/7rAbTdXbkmEEC7xrUsb9QovaLCuc3IRo1MwUTAd\n\
-BgNVHQ4EFgQU2j3DVamGrSfTx33tGcz+KeNscg4wHwYDVR0jBBgwFoAU2j3DVamG\n\
-rSfTx33tGcz+KeNscg4wDwYDVR0TAQH/BAUwAwEB/zAFBgMrZXADQQAWvMVmy8e3\n\
-scSsEjZJSqdZaUTvIdRvMF4sHne9xvtnN8v+aqxgPsyTmNH0ySSmTwT28sNyF15U\n\
-81vAV6JvZYsI\n\
------END CERTIFICATE-----\n";
-
-pub(super) fn test_federation_ca_pem() -> String {
-    TEST_FEDERATION_CA_PEM.to_owned()
-}
-
 pub(super) fn call_session(call_id: &str) -> OpaqueCallSession {
     OpaqueCallSession {
         call_id: call_id.to_owned(),
@@ -622,25 +532,6 @@ pub(super) fn gateway_session(session_id: &str) -> GatewaySession {
         opened_at: 1_760_000_001,
         last_heartbeat_at: 1_760_000_001,
         lifecycle: GatewaySessionLifecycle::Authed,
-    }
-}
-
-pub(super) fn gateway_open_frame(device_id: &str, stream_nonce: &str) -> GatewayOpenFrame {
-    GatewayOpenFrame {
-        protocol_version: GATEWAY_SESSION_PROTOCOL_VERSION.to_owned(),
-        transport_kind: "quic_quinn".to_owned(),
-        client_instance_id: "client_a".to_owned(),
-        device_id: device_id.to_owned(),
-        target_delivery_id: "target_a".to_owned(),
-        stream_nonce: stream_nonce.to_owned(),
-        previous_session_id: None,
-        resume_token_hash: None,
-        last_seen_inbox_seq: None,
-        max_inflight_downstream: 32,
-        max_inflight_upstream: 32,
-        pre_auth_cookie: None,
-        pre_auth_now: None,
-        source_ip_hash: None,
     }
 }
 

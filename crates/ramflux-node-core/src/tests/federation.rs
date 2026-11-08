@@ -3,6 +3,10 @@
 
 use super::*;
 use crate::EnvelopeAuthorityReason::StaleEpoch;
+pub(super) use crate::test_support::federation_fixtures::{
+    federation_forward_request, federation_handshake, federation_route_with_key,
+    root_bound_forward, signed_federation_handshake, test_federation_ca_pem,
+};
 
 #[test]
 fn federation_redb_store_restores_trust_state() -> Result<(), Box<dyn std::error::Error>> {
@@ -496,40 +500,6 @@ fn federation_handshake_requires_pinned_invitation_key() -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn signed_federation_handshake(
-    source_node_id: &str,
-    target_node_id: &str,
-    seed: [u8; 32],
-) -> Result<ramflux_protocol::FederationHandshake, Box<dyn std::error::Error>> {
-    let mut handshake = federation_handshake(source_node_id, target_node_id);
-    handshake.signed.signing_key_id = format!("{source_node_id}#federation");
-    handshake.signed.signature = String::new();
-    handshake.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(&handshake, seed)?;
-    Ok(handshake)
-}
-
-fn federation_handshake(
-    source_node_id: &str,
-    target_node_id: &str,
-) -> ramflux_protocol::FederationHandshake {
-    ramflux_protocol::FederationHandshake {
-        schema: ramflux_protocol::domain::FEDERATION_HANDSHAKE.to_owned(),
-        version: 1,
-        domain: ramflux_protocol::domain::FEDERATION_HANDSHAKE.to_owned(),
-        ext: Ext::default(),
-        signed: signed_fields(),
-        handshake_id: format!("hs_{source_node_id}_{target_node_id}"),
-        source_node_id: source_node_id.to_owned(),
-        target_node_id: target_node_id.to_owned(),
-        source_capabilities: vec!["opaque_delivery".to_owned()],
-        protocol_versions: vec!["v1".to_owned()],
-        transport_backends: vec!["quic_quinn".to_owned()],
-        trust_state_hash: "trust_state_hash".to_owned(),
-        nonce: "nonce_hs".to_owned(),
-        created_at: 1_760_000_000,
-    }
-}
-
 #[test]
 fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn std::error::Error>> {
     let source_seed = seed_from_nonce(0xa1, 4);
@@ -636,84 +606,6 @@ fn federation_forward_requires_pinned_true_source_key() -> Result<(), Box<dyn st
     let rejected = verify_federated_envelope_forward(&forward, &wrong_key);
     assert!(rejected.is_err());
     Ok(())
-}
-
-fn federation_route_with_key(
-    node_id: &str,
-    node_public_key: &str,
-    endpoint: &str,
-    trust_status: FederationTrustStatus,
-) -> FederationPeerRoute {
-    FederationPeerRoute {
-        node_id: node_id.to_owned(),
-        endpoint: endpoint.to_owned(),
-        node_public_key_hash: ramflux_crypto::blake3_256_base64url(
-            ramflux_protocol::domain::FEDERATION_HANDSHAKE,
-            node_public_key.as_bytes(),
-        ),
-        node_capabilities: vec!["opaque_delivery".to_owned()],
-        trust_status,
-        updated_at: 1_760_000_000,
-        expires_at: 1_760_086_400,
-        route_update_proof_hash: "route_update_proof_hash".to_owned(),
-    }
-}
-
-pub(super) fn federation_forward_request(
-    envelope_id: &str,
-    target_delivery_id: &str,
-) -> FederatedEnvelopeForwardRequest {
-    FederatedEnvelopeForwardRequest {
-        migration_evidence: None,
-        signed: default_federation_forward_signed_fields(),
-        admin_token: String::new(),
-        source_node_id: "node_a.example".to_owned(),
-        target_node_id: "node_b.example".to_owned(),
-        delivery_class: "opaque_event".to_owned(),
-        required_capability: "opaque_delivery".to_owned(),
-        envelope: envelope(envelope_id, target_delivery_id, DeliveryClass::OpaqueEvent),
-    }
-}
-
-pub(super) fn root_bound_forward(
-    root: &ramflux_crypto::IdentityRoot,
-    device: &str,
-    record: Option<ramflux_protocol::SignedDeviceSetRecord>,
-    id: &str,
-) -> Result<FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>> {
-    let mut forward = federation_forward_request(id, "root-replay-target");
-    let open = gateway_open_frame(device, "root-forward");
-    let mut authority = gateway_registered_key(&open)?;
-    let devices = authority.signed_device_set.as_ref().ok_or("set")?.devices.clone();
-    authority.principal_id = root.principal_id.clone();
-    authority.root_public_key =
-        Some(ramflux_protocol::encode_base64url(root.signing_key.verifying_key().to_bytes()));
-    authority.signed_device_set = Some(match record {
-        Some(record) => record,
-        None => ramflux_crypto::sign_device_set(
-            root,
-            ramflux_crypto::DeviceSetSigningInput {
-                principal_kind: ramflux_protocol::PrincipalKind::Human,
-                device_set_epoch: 1,
-                devices,
-            },
-        )?,
-    });
-    let source = authority.authenticated_device_identity()?;
-    forward.envelope.source_principal_id = root.principal_id.clone();
-    forward.envelope.source_device_id = device.into();
-    forward
-        .envelope
-        .ext
-        .ext
-        .insert("source_root_commitment".into(), serde_json::json!(source.root_commitment()));
-    forward.envelope.signed.signature = ramflux_crypto::sign_protocol_object(&forward.envelope)?;
-    forward
-        .envelope
-        .ext
-        .ext
-        .insert("source_device_authority".into(), serde_json::to_value(authority)?);
-    Ok(forward)
 }
 
 #[test]

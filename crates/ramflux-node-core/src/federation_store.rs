@@ -80,6 +80,20 @@ enum InboundForwardAdmission {
 }
 
 impl FederationRedbStore {
+    /// Committed inbound forward seen rows (test-support observation only).
+    ///
+    /// # Errors
+    /// Returns an error when the redb read transaction or table cannot be opened.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inbound_forward_seen_count(&self) -> Result<u64, NodeCoreError> {
+        use redb::ReadableTableMetadata;
+        let txn = self.db.begin_read().map_err(|error| NodeCoreError::Redb(error.to_string()))?;
+        txn.open_table(FEDERATION_INBOUND_FORWARD_SEEN_TABLE)
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))?
+            .len()
+            .map_err(|error| NodeCoreError::Redb(error.to_string()))
+    }
+
     #[cfg(test)]
     pub(crate) fn durable_ingress_snapshot(&self) -> Result<DurableIngressSnapshot, NodeCoreError> {
         use redb::ReadableTableMetadata;
