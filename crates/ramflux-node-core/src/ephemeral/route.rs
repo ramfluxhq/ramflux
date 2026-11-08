@@ -730,10 +730,12 @@ mod tests {
         bind_capable(&router, TARGET)?;
         let before = router.ephemeral_durable_snapshot()?;
         let missing = temp_path("missing-oracle");
-        assert!(
-            assert_read_only(&router, &before, b"", &missing).is_err(),
-            "missing store artifact must fail the oracle"
-        );
+        let Err(err) = assert_read_only(&router, &before, b"", &missing) else {
+            return Err("missing store artifact must fail the oracle".into());
+        };
+        let io =
+            err.downcast_ref::<std::io::Error>().ok_or("missing artifact must be io::Error")?;
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
         Ok(())
     }
 
