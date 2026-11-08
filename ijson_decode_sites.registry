@@ -610,7 +610,7 @@ crates/ramflux-sdk/src/client/identity_authority/mod.rs | observe_device_manifes
 crates/ramflux-sdk/src/client/identity_authority/mod.rs | require_cached_root_authority | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/identity_authority/owned.rs | local_principal_kind | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/identity_authority/verify.rs | verify_root_bound_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/inbox_failure.rs | set_failure_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/inbox_failure.rs | verified_failure_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/object.rs | ack_dm_attachment_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/object.rs | ack_object_chunk_via_relay_quic | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/object.rs | download_object_from_relay | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -759,7 +759,7 @@ crates/ramflux-storage/src/account_db/device_metadata.rs | client_device_record_
 crates/ramflux-storage/src/account_db/home_migration.rs | home_migration_transition | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/home_migration.rs | row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/home_migration.rs | valid_progress | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/journal/inbox_policy.rs | set_verified_inbox_failure_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/journal/inbox_policy.rs | apply_inbox_failure_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/journal/mod.rs | row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_audit | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_grant | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
