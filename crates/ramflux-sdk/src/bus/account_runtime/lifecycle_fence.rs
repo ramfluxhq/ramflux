@@ -21,3 +21,37 @@ pub(crate) fn commit<T>(
 ) -> Result<T, StorageError> {
     db.receive_transaction(expected, handle_generation, write)
 }
+
+/// Outcome of one `AckResults` record. Never writes C.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AckRecord {
+    /// Terminal W2/WS intent at or below C; cursor succeeded.
+    Recorded,
+    /// No intent (held / quarantined). Never acknowledged.
+    Held,
+    /// Sequence is above the captured cursor.
+    AboveCursor,
+    /// Cursor failed; C stays at the captured value.
+    CursorFailed,
+}
+
+/// Record one ACK outcome under the commit fence. C is unchanged.
+pub(crate) fn ack_results(
+    db: &AccountDb,
+    handle_generation: u64,
+    turn: &ReceiveTurn,
+    sequence: u64,
+    cursor_ok: bool,
+) -> Result<AckRecord, SdkError> {
+    commit(db, handle_generation, turn.expected(), |tx| {
+        tx.require_writer()?;
+        if sequence > turn.cursor {
+            return Ok(AckRecord::AboveCursor);
+        }
+        if !tx.has_ack_intent(sequence)? {
+            return Ok(AckRecord::Held);
+        }
+        if cursor_ok { Ok(AckRecord::Recorded) } else { Ok(AckRecord::CursorFailed) }
+    })
+    .map_err(SdkError::from)
+}

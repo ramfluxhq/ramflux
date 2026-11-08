@@ -314,6 +314,7 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
             )
             .await?;
             let prepared = prepared.ok_or("missing managed rejection ACK")?;
+            let before_cursor = account.client.gateway_receive_cursor("bob")?;
             let cursor = engine.ack(prepared.ack).await;
             let outcome =
                 sync_driver::finish_prepared_ack(&account, &prepared.state, cursor, &mut pressure);
@@ -323,11 +324,18 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
                     matches!(&error, SdkError::GatewaySessionRejected(reason) if reason == "injected ACK refusal"),
                     "{error:?}"
                 );
+                assert_eq!(
+                    account.client.gateway_receive_cursor("bob")?,
+                    before_cursor,
+                    "cursor error must not write C"
+                );
             } else {
                 assert!(!outcome?);
+                assert_eq!(account.client.gateway_receive_cursor("bob")?, c.entry.inbox_seq);
             }
         } else {
             assert_eq!(sync_driver::run_at(&mut account, now).await?, 0);
+            assert_eq!(account.client.gateway_receive_cursor("bob")?, c.entry.inbox_seq);
         }
         c.rejected(&account.client)?;
         let codes: Vec<String> = c
@@ -345,7 +353,6 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
             before,
             "rejection must not change objects, references or actors"
         );
-        assert_eq!(account.client.gateway_receive_cursor("bob")?, c.entry.inbox_seq);
         let retries = account.client.account_db()?.due_inbox_retries(i64::MAX)?;
         if n < failures {
             assert_eq!(retries.len(), 1);

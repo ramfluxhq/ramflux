@@ -7,12 +7,12 @@ use super::{advance_cursor, retain_ack_retry};
 use crate::prelude::*;
 
 pub(crate) struct AckState {
-    pub(super) entry: GatewayInboxEntry,
-    pub(super) key: String,
-    pub(super) already_seen: bool,
-    pub(super) strip_call_ciphertext: bool,
-    pub(super) accepted: bool,
-    pub(super) received_at: i64,
+    pub(crate) entry: GatewayInboxEntry,
+    pub(crate) key: String,
+    pub(crate) already_seen: bool,
+    pub(crate) strip_call_ciphertext: bool,
+    pub(crate) accepted: bool,
+    pub(crate) received_at: i64,
 }
 pub(crate) struct PreparedAck {
     pub ack: ramflux_protocol::Ack,
@@ -52,19 +52,7 @@ pub(crate) fn finish(
     backpressure: &mut super::super::contact_backpressure::Backpressure,
 ) -> Result<bool, SdkError> {
     let db = account.client.account_db()?;
-    let cursor = match cursor {
-        Ok(cursor) => cursor,
-        Err(error) => {
-            if !state.already_seen || db.has_inbox_retry(&state.key)? {
-                advance_cursor(
-                    &account.client,
-                    &account.target_delivery_id,
-                    state.entry.inbox_seq,
-                )?;
-            }
-            return Err(error);
-        }
-    };
+    let cursor = cursor?;
     #[cfg(test)]
     let started = std::time::Instant::now();
     db.write_transaction(|| {

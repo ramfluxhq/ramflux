@@ -402,6 +402,7 @@ async fn apply_entry(
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::AckResults {
         generation,
+        turn: None,
         state: Box::new(prepared.state),
         cursor: Box::new(cursor),
         backpressure,

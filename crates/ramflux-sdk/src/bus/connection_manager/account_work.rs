@@ -68,6 +68,10 @@ pub(crate) enum AccountWork {
     },
     AckResults {
         generation: u64,
+        /// Ledger coordinates captured with the turn. `None` keeps today's live
+        /// `finish()` path (unactivated accounts). P19 WA tokens are not on this
+        /// base; ACK emission stays on the live receive send.
+        turn: Option<Box<ReceiveTurn>>,
         state: Box<crate::bus::sync_driver::AckState>,
         cursor: Box<Result<crate::GatewayCursor, SdkError>>,
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,

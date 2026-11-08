@@ -276,18 +276,26 @@ impl AccountRuntime {
                 let result = settle_retained(account, handle.generation(), &turn, sequence);
                 let _ = reply.send(result);
             }
-            AccountWork::AckResults { generation, state, cursor, mut backpressure, reply } => {
-                if generation == handle.generation() && !reply.is_closed() {
-                    #[cfg(test)]
-                    let _ack_work = account.client.account_db()?.observe_ack_work();
-                    let result = super::super::sync_driver::finish_prepared_ack(
-                        account,
-                        &state,
-                        *cursor,
-                        &mut backpressure,
-                    );
-                    let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
+            AccountWork::AckResults {
+                generation,
+                turn,
+                state,
+                cursor,
+                mut backpressure,
+                reply,
+            } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return Ok(false);
                 }
+                let result = apply_ack_results(
+                    account,
+                    handle.generation(),
+                    turn.as_deref(),
+                    &state,
+                    *cursor,
+                    &mut backpressure,
+                );
+                let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
             }
             AccountWork::ReceiveObservation { generation, event } => {
                 if generation != handle.generation() {
@@ -439,6 +447,36 @@ async fn short_step<T>(
 ) -> Result<T, SdkError> {
     tokio::time::timeout(limit, future).await.map_err(|_| attempt_timeout())?
 }
+fn apply_ack_results(
+    account: &crate::bus::state::LocalBusAccountState,
+    handle_generation: u64,
+    turn: Option<&crate::bus::connection_manager::ReceiveTurn>,
+    state: &crate::bus::sync_driver::AckState,
+    cursor: Result<crate::GatewayCursor, SdkError>,
+    backpressure: &mut crate::bus::contact_backpressure::Backpressure,
+) -> Result<bool, SdkError> {
+    #[cfg(test)]
+    let _ack_work = account.client.account_db()?.observe_ack_work();
+    let Some(turn) = turn else {
+        return super::super::sync_driver::finish_prepared_ack(
+            account,
+            state,
+            cursor,
+            backpressure,
+        );
+    };
+    let cursor_ok = cursor.is_ok();
+    let record = super::lifecycle_fence::ack_results(
+        account.client.account_db()?,
+        handle_generation,
+        turn,
+        state.entry.inbox_seq,
+        cursor_ok,
+    )?;
+    cursor?;
+    Ok(matches!(record, super::lifecycle_fence::AckRecord::Recorded))
+}
+
 fn attempt_timeout() -> SdkError {
     SdkError::NodeTimeout { retry_after_ms: crate::node::NODE_RETRY_AFTER_MS }
 }

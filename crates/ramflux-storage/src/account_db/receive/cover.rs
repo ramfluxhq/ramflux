@@ -197,6 +197,21 @@ impl ReceiveTransaction<'_> {
         Ok(())
     }
 
+    /// True when terminal W2/WS already created an ACK intent for `sequence`.
+    ///
+    /// # Errors
+    /// Refuses outside the writer transaction, and on storage failures.
+    pub fn has_ack_intent(&self, sequence: u64) -> Result<bool, StorageError> {
+        self.require_writer()?;
+        let seq = sequence.to_be_bytes();
+        let found: i64 = self.db.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM gateway_ack_intent WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3)",
+            params![self.target, self.incarnation, seq.as_slice()],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
+    }
+
     /// Inserts the terminal intent if missing, then releases work and receipt (shared with WS).
     pub(crate) fn finish_terminal(&self, sequence: u64, now: i64) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
