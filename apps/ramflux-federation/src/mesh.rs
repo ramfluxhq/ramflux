@@ -1004,6 +1004,223 @@ mod tests {
         Ok(())
     }
 
+    const SIGNED_FORWARD_ADMISSION_NOW: i64 = 1_760_000_020;
+
+    fn admitted_forward_source(
+        source_seed: [u8; 32],
+    ) -> Result<ramflux_node_core::FederationTrustState, Box<dyn std::error::Error>> {
+        use ramflux_node_core::test_support::federation_fixtures::{
+            federation_route_with_key, signed_federation_handshake, test_federation_ca_pem,
+        };
+        let source_public_key = ramflux_crypto::public_key_base64url_from_seed(source_seed);
+        let mut route = federation_route_with_key(
+            "node-b",
+            &source_public_key,
+            "node-b-federation:7443",
+            ramflux_node_core::FederationTrustStatus::Invited,
+        );
+        route.expires_at = 4_000_000_000;
+        let handshake = signed_federation_handshake("node-b", "node-a", source_seed)?;
+        let mut invitation = ramflux_node_core::FederationNodeInvitation {
+            invitation_id: "inv_node_b_to_a".to_owned(),
+            inviter_node_id: "node-a".to_owned(),
+            candidate_node_id: "node-b".to_owned(),
+            candidate_node_public_key_hash: route.node_public_key_hash.clone(),
+            candidate_node_public_key: source_public_key,
+            candidate_node_ca_cert_pem: test_federation_ca_pem(),
+            allowed_capabilities: vec!["opaque_delivery".to_owned(), "federation_relay".to_owned()],
+            expires_at: 4_000_000_000,
+            signature: String::new(),
+        };
+        invitation.signature =
+            ramflux_crypto::sign_protocol_object_with_seed(&invitation, source_seed)?;
+        let mut state = ramflux_node_core::FederationTrustState::new();
+        state.admit_handshake(ramflux_node_core::FederationHandshakeAdmissionRequest {
+            route,
+            handshake,
+            invitation: Some(invitation),
+            local_capabilities: vec!["opaque_delivery".to_owned(), "federation_relay".to_owned()],
+            local_protocol_versions: vec!["v1".to_owned()],
+            local_transport_backends: vec!["quic_quinn".to_owned()],
+            now: SIGNED_FORWARD_ADMISSION_NOW,
+        })?;
+        Ok(state)
+    }
+
+    /// Builds a fully root-bound, genuinely signed forward from node-b to node-a whose envelope
+    /// ext carries `x_probe`. The signature covers the canonical object, so a raw duplicate of
+    /// that member is authenticated identically under lenient decoding.
+    fn signed_forward_for_mesh(
+        source_seed: [u8; 32],
+    ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>>
+    {
+        use ramflux_node_core::test_support::federation_fixtures::root_bound_forward;
+        let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+        let mut forward = root_bound_forward(&root, "device", None, "ijson-signed-forward")?;
+        forward.source_node_id = "node-b".to_owned();
+        forward.target_node_id = "node-a".to_owned();
+        forward.envelope.created_at = unix_now_seconds()?;
+        forward.envelope.ext.ext.insert("x_probe".to_owned(), serde_json::json!("v"));
+        forward.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes(
+            &ramflux_protocol::envelope_sender_signed_bytes(&forward.envelope)?,
+        );
+        ramflux_node_core::sign_federated_envelope_forward(&mut forward, source_seed)?;
+        Ok(forward)
+    }
+
+    fn unix_now_seconds() -> Result<i64, Box<dyn std::error::Error>> {
+        Ok(i64::try_from(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+        )?)
+    }
+
+    /// Duplicates the single `x_probe` member at the raw byte level; the object stays identical.
+    fn duplicate_x_probe_member(body: &str) -> Result<String, Box<dyn std::error::Error>> {
+        const NEEDLE: &str = "\"x_probe\":\"v\"";
+        if body.matches(NEEDLE).count() != 1 {
+            return Err(test_error("expected exactly one x_probe member in signed forward"));
+        }
+        Ok(body.replacen(NEEDLE, "\"x_probe\":\"v\",\"x_probe\":\"v\"", 1))
+    }
+
+    struct CountingRouter {
+        endpoint: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        worker: std::thread::JoinHandle<()>,
+    }
+
+    impl CountingRouter {
+        /// Serves `/mvp0/envelope` over mesh TLS with an `online` outcome and counts each request
+        /// that completes the TLS handshake and HTTP read.
+        fn spawn(
+            router_tls: &ramflux_transport::MeshTlsConfig,
+            federation_ca_pem: &str,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", router_tls)?;
+            let endpoint = server.local_addr()?.to_string();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let roots = vec![federation_ca_pem.to_owned()];
+            let tls = router_tls.clone();
+            let worker_calls = Arc::clone(&calls);
+            let worker_stop = Arc::clone(&stop);
+            let worker = std::thread::spawn(move || {
+                while !worker_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let Ok(accepted) = server.accept_authenticated_with_pem_roots(&tls, &roots)
+                    else {
+                        continue;
+                    };
+                    let mut stream = accepted.stream;
+                    if let Ok(Some(_request)) =
+                        ramflux_transport::read_mesh_http_request(&mut stream)
+                    {
+                        worker_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _ = ramflux_transport::write_mesh_json_response(
+                            &mut stream,
+                            "200 OK",
+                            &serde_json::json!({
+                                "migration_refusal": null,
+                                "outcome": "online",
+                                "target_delivery_id": "peer",
+                                "inbox_seq": null,
+                                "cursor": null,
+                                "nack": null
+                            }),
+                        );
+                    }
+                }
+            });
+            Ok(Self { endpoint, calls, stop, worker })
+        }
+
+        fn finish(self) -> Result<usize, Box<dyn std::error::Error>> {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Wake the blocking accept so the worker observes the stop flag.
+            let _wake = std::net::TcpStream::connect(&self.endpoint);
+            self.worker.join().map_err(|_| test_error("counting router worker panicked"))?;
+            Ok(self.calls.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    #[test]
+    fn federation_ijson_ingress_refuses_unsafe_integer_signed_forward()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const EXPECTED_BODY: &[u8] =
+            br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+        let root = temp_cert_root("federation-ijson-signed-forward")?;
+        let (server_tls, router_tls, ca_pem) = issue_rsa_mesh_certificates(&root)?;
+        let source_seed = [0x5b; 32];
+        let valid_text = serde_json::to_string(&signed_forward_for_mesh(source_seed)?)?;
+        let mutated_text = duplicate_x_probe_member(&valid_text)?;
+
+        for (text, accepted) in [(mutated_text, false), (valid_text, true)] {
+            let (mut context, store_path) =
+                test_mesh_server_context("federation-ijson-signed-forward")?;
+            context.state = Arc::new(crate::SharedFederationTrustState::new(
+                admitted_forward_source(source_seed)?,
+            ));
+            let router = CountingRouter::spawn(&router_tls, &ca_pem)?;
+            context.router = Arc::new(RouterMeshClient {
+                endpoint: router.endpoint.clone(),
+                server_name: "ramflux-router".to_owned(),
+                tls: server_tls.clone(),
+                client: ramflux_transport::MeshHttpClient::new(),
+                async_mesh: None,
+            });
+            let store = Arc::clone(&context.store);
+            let pending_before = store.list_pending_outbound(100)?;
+            let seen_before = store.inbound_forward_seen_count()?;
+
+            let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &server_tls)?;
+            let endpoint = server.local_addr()?.to_string();
+            let roots = vec![ca_pem.clone()];
+            let accepted_server_tls = server_tls.clone();
+            let worker = std::thread::spawn(move || -> Result<(), String> {
+                let mut stream = server
+                    .accept_authenticated_with_pem_roots(&accepted_server_tls, &roots)
+                    .map_err(|error| error.to_string())?
+                    .stream;
+                let request = ramflux_transport::read_mesh_http_request(&mut stream)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing mesh request".to_owned())?;
+                handle_s8_inbound_envelope_request(&mut stream, None, &request.body, &context)
+                    .map_err(|error| error.to_string())
+            });
+            let raw = serde_json::value::RawValue::from_string(text)?;
+            let (status, body) = ramflux_transport::mesh_http_post_status_body(
+                &endpoint,
+                "/s8/federation/envelope",
+                &router_tls,
+                "ramflux-federation",
+                &raw,
+            )?;
+            worker.join().map_err(|_| "mesh HTTP worker panicked")??;
+            let router_calls = router.finish()?;
+            let seen_after = store.inbound_forward_seen_count()?;
+
+            if accepted {
+                assert_eq!(status, 200, "control body: {}", String::from_utf8_lossy(&body));
+                let response: ramflux_node_core::FederatedEnvelopeForwardResponse =
+                    serde_json::from_slice(&body)?;
+                assert!(response.accepted);
+                assert_eq!(router_calls, 1);
+                assert_eq!(seen_after, seen_before + 1);
+            } else {
+                assert_eq!(status, 400);
+                assert_eq!(body, EXPECTED_BODY);
+                assert_eq!(router_calls, 0);
+                assert_eq!(seen_after, seen_before);
+            }
+            assert_eq!(store.list_pending_outbound(100)?, pending_before);
+            drop(store);
+            cleanup_store(&store_path);
+        }
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     fn issue_rsa_mesh_certificates(
         root: &Path,
     ) -> Result<
