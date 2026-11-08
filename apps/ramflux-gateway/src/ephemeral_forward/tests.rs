@@ -3,7 +3,7 @@
 
 use super::{
     EphemeralEnqueueOutcome, FRAME_BYTE_CAP, GatewayForwardEphemeralRequest, PATH, frame_bytes,
-    handle_at, map_forward, park_next_enqueue, set_skip_deadline_equality,
+    handle_at, map_forward, set_skip_deadline_equality,
 };
 use crate::GatewaySessionHub;
 use crate::clients::{notify_wake_count, reset_notify_wake_count};
@@ -13,7 +13,7 @@ use ramflux_node_core::{
     EphemeralRouteGate, RouterCore, SessionDescriptor, SessionLifecycle, SessionPushForwardOutcome,
 };
 use ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION;
-use ramflux_protocol::{Envelope, Ext};
+use ramflux_protocol::{Envelope, Ext, Priority};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -101,7 +101,11 @@ fn decode_request(
     request: &GatewayForwardEphemeralRequest,
 ) -> Fallible<GatewayForwardEphemeralRequest> {
     let wire = serde_json::to_vec(request)?;
-    Ok(serde_json::from_slice(&wire)?)
+    let decoded: GatewayForwardEphemeralRequest = serde_json::from_slice(&wire)?;
+    let again = serde_json::to_vec(&decoded)?;
+    anyhow::ensure!(again == wire, "forward request bytes changed after decode");
+    anyhow::ensure!(decoded == *request);
+    Ok(decoded)
 }
 
 async fn capable_hub_frames(
@@ -192,9 +196,11 @@ async fn row_writer_emits_transient() -> TestResult {
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Queued));
     hub.flushed(TARGET).await?;
     let recorded = frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.clone();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0]["frame_type"], "ephemeral");
-    assert_eq!(recorded[0]["expires_at_ms"], EXPIRES_AT_MS);
+    let expected = serde_json::from_slice::<Value>(
+        &frame_bytes(&request(TARGET, TARGET, "env-ok").envelope, EXPIRES_AT_MS)
+            .ok_or_else(|| anyhow::anyhow!("encode expected"))?,
+    )?;
+    assert_eq!(recorded, vec![expected]);
     assert_eq!(hub.ephemeral_queued(TARGET).await, 0);
     assert_no_wake();
     Ok(())
@@ -350,10 +356,10 @@ async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
         EphemeralRouteGate::Online { gateway_id: GATEWAY_A.into(), session_id: SESSION.into() }
     );
     let (hub_a, frames_a) = capable_hub_frames(TARGET).await?;
-    let hub_b = capable_hub(TARGET).await?;
+    let (hub_b, frames_b) = capable_hub_frames(TARGET).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    park_next_enqueue(entered.clone(), release.clone());
+    hub_a.park_next_enqueue(entered.clone(), release.clone());
     let held = hub_a.clone();
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-open"), NOW_LIVE_MS).await
@@ -370,9 +376,16 @@ async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
     assert!(reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Queued));
     hub_a.flushed(TARGET).await?;
-    let recorded = frames_a.lock().map_err(|_| anyhow::anyhow!("frames a"))?.clone();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0]["frame_type"], "ephemeral");
+    hub_b.flushed(TARGET).await?;
+    let recorded_a = frames_a.lock().map_err(|_| anyhow::anyhow!("frames a"))?.clone();
+    let recorded_b = frames_b.lock().map_err(|_| anyhow::anyhow!("frames b"))?.clone();
+    let expected = serde_json::from_slice::<Value>(
+        &frame_bytes(&request(TARGET, TARGET, "env-held-open").envelope, EXPIRES_AT_MS)
+            .ok_or_else(|| anyhow::anyhow!("encode expected"))?,
+    )?;
+    assert_eq!(recorded_a, vec![expected]);
+    assert_eq!(recorded_b, Vec::<Value>::new());
+    assert_eq!(hub_a.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub_b.ephemeral_queued(TARGET).await, 0);
     assert_no_wake();
     Ok(())
@@ -380,16 +393,25 @@ async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
 
 async fn row_held_forward_drops_when_a_closed() -> TestResult {
     reset_notify_wake_count();
-    let hub_a = capable_hub(TARGET).await?;
-    let hub_b = capable_hub(TARGET).await?;
+    let router = RouterCore::new();
+    seed_live(&router, TARGET, SESSION, GATEWAY_A)?;
+    router.bind_ephemeral_capability(TARGET, GATEWAY_A, SESSION);
+    let (hub_a, frames_a) = capable_hub_frames(TARGET).await?;
+    let (hub_b, frames_b) = capable_hub_frames(TARGET).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    park_next_enqueue(entered.clone(), release.clone());
+    hub_a.park_next_enqueue(entered.clone(), release.clone());
     let held = hub_a.clone();
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-closed"), NOW_LIVE_MS).await
     });
     tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    seed_live(&router, TARGET, SESSION_B, GATEWAY_B)?;
+    router.bind_ephemeral_capability(TARGET, GATEWAY_B, SESSION_B);
+    assert_eq!(
+        router.route_gate(TARGET),
+        EphemeralRouteGate::Online { gateway_id: GATEWAY_B.into(), session_id: SESSION_B.into() }
+    );
     let snapshot = hub_a.snapshot().await;
     let token = snapshot.get(TARGET).ok_or_else(|| anyhow::anyhow!("hub a token"))?.token;
     hub_a.unregister(TARGET, token).await;
@@ -397,6 +419,12 @@ async fn row_held_forward_drops_when_a_closed() -> TestResult {
     let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::NoSession));
+    hub_a.flushed(TARGET).await?;
+    hub_b.flushed(TARGET).await?;
+    let recorded_a = frames_a.lock().map_err(|_| anyhow::anyhow!("frames a"))?.clone();
+    let recorded_b = frames_b.lock().map_err(|_| anyhow::anyhow!("frames b"))?.clone();
+    assert_eq!(recorded_a, Vec::<Value>::new());
+    assert_eq!(recorded_b, Vec::<Value>::new());
     assert_eq!(hub_a.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub_b.ephemeral_queued(TARGET).await, 0);
     assert_eq!(hub_a.ephemeral_queued(OTHER).await, 0);
@@ -422,7 +450,7 @@ async fn row_held_forward_refused_when_clock_reaches_d() -> TestResult {
     let hub = capable_hub(TARGET).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    park_next_enqueue(entered.clone(), release.clone());
+    hub.park_next_enqueue(entered.clone(), release.clone());
     let held = hub.clone();
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-at-d"), NOW_LIVE_MS).await
@@ -444,7 +472,7 @@ async fn row_held_forward_queued_before_d() -> TestResult {
     let (hub, frames) = capable_hub_frames(TARGET).await?;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    park_next_enqueue(entered.clone(), release.clone());
+    hub.park_next_enqueue(entered.clone(), release.clone());
     let held = hub.clone();
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-before-d"), NOW_LIVE_MS).await
@@ -553,6 +581,26 @@ async fn row_id_bounds_exact_errors_and_inclusive_positives() -> TestResult {
         .map(|e| e.to_string());
     assert_eq!(error.as_deref(), Some("invalid forwarding identity"));
 
+    let mut target_empty = request(TARGET, TARGET, "env-target-empty");
+    target_empty.target_delivery_id.clear();
+    let hub_target_empty = capable_hub(TARGET).await?;
+    let error = handle_at(&hub_target_empty, decode_request(&target_empty)?, NOW_LIVE_MS)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    assert_eq!(error.as_deref(), Some("invalid forwarding identity"));
+    assert_eq!(hub_target_empty.ephemeral_queued(TARGET).await, 0);
+
+    let mut target_over = request(TARGET, TARGET, "env-target-257");
+    target_over.target_delivery_id = "y".repeat(257);
+    let hub_target_over = capable_hub(TARGET).await?;
+    let error = handle_at(&hub_target_over, decode_request(&target_over)?, NOW_LIVE_MS)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    assert_eq!(error.as_deref(), Some("invalid forwarding identity"));
+    assert_eq!(hub_target_over.ephemeral_queued(TARGET).await, 0);
+
     let one = "a";
     let (hub_one, frames_one) = capable_hub_frames(one).await?;
     let mut req_one = request(one, one, "env-id-1");
@@ -571,6 +619,95 @@ async fn row_id_bounds_exact_errors_and_inclusive_positives() -> TestResult {
     hub_max.flushed(&max).await?;
     assert_eq!(frames_max.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
     assert_no_wake();
+    Ok(())
+}
+
+async fn assert_forward_invalid(
+    change: impl FnOnce(&mut GatewayForwardEphemeralRequest),
+    envelope_id: &str,
+) -> TestResult {
+    reset_notify_wake_count();
+    let hub = capable_hub(TARGET).await?;
+    let mut req = request(TARGET, TARGET, envelope_id);
+    change(&mut req);
+    let reply = handle_at(&hub, decode_request(&req)?, NOW_LIVE_MS).await?;
+    assert!(!reply.delivered, "{envelope_id}");
+    assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Invalid), "{envelope_id}");
+    assert_eq!(hub.ephemeral_queued(TARGET).await, 0, "{envelope_id}");
+    assert_no_wake();
+    Ok(())
+}
+
+async fn row_isolated_p01_predicates() -> TestResult {
+    assert_forward_invalid(
+        |req| {
+            req.envelope
+                .ext
+                .ext
+                .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("Ephemeral".to_owned()));
+        },
+        "p01-mode-Ephemeral",
+    )
+    .await?;
+    assert_forward_invalid(
+        |req| {
+            req.envelope
+                .ext
+                .ext
+                .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String(String::new()));
+        },
+        "p01-mode-empty",
+    )
+    .await?;
+    assert_forward_invalid(
+        |req| {
+            req.envelope
+                .ext
+                .ext
+                .insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::Number(1.into()));
+        },
+        "p01-mode-1",
+    )
+    .await?;
+    assert_forward_invalid(
+        |req| {
+            req.envelope.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::Null);
+        },
+        "p01-mode-null",
+    )
+    .await?;
+    assert_forward_invalid(
+        |req| {
+            req.envelope.ext.ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), serde_json::json!({}));
+        },
+        "p01-mode-object",
+    )
+    .await?;
+    assert_forward_invalid(|req| req.envelope.priority = Priority::Normal, "p01-priority-normal")
+        .await?;
+    assert_forward_invalid(|req| req.envelope.priority = Priority::High, "p01-priority-high")
+        .await?;
+    assert_forward_invalid(|req| req.envelope.priority = Priority::Urgent, "p01-priority-urgent")
+        .await?;
+    assert_forward_invalid(|req| req.envelope.ttl = 0, "p01-ttl-0").await?;
+    assert_forward_invalid(|req| req.envelope.ttl = 6, "p01-ttl-6").await?;
+    assert_forward_invalid(|req| req.envelope.ttl = u32::MAX, "p01-ttl-max").await?;
+    assert_forward_invalid(
+        |req| {
+            req.envelope.created_at = i64::MAX;
+            req.envelope.ttl = 5;
+        },
+        "p01-created-overflow",
+    )
+    .await?;
+    assert_forward_invalid(
+        |req| {
+            req.envelope.created_at = -2;
+            req.envelope.ttl = 1;
+        },
+        "p01-negative-deadline",
+    )
+    .await?;
     Ok(())
 }
 
@@ -611,5 +748,6 @@ async fn final_registration_capability() -> TestResult {
     row_frame_32768_accepted_32769_invalid().await?;
     row_marker_required_exact_error().await?;
     row_id_bounds_exact_errors_and_inclusive_positives().await?;
+    row_isolated_p01_predicates().await?;
     Ok(())
 }

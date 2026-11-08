@@ -43,6 +43,11 @@ pub(crate) struct GatewaySessionHub {
     pub(crate) probe_requests: crate::issued_probe::Requests,
     pub(crate) readiness: Arc<crate::session_push::Readiness>,
     pub(crate) ephemeral_rates: crate::ephemeral::EphemeralRateRegistry,
+    /// Per-hub enqueue barrier; tests park one forward without a process-global hold.
+    #[cfg(test)]
+    enqueue_hold: std::sync::Mutex<
+        Option<(std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Semaphore>)>,
+    >,
 }
 
 impl GatewaySessionHub {
@@ -426,7 +431,7 @@ impl GatewaySessionHub {
         expires_at_ms: u64,
     ) -> crate::ephemeral_forward::EphemeralEnqueueOutcome {
         use crate::ephemeral_forward::EphemeralEnqueueOutcome as Outcome;
-        crate::ephemeral_forward::await_enqueue_hold().await;
+        self.await_enqueue_hold().await;
         let Some(entry) = self.snapshot().await.get(registration_target).cloned() else {
             return crate::ephemeral_forward::finish_without_wake(Outcome::Offline);
         };
@@ -452,6 +457,36 @@ impl GatewaySessionHub {
         };
         crate::ephemeral_forward::finish_without_wake(outcome)
     }
+    #[cfg(test)]
+    pub(crate) fn park_next_enqueue(
+        &self,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+    ) {
+        *self.enqueue_hold.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((entered, release));
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::panic, reason = "test hold must fail the test on timeout")]
+    async fn await_enqueue_hold(&self) {
+        let barrier = self.enqueue_hold.lock().ok().and_then(|mut hold| hold.take());
+        if let Some((entered, release)) = barrier {
+            entered.notify_one();
+            match tokio::time::timeout(std::time::Duration::from_secs(10), release.acquire()).await
+            {
+                Ok(Ok(permit)) => permit.forget(),
+                Ok(Err(closed)) => panic!("enqueue hold closed: {closed}"),
+                Err(elapsed) => panic!("enqueue hold timed out: {elapsed}"),
+            }
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn await_enqueue_hold(&self) {
+        std::future::ready(()).await;
+    }
+
     #[cfg(test)]
     pub(crate) async fn ephemeral_queued(&self, target: &str) -> usize {
         self.snapshot().await.get(target).map_or(0, |entry| entry.queue.ephemeral_len())

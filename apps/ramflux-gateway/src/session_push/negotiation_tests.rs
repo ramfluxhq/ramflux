@@ -3,7 +3,7 @@
 
 //! Signed selection is frozen and discovery never blocks compatibility service.
 use super::*;
-pub(super) fn auth(scope: bool) -> anyhow::Result<ramflux_node_core::GatewayAuthFrame> {
+pub(crate) fn auth(scope: bool) -> anyhow::Result<ramflux_node_core::GatewayAuthFrame> {
     let mut value: ramflux_node_core::GatewayAuthFrame = serde_json::from_value(
         json!({"signed_request":{"schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1","signing_key_id":"device","signature_alg":"ed25519","signature":"fixture","source_device_id":"device","request_id":"open","method":"POST","path":"/gateway/open","device_proof_hash":"hash","body_hash":"hash","nonce":"nonce","created_at":1,"expires_at":2},"device_proof":{"schema":"ramflux.device_proof.v1","version":1,"domain":"ramflux.device_proof.v1","signing_key_id":"device","signature_alg":"ed25519","signature":"fixture","principal_id":"principal","device_id":"device","device_epoch":1,"branch_proof_hash":"hash","capability_scope":[],"nonce":"nonce","expires_at":2}}),
     )?;

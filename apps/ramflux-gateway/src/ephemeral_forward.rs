@@ -88,45 +88,13 @@ pub(crate) fn finish_without_wake(outcome: EphemeralEnqueueOutcome) -> Ephemeral
 }
 
 #[cfg(test)]
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-#[cfg(test)]
-static ENQUEUE_HOLD: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>)>> =
-    Mutex::new(None);
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 static SKIP_DEADLINE_EQUALITY: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-pub(crate) fn park_next_enqueue(
-    entered: Arc<tokio::sync::Notify>,
-    release: Arc<tokio::sync::Semaphore>,
-) {
-    *ENQUEUE_HOLD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((entered, release));
-}
-
-#[cfg(test)]
 pub(crate) fn set_skip_deadline_equality(skip: bool) {
     SKIP_DEADLINE_EQUALITY.store(skip, Ordering::SeqCst);
-}
-
-pub(crate) async fn await_enqueue_hold() {
-    #[cfg(test)]
-    {
-        let barrier = ENQUEUE_HOLD.lock().ok().and_then(|mut hold| hold.take());
-        if let Some((entered, release)) = barrier {
-            entered.notify_one();
-            let result =
-                tokio::time::timeout(std::time::Duration::from_secs(10), release.acquire()).await;
-            if let Ok(Ok(permit)) = result {
-                permit.forget();
-            }
-        }
-    }
-    #[cfg(not(test))]
-    std::future::ready(()).await;
 }
 
 fn wall_clock_ms() -> u64 {

@@ -2,22 +2,24 @@
 // Copyright (c) 2026 Span Brain
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
 use crate::{NotifyHttpClient, NotifyMeshClient, RouterAsyncMeshClient, RouterMeshClient};
 
 #[cfg(test)]
-static NOTIFY_WAKE_CALLS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static NOTIFY_WAKE_CALLS: Cell<u64> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn notify_wake_count() -> u64 {
-    NOTIFY_WAKE_CALLS.load(Ordering::SeqCst)
+    NOTIFY_WAKE_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
 pub(crate) fn reset_notify_wake_count() {
-    NOTIFY_WAKE_CALLS.store(0, Ordering::SeqCst);
+    NOTIFY_WAKE_CALLS.with(|calls| calls.set(0));
 }
 
 const ROUTER_ASYNC_ENDPOINT_ENV: &str = "RAMFLUX_ROUTER_ASYNC_ENDPOINT";
@@ -493,7 +495,7 @@ pub(crate) fn notify_offline_wake(
     envelope: &ramflux_protocol::Envelope,
 ) -> anyhow::Result<()> {
     #[cfg(test)]
-    NOTIFY_WAKE_CALLS.fetch_add(1, Ordering::SeqCst);
+    NOTIFY_WAKE_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
     let encrypted_hint = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::NOTIFICATION_WAKE,
         envelope.encrypted_payload.as_bytes(),
@@ -619,7 +621,9 @@ pub(crate) mod tests {
             mesh: None,
         };
         notify_offline_wake(&client, target_delivery_id, envelope)?;
-        let _ = received.recv_timeout(Duration::from_secs(5));
+        received
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| anyhow::anyhow!("notify wake was not received"))?;
         Ok(())
     }
 
