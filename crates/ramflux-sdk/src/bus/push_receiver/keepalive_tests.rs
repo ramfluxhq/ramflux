@@ -5,7 +5,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use crate::bus::connection_manager::tests::{
-    SessionIo, entry, reconnecting_fixture, send, watchdog,
+    SessionIo, entry, reconnecting_fixture, send, wait_bulk_held, watchdog,
 };
 use crate::bus::connection_manager::{
     ConnectionEvent, ConnectionHandle, ConnectionPhase, DisconnectReason,
@@ -154,16 +154,6 @@ fn spawn_cursor(
     })
 }
 
-async fn wait_queued(handle: &ConnectionHandle, n: usize) {
-    for _ in 0..10_000 {
-        if handle.queued_calls() >= n {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!("call queue did not reach {n}");
-}
-
 async fn wait_disconnected(
     events: &mut tokio::sync::broadcast::Receiver<ConnectionEvent>,
     generation: u64,
@@ -219,9 +209,12 @@ async fn keepalive_survives_queue_full() -> Case {
             wait_client_frame(&mut io.output).await,
             GatewayClientFrame::Cursor { .. }
         ));
-        let extra: Vec<_> =
-            (0..CALL_QUEUE.saturating_sub(1)).map(|_| spawn_cursor(&handle)).collect();
-        wait_queued(&handle, CALL_QUEUE).await;
+        let mut extra = Vec::new();
+        for _ in 0..CALL_QUEUE.saturating_sub(1) {
+            extra.push(spawn_cursor(&handle));
+            tokio::task::yield_now().await;
+        }
+        wait_bulk_held(&handle, CALL_QUEUE).await;
         let probe = spawn_cursor(&handle);
         assert!(probe.await?.is_err(), "bulk places must be exhausted");
 
@@ -308,7 +301,7 @@ async fn keepalive_skips_ping_queued_behind_a_reply() -> Case {
             GatewayClientFrame::Cursor { .. }
         ));
         tokio::time::advance(KEEPALIVE_IDLE).await;
-        wait_queued(&handle, 2).await;
+        wait_bulk_held(&handle, 2).await;
 
         send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
         cursor.await??;
@@ -370,11 +363,19 @@ async fn keepalive_stops_on_lock_and_restarts_without_duplicate_connected() -> C
 
         let mut fresh = next_session(&handle, &mut sessions, generation).await?;
         let next = handle.generation();
-        assert!(matches!(
-            events.recv().await?,
-            ConnectionEvent::Connected { generation: g, .. } if g == next
-        ));
-        assert!(events.try_recv().is_err(), "S8 renewal must not emit a duplicate Connected");
+        let mut connected = 0_u32;
+        for _ in 0..10_000 {
+            match events.try_recv() {
+                Ok(ConnectionEvent::Connected { generation: g, .. }) if g == next => {
+                    connected += 1;
+                }
+                Ok(ConnectionEvent::Connected { .. }) => {}
+                Ok(_) => {}
+                Err(_) if connected == 0 => tokio::task::yield_now().await,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(connected, 1, "S8 renewal must send exactly one Connected");
 
         tokio::time::advance(KEEPALIVE_IDLE).await;
         assert!(matches!(

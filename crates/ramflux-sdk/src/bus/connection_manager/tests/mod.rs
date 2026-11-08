@@ -146,6 +146,20 @@ pub(crate) fn reconnecting_fixture(
     );
     Ok((handle, receive))
 }
+
+pub(crate) async fn wait_bulk_held(handle: &ConnectionHandle, held: usize) {
+    for _ in 0..10_000 {
+        if handle.places.available_permits() == super::CALL_QUEUE.saturating_sub(held) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "bulk places held {}, want {held}",
+        super::CALL_QUEUE.saturating_sub(handle.places.available_permits())
+    );
+}
+
 pub(crate) fn send(
     io: &SessionIo,
     frame: &GatewayServerFrame,
