@@ -5,6 +5,7 @@
 //! selector when the merge deletes the owning message. Archived rows are produced by an earlier
 //! merge, as in production.
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
+use super::erased_capture::classification_guard;
 use super::erased_capture_tests::{current, full};
 use super::erased_input_union_tests::{Pair, expiry, pair};
 use super::stage_tests::{bytes, input, run};
@@ -344,6 +345,8 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
             }
         }
         assert_eq!(wrong, Vec::<&str>::new(), "families without their exact selector");
+        // Every footprint store and kind that the seeded databases carry is classified.
+        classification_guard(db).expect("every footprint store and kind is classified");
         // Exactly the expected tuples: the a2i receipt left nothing behind.
         assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
         let archived: i64 = db.query_row(
@@ -522,6 +525,8 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
             }
         }
         assert_eq!(wrong, Vec::<&str>::new(), "families without their exact selector");
+        // Every footprint store and kind that the seeded databases carry is classified.
+        classification_guard(db).expect("every footprint store and kind is classified");
         assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
         Ok(())
     };
