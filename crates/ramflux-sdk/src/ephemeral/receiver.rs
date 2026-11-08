@@ -1203,6 +1203,56 @@ mod tests {
         );
     }
 
+    fn row_hold_received_deadline_zero_refused() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| {
+            e.envelope_id = "hold-dl-zero".to_owned();
+            e.created_at = 1_002;
+            e.ttl = 1;
+        });
+        let Some(bytes) = complete_frame_bytes(&envelope, 0) else {
+            return;
+        };
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.dedup_len(), 0);
+    }
+
+    fn row_hold_received_deadline_max_refused() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| {
+            e.envelope_id = "hold-dl-max".to_owned();
+            e.created_at = 1_002;
+            e.ttl = 1;
+        });
+        let Some(bytes) = complete_frame_bytes(&envelope, u64::MAX) else {
+            return;
+        };
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.dedup_len(), 0);
+    }
+
+    fn row_hold_received_deadline_match_held() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = hold_envelope();
+        let Some(bytes) = complete_frame_bytes(&envelope, 1_003_000) else {
+            return;
+        };
+        assert!(matches!(admit_bytes(&mut rx, &bytes, 1_000_000, 50_000), ReceiverAdmit::Held(_)));
+        assert_eq!(rx.hold_len(), 1);
+        assert_eq!(rx.occupancy().0, 1);
+        assert_eq!(rx.dedup_len(), 0);
+    }
+
     #[test]
     fn ephemeral_receiver_bounds_and_lock() {
         let mut flags = EphemeralReceiver::new();
@@ -1234,6 +1284,9 @@ mod tests {
         row_received_deadline_zero_refused();
         row_received_deadline_max_refused();
         row_received_deadline_match_pop_returns_verified_d();
+        row_hold_received_deadline_zero_refused();
+        row_hold_received_deadline_max_refused();
+        row_hold_received_deadline_match_held();
     }
 
     fn row_live_duplicate_before_d() {
