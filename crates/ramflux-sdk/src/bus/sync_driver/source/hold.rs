@@ -4,7 +4,7 @@
 //! DORMANT P07 adapter: W0-backed hold admission with joined journal and receipt writes.
 //! P20 supplies the live actor's expected E/C/generation/erasure fence; this adapter has no
 //! network work and never sends a reply or ACK.
-#![allow(dead_code)]
+#![allow(dead_code)] // linked by `bus/tests/receive_hold.rs` until P20 wires the actor.
 
 use ramflux_storage::{
     AccountDb, ReceiveExpectation, ReceiveHold, ReceiveHoldClass, ReceiveHoldJournal,

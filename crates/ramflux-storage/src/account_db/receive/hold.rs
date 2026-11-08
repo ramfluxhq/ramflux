@@ -131,10 +131,11 @@ impl ReceiveTransaction<'_> {
                     return Err(StorageError::Integrity("held eviction did not settle"));
                 }
             }
+            // Topic is the dotted journal form of design `inbox_receive_failure` (shared with P08).
             self.db.insert_journal(
                 &format!(
                     "receive-hold-terminal:{}:{}:{}",
-                    self.target, self.incarnation, row.sequence
+                    self.target, row.incarnation, row.sequence
                 ),
                 "inbox.receive_failure",
                 &serde_json::json!({
@@ -146,10 +147,7 @@ impl ReceiveTransaction<'_> {
                 input.at,
                 None,
             )?;
-            self.db.connection.execute(
-                "DELETE FROM runtime_unrouted WHERE envelope_id=?1",
-                params![row.admission_key],
-            )?;
+            self.delete_retry_and_unrouted_if_unheld(&row.admission_key)?;
             self.db.connection.execute(
                 "DELETE FROM runtime_inbox_policy WHERE envelope_key=?1
                    AND NOT EXISTS(SELECT 1 FROM runtime_inbox_retry WHERE envelope_key=?1)
@@ -359,6 +357,25 @@ impl ReceiveTransaction<'_> {
         }
         Ok(())
     }
+
+    /// Drops retry and unrouted rows for `admission_key` only when no other live work uses it.
+    /// P08 terminal cleanup (`cleanup_settled`) shares this guard.
+    pub(crate) fn delete_retry_and_unrouted_if_unheld(
+        &self,
+        admission_key: &str,
+    ) -> Result<(), StorageError> {
+        self.db.connection.execute(
+            "DELETE FROM runtime_unrouted WHERE envelope_id=?1
+               AND NOT EXISTS(SELECT 1 FROM gateway_receive_work WHERE admission_key=?1)",
+            params![admission_key],
+        )?;
+        self.db.connection.execute(
+            "DELETE FROM runtime_inbox_retry WHERE envelope_key=?1
+               AND NOT EXISTS(SELECT 1 FROM gateway_receive_work WHERE admission_key=?1)",
+            params![admission_key],
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -374,17 +391,26 @@ fn violations<'a>(
     rows: &'a [HeldRow],
     candidate: &'a HeldRow,
 ) -> Option<(Scope, String, ReceiveHoldClass, String)> {
-    let count = rows.len();
-    let bytes = rows.iter().fold(0usize, |sum, row| sum.saturating_add(row.byte_len));
-    if count > HOLD_LIMIT || bytes > HOLD_BYTES {
-        return Some((Scope::Aggregate, String::new(), candidate.class, String::new()));
+    // Narrow scopes first so a full class/source/root evicts only within that pool.
+    if candidate.class == ReceiveHoldClass::Contact {
+        let root_count = rows
+            .iter()
+            .filter(|row| {
+                row.class == ReceiveHoldClass::Contact && row.subject == candidate.subject
+            })
+            .count();
+        if root_count > 1 {
+            return Some((
+                Scope::ContactRoot,
+                String::new(),
+                candidate.class,
+                candidate.subject.clone(),
+            ));
+        }
     }
-    let source_rows = rows.iter().filter(|row| row.source == candidate.source);
-    let (source_count, source_bytes) = source_rows.fold((0usize, 0usize), |(n, b), row| {
-        (n.saturating_add(1), b.saturating_add(row.byte_len))
-    });
-    if source_count > SOURCE_LIMIT || source_bytes > SOURCE_BYTES {
-        return Some((Scope::Source, candidate.source.clone(), candidate.class, String::new()));
+    let class_count = rows.iter().filter(|row| row.class == candidate.class).count();
+    if class_count > candidate.class.limit() {
+        return Some((Scope::Class, String::new(), candidate.class, String::new()));
     }
     if candidate.class == ReceiveHoldClass::Policy {
         let policy_source_count = rows
@@ -407,28 +433,17 @@ fn violations<'a>(
             return Some((Scope::UntrustedPolicy, String::new(), candidate.class, String::new()));
         }
     }
-    let class_rows = rows.iter().filter(|row| row.class == candidate.class);
-    let (class_count, _class_bytes) = class_rows.fold((0usize, 0usize), |(n, b), row| {
+    let source_rows = rows.iter().filter(|row| row.source == candidate.source);
+    let (source_count, source_bytes) = source_rows.fold((0usize, 0usize), |(n, b), row| {
         (n.saturating_add(1), b.saturating_add(row.byte_len))
     });
-    if class_count > candidate.class.limit() {
-        return Some((Scope::Class, String::new(), candidate.class, String::new()));
+    if source_count > SOURCE_LIMIT || source_bytes > SOURCE_BYTES {
+        return Some((Scope::Source, candidate.source.clone(), candidate.class, String::new()));
     }
-    if candidate.class == ReceiveHoldClass::Contact {
-        let root_count = rows
-            .iter()
-            .filter(|row| {
-                row.class == ReceiveHoldClass::Contact && row.subject == candidate.subject
-            })
-            .count();
-        if root_count > 1 {
-            return Some((
-                Scope::ContactRoot,
-                String::new(),
-                candidate.class,
-                candidate.subject.clone(),
-            ));
-        }
+    let count = rows.len();
+    let bytes = rows.iter().fold(0usize, |sum, row| sum.saturating_add(row.byte_len));
+    if count > HOLD_LIMIT || bytes > HOLD_BYTES {
+        return Some((Scope::Aggregate, String::new(), candidate.class, String::new()));
     }
     None
 }

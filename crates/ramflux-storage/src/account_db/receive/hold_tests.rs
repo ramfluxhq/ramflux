@@ -467,14 +467,14 @@ fn hold_source_class_quotas() -> Result<(), StorageError> {
     let result = put_hold(&db, cursor, 257, Class::Policy, Some("root-last/device"), None, 32)?;
     assert!(matches!(
         result,
-        ReceiveHoldResult::Held { evicted } if evicted == vec![1, 129]
+        ReceiveHoldResult::Held { evicted } if evicted == vec![129]
     ));
     let count: i64 = db.connection.query_row(
         "SELECT count(*) FROM gateway_receive_receipt WHERE disposition='held'",
         [],
         |r| r.get(0),
     )?;
-    assert_eq!(count, 255, "both the aggregate and policy-class limits remain satisfied");
+    assert_eq!(count, 256, "a full policy class evicts only within that class");
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -706,6 +706,298 @@ fn staged_hold_has_work_and_receipt() -> Result<(), StorageError> {
         |r| r.get(0),
     )?;
     assert_eq!(pair, 1);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn journal_terminal_keys(db: &AccountDb) -> Result<Vec<String>, StorageError> {
+    let mut query = db.connection.prepare(
+        "SELECT source_key FROM runtime_journal
+         WHERE topic='inbox.receive_failure' ORDER BY source_key",
+    )?;
+    Ok(query.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn set_work_bytes(
+    db: &AccountDb,
+    incarnation: &str,
+    sequence: u64,
+    bytes: i64,
+) -> Result<(), StorageError> {
+    db.connection.execute(
+        "UPDATE gateway_receive_work SET entry_json=zeroblob(?1),byte_len=?1
+         WHERE target_delivery_id='t' AND incarnation_id=?2 AND inbox_seq=?3",
+        params![bytes, incarnation, sequence.to_be_bytes().as_slice()],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn evicted_journal_uses_row_incarnation() -> Result<(), StorageError> {
+    let (root, db) = super::stage_tests::setup("hold-evict-incarnation")?;
+    assert!(matches!(
+        put_hold(&db, 0, 1, Class::Unrouted, Some("old-u/device"), None, 32)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    retire_active_incarnation(&db)?;
+    let mut cursor = 0;
+    for sequence in 1..=65 {
+        put_hold_for(
+            &db,
+            "e2",
+            "new-u",
+            cursor,
+            sequence,
+            Class::Unrouted,
+            Some(&format!("new-u-{sequence}/device")),
+            None,
+            32,
+        )?;
+        cursor = sequence;
+    }
+    let keys = journal_terminal_keys(&db)?;
+    assert_eq!(keys.len(), 2);
+    assert!(keys.contains(&"receive-hold-terminal:t:e:1".to_owned()));
+    assert!(keys.contains(&"receive-hold-terminal:t:e2:1".to_owned()));
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn evict_retired_unrouted_keeps_live_redelivery() -> Result<(), StorageError> {
+    let (root, db) = super::stage_tests::setup("hold-unrouted-redeliver")?;
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "shared", &wire)?;
+    set_verified_source(&db, "shared", "old-src/device")?;
+    assert!(matches!(
+        admit(&db, 0, 1, "shared", Class::Unrouted, None, true)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    db.connection
+        .execute("UPDATE gateway_receive_receipt SET first_seen=0 WHERE incarnation_id='e'", [])?;
+    retire_active_incarnation(&db)?;
+    let live = entry(1, 32);
+    stage_for(&db, "e2", 0, 1, "shared", &live)?;
+    assert!(matches!(
+        admit_for(&db, "e2", 0, 1, "shared", Class::Unrouted, None, true)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    let mut cursor = 1;
+    for sequence in 2u64..=64 {
+        put_hold_for(
+            &db,
+            "e2",
+            "fill",
+            cursor,
+            sequence,
+            Class::Unrouted,
+            Some(&format!("fill-{sequence}/device")),
+            None,
+            32,
+        )?;
+        cursor = sequence;
+    }
+    let unrouted: i64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_unrouted WHERE envelope_id='shared'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(unrouted, 1, "live redelivery keeps the unrouted row");
+    let live_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e2'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(live_work, 1);
+    let old_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(old_work, 0, "retired copy was evicted");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn hold_admission_refuses_each_identity_error() -> Result<(), StorageError> {
+    let (root, db) = super::stage_tests::setup("hold-identity-errors")?;
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "admission-one", &wire)?;
+    let identity = db.receive_transaction(expect_for(&db, "e", 0)?, 1, |tx| {
+        tx.admit_hold(ReceiveHold {
+            sequence: 0,
+            admission_key: "admission-one",
+            class: Class::Unrouted,
+            contact_root: None,
+            unrouted_id: None,
+            journal: None,
+            at: 1,
+        })
+    });
+    assert!(matches!(identity, Err(StorageError::Integrity("receive hold identity missing"))));
+    let empty = db.receive_transaction(expect_for(&db, "e", 0)?, 1, |tx| {
+        tx.admit_hold(ReceiveHold {
+            sequence: 1,
+            admission_key: "",
+            class: Class::Unrouted,
+            contact_root: None,
+            unrouted_id: None,
+            journal: None,
+            at: 1,
+        })
+    });
+    assert!(matches!(empty, Err(StorageError::Integrity("receive hold identity missing"))));
+    let root_missing = db.receive_transaction(expect_for(&db, "e", 0)?, 1, |tx| {
+        tx.admit_hold(ReceiveHold {
+            sequence: 1,
+            admission_key: "admission-one",
+            class: Class::Contact,
+            contact_root: None,
+            unrouted_id: None,
+            journal: None,
+            at: 1,
+        })
+    });
+    assert!(matches!(root_missing, Err(StorageError::Integrity("contact hold root missing"))));
+    let staged = db.receive_transaction(expect_for(&db, "e", 0)?, 1, |tx| {
+        tx.admit_hold(ReceiveHold {
+            sequence: 2,
+            admission_key: "missing",
+            class: Class::Unrouted,
+            contact_root: None,
+            unrouted_id: None,
+            journal: None,
+            at: 1,
+        })
+    });
+    assert!(matches!(staged, Err(StorageError::Integrity("hold requires staged work"))));
+    let key = db.receive_transaction(expect_for(&db, "e", 0)?, 1, |tx| {
+        tx.admit_hold(ReceiveHold {
+            sequence: 1,
+            admission_key: "other-key",
+            class: Class::Unrouted,
+            contact_root: None,
+            unrouted_id: None,
+            journal: None,
+            at: 1,
+        })
+    });
+    assert!(matches!(key, Err(StorageError::Integrity("hold admission key differs from W0"))));
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn hold_pauses_when_no_evictable_candidate() -> Result<(), StorageError> {
+    let (root, db) = super::stage_tests::setup("hold-paused")?;
+    for sequence in 2u64..=65 {
+        let seq = sequence.to_be_bytes();
+        let key = format!("seed-{sequence}");
+        let wire = entry(sequence, 32);
+        db.connection.execute(
+            "INSERT INTO gateway_receive_receipt VALUES('t','e',?1,'held',604801,?2)",
+            params![seq.as_slice(), i64::try_from(sequence).unwrap_or(i64::MAX)],
+        )?;
+        db.connection.execute(
+            "INSERT INTO gateway_receive_work VALUES('t','e',?1,?2,?3,?4)",
+            params![seq.as_slice(), &wire, key, i64::try_from(wire.len()).unwrap_or(i64::MAX)],
+        )?;
+        db.connection.execute(
+            "INSERT INTO runtime_unrouted VALUES(?1,?2,?3,?4)",
+            params![key, sequence, &wire, i64::try_from(sequence).unwrap_or(i64::MAX)],
+        )?;
+    }
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "admission-one", &wire)?;
+    let w0 = snap(&db)?;
+    let paused = admit(&db, 0, 1, "admission-one", Class::Unrouted, None, true)?;
+    assert_eq!(paused, ReceiveHoldResult::Paused);
+    assert_eq!(snap(&db)?, w0, "Paused leaves staged W0 unchanged");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn hold_byte_boundaries_are_inclusive() -> Result<(), StorageError> {
+    const SOURCE: i64 = 4 * 1024 * 1024;
+    const AGGREGATE: i64 = 16 * 1024 * 1024;
+    let (root, db) = super::stage_tests::setup("hold-source-bytes")?;
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "src-exact", &wire)?;
+    set_verified_source(&db, "src-exact", "root-src/device")?;
+    set_work_bytes(&db, "e", 1, SOURCE)?;
+    assert!(matches!(
+        admit(&db, 0, 1, "src-exact", Class::Policy, None, false)?,
+        ReceiveHoldResult::Held { .. }
+    ));
+    let bytes: i64 = db.connection.query_row(
+        "SELECT coalesce(sum(w.byte_len),0) FROM gateway_receive_work w
+         JOIN gateway_receive_receipt r USING(target_delivery_id,incarnation_id,inbox_seq)
+         WHERE r.disposition='held'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bytes, SOURCE);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+
+    let (root, db) = super::stage_tests::setup("hold-source-over")?;
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "src-over", &wire)?;
+    set_verified_source(&db, "src-over", "root-src/device")?;
+    set_work_bytes(&db, "e", 1, SOURCE + 1)?;
+    let w0 = snap(&db)?;
+    assert_eq!(
+        admit(&db, 0, 1, "src-over", Class::Policy, None, false)?,
+        ReceiveHoldResult::Paused
+    );
+    assert_eq!(snap(&db)?, w0);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+
+    let (root, db) = super::stage_tests::setup("hold-aggregate-bytes-exact")?;
+    let mut cursor = 0;
+    for sequence in 1..=4 {
+        let key = format!("agg-{sequence}");
+        let source = format!("root-agg-{sequence}/device");
+        let wire = entry(sequence, 32);
+        stage(&db, cursor, sequence, &key, &wire)?;
+        set_verified_source(&db, &key, &source)?;
+        set_work_bytes(&db, "e", sequence, SOURCE)?;
+        assert!(matches!(
+            admit(&db, cursor, sequence, &key, Class::Policy, None, false)?,
+            ReceiveHoldResult::Held { .. }
+        ));
+        cursor = sequence;
+    }
+    let total: i64 = db.connection.query_row(
+        "SELECT coalesce(sum(w.byte_len),0) FROM gateway_receive_work w
+         JOIN gateway_receive_receipt r USING(target_delivery_id,incarnation_id,inbox_seq)
+         WHERE r.disposition='held'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(total, AGGREGATE);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+
+    let (root, db) = super::stage_tests::setup("hold-aggregate-over")?;
+    let wire = entry(1, 32);
+    stage(&db, 0, 1, "agg-over", &wire)?;
+    set_verified_source(&db, "agg-over", "root-huge/device")?;
+    set_work_bytes(&db, "e", 1, AGGREGATE + 1)?;
+    let w0 = snap(&db)?;
+    assert_eq!(
+        admit(&db, 0, 1, "agg-over", Class::Policy, None, false)?,
+        ReceiveHoldResult::Paused
+    );
+    assert_eq!(snap(&db)?, w0);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

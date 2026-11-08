@@ -910,6 +910,9 @@ mod receive_w0;
 #[path = "receive_ws.rs"]
 mod receive_ws;
 
+#[path = "receive_hold.rs"]
+mod receive_hold;
+
 #[path = "receive_history.rs"]
 mod receive_history;
 
