@@ -1232,6 +1232,7 @@ pub(crate) mod tests {
         let (addr_tx, addr_rx) = mpsc::channel::<Result<String, String>>();
         std::thread::Builder::new().name("federation-compio-ijson-test".into()).spawn(
             move || {
+                let error_tx = addr_tx.clone();
                 let outcome = (|| -> Result<(), String> {
                     let reactor = compio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                     reactor.block_on(async move {
@@ -1261,7 +1262,7 @@ pub(crate) mod tests {
                     })
                 })();
                 if let Err(error) = outcome {
-                    let _sent = addr_tx.send(Err(error));
+                    let _sent = error_tx.send(Err(error));
                 }
             },
         )?;
