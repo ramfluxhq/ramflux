@@ -11,7 +11,10 @@ mod account_work;
 mod background_children;
 mod metadata_child;
 pub(crate) use account_work::AccountWork;
-#[cfg(test)]
+#[cfg_attr(
+    not(test),
+    allow(unused_imports, reason = "W0 on main and bus tests import this path")
+)]
 pub(crate) use account_work::ReceiveTurn;
 mod client;
 pub(crate) use client::SessionClient;
