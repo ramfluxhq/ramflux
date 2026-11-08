@@ -174,15 +174,46 @@ mod tests {
         db.complete_operation("op-delete", &delete_body)?;
         db.complete_operation("idem-delete", &delete_body)?;
         db.complete_operation("send-race", &json!({"message_id":"m","preview":"send-body"}))?;
-        let fenced = json!({"message_id":"m","deleted":true});
-        for (id, fingerprint, expected) in [
-            ("op-delete", "fp-op", delete_body.clone()),
-            ("idem-delete", "fp-idem", delete_body),
-            ("send-race", "fp-send", fenced),
-        ] {
+        for (id, fingerprint) in [("op-delete", "fp-op"), ("idem-delete", "fp-idem")] {
             let replay = db.reserve_operation(id, fingerprint)?;
-            assert_eq!(replay, Some(expected), "{id}");
+            assert_eq!(replay, Some(delete_body.clone()), "{id}");
         }
+        assert!(
+            matches!(db.reserve_operation("send-race", "fp-send"), Err(StorageError::ObjectErased)),
+            "send-race replay must be ObjectErased"
+        );
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn keyed_expire_replays_nested_tombstones_exactly() -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("keyed-expire-replay")?;
+        db.send_direct_message("thread", "m1", "peer", b"private-content")?;
+        db.send_direct_message("thread", "m2", "peer", b"private-content")?;
+        db.reserve_operation("op-expire", "fp-expire")?;
+        db.delete_direct_message("thread", "m1", "local", "delete")?;
+        db.delete_direct_message("thread", "m2", "local", "delete")?;
+        let expire_body = json!({
+            "tombstones": [
+                {
+                    "tombstone_id": "tombstone:thread:m1",
+                    "conversation_id": "thread",
+                    "message_id": "m1",
+                    "delete_scope": "local"
+                },
+                {
+                    "tombstone_id": "tombstone:thread:m2",
+                    "conversation_id": "thread",
+                    "message_id": "m2",
+                    "delete_scope": "local"
+                }
+            ]
+        });
+        db.complete_operation("op-expire", &expire_body)?;
+        let replay = db.reserve_operation("op-expire", "fp-expire")?;
+        assert_eq!(replay, Some(expire_body));
         drop(db);
         std::fs::remove_dir_all(root)?;
         Ok(())

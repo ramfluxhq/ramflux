@@ -117,7 +117,7 @@ const BODY: &str = r"
  DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('prepared','history_container'));
  DELETE FROM message_copy_binding WHERE copy_id IN (SELECT kind||':'||locator FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('prepared','history_container'));
  DELETE FROM message_footprint WHERE kind IN ('prepared','history_container','actor') AND locator IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('prepared','history_container'));
- UPDATE runtime_operation SET response_json=CAST(json_object('message_id',NEW.message_id,'deleted',json('true')) AS TEXT) WHERE operation_id IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='operation') AND json_extract(response_json,'$.tombstone_id') IS NULL;
+ UPDATE runtime_operation SET response_json=CAST(json_object('object_erased',json('true')) AS TEXT) WHERE operation_id IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='operation') AND NOT EXISTS(SELECT 1 FROM json_tree(response_json) WHERE key='tombstone_id');
  DELETE FROM message_copy_binding WHERE message_id=NEW.message_id;
  DELETE FROM raw_inner_copy WHERE copy_id IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='raw_inner');
  DELETE FROM raw_inner_owner WHERE owner_id=NEW.message_id;
