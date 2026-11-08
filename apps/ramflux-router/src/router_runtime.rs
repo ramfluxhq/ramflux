@@ -23,6 +23,16 @@ pub(crate) struct TokioRouterRuntime {
     custody: std::sync::OnceLock<Arc<ramflux_node_core::CustodyService>>,
     migration_drain: std::sync::OnceLock<crate::migration_drain::MigrationDrain>,
     migration_courier: std::sync::OnceLock<crate::migration_courier::MigrationCourier>,
+    /// Fixture-scoped, always-active ingress observation; compiled only into unit tests.
+    #[cfg(test)]
+    ingress_probe: IngressProbe,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct IngressProbe {
+    submit_calls: std::sync::atomic::AtomicUsize,
+    dispatches: std::sync::atomic::AtomicUsize,
 }
 
 impl TokioRouterRuntime {
@@ -64,6 +74,8 @@ impl TokioRouterRuntime {
             custody: std::sync::OnceLock::new(),
             migration_courier: std::sync::OnceLock::new(),
             migration_drain: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            ingress_probe: IngressProbe::default(),
         }
     }
 }
@@ -111,6 +123,43 @@ impl RouterHandle {
     pub(crate) fn state(&self) -> &ramflux_node_core::RouterCore {
         match self {
             Self::Tokio(runtime) => runtime.state.as_ref(),
+        }
+    }
+
+    #[cfg(test)]
+    fn count_submit_call(&self) {
+        match self {
+            Self::Tokio(runtime) => {
+                runtime
+                    .ingress_probe
+                    .submit_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn count_dispatch(&self) {
+        match self {
+            Self::Tokio(runtime) => {
+                runtime.ingress_probe.dispatches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Test-only: `(router submit calls, dispatches into the router engine)` seen by this handle.
+    #[cfg(test)]
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "compio-mesh")),
+        allow(dead_code, reason = "read only by the Linux compio live-path test")
+    )]
+    pub(crate) fn ingress_probe(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        match self {
+            Self::Tokio(runtime) => (
+                runtime.ingress_probe.submit_calls.load(SeqCst),
+                runtime.ingress_probe.dispatches.load(SeqCst),
+            ),
         }
     }
 
@@ -187,9 +236,13 @@ impl RouterHandle {
         total_started: Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        #[cfg(test)]
+        self.count_submit_call();
         if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
             return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
         }
+        #[cfg(test)]
+        self.count_dispatch();
         match self {
             Self::Tokio(runtime) => crate::router_engine::submit_envelope_mesh(
                 runtime.state.as_ref(),
@@ -212,9 +265,13 @@ impl RouterHandle {
         total_started: Instant,
         origin: ramflux_node_core::RouterEnvelopeOrigin,
     ) -> anyhow::Result<ramflux_node_core::SessionPushSubmitResponse> {
+        #[cfg(test)]
+        self.count_submit_call();
         if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
             return Ok(crate::durable_mode::rejected_security_mesh(&envelope));
         }
+        #[cfg(test)]
+        self.count_dispatch();
         match self {
             Self::Tokio(runtime) => {
                 crate::router_engine::submit_envelope_mesh_async(
