@@ -111,6 +111,7 @@ fn pairing_channel_transfer_bounds_and_contexts() -> TestResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keep collection maxima and isolated over-bound rows together.
 fn transfer_payload_bounds(all: &Value) -> TestResult {
     let full = independent::<TransferPayload>(all, "TransferPayload")?;
     let typed = decode_value::<TransferPayload>(&full)?;
@@ -121,6 +122,15 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
     assert_eq!(typed.optional_data_keys.len(), 32);
     assert!(typed.group_restriction_summary.iter().all(|v| v.restriction_hashes.len() == 8));
     assert!(typed.group_restriction_summary.iter().all(|v| v.revocation_hashes.len() == 8));
+    for (path, limit) in [
+        ("/pending_invitations/0", 512),
+        ("/journal/0", 512),
+        ("/group_restriction_summary/0", 2048),
+        ("/pending_erasure/0", 1024),
+        ("/optional_data_keys/0", 1024),
+    ] {
+        assert!(bytes(full.pointer(path).ok_or("element")?)?.len() < limit, "{path}");
+    }
 
     for (path, value, error) in [
         (
@@ -191,6 +201,27 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
         json!(format!("{}x", full["optional_data_keys"][31]["key_id"].as_str().ok_or("key id")?)),
         "key_id",
     )?;
+    field::<TransferPayload>(
+        &full,
+        "/optional_data_keys/0/purpose",
+        json!("metadata"),
+        "key.purpose",
+    )?;
+    field::<TransferPayload>(
+        &full,
+        "/pending_erasure/255/device_id",
+        json!(format!(
+            "{}x",
+            full["pending_erasure"][255]["device_id"].as_str().ok_or("device id")?
+        )),
+        "ref.device_id",
+    )?;
+    invalid::<TransferPayload>(
+        &full,
+        "/pending_erasure/255/device_epoch",
+        json!(MAX_SAFE_JSON_INTEGER + 1),
+        WireError::Json,
+    )?;
     let mut hashes = full["group_restriction_summary"][0]["restriction_hashes"]
         .as_array()
         .ok_or("restriction hashes")?
@@ -201,6 +232,18 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
         &full,
         "/group_restriction_summary/0/restriction_hashes",
         json!(hashes),
+        "hashes",
+    )?;
+    let mut revocations = full["group_restriction_summary"][0]["revocation_hashes"]
+        .as_array()
+        .ok_or("revocation hashes")?
+        .clone();
+    revocations.push(json!(encode_base64url([250; 32])));
+    revocations.sort_by_key(Value::to_string);
+    field::<TransferPayload>(
+        &full,
+        "/group_restriction_summary/0/revocation_hashes",
+        json!(revocations),
         "hashes",
     )?;
     assert!(bytes(&full)?.len() < TransferPayload::LIMIT);
@@ -615,6 +658,7 @@ fn channel_contexts(all: &Value) -> TestResult {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keeps codec-level and frozen-context preservation rows adjacent.
 fn preservation_contexts(all: &Value) -> TestResult {
     let fixture_values = fixture()?;
     let source = &fixture_values["transcript"];
@@ -703,7 +747,24 @@ fn preservation_contexts(all: &Value) -> TestResult {
     decode_value::<PreservationBody>(&body)?;
     let mut maximum = body.clone();
     maximum["expires_at"] = json!(MAX_SAFE_JSON_INTEGER);
+    maximum["destination_ref"]["device_id"] = json!("x".repeat(128));
+    maximum["destination_ref"]["device_epoch"] = json!(MAX_SAFE_JSON_INTEGER);
     decode_value::<PreservationBody>(&maximum)?;
+    field::<PreservationBody>(
+        &maximum,
+        "/destination_ref/device_id",
+        json!("x".repeat(129)),
+        "ref.device_id",
+    )?;
+    invalid::<PreservationBody>(
+        &maximum,
+        "/destination_ref/device_epoch",
+        json!(MAX_SAFE_JSON_INTEGER + 1),
+        WireError::Json,
+    )?;
+    for key in ["transfer_id", "transcript_hash", "old_record_hash", "new_record_hash"] {
+        field::<PreservationBody>(&body, &format!("/{key}"), json!("bad"), key)?;
+    }
     field::<PreservationBody>(&body, "/recipient_mode", json!("fresh"), "recipient_mode")?;
     field::<PreservationBody>(&body, "/policy", json!("discard"), "policy")?;
     invalid::<PreservationBody>(
@@ -718,6 +779,37 @@ fn preservation_contexts(all: &Value) -> TestResult {
 
 #[allow(clippy::too_many_lines)] // Keep independent envelope-bound and context cases together.
 fn binding_and_hpke_contexts(all: &Value) -> TestResult {
+    let maximum = independent::<HpkeEnvelope>(all, "HpkeEnvelopeMax")?;
+    assert_eq!(bytes(&maximum)?.len(), HpkeEnvelope::LIMIT);
+    let maximum_binding = maximum["sender_binding"]["body"].clone();
+    let maximum_binding_typed = decode_value::<TransferBinding>(&maximum_binding)?;
+    assert_eq!(maximum_binding_typed.sender_device_ref.device_id.len(), 128);
+    assert_eq!(maximum_binding_typed.sender_device_ref.device_epoch, MAX_SAFE_JSON_INTEGER);
+    for (path, error) in [
+        ("/transfer_id", "transfer_id"),
+        ("/transcript_hash", "transcript_hash"),
+        ("/current_record_hash", "current_record_hash"),
+        ("/sender_hpke_key", "sender_hpke_key"),
+        ("/recipient_hpke_key", "recipient_hpke_key"),
+    ] {
+        field::<TransferBinding>(&maximum_binding, path, json!("bad"), error)?;
+    }
+    field::<TransferBinding>(
+        &maximum_binding,
+        "/sender_device_ref/device_id",
+        json!("x".repeat(129)),
+        "ref.device_id",
+    )?;
+    field::<TransferBinding>(
+        &maximum_binding,
+        "/sender_device_ref/device_epoch",
+        json!(0),
+        "ref.device_epoch",
+    )?;
+    let mut one_over = bytes(&maximum)?;
+    one_over.push(b' ');
+    assert_eq!(HpkeEnvelope::from_wire_bytes(&one_over).err(), Some(WireError::Size));
+
     let fixture_values = fixture()?;
     let mut source = fixture_values["transcript"].clone();
     source["initiator"]["common"]["expires_at"] = json!(MAX_SAFE_JSON_INTEGER - 1);
