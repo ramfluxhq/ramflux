@@ -340,11 +340,9 @@ impl PendingSas {
         if computed != expected {
             return Err(CryptoError::Pairing("commitment_mismatch"));
         }
-        let mut ikm = self.diffie_hellman_ikm(peer)?;
+        let ikm = Zeroizing::new(self.diffie_hellman_ikm(peer)?);
         let transcript_hash = self.transcript_hash_for(peer)?;
-        let established = derived_session(self.role, transcript_hash, ikm, self.secrets.salt)?;
-        ikm.zeroize();
-        Ok(established)
+        derived_session(self.role, transcript_hash, ikm, Zeroizing::new(self.secrets.salt))
     }
 
     fn diffie_hellman_ikm(&self, peer: &RoleContext) -> Result<[u8; 32], CryptoError> {
@@ -402,13 +400,16 @@ impl EstablishedSas {
     /// Bind the locally displayed transcript hash. A false match consumes the ceremony.
     ///
     /// # Errors
-    /// Rejects a TH mismatch, a false comparison, or a wiped session.
+    /// Rejects a repeat confirmation, a TH mismatch, a false comparison, or a wiped session.
     pub fn confirm_local(
         &mut self,
         displayed_hash: &[u8; 32],
         matches: bool,
     ) -> Result<[u8; 32], CryptoError> {
         self.require_live()?;
+        if self.local_confirmed {
+            return Err(CryptoError::Pairing("already_confirmed"));
+        }
         if displayed_hash != &self.transcript_hash {
             return self.fail("transcript_hash");
         }
@@ -424,9 +425,12 @@ impl EstablishedSas {
     /// Accept the peer role MAC. A boolean `confirmed` flag is not an input.
     ///
     /// # Errors
-    /// Rejects a MAC that does not match the peer confirm key and TH.
+    /// Rejects a repeat confirmation, a MAC that does not match the peer confirm key and TH, or a wiped session.
     pub fn accept_peer_mac(&mut self, mac: &[u8; 32]) -> Result<(), CryptoError> {
         self.require_live()?;
+        if self.peer_confirmed {
+            return Err(CryptoError::Pairing("already_confirmed"));
+        }
         let mut verifier = <HmacSha256 as hmac::KeyInit>::new_from_slice(self.peer_confirm_key())
             .map_err(|_| CryptoError::HmacFailed)?;
         verifier.update(&self.transcript_hash);
@@ -567,11 +571,13 @@ fn sas_emoji(index: u8) -> Result<SasEmoji, CryptoError> {
 fn derived_session(
     role: PairingRole,
     transcript_hash: [u8; 32],
-    mut shared: [u8; 32],
-    mut salt: [u8; 32],
+    shared: Zeroizing<[u8; 32]>,
+    salt: Zeroizing<[u8; 32]>,
 ) -> Result<EstablishedSas, CryptoError> {
-    let mut secrets = PairingSecrets::pending([0; 32], salt);
-    secrets.shared = shared;
+    let mut secrets = PairingSecrets::pending([0; 32], *salt);
+    secrets.shared = *shared;
+    drop(shared);
+    drop(salt);
     expand(
         &secrets.shared,
         &transcript_hash,
@@ -602,8 +608,6 @@ fn derived_session(
     sas_bytes.zeroize();
     secrets.shared.zeroize();
     secrets.salt.zeroize();
-    shared.zeroize();
-    salt.zeroize();
     Ok(EstablishedSas {
         role,
         dead: false,

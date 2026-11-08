@@ -251,6 +251,7 @@ fn pairing_sas_transcript_role_and_human_confirmation() -> Result {
     independent_derivation()?;
     pin_independent_emoji_table();
     emoji_index_out_of_range()?;
+    refuse_repeat_confirmation()?;
     Ok(())
 }
 
@@ -568,6 +569,22 @@ fn emoji_index_out_of_range() -> Result {
     expect_pairing(emoji_from_indices([0, 0, 0, 0, 0, 0, 255]).map(|_| ()), "emoji_index")
 }
 
+fn refuse_repeat_confirmation() -> Result {
+    let (mut initiator, mut responder) = confirmed()?;
+    let th = initiator.transcript_hash();
+    expect_pairing(initiator.confirm_local(&th, true).map(|_| ()), "already_confirmed")?;
+    let mut forged =
+        Hmac::<Sha256>::new_from_slice(&[0_u8; 32]).map_err(|_| CryptoError::HmacFailed)?;
+    forged.update(&th);
+    let forged_mac: [u8; 32] = forged.finalize().into_bytes().into();
+    expect_pairing(initiator.accept_peer_mac(&forged_mac), "already_confirmed")?;
+    expect_pairing(responder.accept_peer_mac(&forged_mac), "already_confirmed")?;
+    let (counter, ciphertext) = initiator.seal(b"still-live")?;
+    let opened = responder.open(counter, &ciphertext)?;
+    assert_eq!(&opened[..], b"still-live");
+    Ok(())
+}
+
 #[test]
 fn pairing_owned_secret_cleanup_all_exits() -> Result {
     let _ = take_pairing_secret_cleanups();
@@ -609,6 +626,9 @@ fn pairing_owned_secret_cleanup_all_exits() -> Result {
     assert_wiped_bytes();
     channel_aead_exit()?;
     assert_eq!(take_pairing_secret_cleanups(), 1, "channel_aead");
+    assert_wiped_bytes();
+    transcript_error_after_dh_exit()?;
+    assert_eq!(take_pairing_secret_cleanups(), 1, "common_binding");
     assert_wiped_bytes();
     Ok(())
 }
@@ -727,4 +747,15 @@ fn channel_aead_exit() -> Result {
     expect_pairing(responder.open(0, b"not-aead").map(|_| ()), "channel_aead")?;
     assert!(responder.secrets_are_cleared());
     Ok(())
+}
+
+fn transcript_error_after_dh_exit() -> Result {
+    let transcript = bound_transcript()?;
+    let mut initiator =
+        pending(PairingRole::Initiator, &transcript.initiator, &INIT_SECRET, &INIT_SALT)?;
+    let mut peer = transcript.responder.clone();
+    peer.common.invitation_id = encode_base64url([31; 32]);
+    let frozen = sha256(&context_commitment_preimage(&peer, &RESP_SALT)?);
+    initiator.store_peer_commitment(PairingRole::Responder, frozen)?;
+    expect_pairing(initiator.establish(&peer, &RESP_SALT).map(|_| ()), "common_binding")
 }
