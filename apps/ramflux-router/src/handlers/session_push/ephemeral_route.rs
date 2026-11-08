@@ -401,17 +401,33 @@ fn ephemeral_deadline() -> TestResult {
         live,
         EphemeralRouteResult::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
     );
+    let replayed = router.state().route_ephemeral(&envelope, expires, expires.saturating_sub(1));
+    assert_eq!(replayed, EphemeralRouteResult::Dropped(EphemeralDropReason::Replayed));
     let at_deadline = router.state().route_ephemeral(&envelope, expires, expires);
     assert_eq!(at_deadline, EphemeralRouteResult::Dropped(EphemeralDropReason::Expired));
-    let mismatch = router.state().route_ephemeral(&envelope, expires.saturating_add(1), now_ms());
+    let mismatch_env = signed_ephemeral("deadline-mm", TARGET)?;
+    let mismatch_expires = computed_expires(&mismatch_env, now_ms())?;
+    let mismatch =
+        router.state().route_ephemeral(&mismatch_env, mismatch_expires.saturating_add(1), now_ms());
     assert_eq!(mismatch, EphemeralRouteResult::DeadlineMismatch);
-    let http = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let http_env = signed_ephemeral("deadline-http", TARGET)?;
+    let http_expires = computed_expires(&http_env, now_ms())?;
+    let http = observe_post(&router, &path, &request_body(&http_env, http_expires)?)?;
     assert_eq!(
         http,
         EphemeralRouteResponse::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
     );
-    let http_mismatch =
-        observe_post(&router, &path, &request_body(&envelope, expires.saturating_add(1))?)?;
+    let http_replayed = observe_post(&router, &path, &request_body(&http_env, http_expires)?)?;
+    assert_eq!(
+        http_replayed,
+        EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Replayed }
+    );
+    assert_no_dispatch(&http_replayed);
+    let http_mismatch = observe_post(
+        &router,
+        &path,
+        &request_body(&mismatch_env, mismatch_expires.saturating_add(1))?,
+    )?;
     assert_eq!(
         http_mismatch,
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid }
