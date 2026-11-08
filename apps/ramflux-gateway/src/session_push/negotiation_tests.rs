@@ -145,15 +145,9 @@ async fn session_push_capability_negotiation() -> anyhow::Result<()> {
     assert_eq!(registration(&mut fixture, true, false).await?, None);
     Ok(())
 }
-async fn advance(by: Duration) {
-    tokio::time::pause();
-    tokio::time::advance(by + Duration::from_millis(1)).await;
-    tokio::time::resume();
-}
 #[tokio::test]
 async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
     assert_eq!(DISCOVERY_INTERVAL, Duration::from_secs(60));
-    let retry_interval = Duration::from_secs(1);
     for (label, status, body) in [
         ("push-missing-cap", 404, json!({})),
         ("push-invalid-cap", 200, json!({"capabilities":[7]})),
@@ -161,29 +155,17 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
     ] {
         let mut fixture = Fixture::new(label)?;
         fixture.context.hub.readiness.ready.store(true, Ordering::Release);
-        let probe_timeout = Duration::from_millis(100);
-        if status == 404 {
-            fixture.context.hub.readiness.start_with_interval(
-                &fixture.context.router,
-                retry_interval,
-                probe_timeout,
-                None,
-                None,
-            );
-        } else {
-            fixture.context.hub.readiness.start_with_interval(
-                &fixture.context.router,
-                DISCOVERY_INTERVAL,
-                probe_timeout,
-                None,
-                None,
-            );
-        }
+        let clock = DiscoveryClock::new();
+        fixture.context.hub.readiness.set_discovery_clock(clock.clone());
+        fixture.context.hub.readiness.start_with_interval(
+            &fixture.context.router,
+            DISCOVERY_INTERVAL,
+            Duration::from_millis(100),
+            None,
+            None,
+        );
         let req = fixture.next().await?;
         if body.is_null() {
-            // Keep the request alive; advance the clock past the injected discovery deadline.
-            advance(probe_timeout).await;
-            ready(&fixture, false).await?;
             drop(req);
         } else {
             req.respond.send((status, body)).map_err(|_| Retired)?;
@@ -191,7 +173,12 @@ async fn capability_failures_and_sixty_second_retry() -> anyhow::Result<()> {
         ready(&fixture, false).await?;
         assert_eq!(registration(&mut fixture, true, false).await?, None);
         if status == 404 {
-            advance(retry_interval).await;
+            clock.advance(Duration::from_secs(59));
+            assert!(
+                fixture.requests.try_recv().is_err(),
+                "retry must not fire before 60s of test time"
+            );
+            clock.advance(Duration::from_secs(1));
             let retry = tokio::time::timeout(Duration::from_secs(10), fixture.requests.recv())
                 .await?
                 .ok_or(Retired)?;

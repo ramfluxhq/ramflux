@@ -42,12 +42,46 @@ async fn bounded<T>(
 }
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
 const DISCOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct DiscoveryClock {
+    now_ms: Arc<tokio::sync::watch::Sender<u64>>,
+}
+
+#[cfg(test)]
+impl DiscoveryClock {
+    pub(crate) fn new() -> Self {
+        let (now_ms, _) = tokio::sync::watch::channel(0);
+        Self { now_ms: Arc::new(now_ms) }
+    }
+
+    pub(crate) fn advance(&self, by: Duration) {
+        let ms = u64::try_from(by.as_millis()).unwrap_or(u64::MAX);
+        self.now_ms.send_modify(|now| *now = now.saturating_add(ms));
+    }
+
+    fn now_ms(&self) -> u64 {
+        *self.now_ms.borrow()
+    }
+
+    async fn wait_until(&self, deadline: u64) {
+        let mut rx = self.now_ms.subscribe();
+        while *rx.borrow() < deadline {
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Readiness {
     started: AtomicBool,
     ready: AtomicBool,
     ephemeral: AtomicBool,
     asserted_boot: Mutex<Option<String>>,
+    #[cfg(test)]
+    clock: Mutex<Option<DiscoveryClock>>,
 }
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct NegotiatedBinding {
@@ -86,6 +120,11 @@ impl Readiness {
             Some(gateway_id.to_owned()),
         );
     }
+    #[cfg(test)]
+    pub(crate) fn set_discovery_clock(&self, clock: DiscoveryClock) {
+        *self.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clock);
+    }
+
     pub(crate) fn start_with_interval(
         self: &Arc<Self>,
         router: &RouterMeshClient,
@@ -99,10 +138,26 @@ impl Readiness {
         }
         let weak = Arc::downgrade(self);
         let router = router.clone();
+        #[cfg(test)]
+        let clock = self.clock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            #[cfg(test)]
+            let mut next_tick_ms = 0u64;
             loop {
+                #[cfg(test)]
+                {
+                    if let Some(ref clock) = clock {
+                        clock.wait_until(next_tick_ms).await;
+                        next_tick_ms = clock
+                            .now_ms()
+                            .saturating_add(u64::try_from(period.as_millis()).unwrap_or(u64::MAX));
+                    } else {
+                        interval.tick().await;
+                    }
+                }
+                #[cfg(not(test))]
                 interval.tick().await;
                 if weak.strong_count() == 0 {
                     return;
