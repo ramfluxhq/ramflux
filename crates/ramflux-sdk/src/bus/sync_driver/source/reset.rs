@@ -57,4 +57,14 @@ impl SourceReset<'_> {
     ) -> Result<ReceiveIssued, SdkError> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.observe_issued(issued))?)
     }
+
+    /// Retired-fence pause diagnostic, read by recovery.
+    pub(crate) fn pause_reason(&self, db: &AccountDb) -> Result<Option<String>, SdkError> {
+        Ok(db.receive_pause(self.expected.target)?)
+    }
+
+    /// Recovery clears the retired-fence pause.
+    pub(crate) fn clear_pause(&self, db: &AccountDb) -> Result<(), SdkError> {
+        Ok(db.write_transaction(|| db.clear_receive_pause(self.expected.target))?)
+    }
 }
