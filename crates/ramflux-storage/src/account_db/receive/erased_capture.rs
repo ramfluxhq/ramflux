@@ -165,10 +165,11 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     // Writers `event_store.rs:176`, `group_pending.rs:294` and `receive/stage.rs:170`: projection
     // name, version, a last event id and a checkpoint hash; no envelope and no tuple fields.
     "projection_checkpoint",
-    // Legacy transport stores with no production writer: `raw_envelope_log` keeps only
-    // source_device_id and payload_hash (no principal, signing key or timestamps, so no tuple
-    // can be formed) and `outbox_queue.encrypted_envelope` is outbound; `message_projection`
-    // keeps body_cipher and ids.
+    // Legacy transport stores with no production writer: `raw_envelope_log` keeps
+    // `source_device_id`, `payload_hash` and the sealed `encrypted_payload` blob (not a JSON
+    // envelope, and no principal, signing key or timestamps, so no tuple can be formed);
+    // `outbox_queue.encrypted_envelope` is outbound; `message_projection` keeps `body_cipher`
+    // and ids.
     "raw_envelope_log",
     "outbox_queue",
     "message_projection",
@@ -188,8 +189,10 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     "group_sender_key_counter_seen",
     "root_group_sender_key_counter_seen",
     // The projection itself: writers `messages.rs:77,107` and `deleted_messages.rs:297,456` store
-    // the sender principal, the decrypted local body and typed `MessageMetadata`; the device,
-    // signing key and payload hash are never stored, so no tuple can be formed.
+    // the sender principal, `encrypted_body` and typed `MessageMetadata`, whose optional
+    // franking report carries the message header, ciphertext and a device-id hash. None of
+    // them is a transport envelope: the six tuple fields never sit at the fixed envelope paths
+    // (`$`, `$.envelope`, `$.entry.envelope`) that capture reads, so no tuple can be formed.
     "direct_message_projection",
     // Writers `journal/mod.rs:198` and `surface.rs:30`: the locally rendered message body.
     "runtime_message_content",
