@@ -85,7 +85,7 @@ impl AccountDb {
         self.write_transaction(|| self.insert_journal(source, topic, body, at, subject))
     }
 
-    pub(super) fn insert_journal(
+    pub(crate) fn insert_journal(
         &self,
         source: &str,
         topic: &str,

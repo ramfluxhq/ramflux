@@ -11,6 +11,7 @@ mod group;
 mod history;
 pub(crate) mod hold;
 mod native;
+pub(crate) mod reset;
 pub(crate) mod w0;
 pub(crate) mod ws;
 use crate::prelude::*;

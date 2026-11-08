@@ -8,7 +8,8 @@
 //! Contract: WS is indexed local redrive below C. A terminal event, intent and cleanup share
 //! one transaction, or the hold is preserved; C never moves. Above-C settlement delegates to
 //! ordered W2 (`cover`). A retired incarnation is local cleanup of any sequence (no ACK
-//! intent). Cover, stage and the source gate refuse a retired E. Compat U stays live.
+//! intent). Cover and stage refuse a retired E; source gate and bind redrive
+//! retained work. Compat U stays live.
 #![allow(dead_code)]
 
 use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveSettle, ReceiveSettleResult};

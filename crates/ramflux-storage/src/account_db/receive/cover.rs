@@ -62,6 +62,7 @@ impl ReceiveTransaction<'_> {
     pub fn cover(&self, input: ReceiveCover<'_>) -> Result<ReceiveCoverResult, StorageError> {
         self.require_writer()?;
         self.refuse_retired()?;
+        self.refuse_frozen()?;
         let gaps = merge_gaps(input.gaps)?;
         let live = match input.kind {
             ReceiveCoverKind::GapOnly | ReceiveCoverKind::Oversize => usize::from(gaps.is_empty()),
@@ -166,7 +167,7 @@ impl ReceiveTransaction<'_> {
         )?)
     }
 
-    fn write_gap(&self, gap: &ReceiveGap<'_>, now: i64) -> Result<(), StorageError> {
+    pub(crate) fn write_gap(&self, gap: &ReceiveGap<'_>, now: i64) -> Result<(), StorageError> {
         let count = interval_count(gap.from_seq, gap.to_seq)?;
         let from = gap.from_seq.to_be_bytes();
         let to = gap.to_seq.to_be_bytes();

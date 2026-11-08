@@ -4,8 +4,9 @@
 //! WS below-C settlement. Indexed local redrive: terminal intent+cleanup or a preserved
 //! hold, never a C write. Above-C delegates to ordered W2 (`cover`). A retired incarnation
 //! is local cleanup of any sequence (no ACK intent, no C write, no cover). Compat U
-//! (`incarnation_verified=0`) stays live. Cover, stage and the source gate refuse a retired
-//! E. Dormant until the actor wires it in P20. The typed `inbox_receive_failure` event is
+//! (`incarnation_verified=0`) stays live. Cover and stage refuse a retired E; the source
+//! gate and bind allow already-retained work. Dormant until the actor wires it in P20.
+//! The typed `inbox_receive_failure` event is
 //! written by P07/P08 in the same caller transaction.
 use super::ReceiveTransaction;
 use super::cover::{ReceiveCover, ReceiveCoverKind, ReceiveCoverResult};
@@ -47,6 +48,9 @@ impl ReceiveTransaction<'_> {
     /// stale writer authority, and storage failures.
     pub fn settle(&self, input: ReceiveSettle) -> Result<ReceiveSettleResult, StorageError> {
         self.require_writer()?;
+        if !self.retired {
+            self.refuse_frozen()?;
+        }
         if input.sequence == 0 {
             return Err(StorageError::Integrity("receive sequence must be positive"));
         }

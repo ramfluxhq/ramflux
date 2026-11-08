@@ -28,6 +28,9 @@ pub(crate) mod ledger_backup;
 pub(crate) mod loss;
 #[cfg(test)]
 mod loss_tests;
+pub(crate) mod migrate;
+#[cfg(test)]
+mod migrate_tests;
 pub(crate) mod page;
 #[cfg(test)]
 mod page_tests;
@@ -36,6 +39,9 @@ pub(crate) mod privacy;
 mod privacy_restore_tests;
 #[cfg(test)]
 mod privacy_tests;
+pub(crate) mod reset;
+#[cfg(test)]
+mod reset_tests;
 pub(crate) mod schema;
 pub(crate) mod settle;
 #[cfg(test)]
@@ -72,7 +78,7 @@ pub struct ReceiveTransaction<'a> {
     retired: bool,
 }
 
-/// Cover, stage and the source gate refuse a retired incarnation with this exact error.
+/// Cover and stage refuse a retired incarnation with this exact error.
 pub(crate) const RETIRED_INCARNATION: &str = "retired incarnation is local recovery only";
 
 impl ReceiveTransaction<'_> {
@@ -86,7 +92,7 @@ impl ReceiveTransaction<'_> {
         Ok(())
     }
 
-    /// Cover, stage and the source gate refuse a retired incarnation.
+    /// Cover and stage refuse a retired incarnation. Source gate and bind allow retained work.
     ///
     /// # Errors
     /// Returns the exact retired-incarnation integrity error.
@@ -148,7 +154,7 @@ impl AccountDb {
     }
 }
 
-fn retired_incarnations(blob: &[u8]) -> Result<Vec<String>, StorageError> {
+pub(crate) fn retired_incarnations(blob: &[u8]) -> Result<Vec<String>, StorageError> {
     if blob.is_empty() {
         return Ok(Vec::new());
     }

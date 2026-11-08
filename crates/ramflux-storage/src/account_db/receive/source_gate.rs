@@ -8,14 +8,14 @@ use rusqlite::params;
 
 impl ReceiveTransaction<'_> {
     /// Refuses unless the coordinate still holds a staged or held receipt together with its
-    /// work row, i.e. the recovery input every preparation effect depends on.
+    /// work row, i.e. the recovery input every preparation effect depends on. A retired
+    /// incarnation is allowed for already-retained work (local redrive); new stage/cover
+    /// still refuse it.
     ///
     /// # Errors
-    /// Requires the writer transaction; refuses a retired incarnation and a missing,
-    /// terminal or workless coordinate.
+    /// Requires the writer transaction; refuses a missing, terminal or workless coordinate.
     pub fn require_open_input(&self, sequence: u64) -> Result<(), StorageError> {
         self.require_writer()?;
-        self.refuse_retired()?;
         let seq = sequence.to_be_bytes();
         let open: i64 = self.db.connection.query_row(
             "SELECT count(*) FROM gateway_receive_receipt r JOIN gateway_receive_work w \

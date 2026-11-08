@@ -307,6 +307,16 @@ fn seed_checkpoints(db: &AccountDb) -> Result<(), StorageError> {
          VALUES('gateway_receive_conflict:t',1,'x',1)",
         [],
     )?;
+    db.connection.execute(
+        "INSERT INTO projection_checkpoint(projection_name,projection_version,last_event_id,updated_at) \
+         VALUES('gateway_receive_freeze:t',1,'cursor_ahead',1)",
+        [],
+    )?;
+    db.connection.execute(
+        "INSERT INTO projection_checkpoint(projection_name,projection_version,last_event_id,updated_at) \
+         VALUES('gateway_receive_pause:t',1,'retired_incarnation_fence',1)",
+        [],
+    )?;
     Ok(())
 }
 
