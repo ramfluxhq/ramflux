@@ -6,12 +6,45 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use super::native_test_support::{Fixture, TestResult};
+use crate::bus::state::LocalBusAccountState;
+use crate::bus::sync_driver::source::w0::{
+    prepare_receive_turn, refuse_legacy_receive_unless_ledger_turn,
+};
 use crate::gateway::access::CountingGateway;
-use crate::{GatewayInboxEntry, SdkError};
+use crate::gateway::session_push::{IncarnationId, SessionMode};
+use crate::{GatewayInboxEntry, GatewaySessionEngine, SdkError};
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
 use ramflux_storage::{
     LEGACY_RECEIVE_ACTIVATED, ReceiveMigrate, ReceiveMigrateResult, StorageError,
 };
+use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
+
+type FrameFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
+
+struct NoNetwork;
+impl GatewaySessionFrameSink for NoNetwork {
+    fn send_frame<'a>(&'a mut self, _: &'a [u8]) -> FrameFuture<'a, ()> {
+        Box::pin(async { Err(TransportError::Quic("legacy-guard test I/O".into())) })
+    }
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+impl GatewaySessionFrameSource for NoNetwork {
+    fn recv_frame(&mut self) -> FrameFuture<'_, Vec<u8>> {
+        Box::pin(async { Err(TransportError::Quic("legacy-guard test I/O".into())) })
+    }
+}
+
+fn push_engine(config: crate::GatewaySessionConfig) -> GatewaySessionEngine {
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.mode = SessionMode::Push {
+        incarnation: IncarnationId::try_from("0123456789abcdef0123456789abcdef".to_owned())
+            .expect("incarnation"),
+    };
+    engine
+}
 
 fn assert_activated(error: &SdkError) {
     assert!(
@@ -88,8 +121,54 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
     let ack_delivery = fixture.client.ack_gateway_delivery(&mut engine, "env", &receiver, 1).await;
     assert_activated(ack_delivery.as_ref().expect_err("legacy ack_gateway_delivery"));
 
+    let a2i = fixture.client.receive_a2i_control_events(&mut engine, 8).await;
+    assert_activated(a2i.as_ref().expect_err("legacy a2i"));
+
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    match prepare_receive_turn(&account, 1) {
+        Ok(_) => panic!("legacy PrepareReceive succeeded on an activated ledger"),
+        Err(error) => assert_activated(&error),
+    }
+    match refuse_legacy_receive_unless_ledger_turn(&account, 1) {
+        Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
+        Err(error) => assert_activated(&error),
+    }
+    match crate::bus::sync_driver::receive(&mut account, &mut engine, 1).await {
+        Ok(_) => panic!("legacy bus receive succeeded on an activated ledger"),
+        Err(error) => assert_activated(&error),
+    }
+
     assert_eq!(engine.resumes, 0, "activated pull sent a resume");
     assert_eq!(engine.acks, 0, "activated ACK path sent a wire ACK");
-    assert_eq!(fixture.client.gateway_cursor(&target)?, 9);
+    assert_eq!(account.client.gateway_cursor(&target)?, 9);
+    Ok(())
+}
+
+#[tokio::test]
+async fn activated_ledger_prepare_receive_and_apply_page_are_not_refused() -> TestResult {
+    let fixture = Fixture::new("p24b1-ledger-turn").await?;
+    let target = fixture.config.target_delivery_id.clone();
+    fixture.client.persist_gateway_cursor(&target, 9)?;
+    assert_eq!(
+        fixture
+            .client
+            .account_db()?
+            .activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?,
+        ReceiveMigrateResult::Migrated
+    );
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    account.install_test_session(push_engine(fixture.config.clone()));
+    refuse_legacy_receive_unless_ledger_turn(&account, 1)
+        .expect("ledger ApplyPage (turn: Some) must not be refused");
+    prepare_receive_turn(&account, 1)
+        .expect("ledger PrepareReceive (turn: Some) must not be refused");
     Ok(())
 }

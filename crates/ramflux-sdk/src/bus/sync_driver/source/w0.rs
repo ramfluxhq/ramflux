@@ -107,12 +107,28 @@ impl SourceW0<'_> {
     }
 }
 
+/// Refuse the legacy receive path on an activated ledger.
+///
+/// `actor_turn` is `Some` only for a Push session: that is the ledger actor path
+/// an activated account must use, so it is not refused here. `None` is the
+/// legacy PrepareReceive/ApplyPage branch and is refused first.
+pub(crate) fn refuse_legacy_receive_unless_ledger_turn(
+    account: &LocalBusAccountState,
+    generation: u64,
+) -> Result<(), SdkError> {
+    if actor_turn(account, generation)?.is_some() {
+        return Ok(());
+    }
+    Ok(account.client.account_db()?.refuse_legacy_receive()?)
+}
+
 /// Actor `PrepareReceive` entry. Constructs [`SourceW0`] from the actor's generation and,
 /// when the session is Push, its incarnation. The live cursor plan is unchanged until P24.
 pub(crate) fn prepare_receive_turn(
     account: &LocalBusAccountState,
     generation: u64,
 ) -> Result<ReceivePlan, SdkError> {
+    refuse_legacy_receive_unless_ledger_turn(account, generation)?;
     if let Some(turn) = actor_turn(account, generation)? {
         let source = SourceW0::from_actor(&turn, generation);
         debug_assert_eq!(source.generation, generation);

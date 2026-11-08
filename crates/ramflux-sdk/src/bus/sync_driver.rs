@@ -218,11 +218,12 @@ pub(crate) fn project_committed_message(
     }
 }
 
-async fn receive(
+pub(crate) async fn receive(
     account: &mut LocalBusAccountState,
     engine: &mut impl GatewaySessionAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
+    account.client.account_db()?.refuse_legacy_receive()?;
     account.client.prune_surface_resync_state()?;
     account.client.account_db()?.expire_inbox_holds(now)?;
     redrive_if_state_changed(&account.client)?;

@@ -75,6 +75,7 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         limit: usize,
     ) -> Result<Vec<A2iControlEvent>, SdkError> {
+        self.account_db()?.refuse_legacy_receive()?;
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
         let mut entries = engine.resume_after(after_inbox_seq, limit).await?;
         entries.retain(|entry| entry.inbox_seq > after_inbox_seq);

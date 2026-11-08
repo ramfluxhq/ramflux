@@ -290,7 +290,8 @@ impl AccountRuntime {
                     }
                 };
                 if !active {
-                    self.apply_receive_entry(*entry, source, backpressure, reply).await?;
+                    self.apply_receive_entry(generation, *entry, source, backpressure, reply)
+                        .await?;
                     return Ok(false);
                 }
                 let turn = match page_turn(account, generation, &target, turn) {
@@ -337,6 +338,7 @@ impl AccountRuntime {
 
     async fn apply_receive_entry(
         &mut self,
+        generation: u64,
         entry: super::super::connection_manager::ReceiveEntry,
         source: super::super::sync_driver::source::PreparedSource,
         backpressure: Box<super::super::contact_backpressure::Backpressure>,
@@ -346,6 +348,14 @@ impl AccountRuntime {
     ) -> Result<(), SdkError> {
         let account =
             self.state.accounts.get_mut(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        if let Err(error) =
+            super::super::sync_driver::source::w0::refuse_legacy_receive_unless_ledger_turn(
+                account, generation,
+            )
+        {
+            let _ = reply.send(Err(error));
+            return Ok(());
+        }
         #[cfg(test)]
         let started = {
             if let Some(handle) = &account.connection {
