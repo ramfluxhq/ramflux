@@ -5,7 +5,9 @@
 //!
 //! Production modules are discovered by walking `crates/*/src` and
 //! `apps/*/src` for `.rs` files whose path contains `ephemeral` or
-//! `transient`. Test-only files are excluded. Each module passes two layers:
+//! `transient`, plus named read-only view files (`router/c1_view.rs`) that
+//! sit outside those needles. Test-only files are excluded. Each ephemeral
+//! module passes two layers; view files pass the durable-sink symbol scan:
 //!
 //! 1. Import allow-list. Every `use` path and every module-style path
 //!    expression (`a::b::c(..)`) must start with an entry of
@@ -164,6 +166,14 @@ const DISCOVERY_ROOTS: &[&str] = &["crates", "apps"];
 /// Path fragments that select a production module.
 const DISCOVERY_NEEDLES: &[&str] = &["ephemeral", "transient"];
 
+/// Read-only views that do not match the discovery needles. They are scanned
+/// for durable-sink symbols so the C1 view cannot grow `target_shard` or
+/// publication writes without this guard failing.
+const EXTRA_READ_ONLY_VIEWS: &[&str] = &["crates/ramflux-node-core/src/router/c1_view.rs"];
+
+/// Symbols a read-only view must not name in production items.
+const VIEW_FORBIDDEN_SYMBOLS: &[&str] = &["target_shard", "publication", "begin_write", "save"];
+
 /// This guard. It also lives under `tests/`, so the directory rule already
 /// excludes it; the explicit entry keeps the exclusion visible.
 const GUARD_REL: &str = "crates/ramflux-node-core/src/tests/ephemeral_durable_sinks.rs";
@@ -313,6 +323,16 @@ fn next_char_boundary(src: &str, at: usize) -> usize {
 
 fn forbidden_hits(src: &str) -> Vec<&'static str> {
     FORBIDDEN_SYMBOLS.iter().copied().filter(|symbol| has_symbol(src, symbol)).collect()
+}
+
+fn view_sink_hits(src: &str) -> Vec<&'static str> {
+    let text = expand_detection_text(&normalised_items(src));
+    VIEW_FORBIDDEN_SYMBOLS
+        .iter()
+        .copied()
+        .chain(FORBIDDEN_SYMBOLS.iter().copied())
+        .filter(|symbol| has_symbol(&text, symbol))
+        .collect()
 }
 
 /// Comments and strings stripped, `#[cfg(test)]` items removed, whitespace collapsed.
@@ -1010,6 +1030,35 @@ fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
 }
 
 #[test]
+fn c1_view_has_no_durable_sinks() -> TestResult {
+    let root = workspace_root()?;
+    let discovered = discover_ephemeral_modules(&root)?;
+    let discovered_rels: Vec<String> =
+        discovered.iter().map(|path| rel_path(&root, path)).collect();
+    for rel in EXTRA_READ_ONLY_VIEWS {
+        assert!(
+            !discovered_rels.iter().any(|found| found.as_str() == *rel),
+            "{rel} must stay on the extra-view list (path has no ephemeral/transient needle)"
+        );
+        let path = root.join(rel);
+        let source = std::fs::read_to_string(&path)?;
+        let hits = view_sink_hits(&source);
+        if !hits.is_empty() {
+            return Err(
+                io::Error::other(format!("{rel} names durable-sink symbols: {hits:?}")).into()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn c1_view_scan_refuses_target_shard() {
+    let hits = view_sink_hits("fn leak() { self.core.target_shard(\"t\"); }\n");
+    assert!(hits.contains(&"target_shard"), "view scan must see target_shard, got {hits:?}");
+}
+
+#[test]
 fn ephemeral_inventory_discovery() -> TestResult {
     let root = workspace_root()?;
     let files = discover_ephemeral_modules(&root)?;
@@ -1034,6 +1083,13 @@ fn ephemeral_inventory_discovery() -> TestResult {
         !rels.iter().any(|rel| rel.as_str() == GUARD_REL || rel.contains("/tests/")),
         "guard and tests/ files must be excluded, got {rels:?}"
     );
+    for rel in EXTRA_READ_ONLY_VIEWS {
+        assert!(root.join(rel).is_file(), "extra read-only view {rel} must exist");
+        assert!(
+            !rels.iter().any(|found| found.as_str() == *rel),
+            "extra view {rel} is discovered by needle; drop it from EXTRA_READ_ONLY_VIEWS"
+        );
+    }
     Ok(())
 }
 
