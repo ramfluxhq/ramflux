@@ -111,6 +111,13 @@ const BODY: &str = r"
    SELECT CASE WHEN instr(kind,':')>0 THEN substr(kind,1,instr(kind,':')-1) ELSE kind END,
     CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id);
  DELETE FROM runtime_outbox WHERE sequence IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='outbox');
+ DELETE FROM runtime_outbox WHERE table_name='runtime_actor_state' AND row_id IN
+  (SELECT a.rowid FROM runtime_actor_state a JOIN message_footprint f
+   ON f.kind IN ('prepared','history_container') AND f.locator=a.state_kind WHERE f.message_id=NEW.message_id);
+ DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('prepared','history_container'));
+ DELETE FROM message_copy_binding WHERE copy_id IN (SELECT kind||':'||locator FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('prepared','history_container'));
+ DELETE FROM message_footprint WHERE kind IN ('prepared','history_container','actor') AND locator IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind IN ('prepared','history_container'));
+ UPDATE runtime_operation SET response_json=CAST(json_object('message_id',NEW.message_id,'deleted',json('true')) AS TEXT) WHERE operation_id IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='operation');
  DELETE FROM message_copy_binding WHERE message_id=NEW.message_id;
  DELETE FROM raw_inner_copy WHERE copy_id IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='raw_inner');
  DELETE FROM raw_inner_owner WHERE owner_id=NEW.message_id;

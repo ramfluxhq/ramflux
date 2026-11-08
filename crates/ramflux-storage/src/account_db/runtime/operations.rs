@@ -113,6 +113,7 @@ impl AccountDb {
             "UPDATE runtime_operation SET response_json=?2 WHERE operation_id=?1",
             params![id, serde_json::to_string(response)?],
         )?;
+        self.register_operation_message_copy(id, response)?;
         transaction.commit()?;
         Ok(())
     }

@@ -98,6 +98,15 @@ impl BackupDatabase {
             )?;
             super::raw_inner::quota::validate_all(&self.db)?;
         }
+        self.db.execute_batch(
+            "INSERT OR IGNORE INTO message_footprint SELECT f.message_id,f.kind,f.locator
+             FROM incoming.message_footprint f
+             WHERE f.kind IN ('prepared','history_container','operation');
+             INSERT OR IGNORE INTO message_copy_binding SELECT b.copy_id,b.message_id
+             FROM incoming.message_copy_binding b
+             WHERE b.copy_id GLOB 'prepared:*' OR b.copy_id GLOB 'history_container:*'
+                OR b.copy_id GLOB 'operation:*';",
+        )?;
         Ok(super::message_footprint::migration::register_imported(&self.db)?)
     }
 

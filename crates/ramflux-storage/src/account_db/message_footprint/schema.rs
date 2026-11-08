@@ -64,6 +64,7 @@ fn install_copy_triggers(db: &Connection) -> rusqlite::Result<()> {
         ("runtime_unrouted", "unrouted", "NEW.envelope_id", "entry_json", "1", ""),
         ("runtime_inbox_retry", "retry", "NEW.envelope_key", "entry_json", "1", ""),
         ("runtime_inbox_dead_letter", "dead_letter", "NEW.envelope_key", "entry_json", "1", ""),
+        ("runtime_operation", "operation", "NEW.operation_id", "response_json", "1", ""),
     ] {
         json_copy(db, CopyStore { table, kind, locator: key, column, guard, extra })?;
     }

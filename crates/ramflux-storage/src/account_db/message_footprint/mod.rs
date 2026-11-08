@@ -5,6 +5,9 @@
 #[cfg(test)]
 mod audit;
 mod erasure;
+mod generic_copy;
+#[cfg(test)]
+mod generic_copy_tests;
 pub(super) mod migration;
 #[cfg(test)]
 mod migration_tests;
