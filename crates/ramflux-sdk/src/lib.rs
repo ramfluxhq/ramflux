@@ -2,6 +2,18 @@
 // Copyright (c) 2026 Span Brain
 
 //! Rust core SDK facade and stable C-ABI boundary substrate.
+//!
+//! Receive-ledger authority tokens have no public constructor.
+//!
+//! ```compile_fail
+//! let _ = ramflux_sdk::bus::push_receiver::executor::LedgerExecutor::reset_token(1);
+//! ```
+//! ```compile_fail
+//! let _ = ramflux_sdk::bus::push_receiver::authority::LedgerAuthority::w2(1);
+//! ```
+//! ```compile_fail
+//! let _ = ramflux_sdk::bus::push_receiver::executor::LedgerExecutor::standalone();
+//! ```
 
 /// Dormant generated message schema and local request/update types.
 pub use ramflux_protocol::message;

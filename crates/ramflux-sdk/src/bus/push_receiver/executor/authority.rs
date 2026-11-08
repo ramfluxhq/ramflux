@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Unforgeable W2 / reset / WA / WS / erasure tokens. Constructors are `pub(super)`
+//! to [`super::LedgerExecutor`] only; storage-result conversion is the sole mint path.
+
+/// Kind of ledger write the holder is allowed to perform.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorityKind {
+    /// Ordered cover wrote C (and optional intent) in one W2 transaction.
+    W2,
+    /// Explicit incarnation reset may rewrite C.
+    Reset,
+    /// Wire ACK / `AckBatch`. Minted only after a terminal W2/WS intent with s<=C.
+    Wa,
+    /// Below-C settlement. Never writes C. May delete holds.
+    Ws,
+    /// Explicit erasure transaction. May delete holds; never ACKs.
+    Erasure,
+}
+
+/// Token proving the caller is inside W2, reset, WA, WS, or erasure.
+/// There is no public constructor; only the executor mint path constructs it.
+///
+/// ```compile_fail
+/// let _ = ramflux_sdk::bus::push_receiver::executor::authority::LedgerAuthority::w2(1);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LedgerAuthority {
+    kind: AuthorityKind,
+    seq: u64,
+}
+
+impl LedgerAuthority {
+    pub(super) const fn w2(seq: u64) -> Self {
+        Self { kind: AuthorityKind::W2, seq }
+    }
+
+    pub(super) const fn reset(seq: u64) -> Self {
+        Self { kind: AuthorityKind::Reset, seq }
+    }
+
+    pub(super) const fn wa(seq: u64) -> Self {
+        Self { kind: AuthorityKind::Wa, seq }
+    }
+
+    pub(super) const fn ws(seq: u64) -> Self {
+        Self { kind: AuthorityKind::Ws, seq }
+    }
+
+    pub(super) const fn erasure(seq: u64) -> Self {
+        Self { kind: AuthorityKind::Erasure, seq }
+    }
+
+    #[must_use]
+    pub(crate) const fn kind(self) -> AuthorityKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub(crate) const fn seq(self) -> u64 {
+        self.seq
+    }
+
+    #[must_use]
+    pub(crate) const fn is_wa(self) -> bool {
+        matches!(self.kind, AuthorityKind::Wa)
+    }
+
+    #[must_use]
+    pub(crate) const fn allows_receive_checkpoint(self) -> bool {
+        matches!(self.kind, AuthorityKind::W2 | AuthorityKind::Reset)
+    }
+
+    #[must_use]
+    pub(crate) const fn allows_hold_delete(self) -> bool {
+        matches!(
+            self.kind,
+            AuthorityKind::W2 | AuthorityKind::Ws | AuthorityKind::Reset | AuthorityKind::Erasure
+        )
+    }
+}

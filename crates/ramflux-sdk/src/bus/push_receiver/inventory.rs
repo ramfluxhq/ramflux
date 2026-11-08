@@ -11,9 +11,11 @@ pub(crate) enum WriterClass {
     ProductionLegacy,
     /// Test / fixture-only direct ACK or checkpoint seed.
     FixtureOnly,
+    /// Write lives inside the ledger executor (token already in scope).
+    ExecutorOwned,
 }
 
-/// One scanned call site.
+/// One scanned call site. `count` is the expected occurrences of `symbol` in `file`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WriterSite {
     pub file: &'static str,
@@ -21,9 +23,10 @@ pub(crate) struct WriterSite {
     pub class: WriterClass,
     pub executor: &'static str,
     pub hook: &'static str,
+    pub count: usize,
 }
 
-/// P19-owned §7.1 inventory (API → executor path → guard hook).
+/// Fail-closed §7.1 inventory (API → executor path → guard hook). Per-file expected counts.
 pub(crate) const SITES: &[WriterSite] = &[
     WriterSite {
         file: "src/client/account.rs",
@@ -31,6 +34,15 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "persist_receive_checkpoint_in (W2/reset token)",
         hook: "SQL receive-checkpoint",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/client/account.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::ProductionLegacy,
+        executor: "generic setter; receive-cursor name requires persist_receive_checkpoint_in",
+        hook: "SQL receive-checkpoint when name is receive-cursor",
+        count: 6,
     },
     WriterSite {
         file: "src/client/dm.rs",
@@ -38,13 +50,15 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "request_inbox_in + cover_in",
         hook: "inbox-request",
+        count: 1,
     },
     WriterSite {
         file: "src/client/dm.rs",
-        symbol: "receive_gateway_plaintext_deliveries",
+        symbol: "persist_gateway_receive_cursor",
         class: WriterClass::ProductionLegacy,
-        executor: "request_inbox_in + cover_in + remove_unrouted_in",
-        hook: "inbox-request / hold-delete",
+        executor: "request_inbox_in + cover_in",
+        hook: "SQL receive-checkpoint",
+        count: 4,
     },
     WriterSite {
         file: "src/client/dm.rs",
@@ -52,6 +66,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "send_ack_in (WA token)",
         hook: "outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/client/dm.rs",
@@ -59,13 +74,39 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "managed_public_ack / send_ack_in",
         hook: "outgoing ACK (refusal produces none)",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/client/dm.rs",
+        symbol: "engine.ack(",
+        class: WriterClass::ProductionLegacy,
+        executor: "send_ack_in (WA token)",
+        hook: "outgoing ACK",
+        count: 2,
+    },
+    WriterSite {
+        file: "src/client/dm.rs",
+        symbol: "remove_unrouted",
+        class: WriterClass::ProductionLegacy,
+        executor: "remove_unrouted_in",
+        hook: "hold-delete",
+        count: 4,
     },
     WriterSite {
         file: "src/client/a2i.rs",
-        symbol: "receive_a2i_control_events",
+        symbol: "ack_gateway_entry",
         class: WriterClass::ProductionLegacy,
-        executor: "request_inbox_in + cover_in + send_ack_in",
-        hook: "inbox-request / outgoing ACK",
+        executor: "send_ack_in (WA token); finish_a2i_receive",
+        hook: "outgoing ACK",
+        count: 2,
+    },
+    WriterSite {
+        file: "src/client/a2i.rs",
+        symbol: "persist_gateway_receive_cursor",
+        class: WriterClass::ProductionLegacy,
+        executor: "cover_in / persist_receive_checkpoint_in",
+        hook: "SQL receive-checkpoint",
+        count: 3,
     },
     WriterSite {
         file: "src/client/dm/legacy_receive.rs",
@@ -73,6 +114,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "persist_receive_checkpoint_in (W2/reset token)",
         hook: "SQL receive-checkpoint",
+        count: 1,
     },
     WriterSite {
         file: "src/client/group_quarantine.rs",
@@ -80,13 +122,23 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "remove_unrouted_in",
         hook: "hold-delete",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/connection_manager/receive.rs",
-        symbol: "engine.ack",
+        symbol: "engine.ack(",
         class: WriterClass::ProductionLegacy,
         executor: "send_ack_in (WA token)",
         hook: "outgoing ACK",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/bus/connection_manager/client.rs",
+        symbol: "engine.ack(",
+        class: WriterClass::ProductionLegacy,
+        executor: "send_ack_in (WA token)",
+        hook: "outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/a2i_a2ui.rs",
@@ -94,6 +146,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "request_inbox_in (coalesced catch-up)",
         hook: "inbox-request",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/group.rs",
@@ -101,6 +154,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "cover_in / persist_receive_checkpoint_in",
         hook: "SQL receive-checkpoint",
+        count: 4,
     },
     WriterSite {
         file: "src/bus/dispatch/group.rs",
@@ -108,6 +162,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "send_ack_in (WA token)",
         hook: "outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/group.rs",
@@ -115,6 +170,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "group_remove_unrouted_in",
         hook: "hold-delete",
+        count: 3,
     },
     WriterSite {
         file: "src/bus/dispatch/message.rs",
@@ -122,6 +178,15 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "managed_public_ack",
         hook: "outgoing ACK (typed refusal, no frame)",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/bus/dispatch/message.rs",
+        symbol: "message.receive",
+        class: WriterClass::ProductionLegacy,
+        executor: "cover_in / send_ack_in (P25)",
+        hook: "inbox-request / outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/message.rs",
@@ -129,6 +194,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "message_receive_ack_in (WA)",
         hook: "outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/message.rs",
@@ -136,20 +202,23 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "remove_unrouted_in",
         hook: "hold-delete",
+        count: 2,
     },
     WriterSite {
-        file: "src/bus/connection_manager/client.rs",
-        symbol: "engine.ack",
+        file: "src/bus/dispatch/device.rs",
+        symbol: "set_projection_checkpoint",
         class: WriterClass::ProductionLegacy,
-        executor: "send_ack_in (WA token)",
-        hook: "outgoing ACK",
+        executor: "non-receive push-route checkpoint",
+        hook: "none (not receive-cursor)",
+        count: 2,
     },
     WriterSite {
         file: "src/bus/sync_driver.rs",
-        symbol: "advance_cursor",
+        symbol: "persist_gateway_receive_cursor",
         class: WriterClass::ProductionLegacy,
         executor: "cover_in / persist_receive_checkpoint_in",
         hook: "SQL receive-checkpoint",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/sync_driver.rs",
@@ -157,6 +226,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "send_ack_in (WA token)",
         hook: "outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/sync_driver.rs",
@@ -164,6 +234,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "remove_unrouted_in",
         hook: "hold-delete",
+        count: 3,
     },
     WriterSite {
         file: "src/bus/sync_driver/ack.rs",
@@ -171,6 +242,63 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "remove_unrouted_in",
         hook: "hold-delete",
+        count: 2,
+    },
+    WriterSite {
+        file: "src/bus/state.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::ProductionLegacy,
+        executor: "non-receive gateway-resume checkpoint",
+        hook: "none (not receive-cursor)",
+        count: 4,
+    },
+    WriterSite {
+        file: "src/bus/method_table.rs",
+        symbol: "message.ack",
+        class: WriterClass::ProductionLegacy,
+        executor: "method table name only",
+        hook: "none",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/bus/push_receiver/executor.rs",
+        symbol: "remove_unrouted",
+        class: WriterClass::ExecutorOwned,
+        executor: "remove_unrouted_in (token required)",
+        hook: "hold-delete",
+        count: 5,
+    },
+    WriterSite {
+        file: "src/bus/push_receiver/managed_ack.rs",
+        symbol: "message.ack",
+        class: WriterClass::ExecutorOwned,
+        executor: "managed_public_ack",
+        hook: "outgoing ACK (typed refusal, no frame)",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/client/contact.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::ProductionLegacy,
+        executor: "non-receive contact checkpoint",
+        hook: "none (not receive-cursor)",
+        count: 2,
+    },
+    WriterSite {
+        file: "src/client/group_session.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::ProductionLegacy,
+        executor: "non-receive group-session checkpoint",
+        hook: "none (not receive-cursor)",
+        count: 3,
+    },
+    WriterSite {
+        file: "src/client/private_prekeys.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::ProductionLegacy,
+        executor: "non-receive x3dh checkpoint",
+        hook: "none (not receive-cursor)",
+        count: 2,
     },
     WriterSite {
         file: "src/client/dm_session.rs",
@@ -178,6 +306,15 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::FixtureOnly,
         executor: "test fixture seed (excluded from production guard)",
         hook: "classified fixture",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/client/dm_session.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::FixtureOnly,
+        executor: "test fixture seed",
+        hook: "classified fixture",
+        count: 1,
     },
     WriterSite {
         file: "src/client/routed/root_ack_tests.rs",
@@ -185,6 +322,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::FixtureOnly,
         executor: "unmanaged raw protocol fixture",
         hook: "classified fixture",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/receipt_tests/erasure.rs",
@@ -192,6 +330,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::FixtureOnly,
         executor: "unmanaged raw protocol fixture",
         hook: "classified fixture",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/surface_own_tests/followups.rs",
@@ -199,5 +338,25 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::FixtureOnly,
         executor: "unmanaged raw protocol fixture",
         hook: "classified fixture",
+        count: 2,
     },
+    WriterSite {
+        file: "apps/rf/src/handlers/dm.rs",
+        symbol: "message.ack",
+        class: WriterClass::ProductionLegacy,
+        executor: "rf_dm_ack_request + managed_public_ack (via bus)",
+        hook: "outgoing ACK (typed refusal, no frame)",
+        count: 1,
+    },
+];
+
+/// Substrings counted by the fail-closed writer scan.
+pub(crate) const SCAN_SYMBOLS: &[&str] = &[
+    "persist_gateway_receive_cursor",
+    "ack_gateway_entry",
+    "ack_gateway_delivery",
+    "remove_unrouted",
+    "engine.ack(",
+    "set_projection_checkpoint",
+    "message.ack",
 ];

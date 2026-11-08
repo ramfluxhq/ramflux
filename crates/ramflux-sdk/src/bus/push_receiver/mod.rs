@@ -10,7 +10,7 @@ pub(crate) mod executor;
 pub(crate) mod hooks;
 pub(crate) mod inventory;
 pub(crate) mod managed_ack;
-pub(crate) use managed_ack::MANAGED_ACK_CODE;
+pub(crate) use managed_ack::{MANAGED_ACK_CODE, managed_public_ack};
 #[cfg(test)]
 mod apply_tests;
 pub(crate) mod apply_w1;

@@ -278,6 +278,10 @@ impl LocalBusAccountState {
         self.pending_deliveries.iter().take(limit).cloned().collect()
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "public managed ACK is refused until P25 WA wiring")
+    )]
     pub(crate) fn mark_acked(&mut self, envelope_id: &str) -> Result<(), SdkError> {
         // The compatibility ACK endpoint accepts an ID only when the node can prove it unique.
         // Cache a position only when the local pending page identifies exactly one delivery too.

@@ -25,6 +25,10 @@ impl AckCache {
         self.recent.push_back(id.clone());
         true
     }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "public managed ACK is refused until P25 WA wiring")
+    )]
     pub(crate) fn insert(&mut self, id: AckPosition) {
         if self.contains(&id) {
             return;

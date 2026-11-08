@@ -5,21 +5,24 @@
 //! refusal, SQL/inbox/ACK/hold-delete hooks, held never acknowledged. P25 completes live wiring.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use super::authority::{AuthorityKind, LedgerAuthority};
+use super::authority::LedgerAuthority;
+use super::executor::authority::AuthorityKind;
 use super::executor::{
-    CoverOutcome, LedgerExecutor, group_remove_unrouted_in, message_receive_ack_in,
-    reset_actor_accounts,
+    CoverOutcome, LedgerExecutor, cover_outcome_for_test, group_remove_unrouted_in,
+    message_receive_ack_in, settle_outcome_for_test,
 };
 use super::hooks;
-use super::inventory::{SITES, WriterClass};
+use super::inventory::{SCAN_SYMBOLS, SITES, WriterClass};
 use super::managed_ack::{MANAGED_ACK_CODE, managed_public_ack};
 use crate::bus::io::local_bus_error_code;
 use crate::bus::protocol::LocalBusMessageAckRequest;
 use crate::prelude::*;
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult,
-    ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
+    ReceiveExpectation, ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult, ReceiveStage,
+    ReceiveStageResult, StorageError,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -83,20 +86,11 @@ fn stage(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), StorageError>
     Ok(())
 }
 
-fn rel_src(path: &Path, src_root: &Path) -> String {
-    format!("src/{}", path.strip_prefix(src_root).expect("src").display()).replace('\\', "/")
-}
-
-fn is_fixture(rel: &str) -> bool {
-    rel.contains("/tests/") || rel.ends_with("_tests.rs") || rel.contains("/push_receiver/")
-}
-
-fn writer_patterns(src: &str) -> bool {
-    src.contains("persist_gateway_receive_cursor")
-        || src.contains("ack_gateway_entry")
-        || src.contains("ack_gateway_delivery")
-        || src.contains("remove_unrouted")
-        || src.contains("engine.ack(")
+fn skip_scan(rel: &str) -> bool {
+    rel.contains("/tests/")
+        || rel.contains("_tests/")
+        || rel.ends_with("_tests.rs")
+        || rel.ends_with("inventory.rs")
 }
 
 fn walk_rs(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -111,29 +105,80 @@ fn walk_rs(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn assert_inventory_scan() {
-    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+fn rel_under(path: &Path, root: &Path, prefix: &str) -> String {
+    format!("{prefix}{}", path.strip_prefix(root).expect("src").display()).replace('\\', "/")
+}
+
+fn expected_counts() -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
     for site in SITES {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(site.file);
-        assert!(path.is_file(), "inventory names missing file {}", site.file);
+        *counts.entry(format!("{}::{}", site.file, site.symbol)).or_insert(0) += site.count;
+    }
+    counts
+}
+
+fn scan_tree(
+    root: &Path,
+    prefix: &str,
+    expected: &HashMap<String, usize>,
+    missing: &mut Vec<String>,
+) {
+    if !root.is_dir() {
+        missing.push(format!("missing scan root {}", root.display()));
+        return;
     }
     let mut files = Vec::new();
-    walk_rs(&src_root, &mut files);
-    let mut missing = Vec::new();
+    walk_rs(root, &mut files);
     for path in files {
-        let rel = rel_src(&path, &src_root);
-        if is_fixture(&rel) {
+        let rel = rel_under(&path, root, prefix);
+        if skip_scan(&rel) {
             continue;
         }
         let src = fs::read_to_string(&path).expect("read rust");
-        if writer_patterns(&src) && !SITES.iter().any(|site| site.file == rel) {
-            missing.push(rel);
+        for symbol in SCAN_SYMBOLS {
+            let actual = src.matches(symbol).count();
+            if actual == 0 {
+                continue;
+            }
+            let want = expected.get(&format!("{rel}::{symbol}")).copied().unwrap_or(0);
+            if want != actual {
+                missing.push(format!("{rel} {symbol} actual={actual} expected={want}"));
+            }
         }
     }
+}
+
+fn assert_inventory_scan() {
+    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let rf_root = workspace.join("apps/rf/src");
+    for site in SITES {
+        let path = if site.file.starts_with("apps/") {
+            workspace.join(site.file)
+        } else {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(site.file)
+        };
+        assert!(path.is_file(), "inventory names missing file {}", site.file);
+    }
+    let expected = expected_counts();
+    let mut missing = Vec::new();
+    scan_tree(&sdk_root, "src/", &expected, &mut missing);
+    scan_tree(&rf_root, "apps/rf/src/", &expected, &mut missing);
     assert!(missing.is_empty(), "unclassified production receive writers: {missing:?}");
     assert!(SITES.iter().any(|site| site.file == "src/bus/dispatch/message.rs"
         && site.symbol == "message.ack"
         && site.executor.contains("managed_public_ack")));
+    assert!(
+        SITES
+            .iter()
+            .any(|site| site.file == "src/bus/dispatch/message.rs"
+                && site.symbol == "message.receive")
+    );
+    assert!(SITES.iter().any(|site| site.file == "src/client/a2i.rs" && site.count >= 1));
+    assert!(
+        SITES.iter().any(|site| site.file == "src/client/account.rs"
+            && site.symbol == "set_projection_checkpoint")
+    );
     assert!(SITES.iter().any(|site| site.class == WriterClass::FixtureOnly));
 }
 
@@ -151,16 +196,28 @@ fn cover(
     .map_err(SdkError::from)
 }
 
+fn settle(
+    exec: &LedgerExecutor,
+    db: &AccountDb,
+    cursor: u64,
+    sequence: u64,
+    kind: ReceiveSettleKind,
+) -> Result<super::executor::SettleOutcome, SdkError> {
+    db.receive_transaction(expected(db, cursor)?, 1, |tx| {
+        exec.settle_in(tx, ReceiveSettle { sequence, kind }).map_err(into_storage)
+    })
+    .map_err(SdkError::from)
+}
+
 fn assert_exclusive_and_managed_ack() -> Result<(), SdkError> {
-    reset_actor_accounts();
-    let actor = LedgerExecutor::actor();
-    actor.bind_account("acct-p19")?;
-    let standalone = LedgerExecutor::standalone();
-    match standalone.bind_account("acct-p19") {
-        Err(SdkError::Storage(StorageError::AccountWriterBusy(id))) if id == "acct-p19" => {}
+    let actor = LedgerExecutor::bind_actor("acct-p19-actor")?;
+    let standalone = LedgerExecutor::bind_standalone("acct-p19-actor");
+    match standalone {
+        Err(SdkError::Storage(StorageError::AccountWriterBusy(id))) if id == "acct-p19-actor" => {}
         other => panic!("expected AccountWriterBusy, got {other:?}"),
     }
-    standalone.bind_account("acct-other")?;
+    let other = LedgerExecutor::bind_standalone("acct-p19-other")?;
+    assert_ne!(actor.account(), other.account());
     let request = LocalBusMessageAckRequest {
         envelope_id: "env-1".to_owned(),
         receiver_device_id: "dev-1".to_owned(),
@@ -183,33 +240,73 @@ fn assert_exclusive_and_managed_ack() -> Result<(), SdkError> {
     Ok(())
 }
 
+fn assert_exclusive_across_threads() -> Result<(), SdkError> {
+    let actor = LedgerExecutor::bind_actor("acct-p19-threads")?;
+    let busy = std::thread::spawn(|| LedgerExecutor::bind_standalone("acct-p19-threads"))
+        .join()
+        .expect("join");
+    match busy {
+        Err(SdkError::Storage(StorageError::AccountWriterBusy(id))) if id == "acct-p19-threads" => {
+        }
+        other => panic!("expected AccountWriterBusy across threads, got {other:?}"),
+    }
+    drop(actor);
+    let _freed = LedgerExecutor::bind_standalone("acct-p19-threads")?;
+    Ok(())
+}
+
+fn assert_storage_result_tokens() {
+    let paused = cover_outcome_for_test(7, ReceiveCoverKind::Terminal, ReceiveCoverResult::Paused);
+    assert!(paused.authority.is_none());
+    assert!(!paused.ack_eligible);
+    let held_cover = cover_outcome_for_test(7, ReceiveCoverKind::Held, ReceiveCoverResult::Covered);
+    assert_eq!(held_cover.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    assert!(!held_cover.ack_eligible);
+    let paused_settle =
+        settle_outcome_for_test(3, ReceiveSettleKind::Terminal, ReceiveSettleResult::Paused, false);
+    assert!(paused_settle.authority.is_none());
+    assert!(!paused_settle.ack_eligible);
+    let held_settle =
+        settle_outcome_for_test(3, ReceiveSettleKind::Held, ReceiveSettleResult::Held, false);
+    assert!(held_settle.authority.is_none());
+    assert!(!held_settle.ack_eligible);
+    let covered_settle =
+        settle_outcome_for_test(4, ReceiveSettleKind::Terminal, ReceiveSettleResult::Settled, true);
+    assert_eq!(covered_settle.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    assert!(covered_settle.ack_eligible);
+}
+
 fn assert_hooks(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
     hooks::clear();
     exec.request_inbox_in(0, 64);
     let inbox = hooks::take_inbox();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].after, 0);
-    assert_eq!(exec.load_startup_cursor(db, "t")?, 0);
+    let startup = exec.load_startup_cursor(db, "t")?;
+    assert_eq!(startup.incarnation, "e");
+    assert_eq!(startup.cursor, 0);
     assert_eq!(hooks::take_sql().len(), 0, "startup C is read-only");
     stage(db, 0, 1)?;
     let w2 = cover(exec, db, 0, 1, ReceiveCoverKind::Terminal)?;
     assert_eq!(w2.result, ReceiveCoverResult::Covered);
     assert!(w2.ack_eligible);
-    assert_eq!(w2.authority.kind(), AuthorityKind::W2);
+    assert_eq!(w2.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
     let sql = hooks::take_sql();
     assert_eq!(sql.len(), 1);
     assert_eq!(sql[0].token.kind(), AuthorityKind::W2);
     let wa = exec.mint_wa(w2.authority, w2.ack_eligible, 1)?;
     message_receive_ack_in(exec, &wa, 1)?;
-    let cursor = exec.load_startup_cursor(db, "t")?;
+    let cursor = exec.load_startup_cursor(db, "t")?.cursor;
     let acks = hooks::take_acks();
     assert!(!acks.is_empty(), "conversation ACK must produce a wire frame");
     for frame in &acks {
         assert!(frame.token.is_some_and(LedgerAuthority::is_wa), "ACK outside WA: {frame:?}");
         assert!(frame.seq <= cursor, "ACK s>C: {frame:?}");
     }
-    match exec.persist_receive_checkpoint_in(db, &wa, "t", 1) {
-        Err(SdkError::Storage(StorageError::AuthorizationRejected)) => {}
+    match db.receive_transaction(expected(db, 1)?, 1, |tx| {
+        exec.persist_receive_checkpoint_in(tx, &wa, 1).map_err(into_storage)
+    }) {
+        Err(StorageError::AuthorizationRejected) => {}
         other => panic!("WA must not write C, got {other:?}"),
     }
     assert_eq!(hooks::take_sql().len(), 0);
@@ -223,8 +320,9 @@ fn assert_hooks(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
         other => panic!("held must not mint WA, got {other:?}"),
     }
     assert_eq!(hooks::take_acks().len(), 0, "held never acknowledged");
+    let held_token = held.authority.expect("held cover that wrote C mints W2");
     db.hold_unrouted("hold-1", 2, b"{}", 1)?;
-    group_remove_unrouted_in(exec, db, &held.authority, "hold-1")?;
+    group_remove_unrouted_in(exec, db, &held_token, "hold-1")?;
     assert_eq!(db.unrouted_count()?, 0, "authorized hold delete must remove the row");
     let deletes = hooks::take_deletes();
     assert!(
@@ -242,10 +340,64 @@ fn assert_hooks(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn assert_settle_outcomes(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
+    hooks::clear();
+    stage(db, 2, 3)?;
+    let held = cover(exec, db, 2, 3, ReceiveCoverKind::Held)?;
+    assert_eq!(held.result, ReceiveCoverResult::Covered);
+    hooks::clear();
+    let below = settle(exec, db, 3, 3, ReceiveSettleKind::Terminal)?;
+    assert_eq!(below.result, ReceiveSettleResult::Settled);
+    assert_eq!(below.authority.map(LedgerAuthority::kind), Some(AuthorityKind::Ws));
+    assert!(below.ack_eligible);
+    assert_eq!(hooks::take_sql().len(), 0, "below-C settle must not write C");
+    stage(db, 3, 4)?;
+    let advanced = settle(exec, db, 3, 4, ReceiveSettleKind::Terminal)?;
+    assert_eq!(advanced.result, ReceiveSettleResult::Settled);
+    assert_eq!(advanced.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    assert!(advanced.ack_eligible);
+    let sql = hooks::take_sql();
+    assert_eq!(sql.len(), 1);
+    assert_eq!(sql[0].token.kind(), AuthorityKind::W2);
+    stage(db, 4, 5)?;
+    let kept = cover(exec, db, 4, 5, ReceiveCoverKind::Held)?;
+    assert!(!kept.ack_eligible);
+    hooks::clear();
+    let held_settle = settle(exec, db, 5, 5, ReceiveSettleKind::Held)?;
+    assert_eq!(held_settle.result, ReceiveSettleResult::Held);
+    assert!(held_settle.authority.is_none());
+    assert!(!held_settle.ack_eligible);
+    match exec.mint_wa(held_settle.authority, held_settle.ack_eligible, 5) {
+        Err(SdkError::Storage(StorageError::Integrity("storage result minted no ACK token"))) => {}
+        other => panic!("held settle must not mint WA, got {other:?}"),
+    }
+    assert_eq!(hooks::take_acks().len(), 0);
+    Ok(())
+}
+
 #[test]
 fn all_receive_writers_guard() -> Result<(), SdkError> {
     assert_inventory_scan();
     assert_exclusive_and_managed_ack()?;
+    assert_exclusive_across_threads()?;
+    assert_storage_result_tokens();
     let harness = open()?;
-    assert_hooks(&LedgerExecutor::standalone(), &harness.db)
+    let exec = LedgerExecutor::bind_standalone("acct-p19-hooks")?;
+    assert_hooks(&exec, &harness.db)?;
+    assert_settle_outcomes(&exec, &harness.db)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exclusive_bind_is_process_wide() -> Result<(), SdkError> {
+    let actor = LedgerExecutor::bind_actor("acct-p19-tokio")?;
+    let join = tokio::task::spawn_blocking(|| LedgerExecutor::bind_actor("acct-p19-tokio"))
+        .await
+        .expect("join");
+    match join {
+        Err(SdkError::Storage(StorageError::AccountWriterBusy(id))) if id == "acct-p19-tokio" => {}
+        other => panic!("expected AccountWriterBusy, got {other:?}"),
+    }
+    drop(actor);
+    let _ = LedgerExecutor::bind_standalone("acct-p19-tokio")?;
+    Ok(())
 }

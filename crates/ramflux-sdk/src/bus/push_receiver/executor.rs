@@ -1,22 +1,29 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Exclusive actor/standalone ledger executor. P20 wires it into the S2 actor;
+//! Exclusive per-account ledger executor. P20 wires it into the S2 actor;
 //! standalone public receive uses the same routines under the exclusive client borrow.
 
-use super::authority::{AuthorityKind, LedgerAuthority};
+pub(crate) mod authority;
+
 use super::hooks;
-use crate::dm::gateway_receive_cursor_checkpoint_name;
 use crate::prelude::*;
+use authority::{AuthorityKind, LedgerAuthority};
 use ramflux_storage::{
-    AccountDb, ProjectionStore, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveSettle,
+    AccountDb, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveSettle,
     ReceiveSettleKind, ReceiveSettleResult, ReceiveTransaction, StorageError,
 };
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
-thread_local! {
-    static ACTOR_ACCOUNTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+static REGISTRY: OnceLock<Mutex<HashMap<String, ExecutorOwner>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<String, ExecutorOwner>> {
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, ExecutorOwner>> {
+    registry().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Who holds the exclusive receive writer for an account.
@@ -27,15 +34,18 @@ pub(crate) enum ExecutorOwner {
 }
 
 /// Shared W0/W1/W2/WS/WA entry points. Actor and standalone share this type.
+/// Drop releases the per-account exclusive bind.
+#[derive(Debug)]
 pub(crate) struct LedgerExecutor {
     owner: ExecutorOwner,
+    account: String,
 }
 
 /// Result of one W2 cover through the executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CoverOutcome {
     pub result: ReceiveCoverResult,
-    pub authority: LedgerAuthority,
+    pub authority: Option<LedgerAuthority>,
     pub ack_eligible: bool,
 }
 
@@ -43,101 +53,137 @@ pub(crate) struct CoverOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SettleOutcome {
     pub result: ReceiveSettleResult,
-    pub authority: LedgerAuthority,
+    pub authority: Option<LedgerAuthority>,
     pub ack_eligible: bool,
 }
 
-#[allow(clippy::unused_self)] // exclusive owner is bind_account; P20 uses the bound instance.
+/// Read-only startup incarnation E and cursor C.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StartupCursor {
+    pub incarnation: String,
+    pub cursor: u64,
+}
+
+#[allow(clippy::unused_self)] // exclusive owner is the RAII bind; P25 uses the bound account.
 impl LedgerExecutor {
-    #[must_use]
-    pub(crate) const fn actor() -> Self {
-        Self { owner: ExecutorOwner::Actor }
+    fn bind(owner: ExecutorOwner, account: String) -> Result<Self, SdkError> {
+        let mut held = lock_registry();
+        if held.contains_key(&account) {
+            return Err(SdkError::Storage(StorageError::AccountWriterBusy(account)));
+        }
+        held.insert(account.clone(), owner);
+        Ok(Self { owner, account })
     }
 
-    #[must_use]
-    pub(crate) const fn standalone() -> Self {
-        Self { owner: ExecutorOwner::Standalone }
-    }
-
-    /// Binds this executor to `account`. A standalone bind on an actor-owned account
-    /// returns the existing exclusive-writer error instead of starting a second receiver.
+    /// Exclusive actor bind for `account`. Released on drop.
     ///
     /// # Errors
-    /// [`StorageError::AccountWriterBusy`] when the account already has an actor receiver.
-    pub(crate) fn bind_account(&self, account: &str) -> Result<(), SdkError> {
-        ACTOR_ACCOUNTS.with(|held| {
-            let mut held = held.borrow_mut();
-            match self.owner {
-                ExecutorOwner::Actor => {
-                    held.insert(account.to_owned());
-                    Ok(())
-                }
-                ExecutorOwner::Standalone if held.contains(account) => {
-                    Err(SdkError::Storage(StorageError::AccountWriterBusy(account.to_owned())))
-                }
-                ExecutorOwner::Standalone => Ok(()),
-            }
-        })
+    /// [`StorageError::AccountWriterBusy`] when the account already has a receiver.
+    pub(crate) fn bind_actor(account: impl Into<String>) -> Result<Self, SdkError> {
+        Self::bind(ExecutorOwner::Actor, account.into())
+    }
+
+    /// Exclusive standalone bind for `account`. Released on drop.
+    ///
+    /// # Errors
+    /// [`StorageError::AccountWriterBusy`] when the account already has a receiver.
+    pub(crate) fn bind_standalone(account: impl Into<String>) -> Result<Self, SdkError> {
+        Self::bind(ExecutorOwner::Standalone, account.into())
+    }
+
+    #[must_use]
+    pub(crate) const fn owner(&self) -> ExecutorOwner {
+        self.owner
+    }
+
+    #[must_use]
+    pub(crate) fn account(&self) -> &str {
+        &self.account
     }
 
     /// W2 cover inside the caller's open receive transaction.
     ///
     /// # Errors
-    /// Propagates cover refusals; records the C write with the minted W2 token.
+    /// Propagates cover refusals; records the C write only when storage returns [`ReceiveCoverResult::Covered`].
     pub(crate) fn cover_in(
         &self,
         tx: &ReceiveTransaction<'_>,
         cover: ReceiveCover<'_>,
     ) -> Result<CoverOutcome, SdkError> {
         let seq = cover.sequence;
-        let ack_eligible =
-            matches!(cover.kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Oversize);
+        let kind = cover.kind;
         let result = tx.cover(cover)?;
-        let authority = LedgerAuthority::w2(seq);
-        if result == ReceiveCoverResult::Covered {
-            hooks::record_sql(seq, authority);
+        let outcome = cover_outcome(seq, kind, result);
+        if let Some(token) = outcome.authority {
+            hooks::record_sql(seq, token);
         }
-        Ok(CoverOutcome { result, authority, ack_eligible })
+        Ok(outcome)
     }
 
-    /// WS settle inside the caller's open receive transaction. Never records a C write.
+    /// WS settle inside the caller's open receive transaction.
     ///
     /// # Errors
-    /// Propagates settle refusals.
+    /// Propagates settle refusals; records a C write only when settle advanced C.
     pub(crate) fn settle_in(
         &self,
         tx: &ReceiveTransaction<'_>,
         settle: ReceiveSettle,
     ) -> Result<SettleOutcome, SdkError> {
         let seq = settle.sequence;
-        let ack_eligible = settle.kind == ReceiveSettleKind::Terminal;
+        let kind = settle.kind;
+        let before = tx.receive_cursor()?;
         let result = tx.settle(settle)?;
-        Ok(SettleOutcome { result, authority: LedgerAuthority::ws(seq), ack_eligible })
+        let after = tx.receive_cursor()?;
+        let outcome = settle_outcome(seq, kind, result, after > before);
+        if after > before
+            && let Some(token) = outcome.authority
+        {
+            hooks::record_sql(seq, token);
+        }
+        Ok(outcome)
     }
 
-    /// Mints a reset token. Actual reset writes stay in P10; the token is what the
-    /// generic checkpoint setter requires.
-    #[must_use]
-    pub(crate) fn reset_token(&self, seq: u64) -> LedgerAuthority {
-        LedgerAuthority::reset(seq)
-    }
-
-    /// Mints an erasure token for hold cleanup joined to explicit erasure.
-    #[must_use]
-    pub(crate) fn erasure_token(&self, seq: u64) -> LedgerAuthority {
-        LedgerAuthority::erasure(seq)
-    }
-
-    /// WA token for a terminal intent at `seq`. Held cover/settle cannot mint one.
+    /// Reset token minted only inside an open P10 reset transaction.
     ///
     /// # Errors
-    /// Refuses a held or paused outcome and a sequence that is not the covered one.
+    /// [`StorageError::AuthorizationRejected`] when the writer transaction is closed.
+    pub(crate) fn observe_reset_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        seq: u64,
+    ) -> Result<LedgerAuthority, SdkError> {
+        tx.require_writer()?;
+        Ok(LedgerAuthority::reset(seq))
+    }
+
+    /// Erasure token minted only inside an open erasure transaction.
+    ///
+    /// # Errors
+    /// [`StorageError::AuthorizationRejected`] when the writer transaction is closed.
+    pub(crate) fn observe_erasure_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        seq: u64,
+    ) -> Result<LedgerAuthority, SdkError> {
+        tx.require_writer()?;
+        Ok(LedgerAuthority::erasure(seq))
+    }
+
+    /// WA token for a terminal storage result at `seq`. Held or paused work cannot mint one.
+    ///
+    /// # Errors
+    /// Refuses a missing token, a held or paused outcome, and a sequence that is not the covered one.
     pub(crate) fn mint_wa(
         &self,
-        from: LedgerAuthority,
+        from: Option<LedgerAuthority>,
         ack_eligible: bool,
         seq: u64,
     ) -> Result<LedgerAuthority, SdkError> {
+        let Some(from) = from else {
+            return Err(SdkError::Storage(StorageError::Integrity(
+                "storage result minted no ACK token",
+            )));
+        };
         if !ack_eligible {
             return Err(SdkError::Storage(StorageError::Integrity(
                 "held sequence is not eligible for ACK",
@@ -149,37 +195,35 @@ impl LedgerExecutor {
         Ok(LedgerAuthority::wa(seq))
     }
 
-    /// Generic receive-checkpoint write. The receive-cursor namespace requires W2 or reset.
+    /// Generic receive-checkpoint write. The receive-cursor namespace requires W2 or reset
+    /// and the caller's open receive transaction.
     ///
     /// # Errors
-    /// [`StorageError::AuthorizationRejected`] when the token cannot write C.
+    /// [`StorageError::AuthorizationRejected`] when the token cannot write C or the writer is closed.
     pub(crate) fn persist_receive_checkpoint_in(
         &self,
-        db: &AccountDb,
+        tx: &ReceiveTransaction<'_>,
         token: &LedgerAuthority,
-        target: &str,
         seq: u64,
     ) -> Result<(), SdkError> {
+        tx.require_writer()?;
         if !token.allows_receive_checkpoint() || token.seq() != seq {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
-        db.set_projection_checkpoint(
-            &gateway_receive_cursor_checkpoint_name(target),
-            &seq.to_string(),
-        )?;
+        tx.persist_receive_cursor(seq)?;
         hooks::record_sql(seq, *token);
         Ok(())
     }
 
-    /// Raw ACK. Records the frame with the real WA token, then refuses any other kind.
+    /// Raw ACK. Refuses any other kind, then records the frame with the real WA token.
     ///
     /// # Errors
     /// [`StorageError::AuthorizationRejected`] when the token is not WA for `seq`.
     pub(crate) fn send_ack_in(&self, token: &LedgerAuthority, seq: u64) -> Result<(), SdkError> {
-        hooks::record_ack(seq, Some(*token));
         if !token.is_wa() || token.seq() != seq {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
+        hooks::record_ack(seq, Some(*token));
         Ok(())
     }
 
@@ -206,7 +250,7 @@ impl LedgerExecutor {
         hooks::record_inbox(after, limit);
     }
 
-    /// Read-only startup C. Never writes max into C.
+    /// Read-only startup E+C. Never writes max into C.
     ///
     /// # Errors
     /// [`SdkError::InvalidGatewayCursor`] when the stored checkpoint is not a u64.
@@ -214,17 +258,64 @@ impl LedgerExecutor {
         &self,
         db: &AccountDb,
         target: &str,
-    ) -> Result<u64, SdkError> {
-        let checkpoint = db
-            .projection_checkpoint(&gateway_receive_cursor_checkpoint_name(target))?
-            .unwrap_or_else(|| "0".to_owned());
-        checkpoint.parse::<u64>().map_err(|_error| SdkError::InvalidGatewayCursor(checkpoint))
+    ) -> Result<StartupCursor, SdkError> {
+        let (incarnation, cursor) = db.receive_startup(target)?;
+        Ok(StartupCursor { incarnation, cursor })
     }
 }
 
+impl Drop for LedgerExecutor {
+    fn drop(&mut self) {
+        lock_registry().remove(&self.account);
+    }
+}
+
+fn cover_outcome(seq: u64, kind: ReceiveCoverKind, result: ReceiveCoverResult) -> CoverOutcome {
+    match result {
+        ReceiveCoverResult::Covered => CoverOutcome {
+            result,
+            authority: Some(LedgerAuthority::w2(seq)),
+            ack_eligible: matches!(kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Oversize),
+        },
+        ReceiveCoverResult::Paused => CoverOutcome { result, authority: None, ack_eligible: false },
+    }
+}
+
+fn settle_outcome(
+    seq: u64,
+    kind: ReceiveSettleKind,
+    result: ReceiveSettleResult,
+    wrote_c: bool,
+) -> SettleOutcome {
+    let ack_eligible =
+        result == ReceiveSettleResult::Settled && kind == ReceiveSettleKind::Terminal;
+    let authority = if wrote_c {
+        Some(LedgerAuthority::w2(seq))
+    } else if result == ReceiveSettleResult::Settled {
+        Some(LedgerAuthority::ws(seq))
+    } else {
+        None
+    };
+    SettleOutcome { result, authority, ack_eligible }
+}
+
 #[cfg(test)]
-pub(crate) fn reset_actor_accounts() {
-    ACTOR_ACCOUNTS.with(|held| held.borrow_mut().clear());
+pub(crate) fn cover_outcome_for_test(
+    seq: u64,
+    kind: ReceiveCoverKind,
+    result: ReceiveCoverResult,
+) -> CoverOutcome {
+    cover_outcome(seq, kind, result)
+}
+
+#[cfg(test)]
+pub(crate) fn settle_outcome_for_test(
+    seq: u64,
+    kind: ReceiveSettleKind,
+    result: ReceiveSettleResult,
+    wrote_c: bool,
+) -> SettleOutcome {
+    settle_outcome(seq, kind, result, wrote_c)
 }
 
 /// Conversation `message.receive` redrive ACK. WA owns the wire frame.

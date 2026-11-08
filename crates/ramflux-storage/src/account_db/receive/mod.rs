@@ -65,6 +65,7 @@ mod tests;
 mod w0_replay_support;
 
 use crate::{AccountDb, ProjectionStore, StorageError};
+use rusqlite::OptionalExtension;
 
 /// Expected actor and durable state for one ledger writer phase.
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +132,29 @@ impl ReceiveTransaction<'_> {
             rusqlite::params![self.target, self.incarnation, seq.as_slice()],
         )?;
         Ok(())
+    }
+
+    /// Live receive cursor C for this target. Requires the open writer transaction.
+    ///
+    /// # Errors
+    /// [`StorageError::AuthorizationRejected`] when the writer is closed or C is not a u64.
+    pub fn receive_cursor(&self) -> Result<u64, StorageError> {
+        self.require_writer()?;
+        self.db
+            .projection_checkpoint(&format!("gateway_receive_cursor:{}", self.target))?
+            .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))
+    }
+
+    /// Writes C inside the open receive transaction. SDK token checks live in the executor.
+    ///
+    /// # Errors
+    /// [`StorageError::AuthorizationRejected`] when the writer is closed; storage errors from the write.
+    pub fn persist_receive_cursor(&self, seq: u64) -> Result<(), StorageError> {
+        self.require_writer()?;
+        self.db.set_projection_checkpoint(
+            &format!("gateway_receive_cursor:{}", self.target),
+            &seq.to_string(),
+        )
     }
 }
 
@@ -205,6 +229,27 @@ impl AccountDb {
             }
             Ok(value)
         })
+    }
+
+    /// Read-only startup incarnation E and cursor C. Never writes max into C.
+    ///
+    /// # Errors
+    /// [`StorageError::AuthorizationRejected`] when the stored checkpoint is not a u64;
+    /// storage errors from the epoch lookup.
+    pub fn receive_startup(&self, target: &str) -> Result<(String, u64), StorageError> {
+        let incarnation = self
+            .connection
+            .query_row(
+                "SELECT incarnation_id FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+                rusqlite::params![target],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let cursor = self
+            .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
+            .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?;
+        Ok((incarnation, cursor))
     }
 }
 
