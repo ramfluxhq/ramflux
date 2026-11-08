@@ -300,7 +300,7 @@ fn attachment_erasure_canary_covers_payload_legacy_tables_archives_journal_and_w
             metadata: &value,
         },
     )?;
-    db.reserve_operation("canary-operation", "fingerprint")?;
+    db.reserve_operation("canary-operation", "fingerprint", "")?;
     db.bind_operation_objects("canary-operation", &json!({"object_id":"wire"}))?;
     db.complete_operation(
         "canary-operation",

@@ -72,10 +72,11 @@ async fn media_key_replies_cannot_be_replayed_from_generic_operation_receipts()
     let account = local_bus_account(&state, "alice")?;
     // A different fingerprint can reserve the key only if no generic receipt was retained.
     assert_eq!(
-        account
-            .client
-            .account_db()?
-            .reserve_operation("media-key-request", "probe-no-secret-receipt")?,
+        account.client.account_db()?.reserve_operation(
+            "media-key-request",
+            "probe-no-secret-receipt",
+            ""
+        )?,
         None
     );
     let journal = serde_json::to_string(&account.client.account_db()?.journal_after(0, 128)?)?;

@@ -248,18 +248,18 @@ fn runtime_outbox_survives_exit_before_publish() -> Result<(), StorageError> {
 fn runtime_idempotency_receipts_reject_conflicts_and_pending_retries() -> Result<(), StorageError> {
     let (root, db) = test_db("runtime-idempotency")?;
     db.enable_runtime()?;
-    assert_eq!(db.reserve_operation("operation", "intent")?, None);
-    assert!(db.reserve_operation("operation", "intent").is_err());
+    assert_eq!(db.reserve_operation("operation", "intent", "")?, None);
+    assert!(db.reserve_operation("operation", "intent", "").is_err());
     let response = serde_json::json!({"applied": 1});
     db.complete_operation("operation", &response)?;
-    assert_eq!(db.reserve_operation("operation", "intent")?, Some(response.clone()));
-    assert!(db.reserve_operation("operation", "different intent").is_err());
+    assert_eq!(db.reserve_operation("operation", "intent", "")?, Some(response.clone()));
+    assert!(db.reserve_operation("operation", "different intent", "").is_err());
     drop(db);
     let index = AccountIndex::open(&root)?;
     let key = AccountDbKey::derive("acct", b"storage-test-secret");
     let reopened = AccountDb::open(&index, "acct", &key)?;
     reopened.enable_runtime()?;
-    assert_eq!(reopened.reserve_operation("operation", "intent")?, Some(response));
+    assert_eq!(reopened.reserve_operation("operation", "intent", "")?, Some(response));
     drop(reopened);
     fs::remove_dir_all(root)?;
     Ok(())

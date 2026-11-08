@@ -148,7 +148,7 @@ fn object_erasure_compacts_retry_responses_including_responses_without_an_object
 -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("object-operation-erasure")?;
     owned(&db)?;
-    assert!(db.reserve_operation("operation", "fingerprint")?.is_none());
+    assert!(db.reserve_operation("operation", "fingerprint", "")?.is_none());
     db.bind_operation_objects("operation", &json!({"object_id":"wire"}))?;
     db.complete_operation(
         "operation",
@@ -156,7 +156,7 @@ fn object_erasure_compacts_retry_responses_including_responses_without_an_object
     )?;
     db.delete_direct_message("thread", "message", "local", "delete")?;
     assert!(matches!(
-        db.reserve_operation("operation", "fingerprint"),
+        db.reserve_operation("operation", "fingerprint", ""),
         Err(StorageError::ObjectErased)
     ));
     let response: String = db.connection.query_row(

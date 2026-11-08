@@ -10,6 +10,7 @@ use serde_json::Value;
 pub(super) struct MutationIntent<'a> {
     pub key: Option<&'a str>,
     fingerprint: Option<String>,
+    method: &'a str,
 }
 
 impl<'a> MutationIntent<'a> {
@@ -30,7 +31,7 @@ impl<'a> MutationIntent<'a> {
                 )
             })
             .transpose()?;
-        Ok(Self { key, fingerprint })
+        Ok(Self { key, fingerprint, method: request.method.as_str() })
     }
     pub(super) fn lookup(&self, db: &AccountDb) -> Result<Option<Value>, SdkError> {
         let (Some(key), Some(fingerprint)) = (self.key, self.fingerprint.as_deref()) else {
@@ -54,6 +55,6 @@ impl<'a> MutationIntent<'a> {
         let (Some(key), Some(fingerprint)) = (self.key, self.fingerprint.as_deref()) else {
             return Ok(None);
         };
-        db.reserve_operation(key, fingerprint).map_err(SdkError::from)
+        db.reserve_operation(key, fingerprint, self.method).map_err(SdkError::from)
     }
 }

@@ -45,7 +45,7 @@ fn seed_registered_copies(db: &AccountDb) -> Result<(), StorageError> {
         1,
         None,
     )?;
-    db.reserve_operation("op-projection", "fp")?;
+    db.reserve_operation("op-projection", "fp", "")?;
     db.complete_operation(
         "op-projection",
         &json!({"message_id":"projection-id","preview":"operation-preview-secret"}),
@@ -394,7 +394,7 @@ fn operation_receipt_does_not_claim_actor_rows_that_share_its_key() -> Result<()
     let (root, db) = crate::tests::test_db("p11-operation-actor-collision")?;
     db.send_direct_message("thread", "m", "peer", b"private-content")?;
     db.persist_actor_state(kind, &envelope_with_secret("pair-session-secret"))?;
-    db.reserve_operation(kind, "fp")?;
+    db.reserve_operation(kind, "fp", "")?;
     db.complete_operation(kind, &json!({"message_id":"m","preview":"op-preview-secret"}))?;
     db.persist_actor_state(kind, &envelope_with_secret("pair-session-secret"))?;
     archive_kinds(&db, "archive", kind)?;

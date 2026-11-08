@@ -42,9 +42,19 @@ impl AccountDb {
              CREATE TABLE IF NOT EXISTS runtime_operation (
                 operation_id TEXT PRIMARY KEY,
                 fingerprint TEXT NOT NULL,
-                response_json TEXT
+                response_json TEXT,
+                operation_kind TEXT
              );",
         )?;
+        let operation_kind: i64 = self.connection.query_row(
+            "SELECT count(*) FROM pragma_table_info('runtime_operation') WHERE name='operation_kind'",
+            [],
+            |row| row.get(0),
+        )?;
+        if operation_kind == 0 {
+            self.connection
+                .execute_batch("ALTER TABLE runtime_operation ADD COLUMN operation_kind TEXT")?;
+        }
         // This value comes from the supervisor account record, never from a contact directory.
         self.connection.execute(
             "INSERT INTO runtime_account_identity VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET principal_commitment=excluded.principal_commitment WHERE principal_commitment<>excluded.principal_commitment",

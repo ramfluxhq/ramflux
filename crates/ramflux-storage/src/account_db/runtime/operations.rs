@@ -52,6 +52,7 @@ impl AccountDb {
         &self,
         id: &str,
         fingerprint: &str,
+        kind: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
         let transaction = self.connection.immediate_transaction()?;
         let existing: Option<(String, Option<String>)> = self
@@ -77,8 +78,8 @@ impl AccountDb {
             return Ok(Some(response));
         }
         self.connection.execute(
-            "INSERT INTO runtime_operation(operation_id,fingerprint) VALUES(?1,?2)",
-            params![id, fingerprint],
+            "INSERT INTO runtime_operation(operation_id,fingerprint,operation_kind) VALUES(?1,?2,?3)",
+            params![id, fingerprint, kind],
         )?;
         transaction.commit()?;
         Ok(None)
@@ -131,11 +132,11 @@ mod tests {
         let reader = db.open_reader()?;
         assert_eq!(reader.lookup_operation("new", "a")?, OperationLookup::Absent);
         assert_eq!(db.lookup_operation("new", "b")?, OperationLookup::Absent);
-        assert_eq!(db.reserve_operation("new", "a")?, None);
+        assert_eq!(db.reserve_operation("new", "a", "")?, None);
         assert_eq!(reader.lookup_operation("new", "a")?, OperationLookup::Pending);
         assert_eq!(reader.lookup_operation("new", "b")?, OperationLookup::Mismatch);
         assert!(
-            matches!(db.reserve_operation("new", "a"), Err(StorageError::OperationReconciliationRequired { key }) if key == "new")
+            matches!(db.reserve_operation("new", "a", ""), Err(StorageError::OperationReconciliationRequired { key }) if key == "new")
         );
         let response = json!({"value":"committed"});
         db.complete_operation("new", &response)?;
@@ -143,13 +144,13 @@ mod tests {
             reader.lookup_operation("new", "a")?,
             OperationLookup::Completed(response.clone())
         );
-        assert_eq!(db.reserve_operation("new", "a")?, Some(response));
+        assert_eq!(db.reserve_operation("new", "a", "")?, Some(response));
         db.complete_operation("new", &json!({"object_erased":true}))?;
         assert_eq!(
             reader.lookup_operation("new", "a")?,
             OperationLookup::Completed(json!({"object_erased":true}))
         );
-        assert!(matches!(db.reserve_operation("new", "a"), Err(StorageError::ObjectErased)));
+        assert!(matches!(db.reserve_operation("new", "a", ""), Err(StorageError::ObjectErased)));
         drop(reader);
         drop(db);
         std::fs::remove_dir_all(root)?;
@@ -161,9 +162,9 @@ mod tests {
     -> Result<(), StorageError> {
         let (root, db) = crate::tests::test_db("keyed-delete-complete")?;
         db.send_direct_message("thread", "m", "peer", b"private-content")?;
-        db.reserve_operation("op-delete", "fp-op")?;
-        db.reserve_operation("idem-delete", "fp-idem")?;
-        db.reserve_operation("send-race", "fp-send")?;
+        db.reserve_operation("op-delete", "fp-op", "message.delete")?;
+        db.reserve_operation("idem-delete", "fp-idem", "message.delete")?;
+        db.reserve_operation("send-race", "fp-send", "message.send")?;
         db.delete_direct_message("thread", "m", "local", "delete")?;
         let delete_body = json!({
             "tombstone_id": "tombstone:thread:m",
@@ -175,11 +176,14 @@ mod tests {
         db.complete_operation("idem-delete", &delete_body)?;
         db.complete_operation("send-race", &json!({"message_id":"m","preview":"send-body"}))?;
         for (id, fingerprint) in [("op-delete", "fp-op"), ("idem-delete", "fp-idem")] {
-            let replay = db.reserve_operation(id, fingerprint)?;
+            let replay = db.reserve_operation(id, fingerprint, "message.delete")?;
             assert_eq!(replay, Some(delete_body.clone()), "{id}");
         }
         assert!(
-            matches!(db.reserve_operation("send-race", "fp-send"), Err(StorageError::ObjectErased)),
+            matches!(
+                db.reserve_operation("send-race", "fp-send", "message.send"),
+                Err(StorageError::ObjectErased)
+            ),
             "send-race replay must be ObjectErased"
         );
         drop(db);
@@ -192,7 +196,7 @@ mod tests {
         let (root, db) = crate::tests::test_db("keyed-expire-replay")?;
         db.send_direct_message("thread", "m1", "peer", b"private-content")?;
         db.send_direct_message("thread", "m2", "peer", b"private-content")?;
-        db.reserve_operation("op-expire", "fp-expire")?;
+        db.reserve_operation("op-expire", "fp-expire", "conversation.disappearing.expire")?;
         db.delete_direct_message("thread", "m1", "local", "delete")?;
         db.delete_direct_message("thread", "m2", "local", "delete")?;
         let expire_body = json!({
@@ -212,8 +216,47 @@ mod tests {
             ]
         });
         db.complete_operation("op-expire", &expire_body)?;
-        let replay = db.reserve_operation("op-expire", "fp-expire")?;
+        let replay =
+            db.reserve_operation("op-expire", "fp-expire", "conversation.disappearing.expire")?;
         assert_eq!(replay, Some(expire_body));
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn echoed_tool_started_receipt_with_nested_tombstone_id_replays_object_erased()
+    -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("echoed-tool-started-erasure")?;
+        db.send_direct_message("thread", "m", "peer", b"private-content")?;
+        db.reserve_operation("op-mcp", "fp-mcp", "mcp.tool.started")?;
+        db.complete_operation(
+            "op-mcp",
+            &json!({
+                "status": "ok",
+                "output": {
+                    "echo": {
+                        "message_id": "m",
+                        "text": "echoed-plaintext-body",
+                        "tombstone_id": "x"
+                    }
+                }
+            }),
+        )?;
+        db.delete_direct_message("thread", "m", "local", "delete")?;
+        assert!(
+            matches!(
+                db.reserve_operation("op-mcp", "fp-mcp", "mcp.tool.started"),
+                Err(StorageError::ObjectErased)
+            ),
+            "echoed tool-started receipt must replay ObjectErased"
+        );
+        let receipt: String = db.connection.query_row(
+            "SELECT response_json FROM runtime_operation WHERE operation_id='op-mcp'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!receipt.contains("echoed-plaintext-body"), "{receipt}");
         drop(db);
         std::fs::remove_dir_all(root)?;
         Ok(())
