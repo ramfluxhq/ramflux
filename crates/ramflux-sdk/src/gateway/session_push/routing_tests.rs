@@ -333,9 +333,11 @@ async fn sdk_ijson_receive_refuses_unsafe_integer() {
     use ramflux_protocol::ProtocolError;
 
     for (mode, capable) in [(SessionMode::Legacy, false), (push(), true)] {
-        for bytes in [
-            deliver_frame_bytes(capable, "9007199254740992", false),
-            deliver_frame_bytes(capable, "9007199254740991", true),
+        // (bytes, inner I-JSON error text): the text tells the duplicate-name refusal apart
+        // from the unsafe-integer refusal.
+        for (bytes, needle) in [
+            (deliver_frame_bytes(capable, "9007199254740992", false), "unsafe exact JSON integer"),
+            (deliver_frame_bytes(capable, "9007199254740991", true), "duplicate I-JSON member"),
         ] {
             let mut engine = scripted_raw(
                 mode.clone(),
@@ -344,19 +346,31 @@ async fn sdk_ijson_receive_refuses_unsafe_integer() {
             let (_, _, dispatch_count) =
                 super::carrier_tests::attach_host_with_dispatch_counter(&mut engine);
             let result = engine.read_reply(ExpectedReply::Heartbeat).await;
-            match result {
-                Err(error @ SdkError::Protocol(ProtocolError::IJson(_))) => {
-                    assert_eq!(
-                        crate::client::inbox_failure::deterministic(&error),
-                        Some("i_json_rejected")
-                    );
+            if capable {
+                // A capable decode failure retires the session, as before this change.
+                match result {
+                    Err(SdkError::GatewaySessionRejected(message)) => {
+                        assert_eq!(message, "unexpected gateway frame: malformed capable frame");
+                    }
+                    other => panic!("expected a capable retirement, got {other:?}"),
                 }
-                other => panic!(
-                    "expected an exact I-JSON protocol refusal, got {other:?}; dispatch count={}",
-                    dispatch_count.load(std::sync::atomic::Ordering::Relaxed)
-                ),
+                assert!(matches!(engine.terminal_reason, Some(DisconnectReason::UnexpectedReply)));
+            } else {
+                match &result {
+                    Err(error @ SdkError::Protocol(ProtocolError::IJson(inner))) => {
+                        assert_eq!(
+                            crate::client::inbox_failure::deterministic(error),
+                            Some("i_json_rejected")
+                        );
+                        assert!(inner.to_string().contains(needle), "inner error: {inner}");
+                    }
+                    other => panic!(
+                        "expected an exact I-JSON protocol refusal, got {other:?}; dispatch count={}",
+                        dispatch_count.load(std::sync::atomic::Ordering::Relaxed)
+                    ),
+                }
+                assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)));
             }
-            assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)));
             assert!(engine.pending_deliveries.is_empty());
             assert_eq!(dispatch_count.load(std::sync::atomic::Ordering::Relaxed), 0);
         }
@@ -404,13 +418,13 @@ fn deliver_frame_bytes(capable: bool, created_at: &str, duplicate_extension_key:
 }
 
 async fn refusal_rows() {
-    // (r1) a malformed capable deliver (missing retain_until) is surfaced as a protocol
-    // decode failure and is NOT read as a legacy Deliver.
+    // (r1) a malformed capable deliver (missing retain_until) retires and is NOT read as a
+    // legacy Deliver.
     let mut malformed = capable_deliver();
     malformed.as_object_mut().unwrap().remove("retain_until");
     let mut engine = scripted(push(), vec![malformed]);
     let result = read(&mut engine).await;
-    protocol_decode_error(&result, &engine);
+    retired(result, &engine, "malformed capable frame");
     // (r2) Push deliver without the key, (r3) Push ack without the key.
     let mut engine = engine_of(push(), legacy_deliver());
     let result = read(&mut engine).await;
@@ -465,13 +479,13 @@ async fn refusal_rows() {
     unknown["reason"] = json!("zz");
     let mut engine = engine_of(push(), unknown);
     let result = read(&mut engine).await;
-    protocol_decode_error(&result, &engine);
+    retired(result, &engine, "malformed capable frame");
     // (r10) a keyed nack whose E has 31 characters: retired, no fallback to the keyless shape.
     let mut short = capable_nack(Some(E));
     short["incarnation_id"] = json!(&E[..31]);
     let mut engine = engine_of(push(), short);
     let result = read(&mut engine).await;
-    protocol_decode_error(&result, &engine);
+    retired(result, &engine, "malformed capable frame");
     // (r11) a keyed cursor during an idle read (no outstanding request).
     let keyed_cursor =
         capable(&n::SessionPushServerFrame::Cursor { incarnation_id: E.into(), cursor: None });
@@ -481,15 +495,6 @@ async fn refusal_rows() {
     // A capable decode failure is a RouteError::Capable, never Legacy.
     let bytes = serde_json::to_vec(&capable_deliver_missing()).unwrap();
     assert!(matches!(route(&bytes, &push()), Err(RouteError::Capable(_))));
-}
-
-fn protocol_decode_error(
-    result: &Result<GatewayServerFrame, SdkError>,
-    engine: &GatewaySessionEngine,
-) {
-    assert!(matches!(result, Err(SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)))));
-    assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)));
-    assert!(engine.pending_deliveries.is_empty());
 }
 
 fn engine_of(mode: SessionMode, frame: Value) -> GatewaySessionEngine {

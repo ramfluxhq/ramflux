@@ -554,8 +554,7 @@ async fn refusal_rows() {
     // (r21) a single ACK reply that carries `results` is malformed (no fallback).
     let bytes = mutate(&ack_frame(), |v| v["results"] = json!([]));
     let (result, engine) = single(vec![bytes]).await;
-    assert!(matches!(result, Err(SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)))));
-    assert!(matches!(engine.terminal_reason, Some(DisconnectReason::Transport)), "r21");
+    retired_with(result, &engine, "unexpected gateway frame: malformed capable frame", "r21");
 
     // (r13)-(r16) the result list against the requested [1, 2, 3].
     let mismatch =

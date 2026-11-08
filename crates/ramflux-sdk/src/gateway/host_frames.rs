@@ -352,11 +352,12 @@ impl GatewaySessionEngine {
                 },
             },
             Err(RouteError::Retire(why)) => Err(self.retire(why)),
-            Err(RouteError::Capable(error) | RouteError::Legacy(error)) => {
+            Err(RouteError::Capable(_)) => Err(self.retire("malformed capable frame")),
+            Err(RouteError::Legacy(error)) => {
                 if transport_on_decode_error {
                     self.terminal_reason = Some(DisconnectReason::Transport);
                 }
-                Err(SdkError::Protocol(error))
+                Err(SdkError::from(error))
             }
         }
     }
