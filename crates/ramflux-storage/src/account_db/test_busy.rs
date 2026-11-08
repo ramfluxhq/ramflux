@@ -4,7 +4,6 @@
 //! Test support: a competing writer connection that fails fast instead of waiting.
 use crate::{AccountDb, StorageError};
 
-#[cfg(any(test, feature = "test-instrumentation"))]
 impl AccountDb {
     /// Test support: this connection's busy handler gives up immediately, so a competing write
     /// reports the exact busy error instead of waiting out the default timeout.
