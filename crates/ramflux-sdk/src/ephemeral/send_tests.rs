@@ -31,9 +31,13 @@ struct RecordingWire {
 
 impl RecordingWire {
     fn with_result(outcome: &str, reason: Option<&str>) -> Self {
+        Self::with_result_for("envelope", outcome, reason)
+    }
+
+    fn with_result_for(envelope_id: &str, outcome: &str, reason: Option<&str>) -> Self {
         let mut body = serde_json::json!({
             "frame_type": "ephemeral_result",
-            "envelope_id": "envelope",
+            "envelope_id": envelope_id,
             "outcome": outcome,
         });
         if let Some(reason) = reason {
@@ -105,12 +109,24 @@ fn base_envelope() -> Envelope {
     }
 }
 
+fn signed_request() -> ramflux_protocol::SignedRequest {
+    serde_json::from_value(serde_json::json!({
+        "schema": "ramflux.signed_request.v1", "version": 1, "domain": "ramflux.signed_request.v1",
+        "signing_key_id": "device:phone", "signature_alg": "ed25519", "signature": "fixture",
+        "source_device_id": "device", "request_id": "req", "method": "POST",
+        "path": "/gateway/session/submit",
+        "device_proof_hash": "proof", "body_hash": "body", "nonce": "n",
+        "created_at": 1, "expires_at": 2
+    }))
+    .expect("fixture signed request")
+}
+
 fn send(
     envelope: &Envelope,
     caps: &[String],
     wire: &mut RecordingWire,
 ) -> Result<EphemeralSendOutcome, EphemeralSendError> {
-    send_ephemeral(envelope, caps, NOW_MS, wire)
+    send_ephemeral(&signed_request(), envelope, caps, NOW_MS, wire)
 }
 
 fn row_both_caps_delivers(envelope: &Envelope) -> TestResult {
@@ -120,8 +136,48 @@ fn row_both_caps_delivers(envelope: &Envelope) -> TestResult {
     let sent: Value = serde_json::from_slice(&wire.sent[0])?;
     assert_eq!(sent["frame_type"], "submit");
     assert_eq!(sent["submit"]["envelope"]["envelope_id"], "envelope");
-    assert_eq!(encode_ephemeral_submit(envelope)?, wire.sent[0]);
+    assert!(sent["submit"]["signed_request"].is_object(), "P11 submit carries signed_request");
+    assert_eq!(encode_ephemeral_submit(&signed_request(), envelope)?, wire.sent[0]);
     Ok(())
+}
+
+fn row_submit_bytes_match_gateway_codec(envelope: &Envelope) -> TestResult {
+    let signed = signed_request();
+    let bytes = encode_ephemeral_submit(&signed, envelope)?;
+    let decoded: ramflux_node_core::GatewayClientFrame = ramflux_protocol::parse_i_json(&bytes)?;
+    match &decoded {
+        ramflux_node_core::GatewayClientFrame::Submit { submit } => {
+            assert_eq!(submit.envelope.envelope_id, envelope.envelope_id);
+            assert_eq!(submit.signed_request.request_id, signed.request_id);
+        }
+        other => panic!("gateway decoder must see Submit, got {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_vec(&decoded)?,
+        bytes,
+        "G/ephemeral.rs handler decoder re-encodes byte-identically"
+    );
+    Ok(())
+}
+
+fn row_ttl_one_delivers() -> TestResult {
+    let mut envelope = base_envelope();
+    envelope.ttl = 1;
+    let mut wire = RecordingWire::with_result("accepted", None);
+    assert_eq!(send(&envelope, &both_caps(), &mut wire)?, EphemeralSendOutcome::Delivered);
+    assert_eq!(wire.sent.len(), 1, "ttl=1 is inside the inclusive bound");
+    Ok(())
+}
+
+fn row_result_envelope_mismatch(envelope: &Envelope) {
+    let reply = RecordingWire::with_result_for("other", "accepted", None).replies[0].clone();
+    assert_eq!(
+        decode_ephemeral_result(&reply, &envelope.envelope_id),
+        Err(EphemeralSendError::ResultMismatch)
+    );
+    let mut wire = RecordingWire::with_result_for("other", "accepted", None);
+    assert_eq!(send(envelope, &both_caps(), &mut wire), Err(EphemeralSendError::ResultMismatch));
+    assert_eq!(wire.sent.len(), 1);
 }
 
 fn row_missing_capability_sends_nothing(envelope: &Envelope) -> TestResult {
@@ -173,16 +229,33 @@ fn row_remote_results_map(envelope: &Envelope) -> TestResult {
         ("dropped", Some("rate_limited"), EphemeralSendOutcome::RateLimited),
         ("dropped", Some("replayed"), EphemeralSendOutcome::Replayed),
         ("dropped", Some("unsupported"), EphemeralSendOutcome::Unsupported),
+        ("dropped", Some("recipient_unsupported"), EphemeralSendOutcome::Unsupported),
         (
             "dropped",
             Some("invalid"),
             EphemeralSendOutcome::Invalid(EphemeralModeError::InvalidDeliveryMode),
         ),
         ("dropped", Some("offline"), EphemeralSendOutcome::Dropped(EphemeralDropReason::Offline)),
+        (
+            "dropped",
+            Some("queue_full"),
+            EphemeralSendOutcome::Dropped(EphemeralDropReason::QueueFull),
+        ),
+        ("dropped", Some("expired"), EphemeralSendOutcome::Dropped(EphemeralDropReason::Expired)),
+        (
+            "dropped",
+            Some("not_local"),
+            EphemeralSendOutcome::Dropped(EphemeralDropReason::NotLocal),
+        ),
+        (
+            "dropped",
+            Some("target_refused"),
+            EphemeralSendOutcome::Dropped(EphemeralDropReason::TargetRefused),
+        ),
     ];
     for (outcome, reason, expected) in rows {
         let reply = RecordingWire::with_result(outcome, reason).replies[0].clone();
-        assert_eq!(decode_ephemeral_result(&reply)?, expected);
+        assert_eq!(decode_ephemeral_result(&reply, &envelope.envelope_id)?, expected);
         let mut wire = RecordingWire::with_result(outcome, reason);
         assert_eq!(send(envelope, &both_caps(), &mut wire)?, expected);
         assert_eq!(wire.sent.len(), 1);
@@ -221,13 +294,16 @@ fn row_no_persistence(envelope: &Envelope) -> TestResult {
 #[test]
 fn ephemeral_sdk_send_and_local_unsupported() -> TestResult {
     let envelope = base_envelope();
+    row_submit_bytes_match_gateway_codec(&envelope)?;
     row_both_caps_delivers(&envelope)?;
+    row_ttl_one_delivers()?;
     row_missing_capability_sends_nothing(&envelope)?;
     row_invalid_mode_priority_ttl_sends_nothing()?;
     row_remote_results_map(&envelope)?;
+    row_result_envelope_mismatch(&envelope);
     row_no_persistence(&envelope)?;
     assert_eq!(
-        send_ephemeral(&envelope, &both_caps(), NOW_MS, &mut FailingWire),
+        send_ephemeral(&signed_request(), &envelope, &both_caps(), NOW_MS, &mut FailingWire),
         Err(EphemeralSendError::TransportWrite)
     );
     Ok(())

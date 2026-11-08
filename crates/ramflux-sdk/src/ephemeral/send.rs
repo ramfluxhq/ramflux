@@ -4,11 +4,12 @@
 //! Dormant SDK ephemeral submit codec, D1 validation, and D5 local unsupported.
 
 use ramflux_protocol::ephemeral::{
-    EphemeralDropReason, EphemeralModeError, EphemeralSubmitOutcome, EphemeralSubmitResult,
-    GATEWAY_EPHEMERAL_CAPABILITY, deadline,
+    EphemeralDropReason, EphemeralModeError, EphemeralSubmitResult, GATEWAY_EPHEMERAL_CAPABILITY,
+    deadline,
 };
-use ramflux_protocol::{Envelope, GATEWAY_SESSION_PUSH_CAPABILITY, parse_i_json};
-use serde::{Deserialize, Serialize};
+use ramflux_protocol::{Envelope, GATEWAY_SESSION_PUSH_CAPABILITY, SignedRequest, parse_i_json};
+
+use crate::{GatewayClientFrame, GatewayServerFrame, GatewaySubmitFrame};
 
 /// Typed result of [`send_ephemeral`]: local D1/D5 or a mapped `ephemeral_result`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +29,8 @@ pub enum EphemeralSendError {
     Encode,
     #[error("ephemeral result could not be decoded")]
     Decode,
+    #[error("ephemeral result envelope_id did not match the submit")]
+    ResultMismatch,
     #[error("ephemeral transport write failed")]
     TransportWrite,
     #[error("ephemeral transport read failed")]
@@ -44,25 +47,6 @@ pub trait EphemeralWire {
     fn recv_frame(&mut self) -> Result<Vec<u8>, EphemeralSendError>;
 }
 
-#[derive(Serialize)]
-struct EphemeralSubmitFrame<'a> {
-    frame_type: &'static str,
-    submit: EphemeralSubmitBody<'a>,
-}
-
-#[derive(Serialize)]
-struct EphemeralSubmitBody<'a> {
-    envelope: &'a Envelope,
-}
-
-#[derive(Deserialize)]
-struct EphemeralResultFrame {
-    frame_type: String,
-    envelope_id: String,
-    #[serde(flatten)]
-    result: EphemeralSubmitResult,
-}
-
 /// D5: both echoed capabilities are required before a frame may be written.
 #[must_use]
 pub fn echo_holds_ephemeral_send(capabilities: &[String]) -> bool {
@@ -72,29 +56,45 @@ pub fn echo_holds_ephemeral_send(capabilities: &[String]) -> bool {
         && capabilities.iter().any(|capability| capability == ephemeral)
 }
 
-/// Encodes the C→G ephemeral submit frame (`frame_type=submit`, envelope body).
+/// Encodes the C→G submit with the S6b P11 codec (`GatewayClientFrame::Submit`).
 ///
 /// # Errors
 /// Returns [`EphemeralSendError::Encode`] when JSON serialisation fails.
-pub fn encode_ephemeral_submit(envelope: &Envelope) -> Result<Vec<u8>, EphemeralSendError> {
-    serde_json::to_vec(&EphemeralSubmitFrame {
-        frame_type: "submit",
-        submit: EphemeralSubmitBody { envelope },
+pub fn encode_ephemeral_submit(
+    signed_request: &SignedRequest,
+    envelope: &Envelope,
+) -> Result<Vec<u8>, EphemeralSendError> {
+    serde_json::to_vec(&GatewayClientFrame::Submit {
+        submit: GatewaySubmitFrame {
+            signed_request: signed_request.clone(),
+            envelope: envelope.clone(),
+        },
     })
     .map_err(|_| EphemeralSendError::Encode)
 }
 
-/// Decodes a G→C `ephemeral_result` into a typed send outcome.
+/// Decodes a G→C `ephemeral_result` with the P11 server codec and matches `envelope_id`.
 ///
 /// # Errors
-/// Returns [`EphemeralSendError::Decode`] when the bytes are not a valid result frame.
-pub fn decode_ephemeral_result(bytes: &[u8]) -> Result<EphemeralSendOutcome, EphemeralSendError> {
-    let frame: EphemeralResultFrame =
-        parse_i_json(bytes).map_err(|_| EphemeralSendError::Decode)?;
-    if frame.frame_type != "ephemeral_result" || frame.envelope_id.is_empty() {
-        return Err(EphemeralSendError::Decode);
+/// Returns [`EphemeralSendError::Decode`] when the bytes are not a result frame, or
+/// [`EphemeralSendError::ResultMismatch`] when `envelope_id` differs from the submit.
+pub fn decode_ephemeral_result(
+    bytes: &[u8],
+    envelope_id: &str,
+) -> Result<EphemeralSendOutcome, EphemeralSendError> {
+    match parse_i_json(bytes).map_err(|_| EphemeralSendError::Decode)? {
+        GatewayServerFrame::EphemeralResult { envelope_id: result_id, result }
+            if result_id == envelope_id =>
+        {
+            Ok(map_submit_result(result))
+        }
+        GatewayServerFrame::EphemeralResult { envelope_id: result_id, .. }
+            if !result_id.is_empty() =>
+        {
+            Err(EphemeralSendError::ResultMismatch)
+        }
+        _ => Err(EphemeralSendError::Decode),
     }
-    Ok(map_submit_result(frame.result))
 }
 
 /// Validates D1, applies D5, writes at most one submit frame, and maps the result.
@@ -102,6 +102,7 @@ pub fn decode_ephemeral_result(bytes: &[u8]) -> Result<EphemeralSendOutcome, Eph
 /// # Errors
 /// Returns a transport or codec error only after D1 and D5 have accepted the send.
 pub fn send_ephemeral<W: EphemeralWire>(
+    signed_request: &SignedRequest,
     envelope: &Envelope,
     echo_capabilities: &[String],
     now_ms: u64,
@@ -113,29 +114,23 @@ pub fn send_ephemeral<W: EphemeralWire>(
     if !echo_holds_ephemeral_send(echo_capabilities) {
         return Ok(EphemeralSendOutcome::Unsupported);
     }
-    let frame = encode_ephemeral_submit(envelope)?;
+    let frame = encode_ephemeral_submit(signed_request, envelope)?;
     wire.send_frame(&frame)?;
-    decode_ephemeral_result(&wire.recv_frame()?)
+    decode_ephemeral_result(&wire.recv_frame()?, &envelope.envelope_id)
 }
 
 fn map_submit_result(result: EphemeralSubmitResult) -> EphemeralSendOutcome {
-    match (result.outcome(), result.reason()) {
-        (EphemeralSubmitOutcome::Accepted, None) => EphemeralSendOutcome::Delivered,
-        (EphemeralSubmitOutcome::Dropped, Some(EphemeralDropReason::Invalid) | None)
-        | (EphemeralSubmitOutcome::Accepted, Some(_)) => {
+    match result.reason() {
+        None => EphemeralSendOutcome::Delivered,
+        Some(EphemeralDropReason::Invalid) => {
             EphemeralSendOutcome::Invalid(EphemeralModeError::InvalidDeliveryMode)
         }
-        (
-            EphemeralSubmitOutcome::Dropped,
-            Some(EphemeralDropReason::Unsupported | EphemeralDropReason::RecipientUnsupported),
-        ) => EphemeralSendOutcome::Unsupported,
-        (EphemeralSubmitOutcome::Dropped, Some(EphemeralDropReason::RateLimited)) => {
-            EphemeralSendOutcome::RateLimited
+        Some(EphemeralDropReason::Unsupported | EphemeralDropReason::RecipientUnsupported) => {
+            EphemeralSendOutcome::Unsupported
         }
-        (EphemeralSubmitOutcome::Dropped, Some(EphemeralDropReason::Replayed)) => {
-            EphemeralSendOutcome::Replayed
-        }
-        (EphemeralSubmitOutcome::Dropped, Some(reason)) => EphemeralSendOutcome::Dropped(reason),
+        Some(EphemeralDropReason::RateLimited) => EphemeralSendOutcome::RateLimited,
+        Some(EphemeralDropReason::Replayed) => EphemeralSendOutcome::Replayed,
+        Some(reason) => EphemeralSendOutcome::Dropped(reason),
     }
 }
 
