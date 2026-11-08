@@ -276,7 +276,9 @@ fn storage_error_code(error: &StorageError) -> &'static str {
     use StorageError as E;
     match error {
         E::OperationReconciliationRequired { .. } => "OperationReconciliationRequired",
-        E::SegmentResourceCapacity { .. } | E::AccountWriterBusy(_) => "account_busy",
+        E::SegmentResourceCapacity { .. }
+        | E::UnsupportedRawQuotaExceeded { .. }
+        | E::AccountWriterBusy(_) => "account_busy",
         E::ObjectErased => "ObjectErased",
         E::ObjectIdentityConflict => "ObjectIdentityConflict",
         E::ObjectOwnershipUnverified { .. } => "ObjectOwnershipUnverified",

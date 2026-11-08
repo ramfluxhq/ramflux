@@ -66,7 +66,7 @@ impl BackupDatabase {
         if !native_data_only {
             self.db.execute_batch(
                 "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id)
-                 SELECT copy_id,owner_id FROM raw_inner_copy;
+                 SELECT 'raw:'||copy_id,owner_id FROM raw_inner_copy;
                  INSERT OR IGNORE INTO message_footprint(message_id,kind,locator)
                  SELECT owner_id,'raw_inner',copy_id FROM raw_inner_copy;
                  INSERT OR IGNORE INTO message_footprint(message_id,kind,locator)

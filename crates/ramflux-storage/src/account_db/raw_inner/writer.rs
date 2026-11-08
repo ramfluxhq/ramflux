@@ -76,6 +76,9 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
         return Err(StorageError::AuthorizationRejected);
     }
+    if message_deleted(db, owner_id)? || message_deleted(db, &format!("raw-copy:{copy_id}"))? {
+        return Err(StorageError::AuthorizationRejected);
+    }
     let recorded_source: Option<String> = db
         .query_row(
             "SELECT source_anchor FROM raw_inner_owner WHERE owner_id=?1",
@@ -84,9 +87,6 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         )
         .optional()?;
     if recorded_source.as_deref().is_some_and(|anchor| anchor != source_anchor) {
-        return Err(StorageError::AuthorizationRejected);
-    }
-    if message_deleted(db, owner_id)? {
         return Err(StorageError::AuthorizationRejected);
     }
     let digest: [u8; 32] = Sha256::digest(bytes).into();
@@ -111,7 +111,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
             if !registered {
                 db.execute(
                     "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2)",
-                    params![copy_id, owner_id],
+                    params![format!("raw:{copy_id}"), owner_id],
                 )?;
                 db.execute(
                     "INSERT OR IGNORE INTO message_footprint(message_id,kind,locator) VALUES(?1,'raw_inner',?2)",
@@ -135,7 +135,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     )?;
     db.execute(
         "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2)",
-        params![copy_id, owner_id],
+        params![format!("raw:{copy_id}"), owner_id],
     )?;
     db.execute(
         "INSERT OR IGNORE INTO message_footprint(message_id,kind,locator) VALUES(?1,'raw_inner',?2)",
@@ -165,9 +165,10 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
     if message_deleted(db, message_id)? {
         return Err(StorageError::AuthorizationRejected);
     }
+    let binding_id = format!("raw:{copy_id}");
     db.execute(
         "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2)",
-        params![copy_id, message_id],
+        params![binding_id, message_id],
     )?;
     db.execute(
         "INSERT OR IGNORE INTO message_footprint(message_id,kind,locator) VALUES(?1,'raw_inner',?2)",
@@ -179,7 +180,7 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
     )?;
     db.execute(
         "DELETE FROM message_copy_binding WHERE copy_id=?1 AND message_id<>?2",
-        params![copy_id, message_id],
+        params![binding_id, message_id],
     )?;
     Ok(())
 }

@@ -113,6 +113,28 @@ impl AccountDb {
                 &json!({"version":1}),
             )?;
         }
+        self.persist_deleted_raw_copy_markers(message)?;
+        Ok(())
+    }
+
+    fn persist_deleted_raw_copy_markers(&self, message: &str) -> Result<(), StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT c.copy_id,c.owner_id FROM message_copy_binding b
+             JOIN raw_inner_copy c ON b.copy_id='raw:'||c.copy_id
+             WHERE b.message_id=?1",
+        )?;
+        let copies = query
+            .query_map(params![message], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(query);
+        for (copy_id, owner_id) in copies {
+            self.persist_deletion_marker(&format!("raw-copy:{copy_id}"))?;
+            if owner_id.starts_with("copy:") {
+                self.persist_deletion_marker(&owner_id)?;
+            }
+        }
         Ok(())
     }
 

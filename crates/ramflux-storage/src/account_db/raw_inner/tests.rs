@@ -105,6 +105,177 @@ fn raw_copy_write_requires_transaction_and_charges_duplicate_copies() -> TestRes
 }
 
 #[test]
+fn raw_copy_limits_accept_inclusive_boundaries_and_reject_overages() -> TestResult {
+    let (_root, db) = test_db("raw-copy-inclusive-limits")?;
+    let max_id = "i".repeat(256);
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: &max_id,
+            verified_source_anchor: &max_id,
+            copy_id: &max_id,
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"i",
+            bounded_metadata: &vec![b'm'; 4096],
+        })
+    })?;
+    let max_inner = vec![b'b'; writer::MAX_INNER_BYTES];
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "inner-boundary-owner",
+            verified_source_anchor: "inner-boundary-source",
+            copy_id: "inner-boundary-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: &max_inner,
+            bounded_metadata: b"{}",
+        })
+    })?;
+    let max_history = vec![b'h'; writer::MAX_HISTORY_CONTAINER_BYTES];
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "history-boundary-owner",
+            verified_source_anchor: "history-boundary-source",
+            copy_id: "history-boundary-copy",
+            kind: RawInnerCopyKind::HistoryContainer,
+            bytes: &max_history,
+            bounded_metadata: b"{}",
+        })
+    })?;
+
+    let over_inner = vec![b'b'; writer::MAX_INNER_BYTES + 1];
+    let over_history = vec![b'h'; writer::MAX_HISTORY_CONTAINER_BYTES + 1];
+    for (owner, source, copy, bytes, metadata) in [
+        ("empty-owner", "empty-source", "empty-copy", &[][..], &b"{}"[..]),
+        (
+            "inner-over-owner",
+            "inner-over-source",
+            "inner-over-copy",
+            over_inner.as_slice(),
+            &b"{}"[..],
+        ),
+        (
+            "history-over-owner",
+            "history-over-source",
+            "history-over-copy",
+            over_history.as_slice(),
+            &b"{}"[..],
+        ),
+        (
+            "metadata-over-owner",
+            "metadata-over-source",
+            "metadata-over-copy",
+            &b"x"[..],
+            &vec![b'm'; 4097][..],
+        ),
+    ] {
+        assert!(matches!(
+            db.write_transaction(|| {
+                db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                    owner_id: owner,
+                    verified_source_anchor: source,
+                    copy_id: copy,
+                    kind: if copy.starts_with("history-") {
+                        RawInnerCopyKind::HistoryContainer
+                    } else {
+                        RawInnerCopyKind::OuterInner
+                    },
+                    bytes,
+                    bounded_metadata: metadata,
+                })
+            }),
+            Err(StorageError::AuthorizationRejected)
+        ));
+    }
+    for (owner, source, copy) in [
+        ("o".repeat(257), "source", "copy".to_owned()),
+        ("owner".to_owned(), "s".repeat(257), "copy".to_owned()),
+        ("owner".to_owned(), "source".to_owned(), "c".repeat(257)),
+        ("owner\u{7f}".to_owned(), "source".to_owned(), "copy".to_owned()),
+    ] {
+        assert!(matches!(
+            db.write_transaction(|| {
+                db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                    owner_id: &owner,
+                    verified_source_anchor: &source,
+                    copy_id: &copy,
+                    kind: RawInnerCopyKind::OuterInner,
+                    bytes: b"x",
+                    bounded_metadata: b"{}",
+                })
+            }),
+            Err(StorageError::AuthorizationRejected)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn raw_copy_rejects_owner_source_conflicts_and_invalid_bind_targets() -> TestResult {
+    let (_root, db) = test_db("raw-copy-conflicts")?;
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "owner",
+            verified_source_anchor: "source-a",
+            copy_id: "copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"first",
+            bounded_metadata: b"{}",
+        })
+    })?;
+    assert!(matches!(
+        db.write_transaction(|| {
+            db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                owner_id: "owner",
+                verified_source_anchor: "source-b",
+                copy_id: "another-copy",
+                kind: RawInnerCopyKind::OuterInner,
+                bytes: b"other",
+                bounded_metadata: b"{}",
+            })
+        }),
+        Err(StorageError::AuthorizationRejected)
+    ));
+    assert!(matches!(
+        db.write_transaction(|| {
+            db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                owner_id: "owner",
+                verified_source_anchor: "source-a",
+                copy_id: "copy",
+                kind: RawInnerCopyKind::OuterInner,
+                bytes: b"conflicting bytes",
+                bounded_metadata: b"{}",
+            })
+        }),
+        Err(StorageError::AuthorizationRejected)
+    ));
+    assert!(matches!(
+        db.write_transaction(|| db.bind_raw_inner_copy("unknown-copy", "target")),
+        Err(StorageError::AuthorizationRejected)
+    ));
+
+    db.connection.execute(
+        "INSERT INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,created_at)
+         VALUES('thread','deleted-target','sender',x'',x'7b7d',0,0,1)",
+        [],
+    )?;
+    db.delete_direct_message("thread", "deleted-target", "sender", "tombstone")?;
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "unbound-owner",
+            verified_source_anchor: "source",
+            copy_id: "bind-deleted-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"raw",
+            bounded_metadata: b"{}",
+        })
+    })?;
+    assert!(matches!(
+        db.write_transaction(|| db.bind_raw_inner_copy("bind-deleted-copy", "deleted-target")),
+        Err(StorageError::AuthorizationRejected)
+    ));
+    Ok(())
+}
+
+#[test]
 fn unsupported_owner_limit_is_per_account_and_source() -> TestResult {
     let (_root, db) = test_db("unsupported-owner-limit")?;
     for index in 0..64 {
@@ -222,6 +393,18 @@ fn known_content_evidence_is_private_and_erased_with_its_message() -> TestResult
         })
     });
     assert!(matches!(late_write, Err(StorageError::AuthorizationRejected)));
+    assert!(matches!(
+        db.write_transaction(|| {
+            db.put_known_content_evidence(
+                "known-message",
+                "thread",
+                b"exact inner",
+                b"late provenance",
+                b"late opening",
+            )
+        }),
+        Err(StorageError::AuthorizationRejected)
+    ));
     Ok(())
 }
 
@@ -239,6 +422,14 @@ fn raw_copy_binding_moves_the_locator_to_the_authenticated_replay_target() -> Te
         })?;
         db.bind_raw_inner_copy("envelope-copy", "message-target")
     })?;
+    assert_eq!(
+        db.connection.query_row(
+            "SELECT copy_id FROM message_copy_binding WHERE message_id='message-target'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?,
+        "raw:envelope-copy"
+    );
     assert_eq!(
         db.connection.query_row(
             "SELECT count(*) FROM message_footprint WHERE message_id='copy:authenticated-envelope' AND kind='raw_inner'",
@@ -263,6 +454,81 @@ fn raw_copy_binding_moves_the_locator_to_the_authenticated_replay_target() -> Te
     db.delete_direct_message("thread", "message-target", "sender", "tombstone")?;
     assert!(db.raw_inner_copy("envelope-copy")?.is_none());
     assert_eq!(db.unsupported_raw_quota(None)?.owners, 0);
+    Ok(())
+}
+
+#[test]
+fn erased_bound_raw_copy_cannot_be_rewritten() -> TestResult {
+    let (_root, db) = test_db("raw-copy-sticky-erasure")?;
+    db.connection.execute(
+        "INSERT INTO direct_message_projection(conversation_id,message_id,sender_id,encrypted_body,metadata_json,deleted,is_own,created_at)
+         VALUES('thread','message-target','sender',x'',x'7b7d',0,0,1)",
+        [],
+    )?;
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "copy:authenticated-envelope",
+            verified_source_anchor: "verified-root",
+            copy_id: "same-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"exact raw bytes",
+            bounded_metadata: b"{}",
+        })?;
+        db.bind_raw_inner_copy("same-copy", "message-target")
+    })?;
+    db.delete_direct_message("thread", "message-target", "sender", "tombstone")?;
+    let rewrite = db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "copy:authenticated-envelope",
+            verified_source_anchor: "verified-root",
+            copy_id: "same-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"exact raw bytes",
+            bounded_metadata: b"{}",
+        })
+    });
+    assert!(matches!(rewrite, Err(StorageError::AuthorizationRejected)));
+    let different_owner = db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "different-owner",
+            verified_source_anchor: "verified-root",
+            copy_id: "same-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"exact raw bytes",
+            bounded_metadata: b"{}",
+        })
+    });
+    assert!(matches!(different_owner, Err(StorageError::AuthorizationRejected)));
+    let different_copy = db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "copy:authenticated-envelope",
+            verified_source_anchor: "verified-root",
+            copy_id: "different-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"exact raw bytes",
+            bounded_metadata: b"{}",
+        })
+    });
+    assert!(matches!(different_copy, Err(StorageError::AuthorizationRejected)));
+    assert!(db.raw_inner_copy("same-copy")?.is_none());
+    assert!(db.raw_inner_copy("different-copy")?.is_none());
+    assert_eq!(db.unsupported_raw_quota(None)?.owners, 0);
+    for table in ["raw_inner_copy", "raw_inner_owner", "raw_inner_evidence"] {
+        assert_eq!(
+            db.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                .get::<_, u64>(0))?,
+            0,
+            "unexpected persisted rows in {table}"
+        );
+    }
+    assert_eq!(
+        db.connection.query_row(
+            "SELECT count(*) FROM message_copy_binding WHERE copy_id='raw:same-copy'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?,
+        0
+    );
     Ok(())
 }
 
