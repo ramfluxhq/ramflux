@@ -279,8 +279,14 @@ fn assembled_report_debug_redacts_secret_plaintext_and_opening() -> Result<(), C
     let fields = vector_fields(&envelope_id, &collapse);
     let assembled = assemble_report_opening(VECTOR_INNER, &fields, vector_opening())?;
     let debug = format!("{assembled:?}");
-    assert!(debug.contains("[REDACTED]"));
-    assert!(!debug.contains("s10a-p07-inner"));
-    assert!(!debug.contains(&hex::encode(vector_opening())));
+    assert_eq!(
+        debug,
+        "AssembledReportOpening { collapse_tag: \"[REDACTED]\", report_commitment: \"[REDACTED]\", opening: \"[REDACTED]\", framed_plaintext: \"[REDACTED]\", a0: \"[REDACTED]\" }"
+    );
+    let parsed = parse_report_plaintext(assembled.framed_plaintext())?;
+    assert_eq!(
+        format!("{parsed:?}"),
+        "ParsedReportPlaintext { inner: \"[REDACTED]\", opening: \"[REDACTED]\" }"
+    );
     Ok(())
 }
