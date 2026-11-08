@@ -57,6 +57,42 @@ impl SourceHold<'_> {
         self.admit(db, input)
     }
 
+    /// Same unrouted admission as [`Self::unrouted_entry`], joining an open receive transaction.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn unrouted_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        entry: &GatewayInboxEntry,
+        admission_key: &str,
+        at: i64,
+    ) -> Result<HoldDisposition, SdkError> {
+        let source_key = format!("unrouted:{admission_key}");
+        let body = serde_json::json!({
+            "envelope_id": entry.envelope.envelope_id,
+            "claimed_source_device_id": entry.envelope.source_device_id,
+            "payload_hash": entry.envelope.payload_hash,
+            "inbox_seq": entry.inbox_seq,
+        });
+        let input = ReceiveHold {
+            sequence: entry.inbox_seq,
+            admission_key,
+            class: ReceiveHoldClass::Unrouted,
+            contact_root: None,
+            unrouted_id: Some(admission_key),
+            journal: Some(ReceiveHoldJournal {
+                source_key: &source_key,
+                topic: "message.unrouted",
+                body: &body,
+                subject: None,
+            }),
+            at,
+        };
+        Ok(match tx.admit_hold(input)? {
+            ReceiveHoldResult::Held { evicted } => HoldDisposition::HeldLocal { evicted },
+            ReceiveHoldResult::Paused => HoldDisposition::Paused,
+        })
+    }
+
     /// Contact-capacity pressure shares WS and does not save an actor retry/floor row.
     pub(crate) fn contact_entry(
         &self,

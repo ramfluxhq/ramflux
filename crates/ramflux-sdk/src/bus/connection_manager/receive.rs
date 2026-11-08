@@ -23,6 +23,7 @@ pub(crate) type ReceiveApplied = (
     Box<crate::bus::contact_backpressure::Backpressure>,
 );
 pub(crate) type ReceiveAcked = (bool, Box<crate::bus::contact_backpressure::Backpressure>);
+#[derive(Clone)]
 pub(crate) struct ReceiveEntry {
     pub entry: crate::GatewayInboxEntry,
     pub retry_key: Option<String>,

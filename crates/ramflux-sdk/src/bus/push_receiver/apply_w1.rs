@@ -9,6 +9,8 @@ use crate::bus::account_runtime::lifecycle_fence;
 use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::PreparedSource;
+use crate::bus::sync_driver::source::hold::{HoldDisposition, SourceHold};
+use crate::client::legacy_w1::LegacyW1;
 use crate::prelude::*;
 use ramflux_storage::{
     AccountDb, ProjectionStore, ReceiveCoverResult, ReceiveExpectation, ReceiveGap, ReceiveStage,
@@ -88,7 +90,7 @@ async fn apply_once(
     let local_device = account.gateway_config.device_id.clone();
     let kind = classify(account, entry, source).await?;
     #[cfg(test)]
-    after_classify();
+    after_classify(account.client.account_db()?);
     match kind {
         Kind::Routed => Err(SdkError::InboundRejected(ROUTED_REFUSED.into())),
         Kind::OwnCopy(manifest) => {
@@ -130,16 +132,29 @@ async fn apply_once(
             })?;
             Ok(())
         }
-        Kind::LegacyHold => {
-            let client = &account.client;
-            run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
-                client.apply_legacy_group_hold_w1_in(tx, entry, expected, handle_generation())?;
-                cover_if_held(tx, sequence, true, &[])?;
-                Ok(true)
-            })?;
-            Ok(())
-        }
+        Kind::LegacyHold => hold_unrouted(account, turn, handle_generation, entry, sequence),
     }
+}
+
+fn hold_unrouted(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let key = account.client.inbox_admission_key(entry)?;
+    let at = now_unix_timestamp();
+    run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, expected| {
+        let generation = handle_generation();
+        let gate = LegacyW1 { expected, generation };
+        let hold = SourceHold { expected, generation };
+        match gate.effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at))? {
+            HoldDisposition::HeldLocal { .. } => Ok(true),
+            HoldDisposition::Paused => Ok(false),
+        }
+    })?;
+    Ok(())
 }
 
 enum Kind {
@@ -183,10 +198,13 @@ async fn classify(
     {
         return Ok(Kind::LegacyDm { conversation });
     }
-    if account.client.legacy_a2i_is_unbound(&account.gateway_config.device_id, entry)?
-        || account.client.load_legacy_a2i_receipt(entry)?.is_some()
-    {
+    if account.client.legacy_a2i_is_unbound(&account.gateway_config.device_id, entry)? {
         return Ok(Kind::LegacyA2i);
+    }
+    match account.client.load_legacy_a2i_receipt(entry) {
+        Ok(Some(_)) => return Ok(Kind::LegacyA2i),
+        Ok(None) | Err(SdkError::InboundRejected(_)) => {}
+        Err(error) => return Err(error),
     }
     Ok(Kind::LegacyHold)
 }
@@ -359,7 +377,7 @@ fn read_cursor(db: &AccountDb, target: &str) -> Result<u64, SdkError> {
 #[cfg(test)]
 thread_local! {
     static CROSS_AWAIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
-    static AFTER_CLASSIFY: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static AFTER_CLASSIFY: std::cell::Cell<Option<fn(&AccountDb)>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -371,9 +389,9 @@ async fn cross_await() {
 }
 
 #[cfg(test)]
-fn after_classify() {
+fn after_classify(db: &AccountDb) {
     if let Some(hook) = AFTER_CLASSIFY.with(std::cell::Cell::take) {
-        hook();
+        hook(db);
     }
 }
 
@@ -383,7 +401,7 @@ pub(crate) fn set_cross_await(hook: fn()) {
 }
 
 #[cfg(test)]
-pub(crate) fn set_after_classify(hook: fn()) {
+pub(crate) fn set_after_classify(hook: fn(&AccountDb)) {
     AFTER_CLASSIFY.with(|cell| cell.set(Some(hook)));
 }
 
