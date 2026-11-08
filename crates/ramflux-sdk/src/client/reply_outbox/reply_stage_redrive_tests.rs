@@ -55,16 +55,11 @@ fn redrive(
     let envelope =
         reply_outbox_crash_tests::bound_envelope(&fixture.client, &format!("{auth_key}-env"))?;
     let config = reply_outbox_crash_tests::session_config(&fixture.client)?;
-    let target = fixture
-        .client
-        .device_branch
-        .as_ref()
-        .ok_or(SdkError::IdentityRootMissing)?
-        .device_id
-        .clone();
+    let target =
+        fixture.peer.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone();
     reply_outbox_crash_tests::stage(&fixture.client, sequence)?;
     if let Some(key) = response {
-        reply_outbox_crash_tests::queue_surface_at(&fixture.client, key)?;
+        reply_outbox_crash_tests::queue_surface_at(&fixture.client, &fixture.peer, key)?;
     }
     let db = fixture.client.account_db()?;
     let gate = ReplyOutbox {
@@ -90,6 +85,7 @@ fn redrive(
                 client: &fixture.client,
                 pair: None,
                 config: Some(&config),
+                material: Some(reply_outbox_crash_tests::live_material()),
             },
         )
     }) {
@@ -129,6 +125,7 @@ fn redrive(
                 client: &fixture.client,
                 pair: None,
                 config: Some(&config),
+                material: Some(reply_outbox_crash_tests::live_material()),
             },
         )?,
         Admit::Admitted
@@ -166,6 +163,7 @@ fn redrive(
                 client: &fixture.client,
                 pair: None,
                 config: None,
+                material: None,
             },
         )?,
         Admit::Duplicate

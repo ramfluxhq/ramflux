@@ -16,7 +16,7 @@
 //! in the transaction.
 #![allow(dead_code)]
 
-use crate::client::routed::Opened;
+use crate::client::routed::{Opened, SendMaterial};
 use crate::client::surface::ResyncReply;
 use crate::prelude::*;
 use ramflux_protocol::Envelope;
@@ -74,6 +74,8 @@ pub(crate) struct AdmitRequest<'a> {
     pub pair: Option<PairLive<'a>>,
     /// Surface BUILD signs through this session; pair prepare uses [`PairLive::config`].
     pub config: Option<&'a GatewaySessionConfig>,
+    /// Fetched before W1; `admit_in` seals with it inside the transaction.
+    pub material: Option<SendMaterial>,
 }
 
 /// Inputs so pair admission calls `prepare_received_pair_reply` rather than trusting the envelope.
@@ -190,15 +192,14 @@ fn live_checks(
                 return Err(StorageError::Integrity("reply outbox surface expired").into());
             }
             request.client.validate_surface_resync_reply(&reply)?;
-            if request.envelope.target_delivery_id != reply.destination.target {
-                return Err(
-                    StorageError::Integrity("reply outbox surface destination mismatch").into()
-                );
-            }
             let config = request
                 .config
                 .ok_or(StorageError::Integrity("reply outbox surface requires session config"))?;
-            Ok(Some(request.client.surface_resync_reply_envelope(config, &reply)?))
+            let material = request
+                .material
+                .clone()
+                .ok_or(StorageError::Integrity("reply outbox surface requires send material"))?;
+            Ok(Some(request.client.seal_surface_resync_reply(config, &reply, material)?))
         }
         ReplyKind::Pair => {
             let live = request

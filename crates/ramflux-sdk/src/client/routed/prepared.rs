@@ -13,6 +13,7 @@ pub(crate) struct SendMaterialRequest {
     pub root: Option<String>,
     pub prekey: Option<String>,
 }
+#[derive(Clone)]
 pub(crate) struct SendMaterial {
     pub manifest: Option<(String, SdkDeviceManifestResponse)>,
     pub bundle: Option<ramflux_crypto::PrekeyBundle>,

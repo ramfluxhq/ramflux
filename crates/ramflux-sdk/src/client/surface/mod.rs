@@ -26,6 +26,8 @@ mod projection;
 mod read;
 mod resync_request;
 pub(crate) use resync_request::ResyncReply;
+#[cfg(test)]
+pub(crate) use resync_request::with_fixed_surface_envelope_id;
 mod scope;
 mod signer;
 mod snapshot;

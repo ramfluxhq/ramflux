@@ -320,7 +320,7 @@ impl RamfluxClient {
         Ok(crate::GatewayDirectMessage {
             conversation_id: reply.carrier.conversation_id.clone(),
             message_id: reply.carrier.message_id.clone(),
-            envelope_id: crate::new_surface_message_id()?,
+            envelope_id: surface_reply_envelope_id()?,
             source_principal_id: config.principal_id.clone(),
             sender_id: config.device_id.clone(),
             recipient_device_id: Some(reply.destination.device.clone()),
@@ -332,17 +332,37 @@ impl RamfluxClient {
         })
     }
 
-    /// Sealed-header envelope for the validated reply (empty body until courier material).
-    pub(crate) fn surface_resync_reply_envelope(
+    /// Pair-material request for a surface resync reply; fetch happens before W1.
+    pub(crate) fn surface_resync_send_material_request(
         &self,
         config: &crate::GatewaySessionConfig,
         reply: &ResyncReply,
-    ) -> Result<ramflux_protocol::Envelope, SdkError> {
-        crate::dm::gateway_direct_message_envelope(
+    ) -> Result<crate::client::routed::SendMaterialRequest, SdkError> {
+        self.routed_send_material_request(
             config,
             &self.surface_resync_direct_message(config, reply)?,
-            None,
         )
+    }
+
+    /// Prepare + seal the live courier envelope. `admit_in` and the surface courier share this.
+    pub(crate) fn seal_surface_resync_reply(
+        &self,
+        config: &crate::GatewaySessionConfig,
+        reply: &ResyncReply,
+        material: crate::client::routed::SendMaterial,
+    ) -> Result<ramflux_protocol::Envelope, SdkError> {
+        let control = self.surface_control_packet(
+            &reply.carrier,
+            super::ControlKind::Peer,
+            reply.destination.epoch,
+        )?;
+        let body = zeroize::Zeroizing::new(control.bytes()?);
+        let mut message = self.surface_resync_direct_message(config, reply)?;
+        let mut route = crate::client::routed::Route::control();
+        route.group_id.clone_from(&reply.destination.group);
+        let packet = self.seal_routed_prepared(config, &message, &body, route, material)?;
+        message.encrypted_body = serde_json::to_vec(&packet)?;
+        crate::dm::gateway_direct_message_envelope(config, &message, None)
     }
 
     pub(crate) fn take_surface_resync_answer(
@@ -363,4 +383,31 @@ impl RamfluxClient {
 }
 fn required<'a>(value: &'a Value, field: &str) -> Result<&'a str, SdkError> {
     value[field].as_str().ok_or_else(|| invalid("surface resync metadata absent"))
+}
+
+fn surface_reply_envelope_id() -> Result<String, SdkError> {
+    #[cfg(test)]
+    if let Some(id) = FIXED_ENVELOPE_ID.with(|cell| cell.borrow().clone()) {
+        return Ok(id);
+    }
+    crate::new_surface_message_id()
+}
+
+#[cfg(test)]
+thread_local! {
+    static FIXED_ENVELOPE_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Pins the surface reply envelope id until the guard drops (byte-equality tests).
+#[cfg(test)]
+pub(crate) fn with_fixed_surface_envelope_id<T>(id: &str, f: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FIXED_ENVELOPE_ID.with(|cell| cell.replace(None));
+        }
+    }
+    FIXED_ENVELOPE_ID.with(|cell| cell.replace(Some(id.to_owned())));
+    let _reset = Reset;
+    f()
 }

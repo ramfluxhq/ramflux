@@ -126,10 +126,7 @@ impl RamfluxClient {
         kind: PairControlKind,
     ) -> Result<PairControlDraft, SdkError> {
         let local = self.local_device_identity(&config.device_id)?;
-        let id = format!(
-            "pair-control-{}",
-            ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-        );
+        let id = pair_control_message_id()?;
         let message = GatewayDirectMessage {
             conversation_id: id.clone(),
             message_id: id.clone(),
@@ -208,4 +205,32 @@ impl RamfluxClient {
         draft.message.encrypted_body = serde_json::to_vec(sealed)?;
         super::gateway_direct_message_envelope(config, &draft.message, None)
     }
+}
+
+fn pair_control_message_id() -> Result<String, SdkError> {
+    #[cfg(test)]
+    if let Some(id) = FIXED_PAIR_CONTROL_ID.with(|cell| cell.borrow().clone()) {
+        return Ok(id);
+    }
+    Ok(format!("pair-control-{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)))
+}
+
+#[cfg(test)]
+thread_local! {
+    static FIXED_PAIR_CONTROL_ID: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pins the pair-control envelope id until the guard drops (byte-equality tests).
+#[cfg(test)]
+pub(crate) fn with_fixed_pair_control_id<T>(id: &str, f: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FIXED_PAIR_CONTROL_ID.with(|cell| cell.replace(None));
+        }
+    }
+    FIXED_PAIR_CONTROL_ID.with(|cell| cell.replace(Some(id.to_owned())));
+    let _reset = Reset;
+    f()
 }

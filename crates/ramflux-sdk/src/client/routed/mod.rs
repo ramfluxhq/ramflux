@@ -35,6 +35,8 @@ mod replay_migration;
 mod reset_policy;
 mod reset_prepare;
 mod reset_work;
+#[cfg(test)]
+pub(crate) use reset_prepare::with_fixed_pair_control_id;
 pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
 mod send_candidate;
 mod session;

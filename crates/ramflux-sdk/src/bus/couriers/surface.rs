@@ -16,8 +16,6 @@ struct Plan {
     fingerprint: serde_json::Value,
     reply: ResyncReply,
     config: GatewaySessionConfig,
-    message: GatewayDirectMessage,
-    body: zeroize::Zeroizing<Vec<u8>>,
     request: SendMaterialRequest,
 }
 pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool, SdkError> {
@@ -35,7 +33,7 @@ pub(crate) async fn pass(context: SessionContext, writer: Writer) -> Result<bool
     )
     .await
     .map_err(|_| SdkError::NetworkingPending)?;
-    let Some(envelope) = writer.apply(move |account| seal(account, plan, material)).await? else {
+    let Some(envelope) = writer.apply(move |account| seal(account, &plan, material)).await? else {
         return Ok(true);
     };
     context
@@ -65,20 +63,13 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
         return Ok(None);
     }
     client.validate_surface_resync_reply(&reply)?;
-    let control = client.surface_control_packet(
-        &reply.carrier,
-        crate::client::surface::ControlKind::Peer,
-        reply.destination.epoch,
-    )?;
-    let body = zeroize::Zeroizing::new(control.bytes()?);
     let config = account.gateway_config.clone();
-    let message = client.surface_resync_direct_message(&config, &reply)?;
-    let request = client.routed_send_material_request(&config, &message)?;
-    Ok(Some(Plan { key, fingerprint, reply, config, message, body, request }))
+    let request = client.surface_resync_send_material_request(&config, &reply)?;
+    Ok(Some(Plan { key, fingerprint, reply, config, request }))
 }
 fn seal(
     account: &LocalBusAccountState,
-    mut plan: Plan,
+    plan: &Plan,
     material: Result<SendMaterial, SdkError>,
 ) -> Result<Option<ramflux_protocol::Envelope>, SdkError> {
     let db = account.client.account_db()?;
@@ -92,17 +83,7 @@ fn seal(
     }
     // Consuming before the first submit preserves the shared anti-amplification window.
     db.remove_actor_state(&plan.key)?;
-    let mut route = crate::client::routed::Route::control();
-    route.group_id = plan.reply.destination.group;
-    let packet = account.client.seal_routed_prepared(
-        &plan.config,
-        &plan.message,
-        &plan.body,
-        route,
-        material?,
-    )?;
-    plan.message.encrypted_body = serde_json::to_vec(&packet)?;
-    crate::dm::gateway_direct_message_envelope(&plan.config, &plan.message, None).map(Some)
+    account.client.seal_surface_resync_reply(&plan.config, &plan.reply, material?).map(Some)
 }
 
 #[cfg(test)]

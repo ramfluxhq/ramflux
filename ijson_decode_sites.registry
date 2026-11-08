@@ -637,6 +637,7 @@ crates/ramflux-sdk/src/client/own_device_sync.rs | import_own_history_messages |
 crates/ramflux-sdk/src/client/own_sent_message.rs | receive_own_sent_message | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/private_prekeys.rs | legacy_owned_private_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/private_prekeys.rs | optional_owned_private_prekey | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/reply_outbox.rs | live_checks | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/routed/auth.rs | verify_initiator_identity | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/context.rs | legacy_group_binding | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/control.rs | project_legacy_contact_control | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

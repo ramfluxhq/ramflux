@@ -376,11 +376,31 @@ async fn redrive() -> Result<(), SdkError> {
     let sender = Fixture::new("alice", 131)?;
     let mut receiver = Fixture::new("bob", 141)?;
     friend(&mut receiver, &sender)?;
-    reply_pair_admit(&sender, &receiver)?;
+    reply_pair_admit(&sender, &mut receiver)?;
     Ok(())
 }
 
-fn reply_pair_admit(sender: &Fixture, receiver: &Fixture) -> Result<(), SdkError> {
+fn pair_admit_request<'a>(
+    client: &'a RamfluxClient,
+    sequence: u64,
+    envelope: ramflux_protocol::Envelope,
+    pair: Option<crate::client::reply_outbox::PairLive<'a>>,
+) -> crate::client::reply_outbox::AdmitRequest<'a> {
+    crate::client::reply_outbox::AdmitRequest {
+        sequence,
+        auth_key: "pair-live",
+        envelope,
+        kind: crate::client::reply_outbox::ReplyKind::Pair,
+        response_key: None,
+        message: None,
+        client,
+        pair,
+        config: None,
+        material: None,
+    }
+}
+
+fn reply_pair_admit(sender: &Fixture, receiver: &mut Fixture) -> Result<(), SdkError> {
     let entry = seal_as(
         sender,
         receiver,
@@ -405,59 +425,120 @@ fn reply_pair_admit(sender: &Fixture, receiver: &Fixture) -> Result<(), SdkError
     )?;
     let config = receiver.config()?;
     let body = opened.body.clone();
-    let db = receiver.client.account_db()?;
-    let gate = crate::client::reply_outbox::ReplyOutbox {
-        expected: ReceiveExpectation {
-            target: &receiver.id,
-            incarnation: "e",
-            cursor: 0,
-            generation: 1,
-            erasure_generation: db.privacy_erasure_generation()?,
-        },
-        generation: 1,
-    };
-    let live =
-        crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
     let placeholder =
         crate::client::reply_outbox::reply_outbox_crash_tests::envelope("pair-live-env");
-    let request = |pair| crate::client::reply_outbox::AdmitRequest {
-        sequence: entry.inbox_seq,
-        auth_key: "pair-live",
-        envelope: placeholder.clone(),
-        kind: crate::client::reply_outbox::ReplyKind::Pair,
-        response_key: None,
-        message: None,
-        client: &receiver.client,
-        pair,
-        config: None,
-    };
-    match crate::client::reply_outbox::run(crate::client::reply_outbox::Fault::BeforeCommit, || {
-        gate.admit(db, request(Some(live)))
-    }) {
-        Err(SdkError::Storage(ramflux_storage::StorageError::Integrity(
-            "reply outbox before-commit",
-        ))) => {}
-        other => panic!("expected pair before-commit, got {other:?}"),
+    {
+        let db = receiver.client.account_db()?;
+        let gate = crate::client::reply_outbox::ReplyOutbox {
+            expected: ReceiveExpectation {
+                target: &receiver.id,
+                incarnation: "e",
+                cursor: 0,
+                generation: 1,
+                erasure_generation: db.privacy_erasure_generation()?,
+            },
+            generation: 1,
+        };
+        let live =
+            crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
+        match crate::client::reply_outbox::run(
+            crate::client::reply_outbox::Fault::BeforeCommit,
+            || {
+                gate.admit(
+                    db,
+                    pair_admit_request(
+                        &receiver.client,
+                        entry.inbox_seq,
+                        placeholder.clone(),
+                        Some(live),
+                    ),
+                )
+            },
+        ) {
+            Err(SdkError::Storage(ramflux_storage::StorageError::Integrity(
+                "reply outbox before-commit",
+            ))) => {}
+            other => panic!("expected pair before-commit, got {other:?}"),
+        }
+        assert!(!db.actor_state_exists("gateway/reply-outbox/pair-live")?);
+        let pair_snap = crate::client::reply_outbox::reply_outbox_crash_tests::pair_rows(db)?;
+        let _clock = crate::time::FixedClock::set(crate::prelude::now_unix_timestamp());
+        let expected = crate::client::routed::with_fixed_pair_control_id("fixed-pair", || {
+            receiver.client.prepare_received_pair_reply(&config, &opened, &body)
+        })?
+        .ok_or_else(|| SdkError::LocalBus("pair expected envelope".into()))?;
+        crate::client::reply_outbox::reply_outbox_crash_tests::restore_pair_rows(db, &pair_snap)?;
+        let live =
+            crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
+        assert_eq!(
+            crate::client::routed::with_fixed_pair_control_id("fixed-pair", || {
+                gate.admit(
+                    db,
+                    pair_admit_request(
+                        &receiver.client,
+                        entry.inbox_seq,
+                        placeholder.clone(),
+                        Some(live),
+                    ),
+                )
+            })?,
+            crate::client::reply_outbox::Admit::Admitted
+        );
+        assert!(db.actor_state_exists("gateway/reply-outbox/pair-live")?);
+        assert!(db.actor_state_exists("gateway/reply-transferred/pair-live")?);
+        let stored: crate::client::reply_outbox::PreparedReply = db
+            .load_actor_state("gateway/reply-outbox/pair-live")?
+            .ok_or_else(|| SdkError::LocalBus("pair prepared envelope".into()))?;
+        assert_eq!(stored.envelope, expected);
+        assert_eq!(stored.kind, crate::client::reply_outbox::ReplyKind::Pair);
     }
-    assert!(!db.actor_state_exists("gateway/reply-outbox/pair-live")?);
-    let live =
-        crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
-    assert_eq!(gate.admit(db, request(Some(live)))?, crate::client::reply_outbox::Admit::Admitted);
-    assert!(db.actor_state_exists("gateway/reply-outbox/pair-live")?);
-    assert!(db.actor_state_exists("gateway/reply-transferred/pair-live")?);
-    let stored: crate::client::reply_outbox::PreparedReply = db
-        .load_actor_state("gateway/reply-outbox/pair-live")?
-        .ok_or_else(|| SdkError::LocalBus("pair prepared envelope".into()))?;
-    assert_ne!(stored.envelope.envelope_id, "pair-live-env");
-    assert_eq!(stored.kind, crate::client::reply_outbox::ReplyKind::Pair);
-    let live =
-        crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
-    assert_eq!(gate.admit(db, request(Some(live)))?, crate::client::reply_outbox::Admit::Duplicate);
-    assert_eq!(gate.admit(db, request(None))?, crate::client::reply_outbox::Admit::Duplicate);
-    crate::client::reply_outbox::acknowledge(db, "pair-live")?;
-    assert!(!db.actor_state_exists("gateway/reply-outbox/pair-live")?);
-    assert!(db.actor_state_exists("gateway/reply-transferred/pair-live")?);
-    assert_eq!(gate.admit(db, request(None))?, crate::client::reply_outbox::Admit::Duplicate);
+    reopen(&mut receiver.client, &receiver.id, b"routed-test")?;
+    {
+        let db = receiver.client.account_db()?;
+        let gate = crate::client::reply_outbox::ReplyOutbox {
+            expected: ReceiveExpectation {
+                target: &receiver.id,
+                incarnation: "e",
+                cursor: 0,
+                generation: 1,
+                erasure_generation: db.privacy_erasure_generation()?,
+            },
+            generation: 1,
+        };
+        let live =
+            crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
+        assert_eq!(
+            gate.admit(
+                db,
+                pair_admit_request(
+                    &receiver.client,
+                    entry.inbox_seq,
+                    placeholder.clone(),
+                    Some(live)
+                ),
+            )?,
+            crate::client::reply_outbox::Admit::Duplicate
+        );
+        assert_eq!(
+            gate.admit(
+                db,
+                pair_admit_request(&receiver.client, entry.inbox_seq, placeholder.clone(), None)
+            )?,
+            crate::client::reply_outbox::Admit::Duplicate
+        );
+        crate::client::reply_outbox::acknowledge(db, "pair-live")?;
+        assert!(!db.actor_state_exists("gateway/reply-outbox/pair-live")?);
+        assert!(db.actor_state_exists("gateway/reply-transferred/pair-live")?);
+        assert_eq!(
+            gate.admit(
+                db,
+                pair_admit_request(&receiver.client, entry.inbox_seq, placeholder.clone(), None)
+            )?,
+            crate::client::reply_outbox::Admit::Duplicate
+        );
+        gate.settle_terminal(db, entry.inbox_seq, "pair-live")?;
+        assert!(!db.actor_state_exists("gateway/reply-transferred/pair-live")?);
+    }
     Ok(())
 }
 
