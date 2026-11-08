@@ -21,6 +21,7 @@ use ramflux_storage::{
 const BINDING_ATTEMPTS: u32 = 3;
 const BINDING_GIVE_UP: &str = "legacy binding changed after 3 attempts";
 const ROUTED_REFUSED: &str = "receive ledger refuses live routed apply";
+const COVERED_BELOW: &str = "receive page covered below sequence";
 
 /// True when `target` has a receive-epoch row. Missing table or row is the live unactivated path.
 pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> {
@@ -229,7 +230,8 @@ async fn classify(
 }
 
 /// Reconcile the single-entry page. `NeedStage` writes W0 using the cursor returned
-/// after any gap-prefix cover. Already-covered sequences skip W1.
+/// after any gap-prefix cover. `Covered`/`AlreadyCovered` with C >= seq skip W1.
+/// A cover that leaves C behind seq is a plan bug.
 fn admit_open(
     account: &LocalBusAccountState,
     turn: &mut ReceiveTurn,
@@ -244,6 +246,11 @@ fn admit_open(
         }
         ApplyOutcome::NeedStage { .. } => {
             Err(SdkError::InboundRejected("receive page need-stage mismatch".into()))
+        }
+        ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor }
+            if cursor < sequence =>
+        {
+            Err(SdkError::Storage(StorageError::Integrity(COVERED_BELOW)))
         }
         ApplyOutcome::Covered { .. }
         | ApplyOutcome::AlreadyCovered { .. }

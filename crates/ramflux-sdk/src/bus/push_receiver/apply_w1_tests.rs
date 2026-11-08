@@ -8,6 +8,7 @@ use super::apply_w1::{
     self, apply_page, binding_attempts, binding_give_up, queue_legacy_hold, routed_refused,
     set_after_classify, set_cross_await,
 };
+use crate::bus::connection_manager::receive::bind_retry_turn;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
@@ -526,5 +527,52 @@ async fn a2i_receipt_inbound_rejected_is_not_a_hold() -> Result<(), SdkError> {
     );
     assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 0);
     assert_eq!(cursor(&harness.account)?, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retry_keeps_prepare_turn_after_erasure() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let sends = attach_counter(&mut harness.account);
+    let prepared = turn(&harness.account, 1)?;
+    let mut retry = own_dummy(&harness.account);
+    bind_retry_turn(&mut retry, Some(&prepared));
+    let before = harness.account.client.account_db()?.durable_rows_for_test()?;
+    harness.account.client.account_db()?.advance_erasure_generation_for_test()?;
+    let retry_turn = match retry.turn.clone() {
+        Some(bound) => bound,
+        None => turn(&harness.account, 1)?,
+    };
+    let refused = drive_with_turn(&mut harness.account, &retry_turn, retry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(
+        matches!(error, Some(SdkError::ObjectErased)),
+        "retry with prepare-time erasure must refuse inside the commit: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.durable_rows_for_test()?,
+        before,
+        "erasure after prepare writes nothing on the retry"
+    );
+    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn already_covered_sequence_skips_w1() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let entry = own_dummy(&harness.account);
+    drive(&mut harness.account, entry.clone(), || 1).await?;
+    assert_eq!(cursor(&harness.account)?, 1);
+    let journals = unrouted_journals(harness.account.client.account_db()?)?;
+    let again = drive(&mut harness.account, entry, || 1).await?;
+    assert!(again.0.is_none());
+    assert_eq!(cursor(&harness.account)?, 1);
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("held".into()), 1)
+    );
+    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, journals);
     Ok(())
 }

@@ -31,6 +31,13 @@ pub(crate) struct ReceiveEntry {
     /// Prepare-time fence coordinates cloned from `ReceivePlan` when the ledger is active.
     pub turn: Option<ReceiveTurn>,
 }
+
+/// Retries keep prepare-time E and erasure generation. Cursor is refreshed per `ApplyPage`.
+pub(crate) fn bind_retry_turn(entry: &mut ReceiveEntry, pass_turn: Option<&ReceiveTurn>) {
+    if entry.turn.is_none() {
+        entry.turn = pass_turn.cloned();
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiveTrigger {
     Tick,
@@ -268,7 +275,7 @@ async fn catch_up(
     let mut retries: Vec<_> = retries.into_values().collect();
     retries.sort_by_key(|entry| entry.entry.inbox_seq);
     for mut entry in retries {
-        entry.turn = None;
+        bind_retry_turn(&mut entry, turn.as_ref());
         let (accepted, next) =
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;
