@@ -89,17 +89,20 @@ impl AccountDb {
             if self.privacy_erasure_generation()? != expected.erasure_generation {
                 return Err(StorageError::ObjectErased);
             }
-            let incarnation: String = self.connection.query_row(
-                "SELECT incarnation_id FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+            let (incarnation, retired_blob): (String, Vec<u8>) = self.connection.query_row(
+                "SELECT incarnation_id, retired_incarnations FROM gateway_receive_epoch WHERE target_delivery_id=?1",
                 rusqlite::params![expected.target],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            let retired = retired_incarnations(&retired_blob)?;
             let cursor = self
                 .projection_checkpoint(&format!("gateway_receive_cursor:{}", expected.target))?
                 .map_or(Ok(0), |s| {
                     s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected)
                 })?;
-            if incarnation != expected.incarnation || cursor != expected.cursor {
+            let named = expected.incarnation == incarnation
+                || retired.iter().any(|was| was == expected.incarnation);
+            if !named || cursor != expected.cursor {
                 return Err(StorageError::AuthorizationRejected);
             }
             let authority = ReceiveTransaction {
@@ -115,6 +118,14 @@ impl AccountDb {
             Ok(value)
         })
     }
+}
+
+fn retired_incarnations(blob: &[u8]) -> Result<Vec<String>, StorageError> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_slice(blob)
+        .map_err(|_| StorageError::Integrity("retired incarnation encoding"))
 }
 
 pub(crate) const fn schema_version() -> i64 {

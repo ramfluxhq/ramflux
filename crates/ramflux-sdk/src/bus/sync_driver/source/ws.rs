@@ -7,7 +7,7 @@
 //!
 //! Contract: WS is indexed local redrive below C. A terminal event, intent and cleanup share
 //! one transaction, or the hold is preserved; C never moves. Above-C settlement delegates to
-//! ordered W2 (`cover`). Inactive E is local recovery only.
+//! ordered W2 (`cover`). A retired incarnation is local cleanup only. Compat U stays live.
 #![allow(dead_code)]
 
 use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveSettle, ReceiveSettleResult};

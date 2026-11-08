@@ -194,10 +194,11 @@ impl ReceiveTransaction<'_> {
         Ok(())
     }
 
-    fn finish_terminal(&self, sequence: u64, now: i64) -> Result<(), StorageError> {
+    /// Inserts the terminal intent if missing, then releases work and receipt (shared with WS).
+    pub(crate) fn finish_terminal(&self, sequence: u64, now: i64) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
         self.db.connection.execute(
-            "INSERT INTO gateway_ack_intent VALUES(?1,?2,?3,?4,0,?5,?6)",
+            "INSERT OR IGNORE INTO gateway_ack_intent VALUES(?1,?2,?3,?4,0,?5,?6)",
             params![
                 self.target,
                 self.incarnation,
@@ -207,6 +208,12 @@ impl ReceiveTransaction<'_> {
                 now.saturating_add(604_800)
             ],
         )?;
+        self.cleanup_settled(sequence)
+    }
+
+    /// Deletes work and receipt so the reserved slot is released.
+    pub(crate) fn cleanup_settled(&self, sequence: u64) -> Result<(), StorageError> {
+        let seq = sequence.to_be_bytes();
         self.db.connection.execute(
             "DELETE FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
             params![self.target, self.incarnation, seq.as_slice()],
