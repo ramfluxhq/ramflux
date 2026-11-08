@@ -28,6 +28,9 @@ pub(crate) struct SequenceLocator {
     pub target: String,
     pub incarnation: String,
     pub sequence: u64,
+    /// Set only by WA on a terminal router result. Expiry never sets this.
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 /// Locator actor key bound to `message` so erase visits it.
@@ -152,6 +155,7 @@ fn register_sequence_locator(
         target: expected.target.to_owned(),
         incarnation: expected.incarnation.to_owned(),
         sequence,
+        acknowledged: false,
     };
     let key = locator_key(message);
     if omit_locator_registration() {

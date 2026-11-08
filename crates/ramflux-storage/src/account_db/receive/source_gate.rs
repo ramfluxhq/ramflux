@@ -142,6 +142,85 @@ impl crate::AccountDb {
         Ok(())
     }
 
+    /// Test support: pin ACK-intent clocks so flush-timing tests do not wait on the wall clock.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn set_ack_intent_clock_for_test(
+        &self,
+        created_at: i64,
+        next_attempt_at: i64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE gateway_ack_intent SET created_at=?1, next_attempt_at=?2",
+            params![created_at, next_attempt_at],
+        )?;
+        Ok(())
+    }
+
+    /// Test support: leftover terminal work+receipt the P18 executor keeps until WA/reset.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn seed_compat_terminal_for_test(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+        entry: &[u8],
+    ) -> Result<(), StorageError> {
+        insert_receipt_work(self, target, incarnation, sequence, "completed", "compat", entry)
+    }
+
+    /// Test support: a held receipt+work row that reset must retain.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn seed_held_receive_for_test(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+        entry: &[u8],
+    ) -> Result<(), StorageError> {
+        insert_receipt_work(self, target, incarnation, sequence, "held", "held", entry)
+    }
+
+    /// Test support: rewrite the live epoch name (empty-U simulation) without a reset write.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn rewrite_receive_incarnation_for_test(
+        &self,
+        target: &str,
+        from: &str,
+        to: &str,
+        verified: bool,
+    ) -> Result<(), StorageError> {
+        self.connection.execute_batch("PRAGMA foreign_keys=OFF")?;
+        let rewritten = (|| {
+            self.connection.execute(
+                "UPDATE gateway_receive_epoch SET incarnation_id=?1, incarnation_verified=?2 WHERE target_delivery_id=?3",
+                params![to, i64::from(verified), target],
+            )?;
+            self.connection.execute(
+                "UPDATE gateway_receive_receipt SET incarnation_id=?1 WHERE target_delivery_id=?2 AND incarnation_id=?3",
+                params![to, target, from],
+            )?;
+            self.connection.execute(
+                "UPDATE gateway_receive_work SET incarnation_id=?1 WHERE target_delivery_id=?2 AND incarnation_id=?3",
+                params![to, target, from],
+            )?;
+            self.connection.execute(
+                "UPDATE gateway_ack_intent SET incarnation_id=?1 WHERE target_delivery_id=?2 AND incarnation_id=?3",
+                params![to, target, from],
+            )?;
+            Ok(())
+        })();
+        self.connection.execute_batch("PRAGMA foreign_keys=ON")?;
+        rewritten
+    }
+
     /// Test support: cursor, losses, receipts, intents and work for one target.
     ///
     /// # Errors
@@ -214,6 +293,31 @@ pub struct ReceiveLedgerSnap {
     pub work: i64,
     /// `(table_name, change_kind, published, keys_json)` for every `runtime_outbox` row.
     pub outbox: Vec<(String, String, i64, String)>,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[allow(clippy::too_many_arguments)]
+fn insert_receipt_work(
+    db: &crate::AccountDb,
+    target: &str,
+    incarnation: &str,
+    sequence: u64,
+    disposition: &str,
+    admission: &str,
+    entry: &[u8],
+) -> Result<(), StorageError> {
+    let seq = sequence.to_be_bytes();
+    let length = i64::try_from(entry.len())
+        .map_err(|_| StorageError::Integrity("receive entry byte bound"))?;
+    db.connection.execute(
+        "INSERT INTO gateway_receive_receipt VALUES(?1,?2,?3,?4,100,1)",
+        params![target, incarnation, seq.as_slice(), disposition],
+    )?;
+    db.connection.execute(
+        "INSERT INTO gateway_receive_work VALUES(?1,?2,?3,?4,?5,?6)",
+        params![target, incarnation, seq.as_slice(), entry, admission, length],
+    )?;
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-instrumentation"))]

@@ -4,6 +4,9 @@
 //! Dormant session-push receive executor. P20 wires `ApplyPage` into the actor.
 #![allow(dead_code)]
 
+pub(crate) mod ack_batch;
+#[cfg(test)]
+mod ack_batch_tests;
 pub(crate) mod apply;
 pub(crate) mod authority;
 pub(crate) mod executor;

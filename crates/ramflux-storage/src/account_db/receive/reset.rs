@@ -137,11 +137,15 @@ impl ReceiveTransaction<'_> {
         if input.new_incarnation == self.incarnation {
             return Ok(ReceiveResetResult::Reset);
         }
+        let cursor = self.db.receive_cursor(self.target)?;
+        let verified = self.incarnation_verified()?;
+        // Only an EMPTY unverified U with C=0 initializes silently (design §2.5).
+        let initialize = !verified && cursor == 0 && self.old_namespace_empty()?;
         let mut retired = self.retired_names()?;
         if retired.iter().any(|was| was == input.new_incarnation) {
             return Err(StorageError::Integrity("receive reset incarnation is retired"));
         }
-        if !retired.iter().any(|was| was == self.incarnation) {
+        if !initialize && !retired.iter().any(|was| was == self.incarnation) {
             if retired.len() >= RETIRED_FENCE_CAP {
                 self.db.set_projection_checkpoint(&pause_name(self.target), PAUSE_FENCE)?;
                 before_reset_commit()?;
@@ -149,10 +153,6 @@ impl ReceiveTransaction<'_> {
             }
             retired.push(self.incarnation.to_owned());
         }
-        let cursor = self.db.receive_cursor(self.target)?;
-        let verified = self.incarnation_verified()?;
-        // Only an EMPTY unverified U with C=0 initializes silently (design §2.5).
-        let initialize = !verified && cursor == 0 && self.old_namespace_empty()?;
         let reason =
             if verified { input.reason } else { ReceiveResetReason::IncarnationFirstVerified };
         self.release_terminal_compat()?;

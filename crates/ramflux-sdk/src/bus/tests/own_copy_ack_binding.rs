@@ -7,17 +7,23 @@
     clippy::panic,
     clippy::needless_pass_by_value
 )]
-//! First leg of `own_copy_ack_binding` (S6b P14): W1 registers an erased/backup-safe (T,E,s)
-//! locator; erasure before WA leaves no binding/content; kill-around-commit for the own-copy
-//! transaction and the recovery W1 cut. WA legs are P21.
+//! `own_copy_ack_binding` (P14 first leg + P21 WA): W1 registers an erased/backup-safe (T,E,s)
+//! locator; W2 removes work; a lost ACK retains; `already_settled` WA marks the locator and
+//! drops the intent; erasure visits the marked locator. Kill-around-commit for the own-copy
+//! transaction and the recovery W1 cut.
 
 use super::fixture::{Case, Fixture};
 use super::receive_own_copy::own_copy;
+use crate::bus::push_receiver::ack_batch::SourceWa;
 use crate::client::own_device_copy::w1::{
     self, Fault, OwnCopyW1, locator_key, run, with_omit_locator,
 };
 use crate::prelude::*;
-use ramflux_storage::{ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError};
+use ramflux_storage::{
+    ReceiveAckApply, ReceiveAckApplyResult, ReceiveAckOutcome, ReceiveAckResult, ReceiveCover,
+    ReceiveCoverKind, ReceiveCoverResult, ReceiveExpectation, ReceiveStage, ReceiveStageResult,
+    StorageError,
+};
 use serde_json::json;
 
 const INTEGRITY: &str = "source effect requires staged receive work";
@@ -29,11 +35,15 @@ const SEQUENCE: u64 = 1;
 const RECOVERY_SEQ: u64 = 2;
 
 fn gate(db: &AccountDb) -> Result<OwnCopyW1<'static>, SdkError> {
+    gate_at(db, 0)
+}
+
+fn gate_at(db: &AccountDb, cursor: u64) -> Result<OwnCopyW1<'static>, SdkError> {
     Ok(OwnCopyW1 {
         expected: ReceiveExpectation {
             target: TARGET,
             incarnation: INCARNATION,
-            cursor: 0,
+            cursor,
             generation: 1,
             erasure_generation: db.privacy_erasure_generation()?,
         },
@@ -196,6 +206,66 @@ async fn case() -> Case {
     );
 
     let db = fixture.source.client.account_db()?;
+    assert_eq!(
+        db.receive_transaction(gate(db)?.expected, 1, |tx| {
+            tx.cover(ReceiveCover {
+                sequence: SEQUENCE,
+                kind: ReceiveCoverKind::Terminal,
+                gaps: &[],
+                retain_until: 0,
+            })
+        })?,
+        ReceiveCoverResult::Covered,
+        "W2 removes work and writes the ACK intent"
+    );
+    assert_eq!(db.receive_state_for_test(SEQUENCE)?.0, None, "W2 drops the receipt");
+    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
+    let wa = SourceWa {
+        expected: ReceiveExpectation {
+            target: TARGET,
+            incarnation: INCARNATION,
+            cursor: SEQUENCE,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        generation: 1,
+    };
+    let lost = [ReceiveAckResult { sequence: SEQUENCE, outcome: ReceiveAckOutcome::Uncertain }];
+    assert_eq!(
+        wa.apply(
+            db,
+            ReceiveAckApply {
+                incarnation: INCARNATION,
+                sequences: &[SEQUENCE],
+                results: &lost,
+                now: now_unix_timestamp(),
+            },
+        )?,
+        ReceiveAckApplyResult::Applied { settled: 0 }
+    );
+    let locator =
+        db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
+    assert!(!locator.acknowledged, "lost ACK reply retains the locator unmarked");
+    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
+    let settled =
+        [ReceiveAckResult { sequence: SEQUENCE, outcome: ReceiveAckOutcome::AlreadySettled }];
+    assert_eq!(
+        wa.apply(
+            db,
+            ReceiveAckApply {
+                incarnation: INCARNATION,
+                sequences: &[SEQUENCE],
+                results: &settled,
+                now: now_unix_timestamp(),
+            },
+        )?,
+        ReceiveAckApplyResult::Applied { settled: 1 }
+    );
+    let locator =
+        db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
+    assert!(locator.acknowledged, "already_settled WA marks the locator");
+    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, Vec::<u64>::new());
+
     db.delete_direct_message("healthy", MESSAGE, "local", "erase-before-wa")?;
     assert!(!locator_present(&fixture.source, MESSAGE)?, "erase before WA must drop the locator");
     assert!(
@@ -206,9 +276,9 @@ async fn case() -> Case {
     );
 
     let recovery_bytes = unique_entry(RECOVERY_SEQ, "recovery-hash")?;
-    let expected = gate(db)?.expected;
+    let expected = gate_at(db, 1)?.expected;
     assert_eq!(
-        gate(db)?.stage(db, staged(&recovery_bytes, RECOVERY_SEQ))?,
+        gate_at(db, 1)?.stage(db, staged(&recovery_bytes, RECOVERY_SEQ))?,
         ReceiveStageResult::Staged
     );
     let now = now_unix_timestamp();
@@ -233,7 +303,7 @@ async fn case() -> Case {
     let expected = ReceiveExpectation {
         target: TARGET,
         incarnation: INCARNATION,
-        cursor: 0,
+        cursor: 1,
         generation: 1,
         erasure_generation: pair_db.privacy_erasure_generation()?,
     };
@@ -264,7 +334,7 @@ async fn case() -> Case {
     let expected = ReceiveExpectation {
         target: TARGET,
         incarnation: INCARNATION,
-        cursor: 0,
+        cursor: 1,
         generation: 1,
         erasure_generation: db.privacy_erasure_generation()?,
     };

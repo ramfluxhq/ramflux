@@ -498,9 +498,33 @@ fn empty_unverified_cursor_zero_initializes_without_reset_event() -> Result<(), 
     assert_eq!(cursor(&db)?, 0);
     let (incarnation, retired, activated, _) = epoch(&db)?;
     assert_eq!(incarnation, "n");
-    assert_eq!(retired, vec!["u".to_owned()]);
+    assert_eq!(retired, Vec::<String>::new(), "empty-U init does not consume a retired slot");
     assert_eq!(activated, 0);
     assert_eq!(reset_events(&db)?, 0, "empty U with C=0 emits no inbox_reset");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn empty_unverified_init_does_not_consume_retired_slot() -> Result<(), StorageError> {
+    let (root, db) = setup("reset-empty-u-fence")?;
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET incarnation_id='u', incarnation_verified=0 WHERE target_delivery_id='t'",
+        [],
+    )?;
+    let retired: Vec<String> = (0..RETIRED_FENCE_CAP).map(|i| format!("r{i:02}")).collect();
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET retired_incarnations=?1 WHERE target_delivery_id='t'",
+        params![serde_json::to_vec(&retired)?],
+    )?;
+    db.publish_pending_receive_loss("t", "u", crate::unix_now())?;
+    let result = reset_to(&db, "u", 0, "n", 0, ReceiveResetReason::IncarnationFirstVerified)?;
+    assert_eq!(result, ReceiveResetResult::Reset, "empty-U init must not pause on a full fence");
+    let (incarnation, still, _, _) = epoch(&db)?;
+    assert_eq!(incarnation, "n");
+    assert_eq!(still, retired, "U is not pushed onto the 64 retired names");
+    assert_eq!(reset_events(&db)?, 0);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

@@ -4,6 +4,9 @@
 //! Dormant receive-ledger schema and transaction authority; activation is a separate step.
 #[cfg(test)]
 mod application_outbox_backup_tests;
+pub(crate) mod ack;
+#[cfg(test)]
+mod ack_tests;
 pub(crate) mod cover;
 #[cfg(test)]
 mod cover_tests;
