@@ -250,18 +250,22 @@ fn direct_migration_shares_stage_validation() -> Result<(), StorageError> {
         Ok::<(), StorageError>(())
     })?;
     db.hold_unrouted("u1025", 1025, &bytes(1025), 1)?;
-    match db
-        .write_transaction(|| db.migrate_direct(ReceiveMigrate { target: "t", incarnation: "e" }))
-    {
-        Err(StorageError::Integrity("receive migrate work capacity")) => {}
-        other => panic!("cap: {other:?}"),
-    }
+    assert_eq!(
+        db.write_transaction(
+            || db.migrate_direct(ReceiveMigrate { target: "t", incarnation: "e" })
+        )?,
+        ReceiveMigrateResult::Migrated,
+        "over-cap legacy row does not fail the migration"
+    );
+    let skipped: Option<String> =
+        db.projection_checkpoint(&format!("gateway_receive_migrate:t:{}", 1025u64))?;
+    assert_eq!(skipped.as_deref(), Some("skipped"), "over-cap row stays legacy");
     let exists: i64 = db.connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM gateway_receive_epoch WHERE target_delivery_id='t')",
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(exists, 0, "capacity refusal writes no epoch");
+    assert_eq!(exists, 1, "migration completes with the epoch installed");
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

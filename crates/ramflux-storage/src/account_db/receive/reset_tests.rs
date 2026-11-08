@@ -507,6 +507,29 @@ fn empty_unverified_cursor_zero_initializes_without_reset_event() -> Result<(), 
 }
 
 #[test]
+fn unverified_cursor_zero_with_held_row_resets_with_event() -> Result<(), StorageError> {
+    let (root, db) = setup("reset-held-u")?;
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET incarnation_id='u', incarnation_verified=0 WHERE target_delivery_id='t'",
+        [],
+    )?;
+    put_held(&db, "u", 1)?;
+    db.publish_pending_receive_loss("t", "u", crate::unix_now())?;
+    let result = reset_to(&db, "u", 0, "n", 0, ReceiveResetReason::IncarnationFirstVerified)?;
+    assert_eq!(result, ReceiveResetResult::Reset);
+    assert_eq!(reset_events(&db)?, 1, "U with a held row and C=0 emits exactly one inbox_reset");
+    let classification: String = db.connection.query_row(
+        "SELECT CAST(body_json AS TEXT) FROM runtime_journal WHERE topic='inbox.reset'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(classification.contains("legacy_unverified"), "{classification}");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn reset_clears_freeze_and_observe_issued_refuses_retired() -> Result<(), StorageError> {
     let (root, db) = setup("reset-clear-freeze")?;
     db.set_projection_checkpoint("gateway_receive_cursor:t", "10")?;

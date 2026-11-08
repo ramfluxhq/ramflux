@@ -6,7 +6,7 @@
 //! Dormant until P24 activation wires it. Entry points require the caller's writer.
 use super::ReceiveTransaction;
 use super::cover::ReceiveGap;
-use super::stage::{ReceiveStageResult, bind_receive_entry, receive_capacity};
+use super::stage::{bind_receive_entry, receive_capacity};
 use crate::{AccountDb, ProjectionStore, StorageError};
 use rusqlite::params;
 
@@ -142,13 +142,13 @@ impl AccountDb {
         }
         let length = i64::try_from(entry.len())
             .map_err(|_| StorageError::Integrity("receive entry byte bound"))?;
-        if let Some(paused) = receive_capacity(self, input.target, length)? {
-            return Err(StorageError::Integrity(match paused {
-                ReceiveStageResult::PausedWork => "receive migrate work capacity",
-                ReceiveStageResult::PausedBytes => "receive migrate byte capacity",
-                ReceiveStageResult::PausedIntents => "receive migrate intent capacity",
-                _ => "receive migrate capacity",
-            }));
+        if receive_capacity(self, input.target, length)?.is_some() {
+            // Over-cap legacy row: leave it legacy with a diagnostic; migration continues.
+            self.set_projection_checkpoint(
+                &format!("gateway_receive_migrate:{}:{sequence}", input.target),
+                "skipped",
+            )?;
+            return Ok(());
         }
         let seq = sequence.to_be_bytes();
         self.connection.execute(

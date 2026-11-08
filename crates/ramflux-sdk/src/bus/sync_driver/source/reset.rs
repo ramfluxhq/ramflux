@@ -31,13 +31,18 @@ impl SourceReset<'_> {
         db: &AccountDb,
         input: ReceiveMigrate<'_>,
     ) -> Result<ReceiveMigrateResult, SdkError> {
+        self.check_migrate_identity(input)?;
+        Ok(db.migrate_direct(input)?)
+    }
+
+    fn check_migrate_identity(&self, input: ReceiveMigrate<'_>) -> Result<(), SdkError> {
         if input.target != self.expected.target || input.incarnation != self.expected.incarnation {
             return Err(ramflux_storage::StorageError::Integrity(
-                "receive migrate identity missing",
+                "receive migrate identity mismatch",
             )
             .into());
         }
-        Ok(db.migrate_direct(input)?)
+        Ok(())
     }
 
     /// Atomic expected-E reset onto first-page S.
@@ -66,5 +71,34 @@ impl SourceReset<'_> {
     /// Recovery clears the retired-fence pause.
     pub(crate) fn clear_pause(&self, db: &AccountDb) -> Result<(), SdkError> {
         Ok(db.write_transaction(|| db.clear_receive_pause(self.expected.target))?)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_identity_mismatch_has_distinct_message() {
+        let reset = SourceReset {
+            expected: ReceiveExpectation {
+                target: "t",
+                incarnation: "e",
+                cursor: 0,
+                generation: 1,
+                erasure_generation: 0,
+            },
+            generation: 1,
+        };
+        match reset.check_migrate_identity(ReceiveMigrate { target: "t", incarnation: "other" }) {
+            Err(err) => {
+                assert!(err.to_string().contains("receive migrate identity mismatch"), "{err}");
+            }
+            Ok(()) => panic!("mismatch must refuse"),
+        }
+        assert!(
+            reset.check_migrate_identity(ReceiveMigrate { target: "t", incarnation: "e" }).is_ok()
+        );
     }
 }
