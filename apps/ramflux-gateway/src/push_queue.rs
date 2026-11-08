@@ -24,13 +24,6 @@ pub(crate) const TRANSIENT_FRAME_CAP: usize = 64;
 /// Per-session transient byte occupancy, including the in-flight write.
 pub(crate) const TRANSIENT_BYTE_CAP: usize = 262_144;
 const EMPTY: u64 = u64::MAX;
-#[cfg(test)]
-static BYPASS_TRANSIENT_BOUND: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(test)]
-pub(crate) fn set_bypass_transient_bound(bypass: bool) {
-    BYPASS_TRANSIENT_BOUND.store(bypass, std::sync::atomic::Ordering::SeqCst);
-}
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(15);
 // Sink admission is queue waiting, with its own bound; only the I/O consumes 15s.
 const SINK_ADMISSION_DEADLINE: Duration = Duration::from_secs(60);
@@ -118,6 +111,8 @@ struct Inner {
     #[cfg(test)]
     accesses: Arc<std::sync::atomic::AtomicUsize>,
     clock: AtomicU64,
+    #[cfg(test)]
+    bypass_transient_bound: AtomicBool,
 }
 enum Next {
     Frame(Frame),
@@ -161,6 +156,8 @@ impl PushQueue {
                 #[cfg(test)]
                 accesses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 clock: AtomicU64::new(0),
+                #[cfg(test)]
+                bypass_transient_bound: AtomicBool::new(false),
             }),
         }
     }
@@ -283,7 +280,7 @@ impl PushQueue {
         }
         let (frames, used) = state.transient_occupancy();
         #[cfg(test)]
-        let bypass = BYPASS_TRANSIENT_BOUND.load(Ordering::SeqCst);
+        let bypass = self.inner.bypass_transient_bound.load(Ordering::SeqCst);
         #[cfg(not(test))]
         let bypass = false;
         if !bypass
@@ -302,6 +299,10 @@ impl PushQueue {
     #[cfg(test)]
     pub(crate) fn ephemeral_len(&self) -> usize {
         self.inner.state.lock().map_or(0, |state| state.transient_occupancy().0)
+    }
+    #[cfg(test)]
+    pub(crate) fn set_bypass_transient_bound(&self, bypass: bool) {
+        self.inner.bypass_transient_bound.store(bypass, Ordering::SeqCst);
     }
     fn overflow(&self, seq: u64) -> Admission {
         self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);

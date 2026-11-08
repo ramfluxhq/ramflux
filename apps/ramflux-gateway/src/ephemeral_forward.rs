@@ -87,16 +87,6 @@ pub(crate) fn finish_without_wake(outcome: EphemeralEnqueueOutcome) -> Ephemeral
     outcome
 }
 
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-static SKIP_DEADLINE_EQUALITY: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-pub(crate) fn set_skip_deadline_equality(skip: bool) {
-    SKIP_DEADLINE_EQUALITY.store(skip, Ordering::SeqCst);
-}
-
 fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,7 +119,7 @@ pub(crate) async fn handle_at(
     for id in [&request.source_gateway_id, &request.target_delivery_id] {
         anyhow::ensure!(!id.is_empty() && id.len() <= 256, "invalid forwarding identity");
     }
-    if let Some(outcome) = pre_enqueue_refusal(&request, now_ms) {
+    if let Some(outcome) = pre_enqueue_refusal(&request, now_ms, skip_deadline_equality(hub)) {
         return Ok(map_forward(finish_without_wake(outcome)));
     }
     let bytes = frame_bytes(&request.envelope, request.expires_at_ms)
@@ -149,16 +139,28 @@ pub(crate) async fn handle_at(
     Ok(map_forward(outcome))
 }
 
+fn skip_deadline_equality(hub: &GatewaySessionHub) -> bool {
+    #[cfg(test)]
+    {
+        hub.skip_deadline_equality()
+    }
+    #[cfg(not(test))]
+    {
+        let _hub = hub;
+        false
+    }
+}
+
 fn pre_enqueue_refusal(
     request: &GatewayForwardEphemeralRequest,
     now_ms: u64,
+    skip_deadline_equality: bool,
 ) -> Option<EphemeralEnqueueOutcome> {
     match deadline(&request.envelope, now_ms) {
         Err(EphemeralModeError::Expired) => Some(EphemeralEnqueueOutcome::Expired),
         Err(_) => Some(EphemeralEnqueueOutcome::Invalid),
         Ok(computed) => {
-            #[cfg(test)]
-            if SKIP_DEADLINE_EQUALITY.load(Ordering::SeqCst) {
+            if skip_deadline_equality {
                 return None;
             }
             if computed == request.expires_at_ms {

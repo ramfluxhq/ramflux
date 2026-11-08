@@ -48,6 +48,9 @@ pub(crate) struct GatewaySessionHub {
     enqueue_hold: std::sync::Mutex<
         Option<(std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Semaphore>)>,
     >,
+    /// Per-hub deadline-equality skip for tests. Default is compare (false).
+    #[cfg(test)]
+    skip_deadline_equality: std::sync::atomic::AtomicBool,
 }
 
 impl GatewaySessionHub {
@@ -496,6 +499,14 @@ impl GatewaySessionHub {
         if let Some(entry) = self.snapshot().await.get(target) {
             entry.queue.set_clock_ms(now_ms);
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_skip_deadline_equality(&self, skip: bool) {
+        self.skip_deadline_equality.store(skip, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn skip_deadline_equality(&self) -> bool {
+        self.skip_deadline_equality.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
