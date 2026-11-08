@@ -310,6 +310,41 @@ impl RamfluxClient {
         }
         Ok(())
     }
+
+    /// Content builder shared with the live surface courier `prepare` path.
+    pub(crate) fn surface_resync_direct_message(
+        &self,
+        config: &crate::GatewaySessionConfig,
+        reply: &ResyncReply,
+    ) -> Result<crate::GatewayDirectMessage, SdkError> {
+        Ok(crate::GatewayDirectMessage {
+            conversation_id: reply.carrier.conversation_id.clone(),
+            message_id: reply.carrier.message_id.clone(),
+            envelope_id: crate::new_surface_message_id()?,
+            source_principal_id: config.principal_id.clone(),
+            sender_id: config.device_id.clone(),
+            recipient_device_id: Some(reply.destination.device.clone()),
+            recipient_principal_commitment: Some(reply.destination.root.clone()),
+            target_delivery_id: reply.destination.target.clone(),
+            encrypted_body: Vec::new(),
+            created_at: crate::prelude::now_unix_timestamp(),
+            ttl: self.content_ttl()?,
+        })
+    }
+
+    /// Sealed-header envelope for the validated reply (empty body until courier material).
+    pub(crate) fn surface_resync_reply_envelope(
+        &self,
+        config: &crate::GatewaySessionConfig,
+        reply: &ResyncReply,
+    ) -> Result<ramflux_protocol::Envelope, SdkError> {
+        crate::dm::gateway_direct_message_envelope(
+            config,
+            &self.surface_resync_direct_message(config, reply)?,
+            None,
+        )
+    }
+
     pub(crate) fn take_surface_resync_answer(
         &self,
         entry: &GatewayInboxEntry,

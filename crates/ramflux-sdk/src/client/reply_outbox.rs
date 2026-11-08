@@ -11,8 +11,9 @@
 //! caller's open receive transaction before response state is removed. Bounded couriers send
 //! and retry that unchanged envelope (S6a P7 / P14 `submit_accepted`). A full outbox returns
 //! `OutboxFull` and retains W0 as held. Markers count toward `MAX_OUTBOX` (256 combined
-//! outbox+marker rows) and are pruned when the courier receipt is terminal. Never persist
-//! plaintext to make a step resumable. Network send is not in the transaction.
+//! outbox+marker rows after both writes) and are pruned with W0 terminal settlement, never
+//! at courier ack. Never persist plaintext to make a step resumable. Network send is not
+//! in the transaction.
 #![allow(dead_code)]
 
 use crate::client::routed::Opened;
@@ -20,8 +21,8 @@ use crate::client::surface::ResyncReply;
 use crate::prelude::*;
 use ramflux_protocol::Envelope;
 use ramflux_storage::{
-    AccountDb, ReceiveExpectation, ReceiveStage, ReceiveStageResult, ReceiveTransaction,
-    StorageError,
+    AccountDb, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveExpectation,
+    ReceiveStage, ReceiveStageResult, ReceiveTransaction, StorageError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +72,8 @@ pub(crate) struct AdmitRequest<'a> {
     pub message: Option<&'a str>,
     pub client: &'a RamfluxClient,
     pub pair: Option<PairLive<'a>>,
+    /// Surface BUILD signs through this session; pair prepare uses [`PairLive::config`].
+    pub config: Option<&'a GatewaySessionConfig>,
 }
 
 /// Inputs so pair admission calls `prepare_received_pair_reply` rather than trusting the envelope.
@@ -95,7 +98,8 @@ impl ReplyOutbox<'_> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.stage(input))?)
     }
 
-    /// Standalone admission when the caller is not already inside a receive transaction.
+    /// Standalone admission for tests. Production callers use [`Self::admit_in`].
+    #[cfg(test)]
     pub(crate) fn admit(
         &self,
         db: &AccountDb,
@@ -129,15 +133,29 @@ impl ReplyOutbox<'_> {
     ) -> Result<Admit, SdkError> {
         tx.require_writer()?;
         tx.require_open_input(request.sequence)?;
-        // Duplicate/immutable are marker-authenticated; the queued reply is already gone.
-        let request = if tx.account().actor_state_exists(&marker_key(request.auth_key))? {
-            request
-        } else if let Some(envelope) = live_checks(&request)? {
+        if tx.account().actor_state_exists(&marker_key(request.auth_key))? {
+            before_commit_fault()?;
+            return Ok(Admit::Duplicate);
+        }
+        let request = if let Some(envelope) = live_checks(&request, tx)? {
             AdmitRequest { envelope, ..request }
         } else {
             request
         };
         transfer(tx, request)
+    }
+
+    /// W0 terminal cover and marker prune in one writer transaction.
+    pub(crate) fn settle_terminal(
+        &self,
+        db: &AccountDb,
+        sequence: u64,
+        auth_key: &str,
+    ) -> Result<(), SdkError> {
+        db.receive_transaction(self.expected, self.generation, |tx| {
+            prune_on_terminal(tx, sequence, auth_key)
+        })?;
+        Ok(())
     }
 }
 
@@ -154,25 +172,33 @@ fn digest(envelope: &Envelope) -> Result<String, StorageError> {
     Ok(format!("{}", blake3::hash(&bytes).to_hex()))
 }
 
-fn live_checks(request: &AdmitRequest<'_>) -> Result<Option<Envelope>, SdkError> {
+fn live_checks(
+    request: &AdmitRequest<'_>,
+    tx: &ReceiveTransaction<'_>,
+) -> Result<Option<Envelope>, SdkError> {
     match request.kind {
         ReplyKind::Surface => {
             let key = request
                 .response_key
                 .ok_or(StorageError::Integrity("reply outbox surface requires a queued reply"))?;
-            let db = request.client.account_db()?;
+            let db = tx.account();
             let Some(stored) = db.load_actor_state::<serde_json::Value>(key)? else {
                 return Err(StorageError::Integrity("reply outbox surface reply missing").into());
             };
-            let reply: ResyncReply = serde_json::from_value(stored.clone())?;
-            if serde_json::to_value(&reply)? != stored {
-                return Err(StorageError::Integrity("reply outbox surface fingerprint").into());
-            }
+            let reply: ResyncReply = serde_json::from_value(stored)?;
             if reply.destination.expires_at <= now_unix_timestamp() {
                 return Err(StorageError::Integrity("reply outbox surface expired").into());
             }
             request.client.validate_surface_resync_reply(&reply)?;
-            Ok(None)
+            if request.envelope.target_delivery_id != reply.destination.target {
+                return Err(
+                    StorageError::Integrity("reply outbox surface destination mismatch").into()
+                );
+            }
+            let config = request
+                .config
+                .ok_or(StorageError::Integrity("reply outbox surface requires session config"))?;
+            Ok(Some(request.client.surface_resync_reply_envelope(config, &reply)?))
         }
         ReplyKind::Pair => {
             let live = request
@@ -194,19 +220,9 @@ fn transfer(tx: &ReceiveTransaction<'_>, request: AdmitRequest<'_>) -> Result<Ad
     let stored = outbox_key(request.auth_key);
     let marker = marker_key(request.auth_key);
     let hashed = digest(&request.envelope)?;
-    if db.actor_state_exists(&marker)? {
-        let existing: TransferMarker = db
-            .load_actor_state(&marker)?
-            .ok_or(StorageError::Integrity("reply outbox marker missing digest"))?;
-        if existing.envelope_id != request.envelope.envelope_id || existing.digest != hashed {
-            return Err(StorageError::Integrity("reply outbox envelope is immutable").into());
-        }
-        before_commit_fault()?;
-        return Ok(Admit::Duplicate);
-    }
     let (outbox_rows, _) = db.actor_state_usage(OUTBOX)?;
     let (marker_rows, _) = db.actor_state_usage(MARKER)?;
-    if outbox_rows.saturating_add(marker_rows) >= u64::from(MAX_OUTBOX) {
+    if outbox_rows.saturating_add(marker_rows).saturating_add(2) > u64::from(MAX_OUTBOX) {
         hold_open(tx, request.sequence)?;
         before_commit_fault()?;
         return Ok(Admit::OutboxFull);
@@ -250,13 +266,31 @@ pub(crate) fn due(db: &AccountDb) -> Result<Option<(String, PreparedReply)>, Sdk
     Ok(Some((auth_key, reply)))
 }
 
-/// Submit acknowledgement retires the outbox row and prunes the transfer marker.
+/// Submit acknowledgement retires the outbox row. The transfer marker stays until W0 terminal.
 pub(crate) fn acknowledge(db: &AccountDb, auth_key: &str) -> Result<(), SdkError> {
     db.write_transaction(|| {
         db.remove_actor_state(&outbox_key(auth_key))?;
-        db.remove_actor_state(&marker_key(auth_key))?;
         Ok::<(), StorageError>(())
     })?;
+    Ok(())
+}
+
+fn prune_on_terminal(
+    tx: &ReceiveTransaction<'_>,
+    sequence: u64,
+    auth_key: &str,
+) -> Result<(), StorageError> {
+    tx.require_writer()?;
+    let covered = tx.cover(ReceiveCover {
+        sequence,
+        kind: ReceiveCoverKind::Terminal,
+        gaps: &[],
+        retain_until: 0,
+    })?;
+    if covered != ReceiveCoverResult::Covered {
+        return Err(StorageError::Integrity("reply outbox terminal cover paused"));
+    }
+    tx.account().remove_actor_state(&marker_key(auth_key))?;
     Ok(())
 }
 

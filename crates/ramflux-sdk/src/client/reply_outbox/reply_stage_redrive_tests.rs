@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! `reply_stage_redrive` (P13's `receive_stage_redrive` first leg has not landed; the
-//! controller merges these rows after P13). Do not edit `routed/receive.rs` / `sync_driver.rs`.
+//! `reply_stage_redrive` folded into `receive_stage_redrive` (P13 is on main).
+//! Do not edit `routed/receive.rs` / `sync_driver.rs`.
 #![allow(
     clippy::too_many_lines,
     clippy::unwrap_used,
@@ -41,7 +41,7 @@ pub(crate) fn reply_stage_redrive() -> Result<(), SdkError> {
     let _hang = HangGuard(Some(cancel));
     let mut fixture = Fixture::new()?;
     redrive(&mut fixture, 1, "surface-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
-    redrive(&mut fixture, 2, "pair-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
+    redrive(&mut fixture, 2, "second-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
     Ok(())
 }
 
@@ -52,7 +52,16 @@ fn redrive(
     kind: ReplyKind,
     response: Option<&str>,
 ) -> Result<(), SdkError> {
-    let envelope = reply_outbox_crash_tests::envelope(&format!("{auth_key}-env"));
+    let envelope =
+        reply_outbox_crash_tests::bound_envelope(&fixture.client, &format!("{auth_key}-env"))?;
+    let config = reply_outbox_crash_tests::session_config(&fixture.client)?;
+    let target = fixture
+        .client
+        .device_branch
+        .as_ref()
+        .ok_or(SdkError::IdentityRootMissing)?
+        .device_id
+        .clone();
     reply_outbox_crash_tests::stage(&fixture.client, sequence)?;
     if let Some(key) = response {
         reply_outbox_crash_tests::queue_surface_at(&fixture.client, key)?;
@@ -80,6 +89,7 @@ fn redrive(
                 message: None,
                 client: &fixture.client,
                 pair: None,
+                config: Some(&config),
             },
         )
     }) {
@@ -118,6 +128,7 @@ fn redrive(
                 message: None,
                 client: &fixture.client,
                 pair: None,
+                config: Some(&config),
             },
         )?,
         Admit::Admitted
@@ -130,7 +141,8 @@ fn redrive(
     let stored: super::PreparedReply = db
         .load_actor_state(&format!("{OUTBOX}{auth_key}"))?
         .ok_or_else(|| SdkError::LocalBus("redrive missing envelope".into()))?;
-    assert_eq!(stored.envelope, envelope);
+    assert_ne!(stored.envelope.envelope_id, envelope.envelope_id);
+    assert_eq!(stored.envelope.target_delivery_id, target);
     let gate = ReplyOutbox {
         expected: ReceiveExpectation {
             target: "t",
@@ -153,6 +165,7 @@ fn redrive(
                 message: None,
                 client: &fixture.client,
                 pair: None,
+                config: None,
             },
         )?,
         Admit::Duplicate

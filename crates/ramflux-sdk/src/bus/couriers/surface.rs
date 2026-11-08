@@ -72,19 +72,7 @@ fn prepare(account: &mut LocalBusAccountState) -> Result<Option<Plan>, SdkError>
     )?;
     let body = zeroize::Zeroizing::new(control.bytes()?);
     let config = account.gateway_config.clone();
-    let message = GatewayDirectMessage {
-        conversation_id: reply.carrier.conversation_id.clone(),
-        message_id: reply.carrier.message_id.clone(),
-        envelope_id: crate::new_surface_message_id()?,
-        source_principal_id: config.principal_id.clone(),
-        sender_id: config.device_id.clone(),
-        recipient_device_id: Some(reply.destination.device.clone()),
-        recipient_principal_commitment: Some(reply.destination.root.clone()),
-        target_delivery_id: reply.destination.target.clone(),
-        encrypted_body: Vec::new(),
-        created_at: now_unix_timestamp(),
-        ttl: client.content_ttl()?,
-    };
+    let message = client.surface_resync_direct_message(&config, &reply)?;
     let request = client.routed_send_material_request(&config, &message)?;
     Ok(Some(Plan { key, fingerprint, reply, config, message, body, request }))
 }

@@ -17,14 +17,14 @@ use super::{
 use crate::prelude::*;
 use ramflux_protocol::Envelope;
 use ramflux_storage::{
-    AccountDb, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
+    AccountDb, ProjectionStore, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
 };
 use serde_json::json;
 use std::time::Duration;
 
 const INTEGRITY: &str = "source effect requires staged receive work";
 const BEFORE: &str = "reply outbox before-commit";
-const IMMUTABLE: &str = "reply outbox envelope is immutable";
+const MISMATCH: &str = "reply outbox surface destination mismatch";
 const TARGET: &str = "t";
 const INCARNATION: &str = "e";
 const SURFACE_SEQ: u64 = 1;
@@ -55,12 +55,18 @@ fn hang_guard() -> HangGuard {
     HangGuard(Some(cancel))
 }
 
+fn live_cursor(db: &AccountDb) -> Result<u64, SdkError> {
+    db.projection_checkpoint(&format!("gateway_receive_cursor:{TARGET}"))?.map_or(Ok(0), |value| {
+        value.parse().map_err(|_| SdkError::LocalBus("receive cursor".into()))
+    })
+}
+
 fn gate(db: &AccountDb) -> Result<ReplyOutbox<'static>, SdkError> {
     Ok(ReplyOutbox {
         expected: ReceiveExpectation {
             target: TARGET,
             incarnation: INCARNATION,
-            cursor: 0,
+            cursor: live_cursor(db)?,
             generation: 1,
             erasure_generation: db.privacy_erasure_generation()?,
         },
@@ -107,6 +113,10 @@ fn wire(sequence: u64) -> Vec<u8> {
 }
 
 pub(crate) fn envelope(id: &str) -> Envelope {
+    envelope_at(id, TARGET)
+}
+
+fn envelope_at(id: &str, target: &str) -> Envelope {
     serde_json::from_value(json!({
         "schema": "ramflux.envelope.v1",
         "version": 1,
@@ -117,7 +127,7 @@ pub(crate) fn envelope(id: &str) -> Envelope {
         "envelope_id": id,
         "source_principal_id": "source",
         "source_device_id": "device",
-        "target_delivery_id": TARGET,
+        "target_delivery_id": target,
         "delivery_class": "opaque_event",
         "priority": "normal",
         "ttl": 60,
@@ -126,6 +136,30 @@ pub(crate) fn envelope(id: &str) -> Envelope {
         "payload_hash": format!("P{id}")
     }))
     .unwrap()
+}
+
+pub(super) fn bound_envelope(client: &RamfluxClient, id: &str) -> Result<Envelope, SdkError> {
+    let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    Ok(envelope_at(id, &branch.device_id))
+}
+
+pub(super) fn session_config(client: &RamfluxClient) -> Result<GatewaySessionConfig, SdkError> {
+    let branch = client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+    GatewaySessionConfig::quic(GatewayQuicEndpointConfig {
+        bind_addr: "127.0.0.1:0".parse().map_err(|_| SdkError::LocalBus("address".into()))?,
+        gateway_addr: "127.0.0.1:1".parse().map_err(|_| SdkError::LocalBus("address".into()))?,
+        server_name: "test".into(),
+        ca_cert: std::path::PathBuf::from("ca.pem"),
+        principal_id: branch.principal_id.clone(),
+        device_id: branch.device_id.clone(),
+        target_delivery_id: branch.device_id.clone(),
+        prekey_http_url: None,
+    })
+    .with_account_identity(client)
+}
+
+fn device_target(client: &RamfluxClient) -> Result<String, SdkError> {
+    Ok(client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_id.clone())
 }
 
 pub(super) struct Fixture {
@@ -270,18 +304,31 @@ fn req<'a>(
     kind: ReplyKind,
     response_key: Option<&'a str>,
     message: Option<&'a str>,
+    config: Option<&'a GatewaySessionConfig>,
 ) -> AdmitRequest<'a> {
-    AdmitRequest { sequence, auth_key, envelope, kind, response_key, message, client, pair: None }
+    AdmitRequest {
+        sequence,
+        auth_key,
+        envelope,
+        kind,
+        response_key,
+        message,
+        client,
+        pair: None,
+        config,
+    }
 }
 
-/// Crash after preparing a surface answer and a pair-reset reply, before/after outbox
-/// transfer and after network write before receipt.
+/// Crash after preparing a surface answer, before/after outbox transfer, after courier ack
+/// (marker stays), and after W0 terminal prune.
 #[test]
 fn reply_outbox_crash() -> Result<(), SdkError> {
     let _hang = hang_guard();
     let mut fixture = Fixture::new()?;
-    let surface = envelope("surface-env");
-    let pair = envelope("pair-env");
+    let config = session_config(&fixture.client)?;
+    let surface = bound_envelope(&fixture.client, "surface-env")?;
+    let second = bound_envelope(&fixture.client, "pair-env")?;
+    let target = device_target(&fixture.client)?;
 
     let missing = gate(fixture.client.account_db()?)?.admit(
         fixture.client.account_db()?,
@@ -293,6 +340,7 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
             ReplyKind::Surface,
             Some(SURFACE_RESPONSE),
             Some(MESSAGE),
+            Some(&config),
         ),
     );
     match missing {
@@ -302,6 +350,23 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
 
     stage(&fixture.client, SURFACE_SEQ)?;
     queue_surface(&fixture.client)?;
+    assert_integrity(
+        gate(fixture.client.account_db()?)?.admit(
+            fixture.client.account_db()?,
+            req(
+                &fixture.client,
+                SURFACE_SEQ,
+                SURFACE_KEY,
+                envelope("surface-env"),
+                ReplyKind::Surface,
+                Some(SURFACE_RESPONSE),
+                Some(MESSAGE),
+                Some(&config),
+            ),
+        ),
+        MISMATCH,
+    );
+
     let pre = snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?;
     assert!(pre.response);
     assert!(!pre.outbox);
@@ -319,6 +384,7 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
                     ReplyKind::Surface,
                     Some(SURFACE_RESPONSE),
                     Some(MESSAGE),
+                    Some(&config),
                 ),
             )
         }),
@@ -338,6 +404,7 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
                 ReplyKind::Surface,
                 Some(SURFACE_RESPONSE),
                 Some(MESSAGE),
+                Some(&config),
             ),
         )?,
         Admit::Admitted
@@ -347,7 +414,8 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
     assert!(!after_surface.response, "surface response must transfer before removal");
     assert!(after_surface.outbox);
     assert!(after_surface.marker);
-    assert_eq!(after_surface.envelope_id.as_deref(), Some("surface-env"));
+    assert_ne!(after_surface.envelope_id.as_deref(), Some("surface-env"));
+    assert_eq!(stored_target(&fixture.client, SURFACE_KEY)?, target);
     assert_eq!(after_surface.work, 1);
     assert_eq!(after_surface.disposition.as_deref(), Some("staged"));
 
@@ -358,30 +426,14 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
                 &fixture.client,
                 SURFACE_SEQ,
                 SURFACE_KEY,
-                surface.clone(),
+                envelope("placeholder"),
                 ReplyKind::Surface,
                 Some(SURFACE_RESPONSE),
                 Some(MESSAGE),
+                None,
             ),
         )?,
         Admit::Duplicate
-    );
-    let mut changed = surface.clone();
-    changed.encrypted_payload = "other-seal".into();
-    assert_integrity(
-        gate(fixture.client.account_db()?)?.admit(
-            fixture.client.account_db()?,
-            req(
-                &fixture.client,
-                SURFACE_SEQ,
-                SURFACE_KEY,
-                changed,
-                ReplyKind::Surface,
-                Some(SURFACE_RESPONSE),
-                Some(MESSAGE),
-            ),
-        ),
-        IMMUTABLE,
     );
 
     stage(&fixture.client, PAIR_SEQ)?;
@@ -393,10 +445,11 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
                 &fixture.client,
                 PAIR_SEQ,
                 PAIR_KEY,
-                pair.clone(),
+                second.clone(),
                 ReplyKind::Surface,
                 Some(SURFACE_RESPONSE),
                 Some(MESSAGE),
+                Some(&config),
             ),
         )?,
         Admit::Admitted
@@ -405,36 +458,81 @@ fn reply_outbox_crash() -> Result<(), SdkError> {
     let after_pair = snap(&fixture.client, PAIR_KEY, PAIR_SEQ)?;
     assert!(after_pair.outbox);
     assert!(after_pair.marker);
-    assert_eq!(after_pair.envelope_id.as_deref(), Some("pair-env"));
+    assert_ne!(after_pair.envelope_id.as_deref(), Some("pair-env"));
     assert_eq!(after_pair.work, 2, "surface and pair W0 rows both remain");
     assert_eq!(after_pair.disposition.as_deref(), Some("staged"));
 
     let first =
         due(fixture.client.account_db()?)?.ok_or(SdkError::LocalBus("due surface".into()))?;
-    assert_eq!(first.1.envelope_id, "pair-env");
-    assert_eq!(first.1.envelope, pair);
+    assert_eq!(first.0, PAIR_KEY);
+    assert_eq!(first.1.kind, ReplyKind::Surface);
+    assert_eq!(first.1.envelope.target_delivery_id, target);
     acknowledge(fixture.client.account_db()?, &first.0)?;
     let still =
         due(fixture.client.account_db()?)?.ok_or(SdkError::LocalBus("due surface".into()))?;
-    assert_eq!(still.1.envelope, surface);
+    assert_eq!(still.0, SURFACE_KEY);
     assert_eq!(still.1.kind, ReplyKind::Surface);
     reopen(&mut fixture.client)?;
     let pending = snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?;
     assert!(pending.outbox, "network write before receipt must retain the envelope");
-    assert_eq!(pending.envelope_id.as_deref(), Some("surface-env"));
     acknowledge(fixture.client.account_db()?, SURFACE_KEY)?;
+    reopen(&mut fixture.client)?;
+    let acked = snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?;
+    assert!(!acked.outbox);
+    assert!(acked.marker, "courier ack keeps the transfer marker");
+    assert_eq!(acked.disposition.as_deref(), Some("staged"));
+    assert_eq!(
+        gate(fixture.client.account_db()?)?.admit(
+            fixture.client.account_db()?,
+            req(
+                &fixture.client,
+                SURFACE_SEQ,
+                SURFACE_KEY,
+                envelope("placeholder"),
+                ReplyKind::Surface,
+                Some(SURFACE_RESPONSE),
+                Some(MESSAGE),
+                None,
+            ),
+        )?,
+        Admit::Duplicate
+    );
+    assert!(due(fixture.client.account_db()?)?.is_none());
+    gate(fixture.client.account_db()?)?.settle_terminal(
+        fixture.client.account_db()?,
+        SURFACE_SEQ,
+        SURFACE_KEY,
+    )?;
     reopen(&mut fixture.client)?;
     let done = snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?;
     assert!(!done.outbox);
-    assert!(!done.marker, "terminal courier receipt prunes the transfer marker");
-    assert!(due(fixture.client.account_db()?)?.is_none());
+    assert!(!done.marker, "W0 terminal prunes the transfer marker");
+    gate(fixture.client.account_db()?)?.settle_terminal(
+        fixture.client.account_db()?,
+        PAIR_SEQ,
+        PAIR_KEY,
+    )?;
 
     join_stage_and_admit(&mut fixture.client)?;
     acknowledge(fixture.client.account_db()?, "join-auth")?;
+    gate(fixture.client.account_db()?)?.settle_terminal(
+        fixture.client.account_db()?,
+        3,
+        "join-auth",
+    )?;
     fill_and_hold(&mut fixture.client)?;
     erase_bound_row(&fixture.client)?;
     pair_requires_live_prepare(&fixture.client)?;
+    hold_keeps_quarantined(&fixture.client)?;
     Ok(())
+}
+
+fn stored_target(client: &RamfluxClient, auth_key: &str) -> Result<String, SdkError> {
+    let prepared: PreparedReply = client
+        .account_db()?
+        .load_actor_state(&format!("{OUTBOX}{auth_key}"))?
+        .ok_or_else(|| SdkError::LocalBus("stored envelope".into()))?;
+    Ok(prepared.envelope.target_delivery_id)
 }
 
 fn pair_requires_live_prepare(client: &RamfluxClient) -> Result<(), SdkError> {
@@ -452,6 +550,7 @@ fn pair_requires_live_prepare(client: &RamfluxClient) -> Result<(), SdkError> {
                 message: None,
                 client,
                 pair: None,
+                config: None,
             },
         ),
         "reply outbox pair requires live prepare",
@@ -463,7 +562,8 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
     const SEQ: u64 = 3;
     const KEY: &str = "join-auth";
     let entry = wire(SEQ);
-    let envelope = envelope("join-env");
+    let envelope = bound_envelope(client, "join-env")?;
+    let config = session_config(client)?;
     queue_surface(client)?;
     {
         let db = client.account_db()?;
@@ -483,6 +583,7 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
                                 ReplyKind::Surface,
                                 Some(SURFACE_RESPONSE),
                                 Some(MESSAGE),
+                                Some(&config),
                             ),
                         )
                         .map_err(|error| match error {
@@ -517,6 +618,7 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
                         ReplyKind::Surface,
                         Some(SURFACE_RESPONSE),
                         Some(MESSAGE),
+                        Some(&config),
                     ),
                 )
                 .map_err(|error| match error {
@@ -535,9 +637,12 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
 }
 
 fn fill_and_hold(client: &mut RamfluxClient) -> Result<(), SdkError> {
+    let config = session_config(client)?;
+    let cap = bound_envelope(client, "cap-env")?;
+    let held_env = bound_envelope(client, "held-env")?;
     {
         let db = client.account_db()?;
-        for i in 0..255 {
+        for i in 0..254 {
             db.persist_actor_state(&format!("{OUTBOX}fill-{i}"), &json!({"pad": i}))?;
         }
     }
@@ -550,14 +655,15 @@ fn fill_and_hold(client: &mut RamfluxClient) -> Result<(), SdkError> {
                 client,
                 4,
                 "cap-auth",
-                envelope("cap-env"),
+                cap,
                 ReplyKind::Surface,
                 Some(SURFACE_RESPONSE),
                 None,
+                Some(&config),
             ),
         )?,
         Admit::Admitted,
-        "255 combined rows still admit"
+        "254 combined rows still admit (256 after both writes)"
     );
     queue_surface(client)?;
     stage(client, 5)?;
@@ -572,10 +678,11 @@ fn fill_and_hold(client: &mut RamfluxClient) -> Result<(), SdkError> {
                 client,
                 5,
                 "held-auth",
-                envelope("held-env"),
+                held_env.clone(),
                 ReplyKind::Surface,
                 Some(SURFACE_RESPONSE),
                 None,
+                Some(&config),
             ),
         )?,
         Admit::OutboxFull
@@ -589,18 +696,37 @@ fn fill_and_hold(client: &mut RamfluxClient) -> Result<(), SdkError> {
     assert_eq!(held.disposition.as_deref(), Some("held"));
     {
         let db = client.account_db()?;
-        for i in 0..255 {
+        for i in 0..254 {
             db.remove_actor_state(&format!("{OUTBOX}fill-{i}"))?;
         }
         db.remove_actor_state(&format!("{OUTBOX}cap-auth"))?;
         db.remove_actor_state(&format!("{}cap-auth", super::MARKER))?;
     }
+    assert_eq!(
+        gate(client.account_db()?)?.admit(
+            client.account_db()?,
+            req(
+                client,
+                5,
+                "held-auth",
+                held_env,
+                ReplyKind::Surface,
+                Some(SURFACE_RESPONSE),
+                None,
+                Some(&config),
+            ),
+        )?,
+        Admit::Admitted,
+        "held input re-admits once after the outbox drains"
+    );
     Ok(())
 }
 
 fn erase_bound_row(client: &RamfluxClient) -> Result<(), SdkError> {
     const SEQ: u64 = 6;
     const KEY: &str = "erase-auth";
+    let config = session_config(client)?;
+    let envelope = bound_envelope(client, "erase-env")?;
     stage(client, SEQ)?;
     queue_surface(client)?;
     let db = client.account_db()?;
@@ -614,10 +740,11 @@ fn erase_bound_row(client: &RamfluxClient) -> Result<(), SdkError> {
                     client,
                     SEQ,
                     KEY,
-                    envelope("erase-env"),
+                    envelope,
                     ReplyKind::Surface,
                     Some(SURFACE_RESPONSE),
                     Some(ERASE),
+                    Some(&config),
                 ),
             )
             .map_err(|error| match error {
@@ -637,5 +764,20 @@ fn erase_bound_row(client: &RamfluxClient) -> Result<(), SdkError> {
         !db.actor_state_exists(&format!("{}{KEY}", super::MARKER))?,
         "erase of the bound message must drop the transfer marker"
     );
+    Ok(())
+}
+
+fn hold_keeps_quarantined(client: &RamfluxClient) -> Result<(), SdkError> {
+    const SEQ: u64 = 8;
+    stage(client, SEQ)?;
+    let db = client.account_db()?;
+    db.set_receipt_disposition_for_test(SEQ, "quarantined")?;
+    let outbox = gate(db)?;
+    db.receive_transaction(outbox.expected, outbox.generation, |tx| {
+        tx.hold_receipt(SEQ)?;
+        Ok(())
+    })?;
+    let (disposition, _) = db.receive_state_for_test(SEQ)?;
+    assert_eq!(disposition.as_deref(), Some("quarantined"));
     Ok(())
 }
