@@ -9,6 +9,7 @@ use crate::bus::{
 use crate::client::routed::PreparedInbound;
 mod group;
 mod history;
+pub(crate) mod hold;
 mod native;
 pub(crate) mod w0;
 pub(crate) mod ws;

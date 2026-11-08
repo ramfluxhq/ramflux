@@ -13,8 +13,7 @@ use crate::bus::{
 use crate::client::identity_authority::HeadUse;
 
 #[tokio::test]
-async fn native_contact_background_bootstrap_decrypts_again_without_an_inline_lookup() -> TestResult
-{
+async fn native_contact_background_bootstrap_and_contact_backpressure_record() -> TestResult {
     let mut sender = NativeFixture::new("alice").await?;
     let mut target = NativeFixture::new("bob").await?;
     let directory = Directory::from_records(
@@ -74,6 +73,12 @@ async fn native_contact_background_bootstrap_decrypts_again_without_an_inline_lo
         &receiver.client.authenticated_committed_key(HeadUse::NewAuthorization, &entry)?
     )?);
     assert_eq!(db.actor_state_keys("dm-pair/session/")?.len(), 1);
+    let admission_key = receiver.client.inbox_admission_key(&entry)?;
+    db.defer_inbox_entry(&admission_key, &serde_json::to_vec(&entry)?, now_unix_timestamp())?;
+    let mut backpressure = Backpressure::default();
+    assert!(backpressure.record(&receiver.client, &entry, now_unix_timestamp())?);
+    assert!(!db.has_inbox_retry(&admission_key)?);
+    assert!(db.actor_state_exists("contact-admission/backpressure")?);
     receiver.install_test_session(engine);
     Ok(())
 }

@@ -34,6 +34,9 @@ pub use account_db::receive::ReceiveLedgerSnap;
 pub use account_db::receive::cover::{
     ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveGap,
 };
+pub use account_db::receive::hold::{
+    ReceiveHold, ReceiveHoldClass, ReceiveHoldJournal, ReceiveHoldResult,
+};
 pub use account_db::receive::page::{
     ReceiveCoverStep, ReceiveGapOwned, ReceiveKnownLoss, ReceivePageView, ReceiveReconcileResult,
 };

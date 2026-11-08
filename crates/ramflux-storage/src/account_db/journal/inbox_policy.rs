@@ -125,7 +125,16 @@ impl AccountDb {
         self.set_inbox_failure_policy(key, entry, InboxFailureSource::Unverified, ("none", ""), at)
     }
     pub(super) fn cleanup_inbox_policy(&self) -> Result<(), StorageError> {
-        self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_retry UNION SELECT envelope_key FROM runtime_inbox_dead_letter)",[])?;
+        let has_receive_work: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_receive_work')",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_receive_work {
+            self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_retry UNION SELECT envelope_key FROM runtime_inbox_dead_letter) AND NOT EXISTS(SELECT 1 FROM gateway_receive_work WHERE admission_key=runtime_inbox_policy.envelope_key)",[])?;
+        } else {
+            self.connection.execute("DELETE FROM runtime_inbox_policy WHERE envelope_key NOT IN (SELECT envelope_key FROM runtime_inbox_retry UNION SELECT envelope_key FROM runtime_inbox_dead_letter)",[])?;
+        }
         Ok(())
     }
     /// Selectively wakes work affected by actual group/manifest changes. Each entry can be woken

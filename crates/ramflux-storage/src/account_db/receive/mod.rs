@@ -21,6 +21,9 @@ mod erased_input_producers_tests;
 mod erased_input_tests;
 #[cfg(test)]
 mod erased_input_union_tests;
+pub(crate) mod hold;
+#[cfg(test)]
+mod hold_tests;
 pub(crate) mod ledger_backup;
 pub(crate) mod loss;
 #[cfg(test)]

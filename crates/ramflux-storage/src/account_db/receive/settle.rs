@@ -67,6 +67,36 @@ impl ReceiveTransaction<'_> {
         })
     }
 
+    /// Settles retained work for another incarnation fenced as retired by the current target.
+    /// This is used inside an already-open target transaction so cleanup joins the caller's
+    /// commit; the P06 `settle` path remains the only way to remove its ledger work.
+    pub(crate) fn settle_retained_for(
+        &self,
+        incarnation: &str,
+        input: ReceiveSettle,
+    ) -> Result<ReceiveSettleResult, StorageError> {
+        self.require_writer()?;
+        if incarnation == self.incarnation {
+            return self.settle(input);
+        }
+        let retired_blob: Vec<u8> = self.db.connection.query_row(
+            "SELECT retired_incarnations FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+            params![self.target],
+            |row| row.get(0),
+        )?;
+        let retired: Vec<String> = if retired_blob.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_slice(&retired_blob)
+                .map_err(|_| StorageError::Integrity("retired incarnation encoding"))?
+        };
+        if !retired.iter().any(|value| value == incarnation) {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        ReceiveTransaction { db: self.db, target: self.target, incarnation, retired: true }
+            .settle(input)
+    }
+
     /// Held/quarantined/staged work and erased receipts, oldest first. Live E is at or
     /// below C; a retired E lists every retained or erased row of that incarnation.
     ///

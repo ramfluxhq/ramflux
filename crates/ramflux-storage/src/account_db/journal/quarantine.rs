@@ -18,27 +18,53 @@ impl AccountDb {
         if entry.len() > 1024 * 1024 {
             return Err(StorageError::AuthorizationRejected);
         }
-        self.write_transaction(|| {
-            if let Some(marker) = self.inbox_envelope_marker(entry)?
-                && self.actor_state_exists(&marker)?
-            {
-                return Ok(());
-            }
-            let exists: i64 = self.connection.query_row(
-                "SELECT count(*) FROM runtime_unrouted WHERE envelope_id=?1",
-                params![id],
-                |row| row.get(0),
+        self.write_transaction(|| self.insert_unrouted_row(id, seq, entry, at, true).map(|_| ()))
+    }
+
+    /// Inserts an unrouted row without applying legacy raw-delete eviction. Receive-ledger
+    /// callers first settle any required eviction through WS/W2 in their enclosing transaction.
+    pub(in crate::account_db) fn insert_unrouted_row(
+        &self,
+        id: &str,
+        seq: u64,
+        entry: &[u8],
+        at: i64,
+        legacy_trim: bool,
+    ) -> Result<bool, StorageError> {
+        if entry.len() > 1024 * 1024 {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        if let Some(marker) = self.inbox_envelope_marker(entry)?
+            && self.actor_state_exists(&marker)?
+        {
+            return Ok(true);
+        }
+        let existed_before: i64 = self.connection.query_row(
+            "SELECT count(*) FROM runtime_unrouted WHERE envelope_id=?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if legacy_trim {
+            self.connection.execute(
+                "DELETE FROM runtime_unrouted WHERE received_at<?1",
+                params![at.saturating_sub(7 * 24 * 60 * 60)],
             )?;
-            self.connection.execute("DELETE FROM runtime_unrouted WHERE received_at<?1",params![at.saturating_sub(7*24*60*60)])?;
-            if exists == 0 {
+            if existed_before == 0 {
                 self.connection.execute("DELETE FROM runtime_unrouted WHERE envelope_id IN (SELECT envelope_id FROM runtime_unrouted ORDER BY received_at DESC,inbox_seq DESC,envelope_id DESC LIMIT -1 OFFSET 63)",[])?;
             }
+        }
+        let exists_after_trim: i64 = self.connection.query_row(
+            "SELECT count(*) FROM runtime_unrouted WHERE envelope_id=?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if exists_after_trim == 0 {
             self.connection.execute(
                 "INSERT OR IGNORE INTO runtime_unrouted VALUES(?1,?2,?3,?4)",
                 params![id, seq, entry, at],
             )?;
-            Ok(())
-        })
+        }
+        Ok(existed_before != 0)
     }
     /// # Errors
     /// Returns errors reading the bounded quarantine.

@@ -5,7 +5,7 @@
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 const KEY: &str = "contact-admission/backpressure";
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub(crate) struct Backpressure {
     floor: Option<u64>,
     next_at: i64,
@@ -17,12 +17,12 @@ pub(crate) struct Backpressure {
     #[serde(skip)]
     overflow: BTreeMap<String, u64>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Deferred {
     sequence: u64,
     expires_at: i64,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Scan {
     cursor: u64,
     until: u64,
@@ -63,19 +63,30 @@ impl Backpressure {
         if self.duplicate(entry) {
             return Ok(false);
         }
-        // Past 1024 durable roots, preserve the first envelope and deduplicate this drain in memory.
-        if self.roots.contains_key(&root) || self.roots.len() < 1024 {
-            self.roots
-                .entry(root)
-                .or_insert(Deferred { sequence: entry.inbox_seq, expires_at: expiry(entry, now) });
-        } else {
-            self.overflow.entry(root).or_insert(entry.inbox_seq);
+        let previous = self.clone();
+        let key = client.inbox_admission_key(entry)?;
+        let db = client.account_db()?;
+        let result = db.write_transaction(|| {
+            // Past 1024 durable roots, preserve the first envelope and deduplicate this drain in memory.
+            if self.roots.contains_key(&root) || self.roots.len() < 1024 {
+                self.roots.entry(root).or_insert(Deferred {
+                    sequence: entry.inbox_seq,
+                    expires_at: expiry(entry, now),
+                });
+            } else {
+                self.overflow.entry(root).or_insert(entry.inbox_seq);
+            }
+            self.hold(entry, now);
+            // Persist before the normal cursor advances. The gateway retains the original ciphertext.
+            self.save(client)?;
+            // Existing generic retry rows must not stay due every tick. The durable floor owns redrive.
+            db.remove_inbox_retry(&key)?;
+            Ok::<_, SdkError>(())
+        });
+        if let Err(error) = result {
+            *self = previous;
+            return Err(error);
         }
-        self.hold(entry, now);
-        // Persist before the normal cursor advances. The gateway retains the original ciphertext.
-        self.save(client)?;
-        // Existing generic retry rows must not stay due every tick. The durable floor owns redrive.
-        client.account_db()?.remove_inbox_retry(&client.inbox_admission_key(entry)?)?;
         Ok(true)
     }
     fn hold(&mut self, entry: &GatewayInboxEntry, now: i64) {
