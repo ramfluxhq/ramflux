@@ -5,6 +5,7 @@
 use super::backup_database::BackupDatabase;
 use crate::{AccountDbKey, StorageError};
 use rusqlite::params;
+use std::collections::BTreeSet;
 
 impl BackupDatabase {
     pub(super) fn link_imported_message_footprints(
@@ -64,23 +65,133 @@ impl BackupDatabase {
             }
         }
         if !native_data_only {
+            self.erase_deleted_raw_rows()?;
             self.db.execute_batch(
-                "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id)
-                 SELECT 'raw:'||copy_id,owner_id FROM raw_inner_copy;
+                "DELETE FROM message_copy_binding
+                 WHERE copy_id IN (
+                     SELECT b.copy_id FROM incoming.message_copy_binding b
+                     JOIN incoming.raw_inner_copy i ON b.copy_id='raw:'||i.copy_id
+                     JOIN raw_inner_copy c ON c.copy_id=i.copy_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM incoming.message_copy_binding b
+                     WHERE b.copy_id=message_copy_binding.copy_id
+                       AND b.message_id=message_copy_binding.message_id
+                 );
+                 DELETE FROM message_footprint
+                 WHERE kind='raw_inner'
+                   AND locator IN (SELECT copy_id FROM incoming.raw_inner_copy)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM incoming.message_copy_binding b
+                     WHERE b.copy_id='raw:'||message_footprint.locator
+                       AND b.message_id=message_footprint.message_id
+                   );
+                 INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id)
+                 SELECT b.copy_id,b.message_id FROM incoming.message_copy_binding b
+                 JOIN incoming.raw_inner_copy i ON b.copy_id='raw:'||i.copy_id
+                 JOIN raw_inner_copy c ON c.copy_id=i.copy_id;
                  INSERT OR IGNORE INTO message_footprint(message_id,kind,locator)
-                 SELECT owner_id,'raw_inner',copy_id FROM raw_inner_copy;
+                 SELECT b.message_id,'raw_inner',c.copy_id FROM raw_inner_copy c
+                 JOIN message_copy_binding b ON b.copy_id='raw:'||c.copy_id;
                  INSERT OR IGNORE INTO message_footprint(message_id,kind,locator)
-                 SELECT message_id,'raw_inner_evidence',message_id FROM raw_inner_evidence;
-                 DELETE FROM raw_inner_copy WHERE owner_id IN
-                    (SELECT message_id FROM direct_message_projection WHERE deleted=1);
-                 DELETE FROM raw_inner_owner WHERE owner_id IN
-                    (SELECT message_id FROM direct_message_projection WHERE deleted=1);
-                 DELETE FROM raw_inner_evidence WHERE message_id IN
-                    (SELECT message_id FROM direct_message_projection WHERE deleted=1);",
+                 SELECT message_id,'raw_inner_evidence',message_id FROM raw_inner_evidence;",
             )?;
             super::raw_inner::quota::validate_all(&self.db)?;
         }
         Ok(super::message_footprint::migration::register_imported(&self.db)?)
+    }
+
+    fn erase_deleted_raw_rows(&self) -> Result<(), StorageError> {
+        let owners = {
+            let mut query = self.db.prepare("SELECT owner_id FROM raw_inner_owner")?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut deleted_owners = BTreeSet::new();
+        for owner in owners {
+            if super::raw_inner::message_deleted(&self.db, &owner)? {
+                deleted_owners.insert(owner);
+            }
+        }
+
+        let copies = {
+            let mut query = self.db.prepare("SELECT copy_id FROM raw_inner_copy")?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut deleted_copies = BTreeSet::new();
+        for copy_id in copies {
+            if super::raw_inner::raw_copy_deleted(&self.db, &copy_id)? {
+                deleted_copies.insert(copy_id);
+            }
+        }
+
+        let bound_targets = {
+            let mut query = self.db.prepare(
+                "SELECT c.copy_id,b.message_id FROM incoming.raw_inner_copy c
+                 JOIN incoming.message_copy_binding b ON b.copy_id='raw:'||c.copy_id
+                 UNION
+                 SELECT c.copy_id,b.message_id FROM main.raw_inner_copy c
+                 JOIN main.message_copy_binding b ON b.copy_id='raw:'||c.copy_id",
+            )?;
+            query
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (copy_id, message_id) in bound_targets {
+            if super::raw_inner::message_deleted(&self.db, &message_id)? {
+                deleted_copies.insert(copy_id);
+            }
+        }
+
+        let evidence_messages = {
+            let mut query = self.db.prepare("SELECT message_id FROM raw_inner_evidence")?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut deleted_evidence = Vec::new();
+        for message_id in evidence_messages {
+            if super::raw_inner::message_deleted(&self.db, &message_id)? {
+                deleted_evidence.push(message_id);
+            }
+        }
+
+        for owner_id in deleted_owners {
+            self.db.execute(
+                "DELETE FROM message_copy_binding WHERE copy_id IN
+                 (SELECT 'raw:'||copy_id FROM raw_inner_copy WHERE owner_id=?1)",
+                [&owner_id],
+            )?;
+            self.db.execute(
+                "DELETE FROM message_footprint WHERE kind='raw_inner' AND locator IN
+                 (SELECT copy_id FROM raw_inner_copy WHERE owner_id=?1)",
+                [&owner_id],
+            )?;
+            self.db.execute("DELETE FROM raw_inner_copy WHERE owner_id=?1", [&owner_id])?;
+            self.db.execute("DELETE FROM raw_inner_owner WHERE owner_id=?1", [owner_id])?;
+        }
+        for copy_id in deleted_copies {
+            self.db.execute(
+                "DELETE FROM message_copy_binding WHERE copy_id=?1",
+                [format!("raw:{copy_id}")],
+            )?;
+            self.db.execute(
+                "DELETE FROM message_footprint WHERE kind='raw_inner' AND locator=?1",
+                [&copy_id],
+            )?;
+            self.db.execute("DELETE FROM raw_inner_copy WHERE copy_id=?1", [copy_id])?;
+        }
+        for message_id in deleted_evidence {
+            self.db.execute("DELETE FROM raw_inner_evidence WHERE message_id=?1", [&message_id])?;
+            self.db.execute(
+                "DELETE FROM message_footprint WHERE kind='raw_inner_evidence' AND message_id=?1",
+                [message_id],
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -155,6 +266,82 @@ mod tests {
             drop(local);
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_raw_rows_are_removed_at_the_full_merge_footprint_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = crate::tests::temp_root("backup-footprint-raw-delete-boundary");
+        let source_index = AccountIndex::open(root.join("source"))?;
+        let target_index = AccountIndex::open(root.join("target"))?;
+        source_index.create_account("acct", "own-root")?;
+        target_index.create_account("acct", "own-root")?;
+        let source = AccountDb::open(&source_index, "acct", &AccountDbKey::generate()?)?;
+        let target = AccountDb::open(&target_index, "acct", &AccountDbKey::generate()?)?;
+        for db in [&source, &target] {
+            db.send_direct_message("thread", "message-target", "peer", b"body")?;
+            db.write_transaction(|| {
+                db.put_unsupported_raw_copy(super::super::raw_inner::RawInnerCopyWrite {
+                    owner_id: "copy:authenticated-envelope",
+                    verified_source_anchor: "verified-root",
+                    copy_id: "bound-copy",
+                    kind: super::super::raw_inner::RawInnerCopyKind::NestedGroup,
+                    bytes: b"stale bound bytes",
+                    bounded_metadata: b"{}",
+                })?;
+                db.bind_raw_inner_copy("bound-copy", "message-target")
+            })?;
+            db.write_transaction(|| {
+                db.put_known_content_evidence(
+                    "message-target",
+                    "thread",
+                    b"known content",
+                    b"private provenance",
+                    b"private opening",
+                )
+            })?;
+        }
+        target.delete_direct_message("thread", "message-target", "peer", "delete")?;
+
+        let source_path = root.join("incoming.db");
+        let source_snapshot = source.write_backup_snapshot(&source_path)?;
+        let target_path = root.join("target.db");
+        let target_snapshot = target.write_backup_snapshot(&target_path)?;
+        let merged = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+        merged.attach(&source_path, &source_snapshot.key)?;
+        // Recreate the generic row-merge result to exercise this final deletion guard directly.
+        merged.db.execute_batch(
+            "INSERT INTO main.raw_inner_owner SELECT * FROM incoming.raw_inner_owner;
+             INSERT INTO main.raw_inner_copy SELECT * FROM incoming.raw_inner_copy;
+             INSERT INTO main.raw_inner_evidence SELECT * FROM incoming.raw_inner_evidence;
+             INSERT INTO main.message_copy_binding SELECT * FROM incoming.message_copy_binding
+                WHERE copy_id='raw:bound-copy';",
+        )?;
+
+        merged.erase_deleted_raw_rows()?;
+
+        for table in ["raw_inner_copy", "raw_inner_owner", "raw_inner_evidence"] {
+            assert_eq!(
+                merged.db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get::<_, u64>(0)
+                })?,
+                0,
+                "deleted raw data survived in {table}"
+            );
+        }
+        assert_eq!(
+            merged.db.query_row(
+                "SELECT count(*) FROM message_copy_binding WHERE copy_id='raw:bound-copy'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )?,
+            0
+        );
+        drop(merged);
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 }

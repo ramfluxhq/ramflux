@@ -533,6 +533,84 @@ fn erased_bound_raw_copy_cannot_be_rewritten() -> TestResult {
 }
 
 #[test]
+fn raw_copy_tombstone_domain_does_not_collide_with_message_ids() -> TestResult {
+    let (_root, db) = test_db("raw-copy-marker-domain")?;
+    db.send_direct_message("thread", "raw-copy:copy-id", "sender", b"body")?;
+    db.delete_direct_message("thread", "raw-copy:copy-id", "sender", "tombstone")?;
+
+    let generic_message_marker =
+        db.account_mac(super::super::mac_subkeys::RAW_COPY_MARKER_LABEL, b"copy-id")?;
+    let message_marker = db.account_mac(b"ramflux/tombstone-key/v1", b"raw-copy:copy-id")?;
+    assert_ne!(generic_message_marker, message_marker);
+
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "live-owner",
+            verified_source_anchor: "verified-root",
+            copy_id: "copy-id",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"unrelated raw copy",
+            bounded_metadata: b"{}",
+        })
+    })?;
+    assert!(db.raw_inner_copy("copy-id")?.is_some());
+    Ok(())
+}
+
+#[test]
+fn raw_copy_deletion_marker_survives_full_merge_and_blocks_rewrite() -> TestResult {
+    let root = crate::tests::temp_root("raw-copy-marker-merge");
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let target_index = AccountIndex::open(root.join("target"))?;
+    source_index.create_account("acct", "root")?;
+    target_index.create_account("acct", "root")?;
+    let source = AccountDb::open(&source_index, "acct", &AccountDbKey::generate()?)?;
+    let target = AccountDb::open(&target_index, "acct", &AccountDbKey::generate()?)?;
+    source.send_direct_message("thread", "message-target", "sender", b"body")?;
+    source.write_transaction(|| {
+        source.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "ordinary-owner",
+            verified_source_anchor: "verified-root",
+            copy_id: "erased-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"erased bytes",
+            bounded_metadata: b"{}",
+        })?;
+        source.bind_raw_inner_copy("erased-copy", "message-target")
+    })?;
+    source.delete_direct_message("thread", "message-target", "sender", "tombstone")?;
+
+    let source_path = root.join("source.db");
+    let source_snapshot = source.write_backup_snapshot(&source_path)?;
+    let target_path = root.join("target.db");
+    let target_snapshot = target.write_backup_snapshot(&target_path)?;
+    let mut merged = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+    merged.merge_backup(&source_path, &source_snapshot.key, || Ok(()))?;
+
+    merged.db.execute_batch("BEGIN IMMEDIATE")?;
+    let rewrite = super::writer::put(
+        &merged.db,
+        RawInnerCopyWrite {
+            owner_id: "fresh-owner",
+            verified_source_anchor: "verified-root",
+            copy_id: "erased-copy",
+            kind: RawInnerCopyKind::OuterInner,
+            bytes: b"erased bytes",
+            bounded_metadata: b"{}",
+        },
+    );
+    merged.db.execute_batch("ROLLBACK")?;
+    assert!(matches!(rewrite, Err(StorageError::AuthorizationRejected)));
+    assert_eq!(
+        merged
+            .db
+            .query_row("SELECT count(*) FROM raw_inner_copy", [], |row| { row.get::<_, u64>(0) })?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn unsupported_source_owner_limit_is_enforced_without_eviction() -> TestResult {
     let (_root, db) = test_db("unsupported-source-owner-limit")?;
     for index in 0..16 {
@@ -678,6 +756,79 @@ fn full_merge_does_not_restore_a_raw_copy_for_a_deleted_owner() -> TestResult {
             .db
             .query_row("SELECT count(*) FROM raw_inner_owner", [], |row| row.get::<_, u64>(0))?,
         0
+    );
+    Ok(())
+}
+
+#[test]
+fn full_merge_does_not_restore_a_bound_raw_copy_after_target_deletion() -> TestResult {
+    let root = crate::tests::temp_root("raw-inner-bound-deleted-merge");
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let target_index = AccountIndex::open(root.join("target"))?;
+    source_index.create_account("acct", "root")?;
+    target_index.create_account("acct", "root")?;
+    let source = AccountDb::open(&source_index, "acct", &AccountDbKey::generate()?)?;
+    let target = AccountDb::open(&target_index, "acct", &AccountDbKey::generate()?)?;
+
+    for db in [&source, &target] {
+        db.send_direct_message("thread", "message-target", "sender", b"body")?;
+        db.write_transaction(|| {
+            db.put_unsupported_raw_copy(RawInnerCopyWrite {
+                owner_id: "copy:authenticated-envelope",
+                verified_source_anchor: "verified-root",
+                copy_id: "bound-copy",
+                kind: RawInnerCopyKind::NestedGroup,
+                bytes: b"stale bound raw bytes",
+                bounded_metadata: b"{}",
+            })?;
+            db.bind_raw_inner_copy("bound-copy", "message-target")
+        })?;
+        db.write_transaction(|| {
+            db.put_known_content_evidence(
+                "message-target",
+                "thread",
+                b"known content",
+                b"private provenance",
+                b"private opening",
+            )
+        })?;
+    }
+
+    target.delete_direct_message("thread", "message-target", "sender", "tombstone")?;
+    assert!(source.raw_inner_copy("bound-copy")?.is_some());
+    let source_path = root.join("source.db");
+    let source_snapshot = source.write_backup_snapshot(&source_path)?;
+    let archived = BackupDatabase::open(&source_path, &source_snapshot.key)?;
+    assert_eq!(
+        archived
+            .db
+            .query_row("SELECT count(*) FROM raw_inner_copy", [], |row| { row.get::<_, u64>(0) })?,
+        1,
+        "the pre-delete source archive must contain the raw copy"
+    );
+    drop(archived);
+    let target_path = root.join("target.db");
+    let target_snapshot = target.write_backup_snapshot(&target_path)?;
+    let mut merged = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+    merged.merge_backup(&source_path, &source_snapshot.key, || Ok(()))?;
+
+    for table in ["raw_inner_copy", "raw_inner_owner", "raw_inner_evidence"] {
+        assert_eq!(
+            merged.db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get::<_, u64>(0)
+            })?,
+            0,
+            "deleted raw data survived in {table}"
+        );
+    }
+    assert_eq!(
+        merged.db.query_row(
+            "SELECT count(*) FROM message_copy_binding WHERE copy_id='raw:bound-copy'",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?,
+        0,
+        "a deleted raw copy was rebound to its provisional owner or target"
     );
     Ok(())
 }

@@ -116,7 +116,7 @@ impl BackupDatabase {
         self.db.execute_batch("CREATE TABLE backup_local_message_own AS SELECT p.conversation_id,p.message_id,CASE WHEN p.is_own=1 OR EXISTS(SELECT 1 FROM device_directory d WHERE d.principal_commitment=(SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1) AND p.sender_id IN (d.device_id,COALESCE(d.raw_device_id,d.device_id),d.principal_commitment)) THEN 1 ELSE 0 END AS is_own FROM direct_message_projection p WHERE p.deleted=0; CREATE UNIQUE INDEX backup_local_message_own_key ON backup_local_message_own(conversation_id,message_id);")?;
         Ok(())
     }
-    fn attach(&self, path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
+    pub(super) fn attach(&self, path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
         // Attaching an archive is read-only even when the enclosing merge writes main.
         let absolute = std::fs::canonicalize(path)?;
         let mut uri = String::from("file:");

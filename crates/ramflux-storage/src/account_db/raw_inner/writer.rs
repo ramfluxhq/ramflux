@@ -76,7 +76,7 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
         return Err(StorageError::AuthorizationRejected);
     }
-    if message_deleted(db, owner_id)? || message_deleted(db, &format!("raw-copy:{copy_id}"))? {
+    if message_deleted(db, owner_id)? || raw_copy_deleted(db, copy_id)? {
         return Err(StorageError::AuthorizationRejected);
     }
     let recorded_source: Option<String> = db
@@ -185,7 +185,7 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
     Ok(())
 }
 
-pub(super) fn message_deleted(db: &Connection, message_id: &str) -> Result<bool, StorageError> {
+pub(crate) fn message_deleted(db: &Connection, message_id: &str) -> Result<bool, StorageError> {
     let projection: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=1)",
         [message_id],
@@ -215,6 +215,24 @@ pub(super) fn message_deleted(db: &Connection, message_id: &str) -> Result<bool,
         [legacy],
         |row| row.get(0),
     )?)
+}
+
+pub(crate) fn raw_copy_deleted(db: &Connection, copy_id: &str) -> Result<bool, StorageError> {
+    for mac in super::super::mac_subkeys::all_macs(
+        db,
+        super::super::mac_subkeys::RAW_COPY_MARKER_LABEL,
+        copy_id.as_bytes(),
+    )? {
+        let found: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",
+            [format!("message/deleted-raw-copy/{mac}")],
+            |row| row.get(0),
+        )?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

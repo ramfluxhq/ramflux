@@ -20,6 +20,10 @@ const LABELS: [&[u8]; 6] = [
     b"ramflux/own-sent-receipt/v1",
     b"ramflux/replay-key/v1",
 ];
+// Raw-copy tombstones have a separate cryptographic domain from message IDs.
+// This virtual subkey is derived from the account tombstone key so existing
+// bundles remain byte-compatible while keeping marker namespaces independent.
+pub(crate) const RAW_COPY_MARKER_LABEL: &[u8] = b"ramflux/deleted-raw-copy/v1";
 const BUNDLE_BYTES: usize = 192;
 const SCHEMA: &str = "CREATE TABLE account_mac_bundle (
     bundle_id TEXT PRIMARY KEY,
@@ -56,14 +60,21 @@ impl Bundle {
     }
 
     fn mac(&self, label: &[u8], value: &[u8]) -> Result<String, StorageError> {
-        let index = LABELS
-            .iter()
-            .position(|known| *known == label)
-            .ok_or(StorageError::AuthorizationRejected)?;
-        let key: &[u8; 32] = self.keys[index * 32..(index + 1) * 32]
-            .try_into()
-            .map_err(|_| StorageError::AuthorizationRejected)?;
-        let output = keyed_hash(key, &[value]);
+        let output = if label == RAW_COPY_MARKER_LABEL {
+            let tombstone_key: &[u8; 32] =
+                self.keys[..32].try_into().map_err(|_| StorageError::AuthorizationRejected)?;
+            let raw_copy_key = keyed_hash(tombstone_key, &[RAW_COPY_MARKER_LABEL, &[1]]);
+            keyed_hash(&raw_copy_key, &[value])
+        } else {
+            let index = LABELS
+                .iter()
+                .position(|known| *known == label)
+                .ok_or(StorageError::AuthorizationRejected)?;
+            let key: &[u8; 32] = self.keys[index * 32..(index + 1) * 32]
+                .try_into()
+                .map_err(|_| StorageError::AuthorizationRejected)?;
+            keyed_hash(key, &[value])
+        };
         Ok(ramflux_protocol::encode_base64url(output.as_ref()))
     }
 }

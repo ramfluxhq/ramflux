@@ -9,7 +9,8 @@ const LIMIT: usize = 16;
 // Derived metadata, created only by merge; single-authority schema14 needs no association table.
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_mac_marker_bundle(
     state_kind TEXT PRIMARY KEY, bundle_id TEXT NOT NULL REFERENCES account_mac_bundle(bundle_id))";
-const PREFIXES: [&str; 3] = ["message/deleted/", "message/deleted-envelope/", "routed/seen/"];
+const PREFIXES: [&str; 4] =
+    ["message/deleted/", "message/deleted-envelope/", "message/deleted-raw-copy/", "routed/seen/"];
 type Associations = BTreeMap<String, String>;
 const ORIGIN_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_mac_legacy_origin(
     kind TEXT NOT NULL CHECK(kind IN ('bundle','marker')), value TEXT NOT NULL,
@@ -52,7 +53,7 @@ fn origins(db: &Connection, schema: &str, bundles: &[Bundle]) -> Result<Origins,
 }
 
 fn legacy_markers(db: &Connection, schema: &str) -> Result<BTreeSet<String>, StorageError> {
-    let mut query = db.prepare(&format!("SELECT state_kind FROM {schema}.runtime_actor_state WHERE state_kind GLOB 'message/deleted/*' OR state_kind GLOB 'message/deleted-envelope/*' OR state_kind GLOB 'routed/seen/*'"))?;
+    let mut query = db.prepare(&format!("SELECT state_kind FROM {schema}.runtime_actor_state WHERE state_kind GLOB 'message/deleted/*' OR state_kind GLOB 'message/deleted-envelope/*' OR state_kind GLOB 'message/deleted-raw-copy/*' OR state_kind GLOB 'routed/seen/*'"))?;
     let mut markers = BTreeSet::new();
     for marker in query.query_map([], |r| r.get::<_, String>(0))? {
         let marker = marker?;
@@ -144,7 +145,7 @@ fn associations(
         return Err(StorageError::AuthorizationRejected);
     }
     let current = bundles.iter().find(|b| b.current).ok_or(StorageError::AuthorizationRejected)?;
-    let mut query = db.prepare(&format!("SELECT state_kind FROM {schema}.runtime_actor_state WHERE (state_kind GLOB 'message/deleted/*' AND json_valid(state_json) AND json_extract(state_json,'$.version')=2) OR state_kind GLOB 'message/deleted-envelope/*' OR state_kind GLOB 'routed/seen/*'"))?;
+    let mut query = db.prepare(&format!("SELECT state_kind FROM {schema}.runtime_actor_state WHERE (state_kind GLOB 'message/deleted/*' AND json_valid(state_json) AND json_extract(state_json,'$.version')=2) OR state_kind GLOB 'message/deleted-envelope/*' OR state_kind GLOB 'message/deleted-raw-copy/*' OR state_kind GLOB 'routed/seen/*'"))?;
     for row in query.query_map([], |r| r.get::<_, String>(0))? {
         let marker = row?;
         if !provenance.markers.contains(&marker) && !provenance.bundles.contains(&current.id) {

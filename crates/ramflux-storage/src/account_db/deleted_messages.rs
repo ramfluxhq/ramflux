@@ -130,7 +130,11 @@ impl AccountDb {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(query);
         for (copy_id, owner_id) in copies {
-            self.persist_deletion_marker(&format!("raw-copy:{copy_id}"))?;
+            let marker = format!(
+                "message/deleted-raw-copy/{}",
+                self.account_mac(super::mac_subkeys::RAW_COPY_MARKER_LABEL, copy_id.as_bytes())?
+            );
+            self.persist_actor_state(&marker, &json!({"version":1}))?;
             if owner_id.starts_with("copy:") {
                 self.persist_deletion_marker(&owner_id)?;
             }
