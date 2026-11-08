@@ -6,17 +6,39 @@
 //! HKDF/HMAC/X25519/AEAD library copies, stack residues and panic=abort are not
 //! claimed erased; a stronger guarantee needs a separately audited primitive.
 
-use std::cell::Cell;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-thread_local! {
-    static CLEANUPS: Cell<u64> = const { Cell::new(0) };
+#[cfg(test)]
+mod observer {
+    use std::cell::{Cell, RefCell};
+    thread_local! {
+        static CLEANUPS: Cell<u64> = const { Cell::new(0) };
+        static LAST: RefCell<[u8; 224]> = const { RefCell::new([0; 224]) };
+    }
+    pub fn take() -> u64 {
+        CLEANUPS.with(Cell::take)
+    }
+    pub fn last_bytes() -> [u8; 224] {
+        LAST.with(|bytes| *bytes.borrow())
+    }
+    pub fn record(bytes: [u8; 224]) {
+        CLEANUPS.with(|count| count.set(count.get() + 1));
+        LAST.with(|slot| *slot.borrow_mut() = bytes);
+    }
 }
 
 /// Number of explicit pairing-secret cleanup calls since the last take on this thread.
+#[cfg(test)]
 #[must_use]
 pub fn take_pairing_secret_cleanups() -> u64 {
-    CLEANUPS.with(Cell::take)
+    observer::take()
+}
+
+/// Bytes observed in pairing secret storage after the last explicit cleanup on this thread.
+#[cfg(test)]
+#[must_use]
+pub fn last_wiped_pairing_bytes() -> [u8; 224] {
+    observer::last_bytes()
 }
 
 /// Ephemeral SAS secret, DH output, HKDF keys and salt. Channel plaintext is not stored.
@@ -47,13 +69,39 @@ impl PairingSecrets {
     /// Wipe owned bytes and record the explicit cleanup. Drop still zeroizes if this is skipped.
     pub fn cleanup(&mut self) {
         self.zeroize();
-        CLEANUPS.with(|count| count.set(count.get() + 1));
+        #[cfg(test)]
+        observer::record(self.observed_bytes());
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(super) fn is_wiped(&self) -> bool {
+        self.all_zero()
+    }
+
+    #[cfg(test)]
+    fn all_zero(&self) -> bool {
         self.sas_secret.iter().chain(self.shared.iter()).all(|byte| *byte == 0)
             && self.confirm_i.iter().chain(self.confirm_r.iter()).all(|byte| *byte == 0)
             && self.channel_i.iter().chain(self.channel_r.iter()).all(|byte| *byte == 0)
+            && self.salt.iter().all(|byte| *byte == 0)
+    }
+
+    #[cfg(test)]
+    pub(super) fn observed_bytes(&self) -> [u8; 224] {
+        let mut bytes = [0_u8; 224];
+        let parts = [
+            self.sas_secret,
+            self.shared,
+            self.confirm_i,
+            self.confirm_r,
+            self.channel_i,
+            self.channel_r,
+            self.salt,
+        ];
+        for (slot, part) in bytes.chunks_mut(32).zip(parts) {
+            slot.copy_from_slice(&part);
+        }
+        bytes
     }
 }

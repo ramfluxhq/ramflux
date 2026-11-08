@@ -17,12 +17,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Standard Matrix SAS emoji table (index, glyph, English name).
+/// Standard Matrix SAS emoji table (index, glyph, English name). Horse is U+1F434.
 pub const SAS_EMOJI: [(&str, &str); 64] = [
     ("🐶", "Dog"),
     ("🐱", "Cat"),
     ("🦁", "Lion"),
-    ("🐎", "Horse"),
+    ("🐴", "Horse"),
     ("🦄", "Unicorn"),
     ("🐷", "Pig"),
     ("🐘", "Elephant"),
@@ -130,11 +130,20 @@ impl PairingRole {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Committed,
+    Ready,
+    Dead,
+}
+
 /// Local commitment waiting for the peer reveal. Secrets are memory-only.
 #[derive(ZeroizeOnDrop)]
 pub struct PendingSas {
     #[zeroize(skip)]
     role: PairingRole,
+    #[zeroize(skip)]
+    phase: Phase,
     #[zeroize(skip)]
     context: RoleContext,
     #[zeroize(skip)]
@@ -149,6 +158,8 @@ pub struct PendingSas {
 pub struct EstablishedSas {
     #[zeroize(skip)]
     role: PairingRole,
+    #[zeroize(skip)]
+    dead: bool,
     #[zeroize(skip)]
     transcript_hash: [u8; 32],
     #[zeroize(skip)]
@@ -186,6 +197,7 @@ pub fn commit(
     }
     Ok(PendingSas {
         role,
+        phase: Phase::Committed,
         context: context.clone(),
         commitment: sha256(&context_commitment_preimage(context, salt)?),
         peer_commitment: None,
@@ -198,43 +210,70 @@ impl PendingSas {
     pub fn commitment(&self) -> [u8; 32] {
         self.commitment
     }
-    #[must_use]
-    pub fn salt(&self) -> [u8; 32] {
-        self.secrets.salt
+
+    /// Salt of the local reveal. Refused until the peer commitment is stored.
+    ///
+    /// # Errors
+    /// Rejects a cleaned session or a missing peer commitment.
+    pub fn salt(&self) -> Result<[u8; 32], CryptoError> {
+        self.require_ready()?;
+        Ok(self.secrets.salt)
     }
-    #[must_use]
-    pub fn context(&self) -> &RoleContext {
-        &self.context
+
+    /// Frozen local context. Refused until the peer commitment is stored.
+    ///
+    /// # Errors
+    /// Rejects a cleaned session or a missing peer commitment.
+    pub fn context(&self) -> Result<&RoleContext, CryptoError> {
+        self.require_ready()?;
+        Ok(&self.context)
+    }
+
+    /// Local reveal, only after the peer commitment is stored.
+    ///
+    /// # Errors
+    /// Rejects a cleaned session or a missing peer commitment.
+    pub fn reveal(&self) -> Result<([u8; 32], &RoleContext), CryptoError> {
+        Ok((self.salt()?, self.context()?))
     }
 
     /// Store the peer commitment before any reveal is accepted.
     ///
     /// # Errors
-    /// Rejects the wrong peer role or a conflicting duplicate commitment.
+    /// Rejects a cleaned session, the wrong peer role, or a conflicting duplicate commitment.
     pub fn store_peer_commitment(
         &mut self,
         role: PairingRole,
         commitment: [u8; 32],
     ) -> Result<(), CryptoError> {
+        self.require_live()?;
         if role != self.role.peer() {
             return self.fail("role_mismatch");
         }
-        if let Some(saved) = self.peer_commitment {
-            return if saved == commitment { Ok(()) } else { self.fail("duplicate_commit") };
+        match self.phase {
+            Phase::Ready if self.peer_commitment == Some(commitment) => Ok(()),
+            Phase::Ready => self.fail("duplicate_commit"),
+            Phase::Committed => {
+                self.peer_commitment = Some(commitment);
+                self.phase = Phase::Ready;
+                Ok(())
+            }
+            Phase::Dead => Err(CryptoError::Pairing("cleaned")),
         }
-        self.peer_commitment = Some(commitment);
-        Ok(())
     }
 
     /// Verify the peer reveal against the frozen commitment and derive SAS/MAC/channel keys.
     ///
     /// # Errors
-    /// Rejects a missing/mismatched commitment, non-contributory DH, or an invalid transcript.
+    /// Rejects a cleaned session, a missing/mismatched commitment, non-contributory DH, or an invalid transcript.
     pub fn establish(
         mut self,
         peer: &RoleContext,
         peer_salt: &[u8; 32],
     ) -> Result<EstablishedSas, CryptoError> {
+        if self.phase == Phase::Dead {
+            return Err(CryptoError::Pairing("cleaned"));
+        }
         match self.establish_inner(peer, peer_salt) {
             Ok(established) => {
                 self.secrets.cleanup();
@@ -249,12 +288,41 @@ impl PendingSas {
 
     /// Cancel or expire a pending ceremony and wipe the SAS secret.
     pub fn cleanup(&mut self) {
-        self.secrets.cleanup();
+        self.die();
+    }
+
+    fn die(&mut self) {
+        if self.phase != Phase::Dead {
+            self.phase = Phase::Dead;
+            self.secrets.cleanup();
+        }
     }
 
     fn fail<T>(&mut self, reason: &'static str) -> Result<T, CryptoError> {
-        self.secrets.cleanup();
+        self.die();
         Err(CryptoError::Pairing(reason))
+    }
+
+    fn require_live(&self) -> Result<(), CryptoError> {
+        if self.phase == Phase::Dead { Err(CryptoError::Pairing("cleaned")) } else { Ok(()) }
+    }
+
+    fn require_ready(&self) -> Result<(), CryptoError> {
+        self.require_live()?;
+        match self.phase {
+            Phase::Ready => Ok(()),
+            Phase::Committed => Err(CryptoError::Pairing("peer_commit_missing")),
+            Phase::Dead => Err(CryptoError::Pairing("cleaned")),
+        }
+    }
+
+    fn require_local_sas_key(&self) -> Result<(), CryptoError> {
+        let local_public = PublicKey::from(&StaticSecret::from(self.secrets.sas_secret)).to_bytes();
+        if encode_base64url(local_public) == self.context.sas_key {
+            Ok(())
+        } else {
+            Err(CryptoError::Pairing("sas_key_mismatch"))
+        }
     }
 
     fn establish_inner(
@@ -262,6 +330,8 @@ impl PendingSas {
         peer: &RoleContext,
         peer_salt: &[u8; 32],
     ) -> Result<EstablishedSas, CryptoError> {
+        self.require_ready()?;
+        self.require_local_sas_key()?;
         let expected = self.peer_commitment.ok_or(CryptoError::Pairing("peer_commit_missing"))?;
         if PairingRole::parse(&peer.role)? != self.role.peer() {
             return Err(CryptoError::Pairing("role_mismatch"));
@@ -270,17 +340,14 @@ impl PendingSas {
         if computed != expected {
             return Err(CryptoError::Pairing("commitment_mismatch"));
         }
-        let (initiator, responder) = match self.role {
-            PairingRole::Initiator => (self.context.clone(), peer.clone()),
-            PairingRole::Responder => (peer.clone(), self.context.clone()),
-        };
-        let transcript = Transcript {
-            schema: "ramflux.pairing.Transcript.v2".into(),
-            version: 2,
-            initiator,
-            responder,
-        };
-        let transcript_hash = sha256(&transcript_preimage(&transcript)?);
+        let mut ikm = self.diffie_hellman_ikm(peer)?;
+        let transcript_hash = self.transcript_hash_for(peer)?;
+        let established = derived_session(self.role, transcript_hash, ikm, self.secrets.salt)?;
+        ikm.zeroize();
+        Ok(established)
+    }
+
+    fn diffie_hellman_ikm(&self, peer: &RoleContext) -> Result<[u8; 32], CryptoError> {
         let peer_public = x25519_public(&peer.sas_key)?;
         let local_public = PublicKey::from(&StaticSecret::from(self.secrets.sas_secret)).to_bytes();
         if peer_public == local_public {
@@ -291,7 +358,27 @@ impl PendingSas {
         if !shared.was_contributory() {
             return Err(CryptoError::Pairing("noncontributory"));
         }
-        derived_session(self.role, transcript_hash, *shared.as_bytes(), self.secrets.salt)
+        let ikm = shared.to_bytes();
+        Ok(ikm)
+    }
+
+    fn transcript_hash_for(&self, peer: &RoleContext) -> Result<[u8; 32], CryptoError> {
+        let (initiator, responder) = match self.role {
+            PairingRole::Initiator => (self.context.clone(), peer.clone()),
+            PairingRole::Responder => (peer.clone(), self.context.clone()),
+        };
+        let transcript = Transcript {
+            schema: "ramflux.pairing.Transcript.v2".into(),
+            version: 2,
+            initiator,
+            responder,
+        };
+        Ok(sha256(&transcript_preimage(&transcript)?))
+    }
+
+    #[cfg(test)]
+    pub(super) fn secrets_are_cleared(&self) -> bool {
+        self.secrets.is_wiped()
     }
 }
 
@@ -306,7 +393,10 @@ impl EstablishedSas {
     }
     #[must_use]
     pub fn emoji(&self) -> [SasEmoji; 7] {
-        emoji_from_indices(self.emoji)
+        self.emoji.map(|index| {
+            let (glyph, name) = SAS_EMOJI[usize::from(index)];
+            SasEmoji { index, glyph, name }
+        })
     }
 
     /// Bind the locally displayed transcript hash. A false match consumes the ceremony.
@@ -325,8 +415,10 @@ impl EstablishedSas {
         if !matches {
             return self.fail("sas_mismatch");
         }
+        let mac = hmac_th(self.local_confirm_key(), &self.transcript_hash)?;
         self.local_confirmed = true;
-        hmac_th(self.local_confirm_key(), &self.transcript_hash)
+        self.drop_confirm_keys();
+        Ok(mac)
     }
 
     /// Accept the peer role MAC. A boolean `confirmed` flag is not an input.
@@ -342,6 +434,7 @@ impl EstablishedSas {
             return self.fail("confirm_mac");
         }
         self.peer_confirmed = true;
+        self.drop_confirm_keys();
         Ok(())
     }
 
@@ -395,13 +488,14 @@ impl EstablishedSas {
 
     /// Wipe remaining keys after success, cancel, expiry or caller-driven abort.
     pub fn cleanup(&mut self) {
+        self.dead = true;
         self.local_confirmed = false;
         self.peer_confirmed = false;
         self.secrets.cleanup();
     }
 
     fn require_live(&self) -> Result<(), CryptoError> {
-        if self.secrets.is_wiped() { Err(CryptoError::Pairing("cleaned")) } else { Ok(()) }
+        if self.dead { Err(CryptoError::Pairing("cleaned")) } else { Ok(()) }
     }
     fn require_channel(&mut self) -> Result<(), CryptoError> {
         self.require_live()?;
@@ -414,6 +508,12 @@ impl EstablishedSas {
     fn fail<T>(&mut self, reason: &'static str) -> Result<T, CryptoError> {
         self.cleanup();
         Err(CryptoError::Pairing(reason))
+    }
+    fn drop_confirm_keys(&mut self) {
+        if self.local_confirmed && self.peer_confirmed {
+            self.secrets.confirm_i.zeroize();
+            self.secrets.confirm_r.zeroize();
+        }
     }
     fn local_confirm_key(&self) -> &[u8; 32] {
         match self.role {
@@ -439,22 +539,36 @@ impl EstablishedSas {
             PairingRole::Responder => &self.secrets.channel_i,
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn secrets_are_cleared(&self) -> bool {
+        self.secrets.is_wiped()
+    }
 }
 
 /// Map seven 6-bit indices onto the Matrix SAS table.
-#[must_use]
-pub fn emoji_from_indices(indices: [u8; 7]) -> [SasEmoji; 7] {
-    indices.map(|index| {
-        let (glyph, name) = SAS_EMOJI.get(usize::from(index)).copied().unwrap_or(SAS_EMOJI[0]);
-        SasEmoji { index, glyph, name }
-    })
+///
+/// # Errors
+/// Rejects an index greater than 63.
+pub fn emoji_from_indices(indices: [u8; 7]) -> Result<[SasEmoji; 7], CryptoError> {
+    let mut out = [SasEmoji { index: 0, glyph: SAS_EMOJI[0].0, name: SAS_EMOJI[0].1 }; 7];
+    for (slot, index) in out.iter_mut().zip(indices) {
+        *slot = sas_emoji(index)?;
+    }
+    Ok(out)
+}
+
+fn sas_emoji(index: u8) -> Result<SasEmoji, CryptoError> {
+    let (glyph, name) =
+        SAS_EMOJI.get(usize::from(index)).ok_or(CryptoError::Pairing("emoji_index"))?;
+    Ok(SasEmoji { index, glyph, name })
 }
 
 fn derived_session(
     role: PairingRole,
     transcript_hash: [u8; 32],
-    shared: [u8; 32],
-    salt: [u8; 32],
+    mut shared: [u8; 32],
+    mut salt: [u8; 32],
 ) -> Result<EstablishedSas, CryptoError> {
     let mut secrets = PairingSecrets::pending([0; 32], salt);
     secrets.shared = shared;
@@ -486,8 +600,13 @@ fn derived_session(
     expand(&secrets.shared, &transcript_hash, domain::CUSTODY_PAIRING_SAS, &mut sas_bytes)?;
     let emoji = emoji_indices(sas_bytes);
     sas_bytes.zeroize();
+    secrets.shared.zeroize();
+    secrets.salt.zeroize();
+    shared.zeroize();
+    salt.zeroize();
     Ok(EstablishedSas {
         role,
+        dead: false,
         transcript_hash,
         emoji,
         local_confirmed: false,

@@ -7,7 +7,9 @@ mod sas;
 #[cfg(test)]
 mod tests;
 
-pub use cleanup::{PairingSecrets, take_pairing_secret_cleanups};
+pub use cleanup::PairingSecrets;
+#[cfg(test)]
+pub use cleanup::{last_wiped_pairing_bytes, take_pairing_secret_cleanups};
 pub use sas::{
     EstablishedSas, PairingRole, PendingSas, SAS_EMOJI, SasEmoji, commit, emoji_from_indices,
 };
