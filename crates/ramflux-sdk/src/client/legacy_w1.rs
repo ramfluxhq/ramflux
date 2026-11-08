@@ -131,13 +131,19 @@ impl RamfluxClient {
     }
 
     /// Wired by P20. Decrypts a bound legacy DM and commits content+ratchet+marker through W1.
+    ///
+    /// Precondition: the caller has already run `ensure_inbound_device` for `entry` (it is async
+    /// and cannot run inside this sync W1 path). This function runs the same sync routing-binding
+    /// check the live DM path runs (`authorize_bound_legacy`), including the v2-blocks-legacy guard.
     pub(crate) fn apply_legacy_success_w1(
         &self,
         entry: &GatewayInboxEntry,
+        local_device: &str,
         conversation: &str,
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
+        self.require_legacy_routing_binding(local_device, entry, conversation)?;
         if self.legacy_w1_committed(entry)? {
             return Ok(());
         }
@@ -159,7 +165,7 @@ impl RamfluxClient {
                 session: &session,
                 envelope: &envelope,
                 decrypted: &decrypted,
-                consume_erased: false,
+                consume_erased: true,
                 persist_cursor: false,
             })? {
                 LegacyDmPrepared::Finished => Ok(()),
@@ -178,13 +184,18 @@ impl RamfluxClient {
     }
 
     /// Wired by P20. Peer-rejection cut — reject row + ratchet + marker, no cursor.
+    ///
+    /// Same precondition as `apply_legacy_success_w1`: the caller has run `ensure_inbound_device`,
+    /// and the sync routing-binding check (incl. v2-blocks-legacy) runs here.
     pub(crate) fn apply_legacy_reject_w1(
         &self,
         entry: &GatewayInboxEntry,
+        local_device: &str,
         conversation: &str,
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
+        self.require_legacy_routing_binding(local_device, entry, conversation)?;
         if self.legacy_w1_committed(entry)? {
             return Ok(());
         }
@@ -203,7 +214,7 @@ impl RamfluxClient {
                 session: &session,
                 envelope: &envelope,
                 decrypted: &decrypted,
-                consume_erased: false,
+                consume_erased: true,
                 persist_cursor: false,
             })? {
                 LegacyDmPrepared::Finished => Ok(()),
@@ -215,25 +226,36 @@ impl RamfluxClient {
     }
 
     /// Wired by P20. A2I ratchet + receipt + event, no ACK and no cursor.
+    ///
+    /// `local_device` is the receiver's own device id (`engine.config().device_id` on the live
+    /// path). It must NOT be derived from `entry.target_delivery_id`, which is the delivery id.
+    /// Precondition: the caller has run `ensure_inbound_device` for `entry`. Routing is checked
+    /// first and the receipt second, matching `receive_bound_legacy_a2i`.
     pub(crate) fn apply_legacy_a2i_w1(
         &self,
         entry: &GatewayInboxEntry,
+        local_device: &str,
         expected: ReceiveExpectation<'_>,
         generation: u64,
     ) -> Result<(), SdkError> {
-        if self.load_legacy_a2i_receipt(entry)?.is_some() {
-            return Ok(());
-        }
-        let local = entry.target_delivery_id.clone();
         let db = self.account_db()?;
         let gate = LegacyW1 { expected, generation };
         let sequence = entry.inbox_seq;
-        if self.legacy_a2i_is_unbound(&local, entry)? {
+        if self.legacy_a2i_is_unbound(local_device, entry)? {
             return gate.effect(db, sequence, None, || {
-                self.hold_unbound_legacy_a2i(&local, entry).map(|_| ())
+                if self.hold_unbound_legacy_a2i(local_device, entry)? {
+                    Ok(())
+                } else {
+                    // A binding appeared after the outer check. Nothing was written, so the
+                    // caller must redrive this entry instead of treating it as done.
+                    Err(SdkError::LegacyBindingChanged)
+                }
             });
         }
-        let opened = self.decrypt_bound_legacy_a2i(&local, entry)?;
+        if self.load_legacy_a2i_receipt(entry)?.is_some() {
+            return Ok(());
+        }
+        let opened = self.decrypt_bound_legacy_a2i(local_device, entry)?;
         gate.effect(db, sequence, None, || self.commit_legacy_a2i_w1(entry, &opened))
     }
 

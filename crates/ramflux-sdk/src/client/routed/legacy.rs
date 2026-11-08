@@ -12,13 +12,25 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         conversation: &str,
     ) -> Result<(), SdkError> {
-        if self.legacy_routing_binding(&gateway.device_id, entry)?.as_deref() != Some(conversation)
-        {
+        self.require_legacy_routing_binding(&gateway.device_id, entry, conversation)?;
+        self.ensure_inbound_device(gateway, entry).await
+    }
+
+    /// Sync half of `authorize_bound_legacy`: the exact device/session/conversation binding,
+    /// including the v2-blocks-legacy guard. Shared by the live DM path and the W1 DM paths.
+    /// It does not run `ensure_inbound_device`; async callers must do that separately.
+    pub(crate) fn require_legacy_routing_binding(
+        &self,
+        local: &str,
+        entry: &GatewayInboxEntry,
+        conversation: &str,
+    ) -> Result<(), SdkError> {
+        if self.legacy_routing_binding(local, entry)?.as_deref() != Some(conversation) {
             return Err(SdkError::InboundRejected(
                 "legacy delivery has no matching device/session/conversation binding".to_owned(),
             ));
         }
-        self.ensure_inbound_device(gateway, entry).await
+        Ok(())
     }
 
     pub(crate) fn legacy_routing_binding(

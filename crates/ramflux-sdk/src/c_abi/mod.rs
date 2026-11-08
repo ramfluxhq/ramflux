@@ -863,6 +863,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::Crypto(_)
         | SdkError::SignatureVerificationFailed(_) => RamfluxErrorCode::CryptoFailed,
         SdkError::SurfaceCheckpointMismatch
+        | SdkError::LegacyBindingChanged
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::CustodyConfirmationFailed

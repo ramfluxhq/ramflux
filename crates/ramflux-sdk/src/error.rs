@@ -54,6 +54,8 @@ pub enum SdkError {
     CustodyForkFenced,
     #[error("object erased")]
     ObjectErased,
+    #[error("legacy A2I binding changed during receive; redrive the entry")]
+    LegacyBindingChanged,
     #[error("{}", ATTACHMENT_DELETED)]
     AttachmentDeleted,
     #[error("home migration refused: {0:?}")]

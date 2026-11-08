@@ -10,6 +10,7 @@
     clippy::needless_pass_by_value,
     clippy::unused_async
 )]
+use super::selector_reopen::Case;
 use super::*;
 use crate::bus::sync_driver::source::w0::SourceW0;
 use crate::client::dm::LegacyReceive;
@@ -203,6 +204,22 @@ fn a2i_sealed(
     persist_session: bool,
     envelope_id: Option<&str>,
 ) -> Result<GatewayInboxEntry, SdkError> {
+    let delivery = receiver.id.clone();
+    a2i_sealed_to(sender, receiver, seq, event_target, persist_session, envelope_id, &delivery)
+}
+
+#[allow(clippy::too_many_arguments)]
+/// `delivery` is the entry's delivery id (ledger target). It is signed into the envelope and may
+/// differ from the receiver's local device id `receiver.id`.
+fn a2i_sealed_to(
+    sender: &Fixture,
+    receiver: &mut Fixture,
+    seq: u64,
+    event_target: &str,
+    persist_session: bool,
+    envelope_id: Option<&str>,
+    delivery: &str,
+) -> Result<GatewayInboxEntry, SdkError> {
     review::trust(receiver, sender)?;
     review::trust(sender, receiver)?;
     let conversation = a2i_control_conversation_id(&sender.id, &receiver.id);
@@ -227,7 +244,7 @@ fn a2i_sealed(
     msg.source_principal_id = sender.id.clone();
     msg.sender_id = sender.id.clone();
     msg.recipient_device_id = Some(receiver.id.clone());
-    msg.target_delivery_id = receiver.id.clone();
+    msg.target_delivery_id = delivery.to_owned();
     let bundle = receiver
         .client
         .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
@@ -246,41 +263,48 @@ fn a2i_sealed(
     if persist_session {
         let receiving =
             receiver.client.load_or_create_recv_dm_session(&conversation, header.as_ref())?;
-        receiver.client.send_direct_message(&conversation, "a2i-prior", &sender.id, b"prior")?;
-        receiver.client.persist_dm_session(&conversation, "a2i-prior", "recv", &receiving)?;
+        let prior = format!("a2i-prior-{seq}");
+        receiver.client.send_direct_message(&conversation, &prior, &sender.id, b"prior")?;
+        receiver.client.persist_dm_session(&conversation, &prior, "recv", &receiving)?;
     }
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: seq,
-        target_delivery_id: receiver.id.clone(),
+        target_delivery_id: delivery.to_owned(),
         envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,
     })
 }
 
 fn apply_success(
     receiver: &RamfluxClient,
+    local: &str,
     entry: &GatewayInboxEntry,
     conversation: &str,
 ) -> Result<(), SdkError> {
     let db = receiver.account_db()?;
     let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
-    receiver.apply_legacy_success_w1(entry, conversation, gate.expected, gate.generation)
+    receiver.apply_legacy_success_w1(entry, local, conversation, gate.expected, gate.generation)
 }
 
 fn apply_reject(
     receiver: &RamfluxClient,
+    local: &str,
     entry: &GatewayInboxEntry,
     conversation: &str,
 ) -> Result<(), SdkError> {
     let db = receiver.account_db()?;
     let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
-    receiver.apply_legacy_reject_w1(entry, conversation, gate.expected, gate.generation)
+    receiver.apply_legacy_reject_w1(entry, local, conversation, gate.expected, gate.generation)
 }
 
-fn apply_a2i(receiver: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+fn apply_a2i(
+    receiver: &RamfluxClient,
+    local: &str,
+    entry: &GatewayInboxEntry,
+) -> Result<(), SdkError> {
     let db = receiver.account_db()?;
     let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
-    receiver.apply_legacy_a2i_w1(entry, gate.expected, gate.generation)
+    receiver.apply_legacy_a2i_w1(entry, local, gate.expected, gate.generation)
 }
 
 fn apply_hold(receiver: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
@@ -308,11 +332,11 @@ fn cut_success(
     assert_eq!(pre.cursor, 0);
     assert_eq!(pre.work, 1);
     assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
-        apply_success(&receiver.client, entry, conversation)
+        apply_success(&receiver.client, &receiver.id, entry, conversation)
     }));
     reopen(&mut receiver.client, &receiver.id)?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, pre);
-    apply_success(&receiver.client, entry, conversation)?;
+    apply_success(&receiver.client, &receiver.id, entry, conversation)?;
     let post = snap(&receiver.client, entry, conversation)?;
     assert!(post.marker, "success missing terminal marker");
     assert!(post.ratchet, "success missing ratchet");
@@ -335,11 +359,11 @@ fn cut_reject(
     let pre = snap(&receiver.client, entry, conversation)?;
     assert_eq!(pre.cursor, 0);
     assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
-        apply_reject(&receiver.client, entry, conversation)
+        apply_reject(&receiver.client, &receiver.id, entry, conversation)
     }));
     reopen(&mut receiver.client, &receiver.id)?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, pre);
-    apply_reject(&receiver.client, entry, conversation)?;
+    apply_reject(&receiver.client, &receiver.id, entry, conversation)?;
     let post = snap(&receiver.client, entry, conversation)?;
     assert!(post.marker);
     assert!(post.ratchet);
@@ -357,10 +381,12 @@ fn cut_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkE
     let pre = snap(&receiver.client, entry, &conversation)?;
     assert_eq!(pre.a2i, 0);
     assert_eq!(pre.cursor, 0);
-    assert_fault(legacy_w1::run(Fault::BeforeCommit, || apply_a2i(&receiver.client, entry)));
+    assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
+        apply_a2i(&receiver.client, &receiver.id, entry)
+    }));
     reopen(&mut receiver.client, &receiver.id)?;
     assert_eq!(snap(&receiver.client, entry, &conversation)?, pre);
-    apply_a2i(&receiver.client, entry)?;
+    apply_a2i(&receiver.client, &receiver.id, entry)?;
     let post = snap(&receiver.client, entry, &conversation)?;
     assert!(post.a2i > 0, "A2I missing receipt/event");
     assert!(post.ratchet);
@@ -446,6 +472,16 @@ fn legacy_w1_a2i_routing_hold() -> Result<(), SdkError> {
 }
 
 #[test]
+fn legacy_w1_a2i_delivery_id_is_not_local_device() -> Result<(), SdkError> {
+    hang(cut_a2i_delivery_is_not_device)
+}
+
+#[test]
+fn legacy_w1_dm_erased_attachment_completes() -> Result<(), SdkError> {
+    hang(cut_erased_dm_row)
+}
+
+#[test]
 fn legacy_w1_effect_error_rollback() -> Result<(), SdkError> {
     hang(cut_effect_error_rollback)
 }
@@ -486,14 +522,14 @@ fn redrive_success(
 ) -> Result<(), SdkError> {
     stage_w0(&receiver.client, &receiver.id, entry)?;
     assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
-        apply_success(&receiver.client, entry, conversation)
+        apply_success(&receiver.client, &receiver.id, entry, conversation)
     }));
-    apply_success(&receiver.client, entry, conversation)?;
+    apply_success(&receiver.client, &receiver.id, entry, conversation)?;
     let once = snap(&receiver.client, entry, conversation)?;
     assert!(once.marker);
     assert_eq!(once.work, 1);
     reopen(&mut receiver.client, &receiver.id)?;
-    apply_success(&receiver.client, entry, conversation)?;
+    apply_success(&receiver.client, &receiver.id, entry, conversation)?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, once);
     Ok(())
 }
@@ -505,13 +541,13 @@ fn redrive_reject(
 ) -> Result<(), SdkError> {
     stage_w0(&receiver.client, &receiver.id, entry)?;
     assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
-        apply_reject(&receiver.client, entry, conversation)
+        apply_reject(&receiver.client, &receiver.id, entry, conversation)
     }));
-    apply_reject(&receiver.client, entry, conversation)?;
+    apply_reject(&receiver.client, &receiver.id, entry, conversation)?;
     let once = snap(&receiver.client, entry, conversation)?;
     assert!(once.marker);
     reopen(&mut receiver.client, &receiver.id)?;
-    apply_reject(&receiver.client, entry, conversation)?;
+    apply_reject(&receiver.client, &receiver.id, entry, conversation)?;
     assert_eq!(snap(&receiver.client, entry, conversation)?, once);
     Ok(())
 }
@@ -519,12 +555,14 @@ fn redrive_reject(
 fn redrive_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
     let conversation = a2i_control_conversation_id("alice", "bob");
     stage_w0(&receiver.client, &receiver.id, entry)?;
-    assert_fault(legacy_w1::run(Fault::BeforeCommit, || apply_a2i(&receiver.client, entry)));
-    apply_a2i(&receiver.client, entry)?;
+    assert_fault(legacy_w1::run(Fault::BeforeCommit, || {
+        apply_a2i(&receiver.client, &receiver.id, entry)
+    }));
+    apply_a2i(&receiver.client, &receiver.id, entry)?;
     let once = snap(&receiver.client, entry, &conversation)?;
     assert!(once.a2i > 0);
     reopen(&mut receiver.client, &receiver.id)?;
-    apply_a2i(&receiver.client, entry)?;
+    apply_a2i(&receiver.client, &receiver.id, entry)?;
     assert_eq!(snap(&receiver.client, entry, &conversation)?, once);
     Ok(())
 }
@@ -554,7 +592,10 @@ fn cut_a2i_endpoint_mismatch() -> Result<(), SdkError> {
     let mut receiver = Fixture::new("bob", 211)?;
     let entry = a2i_sealed(&sender, &mut receiver, 1, "carol", true, None)?;
     stage_w0(&receiver.client, &receiver.id, &entry)?;
-    assert_inbound(apply_a2i(&receiver.client, &entry), "legacy A2I endpoint mismatch");
+    assert_inbound(
+        apply_a2i(&receiver.client, &receiver.id, &entry),
+        "legacy A2I endpoint mismatch",
+    );
     Ok(())
 }
 
@@ -563,11 +604,29 @@ fn cut_a2i_payload_reuse() -> Result<(), SdkError> {
     let mut receiver = Fixture::new("bob", 231)?;
     let entry = a2i_entry(&sender, &mut receiver, 1)?;
     stage_w0(&receiver.client, &receiver.id, &entry)?;
-    apply_a2i(&receiver.client, &entry)?;
-    let target = receiver.id.clone();
+    apply_a2i(&receiver.client, &receiver.id, &entry)?;
+    let local = receiver.id.clone();
+    // Same envelope id, different payload. Bind its session to the same conversation (the recv
+    // session is one row per conversation) so the routing check passes and the receipt check
+    // rejects the reuse, matching the live order.
     let envelope_id = entry.envelope.envelope_id.clone();
-    let reused = a2i_sealed(&sender, &mut receiver, 2, &target, false, Some(&envelope_id))?;
-    assert_inbound(apply_a2i(&receiver.client, &reused), "legacy A2I envelope id reused");
+    let reused =
+        a2i_sealed_to(&sender, &mut receiver, 2, &local, false, Some(&envelope_id), &local)?;
+    let wire: SdkDmEncryptedEnvelope = serde_json::from_slice(
+        &ramflux_protocol::decode_base64url(&reused.envelope.encrypted_payload)
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+    )?;
+    let header = wire.x3dh.ok_or_else(|| SdkError::LocalBus("reused A2I has no header".into()))?;
+    let conversation = a2i_control_conversation_id("alice", "bob");
+    let recv = receiver
+        .client
+        .create_recv_dm_session_with_aad(&header, dm_associated_data(&conversation))?;
+    receiver.client.send_direct_message(&conversation, "a2i-reuse-prior", &sender.id, b"prior")?;
+    receiver.client.persist_dm_session(&conversation, "a2i-reuse-prior", "recv", &recv)?;
+    assert_inbound(
+        apply_a2i(&receiver.client, &receiver.id, &reused),
+        "legacy A2I envelope id reused",
+    );
     Ok(())
 }
 
@@ -578,11 +637,90 @@ fn cut_a2i_routing_hold() -> Result<(), SdkError> {
     let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
     stage_w0(&receiver.client, &receiver.id, &entry)?;
     let pre = snap(&receiver.client, &entry, "held-a2i")?;
-    apply_a2i(&receiver.client, &entry)?;
+    apply_a2i(&receiver.client, &receiver.id, &entry)?;
     let post = snap(&receiver.client, &entry, "held-a2i")?;
     assert!(post.held > pre.held, "unbound A2I must remain held");
     assert_eq!(post.a2i, 0, "held A2I must not persist a receipt");
     assert_eq!(post.cursor, 0);
+    Ok(())
+}
+
+/// The ledger target is the delivery id; the receiver's local device id is `receiver.id`. The
+/// legitimate A2I must bind to the local device, so it is applied exactly once (not held).
+fn cut_a2i_delivery_is_not_device() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 245)?;
+    let mut receiver = Fixture::new("bob", 247)?;
+    let delivery = "delivery-bob";
+    assert_ne!(delivery, receiver.id);
+    let local = receiver.id.clone();
+    let entry = a2i_sealed_to(&sender, &mut receiver, 1, &local, true, None, delivery)?;
+    stage_w0(&receiver.client, delivery, &entry)?;
+    let conversation = a2i_control_conversation_id("alice", "bob");
+    let pre = snap(&receiver.client, &entry, &conversation)?;
+    apply_a2i(&receiver.client, &receiver.id, &entry)?;
+    let post = snap(&receiver.client, &entry, &conversation)?;
+    assert!(post.a2i > pre.a2i, "bound A2I was not applied against the local device");
+    assert_eq!(post.held, pre.held, "bound A2I must not be held");
+    assert!(post.ratchet);
+    assert_eq!(post.work, 1);
+    apply_a2i(&receiver.client, &receiver.id, &entry)?;
+    assert_eq!(snap(&receiver.client, &entry, &conversation)?, post, "A2I applied twice");
+    reopen(&mut receiver.client, &receiver.id)?;
+    assert_eq!(snap(&receiver.client, &entry, &conversation)?, post);
+    Ok(())
+}
+
+/// A DM whose attachment object is erased completes with one effect (`ObjectErased` is consumed
+/// like the live path), instead of rolling back and redriving forever.
+fn cut_erased_dm_row() -> Result<(), SdkError> {
+    let mut case = Case::new()?;
+    case.fence()?;
+    review::trust(&case.b, &case.a)?;
+    let conversation = "erased-thread";
+    let mut send = ramflux_crypto::DmSession::initiator(
+        [9; 32],
+        dm_device_id_hash("alice"),
+        dm_device_id_hash("bob"),
+        [6; 32],
+    )?;
+    let recv = ramflux_crypto::DmSession::recipient(
+        [9; 32],
+        dm_device_id_hash("bob"),
+        dm_device_id_hash("alice"),
+        [6; 32],
+    )?;
+    case.b.client.send_direct_message(conversation, "erased-history", "alice", b"prior")?;
+    case.b.client.persist_dm_session(conversation, "erased-history", "recv", &recv)?;
+    let body = serde_json::to_vec(&SdkDmAttachmentEnvelope {
+        schema: "ramflux.sdk.dm_attachment_envelope.v1".into(),
+        version: 1,
+        body_base64: ramflux_protocol::encode_base64url(b"erased-ref-text"),
+        attachments: vec![case.refs[1].clone()],
+    })?;
+    let mut msg = message("erased-dm-one", conversation);
+    msg.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: None,
+        schema: "ramflux.sdk.dm_x3dh_envelope.v1".into(),
+        version: 1,
+        x3dh: None,
+        ciphertext: send.encrypt(&body, dm_associated_data(conversation))?,
+    })?;
+    let entry = GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: case.b.id.clone(),
+        envelope: gateway_direct_message_envelope(&case.a.config()?, &msg, None)?,
+    };
+    stage_w0(&case.b.client, &case.b.id, &entry)?;
+    let pre = snap(&case.b.client, &entry, conversation)?;
+    apply_success(&case.b.client, &case.b.id, &entry, conversation)?;
+    let post = snap(&case.b.client, &entry, conversation)?;
+    assert!(post.marker, "erased-attachment DM must reach its terminal marker");
+    assert_eq!(post.messages, pre.messages + 1, "exactly one effect");
+    assert_eq!(post.work, 1);
+    assert_eq!(stored_body(&case.b.client, conversation, "erased-dm-one")?, b"erased-ref-text");
+    reopen(&mut case.b.client, &case.b.id)?;
+    assert_eq!(snap(&case.b.client, &entry, conversation)?, post);
     Ok(())
 }
 
@@ -663,7 +801,7 @@ async fn legacy_w1_attachment_body_matches_live() -> Result<(), SdkError> {
     let mut w1_receiver = Fixture::new("bob", 213)?;
     let w1_entry = bound(&sender, &mut w1_receiver, "attach-w1", "attach-w1", &wrapper, 1)?;
     stage_w0(&w1_receiver.client, &w1_receiver.id, &w1_entry)?;
-    apply_success(&w1_receiver.client, &w1_entry, "attach-w1")?;
+    apply_success(&w1_receiver.client, &w1_receiver.id, &w1_entry, "attach-w1")?;
     let w1_body = stored_body(&w1_receiver.client, "attach-w1", &w1_entry.envelope.envelope_id)?;
     assert_eq!(w1_body, b"inner-text", "W1 must store the decoded attachment body");
 
