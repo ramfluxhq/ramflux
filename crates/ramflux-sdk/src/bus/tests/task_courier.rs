@@ -843,6 +843,7 @@ async fn inbound_delivered(sender: &mpsc::Sender<AccountCommand>, call_id: &str)
 
 #[path = "task_courier_native.rs"]
 mod native;
+#[cfg(feature = "durability-test-hooks")]
 #[path = "task_courier_refusal.rs"]
 mod refusal;
 

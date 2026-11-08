@@ -266,7 +266,7 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Archive
-        run: cargo nextest archive -p ramflux-sdk --archive-file sdk.tar.zst
+        run: cargo nextest archive -p ramflux-sdk --features durability-test-hooks --archive-file sdk.tar.zst
 
       - name: Upload archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

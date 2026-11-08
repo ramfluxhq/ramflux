@@ -73,6 +73,8 @@ pub(super) struct Fixture {
     pub peer: LocalBusAccountState,
     pub sibling: LocalBusAccountState,
     /// A second device of the peer principal, present only for `with_second_peer`.
+    /// Read only by the durability-gated refusal tests; other builds never read it.
+    #[cfg_attr(not(feature = "durability-test-hooks"), allow(dead_code))]
     pub peer2: Option<LocalBusAccountState>,
     pub gateway: Arc<Mutex<Gateway>>,
     _server: tokio::task::JoinHandle<()>,

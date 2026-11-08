@@ -44,6 +44,10 @@ itest-restore-state = []
 # after-spool-write boundary. Never enabled by production binaries; requires the runtime opt-in env
 # (double gate); marker=0 in production.
 object-ipc-crash-seam = []
+# S6b P11f2: commit-cut observer seam (storage durability hooks) for the task courier refusal
+# tests only. Opt-in per build; the production-absence variant never enables it, and storage
+# refuses it under RAMFLUX_PRODUCTION_BUILD.
+durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
 ed25519-dalek.workspace = true
@@ -89,7 +93,7 @@ chacha20 = { version = "=0.9.1", features = ["zeroize"] }
 poly1305 = { version = "=0.8.0", features = ["zeroize"] }
 
 [dev-dependencies]
-ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget", "durability-test-hooks"] }
+ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }
 ramflux-node-core = { workspace = true }
 rcgen = { workspace = true }
