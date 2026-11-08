@@ -22,7 +22,7 @@ mod object_slot;
 mod own_history;
 pub(crate) use object_slot::PairObjectSlotRequest;
 mod project;
-pub(crate) use committed::{conversation_watermark, object_watermark};
+pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
 pub(crate) mod group_directory;
 mod legacy;
 pub(crate) use group_directory::ReceiveGroupDirectory;

@@ -371,6 +371,7 @@ async fn redrive() -> Result<(), SdkError> {
     .await?;
 
     bootstrap_redrive().await?;
+    crate::client::application_outbox::projection_stage_redrive::projection_stage_redrive()?;
     Ok(())
 }
 

@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant receive-ledger schema and transaction authority; activation is a separate step.
+#[cfg(test)]
+mod application_outbox_backup_tests;
 pub(crate) mod cover;
 #[cfg(test)]
 mod cover_tests;
@@ -93,6 +95,12 @@ impl ReceiveTransaction<'_> {
             return Err(StorageError::AuthorizationRejected);
         }
         Ok(())
+    }
+
+    /// Account handle for W1 joiners that persist on this writer connection.
+    #[must_use]
+    pub fn account(&self) -> &AccountDb {
+        self.db
     }
 
     /// Cover and stage refuse a retired incarnation. Source gate and bind allow retained work.

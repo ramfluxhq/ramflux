@@ -7,7 +7,7 @@ use super::{
 };
 use crate::client::identity_authority::HeadUse;
 #[derive(Serialize, Deserialize)]
-pub(super) struct Committed {
+pub(crate) struct Committed {
     pub routing: Routing,
     pub entry: GatewayInboxEntry,
     #[serde(default = "already_projected")]
@@ -53,7 +53,7 @@ impl RamfluxClient {
         Ok(None)
     }
 
-    pub(super) fn persist_routed_seen(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+    pub(crate) fn persist_routed_seen(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
         let db = self.account_db()?;
         let marker =
             db.routed_seen_key(&ramflux_protocol::canonical_json_bytes(&entry.envelope)?)?;
@@ -113,26 +113,34 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         let key = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
-        db.write_transaction(|| {
-            if let Some(mut receipt) = db.load_actor_state::<Committed>(&key)? {
-                if receipt.projected {
-                    return Ok(false);
-                }
-                receipt.projected = true;
-                db.persist_actor_state(&key, &receipt)?;
-                return Ok(true);
-            }
-            let legacy = self.legacy_committed_key(entry)?;
-            if db.load_actor_state::<String>(&legacy)?.is_none() {
+        db.write_transaction(|| self.write_inbox_projection_claim_at(&db, &key, entry))
+    }
+
+    /// Writes the projected flag on the caller's open connection (live claim and P16 W1).
+    pub(crate) fn write_inbox_projection_claim_at(
+        &self,
+        db: &ramflux_storage::AccountDb,
+        key: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        if let Some(mut receipt) = db.load_actor_state::<Committed>(key)? {
+            if receipt.projected {
                 return Ok(false);
             }
-            let marker = format!("{legacy}/projected");
-            if db.load_actor_state::<bool>(&marker)?.unwrap_or(true) {
-                return Ok(false);
-            }
-            db.persist_actor_state(&marker, &true)?;
-            Ok(true)
-        })
+            receipt.projected = true;
+            db.persist_actor_state(key, &receipt)?;
+            return Ok(true);
+        }
+        let legacy = self.legacy_committed_key(entry)?;
+        if db.load_actor_state::<String>(&legacy)?.is_none() {
+            return Ok(false);
+        }
+        let marker = format!("{legacy}/projected");
+        if db.load_actor_state::<bool>(&marker)?.unwrap_or(true) {
+            return Ok(false);
+        }
+        db.persist_actor_state(&marker, &true)?;
+        Ok(true)
     }
     pub(crate) fn committed_routing(
         &self,

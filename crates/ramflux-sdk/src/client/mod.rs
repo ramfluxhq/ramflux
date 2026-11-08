@@ -18,6 +18,7 @@ pub(crate) mod contact_verification;
 pub mod conversation;
 mod deferred_attachment;
 pub(crate) use deferred_attachment::job::{FetchBinding, FetchFence, FetchPreparation};
+pub(crate) mod application_outbox;
 pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
