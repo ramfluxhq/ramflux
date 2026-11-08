@@ -66,6 +66,9 @@ mod w0_replay_support;
 
 use crate::{AccountDb, ProjectionStore, StorageError};
 use rusqlite::OptionalExtension;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static RECEIVE_TX_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Expected actor and durable state for one ledger writer phase.
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +87,8 @@ pub struct ReceiveTransaction<'a> {
     incarnation: &'a str,
     /// True when the fence admitted a name in `retired_incarnations`, not the live E.
     retired: bool,
+    /// Unique id for this writer phase; SDK tokens bind to it.
+    tx_id: u64,
 }
 
 /// Cover and stage refuse a retired incarnation with this exact error.
@@ -156,6 +161,21 @@ impl ReceiveTransaction<'_> {
             &seq.to_string(),
         )
     }
+
+    /// Identifies this writer phase so SDK tokens cannot move to another transaction.
+    #[must_use]
+    pub const fn writer_id(&self) -> u64 {
+        self.tx_id
+    }
+
+    /// Hold-table delete inside the open receive transaction.
+    ///
+    /// # Errors
+    /// [`StorageError::AuthorizationRejected`] when the writer is closed; storage errors from the delete.
+    pub fn remove_unrouted(&self, id: &str) -> Result<(), StorageError> {
+        self.require_writer()?;
+        self.db.remove_unrouted(id)
+    }
 }
 
 impl AccountDb {
@@ -221,6 +241,7 @@ impl AccountDb {
                 target: expected.target,
                 incarnation: expected.incarnation,
                 retired: expected.incarnation != incarnation,
+                tx_id: RECEIVE_TX_ID.fetch_add(1, Ordering::Relaxed),
             };
             let value = write(&authority)?;
             authority.require_writer()?;

@@ -10,8 +10,9 @@ use super::hooks;
 use crate::prelude::*;
 use authority::{AuthorityKind, LedgerAuthority};
 use ramflux_storage::{
-    AccountDb, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveSettle,
-    ReceiveSettleKind, ReceiveSettleResult, ReceiveTransaction, StorageError,
+    AccountDb, ReceiveBind, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveReset,
+    ReceiveResetResult, ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult, ReceiveTransaction,
+    StorageError,
 };
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -42,7 +43,7 @@ pub(crate) struct LedgerExecutor {
 }
 
 /// Result of one W2 cover through the executor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct CoverOutcome {
     pub result: ReceiveCoverResult,
     pub authority: Option<LedgerAuthority>,
@@ -50,12 +51,28 @@ pub(crate) struct CoverOutcome {
 }
 
 /// Result of one WS settle through the executor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct SettleOutcome {
     pub result: ReceiveSettleResult,
     pub authority: Option<LedgerAuthority>,
     pub ack_eligible: bool,
 }
+
+/// Result of one reset through the executor.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ResetOutcome {
+    pub result: ReceiveResetResult,
+    pub authority: Option<LedgerAuthority>,
+}
+
+/// Result of one logical-message bind through the executor.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct BindOutcome {
+    pub result: ReceiveBind,
+    pub authority: Option<LedgerAuthority>,
+}
+
+const CURSOR_NOT_INCREASING: &str = "receive cursor is not strictly increasing";
 
 /// Read-only startup incarnation E and cursor C.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,9 +130,9 @@ impl LedgerExecutor {
         let seq = cover.sequence;
         let kind = cover.kind;
         let result = tx.cover(cover)?;
-        let outcome = cover_outcome(seq, kind, result);
-        if let Some(token) = outcome.authority {
-            hooks::record_sql(seq, token);
+        let outcome = cover_outcome(seq, kind, result, tx.writer_id());
+        if let Some(ref token) = outcome.authority {
+            hooks::record_sql(seq, token.kind());
         }
         Ok(outcome)
     }
@@ -134,39 +151,41 @@ impl LedgerExecutor {
         let before = tx.receive_cursor()?;
         let result = tx.settle(settle)?;
         let after = tx.receive_cursor()?;
-        let outcome = settle_outcome(seq, kind, result, after > before);
+        let outcome = settle_outcome(seq, kind, result, after > before, tx.writer_id());
         if after > before
-            && let Some(token) = outcome.authority
+            && let Some(ref token) = outcome.authority
         {
-            hooks::record_sql(seq, token);
+            hooks::record_sql(seq, token.kind());
         }
         Ok(outcome)
     }
 
-    /// Reset token minted only inside an open P10 reset transaction.
+    /// Reset token minted only from [`ReceiveTransaction::reset`] → [`ReceiveResetResult::Reset`].
     ///
     /// # Errors
-    /// [`StorageError::AuthorizationRejected`] when the writer transaction is closed.
-    pub(crate) fn observe_reset_in(
+    /// Propagates reset refusals.
+    pub(crate) fn reset_in(
         &self,
         tx: &ReceiveTransaction<'_>,
-        seq: u64,
-    ) -> Result<LedgerAuthority, SdkError> {
-        tx.require_writer()?;
-        Ok(LedgerAuthority::reset(seq))
+        input: ReceiveReset<'_>,
+    ) -> Result<ResetOutcome, SdkError> {
+        let seq = input.settled;
+        let result = tx.reset(input)?;
+        Ok(reset_outcome(seq, result, tx.writer_id()))
     }
 
-    /// Erasure token minted only inside an open erasure transaction.
+    /// Erasure token minted only from [`ReceiveBind::Erased`].
     ///
     /// # Errors
-    /// [`StorageError::AuthorizationRejected`] when the writer transaction is closed.
-    pub(crate) fn observe_erasure_in(
+    /// Propagates bind refusals.
+    pub(crate) fn bind_logical_in(
         &self,
         tx: &ReceiveTransaction<'_>,
-        seq: u64,
-    ) -> Result<LedgerAuthority, SdkError> {
-        tx.require_writer()?;
-        Ok(LedgerAuthority::erasure(seq))
+        sequence: u64,
+        message: &str,
+    ) -> Result<BindOutcome, SdkError> {
+        let result = tx.bind_logical_message(sequence, message)?;
+        Ok(bind_outcome(sequence, result, tx.writer_id()))
     }
 
     /// WA token for a terminal storage result at `seq`. Held or paused work cannot mint one.
@@ -189,59 +208,83 @@ impl LedgerExecutor {
                 "held sequence is not eligible for ACK",
             )));
         }
-        if from.seq() != seq || !matches!(from.kind(), AuthorityKind::W2 | AuthorityKind::Ws) {
+        let (kind, token_seq, writer_id) = from.into_parts();
+        if token_seq != seq || !matches!(kind, AuthorityKind::W2 | AuthorityKind::Ws) {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
-        Ok(LedgerAuthority::wa(seq))
+        Ok(LedgerAuthority::wa(seq, writer_id))
     }
 
     /// Generic receive-checkpoint write. The receive-cursor namespace requires W2 or reset
-    /// and the caller's open receive transaction.
+    /// and the caller's open receive transaction. The token is consumed.
     ///
     /// # Errors
-    /// [`StorageError::AuthorizationRejected`] when the token cannot write C or the writer is closed.
+    /// [`StorageError::AuthorizationRejected`] when the token cannot write C, is bound to
+    /// another transaction, or the writer is closed.
+    /// [`StorageError::Integrity`] `"receive cursor is not strictly increasing"` when a W2
+    /// write is not strictly above durable C.
     pub(crate) fn persist_receive_checkpoint_in(
         &self,
         tx: &ReceiveTransaction<'_>,
-        token: &LedgerAuthority,
+        token: LedgerAuthority,
         seq: u64,
     ) -> Result<(), SdkError> {
         tx.require_writer()?;
-        if !token.allows_receive_checkpoint() || token.seq() != seq {
+        let (kind, token_seq, writer_id) = token.into_parts();
+        if !matches!(kind, AuthorityKind::W2 | AuthorityKind::Reset) || token_seq != seq {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
+        if writer_id != tx.writer_id() {
+            return Err(SdkError::Storage(StorageError::AuthorizationRejected));
+        }
+        if kind == AuthorityKind::W2 {
+            let current = tx.receive_cursor()?;
+            if seq <= current {
+                return Err(SdkError::Storage(StorageError::Integrity(CURSOR_NOT_INCREASING)));
+            }
+        }
         tx.persist_receive_cursor(seq)?;
-        hooks::record_sql(seq, *token);
+        hooks::record_sql(seq, kind);
         Ok(())
     }
 
     /// Raw ACK. Refuses any other kind, then records the frame with the real WA token.
+    /// The token is consumed.
     ///
     /// # Errors
     /// [`StorageError::AuthorizationRejected`] when the token is not WA for `seq`.
-    pub(crate) fn send_ack_in(&self, token: &LedgerAuthority, seq: u64) -> Result<(), SdkError> {
-        if !token.is_wa() || token.seq() != seq {
+    pub(crate) fn send_ack_in(&self, token: LedgerAuthority, seq: u64) -> Result<(), SdkError> {
+        let (kind, token_seq, _) = token.into_parts();
+        if kind != AuthorityKind::Wa || token_seq != seq {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
-        hooks::record_ack(seq, Some(*token));
+        hooks::record_ack(seq, Some(kind));
         Ok(())
     }
 
-    /// Hold-table delete joined to W2 / WS / reset / erasure.
+    /// Hold-table delete joined to W2 / WS / reset / erasure on the caller's transaction.
+    /// The token is consumed.
     ///
     /// # Errors
     /// [`StorageError::AuthorizationRejected`] without transaction authority; storage errors from the delete.
     pub(crate) fn remove_unrouted_in(
         &self,
-        db: &AccountDb,
-        token: &LedgerAuthority,
+        tx: &ReceiveTransaction<'_>,
+        token: LedgerAuthority,
         id: &str,
     ) -> Result<(), SdkError> {
-        if !token.allows_hold_delete() {
+        let (kind, _, writer_id) = token.into_parts();
+        if !matches!(
+            kind,
+            AuthorityKind::W2 | AuthorityKind::Ws | AuthorityKind::Reset | AuthorityKind::Erasure
+        ) {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
-        db.remove_unrouted(id)?;
-        hooks::record_delete(id, Some(*token));
+        if writer_id != tx.writer_id() {
+            return Err(SdkError::Storage(StorageError::AuthorizationRejected));
+        }
+        tx.remove_unrouted(id)?;
+        hooks::record_delete(id, Some(kind));
         Ok(())
     }
 
@@ -270,11 +313,16 @@ impl Drop for LedgerExecutor {
     }
 }
 
-fn cover_outcome(seq: u64, kind: ReceiveCoverKind, result: ReceiveCoverResult) -> CoverOutcome {
+fn cover_outcome(
+    seq: u64,
+    kind: ReceiveCoverKind,
+    result: ReceiveCoverResult,
+    writer_id: u64,
+) -> CoverOutcome {
     match result {
         ReceiveCoverResult::Covered => CoverOutcome {
             result,
-            authority: Some(LedgerAuthority::w2(seq)),
+            authority: Some(LedgerAuthority::w2(seq, writer_id)),
             ack_eligible: matches!(kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Oversize),
         },
         ReceiveCoverResult::Paused => CoverOutcome { result, authority: None, ack_eligible: false },
@@ -286,17 +334,32 @@ fn settle_outcome(
     kind: ReceiveSettleKind,
     result: ReceiveSettleResult,
     wrote_c: bool,
+    writer_id: u64,
 ) -> SettleOutcome {
     let ack_eligible =
         result == ReceiveSettleResult::Settled && kind == ReceiveSettleKind::Terminal;
-    let authority = if wrote_c {
-        Some(LedgerAuthority::w2(seq))
-    } else if result == ReceiveSettleResult::Settled {
-        Some(LedgerAuthority::ws(seq))
-    } else {
-        None
+    let authority = match result {
+        ReceiveSettleResult::Settled if wrote_c => Some(LedgerAuthority::w2(seq, writer_id)),
+        ReceiveSettleResult::Settled => Some(LedgerAuthority::ws(seq, writer_id)),
+        ReceiveSettleResult::Held | ReceiveSettleResult::Paused => None,
     };
     SettleOutcome { result, authority, ack_eligible }
+}
+
+fn reset_outcome(seq: u64, result: ReceiveResetResult, writer_id: u64) -> ResetOutcome {
+    let authority = match result {
+        ReceiveResetResult::Reset => Some(LedgerAuthority::reset(seq, writer_id)),
+        ReceiveResetResult::PausedFence | ReceiveResetResult::PausedLoss => None,
+    };
+    ResetOutcome { result, authority }
+}
+
+fn bind_outcome(seq: u64, result: ReceiveBind, writer_id: u64) -> BindOutcome {
+    let authority = match result {
+        ReceiveBind::Erased => Some(LedgerAuthority::erasure(seq, writer_id)),
+        ReceiveBind::Bound => None,
+    };
+    BindOutcome { result, authority }
 }
 
 #[cfg(test)]
@@ -304,8 +367,9 @@ pub(crate) fn cover_outcome_for_test(
     seq: u64,
     kind: ReceiveCoverKind,
     result: ReceiveCoverResult,
+    writer_id: u64,
 ) -> CoverOutcome {
-    cover_outcome(seq, kind, result)
+    cover_outcome(seq, kind, result, writer_id)
 }
 
 #[cfg(test)]
@@ -314,8 +378,23 @@ pub(crate) fn settle_outcome_for_test(
     kind: ReceiveSettleKind,
     result: ReceiveSettleResult,
     wrote_c: bool,
+    writer_id: u64,
 ) -> SettleOutcome {
-    settle_outcome(seq, kind, result, wrote_c)
+    settle_outcome(seq, kind, result, wrote_c, writer_id)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_outcome_for_test(
+    seq: u64,
+    result: ReceiveResetResult,
+    writer_id: u64,
+) -> ResetOutcome {
+    reset_outcome(seq, result, writer_id)
+}
+
+#[cfg(test)]
+pub(crate) fn bind_outcome_for_test(seq: u64, result: ReceiveBind, writer_id: u64) -> BindOutcome {
+    bind_outcome(seq, result, writer_id)
 }
 
 /// Conversation `message.receive` redrive ACK. WA owns the wire frame.
@@ -324,7 +403,7 @@ pub(crate) fn settle_outcome_for_test(
 /// [`StorageError::AuthorizationRejected`] when `token` is not WA for `seq`.
 pub(crate) fn message_receive_ack_in(
     exec: &LedgerExecutor,
-    token: &LedgerAuthority,
+    token: LedgerAuthority,
     seq: u64,
 ) -> Result<(), SdkError> {
     exec.send_ack_in(token, seq)
@@ -336,9 +415,9 @@ pub(crate) fn message_receive_ack_in(
 /// [`StorageError::AuthorizationRejected`] without W2/WS/reset/erasure; storage errors from the delete.
 pub(crate) fn group_remove_unrouted_in(
     exec: &LedgerExecutor,
-    db: &AccountDb,
-    token: &LedgerAuthority,
+    tx: &ReceiveTransaction<'_>,
+    token: LedgerAuthority,
     id: &str,
 ) -> Result<(), SdkError> {
-    exec.remove_unrouted_in(db, token, id)
+    exec.remove_unrouted_in(tx, token, id)
 }

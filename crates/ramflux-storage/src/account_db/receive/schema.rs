@@ -75,6 +75,19 @@ impl AccountDb {
             Ok(())
         })
     }
+
+    /// Whether schema 15 (receive ledger) is installed. Installation does not activate P25.
+    ///
+    /// # Errors
+    /// Returns SQLite errors from the migration table.
+    pub fn receive_ledger_installed(&self) -> Result<bool, StorageError> {
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migration WHERE schema_version=?1)",
+            params![VERSION],
+            |r| r.get(0),
+        )?;
+        Ok(exists)
+    }
 }
 
 /// Read-only admission precedes migrations, including opens by private restore workers.

@@ -3,4 +3,5 @@
 
 //! Re-export of unforgeable tokens. Constructors live in the executor mint path.
 
+#[cfg(test)]
 pub(crate) use super::executor::authority::LedgerAuthority;

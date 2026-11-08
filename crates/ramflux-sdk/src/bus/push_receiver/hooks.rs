@@ -4,7 +4,7 @@
 //! SQL / inbox-request / outgoing-ACK / hold-delete hooks. The authority on each
 //! event is the real token the executor minted, never a caller-supplied label.
 
-use super::authority::LedgerAuthority;
+use super::executor::authority::AuthorityKind;
 use std::cell::RefCell;
 
 thread_local! {
@@ -18,21 +18,21 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SqlWrite {
     pub seq: u64,
-    pub token: LedgerAuthority,
+    pub kind: super::executor::authority::AuthorityKind,
 }
 
-/// Outgoing Ack / `AckBatch` frame. `token` is `None` when the frame left WA.
+/// Outgoing Ack / `AckBatch` frame. `kind` is `None` when the frame left WA.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AckFrame {
     pub seq: u64,
-    pub token: Option<LedgerAuthority>,
+    pub kind: Option<super::executor::authority::AuthorityKind>,
 }
 
-/// Hold-table delete. `token` is `None` when the delete had no transaction authority.
+/// Hold-table delete. `kind` is `None` when the delete had no transaction authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HoldDelete {
     pub id: String,
-    pub token: Option<LedgerAuthority>,
+    pub kind: Option<super::executor::authority::AuthorityKind>,
 }
 
 /// Inbox Resume / page request issued by the executor.
@@ -42,16 +42,16 @@ pub(crate) struct InboxRequest {
     pub limit: usize,
 }
 
-pub(super) fn record_sql(seq: u64, token: LedgerAuthority) {
-    SQL.with(|rows| rows.borrow_mut().push(SqlWrite { seq, token }));
+pub(super) fn record_sql(seq: u64, kind: AuthorityKind) {
+    SQL.with(|rows| rows.borrow_mut().push(SqlWrite { seq, kind }));
 }
 
-pub(super) fn record_ack(seq: u64, token: Option<LedgerAuthority>) {
-    ACK.with(|rows| rows.borrow_mut().push(AckFrame { seq, token }));
+pub(super) fn record_ack(seq: u64, kind: Option<AuthorityKind>) {
+    ACK.with(|rows| rows.borrow_mut().push(AckFrame { seq, kind }));
 }
 
-pub(super) fn record_delete(id: &str, token: Option<LedgerAuthority>) {
-    DELETE.with(|rows| rows.borrow_mut().push(HoldDelete { id: id.to_owned(), token }));
+pub(super) fn record_delete(id: &str, kind: Option<AuthorityKind>) {
+    DELETE.with(|rows| rows.borrow_mut().push(HoldDelete { id: id.to_owned(), kind }));
 }
 
 pub(super) fn record_inbox(after: u64, limit: usize) {

@@ -97,8 +97,14 @@ impl ReceiveTransaction<'_> {
         if !retired.iter().any(|value| value == incarnation) {
             return Err(StorageError::AuthorizationRejected);
         }
-        ReceiveTransaction { db: self.db, target: self.target, incarnation, retired: true }
-            .settle(input)
+        ReceiveTransaction {
+            db: self.db,
+            target: self.target,
+            incarnation,
+            retired: true,
+            tx_id: self.tx_id,
+        }
+        .settle(input)
     }
 
     /// Held/quarantined/staged work and erased receipts, oldest first. Live E is at or

@@ -176,8 +176,16 @@ pub(crate) const SITES: &[WriterSite] = &[
         file: "src/bus/dispatch/message.rs",
         symbol: "message.ack",
         class: WriterClass::ProductionLegacy,
-        executor: "managed_public_ack",
-        hook: "outgoing ACK (typed refusal, no frame)",
+        executor: "managed_public_ack when ledger installed; else legacy ack_gateway_delivery",
+        hook: "outgoing ACK (typed refusal on managed; legacy engine/mark)",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/bus/dispatch/message.rs",
+        symbol: "ack_gateway_delivery",
+        class: WriterClass::ProductionLegacy,
+        executor: "legacy message.ack when receive ledger is not installed",
+        hook: "outgoing ACK",
         count: 1,
     },
     WriterSite {
@@ -267,6 +275,14 @@ pub(crate) const SITES: &[WriterSite] = &[
         executor: "remove_unrouted_in (token required)",
         hook: "hold-delete",
         count: 5,
+    },
+    WriterSite {
+        file: "src/bus/push_receiver/executor.rs",
+        symbol: "persist_receive_cursor",
+        class: WriterClass::ExecutorOwned,
+        executor: "persist_receive_checkpoint_in",
+        hook: "SQL receive-checkpoint",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/push_receiver/managed_ack.rs",
@@ -359,4 +375,5 @@ pub(crate) const SCAN_SYMBOLS: &[&str] = &[
     "engine.ack(",
     "set_projection_checkpoint",
     "message.ack",
+    "persist_receive_cursor",
 ];

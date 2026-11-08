@@ -8,8 +8,9 @@
 use super::authority::LedgerAuthority;
 use super::executor::authority::AuthorityKind;
 use super::executor::{
-    CoverOutcome, LedgerExecutor, cover_outcome_for_test, group_remove_unrouted_in,
-    message_receive_ack_in, settle_outcome_for_test,
+    CoverOutcome, LedgerExecutor, bind_outcome_for_test, cover_outcome_for_test,
+    group_remove_unrouted_in, message_receive_ack_in, reset_outcome_for_test,
+    settle_outcome_for_test,
 };
 use super::hooks;
 use super::inventory::{SCAN_SYMBOLS, SITES, WriterClass};
@@ -18,13 +19,15 @@ use crate::bus::io::local_bus_error_code;
 use crate::bus::protocol::LocalBusMessageAckRequest;
 use crate::prelude::*;
 use ramflux_storage::{
-    AccountDb, AccountDbKey, AccountIndex, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult,
-    ReceiveExpectation, ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult, ReceiveStage,
-    ReceiveStageResult, StorageError,
+    AccountDb, AccountDbKey, AccountIndex, ReceiveBind, ReceiveCover, ReceiveCoverKind,
+    ReceiveCoverResult, ReceiveExpectation, ReceiveResetResult, ReceiveSettle, ReceiveSettleKind,
+    ReceiveSettleResult, ReceiveStage, ReceiveStageResult, StorageError,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const CURSOR_NOT_INCREASING: &str = "receive cursor is not strictly increasing";
 
 struct Harness {
     _root: tempfile::TempDir,
@@ -39,6 +42,15 @@ fn open() -> Result<Harness, StorageError> {
         AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
     db.install_receive_ledger_schema()?;
     db.seed_receive_epoch_for_test("t", "e")?;
+    Ok(Harness { _root: root, db })
+}
+
+fn open_legacy() -> Result<Harness, StorageError> {
+    let root = tempfile::tempdir().expect("tmp");
+    let index = AccountIndex::open(root.path())?;
+    index.create_account("acct", "principal")?;
+    let db =
+        AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
     Ok(Harness { _root: root, db })
 }
 
@@ -137,9 +149,6 @@ fn scan_tree(
         let src = fs::read_to_string(&path).expect("read rust");
         for symbol in SCAN_SYMBOLS {
             let actual = src.matches(symbol).count();
-            if actual == 0 {
-                continue;
-            }
             let want = expected.get(&format!("{rel}::{symbol}")).copied().unwrap_or(0);
             if want != actual {
                 missing.push(format!("{rel} {symbol} actual={actual} expected={want}"));
@@ -165,6 +174,10 @@ fn assert_inventory_scan() {
     scan_tree(&sdk_root, "src/", &expected, &mut missing);
     scan_tree(&rf_root, "apps/rf/src/", &expected, &mut missing);
     assert!(missing.is_empty(), "unclassified production receive writers: {missing:?}");
+    assert!(SCAN_SYMBOLS.contains(&"persist_receive_cursor"));
+    assert!(SITES.iter().any(|site| site.file == "src/bus/push_receiver/executor.rs"
+        && site.symbol == "persist_receive_cursor"
+        && site.count == 1));
     assert!(SITES.iter().any(|site| site.file == "src/bus/dispatch/message.rs"
         && site.symbol == "message.ack"
         && site.executor.contains("managed_public_ack")));
@@ -240,6 +253,25 @@ fn assert_exclusive_and_managed_ack() -> Result<(), SdkError> {
     Ok(())
 }
 
+fn assert_h1_ack_gate() -> Result<(), SdkError> {
+    let managed = open()?;
+    assert!(managed.db.receive_ledger_installed()?, "schema 15 must activate managed ACK");
+    let legacy = open_legacy()?;
+    assert!(
+        !legacy.db.receive_ledger_installed()?,
+        "production accounts without schema 15 keep legacy ACK"
+    );
+    let src = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bus/dispatch/message.rs"),
+    )
+    .expect("message.rs");
+    assert!(src.contains("receive_ledger_installed"), "H1 ledger gate missing");
+    assert!(src.contains("managed_public_ack"), "managed refusal missing");
+    assert!(src.contains("ack_gateway_delivery"), "legacy ACK body missing");
+    assert!(src.contains("mark_acked"), "legacy mark missing");
+    Ok(())
+}
+
 fn assert_exclusive_across_threads() -> Result<(), SdkError> {
     let actor = LedgerExecutor::bind_actor("acct-p19-threads")?;
     let busy = std::thread::spawn(|| LedgerExecutor::bind_standalone("acct-p19-threads"))
@@ -255,25 +287,96 @@ fn assert_exclusive_across_threads() -> Result<(), SdkError> {
     Ok(())
 }
 
+fn assert_constructor_grep() {
+    let sdk_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk_rs(&sdk_root, &mut files);
+    let allow = ["bus/push_receiver/executor.rs", "bus/push_receiver/executor/authority.rs"];
+    let mut bad = Vec::new();
+    for path in files {
+        let rel =
+            path.strip_prefix(&sdk_root).expect("src").display().to_string().replace('\\', "/");
+        if skip_scan(&format!("src/{rel}")) {
+            continue;
+        }
+        let src = fs::read_to_string(&path).expect("read rust");
+        let allowed = allow.iter().any(|file| rel == *file);
+        for name in ["w2", "reset", "wa", "ws", "erasure"] {
+            let ctor = format!("LedgerAuthority::{name}(");
+            if src.contains(&ctor) && !allowed {
+                bad.push(format!("{rel} {ctor}"));
+            }
+        }
+        for name in ["reset", "erasure"] {
+            let banned = format!("observe_{name}_in");
+            if src.contains(&banned) {
+                bad.push(format!("{rel} {banned}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "token constructors outside conversion: {bad:?}");
+}
+
 fn assert_storage_result_tokens() {
-    let paused = cover_outcome_for_test(7, ReceiveCoverKind::Terminal, ReceiveCoverResult::Paused);
+    let paused =
+        cover_outcome_for_test(7, ReceiveCoverKind::Terminal, ReceiveCoverResult::Paused, 0);
     assert!(paused.authority.is_none());
     assert!(!paused.ack_eligible);
-    let held_cover = cover_outcome_for_test(7, ReceiveCoverKind::Held, ReceiveCoverResult::Covered);
-    assert_eq!(held_cover.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    let held_cover =
+        cover_outcome_for_test(7, ReceiveCoverKind::Held, ReceiveCoverResult::Covered, 0);
+    assert_eq!(held_cover.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::W2));
     assert!(!held_cover.ack_eligible);
-    let paused_settle =
-        settle_outcome_for_test(3, ReceiveSettleKind::Terminal, ReceiveSettleResult::Paused, false);
+    let paused_settle = settle_outcome_for_test(
+        3,
+        ReceiveSettleKind::Terminal,
+        ReceiveSettleResult::Paused,
+        false,
+        0,
+    );
     assert!(paused_settle.authority.is_none());
     assert!(!paused_settle.ack_eligible);
     let held_settle =
-        settle_outcome_for_test(3, ReceiveSettleKind::Held, ReceiveSettleResult::Held, false);
+        settle_outcome_for_test(3, ReceiveSettleKind::Held, ReceiveSettleResult::Held, false, 0);
     assert!(held_settle.authority.is_none());
     assert!(!held_settle.ack_eligible);
-    let covered_settle =
-        settle_outcome_for_test(4, ReceiveSettleKind::Terminal, ReceiveSettleResult::Settled, true);
-    assert_eq!(covered_settle.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    let held_wrote_c =
+        settle_outcome_for_test(3, ReceiveSettleKind::Held, ReceiveSettleResult::Held, true, 0);
+    assert!(held_wrote_c.authority.is_none(), "Held must not mint W2 even when C advanced");
+    let paused_wrote_c = settle_outcome_for_test(
+        3,
+        ReceiveSettleKind::Terminal,
+        ReceiveSettleResult::Paused,
+        true,
+        0,
+    );
+    assert!(paused_wrote_c.authority.is_none(), "Paused must not mint W2 even when C advanced");
+    let covered_settle = settle_outcome_for_test(
+        4,
+        ReceiveSettleKind::Terminal,
+        ReceiveSettleResult::Settled,
+        true,
+        0,
+    );
+    assert_eq!(
+        covered_settle.authority.as_ref().map(LedgerAuthority::kind),
+        Some(AuthorityKind::W2)
+    );
     assert!(covered_settle.ack_eligible);
+    let below_c = settle_outcome_for_test(
+        4,
+        ReceiveSettleKind::Terminal,
+        ReceiveSettleResult::Settled,
+        false,
+        0,
+    );
+    assert_eq!(below_c.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::Ws));
+    let reset_ok = reset_outcome_for_test(9, ReceiveResetResult::Reset, 0);
+    assert_eq!(reset_ok.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::Reset));
+    assert!(reset_outcome_for_test(9, ReceiveResetResult::PausedFence, 0).authority.is_none());
+    assert!(reset_outcome_for_test(9, ReceiveResetResult::PausedLoss, 0).authority.is_none());
+    let erased = bind_outcome_for_test(8, ReceiveBind::Erased, 0);
+    assert_eq!(erased.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::Erasure));
+    assert!(bind_outcome_for_test(8, ReceiveBind::Bound, 0).authority.is_none());
 }
 
 fn assert_hooks(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
@@ -290,53 +393,136 @@ fn assert_hooks(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
     let w2 = cover(exec, db, 0, 1, ReceiveCoverKind::Terminal)?;
     assert_eq!(w2.result, ReceiveCoverResult::Covered);
     assert!(w2.ack_eligible);
-    assert_eq!(w2.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    assert_eq!(w2.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::W2));
     let sql = hooks::take_sql();
     assert_eq!(sql.len(), 1);
-    assert_eq!(sql[0].token.kind(), AuthorityKind::W2);
+    assert_eq!(sql[0].kind, AuthorityKind::W2);
     let wa = exec.mint_wa(w2.authority, w2.ack_eligible, 1)?;
-    message_receive_ack_in(exec, &wa, 1)?;
+    message_receive_ack_in(exec, wa, 1)?;
     let cursor = exec.load_startup_cursor(db, "t")?.cursor;
     let acks = hooks::take_acks();
     assert!(!acks.is_empty(), "conversation ACK must produce a wire frame");
     for frame in &acks {
-        assert!(frame.token.is_some_and(LedgerAuthority::is_wa), "ACK outside WA: {frame:?}");
+        assert_eq!(frame.kind, Some(AuthorityKind::Wa), "ACK outside WA: {frame:?}");
         assert!(frame.seq <= cursor, "ACK s>C: {frame:?}");
     }
-    match db.receive_transaction(expected(db, 1)?, 1, |tx| {
-        exec.persist_receive_checkpoint_in(tx, &wa, 1).map_err(into_storage)
-    }) {
-        Err(StorageError::AuthorizationRejected) => {}
-        other => panic!("WA must not write C, got {other:?}"),
-    }
-    assert_eq!(hooks::take_sql().len(), 0);
-    stage(db, 1, 2)?;
-    let held = cover(exec, db, 1, 2, ReceiveCoverKind::Held)?;
-    assert!(!held.ack_eligible);
-    match exec.mint_wa(held.authority, held.ack_eligible, 2) {
+    Ok(())
+}
+
+fn assert_held_never_acked_and_authorized_delete(
+    exec: &LedgerExecutor,
+    db: &AccountDb,
+) -> Result<(), SdkError> {
+    let held_synth =
+        cover_outcome_for_test(2, ReceiveCoverKind::Held, ReceiveCoverResult::Covered, 0);
+    match exec.mint_wa(held_synth.authority, held_synth.ack_eligible, 2) {
         Err(SdkError::Storage(StorageError::Integrity(
             "held sequence is not eligible for ACK",
         ))) => {}
         other => panic!("held must not mint WA, got {other:?}"),
     }
     assert_eq!(hooks::take_acks().len(), 0, "held never acknowledged");
-    let held_token = held.authority.expect("held cover that wrote C mints W2");
+    stage(db, 1, 2)?;
     db.hold_unrouted("hold-1", 2, b"{}", 1)?;
-    group_remove_unrouted_in(exec, db, &held_token, "hold-1")?;
+    db.receive_transaction(expected(db, 1)?, 1, |tx| {
+        let held = exec
+            .cover_in(
+                tx,
+                ReceiveCover {
+                    sequence: 2,
+                    kind: ReceiveCoverKind::Held,
+                    gaps: &[],
+                    retain_until: 0,
+                },
+            )
+            .map_err(into_storage)?;
+        assert!(!held.ack_eligible);
+        let token = held.authority.expect("held cover that wrote C mints W2");
+        group_remove_unrouted_in(exec, tx, token, "hold-1").map_err(into_storage)
+    })?;
     assert_eq!(db.unrouted_count()?, 0, "authorized hold delete must remove the row");
     let deletes = hooks::take_deletes();
     assert!(
         deletes.iter().any(|row| {
-            row.id == "hold-1" && row.token.is_some_and(LedgerAuthority::allows_hold_delete)
+            row.id == "hold-1" && row.kind.is_some_and(|kind| kind != AuthorityKind::Wa)
         }),
         "delete hook detects missing transaction authority: {deletes:?}"
     );
     db.hold_unrouted("hold-2", 2, b"{}", 1)?;
-    match group_remove_unrouted_in(exec, db, &wa, "hold-2") {
-        Err(SdkError::Storage(StorageError::AuthorizationRejected)) => {}
+    let wa = exec.mint_wa(
+        cover_outcome_for_test(1, ReceiveCoverKind::Terminal, ReceiveCoverResult::Covered, 0)
+            .authority,
+        true,
+        1,
+    )?;
+    match db.receive_transaction(expected(db, 2)?, 1, |tx| {
+        group_remove_unrouted_in(exec, tx, wa, "hold-2").map_err(into_storage)
+    }) {
+        Err(StorageError::AuthorizationRejected) => {}
         other => panic!("WA must not delete holds, got {other:?}"),
     }
     assert_eq!(hooks::take_deletes().len(), 0);
+    Ok(())
+}
+
+fn assert_token_binding(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), SdkError> {
+    hooks::clear();
+    let wa = exec.mint_wa(
+        cover_outcome_for_test(1, ReceiveCoverKind::Terminal, ReceiveCoverResult::Covered, 0)
+            .authority,
+        true,
+        1,
+    )?;
+    match db.receive_transaction(expected(db, 2)?, 1, |tx| {
+        exec.persist_receive_checkpoint_in(tx, wa, 1).map_err(into_storage)
+    }) {
+        Err(StorageError::AuthorizationRejected) => {}
+        other => panic!("WA must not write C, got {other:?}"),
+    }
+    assert_eq!(hooks::take_sql().len(), 0);
+    db.receive_transaction(expected(db, 2)?, 1, |tx| {
+        let token = cover_outcome_for_test(
+            2,
+            ReceiveCoverKind::Terminal,
+            ReceiveCoverResult::Covered,
+            tx.writer_id(),
+        )
+        .authority
+        .expect("w2");
+        match exec.persist_receive_checkpoint_in(tx, token, 2).map_err(into_storage) {
+            Err(StorageError::Integrity(CURSOR_NOT_INCREASING)) => Ok(()),
+            other => panic!("expected strictly increasing, got {other:?}"),
+        }
+    })?;
+    db.receive_transaction(expected(db, 2)?, 1, |tx| {
+        let token = cover_outcome_for_test(
+            3,
+            ReceiveCoverKind::Terminal,
+            ReceiveCoverResult::Covered,
+            tx.writer_id() ^ 1,
+        )
+        .authority
+        .expect("w2");
+        match exec.persist_receive_checkpoint_in(tx, token, 3).map_err(into_storage) {
+            Err(StorageError::AuthorizationRejected) => Ok(()),
+            other => panic!("expected writer bind, got {other:?}"),
+        }
+    })?;
+    db.hold_unrouted("hold-bind", 2, b"{}", 1)?;
+    db.receive_transaction(expected(db, 2)?, 1, |tx| {
+        let token = cover_outcome_for_test(
+            2,
+            ReceiveCoverKind::Held,
+            ReceiveCoverResult::Covered,
+            tx.writer_id() ^ 1,
+        )
+        .authority
+        .expect("w2");
+        match exec.remove_unrouted_in(tx, token, "hold-bind").map_err(into_storage) {
+            Err(StorageError::AuthorizationRejected) => Ok(()),
+            other => panic!("expected writer bind on delete, got {other:?}"),
+        }
+    })?;
     Ok(())
 }
 
@@ -348,17 +534,17 @@ fn assert_settle_outcomes(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), S
     hooks::clear();
     let below = settle(exec, db, 3, 3, ReceiveSettleKind::Terminal)?;
     assert_eq!(below.result, ReceiveSettleResult::Settled);
-    assert_eq!(below.authority.map(LedgerAuthority::kind), Some(AuthorityKind::Ws));
+    assert_eq!(below.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::Ws));
     assert!(below.ack_eligible);
     assert_eq!(hooks::take_sql().len(), 0, "below-C settle must not write C");
     stage(db, 3, 4)?;
     let advanced = settle(exec, db, 3, 4, ReceiveSettleKind::Terminal)?;
     assert_eq!(advanced.result, ReceiveSettleResult::Settled);
-    assert_eq!(advanced.authority.map(LedgerAuthority::kind), Some(AuthorityKind::W2));
+    assert_eq!(advanced.authority.as_ref().map(LedgerAuthority::kind), Some(AuthorityKind::W2));
     assert!(advanced.ack_eligible);
     let sql = hooks::take_sql();
     assert_eq!(sql.len(), 1);
-    assert_eq!(sql[0].token.kind(), AuthorityKind::W2);
+    assert_eq!(sql[0].kind, AuthorityKind::W2);
     stage(db, 4, 5)?;
     let kept = cover(exec, db, 4, 5, ReceiveCoverKind::Held)?;
     assert!(!kept.ack_eligible);
@@ -378,12 +564,16 @@ fn assert_settle_outcomes(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), S
 #[test]
 fn all_receive_writers_guard() -> Result<(), SdkError> {
     assert_inventory_scan();
+    assert_constructor_grep();
     assert_exclusive_and_managed_ack()?;
+    assert_h1_ack_gate()?;
     assert_exclusive_across_threads()?;
     assert_storage_result_tokens();
     let harness = open()?;
     let exec = LedgerExecutor::bind_standalone("acct-p19-hooks")?;
     assert_hooks(&exec, &harness.db)?;
+    assert_held_never_acked_and_authorized_delete(&exec, &harness.db)?;
+    assert_token_binding(&exec, &harness.db)?;
     assert_settle_outcomes(&exec, &harness.db)
 }
 
