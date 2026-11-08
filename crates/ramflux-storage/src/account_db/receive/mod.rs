@@ -27,6 +27,8 @@ pub(crate) mod stage;
 mod stage_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod w0_replay_support;
 
 use crate::{AccountDb, ProjectionStore, StorageError};
 

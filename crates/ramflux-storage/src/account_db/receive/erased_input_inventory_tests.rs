@@ -8,6 +8,7 @@
 use super::erased_capture_tests::{current, full};
 use super::erased_input_union_tests::{Pair, expiry, pair};
 use super::stage_tests::{bytes, input, run};
+use super::w0_replay_support::{Tuple, assert_erased_after_reopen, install};
 use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase, StorageError};
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -123,6 +124,8 @@ struct Want {
     kind: &'static str,
     selector: String,
     expires_at: i64,
+    /// The payload a W0 replay repeats (principal `ip`, device `id`).
+    payload: String,
 }
 
 /// Messages of the extra families: class (A) binding, a quarantined committed receipt and the
@@ -138,7 +141,12 @@ fn seed_extra(db: &AccountDb, derive: &AccountDb, now: i64) -> Result<Vec<Want>,
         "INSERT INTO message_copy_binding VALUES(?1,'B-bind')",
         params![format!("erased-input:{bundle}:{selector}:{}", now + 600)],
     )?;
-    wanted.push(Want { kind: "erased_input_binding", selector, expires_at: now + 600 });
+    wanted.push(Want {
+        kind: "erased_input_binding",
+        selector,
+        expires_at: now + 600,
+        payload: "p-bind".to_owned(),
+    });
     // `legacy/replay/committed` is reached through the real quarantine sequence: the receipt
     // is rewritten under the quarantine key, then the original key is removed.
     db.connection.execute(
@@ -155,7 +163,12 @@ fn seed_extra(db: &AccountDb, derive: &AccountDb, now: i64) -> Result<Vec<Want>,
     db.remove_actor_state(old)?;
     // Merge derives selectors with the merging account's own bundles.
     let (_, selector) = current(derive, "ip", "id", "p-legacy-committed")?;
-    wanted.push(Want { kind: "legacy_replay_committed", selector, expires_at: now + 3_900 });
+    wanted.push(Want {
+        kind: "legacy_replay_committed",
+        selector,
+        expires_at: now + 3_900,
+        payload: "p-legacy-committed".to_owned(),
+    });
     // `legacy/replay/a2i` holds an a2i control event, never an inbound envelope: no tombstone.
     db.connection
         .execute("INSERT INTO message_copy_binding VALUES('payload:p-a2i','B-a2i')", [])?;
@@ -290,13 +303,23 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     let mut expected: Vec<Want> = Vec::new();
     for f in &families {
         let (_, selector) = current_in(&p, &f.payload)?;
-        expected.push(Want { kind: f.kind, selector, expires_at: now + 3_900 });
+        expected.push(Want {
+            kind: f.kind,
+            selector,
+            expires_at: now + 3_900,
+            payload: f.payload.clone(),
+        });
     }
     for (kind, payload) in
         [("archived_actor", "p-archived"), ("archived_event", "p-archived-event")]
     {
         let (_, selector) = current_in(&p, payload)?;
-        expected.push(Want { kind, selector, expires_at: now + 3_900 });
+        expected.push(Want {
+            kind,
+            selector,
+            expires_at: now + 3_900,
+            payload: payload.to_owned(),
+        });
     }
     // The source deleted A itself, which captured the two archived-family tuples under the
     // source's own bundle; the merge unions those tombstones in as well.
@@ -305,7 +328,12 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
         ("source_capture_event", "p-archived-event"),
     ] {
         let (_, selector) = current(&p.source, "ip", "id", payload)?;
-        expected.push(Want { kind, selector, expires_at: now + 3_900 });
+        expected.push(Want {
+            kind,
+            selector,
+            expires_at: now + 3_900,
+            payload: payload.to_owned(),
+        });
     }
     expected.extend(extra);
     let verify = |db: &rusqlite::Connection| -> Result<(), StorageError> {
@@ -329,6 +357,12 @@ fn erased_input_source_inventory_local() -> Result<(), StorageError> {
     verify(&merged.db)?;
     drop(merged);
     verify(&BackupDatabase::open(&path, &target.key)?.db)?;
+    // W0: after restore, a fresh-sequence replay of every tombstoned tuple is erased, immediately
+    // and after reopen.
+    let tuples: Vec<Tuple> =
+        expected.iter().map(|w| ("ip".to_owned(), "id".to_owned(), w.payload.clone())).collect();
+    let index = install(&p.root, "w0-installed", &path, &target.key)?;
+    assert_erased_after_reopen(&index, &target.key, &tuples)?;
     Ok(())
 }
 
@@ -459,7 +493,12 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     let mut expected: Vec<Want> = Vec::new();
     for f in &families {
         let (_, selector) = current(&p.local, "ip", "id", &f.payload)?;
-        expected.push(Want { kind: f.kind, selector, expires_at: now + 3_900 });
+        expected.push(Want {
+            kind: f.kind,
+            selector,
+            expires_at: now + 3_900,
+            payload: f.payload.clone(),
+        });
     }
     for (kind, payload) in [
         ("archived_actor", "p-archived"),
@@ -467,7 +506,12 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         ("legacy_replay_rule_c", "p-legacy"),
     ] {
         let (_, selector) = current(&p.local, "ip", "id", payload)?;
-        expected.push(Want { kind, selector, expires_at: now + 3_900 });
+        expected.push(Want {
+            kind,
+            selector,
+            expires_at: now + 3_900,
+            payload: payload.to_owned(),
+        });
     }
     expected.extend(extra);
     let verify = |db: &rusqlite::Connection| -> Result<(), StorageError> {
@@ -484,6 +528,12 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     verify(&merged.db)?;
     drop(merged);
     verify(&BackupDatabase::open(&path, &target.key)?.db)?;
+    // W0: after restore, a fresh-sequence replay of every tombstoned tuple is erased, immediately
+    // and after reopen.
+    let tuples: Vec<Tuple> =
+        expected.iter().map(|w| ("ip".to_owned(), "id".to_owned(), w.payload.clone())).collect();
+    let index = install(&p.root, "w0-installed", &path, &target.key)?;
+    assert_erased_after_reopen(&index, &target.key, &tuples)?;
     Ok(())
 }
 

@@ -135,7 +135,7 @@ fn erasure_late_stage_and_process() -> Result<(), StorageError> {
 
 /// A work entry whose authenticated tuple is exactly (principal, device, key, payload) and whose
 /// lifetime is fresh, so its erasure leaves a live tombstone.
-fn fresh_entry(sequence: u64, payload: &str, principal: &str, device: &str) -> Vec<u8> {
+pub(super) fn fresh_entry(sequence: u64, payload: &str, principal: &str, device: &str) -> Vec<u8> {
     let mut v: serde_json::Value =
         serde_json::from_slice(&super::stage_tests::bytes(sequence)).expect("entry fixture");
     v["envelope"]["payload_hash"] = json!(payload);
