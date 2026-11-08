@@ -1221,6 +1221,147 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+    fn spawn_compio_federation_listener(
+        context: MeshServerContext,
+        tls: ramflux_transport::MeshTlsConfig,
+        ca_pem: String,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let (addr_tx, addr_rx) = mpsc::channel::<Result<String, String>>();
+        std::thread::Builder::new().name("federation-compio-ijson-test".into()).spawn(
+            move || {
+                let outcome = (|| -> Result<(), String> {
+                    let reactor = compio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                    reactor.block_on(async move {
+                        let roots = Arc::new(move || Ok(vec![ca_pem.clone()]));
+                        let server =
+                            ramflux_transport::CompioMeshQuicServer::bind_with_pem_roots_provider(
+                                "127.0.0.1:0",
+                                &tls,
+                                roots,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let local = server.local_addr().map_err(|error| error.to_string())?;
+                        let _sent = addr_tx.send(Ok(local.to_string()));
+                        loop {
+                            let connection = server
+                                .accept_connection()
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            let context = context.clone();
+                            compio::runtime::spawn(async move {
+                                let _ =
+                                    handle_mesh_compio_quic_connection(connection, &context).await;
+                            })
+                            .detach();
+                        }
+                    })
+                })();
+                if let Err(error) = outcome {
+                    let _sent = addr_tx.send(Err(error));
+                }
+            },
+        )?;
+        addr_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| test_error("compio federation listener did not bind"))?
+            .map_err(test_error)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+    fn compio_quic_frame(path: &str, body: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let path = serde_json::to_string(path)?;
+        Ok(format!(r#"{{"method":"POST","path":{path},"body":{body}}}"#).into_bytes())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+    #[test]
+    fn federation_ijson_ingress_refuses_unsafe_integer_compio_quic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const REFUSAL_FRAME: &[u8] =
+            br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#;
+        let root = temp_cert_root("federation-ijson-compio-quic")?;
+        let (server_tls, router_tls, ca_pem) = issue_rsa_mesh_certificates(&root)?;
+        let source_seed = [0x5c; 32];
+        let valid_text = serde_json::to_string(&signed_forward_for_mesh(source_seed)?)?;
+        let duplicate_text = duplicate_x_probe_member(&valid_text)?;
+        let created_at_marker = "\"created_at\":";
+        if valid_text.matches(created_at_marker).count() != 1 {
+            return Err(test_error("expected exactly one created_at member"));
+        }
+        let value_start = valid_text
+            .find(created_at_marker)
+            .ok_or_else(|| test_error("missing created_at member"))?
+            + created_at_marker.len();
+        let value_len = valid_text[value_start..]
+            .find([',', '}'])
+            .ok_or_else(|| test_error("unterminated created_at value"))?;
+        let unsafe_created_at = format!(
+            "{}9007199254740992{}",
+            &valid_text[..value_start],
+            &valid_text[value_start + value_len..]
+        );
+        let rows = [
+            ("duplicate", duplicate_text.as_str(), false),
+            ("unsafe_integer", unsafe_created_at.as_str(), false),
+            ("control", valid_text.as_str(), true),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+
+        for (label, text, accepted) in rows {
+            let (mut context, store_path) =
+                test_mesh_server_context("federation-ijson-compio-quic")?;
+            context.state = Arc::new(crate::SharedFederationTrustState::new(
+                admitted_forward_source(source_seed)?,
+            ));
+            let router = CountingRouter::spawn(&router_tls, &ca_pem)?;
+            context.router = Arc::new(RouterMeshClient {
+                endpoint: router.endpoint.clone(),
+                server_name: "ramflux-router".to_owned(),
+                tls: server_tls.clone(),
+                client: ramflux_transport::MeshHttpClient::new(),
+                async_mesh: None,
+            });
+            let store = Arc::clone(&context.store);
+            let pending_before = store.list_pending_outbound(100)?;
+            let seen_before = store.inbound_forward_seen_count()?;
+            let endpoint =
+                spawn_compio_federation_listener(context, server_tls.clone(), ca_pem.clone())?;
+            let frame = compio_quic_frame("/s8/federation/envelope", text)?;
+            let response =
+                runtime.block_on(ramflux_transport::mesh_quic_exchange_raw_response_frame(
+                    &endpoint,
+                    &router_tls,
+                    "ramflux-federation",
+                    std::slice::from_ref(&ca_pem),
+                    &frame,
+                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                ))?;
+            let router_calls = router.finish()?;
+            let seen_after = store.inbound_forward_seen_count()?;
+
+            if accepted {
+                let parsed: ramflux_transport::GatewayQuicResponse =
+                    serde_json::from_slice(&response)?;
+                assert_eq!(parsed.status, 200, "{label} control: {parsed:?}");
+                assert!(parsed.body["accepted"].as_bool().unwrap_or(false), "{label} control");
+                assert_eq!(router_calls, 1, "{label} router calls");
+                assert_eq!(seen_after, seen_before + 1, "{label} seen rows");
+            } else {
+                assert_eq!(response, REFUSAL_FRAME, "{label} exact D3 refusal frame");
+                assert_eq!(router_calls, 0, "{label} router calls");
+                assert_eq!(seen_after, seen_before, "{label} seen rows");
+            }
+            assert_eq!(store.list_pending_outbound(100)?, pending_before, "{label} spool");
+            drop(store);
+            cleanup_store(&store_path);
+        }
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     fn issue_rsa_mesh_certificates(
         root: &Path,
     ) -> Result<
