@@ -145,7 +145,7 @@ pub(super) async fn run_anchored(
                 pass_anchored(&handle, &work, snapshot.generation, trigger, limits.call),
             );
             let result = tokio::select! {biased;_=stop.changed()=>break,result=pass=>result};
-            planner.note_generation(snapshot.generation);
+            let ok = matches!(result, Ok(Ok(_)));
             match result {
                 Ok(Ok(_)) => {
                     handle.resync_applied(snapshot.generation, epoch);
@@ -158,16 +158,22 @@ pub(super) async fn run_anchored(
                         .push((trigger, true));
                     #[cfg(test)]
                     handle.shared.receive_completed.notify_one();
-                    planner.note_completed(now_ms, false);
                 }
                 Ok(Err(error)) => tracing::debug!(%error,"receive pass deferred"),
                 Err(_) => tracing::debug!("receive pass deadline expired"),
             }
+            let finished_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+            planner.finish(now_ms, finished_ms, snapshot.generation, ok);
             continue;
         }
-        let wait = planner
-            .wake_at_ms(now_ms)
-            .and_then(|ms| origin.checked_add(std::time::Duration::from_millis(ms)));
+        // Not live: decide() cannot fire, so wait for wake instead of a past deadline spin.
+        let wait = if snapshot.state == NetworkingState::Live {
+            planner
+                .wake_at_ms(now_ms)
+                .and_then(|ms| origin.checked_add(std::time::Duration::from_millis(ms)))
+        } else {
+            None
+        };
         tokio::select! {biased;
             _ = stop.changed() => break,
             () = handle.receive_wake() => {}

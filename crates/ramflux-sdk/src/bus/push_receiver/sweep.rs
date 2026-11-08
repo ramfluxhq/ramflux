@@ -6,6 +6,7 @@
 //! Live `connection_manager::receive::run` keeps the 250 ms–5 s tick until P24
 //! activation. Tests drive this planner with a logical millisecond clock.
 
+use std::num::IntErrorKind;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -44,6 +45,9 @@ pub(crate) struct Planner {
     interval_ms: u64,
     seen_generation: Option<u64>,
     last_completed_ms: Option<u64>,
+    /// Failed-pass backoff: the next pass may not fire before this instant.
+    retry_at_ms: Option<u64>,
+    backoff_ms: u64,
     pub held_probe: bool,
     pub held_gap: bool,
     pub held_retry: bool,
@@ -56,17 +60,19 @@ impl SweepSetting {
     pub const MIN_SECS: u64 = 60;
     pub const MAX_SECS: u64 = 3600;
 
-    /// Pure parser: clamp 60..=3600, default 900. Deprecated vars never change the value.
+    /// Pure parser: trims, clamps 60..=3600 (overflow clamps to 3600), non-numeric defaults to 900.
+    /// Deprecated vars never change the value.
     #[must_use]
     pub(crate) fn parse(
         sweep_secs: Option<&str>,
         deprecated_min_ms: Option<&str>,
         deprecated_max_ms: Option<&str>,
     ) -> Self {
-        let push_secs = sweep_secs
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(Self::DEFAULT_PUSH_SECS)
-            .clamp(Self::MIN_SECS, Self::MAX_SECS);
+        let push_secs = match sweep_secs.map(str::trim).map(str::parse::<u64>) {
+            Some(Ok(secs)) => secs.clamp(Self::MIN_SECS, Self::MAX_SECS),
+            Some(Err(error)) if *error.kind() == IntErrorKind::PosOverflow => Self::MAX_SECS,
+            None | Some(Err(_)) => Self::DEFAULT_PUSH_SECS,
+        };
         Self {
             push_secs,
             deprecated_ignored: deprecated_min_ms.is_some() || deprecated_max_ms.is_some(),
@@ -105,12 +111,18 @@ impl SweepSetting {
 }
 
 impl Planner {
+    /// Failed-pass backoff bounds; same shape as the live receive loop (double, capped).
+    pub(crate) const RETRY_MIN_MS: u64 = 250;
+    pub(crate) const RETRY_MAX_MS: u64 = 5_000;
+
     #[must_use]
     pub(crate) fn new(setting: &SweepSetting, mode: SweepMode) -> Self {
         Self {
             interval_ms: setting.interval(mode).as_millis().try_into().unwrap_or(u64::MAX),
             seen_generation: None,
             last_completed_ms: None,
+            retry_at_ms: None,
+            backoff_ms: 0,
             held_probe: false,
             held_gap: false,
             held_retry: false,
@@ -120,7 +132,7 @@ impl Planner {
     /// Connected catch-up is immediate (the 100 ms bound is the test frame).
     #[must_use]
     pub(crate) fn decide(&self, now_ms: u64, view: View) -> Option<ResumeKind> {
-        if !view.live {
+        if !view.live || self.retry_at_ms.is_some_and(|at| now_ms < at) {
             return None;
         }
         if self.connected_catch_up(view) {
@@ -143,20 +155,38 @@ impl Planner {
         self.seen_generation != Some(view.generation)
     }
 
-    pub(crate) fn note_generation(&mut self, generation: u64) {
-        self.seen_generation = Some(generation);
+    /// Records one pass outcome. Only success marks the generation handled and anchors the
+    /// idle sweep (`started_ms`). Failure schedules a retry `backoff` after `finished_ms`.
+    pub(crate) fn finish(&mut self, started_ms: u64, finished_ms: u64, generation: u64, ok: bool) {
+        if ok {
+            self.seen_generation = Some(generation);
+            self.note_completed(started_ms, false);
+            self.backoff_ms = 0;
+            self.retry_at_ms = None;
+        } else {
+            self.backoff_ms = if self.backoff_ms == 0 {
+                Self::RETRY_MIN_MS
+            } else {
+                self.backoff_ms.saturating_mul(2).min(Self::RETRY_MAX_MS)
+            };
+            self.retry_at_ms = Some(finished_ms.saturating_add(self.backoff_ms));
+        }
     }
 
     /// Successful catch-up (not backpressure-stopped) anchors the idle sweep.
-    pub(crate) fn note_completed(&mut self, now_ms: u64, backpressure: bool) {
+    fn note_completed(&mut self, now_ms: u64, backpressure: bool) {
         if !backpressure {
             self.last_completed_ms = Some(now_ms);
         }
     }
 
-    /// Next sweep deadline in planner milliseconds, if a catch-up has completed.
+    /// Next wake in planner milliseconds: the retry instant while backing off, otherwise the
+    /// idle sweep deadline once a catch-up has completed.
     #[must_use]
     pub(crate) fn wake_at_ms(&self, now_ms: u64) -> Option<u64> {
+        if let Some(at) = self.retry_at_ms.filter(|at| *at > now_ms) {
+            return Some(at);
+        }
         let done = self.last_completed_ms?;
         Some(done.saturating_add(self.interval_ms).max(now_ms))
     }
