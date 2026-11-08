@@ -37,10 +37,15 @@ pub use account_db::receive::cover::{
 pub use account_db::receive::hold::{
     ReceiveHold, ReceiveHoldClass, ReceiveHoldJournal, ReceiveHoldResult,
 };
+pub use account_db::receive::migrate::{ReceiveMigrate, ReceiveMigrateResult};
 pub use account_db::receive::page::{
     ReceiveCoverStep, ReceiveGapOwned, ReceiveKnownLoss, ReceivePageView, ReceiveReconcileResult,
 };
 pub use account_db::receive::privacy::ReceiveBind;
+pub use account_db::receive::reset::{
+    CURSOR_AHEAD, RETIRED_FENCE_CAP, ReceiveIssued, ReceiveReset, ReceiveResetReason,
+    ReceiveResetResult,
+};
 pub use account_db::receive::settle::{ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult};
 pub use account_db::receive::stage::{ReceiveStage, ReceiveStageResult};
 pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction};

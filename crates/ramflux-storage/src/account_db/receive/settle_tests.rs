@@ -365,6 +365,20 @@ fn above_cursor_delegates_and_inactive_is_local() -> Result<(), StorageError> {
     assert_eq!(retired_above.work, Vec::<u64>::new());
     assert_eq!(retired_above.receipts, Vec::<(u64, String)>::new());
     assert_eq!(snap(&db, "e")?.cursor, 4);
+    assert_eq!(
+        intent_seqs(&snap(&db, "e")?),
+        vec![2, 3, 4],
+        "retired s>C settle leaves active-E intents unchanged"
+    );
+
+    put_row(&db, "old", 6, "staged", true)?;
+    assert_eq!(settle(&db, "old", 4, 6, Kind::Held)?, Out::Held);
+    let held = snap(&db, "old")?;
+    assert_eq!(held.cursor, 4);
+    assert_eq!(intent_seqs(&held), Vec::<u64>::new(), "retired Held writes no ACK intent");
+    assert_eq!(held.work, vec![6]);
+    assert_eq!(held.receipts, vec![(6, "held".into())]);
+    assert_eq!(intent_seqs(&snap(&db, "e")?), vec![2, 3, 4]);
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
@@ -396,9 +410,35 @@ fn retired_incarnation_refuses_cover_and_stage() -> Result<(), StorageError> {
     }
     assert_eq!(snap(&db, "old")?.work, vec![1], "retired stage writes no new work");
 
-    match db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.require_open_input(1)) {
+    db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.require_open_input(1))?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn retired_redrive_allows_source_gate_and_bind() -> Result<(), StorageError> {
+    let (root, db) = setup("ws-retired-redrive")?;
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET retired_incarnations=?1 WHERE target_delivery_id='t'",
+        params![serde_json::to_vec(&["old"])?],
+    )?;
+    put_row(&db, "old", 1, "staged", true)?;
+    db.send_direct_message("thread", "M", "peer", b"secret")?;
+    db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.require_open_input(1))?;
+    let bound =
+        db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.bind_logical_message(1, "M"))?;
+    assert_eq!(bound, super::privacy::ReceiveBind::Bound);
+    match cover_as(&db, "old", 0, 1, ReceiveCoverKind::Terminal) {
         Err(StorageError::Integrity(super::RETIRED_INCARNATION)) => {}
-        other => panic!("source gate under retired E: {other:?}"),
+        other => panic!("cover under retired E: {other:?}"),
+    }
+    let wire = bytes(2);
+    let mut page = input(&wire, 2);
+    page.incarnation = "old";
+    match db.receive_transaction(expect(&db, "old", 0)?, 1, |tx| tx.stage(page)) {
+        Err(StorageError::Integrity(super::RETIRED_INCARNATION)) => {}
+        other => panic!("stage under retired E: {other:?}"),
     }
     drop(db);
     std::fs::remove_dir_all(root)?;

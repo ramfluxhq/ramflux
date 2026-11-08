@@ -912,6 +912,8 @@ mod receive_ws;
 
 #[path = "receive_hold.rs"]
 mod receive_hold;
+#[path = "receive_incarnation.rs"]
+mod receive_incarnation;
 
 #[path = "receive_history.rs"]
 mod receive_history;

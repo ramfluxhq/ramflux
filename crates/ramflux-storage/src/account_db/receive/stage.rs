@@ -60,6 +60,7 @@ impl ReceiveTransaction<'_> {
     ) -> Result<ReceiveStageResult, StorageError> {
         self.require_writer()?;
         self.refuse_retired()?;
+        self.refuse_frozen()?;
         self.db.write_transaction(|| self.stage_inner(input, now))
     }
 
