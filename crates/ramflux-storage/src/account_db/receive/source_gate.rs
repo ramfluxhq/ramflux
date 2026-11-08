@@ -132,6 +132,80 @@ impl crate::AccountDb {
         Ok(())
     }
 
+    /// Test support: verified inbox-policy row used as the hold source bucket.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn seed_inbox_policy_for_test(&self, key: &str, source: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO runtime_inbox_policy VALUES(?1,?2,1,1,604801,0,'none','',0,0)",
+            params![key, source],
+        )?;
+        Ok(())
+    }
+
+    /// Test support: overwrite staged work `byte_len` without a multi-MiB payload.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn set_receive_work_bytes_for_test(
+        &self,
+        sequence: u64,
+        byte_len: i64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE gateway_receive_work SET entry_json=zeroblob(?1), byte_len=?1 WHERE inbox_seq=?2",
+            params![byte_len, sequence.to_be_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Test support: retry and policy row counts for one admission key.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn inbox_retry_and_policy_counts_for_test(
+        &self,
+        key: &str,
+    ) -> Result<(i64, i64), StorageError> {
+        let retry = self.connection.query_row(
+            "SELECT count(*) FROM runtime_inbox_retry WHERE envelope_key=?1",
+            params![key],
+            |row| row.get(0),
+        )?;
+        let policy = self.connection.query_row(
+            "SELECT count(*) FROM runtime_inbox_policy WHERE envelope_key=?1",
+            params![key],
+            |row| row.get(0),
+        )?;
+        Ok((retry, policy))
+    }
+
+    /// Test support: retire the live E so a new incarnation can redrive the same key.
+    ///
+    /// # Errors
+    /// Returns SQL or encoding errors.
+    pub fn retire_receive_incarnation_for_test(
+        &self,
+        target: &str,
+        live: &str,
+        next: &str,
+    ) -> Result<(), StorageError> {
+        use crate::ProjectionStore;
+        self.connection.execute(
+            "UPDATE gateway_receive_epoch
+             SET incarnation_id=?2, retired_incarnations=?3
+             WHERE target_delivery_id=?1",
+            params![target, next, serde_json::to_vec(&[live])?],
+        )?;
+        self.connection.execute(
+            "UPDATE gateway_receive_receipt SET first_seen=0 WHERE incarnation_id=?1",
+            params![live],
+        )?;
+        self.set_projection_checkpoint(&format!("gateway_receive_cursor:{target}"), "0")?;
+        Ok(())
+    }
+
     /// Test support: advances the private-erasure generation as an erase would.
     ///
     /// # Errors

@@ -8,7 +8,7 @@
 
 use ramflux_storage::{
     AccountDb, ReceiveExpectation, ReceiveHold, ReceiveHoldClass, ReceiveHoldJournal,
-    ReceiveHoldResult,
+    ReceiveHoldResult, ReceiveTransaction,
 };
 
 use crate::{SdkError, gateway::GatewayInboxEntry};
@@ -80,14 +80,27 @@ impl SourceHold<'_> {
         )
     }
 
-    fn admit(&self, db: &AccountDb, input: ReceiveHold<'_>) -> Result<HoldDisposition, SdkError> {
-        Ok(
-            match db
-                .receive_transaction(self.expected, self.generation, |tx| tx.admit_hold(input))?
-            {
-                ReceiveHoldResult::Held { evicted } => HoldDisposition::HeldLocal { evicted },
-                ReceiveHoldResult::Paused => HoldDisposition::Paused,
-            },
-        )
+    /// Hold admission inside an already-open receive transaction.
+    ///
+    /// # Errors
+    /// Returns the storage refusal from [`ReceiveTransaction::admit_hold`].
+    pub(crate) fn admit_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        input: ReceiveHold<'_>,
+    ) -> Result<HoldDisposition, ramflux_storage::StorageError> {
+        let _ = self;
+        Ok(match tx.admit_hold(input)? {
+            ReceiveHoldResult::Held { evicted } => HoldDisposition::HeldLocal { evicted },
+            ReceiveHoldResult::Paused => HoldDisposition::Paused,
+        })
+    }
+
+    pub(crate) fn admit(
+        &self,
+        db: &AccountDb,
+        input: ReceiveHold<'_>,
+    ) -> Result<HoldDisposition, SdkError> {
+        Ok(db.receive_transaction(self.expected, self.generation, |tx| self.admit_in(tx, input))?)
     }
 }

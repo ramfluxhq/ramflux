@@ -260,16 +260,33 @@ impl AccountRuntime {
                     self.apply_receive_entry(*entry, source, backpressure, reply).await?;
                 }
             }
-            AccountWork::SettleRetained { turn, sequence, reply, .. } => {
-                if reply.is_closed() {
+            AccountWork::SettleRetained { generation, turn, sequence, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
                     return Ok(false);
                 }
-                let result = super::lifecycle_fence::settle_retained(
-                    account.client.account_db()?,
-                    handle.generation(),
-                    &turn,
-                    sequence,
-                );
+                let db = account.client.account_db()?;
+                let expected = turn.expected();
+                let source = crate::bus::sync_driver::source::ws::SourceWs {
+                    expected,
+                    generation: handle.generation(),
+                };
+                let result =
+                    super::lifecycle_fence::commit(db, handle.generation(), expected, |tx| {
+                        match source.settle_in(
+                            tx,
+                            ramflux_storage::ReceiveSettle {
+                                sequence,
+                                kind: ramflux_storage::ReceiveSettleKind::Terminal,
+                            },
+                        )? {
+                            ramflux_storage::ReceiveSettleResult::Settled
+                            | ramflux_storage::ReceiveSettleResult::Held => Ok(()),
+                            ramflux_storage::ReceiveSettleResult::Paused => Err(
+                                ramflux_storage::StorageError::Integrity("settle retained paused"),
+                            ),
+                        }
+                    })
+                    .map_err(SdkError::from);
                 let _ = reply.send(result);
             }
             AccountWork::AckResults { generation, state, cursor, mut backpressure, reply } => {
