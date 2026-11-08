@@ -159,8 +159,8 @@ fn assert_no_dispatch(router: &RouterHandle, target: &str, response: &EphemeralR
     assert_eq!(dispatch_of(router, target), zero_dispatch(), "inbox and home-node forwards");
 }
 
-struct NowMsGuard<'a>(&'a RouterHandle);
-impl Drop for NowMsGuard<'_> {
+struct NowMsGuard(RouterHandle);
+impl Drop for NowMsGuard {
     fn drop(&mut self) {
         self.0.set_ephemeral_now_ms(None);
     }
@@ -450,7 +450,7 @@ fn ephemeral_deadline() -> TestResult {
     let mismatch =
         router.state().route_ephemeral(&mismatch_env, mismatch_expires.saturating_add(1), now_ms());
     assert_eq!(mismatch, EphemeralRouteResult::DeadlineMismatch);
-    let _now = NowMsGuard(&router);
+    let _now = NowMsGuard(router.clone());
     let http_env = signed_ephemeral("deadline-http", TARGET)?;
     let http_expires = computed_expires(&http_env, now_ms())?;
     router.set_ephemeral_now_ms(Some(http_expires.saturating_sub(1)));

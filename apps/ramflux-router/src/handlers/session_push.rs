@@ -117,13 +117,13 @@ fn bound_nack(
     }
 }
 
-fn envelope_now_ms(router: &crate::router_runtime::RouterHandle) -> u64 {
+fn envelope_now_ms(
+    #[cfg_attr(not(test), allow(unused_variables))] router: &crate::router_runtime::RouterHandle,
+) -> u64 {
     #[cfg(test)]
     if let Some(now) = router.ephemeral_now_ms() {
         return now;
     }
-    #[cfg(not(test))]
-    let _router = router;
     ramflux_node_core::now_unix_seconds().saturating_mul(1_000)
 }
 

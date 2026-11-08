@@ -139,14 +139,15 @@ pub(crate) async fn handle_at(
     Ok(map_forward(outcome))
 }
 
-fn skip_deadline_equality(hub: &GatewaySessionHub) -> bool {
+fn skip_deadline_equality(
+    #[cfg_attr(not(test), allow(unused_variables))] hub: &GatewaySessionHub,
+) -> bool {
     #[cfg(test)]
     {
         hub.skip_deadline_equality()
     }
     #[cfg(not(test))]
     {
-        let _hub = hub;
         false
     }
 }
