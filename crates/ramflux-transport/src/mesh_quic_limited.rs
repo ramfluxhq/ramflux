@@ -144,6 +144,50 @@ pub async fn mesh_quic_exchange_raw_frame(
     frame: &[u8],
     deadline: Instant,
 ) -> Result<GatewayQuicResponse, TransportError> {
+    let response = mesh_quic_exchange_raw_response_frame_inner(
+        endpoint,
+        tls,
+        server_name,
+        peer_ca_pems,
+        frame,
+        deadline,
+    )
+    .await?;
+    Ok(ramflux_protocol::parse_i_json(&response)?)
+}
+
+/// Sends caller-supplied request-frame bytes unchanged and returns the response-frame bytes.
+/// This is only available to tests and explicit test-support builds.
+/// # Errors
+/// TLS, QUIC or framing failures, or the deadline.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn mesh_quic_exchange_raw_response_frame(
+    endpoint: &str,
+    tls: &crate::MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<Vec<u8>, TransportError> {
+    mesh_quic_exchange_raw_response_frame_inner(
+        endpoint,
+        tls,
+        server_name,
+        peer_ca_pems,
+        frame,
+        deadline,
+    )
+    .await
+}
+
+async fn mesh_quic_exchange_raw_response_frame_inner(
+    endpoint: &str,
+    tls: &crate::MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+    frame: &[u8],
+    deadline: Instant,
+) -> Result<Vec<u8>, TransportError> {
     let at = tokio::time::Instant::from_std(deadline);
     let addr = tokio::net::lookup_host(endpoint)
         .await?
@@ -165,8 +209,7 @@ pub async fn mesh_quic_exchange_raw_frame(
     tokio::time::timeout_at(at, write_quic_raw_frame(&mut send, frame))
         .await
         .map_err(|_| expired())??;
-    let response = tokio::time::timeout_at(at, crate::quic_gateway::read_quic_raw_frame(&mut recv))
+    tokio::time::timeout_at(at, crate::quic_gateway::read_quic_raw_frame(&mut recv))
         .await
-        .map_err(|_| expired())??;
-    Ok(ramflux_protocol::parse_i_json(&response)?)
+        .map_err(|_| expired())?
 }

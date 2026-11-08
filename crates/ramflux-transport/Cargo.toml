@@ -10,6 +10,7 @@ repository = "https://github.com/ramflux/ramflux-transport"
 default = []
 # Read-only framing progress for deterministic integration fixtures.
 itest-fingerprint = []
+test-support = []
 # PERF-D1-1: default-off transport QUIC capacity microbench. Gates the relay_quic_bench example
 # only; never enters the default/release dependency graph or any normal artifact (marker=0).
 perf-bench = []
