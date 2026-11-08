@@ -270,6 +270,34 @@ async fn case() -> Case {
     reopen(&mut fixture.source)?;
     assert!(reset_work_present(&fixture.source)?);
 
+    // L1: a PairRecoveryRequired from the effect rolls back its own reset writes and is returned
+    // unchanged. P20 routes that exact error to `recover`; the effect path never leaves reset work.
+    let pair_db = fixture.source.client.account_db()?;
+    pair_db.send_direct_message("healthy", "pair-recovery", "peer", b"pair")?;
+    let pair_bytes = unique_entry(5, "pair-recovery-hash")?;
+    let expected = ReceiveExpectation {
+        target: TARGET,
+        incarnation: INCARNATION,
+        cursor: 0,
+        generation: 1,
+        erasure_generation: pair_db.privacy_erasure_generation()?,
+    };
+    assert_eq!(
+        OwnCopyW1 { expected, generation: 1 }.stage(pair_db, staged(&pair_bytes, 5))?,
+        ReceiveStageResult::Staged
+    );
+    let pair = OwnCopyW1 { expected, generation: 1 }.effect(pair_db, 5, "pair-recovery", || {
+        pair_db.persist_actor_state("dm-pair/reset-work/l1", &json!({"pending": true}))?;
+        Err::<(), SdkError>(SdkError::PairRecoveryRequired)
+    });
+    assert!(matches!(&pair, Err(SdkError::PairRecoveryRequired)), "{pair:?}");
+    assert!(
+        !pair_db.actor_state_exists("dm-pair/reset-work/l1")?,
+        "the effect's reset work must not survive a PairRecoveryRequired"
+    );
+    assert!(!locator_present(&fixture.source, "pair-recovery")?);
+    assert_eq!(pair_db.receive_state_for_test(5)?.0.as_deref(), Some("staged"));
+
     fixture.source.client.account_db()?.send_direct_message(
         "healthy",
         "omit-locator",

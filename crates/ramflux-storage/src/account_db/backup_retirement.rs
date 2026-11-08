@@ -8,7 +8,19 @@ use rusqlite::params;
 pub(super) fn archive_outbound_state(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     super::message_footprint::ensure_archive_actor_table(db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/%'; INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/active/%' OR state_kind LIKE 'dm-pair/reset-work/%' OR state_kind LIKE 'dm-pair/bootstrap/%'; DELETE FROM projection_checkpoint WHERE last_event_id IN (SELECT event_id FROM local_event_log WHERE event_type='group.sender_key.state' AND CASE WHEN json_valid(CAST(event_body AS TEXT)) THEN json_extract(CAST(event_body AS TEXT),'$.session_snapshot.is_initiator_side') END=1); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'own-device/send/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'own-device/send/%'; DELETE FROM outbox_queue;")?;
+    strip_own_copy_locators(db)?;
     Ok(())
+}
+
+/// Removes the own-copy (T,E,s) locator actor rows with their footprint and copy bindings.
+/// Backups and restores never carry the locator (S6b P14 H1): it is live-account state that
+/// WA resolves, and erase must not find a copy of it in an exported or restored file.
+pub(super) fn strip_own_copy_locators(db: &rusqlite::Connection) -> rusqlite::Result<()> {
+    db.execute_batch(
+        "DELETE FROM message_copy_binding WHERE copy_id LIKE 'actor:own-device/sequence-locator/%'; \
+         DELETE FROM message_footprint WHERE locator LIKE 'own-device/sequence-locator/%'; \
+         DELETE FROM runtime_actor_state WHERE state_kind LIKE 'own-device/sequence-locator/%';",
+    )
 }
 
 impl AccountDb {

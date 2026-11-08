@@ -53,6 +53,11 @@ impl OwnCopyW1<'_> {
 
     /// Runs the own-copy durable writes, then registers the (T,E,s) locator and binds the
     /// staged input to `message`, all inside one receive transaction.
+    ///
+    /// Error contract: any error from `effect` rolls back every write it made, and that error
+    /// is returned unchanged. A `PairRecoveryRequired` therefore leaves no reset work behind
+    /// here. P20 must route that exact error to `recover`, which runs the reset as its own
+    /// W1 cut. Nothing in this path retries the reset implicitly.
     pub(crate) fn effect<T>(
         &self,
         db: &AccountDb,

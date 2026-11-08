@@ -184,6 +184,27 @@ fn own_copy_late_w1_locator(db: &AccountDb) -> Result<(), StorageError> {
     own_copy_locator_backup_exclusion()
 }
 
+/// Counts own-copy locator rows in runtime actor state, message footprints and copy bindings.
+fn own_copy_locator_rows(conn: &rusqlite::Connection) -> rusqlite::Result<(i64, i64, i64)> {
+    Ok((
+        conn.query_row(
+            "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'own-device/sequence-locator/%'",
+            [],
+            |row| row.get(0),
+        )?,
+        conn.query_row(
+            "SELECT count(*) FROM message_footprint WHERE locator LIKE 'own-device/sequence-locator/%'",
+            [],
+            |row| row.get(0),
+        )?,
+        conn.query_row(
+            "SELECT count(*) FROM message_copy_binding WHERE copy_id LIKE 'actor:own-device/sequence-locator/%'",
+            [],
+            |row| row.get(0),
+        )?,
+    ))
+}
+
 /// Decrypted native backup contains neither ledger rows nor the own-copy sequence locator.
 fn own_copy_locator_backup_exclusion() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("w1-own-copy-backup")?;
@@ -197,8 +218,42 @@ fn own_copy_locator_backup_exclusion() -> Result<(), StorageError> {
         "directory/conversation/seq-locator",
         &json!({"target":"t","incarnation":"e","sequence":1}),
     )?;
+    let live = db.connection.call(|conn| own_copy_locator_rows(conn))?;
+    assert!(live.0 == 1 && live.1 >= 1 && live.2 == 1, "locator is registered live: {live:?}");
+    // Archive path (install.rs fresh restore): the strip runs on a live copy of the rows.
+    let archived = crate::tests::test_db("w1-own-copy-archive")?;
+    archived.1.persist_message_actor_state(
+        "B",
+        "own-device/sequence-locator/B",
+        &json!({"target":"t","incarnation":"e","sequence":1}),
+    )?;
+    archived
+        .1
+        .connection
+        .call(|conn| crate::account_db::backup_retirement::archive_outbound_state(conn))?;
+    assert_eq!(
+        archived.1.connection.call(|conn| own_copy_locator_rows(conn))?,
+        (0, 0, 0),
+        "archive_outbound must drop the locator, footprint and binding rows"
+    );
+    // Snapshot file: opened directly with the snapshot key, never through the live handle.
     let incoming = root.join("incoming.db");
     let snapshot = db.write_backup_snapshot(&incoming)?;
+    let file = rusqlite::Connection::open(&incoming)?;
+    file.execute_batch(&format!("PRAGMA key = \"x'{}'\";", snapshot.key.sqlcipher_hex()))?;
+    assert_eq!(
+        own_copy_locator_rows(&file)?,
+        (0, 0, 0),
+        "decrypted backup file must not contain the own-copy locator, footprint or binding"
+    );
+    let leaked: i64 = file.query_row(
+        "SELECT count(*) FROM runtime_actor_state WHERE state_kind='directory/conversation/seq-locator'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(leaked, 1, "the strip is narrow: other actor state stays in the backup");
+    drop(file);
+    // Fresh restore into a live account: the merged account holds no locator rows.
     let local_index = crate::AccountIndex::open(root.join("local"))?;
     local_index.create_account("acct", "principal")?;
     let local_key = crate::AccountDbKey::derive("acct", b"storage-test-secret");
@@ -207,22 +262,14 @@ fn own_copy_locator_backup_exclusion() -> Result<(), StorageError> {
     let copied = local.write_backup_snapshot(&target)?;
     let mut merged = crate::BackupDatabase::open(&target, &copied.key)?;
     merged.merge_native_backup(&incoming, &snapshot.key, || Ok(()))?;
-    let locator: i64 = merged.db.query_row(
-        "SELECT count(*) FROM runtime_actor_state WHERE state_kind LIKE 'own-device/sequence-locator/%'",
-        [],
-        |row| row.get(0),
-    )?;
-    assert_eq!(locator, 0, "decrypted native backup must not contain the own-copy locator");
-    let leaked: i64 = merged.db.query_row(
-        "SELECT count(*) FROM runtime_actor_state WHERE state_kind='directory/conversation/seq-locator'",
-        [],
-        |row| row.get(0),
-    )?;
     assert_eq!(
-        leaked, 1,
-        "omit own-device backup exclusion: a conversation-prefixed locator is imported"
+        own_copy_locator_rows(&merged.db)?,
+        (0, 0, 0),
+        "restored account must not contain the own-copy locator"
     );
     drop(db);
+    drop(archived.1);
+    std::fs::remove_dir_all(archived.0)?;
     drop(local);
     std::fs::remove_dir_all(root)?;
     Ok(())

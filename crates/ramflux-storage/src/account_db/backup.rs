@@ -132,6 +132,7 @@ impl AccountDb {
             if let Err(error) = super::receive::ledger_backup::sanitize_backup(&target) {
                 return Ok(Err(error));
             }
+            super::backup_retirement::strip_own_copy_locators(&target)?;
             target.execute("DELETE FROM object_segment_resource", [])?;
             // Historical archives have no native physical progress to clear.
             let native:bool=target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0))?;
