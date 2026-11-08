@@ -3,6 +3,8 @@
 
 //! Tombstones of deleted authenticated inputs. A row holds only MAC selectors, the bundle that
 //! produced each, and an expiry; it never holds an id, ciphertext or message link.
+//! `record_erased_input` is the store API; live capture inserts the same rows through SQL.
+#![allow(dead_code)]
 use crate::{AccountDb, StorageError};
 use rusqlite::params;
 
