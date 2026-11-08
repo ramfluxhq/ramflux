@@ -44,6 +44,13 @@ terminal = dict(prepared, phase='cancelled', result='PublicationPending')
 objects = dict(Begin=begin, TransferBegin=transfer, Join=obj('Join', token=token, display_name=name), BeginResult=br, Update=update, LocalEvent=obj('LocalEvent', update=prepared), CredentialRequest=dict(local_account_id=escaped_id(0,128), reservation_id=b(1), frontend_generation=U, action='unlock'))
 objects['Update_installed'] = prepared
 objects['Update_terminal'] = terminal
+objects['EnrollmentBodyMax'] = dict(schema='ramflux.identity.pairing.enrollment.v1', version=1,
+    invitation_id=b(1), transcript_hash=b(2), base_record_hash=b(3), base_epoch=U,
+    recipient_ref=ref(), branch_signing_key=b(4), agreement_key=b(5), requested_role='secondary',
+    capabilities=CAPS, lease_expires_at=U, display_name=name)
+objects['PreservationBodyMax'] = dict(schema='ramflux.identity.transfer.preserve.v1', version=1,
+    transfer_id=b(1), transcript_hash=b(2), old_record_hash=b(3), new_record_hash=b(4),
+    destination_ref=ref(), recipient_mode='existing', policy='preserve_all_existing', expires_at=U)
 for typ, extra in [('Confirm',dict(transcript_hash=b(1), match=False)), ('Approve',dict(transcript_hash=b(1), proposal_hash=b(2), approved=False)), ('Prepare',dict(transcript_hash=b(1))), ('Cancel',{}), ('StatusRequest',{})]:
     objects[typ] = obj(typ, **base, **extra)
 for tag, value in [('begin', br), ('update', prepared), ('error', obj('Failure', code='PublicationPending', retry_after_ms=None))]:

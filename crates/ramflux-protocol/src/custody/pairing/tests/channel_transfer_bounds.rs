@@ -8,6 +8,10 @@ use crate::custody::pairing::channel::*;
 const MAX_CHUNK: usize = 8192;
 const MAX_HPKE: u64 = 819_200;
 const MAX_CANDIDATE: u64 = 524_288;
+const OPERATION_ID: &str = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI";
+const PROPOSAL_HASH: &str = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM";
+const RECORD_HASH: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+const COMPACTED_IDS_HASH: &str = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU";
 
 fn hash() -> String {
     encode_base64url([1; 32])
@@ -40,7 +44,8 @@ fn independent<T: PairingWire>(all: &Value, key: &str) -> TestResult<Value> {
 
 fn transfer_transcript(source: &Value) -> TestResult<(Value, Transcript)> {
     let mut value = source.clone();
-    let common = transfer(&source["initiator"]["common"]);
+    let mut common = transfer(&source["initiator"]["common"]);
+    common["transfer_id"] = json!(encode_base64url([6; 32]));
     value["initiator"]["common"] = common.clone();
     value["responder"]["common"] = common;
     value["initiator"]["hpke_key"] = json!(encode_base64url([100; 32]));
@@ -91,8 +96,8 @@ fn context<'a>(
         transcript_hash: digest,
         sender,
         phase,
-        operation_id: digest,
-        proposal_hash: Some(digest),
+        operation_id: OPERATION_ID,
+        proposal_hash: Some(PROPOSAL_HASH),
         record_hash,
         record_epoch: Some(MAX_SAFE_JSON_INTEGER),
         compacted_ids_hash,
@@ -102,12 +107,33 @@ fn context<'a>(
 #[test]
 fn pairing_channel_transfer_bounds_and_contexts() -> TestResult {
     let all = maxima()?;
+    variable_width_body_maxima(&all).map_err(|e| format!("variable-width body maxima: {e}"))?;
     transfer_payload_bounds(&all).map_err(|e| format!("transfer payload bounds: {e}"))?;
     transfer_contexts(&all).map_err(|e| format!("transfer contexts: {e}"))?;
     channel_chunk_bounds(&all).map_err(|e| format!("channel chunk bounds: {e}"))?;
     channel_contexts(&all).map_err(|e| format!("channel contexts: {e}"))?;
     preservation_contexts(&all).map_err(|e| format!("preservation contexts: {e}"))?;
     binding_and_hpke_contexts(&all).map_err(|e| format!("binding and HPKE contexts: {e}"))?;
+    Ok(())
+}
+
+fn variable_width_body_maxima(all: &Value) -> TestResult {
+    let enrollment = independent::<EnrollmentBody>(all, "EnrollmentBodyMax")?;
+    assert_eq!(enrollment["display_name"].as_str().ok_or("display name")?.len(), 128);
+    assert_eq!(enrollment["recipient_ref"]["device_id"].as_str().ok_or("device id")?.len(), 128);
+    field::<EnrollmentBody>(&enrollment, "/display_name", json!("x".repeat(129)), "display_name")?;
+    field::<EnrollmentBody>(
+        &enrollment,
+        "/recipient_ref/device_id",
+        json!("x".repeat(129)),
+        "ref.device_id",
+    )?;
+
+    let preservation = independent::<PreservationBody>(all, "PreservationBodyMax")?;
+    assert_eq!(
+        preservation["destination_ref"]["device_id"].as_str().ok_or("destination device id")?.len(),
+        128
+    );
     Ok(())
 }
 
@@ -155,7 +181,10 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
             "/group_restriction_summary",
             {
                 let mut v = full["group_restriction_summary"].as_array().ok_or("groups")?.clone();
-                v.push(v[0].clone());
+                v[63]["group_id"] = json!("zzzz");
+                let mut extra = v[63].clone();
+                extra["group_id"] = json!("zzzzz");
+                v.push(extra);
                 json!(v)
             },
             "group_restriction_summary",
@@ -164,7 +193,10 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
             "/pending_erasure",
             {
                 let mut v = full["pending_erasure"].as_array().ok_or("erasure")?.clone();
-                v.push(v[0].clone());
+                v[255]["device_id"] = json!("zzzz");
+                let mut extra = v[255].clone();
+                extra["device_id"] = json!("zzzzz");
+                v.push(extra);
                 json!(v)
             },
             "pending_erasure",
@@ -173,7 +205,10 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
             "/optional_data_keys",
             {
                 let mut v = full["optional_data_keys"].as_array().ok_or("keys")?.clone();
-                v.push(v[0].clone());
+                v[31]["key_id"] = json!("zzzz");
+                let mut extra = v[31].clone();
+                extra["key_id"] = json!("zzzzz");
+                v.push(extra);
                 json!(v)
             },
             "optional_data_keys",
@@ -181,6 +216,13 @@ fn transfer_payload_bounds(all: &Value) -> TestResult {
     ] {
         field::<TransferPayload>(&full, path, value, error)?;
     }
+
+    assert_eq!(
+        full["group_restriction_summary"][0]["group_id"].as_str().ok_or("group id")?.len(),
+        256
+    );
+    assert_eq!(full["optional_data_keys"][0]["key_id"].as_str().ok_or("key id")?.len(), 256);
+    assert_eq!(full["pending_erasure"][0]["device_id"].as_str().ok_or("device id")?.len(), 128);
 
     // Independent maxima reach the declared 256-byte payload identifiers,
     // 128-byte DeviceRef ids and all hash-count limits. The element byte
@@ -366,10 +408,10 @@ fn channel_chunk_bounds(all: &Value) -> TestResult {
             "chunk_length",
         )?;
     }
-    // The channel byte cap is conservative: the largest valid chunk encoding
-    // is smaller than 11,700 because a chunk is capped at 8,192 raw bytes and
-    // every other field is fixed-width. The independent max fixture proves the
-    // largest reachable encoding; cap+1 is covered by from_wire_bytes below.
+    // The channel byte cap is conservative: every valid payload is smaller than
+    // 11,700 because chunks are capped at 8,192 raw bytes and remaining fields
+    // have lower bounded maxima. Thus an exact-size valid Channel is unreachable; the
+    // independent max fixture pins the largest reachable encoding instead.
     let hpke = all["Channel_hpke"]["wire"].as_str().ok_or("hpke wire")?;
     assert!(hpke.len() < Channel::LIMIT);
     let mut over = hpke.as_bytes().to_vec();
@@ -387,6 +429,17 @@ fn channel_contexts(all: &Value) -> TestResult {
     let (transcript_value, transcript) = transfer_transcript(source)?;
     let common = &transcript_value["initiator"]["common"];
     let digest = hash();
+    assert_ne!(digest, common["transfer_id"].as_str().ok_or("transfer id")?);
+    assert_ne!(digest, OPERATION_ID);
+    assert_ne!(digest, PROPOSAL_HASH);
+    assert_ne!(digest, RECORD_HASH);
+    assert_ne!(digest, COMPACTED_IDS_HASH);
+    assert_ne!(OPERATION_ID, PROPOSAL_HASH);
+    assert_ne!(OPERATION_ID, RECORD_HASH);
+    assert_ne!(OPERATION_ID, COMPACTED_IDS_HASH);
+    assert_ne!(PROPOSAL_HASH, RECORD_HASH);
+    assert_ne!(PROPOSAL_HASH, COMPACTED_IDS_HASH);
+    assert_ne!(RECORD_HASH, COMPACTED_IDS_HASH);
 
     let enrollment_context = decode_value::<Transcript>(source)?;
     let enrollment_common = &source["initiator"]["common"];
@@ -479,6 +532,22 @@ fn channel_contexts(all: &Value) -> TestResult {
         )),
         Err(WireError::Field("channel_purpose"))
     );
+    let enrollment_artifact = channel(
+        enrollment_common,
+        &digest,
+        json!({"kind":"artifact_chunk","object_kind":"candidate","object_id":enrollment_common["invitation_id"],"index":0,"count":1,"total_bytes":1,"bytes":encode_base64url([1])}),
+    );
+    assert_eq!(
+        decode_value::<Channel>(&enrollment_artifact)?.validate_context(&context(
+            &enrollment_context,
+            &digest,
+            "responder",
+            "mutually_confirmed",
+            None,
+            None,
+        )),
+        Err(WireError::Field("channel_purpose"))
+    );
 
     let hpke_chunk = channel(
         common,
@@ -511,7 +580,7 @@ fn channel_contexts(all: &Value) -> TestResult {
     );
     c.sender = "responder";
     c.phase = "prepared";
-    c.record_hash = Some(&digest);
+    c.record_hash = Some(RECORD_HASH);
     decode_value::<Channel>(&candidate_chunk)?.validate_context(&c)?;
     let mut wrong = candidate_chunk.clone();
     wrong["payload"]["object_id"] = json!(encode_base64url([2; 32]));
@@ -519,11 +588,22 @@ fn channel_contexts(all: &Value) -> TestResult {
         decode_value::<Channel>(&wrong)?.validate_context(&c),
         Err(WireError::Field("artifact_context"))
     );
+    c.sender = "initiator";
+    assert_eq!(
+        decode_value::<Channel>(&candidate_chunk)?.validate_context(&c),
+        Err(WireError::Field("channel_role"))
+    );
+    c.sender = "responder";
+    c.phase = "acknowledged";
+    assert_eq!(
+        decode_value::<Channel>(&candidate_chunk)?.validate_context(&c),
+        Err(WireError::Field("channel_phase"))
+    );
 
     let approval = channel(
         common,
         &digest,
-        json!({"kind":"approval","proposal_hash":digest,"base_record_hash":common["record_hash"],"base_epoch":common["device_set_epoch"],"approved":true}),
+        json!({"kind":"approval","proposal_hash":PROPOSAL_HASH,"base_record_hash":common["record_hash"],"base_epoch":common["device_set_epoch"],"approved":true}),
     );
     let mut c = context(&transcript, &digest, "initiator", "proposal_pending", None, None);
     decode_value::<Channel>(&approval)?.validate_context(&c)?;
@@ -560,9 +640,9 @@ fn channel_contexts(all: &Value) -> TestResult {
     let candidate = channel(
         common,
         &digest,
-        json!({"kind":"candidate_ready","transfer_id":common["transfer_id"],"record_hash":digest,"compacted_ids_hash":null}),
+        json!({"kind":"candidate_ready","transfer_id":common["transfer_id"],"record_hash":RECORD_HASH,"compacted_ids_hash":null}),
     );
-    let mut c = context(&transcript, &digest, "responder", "prepared", Some(&digest), None);
+    let mut c = context(&transcript, &digest, "responder", "prepared", Some(RECORD_HASH), None);
     decode_value::<Channel>(&candidate)?.validate_context(&c)?;
     for (path, value, error) in [
         ("/payload/transfer_id", json!(encode_base64url([2; 32])), "transfer_id"),
@@ -575,7 +655,7 @@ fn channel_contexts(all: &Value) -> TestResult {
             Err(WireError::Field(error))
         );
     }
-    c.compacted_ids_hash = Some(&digest);
+    c.compacted_ids_hash = Some(COMPACTED_IDS_HASH);
     assert_eq!(
         decode_value::<Channel>(&candidate)?.validate_context(&c),
         Err(WireError::Field("compacted_ids_hash"))
@@ -584,12 +664,12 @@ fn channel_contexts(all: &Value) -> TestResult {
     let published = channel(
         common,
         &digest,
-        json!({"kind":"published","operation_id":digest,"record_hash":digest,"device_set_epoch":MAX_SAFE_JSON_INTEGER,"recipient_ref":transcript_value["responder"]["device_ref"]}),
+        json!({"kind":"published","operation_id":OPERATION_ID,"record_hash":RECORD_HASH,"device_set_epoch":MAX_SAFE_JSON_INTEGER,"recipient_ref":transcript_value["responder"]["device_ref"]}),
     );
-    let mut c = context(&transcript, &digest, "initiator", "acknowledged", Some(&digest), None);
+    let mut c = context(&transcript, &digest, "initiator", "acknowledged", Some(RECORD_HASH), None);
     decode_value::<Channel>(&published)?.validate_context(&c)?;
     for (path, value, error) in [
-        ("/payload/operation_id", json!(encode_base64url([2; 32])), "operation_binding"),
+        ("/payload/operation_id", json!(encode_base64url([8; 32])), "operation_binding"),
         ("/payload/record_hash", json!(encode_base64url([2; 32])), "record_hash"),
         ("/payload/recipient_ref/device_epoch", json!(2), "recipient_ref"),
         ("/payload/device_set_epoch", json!(MAX_SAFE_JSON_INTEGER - 1), "published_epoch"),
@@ -606,17 +686,23 @@ fn channel_contexts(all: &Value) -> TestResult {
         decode_value::<Channel>(&published)?.validate_context(&c),
         Err(WireError::Field("channel_phase"))
     );
+    c.phase = "acknowledged";
+    c.sender = "responder";
+    assert_eq!(
+        decode_value::<Channel>(&published)?.validate_context(&c),
+        Err(WireError::Field("channel_role"))
+    );
 
     let completed = channel(
         common,
         &digest,
-        json!({"kind":"completed","operation_id":digest,"record_hash":digest,"cleanup":"done"}),
+        json!({"kind":"completed","operation_id":OPERATION_ID,"record_hash":RECORD_HASH,"cleanup":"done"}),
     );
-    let mut c = context(&transcript, &digest, "initiator", "completed", Some(&digest), None);
+    let mut c = context(&transcript, &digest, "initiator", "completed", Some(RECORD_HASH), None);
     decode_value::<Channel>(&completed)?.validate_context(&c)?;
     for path in ["/payload/operation_id", "/payload/record_hash"] {
         let mut wrong = completed.clone();
-        *wrong.pointer_mut(path).ok_or("completed field")? = json!(encode_base64url([2; 32]));
+        *wrong.pointer_mut(path).ok_or("completed field")? = json!(encode_base64url([8; 32]));
         assert_eq!(
             decode_value::<Channel>(&wrong)?.validate_context(&c),
             Err(WireError::Field(if path.ends_with("operation_id") {
@@ -626,14 +712,48 @@ fn channel_contexts(all: &Value) -> TestResult {
             }))
         );
     }
+    c.sender = "responder";
+    assert_eq!(
+        decode_value::<Channel>(&completed)?.validate_context(&c),
+        Err(WireError::Field("channel_role"))
+    );
+    c.sender = "initiator";
+    c.phase = "acknowledged";
+    assert_eq!(
+        decode_value::<Channel>(&completed)?.validate_context(&c),
+        Err(WireError::Field("channel_phase"))
+    );
 
     let installed = channel(
         common,
         &digest,
-        json!({"kind":"installed","operation_id":digest,"record_hash":digest,"recipient_ref":transcript_value["responder"]["device_ref"]}),
+        json!({"kind":"installed","operation_id":OPERATION_ID,"record_hash":RECORD_HASH,"recipient_ref":transcript_value["responder"]["device_ref"]}),
     );
-    c = context(&transcript, &digest, "responder", "locally_installed", Some(&digest), None);
+    c = context(&transcript, &digest, "responder", "locally_installed", Some(RECORD_HASH), None);
     decode_value::<Channel>(&installed)?.validate_context(&c)?;
+    for (path, expected) in
+        [("/payload/operation_id", "operation_binding"), ("/payload/record_hash", "record_hash")]
+    {
+        let mut wrong = installed.clone();
+        *wrong.pointer_mut(path).ok_or("installed field")? = json!(encode_base64url([8; 32]));
+        assert_eq!(
+            decode_value::<Channel>(&wrong)?.validate_context(&c),
+            Err(WireError::Field(expected)),
+            "{path} must be independently bound"
+        );
+    }
+    c.sender = "initiator";
+    assert_eq!(
+        decode_value::<Channel>(&installed)?.validate_context(&c),
+        Err(WireError::Field("channel_role"))
+    );
+    c.sender = "responder";
+    c.phase = "completed";
+    assert_eq!(
+        decode_value::<Channel>(&installed)?.validate_context(&c),
+        Err(WireError::Field("channel_phase"))
+    );
+    c.phase = "locally_installed";
     let mut wrong = installed;
     wrong["payload"]["recipient_ref"]["device_id"] = json!("other");
     assert_eq!(
@@ -671,7 +791,7 @@ fn preservation_contexts(all: &Value) -> TestResult {
         "transfer_id":common["transfer_id"],
         "transcript_hash":digest,
         "old_record_hash":common["record_hash"],
-        "new_record_hash":digest,
+        "new_record_hash":RECORD_HASH,
         "destination_ref":transcript_value["responder"]["device_ref"],
         "recipient_mode":common["recipient_mode"],
         "policy":"preserve_all_existing",
@@ -680,10 +800,38 @@ fn preservation_contexts(all: &Value) -> TestResult {
     let ready = channel(
         common,
         &digest,
-        json!({"kind":"transfer_ready","transfer_id":common["transfer_id"],"record_hash":digest,"compacted_ids_hash":null,"preservation":signed(preservation)}),
+        json!({"kind":"transfer_ready","transfer_id":common["transfer_id"],"record_hash":RECORD_HASH,"compacted_ids_hash":null,"preservation":signed(preservation)}),
     );
-    let mut c = context(&transcript, &digest, "initiator", "prepared", Some(&digest), None);
+    let mut c = context(&transcript, &digest, "initiator", "prepared", Some(RECORD_HASH), None);
     decode_value::<Channel>(&ready)?.validate_context(&c)?;
+
+    for (path, nested_path, error) in [
+        ("/payload/transfer_id", Some("/payload/preservation/body/transfer_id"), "transfer_id"),
+        ("/payload/record_hash", Some("/payload/preservation/body/new_record_hash"), "record_hash"),
+        ("/payload/compacted_ids_hash", None, "compacted_ids_hash"),
+    ] {
+        let mut wrong = ready.clone();
+        let altered = if error == "compacted_ids_hash" {
+            json!(COMPACTED_IDS_HASH)
+        } else {
+            json!(encode_base64url([8; 32]))
+        };
+        *wrong.pointer_mut(path).ok_or("transfer ready field")? = altered.clone();
+        if let Some(nested_path) = nested_path {
+            *wrong.pointer_mut(nested_path).ok_or("preservation binding")? = altered;
+        }
+        assert_eq!(
+            decode_value::<Channel>(&wrong)?.validate_context(&c),
+            Err(WireError::Field(error)),
+            "{path} must be independently bound"
+        );
+    }
+    c.sender = "responder";
+    assert_eq!(
+        decode_value::<Channel>(&ready)?.validate_context(&c),
+        Err(WireError::Field("channel_role"))
+    );
+    c.sender = "initiator";
 
     for (path, value, error) in [
         (
@@ -739,6 +887,10 @@ fn preservation_contexts(all: &Value) -> TestResult {
         decode_value::<Channel>(&ready)?.validate_context(&c),
         Err(WireError::Field("channel_phase"))
     );
+
+    let abort = channel(common, &digest, json!({"kind":"abort","reason":"InvalidInput"}));
+    c.phase = "proposal_pending";
+    decode_value::<Channel>(&abort)?.validate_context(&c)?;
 
     // PreservationBody's byte ceiling is conservative and unreachable under
     // its closed fixed-field grammar; exercise its full integer range and each
