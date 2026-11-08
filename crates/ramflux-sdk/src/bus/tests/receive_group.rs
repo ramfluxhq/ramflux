@@ -10,6 +10,11 @@ use crate::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
 
+#[allow(clippy::expect_used)]
+fn expect_no_timeout<T>(result: Result<T, tokio::time::error::Elapsed>) -> T {
+    result.expect("actor stop hung")
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn held_inbound_group_manifest_keeps_local_mutations_available() -> Case {
     LocalSet::new()
@@ -54,10 +59,7 @@ async fn case() -> Case {
     assert_eq!(response.body["members"], json!(["device-peer", "device-sender", "device-sibling"]));
     assert_eq!(response.body["member_roster"].as_array().ok_or("roster")?.len(), 2);
     assert_eq!(response.body["name"], "Received group");
-    match tokio::time::timeout(Duration::from_secs(10), started.actor.stop()).await {
-        Ok(result) => result?,
-        Err(_) => panic!("actor stop hung"),
-    }
+    expect_no_timeout(tokio::time::timeout(Duration::from_secs(10), started.actor.stop()).await)?;
     let root = started.root.clone();
     started.router.await?;
     drop(started.actor);
