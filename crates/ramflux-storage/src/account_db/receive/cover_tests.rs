@@ -111,7 +111,7 @@ pub(super) fn cover(
             erasure_generation: db.privacy_erasure_generation()?,
         },
         1,
-        |tx| tx.cover(ReceiveCover { sequence, kind, gaps }),
+        |tx| tx.cover(ReceiveCover { sequence, kind, gaps, retain_until: 0 }),
     )
 }
 

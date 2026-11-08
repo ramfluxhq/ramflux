@@ -29,8 +29,13 @@ mod database_checkpoint;
 pub mod durability_test_hooks;
 #[cfg(all(feature = "durability-test-hooks", ramflux_production))]
 compile_error!("durability-test-hooks must not be enabled in a production build");
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub use account_db::receive::ReceiveLedgerSnap;
 pub use account_db::receive::cover::{
     ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveGap,
+};
+pub use account_db::receive::page::{
+    ReceiveCoverStep, ReceiveGapOwned, ReceiveKnownLoss, ReceivePageView, ReceiveReconcileResult,
 };
 pub use account_db::receive::privacy::ReceiveBind;
 pub use account_db::receive::settle::{ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult};

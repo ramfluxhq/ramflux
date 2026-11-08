@@ -31,6 +31,8 @@ pub enum ReceiveCoverKind {
     Held,
     /// Range-only cover: gaps then C = page.covered, no live receipt.
     GapOnly,
+    /// `EntryTooLarge` without a local receipt: oversize gap + intent + C = s.
+    Oversize,
 }
 
 /// One W2 step: preceding gaps plus the next ordered boundary.
@@ -39,6 +41,8 @@ pub struct ReceiveCover<'a> {
     pub sequence: u64,
     pub kind: ReceiveCoverKind,
     pub gaps: &'a [ReceiveGap<'a>],
+    /// Router `retain_until` for [`ReceiveCoverKind::Oversize`]; ignored otherwise.
+    pub retain_until: i64,
 }
 
 /// Cover either commits the whole step or pauses without writing.
@@ -60,7 +64,7 @@ impl ReceiveTransaction<'_> {
         self.refuse_retired()?;
         let gaps = merge_gaps(input.gaps)?;
         let live = match input.kind {
-            ReceiveCoverKind::GapOnly => usize::from(gaps.is_empty()),
+            ReceiveCoverKind::GapOnly | ReceiveCoverKind::Oversize => usize::from(gaps.is_empty()),
             ReceiveCoverKind::Terminal | ReceiveCoverKind::Held => 1,
         };
         if gaps.len().saturating_add(live) > BOUNDARY_LIMIT {
@@ -68,6 +72,9 @@ impl ReceiveTransaction<'_> {
         }
         if input.sequence == 0 {
             return Err(StorageError::Integrity("receive sequence must be positive"));
+        }
+        if input.kind == ReceiveCoverKind::Oversize && input.retain_until == 0 {
+            return Err(StorageError::Integrity("receive cover oversize retain_until"));
         }
         let cursor = self
             .db
@@ -82,23 +89,24 @@ impl ReceiveTransaction<'_> {
             }
         }
         span_page(cursor, input.sequence, input.kind, &gaps)?;
-        if input.kind != ReceiveCoverKind::GapOnly {
+        if matches!(input.kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Held) {
             if input.sequence <= cursor {
                 return Err(StorageError::Integrity("receive cover interval outside page"));
             }
             let disposition = self.disposition(input.sequence)?;
             let allowed = match input.kind {
-                ReceiveCoverKind::Terminal => disposition.is_some(),
                 ReceiveCoverKind::Held => {
                     matches!(disposition.as_deref(), Some("staged" | "held" | "quarantined"))
                 }
-                ReceiveCoverKind::GapOnly => true,
+                ReceiveCoverKind::Terminal
+                | ReceiveCoverKind::GapOnly
+                | ReceiveCoverKind::Oversize => disposition.is_some(),
             };
             if !allowed {
                 return Err(StorageError::Integrity("receive cover requires a receipt"));
             }
         }
-        if input.kind == ReceiveCoverKind::Terminal
+        if matches!(input.kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Oversize)
             && self.intent_slots(input.sequence)? >= SLOT_LIMIT
         {
             return Ok(ReceiveCoverResult::Paused);
@@ -114,6 +122,9 @@ impl ReceiveTransaction<'_> {
             ReceiveCoverKind::Terminal => self.finish_terminal(input.sequence, now)?,
             ReceiveCoverKind::Held => self.mark_held(input.sequence)?,
             ReceiveCoverKind::GapOnly => {}
+            ReceiveCoverKind::Oversize => {
+                self.finish_oversize(input.sequence, input.retain_until, now)?;
+            }
         }
         self.db
             .set_projection_checkpoint(&cursor_name(self.target), &input.sequence.to_string())?;
@@ -224,13 +235,27 @@ impl ReceiveTransaction<'_> {
         )?;
         Ok(())
     }
+
+    fn finish_oversize(
+        &self,
+        sequence: u64,
+        retain_until: i64,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let seq = sequence.to_be_bytes();
+        self.db.connection.execute(
+            "INSERT INTO gateway_ack_intent VALUES(?1,?2,?3,?4,0,?5,?6)",
+            params![self.target, self.incarnation, seq.as_slice(), now, now, retain_until],
+        )?;
+        Ok(())
+    }
 }
 
-fn cursor_name(target: &str) -> String {
+pub(crate) fn cursor_name(target: &str) -> String {
     format!("gateway_receive_cursor:{target}")
 }
 
-fn interval_count(from: u64, to: u64) -> Result<u64, StorageError> {
+pub(crate) fn interval_count(from: u64, to: u64) -> Result<u64, StorageError> {
     if from == 0 {
         return Err(StorageError::Integrity("receive sequence must be positive"));
     }
@@ -262,7 +287,7 @@ fn span_page(
         Ok(true)
     };
     let covered = match kind {
-        ReceiveCoverKind::GapOnly => {
+        ReceiveCoverKind::GapOnly | ReceiveCoverKind::Oversize => {
             !gaps.is_empty()
                 && gaps[0].from_seq == start
                 && gaps.last().is_some_and(|gap| gap.to_seq == sequence)

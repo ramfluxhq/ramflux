@@ -166,8 +166,44 @@ fn capacity_and_range_work() -> Result<(), StorageError> {
     )?;
     assert_eq!(run(&db, input(&wire, u64::MAX))?, R::Staged, "inclusive work bound");
     clear(&db)?;
+    huge_hole_uses_one_interval(&db)?;
     drop(db);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn huge_hole_uses_one_interval(db: &AccountDb) -> Result<(), StorageError> {
+    let covered = 1_000_000_000_000_000u64;
+    let expired =
+        [super::page::ReceiveKnownLoss { from_seq: 1, to_seq: covered, reason: "expired" }];
+    let hole = db.receive_transaction(
+        ReceiveExpectation {
+            target: "t",
+            incarnation: "e",
+            cursor: 0,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        1,
+        |tx| {
+            tx.reconcile(super::page::ReceivePageView {
+                after: 0,
+                covered,
+                entries: &[],
+                known_losses: &expired,
+            })
+        },
+    )?;
+    match hole {
+        super::page::ReceiveReconcileResult::Plan(steps) => {
+            assert_eq!(steps.len(), 1, "huge hole uses one interval");
+            assert_eq!(steps[0].gaps.len(), 1);
+            assert_eq!(steps[0].gaps[0].to_seq, covered);
+        }
+        other @ super::page::ReceiveReconcileResult::NeedStage { .. } => {
+            panic!("expected one interval, got {other:?}")
+        }
+    }
     Ok(())
 }
 #[test]

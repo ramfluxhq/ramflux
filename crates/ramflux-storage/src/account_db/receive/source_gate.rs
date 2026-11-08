@@ -141,4 +141,74 @@ impl crate::AccountDb {
             .execute("UPDATE account_erasure_generation SET generation=generation+1", [])?;
         Ok(())
     }
+
+    /// Test support: cursor, losses, receipts, intents and work for one target.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn receive_ledger_snap_for_test(
+        &self,
+        target: &str,
+    ) -> Result<ReceiveLedgerSnap, StorageError> {
+        use crate::ProjectionStore;
+        let cursor = self
+            .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
+            .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?;
+        let mut losses = Vec::new();
+        let mut query = self.connection.prepare(
+            "SELECT from_seq,to_seq,count,reason FROM gateway_inbox_loss WHERE target_delivery_id=?1 ORDER BY from_seq",
+        )?;
+        for row in query.query_map(params![target], |row| {
+            Ok((
+                be_seq(&row.get::<_, Vec<u8>>(0)?),
+                be_seq(&row.get::<_, Vec<u8>>(1)?),
+                be_seq(&row.get::<_, Vec<u8>>(2)?),
+                row.get(3)?,
+            ))
+        })? {
+            losses.push(row?);
+        }
+        let mut receipts = Vec::new();
+        let mut query = self.connection.prepare(
+            "SELECT inbox_seq,disposition FROM gateway_receive_receipt WHERE target_delivery_id=?1 ORDER BY inbox_seq",
+        )?;
+        for row in query.query_map(params![target], |row| {
+            Ok((be_seq(&row.get::<_, Vec<u8>>(0)?), row.get(1)?))
+        })? {
+            receipts.push(row?);
+        }
+        let mut intents = Vec::new();
+        let mut query = self.connection.prepare(
+            "SELECT inbox_seq FROM gateway_ack_intent WHERE target_delivery_id=?1 ORDER BY inbox_seq",
+        )?;
+        for row in query.query_map(params![target], |row| Ok(be_seq(&row.get::<_, Vec<u8>>(0)?)))? {
+            intents.push(row?);
+        }
+        let work = self.connection.query_row(
+            "SELECT count(*) FROM gateway_receive_work WHERE target_delivery_id=?1",
+            params![target],
+            |row| row.get(0),
+        )?;
+        Ok(ReceiveLedgerSnap { cursor, losses, receipts, intents, work })
+    }
+}
+
+/// Value snapshot of ledger rows used by SDK page-apply tests.
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReceiveLedgerSnap {
+    pub cursor: u64,
+    pub losses: Vec<(u64, u64, u64, String)>,
+    pub receipts: Vec<(u64, String)>,
+    pub intents: Vec<u64>,
+    pub work: i64,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+fn be_seq(bytes: &[u8]) -> u64 {
+    let mut buf = [0u8; 8];
+    if bytes.len() == 8 {
+        buf.copy_from_slice(bytes);
+    }
+    u64::from_be_bytes(buf)
 }

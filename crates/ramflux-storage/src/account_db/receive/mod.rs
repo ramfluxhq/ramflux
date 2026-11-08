@@ -25,6 +25,9 @@ pub(crate) mod ledger_backup;
 pub(crate) mod loss;
 #[cfg(test)]
 mod loss_tests;
+pub(crate) mod page;
+#[cfg(test)]
+mod page_tests;
 pub(crate) mod privacy;
 #[cfg(test)]
 mod privacy_restore_tests;
@@ -35,6 +38,8 @@ pub(crate) mod settle;
 #[cfg(test)]
 mod settle_tests;
 mod source_gate;
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub use source_gate::ReceiveLedgerSnap;
 pub(crate) mod stage;
 #[cfg(test)]
 mod stage_tests;
