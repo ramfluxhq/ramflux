@@ -18,7 +18,7 @@ fn buf() -> ReorderBuffer {
 }
 
 fn buffered(seq: u64) -> AdmitOutcome {
-    AdmitOutcome::Buffered { seq, dropped: None }
+    AdmitOutcome::Buffered { seq, evicted: Vec::new() }
 }
 
 fn catch_up(after: u64) -> Tick {
@@ -27,9 +27,9 @@ fn catch_up(after: u64) -> Tick {
 
 fn apply_order(buffer: &mut ReorderBuffer, first: u64) -> Result<Vec<u64>, ReorderError> {
     let mut order = vec![first];
-    buffer.applied(first)?;
+    buffer.applied(0, first)?;
     for seq in buffer.peek_contiguous() {
-        buffer.applied(seq)?;
+        buffer.applied(0, seq)?;
         order.push(seq);
     }
     Ok(order)
@@ -40,7 +40,7 @@ fn admit_range(buffer: &mut ReorderBuffer, from: u64, count: usize, bytes: usize
         let seq = from.saturating_add(offset as u64);
         let got = buffer.admit(0, seq, bytes, true);
         assert!(
-            matches!(got, AdmitOutcome::Buffered { seq: got_seq, dropped: None } if got_seq == seq),
+            matches!(&got, AdmitOutcome::Buffered { seq: got_seq, evicted } if *got_seq == seq && evicted.is_empty()),
             "{got:?}"
         );
     }
@@ -53,7 +53,7 @@ fn reorder_and_gap() -> Result<(), ReorderError> {
     assert_eq!(filled.tick(200), Tick::Idle, "no Resume before the sibling arrives");
     assert_eq!(filled.admit(200, 1, 8, true), AdmitOutcome::ReadyToApply { seq: 1 });
     assert!(
-        matches!(filled.applied(2), Err(ReorderError::Protocol(msg)) if msg.contains("contiguous")),
+        matches!(filled.applied(200, 2), Err(ReorderError::Protocol(msg)) if msg.contains("contiguous")),
         "arrival order must not apply"
     );
     assert_eq!(apply_order(&mut filled, 1)?, vec![1, 2]);
@@ -92,33 +92,67 @@ fn coalesced_resync() {
     held.note_hint(CatchUpHint::Connected);
     assert!(held.follow_up(), "hints during the held run coalesce to one follow-up");
     assert_eq!(held.tick(0), Tick::Idle);
-    held.finish_catch_up();
+    held.finish_catch_up(0);
     assert_eq!(held.tick(0), catch_up(0), "exactly one follow-up after the held run");
-    held.finish_catch_up();
+    held.finish_catch_up(0);
     assert_eq!(held.tick(0), Tick::Idle, "no third catch-up");
 
     overflow_and_yield();
+}
+
+#[test]
+fn cover_rearms_remaining_hole() {
+    let mut buffer = buf();
+    assert_eq!(buffer.admit(0, 1005, 8, true), buffered(1005));
+    assert_eq!(buffer.admit(0, 1006, 8, true), buffered(1006));
+    buffer.covered(500, 1000).expect("forward cover");
+    assert!(buffer.hole(), "1001..=1004 are still lost after the cover");
+    assert_eq!(buffer.tick(999), Tick::Idle, "re-armed at the cover, not the old admit");
+    assert_eq!(buffer.tick(1000), catch_up(1000), "next catch-up starts at the new C");
+}
+
+#[test]
+fn resync_survives_local_work() {
+    let mut buffer = buf();
+    buffer.note_hint(CatchUpHint::Resync);
+    buffer.note_local_work();
+    assert_eq!(buffer.tick(0), catch_up(0), "local work with no hole keeps the pending Resync");
+    assert_eq!(buffer.tick(0), Tick::Idle, "exactly one CatchUp");
+    buffer.finish_catch_up(0);
+    assert_eq!(buffer.tick(0), Tick::Idle, "no follow-up was requested");
 }
 
 fn overflow_and_yield() {
     let mut refs = buf();
     admit_range(&mut refs, 2, MAX_REFS, 8);
     assert_eq!(refs.len(), MAX_REFS);
-    let overflow = refs.admit(0, 2 + MAX_REFS as u64, 8, true);
-    assert_eq!(
-        overflow,
-        AdmitOutcome::Buffered { seq: 2 + MAX_REFS as u64, dropped: Some(2 + MAX_REFS as u64) }
-    );
+    let top = 2 + MAX_REFS as u64;
+    let overflow = refs.admit(0, top, 8, true);
+    assert_eq!(overflow, AdmitOutcome::Evicted { seq: top, evicted: vec![top] }, "self-eviction");
     assert_eq!(refs.len(), MAX_REFS, "lowest-first retention");
-    assert!(!refs.contains(2 + MAX_REFS as u64));
+    assert!(!refs.contains(top));
     assert_eq!(refs.overflow_acks(), 0, "overflow sends no ACK");
 
     let mut bulky = buf();
     admit_range(&mut bulky, 2, 8, MAX_REF_BYTES / 8);
     let over_bytes = bulky.admit(0, 10, 1, true);
-    assert_eq!(over_bytes, AdmitOutcome::Buffered { seq: 10, dropped: Some(10) });
+    assert_eq!(over_bytes, AdmitOutcome::Evicted { seq: 10, evicted: vec![10] });
     assert_eq!(bulky.bytes(), MAX_REF_BYTES);
     assert_eq!(bulky.overflow_acks(), 0);
+
+    // One large low ref evicts several higher refs: every dropped seq is reported, highest first.
+    let mut many = buf();
+    for seq in 10..18 {
+        assert_eq!(many.admit(0, seq, MAX_REF_BYTES / 8, true), buffered(seq));
+    }
+    let big_low = many.admit(0, 5, MAX_REF_BYTES / 2, true);
+    assert_eq!(
+        big_low,
+        AdmitOutcome::Buffered { seq: 5, evicted: vec![17, 16, 15, 14] },
+        "all dropped refs reported"
+    );
+    assert_eq!(many.bytes(), MAX_REF_BYTES);
+    assert!(many.contains(5) && many.contains(13) && !many.contains(14));
 
     let mut pages = buf();
     pages.note_hint(CatchUpHint::Resync);
@@ -132,7 +166,7 @@ fn overflow_and_yield() {
     let mut turn = buf();
     admit_range(&mut turn, 2, 70, 8);
     assert_eq!(turn.admit(0, 1, 8, true), AdmitOutcome::ReadyToApply { seq: 1 });
-    turn.applied(1).expect("C+1");
+    turn.applied(0, 1).expect("C+1");
     assert_eq!(turn.peek_contiguous().len(), PAGE_LIMIT as usize, "64 boundaries per turn");
 }
 

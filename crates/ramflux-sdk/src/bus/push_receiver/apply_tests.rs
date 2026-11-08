@@ -7,6 +7,7 @@ use super::apply::{
     ApplyError, ApplyFault, ApplyLoss, ApplyOutcome, ApplyPage, ApplyPoint, apply_page,
     apply_point, cover_held, run as with_reject, validate_page, validate_point,
 };
+use super::reorder::{AdmitOutcome, MAX_REFS, PAGE_LIMIT, ReorderBuffer, ReorderError, Tick};
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ReceiveCoverResult, ReceiveExpectation,
     ReceiveLedgerSnap, ReceiveStage, ReceiveStageResult, StorageError,
@@ -247,6 +248,61 @@ fn stale_page_suffix_progress() -> Result<(), ApplyError> {
     assert_eq!(gone.cursor, 22);
     assert!(gone.losses.iter().any(|row| row.0 == 22 && row.3 == "unknown"));
     assert_eq!(gone.intents, vec![12, 21], "gone writes no intent");
+    reorder_follows_cover().expect("reorder leg follows the page cover");
+    Ok(())
+}
+
+/// Reorder leg: an authoritative cover jumps C across a large loss range in one call, and the work
+/// it performs is bounded by the ref cap, not by the number of lost seqs.
+fn reorder_follows_cover() -> Result<(), ReorderError> {
+    const FAR: u64 = 100_000;
+    let mut buffer = ReorderBuffer::new(0);
+    for seq in [1001, 1002, 1500, 1501, 1502] {
+        assert_eq!(
+            buffer.admit(0, seq, 8, true),
+            AdmitOutcome::Buffered { seq, evicted: Vec::new() }
+        );
+    }
+    assert!(buffer.hole());
+    assert_eq!(buffer.tick(500), Tick::CatchUp { after: 0, page_limit: PAGE_LIMIT });
+
+    buffer.covered(500, 1000)?;
+    assert_eq!(buffer.cursor(), 1000);
+    assert_eq!(buffer.peek_contiguous(), vec![1001, 1002], "refs above the cover stay");
+    assert_eq!(buffer.len(), 5, "every ref above the cover stays in RAM");
+    assert!(!buffer.hole(), "1001 and 1002 are contiguous with the new C");
+    assert!(buffer.covered(500, 999).is_err(), "a cover never moves C backwards");
+    buffer.applied(600, 1001)?;
+    buffer.applied(600, 1002)?;
+    assert!(buffer.hole(), "1003..=1499 are lost after the contiguous apply");
+    buffer.finish_catch_up(600);
+    assert_eq!(buffer.tick(1099), Tick::Idle, "the gap timer starts at the apply, waits 500 ms");
+    assert_eq!(
+        buffer.tick(1100),
+        Tick::CatchUp { after: 1002, page_limit: PAGE_LIMIT },
+        "next catch-up starts at the new C"
+    );
+
+    // One call across 99,000 lost seqs: the three refs at or below FAR are dropped.
+    let before = buffer.cover_steps();
+    buffer.covered(1100, FAR)?;
+    let work = buffer.cover_steps() - before;
+    assert!(
+        work <= 1 + MAX_REFS as u64,
+        "cover work {work} must be bounded by the ref cap, not the loss range"
+    );
+    buffer.finish_catch_up(1100);
+    assert_eq!((buffer.cursor(), buffer.len(), buffer.bytes()), (FAR, 0, 0));
+    assert!(!buffer.hole(), "a full cover leaves no hole and no gap timer");
+    assert_eq!(buffer.tick(2_000), Tick::Idle);
+
+    assert_eq!(
+        buffer.admit(2_000, FAR + 5, 8, true),
+        AdmitOutcome::Buffered { seq: FAR + 5, evicted: Vec::new() }
+    );
+    assert!(buffer.hole());
+    assert_eq!(buffer.tick(2_499), Tick::Idle);
+    assert_eq!(buffer.tick(2_500), Tick::CatchUp { after: FAR, page_limit: PAGE_LIMIT });
     Ok(())
 }
 

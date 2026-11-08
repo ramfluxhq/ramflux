@@ -27,13 +27,28 @@ pub(crate) enum CatchUpHint {
 }
 
 /// Result of admitting one push into the reorder buffer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[must_use]
 pub(crate) enum AdmitOutcome {
-    ReadyToApply { seq: u64 },
-    Buffered { seq: u64, dropped: Option<u64> },
-    Duplicate { seq: u64 },
-    Refused { seq: u64 },
+    ReadyToApply {
+        seq: u64,
+    },
+    /// `seq` is retained in RAM. `evicted` lists every higher ref dropped to fit the caps.
+    Buffered {
+        seq: u64,
+        evicted: Vec<u64>,
+    },
+    /// `seq` itself was the highest ref and was evicted. `evicted` lists every dropped seq, `seq` included.
+    Evicted {
+        seq: u64,
+        evicted: Vec<u64>,
+    },
+    Duplicate {
+        seq: u64,
+    },
+    Refused {
+        seq: u64,
+    },
 }
 
 /// Scheduler step. Tests drive this with a virtual clock; never the wall clock.
@@ -92,6 +107,7 @@ pub(crate) struct ReorderBuffer {
     catch_up: CatchUp,
     local_work: bool,
     overflow_acks: u64,
+    cover_steps: u64,
 }
 
 impl ReorderBuffer {
@@ -105,6 +121,7 @@ impl ReorderBuffer {
             catch_up: CatchUp::default(),
             local_work: false,
             overflow_acks: 0,
+            cover_steps: 0,
         }
     }
 
@@ -121,6 +138,12 @@ impl ReorderBuffer {
     #[must_use]
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Work units spent by `covered` (container operations, not seq positions). Bounded by the ref cap.
+    #[must_use]
+    pub(crate) fn cover_steps(&self) -> u64 {
+        self.cover_steps
     }
 
     #[must_use]
@@ -170,24 +193,28 @@ impl ReorderBuffer {
         }
         self.refs.insert(seq, ref_bytes);
         self.bytes = self.bytes.saturating_add(ref_bytes);
-        let dropped = self.evict_highest();
+        let evicted = self.evict_highest();
         self.arm_gap(now_ms);
-        AdmitOutcome::Buffered { seq, dropped }
+        if evicted.contains(&seq) {
+            AdmitOutcome::Evicted { seq, evicted }
+        } else {
+            AdmitOutcome::Buffered { seq, evicted }
+        }
     }
 
-    fn evict_highest(&mut self) -> Option<u64> {
-        let mut dropped = None;
+    fn evict_highest(&mut self) -> Vec<u64> {
+        let mut evicted = Vec::new();
         while self.refs.len() > MAX_REFS || self.bytes > MAX_REF_BYTES {
             let Some((&seq, &n)) = self.refs.iter().next_back() else {
                 break;
             };
             self.refs.remove(&seq);
             self.bytes = self.bytes.saturating_sub(n);
-            dropped = Some(seq);
+            evicted.push(seq);
             self.overflow_acks = 0;
             self.catch_up.request();
         }
-        dropped
+        evicted
     }
 
     fn arm_gap(&mut self, now_ms: u64) {
@@ -204,7 +231,7 @@ impl ReorderBuffer {
     ///
     /// # Errors
     /// Returns a protocol error when `seq` is not the next contiguous cursor.
-    pub(crate) fn applied(&mut self, seq: u64) -> Result<(), ReorderError> {
+    pub(crate) fn applied(&mut self, now_ms: u64, seq: u64) -> Result<(), ReorderError> {
         let next = self
             .cursor
             .checked_add(1)
@@ -216,9 +243,33 @@ impl ReorderBuffer {
             self.bytes = self.bytes.saturating_sub(n);
         }
         self.cursor = seq;
-        if !self.hole() {
-            self.gap_started_at = None;
+        // A contiguous apply can leave a hole behind: that hole starts its own gap timer now.
+        self.gap_started_at = if self.hole() { self.gap_started_at.or(Some(now_ms)) } else { None };
+        Ok(())
+    }
+
+    /// Authoritative page cover: moves C to `new_c` in one call. Every RAM ref at or below
+    /// `new_c` is dropped, so the work is bounded by the ref cap, not by the size of the loss range.
+    /// The single gap timer is re-armed at `now_ms` when a hole remains past `new_c`.
+    ///
+    /// # Errors
+    /// Returns a protocol error when `new_c` would move C backwards.
+    pub(crate) fn covered(&mut self, now_ms: u64, new_c: u64) -> Result<(), ReorderError> {
+        if new_c < self.cursor {
+            return Err(ReorderError::Protocol("receive reorder cover moves backward"));
         }
+        let high = match new_c.checked_add(1) {
+            Some(first_kept) => self.refs.split_off(&first_kept),
+            None => BTreeMap::new(),
+        };
+        self.cover_steps = self.cover_steps.saturating_add(1);
+        let covered_refs = std::mem::replace(&mut self.refs, high);
+        for n in covered_refs.values() {
+            self.cover_steps = self.cover_steps.saturating_add(1);
+            self.bytes = self.bytes.saturating_sub(*n);
+        }
+        self.cursor = new_c;
+        self.gap_started_at = if self.hole() { Some(now_ms) } else { None };
         Ok(())
     }
 
@@ -249,8 +300,13 @@ impl ReorderBuffer {
         self.local_work = true;
     }
 
-    pub(crate) fn finish_catch_up(&mut self) {
+    /// Ends the in-flight run. A hole that outlives the run re-arms the gap timer (L4), so
+    /// recovery does not wait for the next push or the safety sweep.
+    pub(crate) fn finish_catch_up(&mut self, now_ms: u64) {
         self.catch_up.finish();
+        if self.hole() && self.gap_started_at.is_none() {
+            self.gap_started_at = Some(now_ms);
+        }
     }
 
     /// Records one catch-up page. True when the run must yield after 16 pages.
@@ -272,11 +328,10 @@ impl ReorderBuffer {
 
     pub(crate) fn tick(&mut self, now_ms: u64) -> Tick {
         if self.local_work {
+            // Local work only suppresses a pull it covers. It must not cancel other pending triggers (M1).
             self.local_work = false;
             if self.hole() {
                 self.catch_up.request();
-            } else {
-                return Tick::Idle;
             }
         }
         if self.should_fire_gap(now_ms) {
