@@ -15,6 +15,7 @@
 //! each run through the dormant W0 adapter, with a real account DB reopen. P12 is dormant at
 //! the SDK level: P20 wires the adapter into the actor.
 use super::fixture::{Case, Fixture};
+use crate::bus::connection_manager::ReceiveTurn;
 use crate::bus::sync_driver::source::w0::SourceW0;
 use crate::client::identity_authority::test_support::public_manifest;
 use crate::prelude::*;
@@ -25,6 +26,16 @@ use serde_json::json;
 use std::cell::Cell;
 
 const INTEGRITY: &str = "source effect requires staged receive work";
+
+fn turn(db: &AccountDb, generation: u64, incarnation: &str) -> Result<ReceiveTurn, SdkError> {
+    Ok(ReceiveTurn {
+        target: "t".into(),
+        incarnation: incarnation.into(),
+        cursor: 0,
+        generation,
+        erasure_generation: db.privacy_erasure_generation()?,
+    })
+}
 
 fn gate(db: &AccountDb) -> Result<SourceW0<'static>, SdkError> {
     Ok(SourceW0 {
@@ -37,6 +48,14 @@ fn gate(db: &AccountDb) -> Result<SourceW0<'static>, SdkError> {
         },
         generation: 1,
     })
+}
+
+fn actor_gate(turn: &ReceiveTurn, handle_generation: u64) -> SourceW0<'_> {
+    SourceW0::from_actor(turn, handle_generation)
+}
+
+fn snap(account: &LocalBusAccountState) -> Result<Vec<String>, SdkError> {
+    Ok(account.client.account_db()?.durable_rows_for_test()?)
 }
 
 fn wire(sequence: u64) -> Vec<u8> {
@@ -329,14 +348,19 @@ async fn terminal_receipt_with_work() -> Case {
 }
 
 #[cfg(feature = "itest-local-mint")]
-async fn history(fixture: &mut Fixture) -> Case {
+struct HistoryPacket {
+    sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope,
+    manifest: crate::SdkDeviceManifestResponse,
+    total: u32,
+    relay: super::relay_fixture::Relay,
+}
+
+#[cfg(feature = "itest-local-mint")]
+async fn history_packet(fixture: &mut Fixture) -> Case<HistoryPacket> {
     use super::receive_history_relay::prepare;
     use super::relay_fixture::Relay;
-    use crate::client::object::fetch_job;
-    use crate::client::own_device_sync::receive_job::HistoryPreparation;
     use std::rc::Rc;
 
-    const S: u64 = 41;
     let relay = Relay::start(Rc::new(|_, _, _| Ok(()))).await?;
     let (mut sync, total) = prepare(fixture, &relay)?;
     // The control envelope is signed by the sibling device, as the received packet is.
@@ -355,16 +379,27 @@ async fn history(fixture: &mut Fixture) -> Case {
             .cloned()
             .ok_or("own manifest")?,
     )?;
+    Ok(HistoryPacket { sync, manifest, total, relay })
+}
+
+#[cfg(feature = "itest-local-mint")]
+async fn history(fixture: &mut Fixture) -> Case {
+    use crate::client::object::fetch_job;
+    use crate::client::own_device_sync::receive_job::HistoryPreparation;
+
+    const S: u64 = 41;
+    let HistoryPacket { sync, manifest, total, relay } = history_packet(fixture).await?;
     let entry = wire(S);
     let account = &mut fixture.source;
     let called = Cell::new(0_u32);
-    let prepare_step = |client: &mut RamfluxClient| {
+    let prepare_step = |client: &RamfluxClient| {
         called.set(called.get() + 1);
         client.prepare_own_history_receive(sync.clone(), manifest.clone(), Duration::from_secs(10))
     };
     // (a) No W0: refused before `prepare_own_history_receive` (and its manifest accept) runs.
     let refused =
-        gate(account.client.account_db()?)?.effect_mut(&mut account.client, S, prepare_step);
+        gate(account.client.account_db()?)?
+            .effect(account.client.account_db()?, S, || prepare_step(&account.client));
     assert!(
         matches!(&refused, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == INTEGRITY),
         "{:?}",
@@ -375,7 +410,7 @@ async fn history(fixture: &mut Fixture) -> Case {
     let db = account.client.account_db()?;
     assert_eq!(gate(db)?.stage(db, staged(&entry, S))?, ReceiveStageResult::Staged);
     let HistoryPreparation::Fetch(fetch) =
-        gate(db)?.effect_mut(&mut account.client, S, prepare_step)?
+        gate(db)?.effect(db, S, || prepare_step(&account.client))?
     else {
         return Err("history preparation must request a fetch".into());
     };
@@ -451,5 +486,135 @@ async fn history(fixture: &mut Fixture) -> Case {
     assert_eq!(gate(db)?.bind(db, S, "MH")?, ReceiveBind::Erased);
     assert_eq!(state(account, S)?, (Some("erased".to_owned()), 0));
     drop(relay);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn source_w0_actor_expectation_refuses_stale_commit() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            stale_commit(),
+        ))))
+        .await
+}
+
+async fn stale_commit() -> Case {
+    let mut fixture = Box::pin(Fixture::new("w0-actor-stale")).await?;
+    ledger(&fixture.source)?;
+    let account = &mut fixture.source;
+    let entry = wire(11);
+    let coords = {
+        let db = account.client.account_db()?;
+        let coords = turn(db, 1, "e")?;
+        assert_eq!(
+            actor_gate(&coords, 1).stage(db, staged(&entry, 11))?,
+            ReceiveStageResult::Staged
+        );
+        coords
+    };
+    let before = snap(account)?;
+    let called = Cell::new(0_u32);
+    let refused = actor_gate(&coords, 2).effect(account.client.account_db()?, 11, || {
+        called.set(1);
+        Ok(())
+    });
+    assert!(
+        matches!(refused, Err(SdkError::Storage(StorageError::AuthorizationRejected))),
+        "stale generation must refuse: {refused:?}"
+    );
+    assert_eq!(called.get(), 0, "stale generation must not run the effect");
+    assert_eq!(snap(account)?, before, "stale generation leaves no partial effect");
+    let wrong_e = turn(account.client.account_db()?, 1, "other")?;
+    let refused = actor_gate(&wrong_e, 1).effect(account.client.account_db()?, 11, || {
+        called.set(1);
+        Ok(())
+    });
+    assert!(
+        matches!(refused, Err(SdkError::Storage(StorageError::AuthorizationRejected))),
+        "stale E must refuse: {refused:?}"
+    );
+    assert_eq!(called.get(), 0, "stale E must not run the effect");
+    assert_eq!(snap(account)?, before, "stale E leaves no partial effect");
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(feature = "itest-local-mint")]
+#[tokio::test(flavor = "current_thread")]
+async fn own_history_prepare_is_atomic() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            history_atomic(),
+        ))))
+        .await
+}
+
+#[cfg(feature = "itest-local-mint")]
+async fn history_atomic() -> Case {
+    use crate::client::own_device_sync::receive_job::HistoryPreparation;
+
+    const S: u64 = 42;
+    let mut fixture = Box::pin(Fixture::new("w0-history-atomic")).await?;
+    ledger(&fixture.source)?;
+    let packet = history_packet(&mut fixture).await?;
+    let peer = fixture.sibling.client.owned_device_identity()?;
+    let account = &mut fixture.source;
+    let entry = wire(S);
+    let coords = {
+        let db = account.client.account_db()?;
+        let coords = turn(db, 1, "e")?;
+        assert_eq!(
+            actor_gate(&coords, 1).stage(db, staged(&entry, S))?,
+            ReceiveStageResult::Staged
+        );
+        coords
+    };
+    let before = snap(account)?;
+    let directory_before = directory_source(&account.client, &peer)?;
+    let called = Cell::new(0_u32);
+    let prepare = |client: &RamfluxClient| {
+        called.set(called.get() + 1);
+        client.prepare_own_history_receive(
+            packet.sync.clone(),
+            packet.manifest.clone(),
+            Duration::from_secs(10),
+        )
+    };
+    let refused = crate::bus::sync_driver::source::w0::run(
+        crate::bus::sync_driver::source::w0::Fault::BeforeCommit,
+        || {
+            actor_gate(&coords, 1)
+                .effect(account.client.account_db()?, S, || prepare(&account.client))
+        },
+    );
+    assert!(
+        matches!(
+            &refused,
+            Err(SdkError::Storage(StorageError::Integrity(text)))
+                if *text == "source w0 before-commit"
+        ),
+        "mid-prepare fault must fire after the writes: {:?}",
+        refused.as_ref().err()
+    );
+    assert_eq!(called.get(), 1, "prepare must run so the fault is after the last write");
+    assert_eq!(snap(account)?, before, "fault after last write leaves no partial effect");
+    assert_eq!(
+        directory_source(&account.client, &peer)?,
+        directory_before,
+        "manifest accept must roll back with the receive transaction"
+    );
+    let HistoryPreparation::Fetch(_) =
+        actor_gate(&coords, 1)
+            .effect(account.client.account_db()?, S, || prepare(&account.client))?
+    else {
+        return Err("history preparation must request a fetch".into());
+    };
+    assert_eq!(called.get(), 2);
+    drop(packet.relay);
+    let root = fixture.root.clone();
+    drop(fixture);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

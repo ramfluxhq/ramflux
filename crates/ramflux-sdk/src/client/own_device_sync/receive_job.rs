@@ -25,7 +25,7 @@ pub(crate) struct HistoryFetch {
 }
 impl RamfluxClient {
     pub(crate) fn prepare_own_history_receive(
-        &mut self,
+        &self,
         envelope: SdkOwnDeviceSyncEnvelope,
         manifest: SdkDeviceManifestResponse,
         #[cfg(feature = "itest-local-mint")] http_timeout: std::time::Duration,

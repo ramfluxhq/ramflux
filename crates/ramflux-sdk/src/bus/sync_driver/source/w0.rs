@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! DORMANT W0 adapter for source preparation (S6b P12). No production caller reaches it: the
-//! live `Writer::apply` path is unchanged. The expectation values (target, incarnation, cursor,
-//! generation, erasure generation) come from the caller; P20 (the actor contract) supplies them.
+//! DORMANT W0 adapter for source preparation (S6b P12 / P20b). No production caller reaches
+//! the live `Writer::apply` path: that body is unchanged until P24/P25. The actor
+//! `PrepareReceive` arm supplies `ReceiveExpectation` via [`SourceW0::from_actor`].
 //!
 //! Contract: W0 (`stage`) precedes every preparation effect; each effect runs inside one
 //! generation, incarnation, cursor and erase-fenced receive transaction and only while the
 //! coordinate's recovery input (receipt plus work) is retained; a late W1 bind erases or binds.
+//! `prepare_own_history_receive` runs through [`SourceW0::effect`] so its writes join the
+//! receive transaction (nested `write_transaction` is a SAVEPOINT).
 #![allow(dead_code)]
 
+use crate::bus::connection_manager::{ReceivePlan, ReceiveTurn};
+use crate::bus::state::LocalBusAccountState;
+use crate::gateway::session_push::SessionMode;
 use crate::{RamfluxClient, SdkError};
 use ramflux_storage::{
     AccountDb, ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
@@ -22,6 +27,13 @@ pub(crate) struct SourceW0<'a> {
 }
 
 impl SourceW0<'_> {
+    /// Actor-owned coordinates become the W0 fence. `handle_generation` is S2's current
+    /// generation; a mismatch with `turn.generation` refuses at commit.
+    #[must_use]
+    pub(crate) fn from_actor(turn: &ReceiveTurn, handle_generation: u64) -> SourceW0<'_> {
+        SourceW0 { expected: turn.expected(), generation: handle_generation }
+    }
+
     /// W0: reserves receipt, work and terminal-intent capacity before any preparation effect.
     pub(crate) fn stage(
         &self,
@@ -33,7 +45,9 @@ impl SourceW0<'_> {
 
     /// Runs one preparation effect inside the fenced transaction. A stale generation,
     /// incarnation, cursor or erasure generation, or a missing recovery input, refuses before
-    /// the effect; a failing effect rolls the whole transaction back.
+    /// the effect; a failing effect rolls the whole transaction back. Own-history preparation
+    /// (`prepare_own_history_receive`) uses this path so manifest accept and history import
+    /// commit with the fence or not at all.
     pub(crate) fn effect<T>(
         &self,
         db: &AccountDb,
@@ -49,6 +63,7 @@ impl SourceW0<'_> {
             if failed {
                 return Err(StorageError::Integrity("source effect failed"));
             }
+            before_commit_fault()?;
             Ok(())
         });
         match (fenced, outcome) {
@@ -59,11 +74,8 @@ impl SourceW0<'_> {
         }
     }
 
-    /// The same gate for an effect that needs `&mut RamfluxClient` and therefore cannot run
-    /// inside the receive transaction (the client owns the database handle). The fence is a
-    /// pre-check and a post-check only: a concurrent erase or retirement is reported instead of
-    /// looking like success. The post-check cannot undo a write the effect already committed.
-    /// P20 runs `prepare_own_history_receive` inside the receive transaction.
+    /// Gate for an effect that needs `&mut RamfluxClient` (the client owns the database
+    /// handle). Cipher import still uses this seam; own-history *preparation* uses [`Self::effect`].
     pub(crate) fn effect_mut<T>(
         &self,
         client: &mut RamfluxClient,
@@ -93,4 +105,83 @@ impl SourceW0<'_> {
             tx.bind_logical_message(sequence, message)
         })?)
     }
+}
+
+/// Actor `PrepareReceive` entry. Constructs [`SourceW0`] from the actor's generation and,
+/// when the session is Push, its incarnation. The live cursor plan is unchanged until P24.
+pub(crate) fn prepare_receive_turn(
+    account: &LocalBusAccountState,
+    generation: u64,
+) -> Result<ReceivePlan, SdkError> {
+    if let Some(turn) = actor_turn(account, generation)? {
+        let source = SourceW0::from_actor(&turn, generation);
+        debug_assert_eq!(source.generation, generation);
+        debug_assert_eq!(source.expected.generation, turn.generation);
+    }
+    crate::bus::sync_driver::prepare_receive(account)
+}
+
+fn actor_turn(
+    account: &LocalBusAccountState,
+    generation: u64,
+) -> Result<Option<ReceiveTurn>, SdkError> {
+    let Some(engine) = account.engine.as_ref() else {
+        return Ok(None);
+    };
+    let SessionMode::Push { incarnation } = &engine.mode else {
+        return Ok(None);
+    };
+    let target = account.target_delivery_id.clone();
+    let cursor = account.client.gateway_receive_cursor(&target)?;
+    let erasure_generation = account.client.account_db()?.privacy_erasure_generation()?;
+    Ok(Some(ReceiveTurn {
+        target,
+        incarnation: incarnation.as_str().to_owned(),
+        cursor,
+        generation,
+        erasure_generation,
+    }))
+}
+
+fn before_commit_fault() -> Result<(), StorageError> {
+    if matches!(current_fault(), Fault::BeforeCommit) {
+        return Err(StorageError::Integrity("source w0 before-commit"));
+    }
+    Ok(())
+}
+
+fn current_fault() -> Fault {
+    #[cfg(test)]
+    {
+        FAULT.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        Fault::None
+    }
+}
+
+/// In-transaction fault injected by tests. Production always uses `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Fault {
+    None,
+    BeforeCommit,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAULT: std::cell::Cell<Fault> = const { std::cell::Cell::new(Fault::None) };
+}
+
+#[cfg(test)]
+pub(crate) fn run<T>(fault: Fault, f: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAULT.with(|cell| cell.set(Fault::None));
+        }
+    }
+    FAULT.with(|cell| cell.set(fault));
+    let _reset = Reset;
+    f()
 }

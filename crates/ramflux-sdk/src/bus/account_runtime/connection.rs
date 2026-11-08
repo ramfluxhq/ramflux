@@ -210,7 +210,9 @@ impl AccountRuntime {
                     return Ok(false);
                 }
                 tracing::trace!(?trigger, generation, "preparing stored receive cursor");
-                let result = super::super::sync_driver::prepare_receive(account);
+                let result = super::super::sync_driver::source::w0::prepare_receive_turn(
+                    account, generation,
+                );
                 let _ = reply.send(result);
             }
             AccountWork::ApplyPage { generation, entry, source, backpressure, reply } => {
