@@ -32,7 +32,7 @@ impl SourceReset<'_> {
         input: ReceiveMigrate<'_>,
     ) -> Result<ReceiveMigrateResult, SdkError> {
         self.check_migrate_identity(input)?;
-        Ok(db.migrate_direct(input)?)
+        Ok(db.activate_receive_ledger_in(input)?)
     }
 
     fn check_migrate_identity(&self, input: ReceiveMigrate<'_>) -> Result<(), SdkError> {

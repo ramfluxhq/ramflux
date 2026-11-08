@@ -36,7 +36,8 @@ pub use account_db::receive::ack::{
     ReceiveAckOutcome, ReceiveAckResult,
 };
 pub use account_db::receive::activation::{
-    FIRST_ACTIVATION_DEFAULT, LEGACY_RECEIVE_ACTIVATED, ReceiveActivation,
+    FIRST_ACTIVATION_DEFAULT, LEGACY_RECEIVE_ACTIVATED, MISSING_EPOCH, ReceiveActivation,
+    UNKNOWN_ACTIVATION,
 };
 pub use account_db::receive::cover::{
     ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveGap,

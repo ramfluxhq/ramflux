@@ -33,7 +33,7 @@ impl AccountDb {
     ///
     /// # Errors
     /// Requires an open writer transaction. Refuses a missing target or incarnation.
-    pub fn migrate_direct(
+    pub(crate) fn migrate_direct(
         &self,
         input: ReceiveMigrate<'_>,
     ) -> Result<ReceiveMigrateResult, StorageError> {

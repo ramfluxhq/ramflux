@@ -289,6 +289,7 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         limit: usize,
     ) -> Result<Vec<GatewayInboxEntry>, SdkError> {
+        self.account_db()?.refuse_legacy_receive()?;
         let after_inbox_seq = self.gateway_cursor(engine.target_delivery_id())?;
         let entries = engine.resume_after(after_inbox_seq, limit).await?;
         for entry in &entries {
@@ -311,6 +312,7 @@ impl RamfluxClient {
         auto_fetch_attachments: bool,
         relay_service_key_base64: Option<String>,
     ) -> Result<Vec<GatewayPlaintextDelivery>, SdkError> {
+        self.account_db()?.refuse_legacy_receive()?;
         let after_inbox_seq = self.gateway_receive_cursor(engine.target_delivery_id())?;
         let mut entries = engine.resume_after(after_inbox_seq, limit).await?;
         entries.retain(|entry| entry.inbox_seq > after_inbox_seq);
@@ -574,6 +576,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         received_at: i64,
     ) -> Result<GatewayCursor, SdkError> {
+        self.account_db()?.refuse_legacy_receive()?;
         let receiver = self.owned_device_identity()?;
         if engine.config().source_identity.as_ref() != Some(&receiver)
             || entry.target_delivery_id != engine.target_delivery_id()
@@ -603,6 +606,7 @@ impl RamfluxClient {
         receiver: &ramflux_crypto::RootQualifiedDeviceRef,
         received_at: i64,
     ) -> Result<GatewayCursor, SdkError> {
+        self.account_db()?.refuse_legacy_receive()?;
         if self.owned_device_identity()? != *receiver
             || engine.config().source_identity.as_ref() != Some(receiver)
         {

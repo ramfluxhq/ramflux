@@ -241,3 +241,153 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         Box::pin(GatewaySessionEngine::close(self, reason))
     }
 }
+
+#[cfg(test)]
+fn unused<'a, T: Send + 'a>(name: &'static str) -> GatewayCallFuture<'a, T> {
+    Box::pin(async move { Err(SdkError::LocalBus(name.into())) })
+}
+
+/// Counts `resume_after` and `ack` so an Activated legacy path can prove it never touched the wire.
+#[cfg(test)]
+pub(crate) struct CountingGateway {
+    config: GatewaySessionConfig,
+    session: GatewaySessionState,
+    pub resumes: u32,
+    pub acks: u32,
+}
+
+#[cfg(test)]
+impl CountingGateway {
+    pub(crate) fn new(config: GatewaySessionConfig) -> Self {
+        Self {
+            config,
+            session: GatewaySessionState {
+                session_id: "counting".into(),
+                gateway_id: "counting".into(),
+                resume_token: "counting".into(),
+                resume_window_seconds: 1,
+                accepted_inbox_seq: 0,
+            },
+            resumes: 0,
+            acks: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ClassifiedSubmit for CountingGateway {
+    fn submit_classified(
+        &mut self,
+        _envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, Result<GatewayInboxEntry, crate::gateway::session_push::SubmitRefusal>>
+    {
+        unused("submit_classified")
+    }
+}
+
+#[cfg(test)]
+impl GatewaySessionAccess for CountingGateway {
+    fn config(&self) -> &GatewaySessionConfig {
+        &self.config
+    }
+    fn session(&self) -> &GatewaySessionState {
+        &self.session
+    }
+    fn heartbeat(&mut self) -> GatewayCallFuture<'_, ()> {
+        unused("heartbeat")
+    }
+    fn submit_envelope(
+        &mut self,
+        _envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, GatewayInboxEntry> {
+        unused("submit_envelope")
+    }
+    fn own_device_fanout(
+        &mut self,
+        _principal_id: impl Into<String>,
+        _source_device_id: impl Into<String>,
+        _envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, GatewayOwnDeviceFanoutResponse> {
+        unused("own_device_fanout")
+    }
+    fn ack(&mut self, _ack: ramflux_protocol::Ack) -> GatewayCallFuture<'_, GatewayCursor> {
+        self.acks += 1;
+        let target = self.config.target_delivery_id.clone();
+        Box::pin(async move {
+            Ok(GatewayCursor {
+                target_delivery_id: target,
+                inbox_seq: 1,
+                last_envelope_id: None,
+                acked_envelope_ids: Vec::new(),
+                nacked_envelope_ids: std::collections::BTreeMap::new(),
+            })
+        })
+    }
+    fn cursor(&mut self) -> GatewayCallFuture<'_, Option<GatewayCursor>> {
+        unused("cursor")
+    }
+    fn resume_after(
+        &mut self,
+        _after_inbox_seq: u64,
+        _limit: usize,
+    ) -> GatewayCallFuture<'_, Vec<GatewayInboxEntry>> {
+        self.resumes += 1;
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn register_identity(
+        &mut self,
+        _request: SdkIdentityRegisterRequest,
+    ) -> GatewayCallFuture<'_, SdkIdentityRegistrationResponse> {
+        unused("register_identity")
+    }
+    fn publish_prekey_bundle<'a>(
+        &'a mut self,
+        _device_id: &'a str,
+        _bundle: &'a ramflux_crypto::PrekeyBundle,
+    ) -> GatewayCallFuture<'a, SdkPrekeyResponse> {
+        unused("publish_prekey_bundle")
+    }
+    fn fetch_principal_manifest<'a>(
+        &'a mut self,
+        _principal: &'a str,
+    ) -> GatewayCallFuture<'a, Option<SdkDeviceManifestResponse>> {
+        unused("fetch_principal_manifest")
+    }
+    fn fetch_prekey_bundle<'a>(
+        &'a mut self,
+        _device_id: &'a str,
+    ) -> GatewayCallFuture<'a, SdkPrekeyResponse> {
+        unused("fetch_prekey_bundle")
+    }
+    #[cfg(feature = "itest-local-mint")]
+    fn issue_relay_token(
+        &mut self,
+        _body: GatewayRelayTokenIssueBody,
+    ) -> GatewayCallFuture<'_, SdkRelayToken> {
+        unused("issue_relay_token")
+    }
+    fn issue_relay_token_v3(
+        &mut self,
+        _body: SdkRelayTokenV3IssueBody,
+    ) -> GatewayCallFuture<'_, ramflux_protocol::RelayTokenV3> {
+        unused("issue_relay_token_v3")
+    }
+    fn voice_lease(
+        &mut self,
+        _body: ramflux_protocol::VoiceLeaseRequest,
+    ) -> GatewayCallFuture<'_, ramflux_protocol::VoiceLeaseResponse> {
+        unused("voice_lease")
+    }
+    fn set_push_route(
+        &mut self,
+        _route: Option<GatewayPushRouteRegistration>,
+    ) -> GatewayCallFuture<'_, Option<u64>> {
+        unused("set_push_route")
+    }
+    fn register_push_route(&mut self) -> GatewayCallFuture<'_, Option<String>> {
+        unused("register_push_route")
+    }
+    fn close<'a>(&'a mut self, _reason: &'a str) -> GatewayCallFuture<'a, ()> {
+        unused("close")
+    }
+}

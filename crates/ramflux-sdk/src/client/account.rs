@@ -256,10 +256,10 @@ impl RamfluxClient {
         target_delivery_id: &str,
         inbox_seq: u64,
     ) -> Result<(), SdkError> {
-        self.set_projection_checkpoint(
+        Ok(self.account_db()?.persist_legacy_checkpoint_if_inactive(
             &gateway_cursor_checkpoint_name(target_delivery_id),
             &inbox_seq.to_string(),
-        )
+        )?)
     }
 
     /// # Errors
@@ -269,11 +269,7 @@ impl RamfluxClient {
         target_delivery_id: &str,
         inbox_seq: u64,
     ) -> Result<(), SdkError> {
-        self.account_db()?.refuse_legacy_receive()?;
-        self.set_projection_checkpoint(
-            &gateway_receive_cursor_checkpoint_name(target_delivery_id),
-            &inbox_seq.max(self.gateway_receive_cursor(target_delivery_id)?).to_string(),
-        )
+        Ok(self.account_db()?.persist_receive_cursor_if_inactive(target_delivery_id, inbox_seq)?)
     }
 
     /// # Errors

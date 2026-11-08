@@ -4,12 +4,18 @@
 //! First-leg `activation_revert_preserves_ledger`: discriminator, guards, crash cuts.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use super::activation::{FIRST_ACTIVATION_DEFAULT, LEGACY_RECEIVE_ACTIVATED, ReceiveActivation};
+use super::activation::{
+    ACTIVATION_KEY, FIRST_ACTIVATION_DEFAULT, LEGACY_RECEIVE_ACTIVATED, MISSING_EPOCH,
+    ReceiveActivation, UNKNOWN_ACTIVATION,
+};
+use super::cover::{ReceiveCover, ReceiveCoverKind, ReceiveCoverResult};
 use super::migrate::{ReceiveMigrate, ReceiveMigrateResult};
 use super::stage::{ReceiveStage, ReceiveStageResult};
 use super::{ReceiveExpectation, ReceiveTransaction};
-use crate::{AccountDb, AccountDbKey, AccountIndex, StorageError, durability_test_hooks};
-use rusqlite::params;
+use crate::{
+    AccountDb, AccountDbKey, AccountIndex, ProjectionStore, StorageError, durability_test_hooks,
+};
+use rusqlite::{OptionalExtension, params};
 use std::{
     path::Path,
     process::{Child, Command},
@@ -73,36 +79,59 @@ fn old_writer_child(root: &Path) -> std::process::ExitStatus {
     )
 }
 
-fn persist_work(db: &AccountDb) -> Result<(), StorageError> {
-    let bytes = super::stage_tests::bytes(1);
-    let input = ReceiveStage {
+fn expect<'a>(db: &AccountDb, cursor: u64) -> Result<ReceiveExpectation<'a>, StorageError> {
+    Ok(ReceiveExpectation {
         target: TARGET,
         incarnation: INCARNATION,
-        sequence: 1,
-        entry_json: &bytes,
-        admission_key: "authenticated-key",
-        retain_until: 100,
-        first_seen: 1,
-    };
-    db.receive_transaction(
-        ReceiveExpectation {
-            target: TARGET,
-            incarnation: INCARNATION,
-            cursor: 0,
-            generation: 1,
-            erasure_generation: db.privacy_erasure_generation()?,
-        },
-        1,
-        |tx: &ReceiveTransaction<'_>| {
-            assert_eq!(tx.stage(input)?, ReceiveStageResult::Staged);
-            tx.hold_receipt(1)?;
-            Ok(())
-        },
-    )?;
-    db.connection.execute(
-        "INSERT INTO gateway_ack_intent VALUES(?1,?2,?3,1,0,1,100)",
-        params![TARGET, INCARNATION, 2u64.to_be_bytes().as_slice()],
-    )?;
+        cursor,
+        generation: 1,
+        erasure_generation: db.privacy_erasure_generation()?,
+    })
+}
+
+fn persist_work(db: &AccountDb) -> Result<(), StorageError> {
+    let first = super::stage_tests::bytes(1);
+    db.receive_transaction(expect(db, 0)?, 1, |tx: &ReceiveTransaction<'_>| {
+        assert_eq!(
+            tx.stage(ReceiveStage {
+                target: TARGET,
+                incarnation: INCARNATION,
+                sequence: 1,
+                entry_json: &first,
+                admission_key: "authenticated-key",
+                retain_until: 100,
+                first_seen: 1,
+            })?,
+            ReceiveStageResult::Staged
+        );
+        assert_eq!(
+            tx.cover(ReceiveCover {
+                sequence: 1,
+                kind: ReceiveCoverKind::Terminal,
+                gaps: &[],
+                retain_until: 0,
+            })?,
+            ReceiveCoverResult::Covered
+        );
+        Ok(())
+    })?;
+    let second = super::stage_tests::bytes(2);
+    db.receive_transaction(expect(db, 1)?, 1, |tx: &ReceiveTransaction<'_>| {
+        assert_eq!(
+            tx.stage(ReceiveStage {
+                target: TARGET,
+                incarnation: INCARNATION,
+                sequence: 2,
+                entry_json: &second,
+                admission_key: "authenticated-key",
+                retain_until: 100,
+                first_seen: 1,
+            })?,
+            ReceiveStageResult::Staged
+        );
+        tx.hold_receipt(2)?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -180,10 +209,54 @@ fn activation_revert_preserves_ledger() -> Result<(), StorageError> {
     Ok(())
 }
 
+fn table_count(db: &AccountDb, table: &str) -> Result<i64, StorageError> {
+    let exists: i64 = db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        params![table],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(0);
+    }
+    Ok(db.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?)
+}
+
+fn held_work(db: &AccountDb) -> Result<(i64, i64), StorageError> {
+    if table_count(db, "gateway_receive_receipt")? == 0 {
+        return Ok((0, 0));
+    }
+    let held: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_receipt WHERE disposition='held'",
+        [],
+        |row| row.get(0),
+    )?;
+    let work: i64 =
+        db.connection
+            .query_row("SELECT count(*) FROM gateway_receive_work", [], |row| row.get(0))?;
+    Ok((held, work))
+}
+
+fn activated_cursor(db: &AccountDb) -> Result<Option<u64>, StorageError> {
+    if table_count(db, "gateway_receive_epoch")? == 0 {
+        return Ok(None);
+    }
+    let blob: Option<Vec<u8>> = db
+        .connection
+        .query_row(
+            "SELECT activated_cursor FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+            params![TARGET],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(blob.map(|bytes| u64::from_be_bytes(bytes.try_into().expect("activated cursor"))))
+}
+
 #[test]
 fn activation_commit_is_atomic() -> Result<(), StorageError> {
     for mode in ["before", "after"] {
         let (root, db) = crate::tests::test_db(&format!("receive-activation-cut-{mode}"))?;
+        db.set_projection_checkpoint("gateway_receive_cursor:t", "7")?;
+        db.hold_unrouted("env-1", 5, &super::stage_tests::bytes(5), 1)?;
         drop(db);
         let status = child(&root, mode);
         #[cfg(unix)]
@@ -194,21 +267,26 @@ fn activation_commit_is_atomic() -> Result<(), StorageError> {
         assert!(!status.success(), "child must abort at the real COMMIT");
         let db = reopen(&root)?;
         let activated = db.receive_activation()? == ReceiveActivation::Activated;
-        let epoch: i64 = db.connection.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='gateway_receive_epoch'",
-            [],
-            |row| row.get(0),
-        )?;
-        let rows: i64 = if epoch == 0 {
-            0
-        } else {
-            db.connection
-                .query_row("SELECT count(*) FROM gateway_receive_epoch", [], |row| row.get(0))?
-        };
+        let rows = table_count(&db, "gateway_receive_epoch")?;
+        let cursor = db.receive_cursor(TARGET)?;
+        let unrouted = table_count(&db, "runtime_unrouted")?;
+        let (held, work) = held_work(&db)?;
         if mode == "after" {
-            assert!(activated && rows == 1, "after COMMIT is the complete activated state");
+            assert!(
+                activated
+                    && rows == 1
+                    && cursor == 7
+                    && activated_cursor(&db)? == Some(7)
+                    && held == 1
+                    && work == 1
+                    && unrouted == 1,
+                "after COMMIT is the complete activated state"
+            );
         } else {
-            assert!(!activated && rows == 0, "before COMMIT is the inactive pre-activation state");
+            assert!(
+                !activated && rows == 0 && cursor == 7 && held == 0 && work == 0 && unrouted == 1,
+                "before COMMIT is the inactive pre-activation state"
+            );
         }
         drop(db);
         std::fs::remove_dir_all(root)?;
@@ -227,6 +305,53 @@ fn activation_before_commit_fault_rolls_back() -> Result<(), StorageError> {
         "{error:?}"
     );
     assert_eq!(db.receive_activation()?, ReceiveActivation::Inactive);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn unknown_discriminator_fails_closed() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("receive-activation-unknown")?;
+    db.set_projection_checkpoint(ACTIVATION_KEY, "garbage")?;
+    assert!(
+        matches!(db.receive_activation(), Err(StorageError::Integrity(UNKNOWN_ACTIVATION))),
+        "unknown discriminator must not read Inactive"
+    );
+    assert!(
+        matches!(db.refuse_legacy_receive(), Err(StorageError::Integrity(UNKNOWN_ACTIVATION))),
+        "legacy writers must fail closed on an unknown discriminator"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn activated_without_epoch_refuses_second_activation() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("receive-activation-missing-epoch")?;
+    assert_eq!(db.activate_receive_ledger(migrate())?, ReceiveMigrateResult::Migrated);
+    db.write_transaction(|| {
+        db.connection.execute("DELETE FROM gateway_receive_epoch", [])?;
+        assert!(
+            matches!(
+                db.activate_receive_ledger_in(migrate()),
+                Err(StorageError::Integrity(MISSING_EPOCH))
+            ),
+            "Activated with no epoch must fail closed"
+        );
+        assert!(
+            matches!(
+                db.activate_receive_ledger_in(ReceiveMigrate {
+                    target: "other",
+                    incarnation: INCARNATION,
+                }),
+                Err(StorageError::Integrity(MISSING_EPOCH))
+            ),
+            "second target on an Activated account must fail closed"
+        );
+        Ok::<(), StorageError>(())
+    })?;
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

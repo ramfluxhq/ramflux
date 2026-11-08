@@ -4,9 +4,10 @@
 //! `ledger_privacy_restore`: published backups, merged generations and restore installs carry
 //! tombstones and bindings, never the five gateway tables, receive C/E or receive-work footprints.
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
-use super::activation::{ACTIVATION_KEY, ReceiveActivation};
+use super::activation::ReceiveActivation;
 use super::erased_capture_tests::current;
 use super::erased_input_union_tests::pair;
+use super::migrate::{ReceiveMigrate, ReceiveMigrateResult};
 use super::privacy::ReceiveBind;
 use super::privacy_tests::bind;
 use super::stage_tests::{bytes, input, run, work_rows};
@@ -190,6 +191,7 @@ fn privacy_restore_strips_unstripped_inputs() -> Result<(), StorageError> {
     p.local.send_direct_message("thread", "keep", "peer", b"x")?;
     p.source.send_direct_message("thread", "keep", "peer", b"x")?;
     seed_ledger(&p.local, now)?;
+    seed_activation(&p.local)?;
     seed_checkpoints(&p.local)?;
     put_tombstone(&p.local, "ap", "ad", "payload-a", now + 3_900)?;
     put_tombstone(&p.local, "bp", "bd", "payload-b", now + 3_900)?;
@@ -324,11 +326,14 @@ fn seed_checkpoints(db: &AccountDb) -> Result<(), StorageError> {
          VALUES('gateway_receive_pause:t',1,'retired_incarnation_fence',1)",
         [],
     )?;
-    db.connection.execute(
-        "INSERT INTO projection_checkpoint(projection_name,projection_version,last_event_id,updated_at) \
-         VALUES(?1,1,'activated',1)",
-        params![ACTIVATION_KEY],
-    )?;
+    Ok(())
+}
+
+fn seed_activation(db: &AccountDb) -> Result<(), StorageError> {
+    assert_eq!(
+        db.activate_receive_ledger(ReceiveMigrate { target: "t", incarnation: "e" })?,
+        ReceiveMigrateResult::Existing
+    );
     Ok(())
 }
 
@@ -347,6 +352,7 @@ fn ledger_privacy_restore() -> Result<(), StorageError> {
     // Real deleted messages A and B: bound work through the receive path, then the deletion.
     let (_, selector_a) = stage_bind_delete(&p.local, 2, "A", ("ap", "ad", "payload-a"), now)?;
     let (_, selector_b) = stage_bind_delete(&p.local, 3, "B", ("bp", "bd", "payload-b"), now)?;
+    seed_activation(&p.local)?;
     seed_checkpoints(&p.local)?;
     let before = ledger_counts_account(&p.local)?;
     assert!(before.receipts > 0 && before.work > 0 && before.epochs > 0);

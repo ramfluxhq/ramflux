@@ -13,6 +13,10 @@ const ACTIVATED: &str = "activated";
 
 /// Exact error when a legacy receive writer meets an activated account DB.
 pub const LEGACY_RECEIVE_ACTIVATED: &str = "receive ledger activated";
+/// Exact error when the discriminator is present but not a known state.
+pub const UNKNOWN_ACTIVATION: &str = "receive activation unknown";
+/// Exact error when Activated metadata has no epoch for the requested target.
+pub const MISSING_EPOCH: &str = "receive activation missing epoch";
 
 /// First-activation switch. Off until P25; already-activated accounts stay on the ledger.
 pub const FIRST_ACTIVATION_DEFAULT: bool = false;
@@ -29,23 +33,59 @@ impl AccountDb {
     /// Reads the durable discriminator. Absence is Inactive (including a stripped restore).
     ///
     /// # Errors
-    /// Returns SQLite errors.
+    /// Returns SQLite errors. An unknown discriminator value fails closed.
     pub fn receive_activation(&self) -> Result<ReceiveActivation, StorageError> {
-        Ok(match self.projection_checkpoint(ACTIVATION_KEY)?.as_deref() {
-            Some(ACTIVATED) => ReceiveActivation::Activated,
-            _ => ReceiveActivation::Inactive,
-        })
+        match self.projection_checkpoint(ACTIVATION_KEY)?.as_deref() {
+            Some(ACTIVATED) => Ok(ReceiveActivation::Activated),
+            None => Ok(ReceiveActivation::Inactive),
+            Some(_) => Err(StorageError::Integrity(UNKNOWN_ACTIVATION)),
+        }
     }
 
     /// Legacy receive writers must call this before writing C or ACK state.
     ///
     /// # Errors
-    /// Returns [`LEGACY_RECEIVE_ACTIVATED`] when the discriminator is Activated.
+    /// Returns [`LEGACY_RECEIVE_ACTIVATED`] when the discriminator is Activated, or
+    /// [`UNKNOWN_ACTIVATION`] when the stored value is not a known state.
     pub fn refuse_legacy_receive(&self) -> Result<(), StorageError> {
         match self.receive_activation()? {
             ReceiveActivation::Activated => Err(StorageError::Integrity(LEGACY_RECEIVE_ACTIVATED)),
             ReceiveActivation::Inactive => Ok(()),
         }
+    }
+
+    /// Writes a legacy checkpoint only after re-reading the discriminator in this writer.
+    ///
+    /// # Errors
+    /// Returns [`LEGACY_RECEIVE_ACTIVATED`] or [`UNKNOWN_ACTIVATION`] instead of writing.
+    pub fn persist_legacy_checkpoint_if_inactive(
+        &self,
+        projection_name: &str,
+        last_event_id: &str,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            self.refuse_legacy_receive()?;
+            self.set_projection_checkpoint(projection_name, last_event_id)
+        })
+    }
+
+    /// Advances legacy receive C only after re-reading the discriminator in this writer.
+    ///
+    /// # Errors
+    /// Returns [`LEGACY_RECEIVE_ACTIVATED`] or [`UNKNOWN_ACTIVATION`] instead of writing.
+    pub fn persist_receive_cursor_if_inactive(
+        &self,
+        target: &str,
+        inbox_seq: u64,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            self.refuse_legacy_receive()?;
+            let next = inbox_seq.max(self.receive_cursor(target)?);
+            self.set_projection_checkpoint(
+                &format!("gateway_receive_cursor:{target}"),
+                &next.to_string(),
+            )
+        })
     }
 
     /// Dormant first-activation. Production stays off; tests call [`Self::activate_receive_ledger`].
@@ -85,12 +125,32 @@ impl AccountDb {
             return Err(StorageError::AuthorizationRejected);
         }
         if self.receive_activation()? == ReceiveActivation::Activated {
+            if !self.epoch_exists_for(input.target)? {
+                return Err(StorageError::Integrity(MISSING_EPOCH));
+            }
             return Ok(ReceiveMigrateResult::Existing);
         }
         let result = self.migrate_direct(input)?;
         self.set_projection_checkpoint(ACTIVATION_KEY, ACTIVATED)?;
         before_activation_commit()?;
         Ok(result)
+    }
+
+    fn epoch_exists_for(&self, target: &str) -> Result<bool, StorageError> {
+        let table: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_receive_epoch')",
+            [],
+            |row| row.get(0),
+        )?;
+        if table == 0 {
+            return Ok(false);
+        }
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM gateway_receive_epoch WHERE target_delivery_id=?1)",
+            rusqlite::params![target],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
     }
 }
 
