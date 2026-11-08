@@ -479,6 +479,54 @@ mod i_json_tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+
+    fn with_admitted_state(
+        base: &ItestHttpContext,
+        source_seed: [u8; 32],
+    ) -> TestResult<ItestHttpContext> {
+        Ok(ItestHttpContext {
+            state: Arc::new(crate::SharedFederationTrustState::new(
+                crate::mesh::tests::admitted_forward_source(source_seed)?,
+            )),
+            store: Arc::clone(&base.store),
+            router: Arc::clone(&base.router),
+            discovery: base.discovery.clone(),
+            mesh_observability: Arc::clone(&base.mesh_observability),
+        })
+    }
+
+    #[test]
+    fn federation_ijson_ingress_refuses_unsafe_integer_itest_signed_forward() -> TestResult {
+        const FORWARD_BODY: &[u8] =
+            br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+        let root = crate::test_certificates::temp_cert_root("federation-ijson-itest-signed")?;
+        let source_seed = [0x5d; 32];
+        let valid_text =
+            serde_json::to_string(&crate::mesh::tests::signed_forward_for_mesh(source_seed)?)?;
+        let duplicate_text = crate::mesh::tests::duplicate_x_probe_member(&valid_text)?;
+
+        // Refused before any state read, peer resolution, signing, spool write or router call,
+        // so the pending outbound spool must not change.
+        let base = context(&root)?;
+        let store = Arc::clone(&base.store);
+        let refused = with_admitted_state(&base, source_seed)?;
+        let pending_before = store.list_pending_outbound(100)?;
+        let reply = response("/s8/federation/forward", &duplicate_text, refused)?;
+        assert_reply(&reply, "400 Bad Request", Some(FORWARD_BODY))?;
+        assert_eq!(store.list_pending_outbound(100)?, pending_before);
+
+        // Control: the unmodified signed forward decodes and reaches the handler. The peer
+        // endpoint is unreachable in this fixture, so the reply is not the I-JSON refusal.
+        let control = with_admitted_state(&base, source_seed)?;
+        let reply = response("/s8/federation/forward", &valid_text, control)?;
+        assert!(
+            !reply.contains(std::str::from_utf8(FORWARD_BODY)?),
+            "control must not be the I-JSON refusal: {reply}"
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "itest-http")]

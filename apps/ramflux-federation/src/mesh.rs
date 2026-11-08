@@ -897,7 +897,7 @@ fn migration_request_deadline(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::test_certificates::{issue_test_ca, issue_test_service_cert, temp_cert_root};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1006,7 +1006,7 @@ mod tests {
 
     const SIGNED_FORWARD_ADMISSION_NOW: i64 = 1_760_000_020;
 
-    fn admitted_forward_source(
+    pub(crate) fn admitted_forward_source(
         source_seed: [u8; 32],
     ) -> Result<ramflux_node_core::FederationTrustState, Box<dyn std::error::Error>> {
         use ramflux_node_core::test_support::federation_fixtures::{
@@ -1050,7 +1050,7 @@ mod tests {
     /// Builds a fully root-bound, genuinely signed forward from node-b to node-a whose envelope
     /// ext carries `x_probe`. The signature covers the canonical object, so a raw duplicate of
     /// that member is authenticated identically under lenient decoding.
-    fn signed_forward_for_mesh(
+    pub(crate) fn signed_forward_for_mesh(
         source_seed: [u8; 32],
     ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>>
     {
@@ -1068,14 +1068,16 @@ mod tests {
         Ok(forward)
     }
 
-    fn unix_now_seconds() -> Result<i64, Box<dyn std::error::Error>> {
+    pub(crate) fn unix_now_seconds() -> Result<i64, Box<dyn std::error::Error>> {
         Ok(i64::try_from(
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
         )?)
     }
 
     /// Duplicates the single `x_probe` member at the raw byte level; the object stays identical.
-    fn duplicate_x_probe_member(body: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub(crate) fn duplicate_x_probe_member(
+        body: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         const NEEDLE: &str = "\"x_probe\":\"v\"";
         if body.matches(NEEDLE).count() != 1 {
             return Err(test_error("expected exactly one x_probe member in signed forward"));
