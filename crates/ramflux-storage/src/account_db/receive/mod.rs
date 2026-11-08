@@ -93,6 +93,8 @@ pub struct ReceiveExpectation<'a> {
 pub struct RecoveryInput {
     pub sequence: u64,
     pub disposition: String,
+    /// Normalized authenticated entry bytes staged by W0; the redrive source of truth.
+    pub entry_json: Vec<u8>,
 }
 
 /// Unforgeable authority scoped to an account's immediate writer transaction.
@@ -199,7 +201,7 @@ impl ReceiveTransaction<'_> {
     pub fn recovery_inputs(&self) -> Result<Vec<RecoveryInput>, StorageError> {
         self.require_writer()?;
         let mut statement = self.db.connection.prepare(
-            "SELECT r.inbox_seq, r.disposition FROM gateway_receive_receipt r
+            "SELECT r.inbox_seq, r.disposition, w.entry_json FROM gateway_receive_receipt r
              JOIN gateway_receive_work w
                ON w.target_delivery_id=r.target_delivery_id
               AND w.incarnation_id=r.incarnation_id
@@ -208,17 +210,17 @@ impl ReceiveTransaction<'_> {
                AND r.disposition IN ('staged','held')
              ORDER BY r.inbox_seq",
         )?;
-        let rows = statement
-            .query_map(rusqlite::params![self.target, self.incarnation], |row| {
-                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+        let rows =
+            statement.query_map(rusqlite::params![self.target, self.incarnation], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
             })?;
         let mut inputs = Vec::new();
         for row in rows {
-            let (seq, disposition) = row?;
+            let (seq, disposition, entry_json) = row?;
             let sequence = u64::from_be_bytes(
                 seq.try_into().map_err(|_| StorageError::Integrity("receive sequence encoding"))?,
             );
-            inputs.push(RecoveryInput { sequence, disposition });
+            inputs.push(RecoveryInput { sequence, disposition, entry_json });
         }
         Ok(inputs)
     }

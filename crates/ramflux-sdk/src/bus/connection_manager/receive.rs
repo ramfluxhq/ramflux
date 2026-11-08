@@ -533,7 +533,7 @@ pub(crate) async fn test_redrive(
                         .await,
                     );
                 }
-                AccountWork::ReceiveObservation { .. } | AccountWork::Observation { .. } => {}
+                AccountWork::ReceiveObservation { .. } => {}
                 AccountWork::AckResults { state, cursor, mut backpressure, reply, .. } => {
                     let result = crate::bus::sync_driver::finish_prepared_ack(
                         account,

@@ -181,14 +181,6 @@ impl AccountRuntime {
                 return Ok(self.apply_ack_work(&handle, work));
             }
             AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
-            AccountWork::Observation { event } => {
-                return Ok(record_observation(
-                    account,
-                    &handle,
-                    event,
-                    &mut self.networking_observation_warned,
-                ));
-            }
             AccountWork::Prepare { generation, deadline, reply } => {
                 if reply.is_closed()
                     || generation != handle.generation()
@@ -276,6 +268,7 @@ impl AccountRuntime {
                     account,
                     generation,
                     handle.generation(),
+                    trigger,
                 );
                 let _ = reply.send(result);
             }
@@ -323,24 +316,11 @@ impl AccountRuntime {
                 let _ = reply.send(result);
             }
             AccountWork::ReceiveObservation { generation, event } => {
-                if generation != handle.generation() {
-                    return Ok(false);
-                }
-                if matches!(
-                    event,
-                    crate::bus::connection_manager::ConnectionEvent::Connected { .. }
-                ) {
-                    match super::lifecycle_fence::recover_account(
-                        account.client.account_db()?,
-                        &account.target_delivery_id,
-                        handle.generation(),
-                    ) {
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::debug!(%error, "receive disk recovery deferred");
-                        }
-                    }
-                }
+                // Every event updates the networking status from the CURRENT snapshot, whatever
+                // generation it carries: the worker bumps the snapshot generation right after it
+                // emits Disconnected/AttemptFailed, so a late event must still publish. Only disk
+                // recovery is generation-gated (PrepareReceive drops a stale generation).
+                tracing::trace!(generation, current = handle.generation(), "receive observation");
                 return Ok(record_observation(
                     account,
                     handle,

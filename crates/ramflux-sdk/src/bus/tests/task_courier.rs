@@ -956,7 +956,8 @@ async fn ordinary_commands_are_served_while_courier_checkpoints_loop() -> Case {
             let producer = tokio::task::spawn_local(async move {
                 loop {
                     if writer
-                        .send(crate::bus::connection_manager::AccountWork::Observation {
+                        .send(crate::bus::connection_manager::AccountWork::ReceiveObservation {
+                            generation: 0,
                             event: crate::bus::connection_manager::ConnectionEvent::AttemptFailed {
                                 reason: "checkpoint-loop".into(),
                                 retry_after_ms: None,

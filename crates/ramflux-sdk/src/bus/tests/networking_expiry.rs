@@ -536,7 +536,8 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
             for _ in 0..2 {
                 h.runtime
                     .apply_connection_work(
-                        super::super::connection_manager::AccountWork::Observation {
+                        super::super::connection_manager::AccountWork::ReceiveObservation {
+                            generation: 0,
                             event:
                                 super::super::connection_manager::ConnectionEvent::Disconnected {
                                     reason:
@@ -561,12 +562,15 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
                 .client
                 .active_account_db = Some(db);
             h.runtime
-                .apply_connection_work(super::super::connection_manager::AccountWork::Observation {
-                    event: super::super::connection_manager::ConnectionEvent::Disconnected {
-                        reason: super::super::connection_manager::DisconnectReason::Stop,
+                .apply_connection_work(
+                    super::super::connection_manager::AccountWork::ReceiveObservation {
                         generation: 0,
+                        event: super::super::connection_manager::ConnectionEvent::Disconnected {
+                            reason: super::super::connection_manager::DisconnectReason::Stop,
+                            generation: 0,
+                        },
                     },
-                })
+                )
                 .await?;
             let saved = h
                 .account()?
@@ -584,12 +588,15 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
                 .client
                 .active_account_db = None;
             h.runtime
-                .apply_connection_work(super::super::connection_manager::AccountWork::Observation {
-                    event: super::super::connection_manager::ConnectionEvent::Disconnected {
-                        reason: super::super::connection_manager::DisconnectReason::Stop,
+                .apply_connection_work(
+                    super::super::connection_manager::AccountWork::ReceiveObservation {
                         generation: 0,
+                        event: super::super::connection_manager::ConnectionEvent::Disconnected {
+                            reason: super::super::connection_manager::DisconnectReason::Stop,
+                            generation: 0,
+                        },
                     },
-                })
+                )
                 .await?;
             assert!(h.runtime.networking_observation_warned, "a new outage warns again");
             assert_eq!(
@@ -597,6 +604,50 @@ async fn observation_persistence_failure_keeps_actor_open_and_allows_retry() -> 
                 2,
                 "separate outage must emit another warning"
             );
+            h.runtime.stop_connection().await;
+            Ok(())
+        }))
+        .await
+}
+
+/// The worker bumps the snapshot generation right after it emits `Disconnected`, so the
+/// actor routinely sees an observation whose generation is already stale. It must still
+/// record and publish the CURRENT networking snapshot (a v3 account never stays `Live`).
+#[tokio::test(flavor = "current_thread")]
+async fn stale_generation_disconnect_still_updates_networking() -> TestResult {
+    LocalSet::new()
+        .run_until(Box::pin(async {
+            let mut h = Harness::new().await?;
+            let current = h.account()?.connection.as_ref().ok_or("connection")?.generation();
+            let stale = current.wrapping_add(1);
+            let before = h
+                .account()?
+                .client
+                .account_db()?
+                .load_actor_state::<serde_json::Value>("account/networking")?;
+            h.observed.borrow_mut().clear();
+            h.runtime
+                .apply_connection_work(
+                    super::super::connection_manager::AccountWork::ReceiveObservation {
+                        generation: stale,
+                        event: super::super::connection_manager::ConnectionEvent::Disconnected {
+                            reason: super::super::connection_manager::DisconnectReason::Stop,
+                            generation: stale,
+                        },
+                    },
+                )
+                .await?;
+            let after = h
+                .account()?
+                .client
+                .account_db()?
+                .load_actor_state::<serde_json::Value>("account/networking")?;
+            assert!(
+                h.observed.borrow().iter().any(networking),
+                "a stale-generation observation must still publish the networking status"
+            );
+            assert_ne!(before, after, "the persisted networking snapshot must follow the event");
+            assert!(after.as_ref().is_some_and(|saved| saved.get("session").is_some()));
             h.runtime.stop_connection().await;
             Ok(())
         }))

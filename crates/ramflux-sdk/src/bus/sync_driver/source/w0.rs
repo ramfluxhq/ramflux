@@ -132,21 +132,66 @@ pub(crate) fn refuse_legacy_receive_unless_ledger_turn(
 }
 
 /// Actor `PrepareReceive` entry. The live cursor plan is computed first so extra dormant
-/// reads cannot fail live receive. When the ledger is activated, [`SourceW0::from_actor`]
-/// builds the fence (`turn.generation` vs S2 `handle_generation`) and recovers open work
-/// from disk.
+/// reads cannot fail live receive. When the ledger is activated and this is the Connected
+/// pass, [`SourceW0::from_actor`] builds the fence (`turn.generation` vs S2 `handle_generation`)
+/// and the open W0/W1 rows read from disk inside that fence feed `plan.retries`, so the
+/// receive child redrives staged-but-unapplied work through the normal apply path. Fence
+/// refusals and read errors are logged, never silently dropped, and never fail the live plan.
 pub(crate) fn prepare_receive_turn(
     account: &LocalBusAccountState,
     turn_generation: u64,
     handle_generation: u64,
+    trigger: crate::bus::connection_manager::ReceiveTrigger,
 ) -> Result<ReceivePlan, SdkError> {
     refuse_legacy_receive_unless_ledger_turn(account, turn_generation)?;
-    let plan = crate::bus::sync_driver::prepare_receive(account, turn_generation)?;
-    if let Ok(Some(turn)) = actor_turn(account, turn_generation) {
-        let source = SourceW0::from_actor(&turn, handle_generation);
-        let _ = source.recover_from_disk(account.client.account_db()?);
+    let mut plan = crate::bus::sync_driver::prepare_receive(account, turn_generation)?;
+    // Only the Connected pass recovers: Tick/Resync never pay the writer lock for a read.
+    if trigger != crate::bus::connection_manager::ReceiveTrigger::Connected {
+        return Ok(plan);
+    }
+    let turn = match actor_turn(account, turn_generation) {
+        Ok(Some(turn)) => turn,
+        Ok(None) => return Ok(plan),
+        Err(error) => {
+            tracing::warn!(%error, "receive ledger coordinates unreadable; disk recovery skipped");
+            return Ok(plan);
+        }
+    };
+    let recovered = account
+        .client
+        .account_db()
+        .and_then(|db| SourceW0::from_actor(&turn, handle_generation).recover_from_disk(db));
+    match recovered {
+        Ok(inputs) => merge_recovered(&mut plan, &inputs),
+        Err(error) => tracing::warn!(%error, "receive disk recovery refused; live plan unchanged"),
     }
     Ok(plan)
+}
+
+/// Adds each recovered staged/held entry to the plan unless the plan already carries it.
+fn merge_recovered(plan: &mut ReceivePlan, inputs: &[ramflux_storage::RecoveryInput]) {
+    for input in inputs {
+        let entry = match serde_json::from_slice::<crate::GatewayInboxEntry>(&input.entry_json) {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%error, sequence = input.sequence,
+                    "recovered receive entry is not decodable; left on disk");
+                continue;
+            }
+        };
+        let known = plan.retries.iter().any(|prepared| {
+            prepared.entry.inbox_seq == entry.inbox_seq
+                && prepared.entry.envelope.envelope_id == entry.envelope.envelope_id
+        });
+        if !known {
+            plan.retries.push(crate::bus::connection_manager::ReceiveEntry {
+                entry,
+                retry_key: None,
+                replay: false,
+                turn: None,
+            });
+        }
+    }
 }
 
 /// Push-session coordinates from S2's engine plus disk cursor/erase. `None` when the

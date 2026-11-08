@@ -94,10 +94,6 @@ pub(crate) enum AccountWork {
     Metadata {
         metadata: Box<SessionMetadata>,
     },
-    #[allow(dead_code, reason = "kept for networking_expiry and task_courier tests")]
-    Observation {
-        event: super::ConnectionEvent,
-    },
     Prepare {
         generation: u64,
         deadline: Instant,

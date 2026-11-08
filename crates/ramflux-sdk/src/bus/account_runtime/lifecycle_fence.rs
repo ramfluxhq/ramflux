@@ -7,11 +7,12 @@
 //! bodies. Activated accounts persist `gateway_receive_activation` in receive metadata;
 //! first activation stays default-off until P25. Legacy receive-C writers refuse once
 //! Activated. After lock/unlock or restart the actor recovers solely from disk
-//! (W0/W1/work rows). Shared-ledger routing is P24b2.
+//! (W0/W1/work rows): `PrepareReceive` on a Connected pass feeds the open rows into the
+//! receive plan (`source::w0::prepare_receive_turn`). Shared-ledger routing is P24b2.
 #![allow(dead_code)]
 
 use ramflux_storage::{
-    AccountDb, ProjectionStore, ReceiveExpectation, ReceiveTransaction, RecoveryInput, StorageError,
+    AccountDb, ReceiveExpectation, ReceiveTransaction, RecoveryInput, StorageError,
 };
 
 use crate::SdkError;
@@ -96,31 +97,6 @@ pub(crate) fn ack_results(
     })
     .map_err(SdkError::from)
 }
-
-/// Coordinates for one target read from durable epoch/cursor/erase rows. `None` when
-/// the ledger is unactivated (no epoch row).
-pub(crate) fn turn_from_disk(
-    db: &AccountDb,
-    target: &str,
-    generation: u64,
-) -> Result<Option<ReceiveTurn>, SdkError> {
-    let Some(incarnation) = db.receive_epoch(target)? else {
-        return Ok(None);
-    };
-    let cursor = db
-        .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
-        .map_or(Ok(0_u64), |value| {
-            value.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected)
-        })?;
-    Ok(Some(ReceiveTurn {
-        target: target.to_owned(),
-        incarnation,
-        cursor,
-        generation,
-        erasure_generation: db.privacy_erasure_generation()?,
-    }))
-}
-
 /// Resume open W0/W1 work from disk under the commit fence. RAM held pages are ignored.
 pub(crate) fn recover_from_disk(
     db: &AccountDb,
@@ -128,16 +104,4 @@ pub(crate) fn recover_from_disk(
     expected: ReceiveExpectation<'_>,
 ) -> Result<DiskRecovery, StorageError> {
     commit(db, handle_generation, expected, |tx| Ok(DiskRecovery { inputs: tx.recovery_inputs()? }))
-}
-
-/// Connected/restart recovery: load the disk turn and its open work, or `None` when dormant.
-pub(crate) fn recover_account(
-    db: &AccountDb,
-    target: &str,
-    handle_generation: u64,
-) -> Result<Option<DiskRecovery>, SdkError> {
-    let Some(turn) = turn_from_disk(db, target, handle_generation)? else {
-        return Ok(None);
-    };
-    Ok(Some(recover_from_disk(db, handle_generation, turn.expected())?))
 }

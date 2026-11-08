@@ -15,13 +15,13 @@
 //! each run through the dormant W0 adapter, with a real account DB reopen. P12 is dormant at
 //! the SDK level: P20 wires the adapter into the actor.
 use super::fixture::{Case, Fixture};
-use crate::bus::connection_manager::ReceiveTurn;
+use crate::bus::connection_manager::{ReceiveTrigger, ReceiveTurn};
 use crate::bus::sync_driver::source::w0::{SourceW0, actor_turn, prepare_receive_turn};
 use crate::client::identity_authority::test_support::public_manifest;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{
-    ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, RecoveryInput, StorageError,
+    ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
 };
 use serde_json::json;
 use std::cell::Cell;
@@ -678,8 +678,15 @@ async fn prepare_uses_actor() -> Case {
     let mut fixture = Box::pin(Fixture::new("w0-prepare-actor")).await?;
     activate_push(&mut fixture.source)?;
     stage_on_target(&fixture.source, 7, 1)?;
-    let plan = prepare_receive_turn(&fixture.source, 1, 1)?;
+    let plan = prepare_receive_turn(&fixture.source, 1, 1, ReceiveTrigger::Connected)?;
     assert_eq!(plan.limit, 64);
+    assert_eq!(
+        plan.retries.iter().map(|prepared| prepared.entry.inbox_seq).collect::<Vec<_>>(),
+        vec![7],
+        "Connected recovery feeds the staged row into the receive plan"
+    );
+    let tick = prepare_receive_turn(&fixture.source, 1, 1, ReceiveTrigger::Tick)?;
+    assert!(tick.retries.is_empty(), "only the Connected pass recovers from disk");
     let turn = actor_turn(&fixture.source, 1)?.ok_or("activated Push turn")?;
     assert_eq!(turn.target, fixture.source.target_delivery_id);
     assert_eq!(turn.incarnation, PUSH_E);
@@ -687,8 +694,11 @@ async fn prepare_uses_actor() -> Case {
     let recovered =
         SourceW0::from_actor(&turn, 1).recover_from_disk(fixture.source.client.account_db()?)?;
     assert_eq!(
-        recovered,
-        vec![RecoveryInput { sequence: 7, disposition: "staged".into() }],
+        recovered
+            .iter()
+            .map(|input| (input.sequence, input.disposition.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(7, "staged")],
         "prepare_receive_turn SourceW0 must recover staged work from disk"
     );
     let root = fixture.root.clone();
@@ -709,8 +719,10 @@ async fn from_actor_generation_mismatch_is_reachable() -> Case {
 async fn mismatch_reachable() -> Case {
     let mut fixture = Box::pin(Fixture::new("w0-from-actor-mismatch")).await?;
     activate_push(&mut fixture.source)?;
-    let plan = prepare_receive_turn(&fixture.source, 1, 2)?;
+    stage_on_target(&fixture.source, 7, 1)?;
+    let plan = prepare_receive_turn(&fixture.source, 1, 2, ReceiveTrigger::Connected)?;
     assert_eq!(plan.limit, 64, "live plan must survive from_actor mismatch");
+    assert!(plan.retries.is_empty(), "a refused fence recovers nothing");
     let turn = actor_turn(&fixture.source, 1)?.ok_or("activated Push turn")?;
     let refused =
         SourceW0::from_actor(&turn, 2).recover_from_disk(fixture.source.client.account_db()?);
@@ -740,7 +752,7 @@ async fn live_unactivated() -> Case {
         incarnation: IncarnationId::try_from(PUSH_E.to_owned()).map_err(std::io::Error::other)?,
     };
     assert!(actor_turn(&fixture.source, 1)?.is_none(), "no epoch row skips extra DB reads");
-    let plan = prepare_receive_turn(&fixture.source, 1, 1)?;
+    let plan = prepare_receive_turn(&fixture.source, 1, 1, ReceiveTrigger::Connected)?;
     assert_eq!(plan.limit, 64, "live PrepareReceive must succeed without epoch reads");
     let root = fixture.root.clone();
     drop(fixture);

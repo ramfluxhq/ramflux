@@ -73,6 +73,10 @@ impl AccountDb {
             self.insert_inbox_dead_letter(key, entry, metadata, at)
         })
     }
+    /// Terminal diagnostic for one explicitly dead-lettered key. Intended: the plain DELETE of
+    /// the key's `runtime_inbox_retry` and `runtime_unrouted` rows removes every redrivable hold
+    /// for a key that is now terminal, so it cannot be retried after its diagnostic is written.
+    /// A key that only has staged W0 work owns no such row; both DELETEs then match nothing.
     pub(crate) fn insert_inbox_dead_letter(
         &self,
         key: &str,

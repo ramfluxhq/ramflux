@@ -1,116 +1,77 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-#![allow(clippy::unwrap_used, clippy::panic)]
-//! `lifecycle_fence`: a held page/result released after lock under the old generation
-//! writes nothing and does not ACK; unlock recovers disk. Negative: drop the actor
-//! generation argument at commit and the stale row appears.
-use super::super::lifecycle_fence::{commit, recover_account, recover_from_disk};
+#![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
+//! `lifecycle_fence` through the real account runtime. A real loopback gateway serves one
+//! signed message. Generation 1 pulls the page and holds its `ApplyPage` (a held result).
+//! The real `account.lock` command stops that connection (bound: under one second). The
+//! held result is then released into the actor at generation 1 after a new connection owns
+//! generation 2: it must write nothing, apply nothing and ACK nothing. After the reopen, the
+//! Connected `PrepareReceive` recovers the staged copy from disk (the router no longer has
+//! it) and the real receive child applies it exactly once and ACKs on the gateway. Negatives:
+//! dropping the actor generation check makes the stale release write the message; dropping
+//! the recovery feed leaves the message unapplied.
 use super::fixture::{Case, Fixture};
-use crate::bus::connection_manager::{
-    AccountWork, ConnectionEvent, ConnectionHandle, DisconnectReason, ReceiveTrigger, ReceiveTurn,
-};
+use super::receive_ack::command;
+use crate::bus::connection_manager::AccountWork;
 use crate::bus::events::EventBatch;
 use crate::bus::runtime_limits::RuntimeTimeouts;
+use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
-use ramflux_storage::{ReceiveExpectation, ReceiveStage, StorageError};
-use serde_json::json;
+use ramflux_storage::{ReceiveExpectation, ReceiveStage};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
-const SEQ: u64 = 7;
-const INCARNATION: &str = "e";
-
-struct PendingConnect;
-impl crate::bus::connection_manager::SessionConnector for PendingConnect {
-    fn connect(
-        &self,
-        _config: GatewaySessionConfig,
-        _deadline: tokio::time::Instant,
-    ) -> crate::bus::connection_manager::SessionFuture<'_, GatewaySessionEngine> {
-        Box::pin(std::future::pending())
-    }
-}
+const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
+const CONVERSATION: &str = "healthy";
 
 fn limits() -> RuntimeTimeouts {
     RuntimeTimeouts::held_for_test()
 }
 
-fn wire(target: &str) -> Vec<u8> {
-    serde_json::to_vec(&json!({"inbox_seq":SEQ,"target_delivery_id":target,"envelope":{
-        "schema":"test","version":1,"domain":"test","signing_key_id":"key","signature_alg":"ed25519","signature":"sig",
-        "envelope_id":"env-7","source_principal_id":"source","source_device_id":"device","target_delivery_id":target,
-        "delivery_class":"opaque_event","priority":"normal","ttl":60,"created_at":1,"encrypted_payload":"cipher","payload_hash":"H7"
-    }}))
-    .unwrap()
-}
-
-fn state(account: &LocalBusAccountState) -> Result<(Option<String>, i64), SdkError> {
-    Ok(account.client.account_db()?.receive_state_for_test(SEQ)?)
-}
-
-fn seed_epoch(account: &LocalBusAccountState, target: &str) -> Case {
-    let db = account.client.account_db()?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test(target, INCARNATION)?;
-    Ok(())
-}
-
-fn hold_page(account: &LocalBusAccountState, target: &str, generation: u64) -> Case {
-    let db = account.client.account_db()?;
-    let expected = ReceiveExpectation {
-        target,
-        incarnation: INCARNATION,
-        cursor: 0,
-        generation,
-        erasure_generation: db.privacy_erasure_generation()?,
-    };
-    let entry = wire(target);
-    db.receive_transaction(expected, generation, |tx| {
-        tx.stage(ReceiveStage {
-            target,
-            incarnation: INCARNATION,
-            sequence: SEQ,
-            entry_json: &entry,
-            admission_key: "authenticated-key",
-            retain_until: now_unix_timestamp() + 300,
-            first_seen: 1,
-        })?;
-        tx.hold_receipt(SEQ)
-    })?;
-    Ok(())
-}
-
-fn fence_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRuntime, u64, String) {
-    let handle = ConnectionHandle::start_with(
-        account.gateway_config.clone(),
+fn open_account(
+    root: &Path,
+    config: &GatewaySessionConfig,
+    commitment: &str,
+) -> Result<LocalBusAccountState, SdkError> {
+    let mut account = crate::bus::runtime_tests::account(
+        &root.join("source"),
+        "sender",
         None,
-        limits(),
-        Arc::new(PendingConnect),
-        None,
-    );
-    let generation = handle.generation();
-    account.connection = Some(handle);
-    let target = account.target_delivery_id.clone();
+        Arc::new(AtomicBool::new(false)),
+    )?;
+    account.principal_commitment = commitment.to_owned();
+    account.gateway_config = config.clone();
+    account.target_delivery_id = account.gateway_config.target_delivery_id.clone();
+    account.engine = None;
+    crate::bus::dispatch::object::hydrate_local_object_state(&mut account)?;
+    Ok(account)
+}
+
+fn runtime_for(account: LocalBusAccountState, root: &Path) -> super::super::AccountRuntime {
     let (commands, receiver) = mpsc::channel(8);
-    drop(commands);
-    let (_stop, shutdown) = watch::channel(false);
-    let (events, mut batches) = mpsc::channel::<EventBatch>(8);
+    let (stop, shutdown) = watch::channel(false);
+    let (events, mut batches) = mpsc::channel::<EventBatch>(64);
     tokio::task::spawn_local(async move {
         while let Some(batch) = batches.recv().await {
             let _ = batch.accepted.send(());
         }
     });
     let (connection_sender, connection_work) = mpsc::channel(8);
-    let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
-    let (_preempt_sender, preempt) = watch::channel(0_u64);
-    let runtime = super::super::AccountRuntime {
+    let (lifecycle_sender, lifecycle) = mpsc::channel(4);
+    let (preempt_sender, preempt) = watch::channel(0_u64);
+    std::mem::forget((commands, stop, lifecycle_sender, preempt_sender));
+    super::super::AccountRuntime {
         timeouts: limits(),
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {
             account_index: None,
-            config: LocalBusConfig::new(PathBuf::from("fence.sock"), PathBuf::from("fence-data")),
+            config: LocalBusConfig {
+                itest_legacy_accounts: true,
+                ..LocalBusConfig::new(root.join("bus.sock"), root.join("source"))
+            },
             nodes: crate::node::NodeStore::default(),
             accounts: BTreeMap::from([("sender".into(), account)]),
             active_account_id: None,
@@ -132,161 +93,196 @@ fn fence_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRun
         connection_work,
         receive_gate_hook: None,
         courier_events: None,
-    };
-    (runtime, generation, target)
-}
-
-fn db_of(runtime: &super::super::AccountRuntime) -> Result<&AccountDb, SdkError> {
-    runtime
-        .state
-        .accounts
-        .get("sender")
-        .ok_or(SdkError::LocalBus("account".into()))?
-        .client
-        .account_db()
+    }
 }
 
 fn account_of(runtime: &super::super::AccountRuntime) -> Result<&LocalBusAccountState, SdkError> {
     runtime.state.accounts.get("sender").ok_or(SdkError::LocalBus("account".into()))
 }
 
-async fn observe(
-    runtime: &mut super::super::AccountRuntime,
-    generation: u64,
-) -> Result<(), SdkError> {
-    runtime
-        .apply_connection_work(AccountWork::ReceiveObservation {
-            generation,
-            event: ConnectionEvent::Connected {
-                session_id: "s".into(),
-                resumed: false,
-                generation,
-            },
+fn messages(runtime: &super::super::AccountRuntime) -> Result<usize, SdkError> {
+    Ok(account_of(runtime)?.client.direct_messages(CONVERSATION)?.len())
+}
+
+fn acked(gateway: &std::sync::Mutex<super::fixture::Gateway>) -> Result<usize, SdkError> {
+    Ok(gateway.lock().map_err(|_| SdkError::LocalBus("gateway".into()))?.acked.len())
+}
+
+/// Dormant W0 staging: the router delivered this entry and its durable copy is on disk.
+fn stage(account: &LocalBusAccountState, entry: &GatewayInboxEntry) -> Case {
+    let target = account.target_delivery_id.clone();
+    let db = account.client.account_db()?;
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(&target, PUSH_E)?;
+    let bytes = serde_json::to_vec(entry)?;
+    let expected = ReceiveExpectation {
+        target: &target,
+        incarnation: PUSH_E,
+        cursor: 0,
+        generation: 1,
+        erasure_generation: db.privacy_erasure_generation()?,
+    };
+    db.receive_transaction(expected, 1, |tx| {
+        tx.stage(ReceiveStage {
+            target: &target,
+            incarnation: PUSH_E,
+            sequence: entry.inbox_seq,
+            entry_json: &bytes,
+            admission_key: "authenticated-key",
+            retain_until: now_unix_timestamp() + 300,
+            first_seen: 1,
         })
-        .await?;
+    })?;
     Ok(())
 }
 
-fn unlock_under_one_second(runtime: &mut super::super::AccountRuntime) -> Case {
-    let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
-    account.client.active_account_db = None;
-    let locked = Instant::now();
-    account.client.unlock_account("sender", b"actor-test-secret")?;
-    assert!(locked.elapsed() < Duration::from_secs(1), "account lock must finish in under 1s");
-    Ok(())
+/// The Push coordinates `actor_turn` reads. The handle owns the live engine, so a dormant
+/// engine stands in as the coordinate carrier and is moved to the reopened account.
+fn push_engine(mut engine: GatewaySessionEngine) -> Result<GatewaySessionEngine, SdkError> {
+    engine.mode = SessionMode::Push {
+        incarnation: IncarnationId::try_from(PUSH_E.to_owned())
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+    };
+    Ok(engine)
 }
 
-fn bump_handle(runtime: &mut super::super::AccountRuntime) -> Case<u64> {
-    let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
-    if let Some(handle) = account.connection.take() {
-        handle.request_stop(DisconnectReason::Lock);
+fn generation_of(runtime: &super::super::AccountRuntime) -> Result<u64, SdkError> {
+    Ok(account_of(runtime)?
+        .connection
+        .as_ref()
+        .ok_or(SdkError::GatewaySessionNotEstablished)?
+        .generation())
+}
+
+/// Drives the connection work the way `serve` does until `done` holds. Returns the first
+/// `ApplyPage` instead of applying it when `hold` is set (a held page/result).
+async fn pump(
+    runtime: &mut super::super::AccountRuntime,
+    hold: bool,
+    mut done: impl FnMut(&super::super::AccountRuntime) -> bool,
+) -> Result<Option<AccountWork>, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if done(runtime) {
+            return Ok(None);
+        }
+        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
+        {
+            Ok(Some(work)) => {
+                if hold && matches!(work, AccountWork::ApplyPage { .. }) {
+                    return Ok(Some(work));
+                }
+                runtime.apply_connection_work(work).await?;
+            }
+            Ok(None) => return Err("connection work channel closed".into()),
+            Err(_) => {}
+        }
     }
-    let handle = ConnectionHandle::start_with(
-        account.gateway_config.clone(),
-        None,
-        limits(),
-        Arc::new(PendingConnect),
-        None,
-    );
-    let generation = handle.generation();
-    account.connection = Some(handle);
-    Ok(generation)
+    Err("pump deadline".into())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn lifecycle_fence() -> Case {
     LocalSet::new()
         .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
-            held().await?;
+            Box::pin(held()).await?;
             Box::pin(super::receive_ack::ack_fence()).await
         }))))
         .await
 }
 
 async fn held() -> Case {
-    let fixture = Box::pin(Fixture::new("lifecycle-fence")).await?;
-    let gateway = Arc::clone(&fixture.gateway);
-    seed_epoch(&fixture.source, &fixture.source.target_delivery_id.clone())?;
-    let root = fixture.root.clone();
-    let (mut runtime, g1, target) = fence_runtime(fixture.source);
-    hold_page(account_of(&runtime)?, &target, g1)?;
-    assert_eq!(state(account_of(&runtime)?)?, (Some("held".to_owned()), 1));
-    observe(&mut runtime, g1).await?;
-    let recovered = recover_account(db_of(&runtime)?, &target, g1)?.ok_or("disk at g1")?;
-    assert!(
-        recovered.inputs.iter().any(|row| row.sequence == SEQ && row.disposition == "held"),
-        "Connected recovers held work from disk: {:?}",
-        recovered.inputs
-    );
-    unlock_under_one_second(&mut runtime)?;
-    let g2 = bump_handle(&mut runtime)?;
-    assert_ne!(g2, g1, "lock must issue a new handle generation");
-    let recovered = recover_account(db_of(&runtime)?, &target, g2)?.ok_or("disk at g2")?;
-    assert!(
-        recovered.inputs.iter().any(|row| row.sequence == SEQ && row.disposition == "held"),
-        "unlock recovers held work from disk: {:?}",
-        recovered.inputs
-    );
-    assert_eq!(state(account_of(&runtime)?)?, (Some("held".to_owned()), 1));
-    let probe = db_of(&runtime)?.observe_sql_work();
+    let mut fixture = Box::pin(Fixture::new("lifecycle-fence")).await?;
+    fixture.inbound().await?;
+    let Fixture { root, mut source, peer, sibling, gateway, .. } = fixture;
+    let entry = {
+        let mut served = gateway.lock().map_err(|_| "gateway")?;
+        served.inbox.truncate(1);
+        served.inbox.first().cloned().ok_or("signed message")?
+    };
+    let config = source.gateway_config.clone();
+    let commitment = source.principal_commitment.clone();
+    let carrier = push_engine(source.engine.take().ok_or("fixture engine")?)?;
+    drop(source);
+
+    // Generation 1: the staged copy exists, the router still serves it, the page is held.
+    let account = open_account(&root, &config, &commitment)?;
+    stage(&account, &entry)?;
+    let mut runtime = runtime_for(account, &root);
+    runtime.start_connection()?;
+    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
+    let Some(AccountWork::ApplyPage {
+        generation: g1,
+        entry: page,
+        source,
+        backpressure,
+        reply,
+        turn,
+    }) = pump(&mut runtime, true, |_| false).await?
+    else {
+        return Err("generation 1 must hold an ApplyPage".into());
+    };
+    assert_eq!(g1, generation_of(&runtime)?, "the page is held at the live generation");
+    assert_eq!(messages(&runtime)?, 0, "a held page has applied nothing");
+    assert_eq!(acked(&gateway)?, 0, "a held page has acknowledged nothing");
+
+    // The router row is gone: only the staged copy on disk can finish this message.
+    gateway.lock().map_err(|_| "gateway")?.inbox.clear();
+    let carrier = runtime
+        .state
+        .accounts
+        .get_mut("sender")
+        .and_then(|account| account.engine.take())
+        .ok_or("carrier")?;
+
+    // Real `account.lock` through the actor, bounded by one second on the lock itself.
+    let (lock_reply, lock_response) = oneshot::channel();
+    let mut lock = command("account.lock", serde_json::json!({}));
+    lock.reply = Some(lock_reply);
+    let locked = Instant::now();
+    runtime.apply(lock).await?;
+    assert!(locked.elapsed() < Duration::from_secs(1), "account lock must finish in under 1s");
+    lock_response.await??;
+    assert!(runtime.state.accounts.is_empty(), "lock closes the account");
+    drop(reply);
+
+    // Unlock: reopen from disk; the runtime starts the connection at a new generation.
+    runtime.state.accounts.insert("sender".into(), open_account(&root, &config, &commitment)?);
+    runtime.start_connection()?;
+    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
+    let g2 = generation_of(&runtime)?;
+    assert_ne!(g1, g2, "unlock must issue a new connection generation");
+
+    // Release the held result at the OLD generation: no DB write, no apply, no ACK.
+    let (stale_reply, stale_response) = oneshot::channel();
+    let probe = account_of(&runtime)?.client.account_db()?.observe_sql_work();
     let writes = probe.snapshot().write_statements;
-    observe(&mut runtime, g1).await?;
-    assert_eq!(
-        probe.snapshot().write_statements,
-        writes,
-        "old generation observation writes nothing"
-    );
-    let (reply, response) = oneshot::channel();
     runtime
-        .apply_connection_work(AccountWork::PrepareReceive {
+        .apply_connection_work(AccountWork::ApplyPage {
             generation: g1,
-            trigger: ReceiveTrigger::Connected,
-            reply,
+            entry: page,
+            source,
+            backpressure,
+            reply: stale_reply,
+            turn,
         })
         .await?;
-    assert!(response.await.is_err(), "stale PrepareReceive must drop the reply");
-    assert!(
-        gateway.lock().map_err(|_| "gateway")?.acked.is_empty(),
-        "fake transport must not ACK after old-generation release"
-    );
-    let db = db_of(&runtime)?;
-    let old = ReceiveTurn {
-        target: target.clone(),
-        incarnation: INCARNATION.into(),
-        cursor: 0,
-        generation: g1,
-        erasure_generation: db.privacy_erasure_generation()?,
-    };
-    let stale = commit(db, g2, old.expected(), |tx| {
-        let entry = wire(&target);
-        tx.stage(ReceiveStage {
-            target: &target,
-            incarnation: INCARNATION,
-            sequence: SEQ + 1,
-            entry_json: &entry,
-            admission_key: "authenticated-key",
-            retain_until: now_unix_timestamp() + 300,
-            first_seen: 1,
-        })
-    });
-    assert!(
-        matches!(stale, Err(StorageError::AuthorizationRejected)),
-        "old generation must not commit: {stale:?}"
-    );
-    assert_eq!(state(account_of(&runtime)?)?, (Some("held".to_owned()), 1));
-    let fresh = recover_from_disk(
-        db,
-        g2,
-        ReceiveExpectation {
-            target: &target,
-            incarnation: INCARNATION,
-            cursor: 0,
-            generation: g2,
-            erasure_generation: db.privacy_erasure_generation()?,
-        },
-    )?;
-    assert!(fresh.inputs.iter().any(|row| row.sequence == SEQ && row.disposition == "held"));
+    assert!(stale_response.await.is_err(), "a stale ApplyPage must be dropped without a reply");
+    assert_eq!(probe.snapshot().write_statements, writes, "old generation writes nothing");
+    assert_eq!(messages(&runtime)?, 0, "old generation applies nothing");
+    assert_eq!(acked(&gateway)?, 0, "old generation must not ACK");
+
+    // Recovery from disk through the actor: the Connected PrepareReceive feeds the staged
+    // row to the real receive child, which applies it exactly once.
+    pump(&mut runtime, false, |runtime| messages(runtime).is_ok_and(|count| count > 0)).await?;
+    let settle = Instant::now() + Duration::from_millis(500);
+    pump(&mut runtime, false, |_| Instant::now() >= settle).await?;
+    assert_eq!(messages(&runtime)?, 1, "recovered work applies exactly once");
+    // ACK leg: S6b P24b2 (controller ruling 2026-11-09)
+    assert_eq!(acked(&gateway)?, 0, "the activated path sends no ACK until P24b2");
+    runtime.stop_connection().await;
     drop(runtime);
+    drop((peer, sibling));
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
