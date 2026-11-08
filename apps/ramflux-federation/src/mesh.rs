@@ -1380,7 +1380,12 @@ pub(crate) mod tests {
                     assert_eq!(store.list_pending_outbound(100)?, pending_before, "{label} spool");
                 }
                 Expected::ReachedHandler => {
-                    assert_ne!(response, REFUSAL_FRAME, "{label} must pass the strict decoder");
+                    let parsed: ramflux_transport::GatewayQuicResponse =
+                        serde_json::from_slice(&response)?;
+                    assert_ne!(
+                        parsed.body["reason_code"], "i_json_rejected",
+                        "{label} must pass the strict decoder"
+                    );
                 }
             }
             drop(store);

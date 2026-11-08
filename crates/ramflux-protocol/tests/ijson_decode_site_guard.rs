@@ -7,11 +7,60 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use quote::ToTokens;
-use syn::parse::Parser;
 use syn::visit::Visit;
-use syn::{Expr, GenericArgument, Item, Meta, Type, UseTree};
+use syn::{Expr, GenericArgument, Item, Type, UseTree};
 
 const REGISTRY: &str = "ijson_decode_sites.registry";
+const PLANTED_SOURCE: &str = r#"
+    use serde::de::DeserializeOwned;
+    use serde_json::{from_slice as decode_bytes, value::RawValue as JsonRawValue};
+    struct Wrapper { envelope: ramflux_protocol::Envelope }
+    fn inferred(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
+        let e = serde_json::from_slice(b)?;
+        Ok(e)
+    }
+    fn multiline(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
+        serde_json::from_slice::<
+            ramflux_protocol::Envelope
+        >(b)
+    }
+    fn wrapper(b: &[u8]) -> Result<Wrapper, Error> {
+        serde_json::from_slice::<Wrapper>(b)
+    }
+    fn strict_wrapper(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
+        ramflux_protocol::decode_signed_envelope_ijson(b)
+    }
+    fn generic<T: DeserializeOwned>(b: &[u8]) -> Result<T, Error> {
+        serde_json::from_slice::<T>(b)
+    }
+    fn alias(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
+        decode_bytes(b)
+    }
+    fn raw_value(b: &[u8]) -> Result<Box<JsonRawValue>, Error> {
+        serde_json::from_slice(b)
+    }
+    fn function_value(b: &[u8]) {
+        let _ = Some(b).map(serde_json::from_slice::<ramflux_protocol::Envelope>);
+    }
+    #[cfg(not(test))]
+    fn production_cfg(b: &[u8]) {
+        let _ = serde_json::from_slice::<ramflux_protocol::Envelope>(b);
+    }
+    #[cfg(any(test, feature = "itest-http"))]
+    fn feature_cfg_is_not_test_only(b: &[u8]) {
+        let _ = serde_json::from_slice::<ramflux_protocol::Envelope>(b);
+    }
+    #[cfg(test)]
+    mod inline {
+        fn fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }
+    }
+    #[test]
+    fn test_fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }
+    #[tokio::test]
+    async fn async_fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }
+    #[cfg(test)]
+    mod external;
+"#;
 const DECODERS: [&str; 8] = [
     "from_slice",
     "from_str",
@@ -38,8 +87,6 @@ struct Site {
     closure_hit: bool,
     generic_deserialize: bool,
     strict: bool,
-    class: char,
-    evidence: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,53 +105,57 @@ fn ijson_decode_site_guard() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn deleting_a_class_a_row_reports_the_exact_unregistered_verdict()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sites = scan_tree(&root)?;
+    let mut registry = read_registry(&root.join(REGISTRY))?;
+    let key = registry
+        .iter()
+        .find_map(|(key, row)| (row.class == 'A').then_some(key.clone()))
+        .ok_or("registry has no class A row")?;
+    registry.remove(&key);
+    assert_eq!(
+        validate_registry(&sites, &registry).err(),
+        Some(format!("unregistered decoder: {}", display_key(&key)))
+    );
+    Ok(())
+}
+
+#[test]
+fn test_path_exemptions_match_only_the_card_patterns() {
+    for path in [
+        "tests/fixture.rs",
+        "crates/demo/src/generated_tests/decode.rs",
+        "crates/demo/src/decode_tests.rs",
+    ] {
+        assert!(is_test_path(path), "expected test path exemption: {path}");
+    }
+    for path in [
+        "crates/demo/src/fixture.rs",
+        "crates/demo/src/test_support.rs",
+        "crates/demo/examples/decode.rs",
+        "crates/demo/benches/decode.rs",
+        "crates/demo/src/decode_test.rs",
+        "crates/demo/src/tests.rs",
+    ] {
+        assert!(!is_test_path(path), "unexpected broad test path exemption: {path}");
+    }
+}
+
+#[test]
 fn planted_decode_site_spellings_and_exemptions_are_detected()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = temp_tree("planted")?;
+    write_source(&root, "crates/demo/src/decode.rs", PLANTED_SOURCE)?;
     write_source(
         &root,
-        "crates/demo/src/decode.rs",
-        r"
-            use serde::de::DeserializeOwned;
-            use serde_json::{from_slice as decode_bytes, value::RawValue as JsonRawValue};
-            struct Wrapper { envelope: ramflux_protocol::Envelope }
-            fn inferred(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
-                let e = serde_json::from_slice(b)?;
-                Ok(e)
-            }
-            fn multiline(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
-                serde_json::from_slice::<
-                    ramflux_protocol::Envelope
-                >(b)
-            }
-            fn wrapper(b: &[u8]) -> Result<Wrapper, Error> {
-                serde_json::from_slice::<Wrapper>(b)
-            }
-            fn strict_wrapper(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
-                ramflux_protocol::decode_signed_envelope_ijson(b)
-            }
-            fn generic<T: DeserializeOwned>(b: &[u8]) -> Result<T, Error> {
-                serde_json::from_slice::<T>(b)
-            }
-            fn alias(b: &[u8]) -> Result<ramflux_protocol::Envelope, Error> {
-                decode_bytes(b)
-            }
-            fn raw_value(b: &[u8]) -> Result<Box<JsonRawValue>, Error> {
-                serde_json::from_slice(b)
-            }
-            #[cfg(test)]
-            mod inline {
-                fn fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }
-            }
-            #[test]
-            fn test_fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }
-            #[tokio::test]
-            async fn async_fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }
-        ",
+        "crates/demo/src/decode/external.rs",
+        "fn external_fixture(b: &[u8]) { let _ = serde_json::from_slice::<Envelope>(b); }",
     )?;
     let sites = scan_tree(&root)?;
     let keys = sites.iter().map(|site| site.key.clone()).collect::<BTreeSet<_>>();
-    assert_eq!(sites.len(), 7, "all decoder spellings except test code are registered");
+    assert_eq!(sites.len(), 10, "function values and non-test cfg items are registered");
     assert!(sites.iter().any(|site| site.key.function == "inferred" && site.closure_hit));
     assert!(sites.iter().any(|site| site.key.function == "multiline" && site.closure_hit));
     assert!(sites.iter().any(|site| site.key.function == "wrapper" && site.closure_hit));
@@ -116,25 +167,62 @@ fn planted_decode_site_spellings_and_exemptions_are_detected()
             .iter()
             .any(|site| site.key.function == "raw_value" && site.target.contains("RawValue"))
     );
+    assert!(sites.iter().any(|site| site.key.function == "function_value"));
+    assert!(sites.iter().any(|site| site.key.function == "production_cfg"));
+    assert!(sites.iter().any(|site| site.key.function == "feature_cfg_is_not_test_only"));
     assert!(!sites.iter().any(|site| site.key.function == "fixture"));
+    assert!(!sites.iter().any(|site| site.key.function == "external_fixture"));
 
     let rows = sites
         .iter()
         .map(|site| {
-            (site.key.clone(), RegistryRow { class: site.class, evidence: site.evidence.clone() })
+            (
+                site.key.clone(),
+                RegistryRow { class: 'E', evidence: "excluded=planted fixture".to_owned() },
+            )
         })
         .collect::<BTreeMap<_, _>>();
     let mut missing = rows.clone();
-    missing.remove(keys.first().ok_or("no planted call sites")?);
-    assert!(validate_registry(&sites, &missing).is_err(), "a missing row is rejected");
-    let mut stale = rows;
+    let missing_key = keys.first().ok_or("no planted call sites")?;
+    missing.remove(missing_key);
+    assert_registry_verdict(
+        &sites,
+        &missing,
+        format!("unregistered decoder: {}", display_key(missing_key)),
+    );
+    let mut stale = rows.clone();
+    let stale_key =
+        Key { path: "crates/demo/src/stale.rs".to_owned(), function: "old".to_owned(), ordinal: 1 };
     stale.insert(
-        Key { path: "crates/demo/src/stale.rs".to_owned(), function: "old".to_owned(), ordinal: 1 },
+        stale_key.clone(),
         RegistryRow { class: 'E', evidence: "excluded=stale fixture".to_owned() },
     );
-    assert!(validate_registry(&sites, &stale).is_err(), "a stale row is rejected");
+    assert_registry_verdict(
+        &sites,
+        &stale,
+        format!("stale decoder row: {}", display_key(&stale_key)),
+    );
+    for function in ["function_value", "production_cfg", "feature_cfg_is_not_test_only"] {
+        let key = sites
+            .iter()
+            .find(|site| site.key.function == function)
+            .ok_or("missing planted decoder")?
+            .key
+            .clone();
+        let mut missing_row = rows.clone();
+        missing_row.remove(&key);
+        assert_registry_verdict(
+            &sites,
+            &missing_row,
+            format!("unregistered decoder: {}", display_key(&key)),
+        );
+    }
     fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn assert_registry_verdict(sites: &[Site], rows: &BTreeMap<Key, RegistryRow>, expected: String) {
+    assert_eq!(validate_registry(sites, rows).err(), Some(expected));
 }
 
 #[test]
@@ -144,16 +232,28 @@ fn registry_guard_rejects_class_a_or_b_without_a_strict_call()
     write_source(
         &root,
         "apps/ramflux-router/src/handlers.rs",
-        "fn ingress(b: &[u8]) { let _: Envelope = serde_json::from_slice(b).unwrap(); }",
+        "fn ingress(b: &[u8]) { let _: Envelope = serde_json::from_slice(b).unwrap(); let _ = ramflux_protocol::parse_i_json::<Envelope>(b); }",
     )?;
     let sites = scan_tree(&root)?;
-    let site = sites.first().ok_or("missing planted ingress site")?;
-    assert_eq!(site.class, 'A');
-    let registry = BTreeMap::from([(
-        site.key.clone(),
-        RegistryRow { class: 'A', evidence: "strict=serde_json::from_slice".to_owned() },
-    )]);
-    assert!(validate_registry(&sites, &registry).is_err(), "lenient A call is rejected");
+    let site =
+        sites.iter().find(|site| !site.strict).ok_or("missing planted lenient ingress site")?;
+    let registry = sites
+        .iter()
+        .map(|site| {
+            (site.key.clone(), RegistryRow { class: 'A', evidence: "admission=planted".to_owned() })
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        validate_registry(&sites, &registry).err().as_deref(),
+        Some(
+            format!(
+                "class A lacks strict parse_i_json call: {} (from_slice)",
+                display_key(&site.key)
+            )
+            .as_str()
+        ),
+        "a lenient A call has the stable strictness verdict"
+    );
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -163,7 +263,8 @@ fn registry_guard_rejects_class_a_or_b_without_a_strict_call()
 fn regenerate_ijson_decode_site_registry() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sites = scan_tree(&root)?;
-    let text = registry_text(&sites);
+    let previous = read_registry(&root.join(REGISTRY)).unwrap_or_default();
+    let text = registry_text(&sites, &previous);
     fs::write(root.join(REGISTRY), text)?;
     Ok(())
 }
@@ -183,14 +284,89 @@ fn scan_tree(root: &Path) -> Result<Vec<Site>, Box<dyn std::error::Error>> {
         .map(|(path, text)| Ok((path.clone(), syn::parse_file(text)?)))
         .collect::<Result<Vec<_>, syn::Error>>()?;
     let closure = type_closure(&parsed);
+    let test_modules = test_module_paths(&parsed);
     let mut sites = Vec::new();
     for (path, file) in &parsed {
+        if test_modules.contains(path) {
+            continue;
+        }
         let mut visitor = SiteVisitor::new(path.clone(), &closure);
         visitor.visit_file(file);
         sites.extend(visitor.sites);
     }
     sites.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(sites)
+}
+
+fn test_module_paths(parsed: &[(String, syn::File)]) -> BTreeSet<String> {
+    let known_paths = parsed.iter().map(|(path, _)| path.as_str()).collect::<BTreeSet<_>>();
+    let mut test_paths = BTreeSet::new();
+    for (path, file) in parsed {
+        let file_path = Path::new(path);
+        let parent = file_path.parent().unwrap_or_else(|| Path::new(""));
+        let module_dir = if file_path.file_stem().is_some_and(|stem| stem == "mod") {
+            parent.to_path_buf()
+        } else {
+            parent.join(file_path.file_stem().unwrap_or_default())
+        };
+        collect_test_module_paths(&file.items, &module_dir, &known_paths, &mut test_paths);
+    }
+    test_paths
+}
+
+fn collect_test_module_paths(
+    items: &[Item],
+    module_dir: &Path,
+    known_paths: &BTreeSet<&str>,
+    test_paths: &mut BTreeSet<String>,
+) {
+    for item in items {
+        let Item::Mod(module) = item else { continue };
+        if is_test_cfg(&module.attrs) {
+            if module.content.is_none() {
+                let explicit_path = module.attrs.iter().find_map(|attr| {
+                    if !attr.path().is_ident("path") {
+                        return None;
+                    }
+                    match &attr.meta {
+                        syn::Meta::NameValue(value) => match &value.value {
+                            Expr::Lit(expr) => match &expr.lit {
+                                syn::Lit::Str(path) => Some(module_dir.join(path.value())),
+                                _ => None,
+                            },
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                });
+                let candidates = explicit_path.map_or_else(
+                    || {
+                        let stem = module.ident.to_string();
+                        vec![
+                            module_dir.join(format!("{stem}.rs")),
+                            module_dir.join(stem).join("mod.rs"),
+                        ]
+                    },
+                    |path| vec![path],
+                );
+                for candidate in candidates {
+                    let normalized = candidate.to_string_lossy().replace('\\', "/");
+                    if known_paths.contains(normalized.as_str()) {
+                        test_paths.insert(normalized);
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some((_, nested)) = &module.content {
+            collect_test_module_paths(
+                nested,
+                &module_dir.join(module.ident.to_string()),
+                known_paths,
+                test_paths,
+            );
+        }
+    }
 }
 
 fn collect_sources(
@@ -216,13 +392,7 @@ fn collect_sources(
 
 fn is_test_path(path: &str) -> bool {
     path.split('/').any(|part| part == "tests" || part.ends_with("_tests"))
-        || path.ends_with("_test.rs")
         || path.ends_with("_tests.rs")
-        || path.ends_with("/tests.rs")
-        || path.contains("test_support")
-        || path.contains("fixture")
-        || path.contains("/benches/")
-        || path.contains("/examples/")
 }
 
 fn type_closure(files: &[(String, syn::File)]) -> BTreeSet<String> {
@@ -364,7 +534,9 @@ impl<'a> SiteVisitor<'a> {
             }
         }
         if full.first().is_some_and(|part| part == "ramflux_protocol")
-            && full.last().is_some_and(|last| last.starts_with("decode_signed_"))
+            && full
+                .last()
+                .is_some_and(|last| last == "parse_i_json" || last.starts_with("decode_signed_"))
         {
             self.aliases.insert(local.clone(), full.join("::"));
         }
@@ -447,25 +619,7 @@ impl<'a> SiteVisitor<'a> {
             && target_identifiers(&target).iter().any(|name| name == "T");
         let strict = spelling == "parse_i_json" || spelling.starts_with("decode_signed_");
         let key = Key { path: self.path.clone(), function, ordinal };
-        let (class, evidence) = classify(Classification {
-            path: &key.path,
-            function: &key.function,
-            spelling: &spelling,
-            closure: closure_hit,
-            generic: generic_deserialize,
-            strict,
-            target: &target,
-        });
-        self.sites.push(Site {
-            key,
-            spelling,
-            target,
-            closure_hit,
-            generic_deserialize,
-            strict,
-            class,
-            evidence,
-        });
+        self.sites.push(Site { key, spelling, target, closure_hit, generic_deserialize, strict });
         for argument in args {
             self.visit_expr(argument);
         }
@@ -560,6 +714,14 @@ impl<'ast> Visit<'ast> for SiteVisitor<'_> {
         self.record_call(&call.func, call.args.iter());
     }
 
+    fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        if self.call_spelling(&Expr::Path(path.clone())).is_some() {
+            self.record_call(&Expr::Path(path.clone()), std::iter::empty());
+        } else {
+            syn::visit::visit_expr_path(self, path);
+        }
+    }
+
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         if call.method == "from_slice"
             || call.method == "from_str"
@@ -587,15 +749,6 @@ impl<'ast> Visit<'ast> for SiteVisitor<'_> {
                 target_identifiers(&target).iter().any(|name| self.closure.contains(name));
             let key = Key { path: self.path.clone(), function, ordinal: *ordinal };
             let spelling = call.method.to_string();
-            let (class, evidence) = classify(Classification {
-                path: &key.path,
-                function: &key.function,
-                spelling: &spelling,
-                closure: closure_hit,
-                generic: false,
-                strict: false,
-                target: &target,
-            });
             self.sites.push(Site {
                 key,
                 spelling,
@@ -603,8 +756,6 @@ impl<'ast> Visit<'ast> for SiteVisitor<'_> {
                 closure_hit,
                 generic_deserialize: false,
                 strict: false,
-                class,
-                evidence,
             });
         }
         syn::visit::visit_expr_method_call(self, call);
@@ -633,128 +784,18 @@ fn target_identifiers(target: &str) -> Vec<String> {
 }
 
 fn is_test_cfg(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|attr| attr.path().is_ident("cfg") && meta_has_test(&attr.meta))
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test")
+    })
 }
 
 fn is_test_fn(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         attr.path().segments.last().is_some_and(|segment| segment.ident == "test")
-            || (attr.path().is_ident("cfg") && meta_has_test(&attr.meta))
+            || (attr.path().is_ident("cfg")
+                && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test"))
     })
-}
-
-fn meta_has_test(meta: &Meta) -> bool {
-    match meta {
-        Meta::Path(path) => path.is_ident("test"),
-        Meta::List(list) => {
-            let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
-            parser.parse2(list.tokens.clone()).is_ok_and(|nested| nested.iter().any(meta_has_test))
-        }
-        Meta::NameValue(_) => false,
-    }
-}
-
-const A_PATHS: [&str; 11] = [
-    "apps/ramflux-router/src/handlers.rs",
-    "apps/ramflux-router/src/handlers/session_push.rs",
-    "apps/ramflux-router/src/serve.rs",
-    "apps/ramflux-gateway/src/itest_http.rs",
-    "apps/ramflux-gateway/src/session.rs",
-    "apps/ramflux-federation/src/mesh.rs",
-    "apps/ramflux-federation/src/admin_http.rs",
-    "apps/ramflux-federation/src/itest_http.rs",
-    "crates/ramflux-transport/src/loopback.rs",
-    "crates/ramflux-sdk/src/gateway/host_frames.rs",
-    "crates/ramflux-sdk/src/gateway/session_push.rs",
-];
-
-const B_PATHS: [&str; 9] = [
-    "crates/ramflux-transport/src/mesh_quic.rs",
-    "crates/ramflux-transport/src/compio_mesh.rs",
-    "crates/ramflux-transport/src/mesh_quic_limited.rs",
-    "crates/ramflux-transport/src/mesh_http.rs",
-    "crates/ramflux-transport/src/backend.rs",
-    "crates/ramflux-transport/src/quic_gateway.rs",
-    "crates/ramflux-transport/src/compio_gateway.rs",
-    "crates/ramflux-node-core/src/http_support.rs",
-    "apps/ramflux-router/src/forward_http.rs",
-];
-
-#[derive(Clone, Copy)]
-struct Classification<'a> {
-    path: &'a str,
-    function: &'a str,
-    spelling: &'a str,
-    closure: bool,
-    generic: bool,
-    strict: bool,
-    target: &'a str,
-}
-
-fn classify(facts: Classification<'_>) -> (char, String) {
-    let Classification { path, function, spelling, closure, generic, strict, target } = facts;
-    let ingress = A_PATHS.contains(&path);
-    let reader = B_PATHS.contains(&path);
-    let strict_value_admission = (path == "apps/ramflux-federation/src/mesh.rs"
-        && function == "handle_federation_mesh_quic_request")
-        || (path == "apps/ramflux-router/src/handlers/session_push.rs"
-            && matches!(function, "bound_ack" | "bound_nack"));
-    let outbound_response =
-        path == "apps/ramflux-gateway/src/session.rs" && function == "handle_gateway_submit";
-    if strict_value_admission && strict {
-        return ('A', format!("strict={spelling}; admission=A byte ingress"));
-    }
-    let a_candidate = ingress && (closure || generic || target == "INFERRED");
-    let b_candidate = reader
-        && !target.contains("RawBodyOnly")
-        && !target.contains("RawRequest")
-        && (strict || closure || generic || target == "INFERRED");
-    if (a_candidate || b_candidate) && !strict_value_admission && !outbound_response {
-        let class = if a_candidate { 'A' } else { 'B' };
-        let evidence = if strict {
-            format!("strict={spelling}; admission={class} ingress boundary")
-        } else {
-            format!("STRICT-REQUIRED; {class} ingress/reader site")
-        };
-        return (class, evidence);
-    }
-    if is_stored_path(path) && closure {
-        return ('D', "admitted-before-persist; stored row is not an ingress decoder".to_owned());
-    }
-    if strict_value_admission && closure {
-        return ('C', "admission=previous parse_i_json of the enclosing frame/value".to_owned());
-    }
-    if outbound_response {
-        return (
-            'E',
-            "excluded=router response decoding; not a received signed-envelope ingress".to_owned(),
-        );
-    }
-    if closure && strict {
-        return ('C', format!("admission={spelling} at {function}"));
-    }
-    let reason = if target.contains("RawValue") {
-        "excluded=RawValue peek; classify-only, never admits"
-    } else if closure {
-        "excluded=decode is not an ingress admission; no signed envelope is admitted here"
-    } else if target == "INFERRED" {
-        "excluded=target type is not in Envelope/Ack/Nack containment closure"
-    } else {
-        "excluded=target type is outside Envelope/Ack/Nack containment closure"
-    };
-    ('E', reason.to_owned())
-}
-
-fn is_stored_path(path: &str) -> bool {
-    path.contains("/router_store")
-        || path.contains("router_store/")
-        || path.contains("router_wal/")
-        || path.contains("federation_store")
-        || path.contains("home_migration_store")
-        || path.contains("custody_authority/")
-        || path.contains("/bus/")
-        || path.contains("/client/")
-        || path.contains("account_db/receive/")
 }
 
 fn validate_registry(sites: &[Site], rows: &BTreeMap<Key, RegistryRow>) -> Result<(), String> {
@@ -769,12 +810,11 @@ fn validate_registry(sites: &[Site], rows: &BTreeMap<Key, RegistryRow>) -> Resul
     }
     for site in sites {
         let Some(row) = rows.get(&site.key) else { continue };
-        if row.class != site.class {
+        if !matches!(row.class, 'A' | 'B' | 'C' | 'D' | 'E') {
             errors.push(format!(
-                "class changed for {}: registry {}, detected {}",
+                "invalid registry class for {}: {}",
                 display_key(&site.key),
-                row.class,
-                site.class
+                row.class
             ));
         }
         if row.evidence.trim().is_empty() {
@@ -783,13 +823,51 @@ fn validate_registry(sites: &[Site], rows: &BTreeMap<Key, RegistryRow>) -> Resul
                 display_key(&site.key)
             ));
         }
-        if matches!(row.class, 'A' | 'B') && !site.strict {
+        if matches!(row.class, 'A' | 'B')
+            && !sites.iter().any(|candidate| {
+                candidate.key.path == site.key.path
+                    && candidate.key.function == site.key.function
+                    && candidate.key.ordinal <= site.key.ordinal
+                    && candidate.strict
+            })
+        {
             errors.push(format!(
                 "class {} lacks strict parse_i_json call: {} ({})",
                 row.class,
                 display_key(&site.key),
                 site.spelling
             ));
+        }
+        if row.class == 'C' {
+            let Some(provenance) = row.evidence.strip_prefix("admission=") else {
+                errors.push(format!(
+                    "class C lacks admission call provenance: {}",
+                    display_key(&site.key)
+                ));
+                continue;
+            };
+            let valid_admissions = provenance.split(',').all(|reference| {
+                let mut parts = reference.split('#');
+                let admission = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                    (Some(path), Some(function), Some(ordinal), None) => {
+                        ordinal.parse::<usize>().ok().map(|ordinal| Key {
+                            path: path.to_owned(),
+                            function: function.to_owned(),
+                            ordinal,
+                        })
+                    }
+                    _ => None,
+                };
+                admission.is_some_and(|key| {
+                    sites.iter().any(|candidate| candidate.key == key && candidate.strict)
+                })
+            });
+            if !valid_admissions {
+                errors.push(format!(
+                    "class C names no real admitting call: {} (admission={provenance})",
+                    display_key(&site.key),
+                ));
+            }
         }
     }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
@@ -821,15 +899,16 @@ fn read_registry(path: &Path) -> Result<BTreeMap<Key, RegistryRow>, Box<dyn std:
     Ok(rows)
 }
 
-fn registry_text(sites: &[Site]) -> String {
+fn registry_text(sites: &[Site], previous: &BTreeMap<Key, RegistryRow>) -> String {
     let mut output = String::from(
         "# path | enclosing fn | ordinal | class | admission provenance or exclusion reason\n",
     );
     for site in sites {
+        let Some(row) = previous.get(&site.key) else { continue };
         let _ = writeln!(
             output,
             "{} | {} | {} | {} | {}",
-            site.key.path, site.key.function, site.key.ordinal, site.class, site.evidence
+            site.key.path, site.key.function, site.key.ordinal, row.class, row.evidence
         );
     }
     output

@@ -4,6 +4,7 @@ apps/ramflux-agent-host/src/checkpoint.rs | load | 1 | E | excluded=decode is no
 apps/ramflux-agent-host/src/config.rs | load | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-agent-host/src/provisioning.rs | import_provisioning_bundle | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-agent-host/src/prx.rs | request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-agent-host/src/prx.rs | restore | 1 | E | excluded=agent-host PRX response decoding; outside the signed-envelope closure
 apps/ramflux-agent-host/src/runner_output.rs | recover_outputs | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-agent-host/src/runner_surface.rs | derive_action_outputs | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-agent-host/src/surface_plan.rs | rederive | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -16,8 +17,8 @@ apps/ramflux-federation/src/attachment_renewal.rs | inbound_peer | 1 | E | exclu
 apps/ramflux-federation/src/attachment_renewal.rs | local_peer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/durable_ingress_registry.rs | exercise_federation_control | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/durable_ingress_registry.rs | marked_forward | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 1 | C | admission=crates/ramflux-transport/src/mesh_http.rs#post_json#1,crates/ramflux-transport/src/quic_gateway.rs#read_quic_json_frame#1
+apps/ramflux-federation/src/flow.rs | post_inbound_to_router | 2 | C | admission=crates/ramflux-transport/src/mesh_http.rs#post_json#1,crates/ramflux-transport/src/quic_gateway.rs#read_quic_json_frame#1
 apps/ramflux-federation/src/helpers.rs | router_response_error | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -26,7 +27,7 @@ apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 4 | E | exclu
 apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 5 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 6 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-federation/src/itest_http.rs | handle_itest_request | 7 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-federation/src/mesh.rs | handle_federation_mesh_quic_request | 1 | C | admission=previous parse_i_json of the enclosing frame/value
+apps/ramflux-federation/src/mesh.rs | handle_federation_mesh_quic_request | 1 | C | admission=crates/ramflux-transport/src/mesh_quic.rs#accept_request_on_connection_once#1
 apps/ramflux-federation/src/mesh.rs | handle_federation_mesh_quic_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/mesh.rs | handle_mesh_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/mesh.rs | handle_s8_inbound_envelope_request | 1 | A | strict=parse_i_json; admission=A ingress boundary
@@ -41,8 +42,8 @@ apps/ramflux-gateway/src/device_set_limit.rs | admit_request | 1 | E | excluded=
 apps/ramflux-gateway/src/durable_ingress_registry.rs | drive_itest_http_marked | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/durable_ingress_registry.rs | send_frame | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/ramflux-gateway/src/ingress.rs | parse_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/ingress.rs | parse_inner | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-apps/ramflux-gateway/src/ingress.rs | parse_inner | 3 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-gateway/src/ingress.rs | parse_inner | 2 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1
+apps/ramflux-gateway/src/ingress.rs | parse_inner | 3 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1
 apps/ramflux-gateway/src/ingress.rs | registration_rejection | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/issued_probe.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/issued_probe.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -62,18 +63,18 @@ apps/ramflux-gateway/src/itest_http.rs | handle_mvp7_itest_request | 3 | E | exc
 apps/ramflux-gateway/src/itest_http.rs | handle_mvp7_itest_request | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/itest_http.rs | handle_preauth_control_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/push_queue.rs | offered_wire | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 1 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1
 apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/quic_dispatch.rs | forward_quic_envelope | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-gateway/src/quic_dispatch.rs | forward_quic_envelope | 1 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1
 apps/ramflux-gateway/src/registration.rs | prepare | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/registration.rs | registration_result | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/registration.rs | registration_result | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/registration.rs | session_response | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/ramflux-gateway/src/registration.rs | session_response | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-gateway/src/serve.rs | handle_gateway_forward_request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-apps/ramflux-gateway/src/serve.rs | handle_gateway_forward_request | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+apps/ramflux-gateway/src/serve.rs | handle_gateway_forward_request | 1 | C | admission=crates/ramflux-transport/src/mesh_quic.rs#accept_request_on_connection_once#1
+apps/ramflux-gateway/src/serve.rs | handle_gateway_forward_request | 2 | C | admission=crates/ramflux-transport/src/mesh_quic.rs#accept_request_on_connection_once#1
 apps/ramflux-gateway/src/session.rs | handle_gateway_own_device_fanout | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/session.rs | handle_gateway_submit | 1 | E | excluded=router response decoding; not a received signed-envelope ingress
 apps/ramflux-gateway/src/session.rs | load_gateway_v3_issuer_material | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -86,6 +87,10 @@ apps/ramflux-gateway/src/session_push.rs | router_refusal | 1 | E | excluded=tar
 apps/ramflux-gateway/src/session_push/ephemeral_negotiation.rs | apply_router | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/session_push/ephemeral_negotiation.rs | apply_router | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/session_push/ephemeral_negotiation.rs | open_frame | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-gateway/src/session_push/test_support.rs | send_frame | 1 | E | excluded=test support frame fixture; not a received production ingress
+apps/ramflux-gateway/src/session_push/test_support.rs | serve | 1 | E | excluded=test support server fixture; not a received production ingress
+apps/ramflux-gateway/src/submit_fixtures.rs | signed_submit | 1 | E | excluded=signed submit test fixture decoding; not a received production ingress
+apps/ramflux-gateway/src/submit_fixtures.rs | test_envelope | 1 | E | excluded=envelope test fixture decoding; not a received production ingress
 apps/ramflux-notify/src/main.rs | fcm_oauth_access_token | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | fcm_oauth_access_token | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-notify/src/main.rs | handle_itest_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -116,6 +121,7 @@ apps/ramflux-relay/src/legacy_object.rs | handle_object_relay_request | 1 | E | 
 apps/ramflux-relay/src/legacy_object.rs | handle_object_relay_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-relay/src/legacy_object.rs | handle_object_relay_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-relay/src/legacy_object.rs | handle_object_relay_request | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-relay/src/test_support.rs | spawn_retention_blocking_mesh_echo_server | 1 | E | excluded=test support echo response; not a received signed-envelope ingress
 apps/ramflux-relay/src/trust_keyring.rs | load_keyring_trust | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-relay/src/trust_keyring.rs | load_provider_keyring | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-relay/src/trust_single_key.rs | load_trust_snapshot_cache | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -165,8 +171,8 @@ apps/ramflux-router/src/handlers.rs | handle_mvp6_registration_policy | 1 | E | 
 apps/ramflux-router/src/handlers.rs | handle_s1_session_upsert | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | mesh_fanout_response | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 1 | A | strict=parse_i_json; admission=A byte ingress
-apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 2 | C | admission=previous parse_i_json of the enclosing frame/value
-apps/ramflux-router/src/handlers/session_push.rs | bound_nack | 1 | C | admission=previous parse_i_json of the enclosing frame/value
+apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 2 | C | admission=apps/ramflux-router/src/handlers/session_push.rs#bound_ack#1
+apps/ramflux-router/src/handlers/session_push.rs | bound_nack | 1 | C | admission=apps/ramflux-router/src/handlers/session_push.rs#route#1
 apps/ramflux-router/src/handlers/session_push.rs | envelope_ephemeral | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-router/src/handlers/session_push.rs | issued | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers/session_push.rs | reassert | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -174,12 +180,6 @@ apps/ramflux-router/src/handlers/session_push.rs | route | 1 | E | excluded=targ
 apps/ramflux-router/src/handlers/session_push.rs | route | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers/session_push.rs | route | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers/session_push.rs | route | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-router/src/handlers/session_push/capability_binding.rs | call | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-router/src/handlers/session_push/ephemeral_reassertion.rs | call | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-router/src/handlers/session_push/ephemeral_reassertion.rs | row_request_decode_negatives | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-router/src/handlers/session_push/ephemeral_reassertion.rs | row_request_decode_negatives | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-router/src/handlers/session_push/ephemeral_route.rs | call | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-apps/ramflux-router/src/handlers/session_push/ephemeral_route.rs | post_route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/identity_authority.rs | handle_signed_device_set | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/lifecycle.rs | handle_custody_budgets | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/lifecycle.rs | handle_mvp7_abuse_report | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -247,6 +247,8 @@ crates/ramflux-node-core/src/notify_wal.rs | notify_wal_compact | 1 | E | exclud
 crates/ramflux-node-core/src/notify_wal.rs | try_from | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/redb_store.rs | load_snapshot | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/relay/attachment/backend/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-node-core/src/relay/attachment/grants/fixture.rs | set_generations | 1 | E | excluded=fixture generation data; not a received signed-envelope ingress
+crates/ramflux-node-core/src/relay/attachment/grants/test_support.rs | fixtures_case | 1 | E | excluded=test support grant fixture; not a received signed-envelope ingress
 crates/ramflux-node-core/src/relay/attachment/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/relay/store.rs | load_incremental_state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/relay/store.rs | load_incremental_state | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -309,7 +311,7 @@ crates/ramflux-node-core/src/username_directory/checkpoint.rs | read_safe_wall |
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/checkpoint.rs | release_result_owner | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/username_directory/mod.rs | read_head | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/a2ui_state/checkpoint.rs | from_checkpoint_bytes | 1 | C | admission=parse_i_json at from_checkpoint_bytes
+crates/ramflux-protocol/src/a2ui_state/checkpoint.rs | from_checkpoint_bytes | 1 | C | admission=crates/ramflux-protocol/src/a2ui_state/checkpoint.rs#from_checkpoint_bytes#1
 crates/ramflux-protocol/src/a2ui_state/checkpoint.rs | resynchronize_compact | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/a2ui_state/types.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/a2ui_state/types.rs | from_wire_bytes | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -358,9 +360,9 @@ crates/ramflux-protocol/src/home_migration/control.rs | try_from | 5 | E | exclu
 crates/ramflux-protocol/src/home_migration/control.rs | try_from | 6 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/home_migration/control.rs | try_from | 7 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/home_migration/control.rs | try_from | 8 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/i_json.rs | decode_signed_ack_ijson | 1 | C | admission=parse_i_json at decode_signed_ack_ijson
-crates/ramflux-protocol/src/i_json.rs | decode_signed_envelope_ijson | 1 | C | admission=parse_i_json at decode_signed_envelope_ijson
-crates/ramflux-protocol/src/i_json.rs | decode_signed_nack_ijson | 1 | C | admission=parse_i_json at decode_signed_nack_ijson
+crates/ramflux-protocol/src/i_json.rs | decode_signed_ack_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_ack_ijson#1
+crates/ramflux-protocol/src/i_json.rs | decode_signed_envelope_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_envelope_ijson#1
+crates/ramflux-protocol/src/i_json.rs | decode_signed_nack_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_nack_ijson#1
 crates/ramflux-protocol/src/i_json.rs | parse_i_json | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/i_json.rs | parse_i_json | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/i_json.rs | validate_i_json_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -436,6 +438,7 @@ crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | dispatch_mcp_approval_granted
 crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | dispatch_mcp_bus_request | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | dispatch_mcp_bus_request | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | hydrate_local_mcp_state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/grant_mcp.rs | mcp_grant_signing_body | 1 | E | excluded=local MCP task-binding value; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_bus_request_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_bus_request_inner | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/group.rs | dispatch_group_bus_request_inner | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -497,6 +500,9 @@ crates/ramflux-sdk/src/bus/dispatch/object.rs | rehydrate_one_object_put_spool |
 crates/ramflux-sdk/src/bus/dispatch/object_status.rs | upload_status | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/surface.rs | dispatch_surface_inner | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/dispatch/surface.rs | request_resync | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | directory | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
+crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | own_response | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
+crates/ramflux-sdk/src/bus/dispatch/surface_text_fixture.rs | send_frame | 1 | E | excluded=surface text test fixture; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/dispatch/surface_transport.rs | send_direct | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/task.rs | build_event | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/dispatch/task.rs | build_event | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -534,6 +540,7 @@ crates/ramflux-sdk/src/bus/readers/local.rs | verification | 1 | E | excluded=ta
 crates/ramflux-sdk/src/bus/recovery.rs | apply | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/recovery.rs | apply | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | federation_route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | ownership_transfer | 1 | E | excluded=local group actor value; outside the signed-envelope closure
 crates/ramflux-sdk/src/bus/shared_group_sync/mod.rs | verified_member | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/state.rs | restore_gateway_resume_checkpoint | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/bus/subscription.rs | start | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -547,8 +554,8 @@ crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 1 | D | admitted-befor
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 2 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 3 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/c_abi/mod.rs | parse_json_input | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/a2i.rs | receive_bound_legacy_a2i | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/a2i.rs | receive_bound_legacy_a2i | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/a2i.rs | decrypt_bound_legacy_a2i | 1 | E | excluded=decrypted local DM envelope; not a signed ingress envelope
+crates/ramflux-sdk/src/client/a2i.rs | decrypt_bound_legacy_a2i | 2 | E | excluded=decrypted local A2I event; not a signed ingress envelope
 crates/ramflux-sdk/src/client/call/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/contact.rs | verify_device_manifest_json | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/contact_requests/messages.rs | contact_message_preview | 1 | D | admitted-before-persist; stored row is not an ingress decoder
@@ -598,6 +605,7 @@ crates/ramflux-sdk/src/client/group_session.rs | retry_pending_group_messages | 
 crates/ramflux-sdk/src/client/home_migration.rs | decode | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/identity_authority/custody_directory.rs | require_custody_device | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/identity_authority/custody_lifecycle.rs | keys_differ | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/identity_authority/directory.rs | apply_record_retirements | 1 | E | excluded=persisted X25519 key field; outside the signed-envelope closure
 crates/ramflux-sdk/src/client/identity_authority/mod.rs | observe_device_manifest_json | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/identity_authority/mod.rs | require_cached_root_authority | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/identity_authority/owned.rs | local_principal_kind | 1 | D | admitted-before-persist; stored row is not an ingress decoder
@@ -716,7 +724,8 @@ crates/ramflux-sdk/src/custody/bus.rs | exchange | 1 | E | excluded=decode is no
 crates/ramflux-sdk/src/custody/vault/linux/init.rs | parse | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/presence.rs | approved_primary_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/ephemeral/receiver.rs | admit | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-crates/ramflux-sdk/src/gateway/engine.rs | read_gateway_server_frame_bytes | 1 | C | admission=parse_i_json at read_gateway_server_frame_bytes
+crates/ramflux-sdk/src/gateway/engine.rs | fetch_principal_manifest | 1 | E | excluded=manifest response field; enclosing gateway frame is already strictly decoded
+crates/ramflux-sdk/src/gateway/engine.rs | read_gateway_server_frame_bytes | 1 | C | admission=crates/ramflux-sdk/src/gateway/engine.rs#read_gateway_server_frame_bytes#1
 crates/ramflux-sdk/src/gateway/session_push.rs | decode_server_frame | 1 | A | strict=parse_i_json; admission=A ingress boundary
 crates/ramflux-sdk/src/gateway/session_push.rs | from_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/gateway/session_push.rs | legacy | 1 | A | strict=parse_i_json; admission=A ingress boundary
@@ -731,8 +740,8 @@ crates/ramflux-sdk/src/prekey.rs | sdk_gateway_request_json | 1 | E | excluded=t
 crates/ramflux-sdk/src/prekey.rs | sdk_gateway_request_json | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey.rs | sdk_http_json_request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey.rs | sdk_http_json_request_with_deadline | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
-crates/ramflux-sdk/src/prekey.rs | sdk_quic_gateway_request | 1 | C | admission=parse_i_json at sdk_quic_gateway_request
-crates/ramflux-sdk/src/prekey.rs | sdk_tcp_tls_gateway_request | 1 | C | admission=parse_i_json at sdk_tcp_tls_gateway_request
+crates/ramflux-sdk/src/prekey.rs | sdk_quic_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_quic_gateway_request#1
+crates/ramflux-sdk/src/prekey.rs | sdk_tcp_tls_gateway_request | 1 | C | admission=crates/ramflux-sdk/src/prekey.rs#sdk_tcp_tls_gateway_request#1
 crates/ramflux-sdk/src/prekey/http_async.rs | request | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/prekey/manifest.rs | deserialize | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 crates/ramflux-sdk/src/surface_refusal.rs | renderer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -760,7 +769,6 @@ crates/ramflux-storage/src/account_db/mcp.rs | load_mcp_tools | 1 | E | excluded
 crates/ramflux-storage/src/account_db/mcp.rs | load_recent_mcp_audit | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/mcp.rs | set_mcp_grant_revoked | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/mcp.rs | set_mcp_standing_approval_revoked | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/message_footprint/audit.rs | unregistered_envelope_copies | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/message_footprint/migration.rs | register_row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/message_footprint/mod.rs | message_copy_actor_states | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/message_footprint/replay_reference.rs | register | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -783,6 +791,8 @@ crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 1 | E 
 crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/read_model.rs | client_audit_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/receive/erased_capture.rs | tuple_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/receive/loss.rs | pending_loss_outbox | 1 | E | excluded=local receive-loss index keys; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/mod.rs | retired_incarnations | 1 | E | excluded=local retired-incarnation storage metadata; outside the signed-envelope closure
 crates/ramflux-storage/src/account_db/receive/stage.rs | stage_inner | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-storage/src/account_db/replay_markers.rs | canonical_envelope | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/control.rs | list_actor_states | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -808,6 +818,7 @@ crates/ramflux-storage/src/row_mappers.rs | pending_recovery_approval_from_row |
 crates/ramflux-storage/src/row_mappers.rs | pending_recovery_from_row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/row_mappers.rs | pending_recovery_from_row | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/schema_device_namespace.rs | metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-transport/examples/relay_quic_bench.rs | spawn_echo_server | 1 | E | excluded=benchmark fixture decoder; not a production ingress
 crates/ramflux-transport/src/backend.rs | h2_submit_envelope | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/compio_gateway.rs | read_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/compio_mesh.rs | accept_json_or_postcard_request_on_connection_once | 1 | B | strict=parse_i_json; admission=B ingress boundary
