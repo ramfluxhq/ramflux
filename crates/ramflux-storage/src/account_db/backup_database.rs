@@ -258,6 +258,7 @@ impl BackupDatabase {
             "UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1",
             params![key.fingerprint()],
         )?;
+        super::receive::ledger_backup::sanitize_backup(&target)?;
         drop(target);
         std::fs::File::open(path)?.sync_all()?;
         Ok(())

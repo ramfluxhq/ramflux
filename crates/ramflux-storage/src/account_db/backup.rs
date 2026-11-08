@@ -129,6 +129,7 @@ impl AccountDb {
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             super::backup_selector_admission::drop_scratch(&target)?;
             super::home_migration::strip_from_backup(&target)?;
+            super::receive::ledger_backup::sanitize_backup(&target)?;
             target.execute("DELETE FROM object_segment_resource", [])?;
             // Historical archives have no native physical progress to clear.
             let native:bool=target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0))?;

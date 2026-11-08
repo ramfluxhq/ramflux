@@ -3,8 +3,6 @@
 
 //! Tombstones of deleted authenticated inputs. A row holds only MAC selectors, the bundle that
 //! produced each, and an expiry; it never holds an id, ciphertext or message link.
-// Dormant: the first producers and the W0 reader land in later P03a parts.
-#![allow(dead_code)]
 use crate::{AccountDb, StorageError};
 use rusqlite::params;
 

@@ -45,6 +45,12 @@ fn skip_merge_table(table: &str) -> bool {
             | "account_mac_bundle"
             // Tombstones are unioned by their own helper (P03a-3d1), never row-merged.
             | "receive_erased_input"
+            // Receive ledger never crosses a backup; P03b strips it and skips the row merge.
+            | "gateway_receive_receipt"
+            | "gateway_receive_work"
+            | "gateway_ack_intent"
+            | "gateway_inbox_loss"
+            | "gateway_receive_epoch"
             | "account_mac_marker_bundle"
             | "account_mac_legacy_origin"
             | "account_erasure_generation"
@@ -373,6 +379,7 @@ impl BackupDatabase {
             super::backup_selector_admission::final_deletion::verify(&self.db)?;
         }
         super::receive::erased_capture::reconcile_merge_capture(&self.db, crate::unix_now())?;
+        super::receive::ledger_backup::sanitize_backup(&self.db)?;
         super::backup_selector_admission::drop_scratch(&self.db)?;
         #[cfg(test)]
         super::backup_selector_admission::staging_tests::before_commit(&self.db)?;
@@ -639,6 +646,7 @@ impl BackupDatabase {
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind));")?;
         super::message_footprint::install(&self.db)?;
         super::home_migration::strip_from_backup(&self.db)?;
+        super::receive::ledger_backup::sanitize_backup(&self.db)?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         super::backup_retirement::archive_outbound_state(&self.db)?;
         transaction.commit()?;

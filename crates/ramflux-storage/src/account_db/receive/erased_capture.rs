@@ -402,6 +402,44 @@ pub(crate) fn write_work_bindings(
     Ok(())
 }
 
+/// Records every live work envelope as a tombstone before a backup strip deletes the work rows.
+/// Selectors use this database's retained MAC bundles; merge then unions the table as today.
+///
+/// # Errors
+/// Returns storage or MAC errors.
+pub(crate) fn carry_work_tombstones(db: &Connection, now: i64) -> Result<(), StorageError> {
+    if !has_table(db, "main", "gateway_receive_work")?
+        || !has_table(db, "main", "receive_erased_input")?
+    {
+        return Ok(());
+    }
+    let mut query = db.prepare("SELECT CAST(entry_json AS BLOB) FROM gateway_receive_work")?;
+    let bodies = query
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    for body in bodies {
+        let Some(tuple) = tuple_of(&body, now) else {
+            continue;
+        };
+        let canonical = ErasedTuple {
+            principal: &tuple.principal,
+            device: &tuple.device,
+            signing_key_id: &tuple.signing_key_id,
+            payload_hash: &tuple.payload_hash,
+        }
+        .canonical()?;
+        for (bundle, selector) in super::super::mac_subkeys::bundle_macs(db, LABEL, &canonical)? {
+            db.execute(
+                "INSERT INTO receive_erased_input VALUES(?1,?2,?3) \
+                 ON CONFLICT(selector) DO UPDATE SET expires_at=max(expires_at,excluded.expires_at)",
+                params![selector, bundle, tuple.expires_at],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Reads a six-field envelope out of one stored value, or nothing.
 fn candidate_tuple(
     db: &Connection,

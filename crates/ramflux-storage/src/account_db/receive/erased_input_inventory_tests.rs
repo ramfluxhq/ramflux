@@ -393,11 +393,11 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         "journal",
         "group_pending_undecrypted",
         "contact_message_request",
+        "receive_work",
     ];
-    assert_covers_source_kinds(&kinds, &["receive_work"]);
-    // `receive_work` is absent on purpose: installing the receive ledger stamps schema version
-    // 15 on the incoming account, which a merge refuses as too new (`AccountSchemaTooNew`), and
-    // backups are to strip the ledger tables (P03b). An incoming snapshot cannot carry it yet.
+    assert_covers_source_kinds(&kinds, &[]);
+    // Merge admits schema v15, so `receive_work` is an incoming Source family. The snapshot
+    // strips the work rows after recording tombstones under the incoming account's MAC bundles.
     let p = pair("erased-inventory-incoming")?;
     let families: Vec<Family> = kinds.iter().map(|k| Family::new(k)).collect();
     // The local account holds every message and deletes it: it has no source of its own.
@@ -459,8 +459,13 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         carrier.send_direct_message("thread", id, "peer", b"x")?;
     }
     let extra = seed_extra(&carrier, &p.local, now)?;
+    let mut incoming_work_selector = None;
     for (n, f) in (1_i64..).zip(&families) {
         seed_local(&carrier, f, n, now)?;
+        if f.kind == "receive_work" {
+            let (_, selector) = current(&carrier, "ip", "id", &f.payload)?;
+            incoming_work_selector = Some(selector);
+        }
     }
     let contact = Family::new("contact_message_request");
     carrier.connection.execute(
@@ -495,7 +500,11 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     merged.merge_backup(&incoming, &incoming_snapshot.key, || Ok(()))?;
     let mut expected: Vec<Want> = Vec::new();
     for f in &families {
-        let (_, selector) = current(&p.local, "ip", "id", &f.payload)?;
+        let selector = if f.kind == "receive_work" {
+            incoming_work_selector.clone().expect("receive_work seeded")
+        } else {
+            current(&p.local, "ip", "id", &f.payload)?.1
+        };
         expected.push(Want {
             kind: f.kind,
             selector,
@@ -539,30 +548,5 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         expected.iter().map(|w| ("ip".to_owned(), "id".to_owned(), w.payload.clone())).collect();
     let index = install(&p.root, "w0-installed", &path, &target.key)?;
     assert_erased_after_reopen(&index, &target.key, &tuples)?;
-    Ok(())
-}
-
-#[test]
-fn erased_input_incoming_receive_ledger_is_refused_as_too_new() -> Result<(), StorageError> {
-    // Declared exclusion: `receive_work` cannot be an incoming Source family yet. Installing the
-    // receive ledger stamps schema version 15 and a merge refuses any newer incoming schema.
-    // Pinning the exact refusal means the family is added to the incoming inventory when merge
-    // compatibility (P03b) lands, and this test is then replaced.
-    let p = pair("erased-inventory-incoming-ledger")?;
-    p.source.install_receive_ledger_schema()?;
-    let incoming = p.root.join("incoming.db");
-    let snapshot = p.source.write_backup_snapshot(&incoming)?;
-    let path = p.root.join("merged.db");
-    let target = p.local.write_backup_snapshot(&path)?;
-    let mut merged = BackupDatabase::open(&path, &target.key)?;
-    let refused = merged.merge_backup(&incoming, &snapshot.key, || Ok(()));
-    assert!(
-        matches!(
-            &refused,
-            Err(StorageError::AccountSchemaTooNew { schema_version: 15, supported: 14 })
-        ),
-        "{:?}",
-        refused.err()
-    );
     Ok(())
 }

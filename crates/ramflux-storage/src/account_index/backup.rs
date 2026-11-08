@@ -110,6 +110,11 @@ impl AccountIndex {
             return Err(StorageError::AuthorizationRejected);
         }
         let _writer = self.acquire_account_writer(install.account_id)?;
+        match self.account(install.account_id) {
+            Ok(account) => crate::account_erase::refuse_removed(&account)?,
+            Err(StorageError::AccountNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
         self.ensure_generation_hint(install.account_id)?;
         let transaction = self.connection.immediate_transaction()?;
         let previous = self

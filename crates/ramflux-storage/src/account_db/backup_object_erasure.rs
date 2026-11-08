@@ -32,10 +32,11 @@ impl BackupDatabase {
             [],
             |r| r.get(0),
         )?;
-        if input_version > super::mac_subkeys::VERSION {
+        let supported = super::receive::schema_version();
+        if input_version > supported {
             return Err(StorageError::AccountSchemaTooNew {
                 schema_version: input_version,
-                supported: super::mac_subkeys::VERSION,
+                supported,
             });
         }
         let modern = exists(&self.db, "incoming", "object_erasure_fence")?;
@@ -45,10 +46,10 @@ impl BackupDatabase {
                 [],
                 |r| r.get(0),
             )?;
-            if version > super::mac_subkeys::VERSION {
+            if version > supported {
                 return Err(StorageError::AccountSchemaTooNew {
                     schema_version: version,
-                    supported: super::mac_subkeys::VERSION,
+                    supported,
                 });
             }
             let checksum: Option<String> = self

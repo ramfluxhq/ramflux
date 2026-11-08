@@ -52,6 +52,32 @@ fn clear(db: &AccountDb) -> Result<(), StorageError> {
     db.connection.execute_batch("DELETE FROM gateway_receive_work; DELETE FROM gateway_receive_receipt; DELETE FROM gateway_ack_intent;")?;
     Ok(())
 }
+
+fn normalized_ceiling_entry(len: usize) -> Vec<u8> {
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes(1)).expect("fixture");
+    let mut lo = 0usize;
+    let mut hi = len;
+    let mut hit = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        value["envelope"]["encrypted_payload"] = serde_json::json!("a".repeat(mid));
+        let encoded = serde_json::to_vec(&value).expect("encode");
+        match encoded.len().cmp(&len) {
+            std::cmp::Ordering::Equal => {
+                hit = Some(encoded);
+                break;
+            }
+            std::cmp::Ordering::Less => lo = mid.saturating_add(1),
+            std::cmp::Ordering::Greater => {
+                if mid == 0 {
+                    break;
+                }
+                hi = mid - 1;
+            }
+        }
+    }
+    hit.expect("exact normalized length")
+}
 #[test]
 fn capacity_and_range_work() -> Result<(), StorageError> {
     let (root, db) = setup("w0-capacity")?;
@@ -62,6 +88,16 @@ fn capacity_and_range_work() -> Result<(), StorageError> {
     let mut maximum = bytes(1);
     maximum.resize(1_048_576, b' ');
     assert_eq!(run(&db, input(&maximum, 1))?, R::Staged, "inclusive entry byte bound");
+    clear(&db)?;
+    let normalized = normalized_ceiling_entry(1_048_576);
+    assert_eq!(normalized.len(), 1_048_576);
+    let decoded: serde_json::Value = serde_json::from_slice(&normalized).expect("decode");
+    assert_eq!(
+        serde_json::to_vec(&decoded).expect("re-encode"),
+        normalized,
+        "normalized 1 MiB round-trip"
+    );
+    assert_eq!(run(&db, input(&normalized, 1))?, R::Staged, "normalized inclusive ceiling");
     clear(&db)?;
     // Inactive E consumes slots; no per-sequence walk, even at u64::MAX.
     db.write_transaction(|| {
