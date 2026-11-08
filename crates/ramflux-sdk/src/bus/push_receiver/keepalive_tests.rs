@@ -4,11 +4,12 @@
 //! Named P24a cell: activity on every complete frame, 25 s/10 s heartbeat, 35 s retire.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use crate::bus::connection_manager::model::ConnectionPhase;
 use crate::bus::connection_manager::tests::{
     SessionIo, entry, reconnecting_fixture, send, watchdog,
 };
-use crate::bus::connection_manager::{ConnectionEvent, ConnectionHandle, DisconnectReason};
+use crate::bus::connection_manager::{
+    ConnectionEvent, ConnectionHandle, ConnectionPhase, DisconnectReason,
+};
 use crate::bus::runtime_limits::{CALL_QUEUE, KEEPALIVE_CALL, KEEPALIVE_IDLE, RuntimeTimeouts};
 use crate::{GatewayClientFrame, GatewayServerFrame};
 use std::time::Duration;
@@ -353,7 +354,7 @@ async fn keepalive_stops_on_lock_and_restarts_without_duplicate_connected() -> C
 
         let (handle, mut sessions) = reconnecting_fixture(keepalive_limits())?;
         let mut events = handle.events();
-        let io = sessions.recv().await.ok_or("connector did not enter")?;
+        let mut io = sessions.recv().await.ok_or("connector did not enter")?;
         handle.require_live(Duration::from_secs(600)).await?;
         let generation = handle.generation();
         assert!(matches!(
