@@ -119,7 +119,12 @@ impl ReceiveTransaction<'_> {
             ReceiveSettleKind::Terminal => ReceiveCoverKind::Terminal,
             ReceiveSettleKind::Held => ReceiveCoverKind::Held,
         };
-        match self.cover(ReceiveCover { sequence: input.sequence, kind, gaps: &[] })? {
+        match self.cover(ReceiveCover {
+            sequence: input.sequence,
+            kind,
+            gaps: &[],
+            retain_until: 0,
+        })? {
             ReceiveCoverResult::Paused => Ok(ReceiveSettleResult::Paused),
             ReceiveCoverResult::Covered => Ok(match input.kind {
                 ReceiveSettleKind::Terminal => ReceiveSettleResult::Settled,

@@ -61,7 +61,7 @@ fn cover_as(
     kind: ReceiveCoverKind,
 ) -> Result<ReceiveCoverResult, StorageError> {
     db.receive_transaction(expect(db, incarnation, cursor)?, 1, |tx| {
-        tx.cover(ReceiveCover { sequence, kind, gaps: &[] })
+        tx.cover(ReceiveCover { sequence, kind, gaps: &[], retain_until: 0 })
     })
 }
 
