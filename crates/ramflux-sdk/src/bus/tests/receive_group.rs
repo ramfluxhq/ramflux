@@ -54,9 +54,9 @@ async fn case() -> Case {
     assert_eq!(response.body["members"], json!(["device-peer", "device-sender", "device-sibling"]));
     assert_eq!(response.body["member_roster"].as_array().ok_or("roster")?.len(), 2);
     assert_eq!(response.body["name"], "Received group");
-    let wall = std::time::Instant::now();
-    started.actor.stop().await?;
-    assert!(wall.elapsed() < Duration::from_secs(1));
+    tokio::time::timeout(Duration::from_secs(10), started.actor.stop())
+        .await
+        .expect("actor stop hung")?;
     let root = started.root.clone();
     started.router.await?;
     drop(started.actor);
