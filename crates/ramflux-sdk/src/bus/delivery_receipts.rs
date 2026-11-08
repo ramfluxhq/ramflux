@@ -255,6 +255,15 @@ fn receipt_message(
     Ok((message, serde_json::to_vec(&event)?))
 }
 
+/// Dormant S10a P07 candidate. Live receipt envelopes keep franking JSON.
+#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
+pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
+{
+    crate::client::report_envelope::produce_kind(
+        crate::client::report_envelope::CandidateKind::Receipt,
+    )
+}
+
 pub(crate) mod background;
 pub(crate) use background::{ReceiptWork, apply as apply_background, run as run_background};
 

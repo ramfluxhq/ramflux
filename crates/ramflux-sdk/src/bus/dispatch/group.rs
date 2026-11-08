@@ -35,6 +35,33 @@ fn group_operation_error(method: &str, error: SdkError, native: bool) -> SdkErro
     SdkError::GroupRefused { operation, source: Box::new(error) }
 }
 
+/// Dormant S10a P07 candidate for group message envelopes.
+#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
+pub(crate) fn candidate_group_message_report()
+-> Result<crate::client::report_envelope::CandidateReport, SdkError> {
+    crate::client::report_envelope::produce_kind(
+        crate::client::report_envelope::CandidateKind::GroupMessage,
+    )
+}
+
+/// Dormant S10a P07 candidate for group control envelopes.
+#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
+pub(crate) fn candidate_group_control_report()
+-> Result<crate::client::report_envelope::CandidateReport, SdkError> {
+    crate::client::report_envelope::produce_kind(
+        crate::client::report_envelope::CandidateKind::GroupControl,
+    )
+}
+
+/// Dormant S10a P07 candidate for sender-key distribution envelopes.
+#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
+pub(crate) fn candidate_group_skd_report()
+-> Result<crate::client::report_envelope::CandidateReport, SdkError> {
+    crate::client::report_envelope::produce_kind(
+        crate::client::report_envelope::CandidateKind::GroupSenderKeyDistribution,
+    )
+}
+
 #[allow(clippy::too_many_lines)]
 async fn dispatch_group_bus_request_inner(
     request: &LocalBusFrame,

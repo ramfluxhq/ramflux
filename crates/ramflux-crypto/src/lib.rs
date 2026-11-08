@@ -18,6 +18,7 @@ mod error;
 mod franking;
 mod group_sender;
 mod group_state;
+mod report_opening;
 pub use group_state::{
     GroupChangeRequestInput, GroupStateCreateInput, GroupStateRelation, VerifiedGroupState,
     accept_group_transfer, advance_group_state, advance_native_group_state,
@@ -97,6 +98,12 @@ pub use prekey::{
 };
 pub use recovery::{
     RecoveryQuorumMemberKind, RecoveryShare, create_recovery_quorum, recover_secret_from_quorum,
+};
+pub use report_opening::{
+    AssembledReportOpening, COLLAPSE_KEY_INFO, REPORT_OPENING_DOMAIN, ReportA0,
+    ReportDeliveryClass, ReportDeliveryMode, ReportPriority, assemble_report_opening, collapse_key,
+    collapse_tag, cover_collapse_tag, encode_report_a0, frame_report_plaintext,
+    parse_report_plaintext, report_commitment, verify_report_opening,
 };
 pub use signing::{
     CanonicalSignatureBatchItem, CanonicalSignatureSingleKeyBatchItem,

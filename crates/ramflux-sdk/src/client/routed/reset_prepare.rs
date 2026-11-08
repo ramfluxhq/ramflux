@@ -221,6 +221,15 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Dormant S10a P07 candidate for pair-reply constructors.
+#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
+pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
+{
+    crate::client::report_envelope::produce_kind(
+        crate::client::report_envelope::CandidateKind::PairReply,
+    )
+}
+
 /// Pins the pair-control envelope id until the guard drops (byte-equality tests).
 #[cfg(test)]
 pub(crate) fn with_fixed_pair_control_id<T>(id: &str, f: impl FnOnce() -> T) -> T {

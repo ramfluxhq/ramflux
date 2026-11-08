@@ -529,6 +529,15 @@ fn own_row_id(
         super::own_device_copy::copy_id(source.root_commitment(), source.device_id(), envelope)?
     ))
 }
+/// Dormant S10a P07 candidate for own-sent message replicas.
+#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
+pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
+{
+    crate::client::report_envelope::produce_kind(
+        crate::client::report_envelope::CandidateKind::OwnSentMessage,
+    )
+}
+
 fn alias_key(
     db: &ramflux_storage::AccountDb,
     message: &str,

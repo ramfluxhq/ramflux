@@ -61,6 +61,18 @@ pub enum CryptoError {
     InvalidHomeNodeMigrationProof(&'static str),
     #[error("pairing rejected: {0}")]
     Pairing(&'static str),
+    #[error("report opening inner exceeds u32 length")]
+    ReportInnerTooLarge,
+    #[error("report opening frame too short")]
+    ReportFrameTooShort,
+    #[error("report opening inner length mismatch")]
+    ReportInnerLengthMismatch,
+    #[error("report opening padding or header encryption refused")]
+    ReportPaddingOrHeaderRefused,
+    #[error("report opening commitment mismatch")]
+    ReportCommitmentMismatch,
+    #[error("report opening A0 field exceeds u32 length")]
+    ReportA0TooLarge,
 }
 
 impl From<ramflux_protocol::custody::pairing::WireError> for CryptoError {
