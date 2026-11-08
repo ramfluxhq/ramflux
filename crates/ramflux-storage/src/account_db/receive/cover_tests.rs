@@ -62,6 +62,19 @@ fn insert_receipt(db: &AccountDb, sequence: u64, disposition: &str) -> Result<()
     })
 }
 
+fn insert_work(db: &AccountDb, sequence: u64) -> Result<(), StorageError> {
+    let wire = bytes(sequence);
+    let length = i64::try_from(wire.len())
+        .map_err(|_| StorageError::Integrity("receive entry byte bound"))?;
+    db.write_transaction(|| {
+        db.connection.execute(
+            "INSERT INTO gateway_receive_work VALUES('t','e',?1,?2,'authenticated-key',?3)",
+            params![sequence.to_be_bytes().as_slice(), wire, length],
+        )?;
+        Ok(())
+    })
+}
+
 fn assert_refused(
     db: &AccountDb,
     cursor: u64,
@@ -358,6 +371,7 @@ fn pauses_when_slots_are_held_by_other_sequences() -> Result<(), StorageError> {
         Ok::<(), StorageError>(())
     })?;
     insert_receipt(&db, 1025, "staged")?;
+    insert_work(&db, 1025)?;
     assert_eq!(slots(&db)?, 1025, "1,024 other intents plus the covered receipt");
     let pre = snap(&db)?;
     assert_eq!(cover(&db, 1023, 1025, Kind::Terminal, &[gap(1024, 1024)])?, Out::Paused);
@@ -516,9 +530,19 @@ fn refuses_exact_interval_errors() -> Result<(), StorageError> {
     assert_refused(&db, 5, 6, Kind::Held, &[], "receive cover requires a receipt")?;
     assert_refused(&db, 5, 5, Kind::CompatTerminal, &[], "receive cover interval outside page")?;
     // L1: compat terminal only from a staged receipt with registered work.
+    // Cover still requires a page that spans (C, s]; pin C to s-1 so span_page
+    // passes and the receipt/work rule is the one that fires.
     insert_receipt(&db, 9, "held")?;
-    assert_refused(&db, 5, 9, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
-    assert_refused(&db, 5, 7, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
+    db.write_transaction(|| {
+        db.set_projection_checkpoint("gateway_receive_cursor:t", "8")?;
+        Ok::<(), StorageError>(())
+    })?;
+    assert_refused(&db, 8, 9, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
+    db.write_transaction(|| {
+        db.set_projection_checkpoint("gateway_receive_cursor:t", "6")?;
+        Ok::<(), StorageError>(())
+    })?;
+    assert_refused(&db, 6, 7, Kind::CompatTerminal, &[], "receive cover requires a receipt")?;
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
