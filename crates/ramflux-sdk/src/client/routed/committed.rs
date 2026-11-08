@@ -113,7 +113,7 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let db = self.account_db()?;
         let key = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
-        db.write_transaction(|| self.write_inbox_projection_claim_at(&db, &key, entry))
+        db.write_transaction(|| self.write_inbox_projection_claim_at(db, &key, entry))
     }
 
     /// Writes the projected flag on the caller's open connection (live claim and P16 W1).

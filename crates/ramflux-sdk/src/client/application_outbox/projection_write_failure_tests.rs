@@ -207,10 +207,8 @@ fn snap(client: &RamfluxClient, auth_key: &str, sequence: u64) -> Result<Snap, S
     let db = client.account_db()?;
     let stored = format!("{OUTBOX}{auth_key}");
     let event: Option<ApplicationEvent> = db.load_actor_state(&stored)?;
-    let projected = db
-        .load_actor_state::<Committed>(auth_key)?
-        .map(|receipt| receipt.projected)
-        .unwrap_or(false);
+    let projected =
+        db.load_actor_state::<Committed>(auth_key)?.is_some_and(|receipt| receipt.projected);
     let (disposition, work) = db.receive_state_for_test(sequence)?;
     let receiver = client.owned_device_identity()?;
     Ok(Snap {
@@ -255,7 +253,7 @@ fn fail_and_hold(
         run(fault, || {
             gate(fixture.client.account_db()?)?.admit(
                 fixture.client.account_db()?,
-                req(&fixture.client, SEQ, AUTH, entry, Some(MESSAGE)),
+                &req(&fixture.client, SEQ, AUTH, entry, Some(MESSAGE)),
             )
         }),
         text,
@@ -278,7 +276,7 @@ fn projection_write_failure() -> Result<(), SdkError> {
 
     let missing = gate(fixture.client.account_db()?)?.admit(
         fixture.client.account_db()?,
-        req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
+        &req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
     );
     match missing {
         Err(SdkError::Storage(StorageError::Integrity(text))) if text == INTEGRITY => {}
@@ -300,7 +298,7 @@ fn projection_write_failure() -> Result<(), SdkError> {
     assert_eq!(
         gate(fixture.client.account_db()?)?.admit(
             fixture.client.account_db()?,
-            req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
+            &req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
         )?,
         Admit::Admitted,
         "seen marker must not skip projection as Completed"
@@ -323,7 +321,7 @@ fn projection_write_failure() -> Result<(), SdkError> {
     assert_eq!(
         gate(fixture.client.account_db()?)?.admit(
             fixture.client.account_db()?,
-            req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
+            &req(&fixture.client, SEQ, AUTH, &entry, Some(MESSAGE)),
         )?,
         Admit::Duplicate
     );
@@ -343,14 +341,15 @@ fn drain_without_outbox(client: &mut RamfluxClient) -> Result<(), SdkError> {
     let entry = inbox("drain-env", DRAIN_SEQ);
     stage(client, DRAIN_SEQ)?;
     persist_receipt(client, &entry, DRAIN, MESSAGE)?;
-    client.write_inbox_projection_claim_at(&client.account_db()?, DRAIN, &entry)?;
+    let db = client.account_db()?;
+    client.write_inbox_projection_claim_at(db, DRAIN, &entry)?;
     assert!(
         client.account_db()?.load_actor_state::<Committed>(DRAIN)?.is_some_and(|r| r.projected)
     );
     assert!(!client.account_db()?.actor_state_exists(&format!("{OUTBOX}{DRAIN}"))?);
     assert_eq!(
         gate(client.account_db()?)?
-            .admit(client.account_db()?, req(client, DRAIN_SEQ, DRAIN, &entry, Some(MESSAGE)),)?,
+            .admit(client.account_db()?, &req(client, DRAIN_SEQ, DRAIN, &entry, Some(MESSAGE)),)?,
         Admit::Duplicate,
         "projected-without-outbox must still drain the unfinished projection"
     );
@@ -368,7 +367,7 @@ fn erase_bound_row(client: &RamfluxClient) -> Result<(), SdkError> {
     db.send_direct_message("thread", ERASE, "peer", b"secret")?;
     let outbox = gate(db)?;
     db.receive_transaction(outbox.expected, outbox.generation, |tx| {
-        outbox.admit_in(tx, req(client, ESEQ, KEY, &entry, Some(ERASE))).map_err(|error| {
+        outbox.admit_in(tx, &req(client, ESEQ, KEY, &entry, Some(ERASE))).map_err(|error| {
             match error {
                 SdkError::Storage(storage) => storage,
                 _ => StorageError::Integrity("erase admit"),
@@ -398,7 +397,7 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
             run(Fault::BeforeCommit, || {
                 db.receive_transaction(outbox.expected, outbox.generation, |tx| {
                     tx.stage(staged(&wire, JSEQ))?;
-                    outbox.admit_in(tx, req(client, JSEQ, KEY, &entry, Some(MESSAGE))).map_err(
+                    outbox.admit_in(tx, &req(client, JSEQ, KEY, &entry, Some(MESSAGE))).map_err(
                         |error| match error {
                             SdkError::Storage(storage) => storage,
                             _ => StorageError::Integrity("join admit"),
@@ -421,7 +420,7 @@ fn join_stage_and_admit(client: &mut RamfluxClient) -> Result<(), SdkError> {
         let outbox = gate(db)?;
         db.receive_transaction(outbox.expected, outbox.generation, |tx| {
             tx.stage(staged(&wire, JSEQ))?;
-            outbox.admit_in(tx, req(client, JSEQ, KEY, &entry, Some(MESSAGE))).map_err(
+            outbox.admit_in(tx, &req(client, JSEQ, KEY, &entry, Some(MESSAGE))).map_err(
                 |error| match error {
                     SdkError::Storage(storage) => storage,
                     _ => StorageError::Integrity("join admit"),

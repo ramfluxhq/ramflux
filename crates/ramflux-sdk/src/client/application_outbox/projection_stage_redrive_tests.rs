@@ -65,7 +65,7 @@ fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkErr
     match run(Fault::BeforeCommit, || {
         gate.admit(
             db,
-            AdmitRequest {
+            &AdmitRequest {
                 sequence,
                 auth_key: &auth,
                 entry: &entry,
@@ -101,7 +101,7 @@ fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkErr
     assert_eq!(
         gate.admit(
             db,
-            AdmitRequest {
+            &AdmitRequest {
                 sequence,
                 auth_key: &auth,
                 entry: &entry,
@@ -130,7 +130,7 @@ fn redrive(fixture: &mut Fixture, sequence: u64, env: &str) -> Result<(), SdkErr
     assert_eq!(
         gate.admit(
             db,
-            AdmitRequest {
+            &AdmitRequest {
                 sequence,
                 auth_key: &auth,
                 entry: &entry,

@@ -70,7 +70,7 @@ impl ApplicationOutbox<'_> {
     pub(crate) fn admit(
         &self,
         db: &AccountDb,
-        request: AdmitRequest<'_>,
+        request: &AdmitRequest<'_>,
     ) -> Result<Admit, SdkError> {
         let mut outcome = None;
         let fenced = db.receive_transaction(self.expected, self.generation, |tx| {
@@ -98,7 +98,7 @@ impl ApplicationOutbox<'_> {
     pub(crate) fn admit_in(
         &self,
         tx: &ReceiveTransaction<'_>,
-        request: AdmitRequest<'_>,
+        request: &AdmitRequest<'_>,
     ) -> Result<Admit, SdkError> {
         tx.require_writer()?;
         tx.require_open_input(request.sequence)?;
@@ -123,7 +123,7 @@ fn live_checks(db: &AccountDb, auth_key: &str, entry: &GatewayInboxEntry) -> Res
     Ok(())
 }
 
-fn transfer(tx: &ReceiveTransaction<'_>, request: AdmitRequest<'_>) -> Result<Admit, SdkError> {
+fn transfer(tx: &ReceiveTransaction<'_>, request: &AdmitRequest<'_>) -> Result<Admit, SdkError> {
     let db = tx.account();
     let stored = outbox_key(request.auth_key);
     claim_fault()?;
@@ -249,6 +249,8 @@ pub(crate) fn run<T>(fault: Fault, f: impl FnOnce() -> T) -> T {
 }
 
 #[cfg(test)]
+#[path = "application_outbox/projection_stage_redrive_tests.rs"]
 pub(crate) mod projection_stage_redrive;
 #[cfg(test)]
+#[path = "application_outbox/projection_write_failure_tests.rs"]
 pub(crate) mod projection_write_failure;
