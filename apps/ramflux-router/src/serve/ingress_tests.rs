@@ -910,7 +910,7 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
                             &endpoint,
                             if federation_peer { &pki.federation } else { &pki.gateway },
                             "ramflux-router",
-                            &[pki.ca_pem.clone()],
+                            std::slice::from_ref(&pki.ca_pem),
                             &request_frame,
                             Instant::now() + Duration::from_secs(10),
                         ),
