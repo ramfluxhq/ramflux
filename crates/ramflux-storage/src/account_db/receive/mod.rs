@@ -44,11 +44,11 @@ mod privacy_tests;
 pub(crate) mod removal;
 #[cfg(test)]
 mod removal_tests;
+#[cfg(test)]
+mod reply_outbox_backup_tests;
 pub(crate) mod reset;
 #[cfg(test)]
 mod reset_tests;
-#[cfg(test)]
-mod reply_outbox_backup_tests;
 pub(crate) mod schema;
 pub(crate) mod settle;
 #[cfg(test)]
