@@ -1072,6 +1072,35 @@ where
     }
 }
 
+/// Posts like [`mesh_quic_post_postcard_with_peer_ca_pems_async`] but returns the status and the
+/// original postcard response payload bytes, before any JSON parsing or value construction.
+/// This is only available to tests and explicit test-support builds.
+/// # Errors
+/// Returns an error when the request cannot be encoded or QUIC/TLS fails.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn mesh_quic_post_postcard_raw_body_with_peer_ca_pems_async<T>(
+    endpoint: &str,
+    path: &str,
+    tls: &MeshTlsConfig,
+    server_name: &str,
+    peer_ca_pems: &[String],
+    value: &T,
+) -> Result<(u16, Vec<u8>), TransportError>
+where
+    T: serde::Serialize,
+{
+    let body = serde_json::to_vec(value)?;
+    let response = run_mesh_quic_postcard_request_async(
+        endpoint,
+        tls,
+        server_name,
+        peer_ca_pems,
+        MeshQuicPostcardRequest { method: "POST".to_owned(), path: path.to_owned(), body },
+    )
+    .await?;
+    Ok((response.status, response.body))
+}
+
 fn run_mesh_quic_request(
     endpoint: &str,
     tls: &MeshTlsConfig,

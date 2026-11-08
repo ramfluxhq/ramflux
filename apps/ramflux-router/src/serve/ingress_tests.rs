@@ -3,10 +3,7 @@
 //! The router's real async QUIC ingress keeps `/source` bodies byte-exact (P25 N5b).
 use super::{RouterAsyncMeshPeerAuth, router_async_mesh_quic_connection_loop};
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
-use ramflux_transport::{
-    MeshQuicRawPost, mesh_quic_post_postcard_with_peer_ca_pems_async,
-    mesh_quic_post_raw_with_peer_ca_pems_async,
-};
+use ramflux_transport::{MeshQuicRawPost, mesh_quic_post_raw_with_peer_ca_pems_async};
 use ramflux_transport::{MeshQuicServer, MeshTlsConfig, mesh_quic_exchange_raw_frame};
 use std::{
     collections::BTreeSet,
@@ -439,9 +436,9 @@ async fn postcard_post(
     envelope: &ramflux_protocol::Envelope,
     created_at: Option<i64>,
     duplicate_extension: bool,
-) -> Result<serde_json::Value, ramflux_transport::TransportError> {
+) -> Result<(u16, Vec<u8>), ramflux_transport::TransportError> {
     let roots = [ca_pem.to_owned()];
-    ramflux_transport::mesh_quic_post_postcard_with_peer_ca_pems_async::<_, serde_json::Value>(
+    ramflux_transport::mesh_quic_post_postcard_raw_body_with_peer_ca_pems_async(
         endpoint,
         "/mvp0/envelope",
         tls,
@@ -460,14 +457,15 @@ fn json_quic_frame(path: &str, body: &[u8]) -> TestResult<Vec<u8>> {
     Ok(frame)
 }
 
+/// Sends the request bytes unchanged and returns the original response-frame bytes.
 async fn json_quic_post(
     endpoint: &str,
     tls: &MeshTlsConfig,
     ca_pem: &str,
     path: &str,
     body: &[u8],
-) -> Result<ramflux_transport::GatewayQuicResponse, ramflux_transport::TransportError> {
-    ramflux_transport::mesh_quic_exchange_raw_frame(
+) -> Result<Vec<u8>, ramflux_transport::TransportError> {
+    ramflux_transport::mesh_quic_exchange_raw_response_frame(
         endpoint,
         tls,
         "ramflux-router",
@@ -706,6 +704,9 @@ async fn json_quic_post_raw(
 #[allow(clippy::too_many_lines, reason = "one named regression spans every router ingress surface")]
 async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
     const EXPECTED_BODY: &str = r#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
+    /// Independent literal for the whole original JSON QUIC response frame.
+    const REFUSAL_FRAME: &[u8] =
+        br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#;
     use std::time::Duration;
 
     let _serial = IJSON_TEST_LOCK.lock().await;
@@ -758,22 +759,15 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
         .await,
         "postcard control",
     )?;
-    match postcard_control {
-        Ok(value) => assert_ne!(value["error"], "i_json_rejected"),
-        Err(ramflux_transport::TransportError::Http(message)) => {
-            assert!(
-                message.starts_with("HTTP 500:"),
-                "safe integer reached the handler: {message}"
-            );
-            assert!(
-                !message.contains("i_json_rejected"),
-                "safe integer must not be refused as I-JSON"
-            );
-        }
-        Err(error) => {
-            return Err(format!("unexpected postcard control error: {error:?}").into());
-        }
-    }
+    let (control_status, control_body) = postcard_control?;
+    assert!(
+        (200..300).contains(&control_status) || control_status == 500,
+        "safe integer must reach the handler, got status {control_status}"
+    );
+    assert!(
+        !control_body.windows(b"i_json_rejected".len()).any(|window| window == b"i_json_rejected"),
+        "safe integer must not be refused as I-JSON"
+    );
     for (created_at, duplicate_extension) in [(Some(9_007_199_254_740_992), false), (None, true)] {
         let result = fixture_wait(
             tokio::time::timeout(
@@ -790,14 +784,13 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
             .await,
             "postcard rejection",
         )?;
-        match result {
-            Err(ramflux_transport::TransportError::Http(message)) => {
-                assert_eq!(message, format!("HTTP 400: {EXPECTED_BODY}"));
-            }
-            other => {
-                return Err(format!("expected exact postcard I-JSON refusal, got {other:?}").into());
-            }
-        }
+        let (status, payload) = result?;
+        assert_eq!(status, 400);
+        assert_eq!(
+            payload,
+            EXPECTED_BODY.as_bytes(),
+            "postcard refusal payload must match the independent byte literal"
+        );
     }
     let bridge = super::RouterSubmitBridge {
         router: Arc::clone(&router),
@@ -891,7 +884,10 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
             .await,
             "JSON QUIC control",
         )??;
-        assert_ne!(control.status, 400, "safe-integer endpoint {path} must reach its handler");
+        assert!(
+            !control.starts_with(br#"{"status":400"#),
+            "safe-integer endpoint {path} must reach its handler"
+        );
         for (created_at, duplicate_extension) in
             [(Some(9_007_199_254_740_992), false), (None, true)]
         {
@@ -901,30 +897,6 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
                 created_at,
                 duplicate_extension,
             })?;
-            if duplicate_extension && path == "/mvp0/envelope" {
-                let request_frame = json_quic_frame(path, &body)?;
-                let response_frame = fixture_wait(
-                    tokio::time::timeout(
-                        Duration::from_secs(15),
-                        ramflux_transport::mesh_quic_exchange_raw_response_frame(
-                            &endpoint,
-                            if federation_peer { &pki.federation } else { &pki.gateway },
-                            "ramflux-router",
-                            std::slice::from_ref(&pki.ca_pem),
-                            &request_frame,
-                            Instant::now() + Duration::from_secs(10),
-                        ),
-                    )
-                    .await,
-                    "raw nested-duplicate JSON QUIC refusal",
-                )??;
-                assert_eq!(
-                    response_frame,
-                    br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#,
-                    "nested-duplicate refusal must match the independent raw response frame"
-                );
-                continue;
-            }
             let response = fixture_wait(
                 tokio::time::timeout(
                     Duration::from_secs(15),
@@ -939,8 +911,7 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
                 .await,
                 "JSON QUIC refusal",
             )??;
-            assert_eq!(response.status, 400, "{path}");
-            assert_eq!(serde_json::to_vec(&response.body)?, EXPECTED_BODY.as_bytes(), "{path}");
+            assert_eq!(response, REFUSAL_FRAME, "{path}");
         }
     }
 
@@ -983,12 +954,10 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
                 "JSON QUIC ACK/NACK",
             )??;
             if refused {
-                assert_eq!(response.status, 400, "JSON QUIC {path}");
-                assert_eq!(serde_json::to_vec(&response.body)?, EXPECTED_BODY.as_bytes(), "{path}");
+                assert_eq!(response, REFUSAL_FRAME, "JSON QUIC {path}");
             } else {
                 assert_ne!(
-                    serde_json::to_vec(&response.body)?,
-                    EXPECTED_BODY.as_bytes(),
+                    response, REFUSAL_FRAME,
                     "safe-integer control reaches JSON QUIC handler {path}"
                 );
             }
@@ -1284,7 +1253,7 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
                 duplicate_extension,
             })?;
             if duplicate_extension {
-                let response = fixture_wait(
+                let response_frame = fixture_wait(
                     tokio::time::timeout(
                         Duration::from_secs(15),
                         json_quic_post(
@@ -1296,10 +1265,13 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
                         ),
                     )
                     .await,
-                    "compio JSON duplicate-key refusal",
+                    "compio raw JSON duplicate-key refusal",
                 )??;
-                assert_eq!(response.status, 400);
-                assert_eq!(serde_json::to_vec(&response.body)?, EXPECTED_BODY);
+                assert_eq!(
+                    response_frame,
+                    br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#,
+                    "compio duplicate-key refusal must match the independent raw response frame"
+                );
             } else {
                 let response = fixture_wait(
                     tokio::time::timeout(
@@ -1343,11 +1315,12 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
                 .await,
                 "compio postcard I-JSON refusal",
             )?;
-            assert!(matches!(
-                response,
-                Err(ramflux_transport::TransportError::Http(ref message))
-                    if message.as_bytes() == [b"HTTP 400: ".as_slice(), EXPECTED_BODY].concat()
-            ), "expected exact compio postcard refusal, got {response:?}");
+            let (status, payload) = response?;
+            assert_eq!(status, 400);
+            assert_eq!(
+                payload, EXPECTED_BODY,
+                "compio postcard refusal payload must match the independent byte literal"
+            );
             assert_eq!(ingress_effect_snapshot(&router, &db_path, &envelope)?, before);
         }
 
@@ -1416,7 +1389,7 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
         let response = fixture_wait(
             tokio::time::timeout(
                 Duration::from_secs(15),
-                mesh_quic_post_postcard_with_peer_ca_pems_async::<_, Box<serde_json::value::RawValue>>(
+                ramflux_transport::mesh_quic_post_postcard_raw_body_with_peer_ca_pems_async(
                     &endpoint,
                     "/mvp0/envelope",
                     &pki.gateway,
@@ -1441,10 +1414,12 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
             .created_at
             .saturating_add(i64::from(accepted_postcard.ttl));
         let expected_postcard_wire = format!(
-            r#"{{"cursor":null,"inbox_seq":2,"incarnation_id":"{incarnation_id}","outcome":"online","retain_until":{retain_until},"target_delivery_id":"target_alice"}}"#
+            r#"{{"outcome":"online","target_delivery_id":"target_alice","inbox_seq":2,"cursor":null,"incarnation_id":"{incarnation_id}","retain_until":{retain_until}}}"#
         );
+        let (accepted_status, accepted_payload) = response;
+        assert_eq!(accepted_status, 200);
         assert_eq!(
-            response.get().as_bytes(),
+            accepted_payload,
             expected_postcard_wire.as_bytes(),
             "raw postcard response payload must match the independent byte literal"
         );
