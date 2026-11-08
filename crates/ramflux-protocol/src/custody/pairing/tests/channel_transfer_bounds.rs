@@ -588,18 +588,6 @@ fn channel_contexts(all: &Value) -> TestResult {
         decode_value::<Channel>(&wrong)?.validate_context(&c),
         Err(WireError::Field("artifact_context"))
     );
-    c.sender = "initiator";
-    assert_eq!(
-        decode_value::<Channel>(&candidate_chunk)?.validate_context(&c),
-        Err(WireError::Field("channel_role"))
-    );
-    c.sender = "responder";
-    c.phase = "acknowledged";
-    assert_eq!(
-        decode_value::<Channel>(&candidate_chunk)?.validate_context(&c),
-        Err(WireError::Field("channel_phase"))
-    );
-
     let approval = channel(
         common,
         &digest,
@@ -644,6 +632,18 @@ fn channel_contexts(all: &Value) -> TestResult {
     );
     let mut c = context(&transcript, &digest, "responder", "prepared", Some(RECORD_HASH), None);
     decode_value::<Channel>(&candidate)?.validate_context(&c)?;
+    c.sender = "initiator";
+    assert_eq!(
+        decode_value::<Channel>(&candidate)?.validate_context(&c),
+        Err(WireError::Field("channel_role"))
+    );
+    c.sender = "responder";
+    c.phase = "acknowledged";
+    assert_eq!(
+        decode_value::<Channel>(&candidate)?.validate_context(&c),
+        Err(WireError::Field("channel_phase"))
+    );
+    c.phase = "prepared";
     for (path, value, error) in [
         ("/payload/transfer_id", json!(encode_base64url([2; 32])), "transfer_id"),
         ("/payload/record_hash", json!(encode_base64url([2; 32])), "record_hash"),
