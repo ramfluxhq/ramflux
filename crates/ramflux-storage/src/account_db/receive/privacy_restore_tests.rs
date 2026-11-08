@@ -9,8 +9,7 @@ use super::erased_input_union_tests::pair;
 use super::stage_tests::{bytes, input, run};
 use super::w0_replay_support::{Tuple, assert_erased, install};
 use crate::{
-    AccountDb, AccountDbKey, AccountIndex, BackupDatabase, BackupIndexInstall, BackupOpenMode,
-    StorageError,
+    AccountDb, AccountIndex, BackupDatabase, BackupIndexInstall, BackupOpenMode, StorageError,
 };
 use rusqlite::params;
 use serde_json::{Value, json};
