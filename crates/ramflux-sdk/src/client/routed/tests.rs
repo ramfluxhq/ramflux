@@ -899,3 +899,6 @@ mod p310;
 
 #[path = "revocation_receive_tests.rs"]
 mod revocation_receive_tests;
+
+#[path = "effect_marker_tests.rs"]
+mod effect_marker_tests;

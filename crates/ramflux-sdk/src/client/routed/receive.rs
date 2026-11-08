@@ -340,7 +340,12 @@ impl RamfluxClient {
         finish: Finish,
     ) -> Result<Delivery, SdkError> {
         let Finish { opened, body, plaintext, refs, import, background, consume_erased } = finish;
-        self.finish_pair_retirement()?;
+        // Durable pair-secret retirement runs at the end of `commit_routed_projection` /
+        // `commit_contact_request_bootstrap` after that writer transaction commits (a WAL
+        // checkpoint cannot run while the transaction is open). RAM-only after commit:
+        // `voice_calls`, `voice_transition`, and `object_store.tombstone` (rebuilt on load /
+        // session). Network post-commit (pair-reset reply, attachment import) is P17 / P16;
+        // the seen early-return stays for those.
         let pair_reply = if background {
             match self.prepare_received_pair_reply(engine.config(), &opened, &body) {
                 Ok(reply) => reply,
@@ -587,7 +592,9 @@ impl RamfluxClient {
         manifest: &crate::prekey::SdkDeviceManifestResponse,
         local: &str,
     ) -> Result<Delivery, SdkError> {
-        self.account_db()?.write_transaction(|| {
+        let delivery = self.account_db()?.write_transaction(|| {
+            #[cfg(test)]
+            commit_fault::take(commit_fault::Kind::Bootstrap)?;
             // Candidate authentication supplies receipt scope without resurrecting requester caches.
             let source = Self::device_identity_from_manifest(manifest,&entry.envelope.source_device_id)?;
             let packet = decode(&entry.envelope)?;
@@ -641,7 +648,9 @@ impl RamfluxClient {
             })?;
             Ok(Delivery { routing: Some(opened.routing), plaintext: None, call_control: false, pair_reply: None })
 
-        })
+        })?;
+        self.finish_pair_retirement()?;
+        Ok(delivery)
     }
     fn commit_routed_pair_context(
         &self,
@@ -649,6 +658,8 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<(), SdkError> {
+        #[cfg(test)]
+        commit_fault::take(commit_fault::Kind::Pair)?;
         if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none()
             || matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
         {
@@ -686,6 +697,16 @@ impl RamfluxClient {
         &self,
         context: Commit<'_>,
     ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+        let result =
+            self.account_db()?.write_transaction(|| self.persist_routed_projection(context))?;
+        self.finish_pair_retirement()?;
+        Ok(result)
+    }
+
+    fn persist_routed_projection(
+        &self,
+        context: Commit<'_>,
+    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
         let Commit {
             opened,
             entry,
@@ -699,39 +720,49 @@ impl RamfluxClient {
             references,
             consume_erased,
         } = context;
-        self.account_db()?.write_transaction(|| -> Result<_, SdkError> {
-            if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
-                && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
-            {
-                self.persist_routed_seen(entry)?;
-                return Ok((None, Vec::new()));
-            }
-            let mut admitted = Vec::new();
-            if let Some(shared) = shared_group {
-                self.apply_prepared_shared_group(shared, local_target.ok_or_else(|| invalid("group receive target is absent"))?)?;
-            }
-            if let Some((event, key)) = membership {
-                self.apply_bootstrap_group_member_join_event(
-                    event,
-                    &entry.envelope.source_device_id,
-                    key,
-                )?;
-            }
-            let source=self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
-            if opened.routing.kind == Kind::Direct
-                && self.friend_rejection_reason(source.root_commitment())?.is_none()
-                && !self.pending_contact_root(source.root_commitment())?
-                && !self.accepted_contact_source(source.root_commitment(), &entry.envelope.source_principal_id)?
-            {
-                return Err(invalid("direct message requires current root consent at commit"));
-            }
-            let pending=opened.routing.kind==Kind::Direct
-                && self.pending_contact_root(source.root_commitment())?
-                && !self.accepted_contact_source(source.root_commitment(), &entry.envelope.source_principal_id)?;
-            let plaintext=if pending {
-                self.hold_contact_routed_message(&opened.routing,entry,body,metadata,references)?;
-                None
-            } else {
+        #[cfg(test)]
+        commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
+        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
+            && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
+        {
+            self.persist_routed_seen(entry)?;
+            return Ok((None, Vec::new()));
+        }
+        let mut admitted = Vec::new();
+        if let Some(shared) = shared_group {
+            self.apply_prepared_shared_group(
+                shared,
+                local_target.ok_or_else(|| invalid("group receive target is absent"))?,
+            )?;
+        }
+        if let Some((event, key)) = membership {
+            self.apply_bootstrap_group_member_join_event(
+                event,
+                &entry.envelope.source_device_id,
+                key,
+            )?;
+        }
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if opened.routing.kind == Kind::Direct
+            && self.friend_rejection_reason(source.root_commitment())?.is_none()
+            && !self.pending_contact_root(source.root_commitment())?
+            && !self.accepted_contact_source(
+                source.root_commitment(),
+                &entry.envelope.source_principal_id,
+            )?
+        {
+            return Err(invalid("direct message requires current root consent at commit"));
+        }
+        let pending = opened.routing.kind == Kind::Direct
+            && self.pending_contact_root(source.root_commitment())?
+            && !self.accepted_contact_source(
+                source.root_commitment(),
+                &entry.envelope.source_principal_id,
+            )?;
+        let plaintext = if pending {
+            self.hold_contact_routed_message(&opened.routing, entry, body, metadata, references)?;
+            None
+        } else {
             for (index, (reference, prepared)) in references.into_iter().enumerate() {
                 let registration = self.persist_sender_attachment_reference(
                     reference,
@@ -747,45 +778,54 @@ impl RamfluxClient {
                 super::tests::selector_reopen::registered(&registration);
                 match registration {
                     Ok(()) => admitted.push(index),
-                    Err(SdkError::ObjectErased) if consume_erased => {},
+                    Err(SdkError::ObjectErased) if consume_erased => {}
                     Err(error) => return Err(error),
                 }
             }
             self.project_routed(opened, entry, body, metadata)?
-            };
-            self.commit_routed_pair_context(opened, entry, body)?;
-            for slot in slots {
-                self.persist_message_slot_receipt(&opened.routing.message_id,slot)?;
-            }
-            if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
-                self.persist_projection_owner(entry, &opened.routing.message_id)?;
-                self.account_db()?.persist_actor_state(
-                    &format!("routed/message-metadata/{}", opened.routing.message_id),
-                    &opened.routing,
-                )?;
-            }
-            self.account_db()?.persist_message_watermark(
-                &opened.routing.message_id,
-                &opened.routing.conversation_id,
-                &super::conversation_watermark(&opened.routing.conversation_id),
-                &receipt,
-            )?;
-            let mut retained = entry.clone();
-            if opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX) {
-                // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
-                // call ciphertext alongside them: committed replay needs only attribution/hash.
-                retained.envelope.encrypted_payload.clear();
-                self.append_event(&entry.envelope.envelope_id, "call.control.committed", &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
-            } else {
-                self.append_gateway_delivery(entry)?;
-            }
+        };
+        self.commit_routed_pair_context(opened, entry, body)?;
+        for slot in slots {
+            self.persist_message_slot_receipt(&opened.routing.message_id, slot)?;
+        }
+        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+            self.persist_projection_owner(entry, &opened.routing.message_id)?;
             self.account_db()?.persist_actor_state(
-                receipt,
-                &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
+                &format!("routed/message-metadata/{}", opened.routing.message_id),
+                &opened.routing,
             )?;
-            self.persist_routed_seen(entry)?;
-            Ok((plaintext, admitted))
-        })
+        }
+        self.persist_routed_marker(opened, entry, body, receipt)?;
+        Ok((plaintext, admitted))
+    }
+
+    fn persist_routed_marker(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+        receipt: &str,
+    ) -> Result<(), SdkError> {
+        self.account_db()?.persist_message_watermark(
+            &opened.routing.message_id,
+            &opened.routing.conversation_id,
+            &super::conversation_watermark(&opened.routing.conversation_id),
+            &receipt,
+        )?;
+        let mut retained = entry.clone();
+        if opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX) {
+            // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
+            // call ciphertext alongside them: committed replay needs only attribution/hash.
+            retained.envelope.encrypted_payload.clear();
+            self.append_event(&entry.envelope.envelope_id, "call.control.committed", &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
+        } else {
+            self.append_gateway_delivery(entry)?;
+        }
+        self.account_db()?.persist_actor_state(
+            receipt,
+            &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
+        )?;
+        self.persist_routed_seen(entry)
     }
 }
 
@@ -813,4 +853,45 @@ fn admitted_refs(
     admitted: Vec<usize>,
 ) -> Vec<crate::dm::SdkDmAttachmentRef> {
     admitted.into_iter().map(|index| refs[index].clone()).collect()
+}
+
+#[cfg(test)]
+pub(crate) mod commit_fault {
+    use super::SdkError;
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Kind {
+        Bootstrap,
+        Pair,
+        GroupControl,
+        Content,
+    }
+
+    thread_local! {
+        static FAIL: Cell<Option<Kind>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn projection(kind: &super::Kind) -> Kind {
+        match kind {
+            super::Kind::Direct | super::Kind::GroupMessage => Kind::Content,
+            super::Kind::GroupControl | super::Kind::Control | super::Kind::Receipt => {
+                Kind::GroupControl
+            }
+        }
+    }
+
+    pub(crate) fn fail_before(kind: Kind) {
+        FAIL.with(|cell| cell.set(Some(kind)));
+    }
+
+    pub(crate) fn take(kind: Kind) -> Result<(), SdkError> {
+        FAIL.with(|cell| {
+            if cell.get() == Some(kind) {
+                cell.set(None);
+                return Err(SdkError::LocalBus("routed commit fault".into()));
+            }
+            Ok(())
+        })
+    }
 }

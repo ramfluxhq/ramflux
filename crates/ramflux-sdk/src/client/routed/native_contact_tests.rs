@@ -5,7 +5,7 @@
 use super::*;
 use crate::client::native_test_support::{Fixture, TestResult};
 
-fn carrier(
+pub(super) fn carrier(
     sender: &Fixture,
     target: &Fixture,
     bytes: &[u8],
