@@ -51,7 +51,12 @@ fn stage(db: &AccountDb, cursor: u64, sequence: u64, key: &str) -> Result<Vec<u8
 
 fn cover_held(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), StorageError> {
     let out = db.receive_transaction(expect(db, cursor)?, 1, |tx| {
-        tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps: &[] })
+        tx.cover(ReceiveCover {
+            sequence,
+            kind: ReceiveCoverKind::Held,
+            gaps: &[],
+            retain_until: 0,
+        })
     })?;
     assert_eq!(out, ReceiveCoverResult::Covered);
     Ok(())
