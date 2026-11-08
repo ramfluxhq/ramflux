@@ -181,7 +181,34 @@ fn own_copy_late_w1_locator(db: &AccountDb) -> Result<(), StorageError> {
         "late erase must drop the own-copy sequence locator"
     );
     assert_eq!(receipt_state(db, 13)?.as_deref(), Some("erased"));
-    own_copy_locator_backup_exclusion()
+    own_copy_locator_backup_exclusion()?;
+    own_copy_locator_survives_live_recovery()
+}
+
+/// Identity-recovery retirement on a live account keeps the own-copy locator, its footprint and
+/// its copy binding; only backup and restore copies are stripped (S6b P14 M1).
+fn own_copy_locator_survives_live_recovery() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("w1-own-copy-live-recovery")?;
+    db.send_direct_message("thread", "L", "peer", b"secret")?;
+    db.persist_message_actor_state(
+        "L",
+        "own-device/sequence-locator/L",
+        &json!({"target":"t","incarnation":"e","sequence":2}),
+    )?;
+    let before = db.connection.call(|conn| own_copy_locator_rows(conn))?;
+    assert_eq!(before.0, 1, "locator state is registered live: {before:?}");
+    assert!(before.1 >= 1, "locator footprint is registered live: {before:?}");
+    assert_eq!(before.2, 1, "locator binding is registered live: {before:?}");
+    db.retire_outbound_for_recovery("recovery-head-l")?;
+    assert_eq!(
+        db.connection.call(|conn| own_copy_locator_rows(conn))?,
+        before,
+        "live recovery retirement must keep the locator state, footprint and binding"
+    );
+    assert!(db.actor_state_exists("own-device/sequence-locator/L")?);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 /// Counts own-copy locator rows in runtime actor state, message footprints and copy bindings.
@@ -222,15 +249,19 @@ fn own_copy_locator_backup_exclusion() -> Result<(), StorageError> {
     assert!(live.0 == 1 && live.1 >= 1 && live.2 == 1, "locator is registered live: {live:?}");
     // Archive path (install.rs fresh restore): the strip runs on a live copy of the rows.
     let archived = crate::tests::test_db("w1-own-copy-archive")?;
+    archived.1.send_direct_message("thread", "B", "peer", b"secret")?;
     archived.1.persist_message_actor_state(
         "B",
         "own-device/sequence-locator/B",
         &json!({"target":"t","incarnation":"e","sequence":1}),
     )?;
-    archived
-        .1
-        .connection
-        .call(|conn| crate::account_db::backup_retirement::archive_outbound_state(conn))?;
+    let archive_key = crate::AccountDbKey::derive("acct", b"storage-test-secret");
+    let live_rows = archived.1.connection.call(|conn| own_copy_locator_rows(conn))?;
+    assert!(
+        live_rows.0 == 1 && live_rows.1 >= 1 && live_rows.2 == 1,
+        "locator rows exist before the archive strip: {live_rows:?}"
+    );
+    crate::BackupDatabase::open(&archived.1.path, &archive_key)?.archive_outbound()?;
     assert_eq!(
         archived.1.connection.call(|conn| own_copy_locator_rows(conn))?,
         (0, 0, 0),
