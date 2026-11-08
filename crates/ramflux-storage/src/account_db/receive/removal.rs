@@ -215,7 +215,8 @@ impl AccountDb {
         Ok(found != 0)
     }
 
-    /// Settles every `(target, incarnation, sequence)` row for `admission_key` through WS/W2.
+    /// Settles `(target, incarnation, sequence)` rows for `admission_key` through WS/W2. Expiry and
+    /// eviction reasons settle only held or quarantined rows; other reasons settle every row.
     /// Local GC fences on expected cursor and erasure generation; the actor generation fence is P20.
     ///
     /// # Errors
@@ -226,7 +227,11 @@ impl AccountDb {
         reason: ReceiveFailureReason,
         at: i64,
     ) -> Result<bool, StorageError> {
-        let rows = self.admission_work(key)?;
+        // Expiry and eviction are local hold removals: staged (unprocessed) rows that share the
+        // admission key, and their receipts, are never settled by them (design §2.6).
+        let held_only =
+            matches!(reason, ReceiveFailureReason::HeldExpired | ReceiveFailureReason::HeldEvicted);
+        let rows = self.admission_work(key, held_only)?;
         if rows.is_empty() {
             return Ok(false);
         }
@@ -308,16 +313,26 @@ impl AccountDb {
         self.settle_admission(key, reason, at)
     }
 
-    fn admission_work(&self, key: &str) -> Result<Vec<(String, String, u64)>, StorageError> {
+    fn admission_work(
+        &self,
+        key: &str,
+        held_only: bool,
+    ) -> Result<Vec<(String, String, u64)>, StorageError> {
         if !self.receive_ledger_present()? {
             return Ok(Vec::new());
         }
         let mut query = self.connection.prepare(
-            "SELECT target_delivery_id,incarnation_id,inbox_seq FROM gateway_receive_work
-             WHERE admission_key=?1
-             ORDER BY target_delivery_id,incarnation_id,inbox_seq",
+            "SELECT w.target_delivery_id,w.incarnation_id,w.inbox_seq FROM gateway_receive_work w
+             WHERE w.admission_key=?1
+               AND (?2=0 OR EXISTS(
+                 SELECT 1 FROM gateway_receive_receipt r
+                 WHERE r.target_delivery_id=w.target_delivery_id
+                   AND r.incarnation_id=w.incarnation_id
+                   AND r.inbox_seq=w.inbox_seq
+                   AND r.disposition IN ('held','quarantined')))
+             ORDER BY w.target_delivery_id,w.incarnation_id,w.inbox_seq",
         )?;
-        let rows = query.query_map(params![key], |row| {
+        let rows = query.query_map(params![key, i64::from(held_only)], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
         })?;
         let mut out = Vec::new();

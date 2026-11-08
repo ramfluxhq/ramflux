@@ -435,6 +435,86 @@ fn retired_settle_keeps_live_retry_and_unrouted() -> Result<(), StorageError> {
 }
 
 #[test]
+fn held_purge_scope_and_expiry_boundary() -> Result<(), StorageError> {
+    staged_survives_held_purge()?;
+    default_expiry_boundary()?;
+    Ok(())
+}
+
+fn staged_survives_held_purge() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-h1")?;
+    let wire = stage(&db, 0, 1, "shared")?;
+    cover_held(&db, 0, 1)?;
+    db.hold_unrouted("shared", 1, &wire, 1)?;
+    db.defer_inbox_entry("shared", &wire, 1)?;
+    db.connection.execute(
+        "UPDATE gateway_receive_epoch SET incarnation_id='e2', retired_incarnations=?1 WHERE target_delivery_id='t'",
+        params![serde_json::to_vec(&["e"])?],
+    )?;
+    db.set_projection_checkpoint("gateway_receive_cursor:t", "0")?;
+    let live = bytes(1);
+    let staged = db.receive_transaction(expect_for(&db, "e2", 0)?, 1, |tx| {
+        tx.stage(ReceiveStage {
+            target: "t",
+            incarnation: "e2",
+            sequence: 1,
+            entry_json: &live,
+            admission_key: "shared",
+            retain_until: 100,
+            first_seen: 700_000,
+        })
+    })?;
+    assert!(matches!(staged, ReceiveStageResult::Staged | ReceiveStageResult::Existing));
+    db.trim_expired_unrouted(700_000)?;
+    let live_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e2'",
+        [],
+        |row| row.get(0),
+    )?;
+    let live_receipt: String = db.connection.query_row(
+        "SELECT disposition FROM gateway_receive_receipt WHERE target_delivery_id='t' AND incarnation_id='e2' AND inbox_seq=?1",
+        params![1u64.to_be_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    let live_intents: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_ack_intent WHERE target_delivery_id='t' AND incarnation_id='e2'",
+        [],
+        |row| row.get(0),
+    )?;
+    let old_work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE admission_key='shared' AND incarnation_id='e'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(live_work, 1, "staged work sharing the key survives the purge");
+    assert_eq!(live_receipt, "staged", "staged receipt survives the purge");
+    assert_eq!(live_intents, 0, "no ACK intent for work never processed");
+    assert_eq!(old_work, 0, "old held work is settled");
+    assert_eq!(
+        unrouted_for(&db, "shared")?,
+        1,
+        "shared guard keeps the unrouted row while staged work shares the key"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn default_expiry_boundary() -> Result<(), StorageError> {
+    let (root, db) = setup("p08-boundary")?;
+    stage(&db, 0, 1, "edge")?;
+    cover_held(&db, 0, 1)?;
+    let bound = 1 + 604_800;
+    assert_eq!(expire_tx(&db, 1, bound - 1)?, Vec::<u64>::new(), "one second before stays");
+    assert_eq!(snap(&db)?.work, vec![1]);
+    assert_eq!(expire_tx(&db, 1, bound)?, vec![1], "exactly at the bound expires");
+    assert_eq!(snap(&db)?.work, Vec::<u64>::new());
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn failure_policy_stage_crash() -> Result<(), StorageError> {
     retryable_cut()?;
     deterministic_cut()?;
