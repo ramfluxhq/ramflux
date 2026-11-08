@@ -214,6 +214,35 @@ fn receipt_reconciles_absent_range() -> Result<(), StorageError> {
 }
 
 #[test]
+fn quarantined_receipt_stops_plan_and_keeps_state() -> Result<(), StorageError> {
+    let (root, db) = setup("w2-quarantined")?;
+    stage(&db, 2)?;
+    redrive(&db, 2, "quarantined")?;
+    let before = receipt_rows(&db)?;
+    let trimmed = [ReceiveKnownLoss { from_seq: 1, to_seq: 10, reason: "expired" }];
+    let page = ReceivePageView { after: 0, covered: 10, entries: &[], known_losses: &trimmed };
+    let plan = reconcile(&db, 0, page)?;
+    match &plan {
+        ReceiveReconcileResult::NeedStage { sequence, prefix } => {
+            assert_eq!(*sequence, 2);
+            assert_eq!(prefix.len(), 1, "only the gap before 2 is covered");
+        }
+        other @ ReceiveReconcileResult::Plan(_) => {
+            panic!("quarantined receipt must stop the plan, got {other:?}")
+        }
+    }
+    assert_eq!(db.apply_receive_plan(expect(&db, 0)?, 1, plan.prefix())?, Out::Covered);
+    assert_eq!(cursor(&db)?, 1);
+    assert_eq!(receipt_rows(&db)?, before, "quarantined receipt is kept, not settled");
+    assert_eq!(receipt_rows(&db)?, vec![(2, "quarantined".into())]);
+    assert_eq!(intent_rows(&db)?, Vec::<u64>::new(), "a quarantined sequence gets no ACK intent");
+    assert_eq!(work_count(&db)?, 1, "quarantined work survives");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn reconcile_never_paints_beyond_covered() -> Result<(), StorageError> {
     let (root, db) = setup("w2-paint-beyond")?;
     let beyond = [ReceiveKnownLoss { from_seq: 5, to_seq: 15, reason: "expired" }];

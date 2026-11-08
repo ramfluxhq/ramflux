@@ -60,6 +60,11 @@ pub struct ReceiveCoverStep {
 
 /// Reconcile either yields a full plan or stops at the first live sequence that is not yet
 /// finished (unreceipted, staged, held or quarantined). The caller must stage or redrive it.
+///
+/// Caller contract for `NeedStage` (I4, §2.3 W2 step 3): reconcile never emits a held step.
+/// When W1 later reports `held` for that sequence, the caller advances C over the held entries
+/// itself by issuing the held W2 (`tx.cover` with `ReceiveCoverKind::Held`). Otherwise a
+/// long hold would stall C. This is a P20 actor duty; storage does not do it implicitly.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReceiveReconcileResult {
     Plan(Vec<ReceiveCoverStep>),

@@ -321,6 +321,49 @@ fn validate_point_refuses_each_mismatch_exactly() {
 }
 
 #[test]
+fn point_reply_over_unfinished_receipt_stops_then_settles() -> Result<(), ApplyError> {
+    for disposition in ["staged", "held"] {
+        let points = [
+            ApplyPoint::Entry { seq: 1, target: "t", incarnation: "e" },
+            ApplyPoint::TooLarge { seq: 1, retain_until: 9_000, incarnation: "e" },
+            ApplyPoint::Gone { seq: 1, observed_issued: 1, reason: "unknown", incarnation: "e" },
+        ];
+        for point in points {
+            let harness = open()?;
+            let db = &harness.db;
+            stage(db, 0, 1)?;
+            db.set_receipt_disposition_for_test(1, disposition)?;
+            let before = snap(db)?;
+            assert_eq!(
+                apply_point(db, expected(db, 0)?, 1, 1, point)?,
+                ApplyOutcome::NeedStage { sequence: 1, cursor: 0 },
+                "{disposition} receipt stops the point reply {point:?}"
+            );
+            assert_eq!(
+                snap(db)?,
+                before,
+                "{disposition} stop writes no loss, intent or outbox row"
+            );
+            assert_eq!(snap(db)?.receipts, vec![(1, disposition.to_owned())]);
+            assert_eq!(snap(db)?.work, 1, "{disposition} work survives the stop");
+
+            db.set_receipt_disposition_for_test(1, "completed")?;
+            assert_eq!(
+                apply_point(db, expected(db, 0)?, 1, 1, point)?,
+                ApplyOutcome::Covered { cursor: 1 },
+                "completed W1 lets the same reply settle {point:?}"
+            );
+            let settled = snap(db)?;
+            assert_eq!(settled.cursor, 1);
+            assert_eq!(settled.intents, vec![1]);
+            assert_eq!(settled.work, 0);
+            assert_eq!(settled.receipts, Vec::<(u64, String)>::new());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn point_and_page_mismatches_write_nothing() -> Result<(), ApplyError> {
     let harness = open()?;
     let db = &harness.db;
