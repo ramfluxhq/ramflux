@@ -953,9 +953,9 @@ fn migration_error_code(reason: ramflux_protocol::home_migration::Refusal) -> Ra
 fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode {
     use ramflux_storage::StorageError as E;
     match error {
-        E::AccountWriterBusy(_) | E::SegmentResourceCapacity { .. } => {
-            RamfluxErrorCode::AccountBusy
-        }
+        E::AccountWriterBusy(_)
+        | E::SegmentResourceCapacity { .. }
+        | E::UnsupportedRawQuotaExceeded { .. } => RamfluxErrorCode::AccountBusy,
         E::ObjectErased => RamfluxErrorCode::ObjectErased,
         E::ObjectIdentityConflict => RamfluxErrorCode::ObjectIdentityConflict,
         E::ObjectOwnershipUnverified { .. } => RamfluxErrorCode::ObjectOwnershipUnverified,
