@@ -47,12 +47,7 @@ pub(crate) async fn handle_dm(socket: PathBuf, command: DmCommand) -> Result<(),
         DmAction::List(selector) => handle_dm_list(&mut bus, selector).await,
         DmAction::Read(read) => handle_dm_read(&mut bus, read).await,
         DmAction::Ack(ack) => {
-            let envelope_id = rf_dm_ack_envelope_id(&ack)?;
-            let request = LocalBusMessageAckRequest {
-                envelope_id,
-                receiver_device_id: ack.receiver_device,
-                received_at: ack.received_at.unwrap_or_else(rf_now_unix_timestamp),
-            };
+            let request = rf_dm_ack_request(&ack)?;
             print_json(
                 &bus.request(
                     Some(ack.account),
@@ -276,6 +271,14 @@ async fn handle_dm_mute(bus: &mut LocalBusClient, mute: DmMute) -> Result<(), Rf
         )
         .await?,
     )
+}
+
+fn rf_dm_ack_request(ack: &DmAck) -> Result<LocalBusMessageAckRequest, RfError> {
+    Ok(LocalBusMessageAckRequest {
+        envelope_id: rf_dm_ack_envelope_id(ack)?,
+        receiver_device_id: ack.receiver_device.clone(),
+        received_at: ack.received_at.unwrap_or_else(rf_now_unix_timestamp),
+    })
 }
 
 fn rf_dm_ack_envelope_id(ack: &DmAck) -> Result<String, RfError> {
