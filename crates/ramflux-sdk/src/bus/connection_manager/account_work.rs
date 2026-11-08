@@ -5,7 +5,32 @@
 
 use super::SessionMetadata;
 use crate::{GatewaySessionConfig, SdkError};
+use ramflux_storage::ReceiveExpectation;
 use tokio::{sync::oneshot, time::Instant};
+
+/// Owned actor/durable coordinates carried on a receive turn. The commit fence
+/// borrows this as `ReceiveExpectation`.
+#[derive(Clone, Debug)]
+pub(crate) struct ReceiveTurn {
+    pub target: String,
+    pub incarnation: String,
+    pub cursor: u64,
+    pub generation: u64,
+    pub erasure_generation: i64,
+}
+
+impl ReceiveTurn {
+    #[must_use]
+    pub(crate) fn expected(&self) -> ReceiveExpectation<'_> {
+        ReceiveExpectation {
+            target: &self.target,
+            incarnation: &self.incarnation,
+            cursor: self.cursor,
+            generation: self.generation,
+            erasure_generation: self.erasure_generation,
+        }
+    }
+}
 
 pub(crate) enum AccountWork {
     Fatal {
@@ -17,24 +42,36 @@ pub(crate) enum AccountWork {
     OwnCopy(Box<crate::bus::own_device_copy::OwnCopyWork>),
     Receipts(Box<crate::bus::delivery_receipts::ReceiptWork>),
     Directory(Box<crate::bus::couriers::directory::DirectoryWork>),
-    ReceivePrepare {
+    PrepareReceive {
         generation: u64,
         trigger: super::ReceiveTrigger,
         reply: oneshot::Sender<Result<super::ReceivePlan, SdkError>>,
     },
-    ReceiveApply {
+    ApplyPage {
         generation: u64,
         entry: Box<super::receive::ReceiveEntry>,
         source: crate::bus::sync_driver::source::PreparedSource,
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
         reply: oneshot::Sender<Result<super::receive::ReceiveApplied, SdkError>>,
     },
-    ReceiveAck {
+    #[allow(dead_code, reason = "P20a dormant; live senders arrive in later P20 parts")]
+    SettleRetained {
+        generation: u64,
+        turn: Box<ReceiveTurn>,
+        sequence: u64,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
+    AckResults {
         generation: u64,
         state: Box<crate::bus::sync_driver::AckState>,
         cursor: Box<Result<crate::GatewayCursor, SdkError>>,
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
         reply: oneshot::Sender<Result<super::receive::ReceiveAcked, SdkError>>,
+    },
+    #[allow(dead_code, reason = "P20a dormant; live senders arrive in later P20 parts")]
+    ReceiveObservation {
+        generation: u64,
+        event: super::ConnectionEvent,
     },
     Metadata {
         metadata: Box<SessionMetadata>,

@@ -111,7 +111,7 @@ async fn pass(
     call_timeout: std::time::Duration,
 ) -> Result<bool, SdkError> {
     let (reply, response) = oneshot::channel();
-    work.send(AccountWork::ReceivePrepare { generation, trigger, reply })
+    work.send(AccountWork::PrepareReceive { generation, trigger, reply })
         .await
         .map_err(|_| handle.pending())?;
     let plan = response.await.map_err(|_| handle.pending())??;
@@ -245,7 +245,7 @@ async fn apply_entry(
     #[cfg(test)]
     handle.test_record_receive("source", source_started.elapsed());
     let (reply, response) = oneshot::channel();
-    work.send(AccountWork::ReceiveApply {
+    work.send(AccountWork::ApplyPage {
         generation,
         entry: Box::new(entry),
         source,
@@ -278,7 +278,7 @@ async fn apply_entry(
     #[cfg(test)]
     handle.test_record_receive("ack-network", started.elapsed());
     let (reply, response) = oneshot::channel();
-    work.send(AccountWork::ReceiveAck {
+    work.send(AccountWork::AckResults {
         generation,
         state: Box::new(prepared.state),
         cursor: Box::new(cursor),
@@ -316,11 +316,11 @@ pub(crate) async fn test_redrive(
                 }
             };
             match message {
-                AccountWork::ReceivePrepare { reply, .. } => {
+                AccountWork::PrepareReceive { reply, .. } => {
                     let _ = reply.send(crate::bus::sync_driver::prepare_receive(account));
                 }
                 AccountWork::Courier(step) => step.apply(account),
-                AccountWork::ReceiveApply { entry, source, backpressure, reply, .. } => {
+                AccountWork::ApplyPage { entry, source, backpressure, reply, .. } => {
                     if let Some(key) = &entry.retry_key
                         && crate::bus::couriers::head_refresh::inbound::eligible(account, key)
                     {
@@ -342,7 +342,7 @@ pub(crate) async fn test_redrive(
                         .await,
                     );
                 }
-                AccountWork::ReceiveAck { state, cursor, mut backpressure, reply, .. } => {
+                AccountWork::AckResults { state, cursor, mut backpressure, reply, .. } => {
                     let result = crate::bus::sync_driver::finish_prepared_ack(
                         account,
                         &state,

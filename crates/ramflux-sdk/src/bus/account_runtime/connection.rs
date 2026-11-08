@@ -152,33 +152,12 @@ impl AccountRuntime {
                 }
             }
             AccountWork::Directory(work) => self.apply_directory_work(*work)?,
-            AccountWork::ReceivePrepare { generation, trigger, reply } => {
-                if generation != handle.generation() || reply.is_closed() {
-                    return Ok(false);
-                }
-                tracing::trace!(?trigger, generation, "preparing stored receive cursor");
-                let result = super::super::sync_driver::prepare_receive(account);
-                let _ = reply.send(result);
-            }
-            AccountWork::ReceiveApply { generation, entry, source, backpressure, reply } => {
-                if generation != handle.generation() || reply.is_closed() {
-                    return Ok(false);
-                }
-                self.apply_receive_entry(*entry, source, backpressure, reply).await?;
-            }
-
-            AccountWork::ReceiveAck { generation, state, cursor, mut backpressure, reply } => {
-                if generation == handle.generation() && !reply.is_closed() {
-                    #[cfg(test)]
-                    let _ack_work = account.client.account_db()?.observe_ack_work();
-                    let result = super::super::sync_driver::finish_prepared_ack(
-                        account,
-                        &state,
-                        *cursor,
-                        &mut backpressure,
-                    );
-                    let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
-                }
+            AccountWork::PrepareReceive { .. }
+            | AccountWork::ApplyPage { .. }
+            | AccountWork::SettleRetained { .. }
+            | AccountWork::AckResults { .. }
+            | AccountWork::ReceiveObservation { .. } => {
+                return self.apply_receive_turn(&handle, work).await;
             }
             AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
             AccountWork::Observation { event } => {
@@ -215,6 +194,70 @@ impl AccountRuntime {
             }
         }
         Ok(publish_networking)
+    }
+
+    async fn apply_receive_turn(
+        &mut self,
+        handle: &crate::bus::connection_manager::ConnectionHandle,
+        work: AccountWork,
+    ) -> Result<bool, SdkError> {
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return Ok(false);
+        };
+        match work {
+            AccountWork::PrepareReceive { generation, trigger, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return Ok(false);
+                }
+                tracing::trace!(?trigger, generation, "preparing stored receive cursor");
+                let result = super::super::sync_driver::prepare_receive(account);
+                let _ = reply.send(result);
+            }
+            AccountWork::ApplyPage { generation, entry, source, backpressure, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return Ok(false);
+                }
+                self.apply_receive_entry(*entry, source, backpressure, reply).await?;
+            }
+            AccountWork::SettleRetained { turn, sequence, reply, .. } => {
+                if reply.is_closed() {
+                    return Ok(false);
+                }
+                let result = super::lifecycle_fence::settle_retained(
+                    account.client.account_db()?,
+                    handle.generation(),
+                    &turn,
+                    sequence,
+                );
+                let _ = reply.send(result);
+            }
+            AccountWork::AckResults { generation, state, cursor, mut backpressure, reply } => {
+                if generation == handle.generation() && !reply.is_closed() {
+                    #[cfg(test)]
+                    let _ack_work = account.client.account_db()?.observe_ack_work();
+                    let result = super::super::sync_driver::finish_prepared_ack(
+                        account,
+                        &state,
+                        *cursor,
+                        &mut backpressure,
+                    );
+                    let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
+                }
+            }
+            AccountWork::ReceiveObservation { generation, event } => {
+                if generation != handle.generation() {
+                    return Ok(false);
+                }
+                return Ok(record_observation(
+                    account,
+                    handle,
+                    event,
+                    &mut self.networking_observation_warned,
+                ));
+            }
+            _ => return Ok(false),
+        }
+        Ok(false)
     }
 
     async fn apply_receive_entry(

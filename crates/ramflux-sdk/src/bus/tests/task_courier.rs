@@ -907,6 +907,9 @@ mod receive_reset;
 #[path = "receive_w0.rs"]
 mod receive_w0;
 
+#[path = "lifecycle_fence.rs"]
+mod lifecycle_fence;
+
 #[path = "receive_ws.rs"]
 mod receive_ws;
 

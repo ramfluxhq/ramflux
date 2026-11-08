@@ -14,6 +14,7 @@ mod connection;
 mod directory;
 pub(super) mod fetches;
 pub(crate) mod head_refresh;
+pub(crate) mod lifecycle_fence;
 mod readers;
 pub(super) mod uploads;
 
