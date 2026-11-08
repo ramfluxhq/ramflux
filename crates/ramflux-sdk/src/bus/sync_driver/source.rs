@@ -11,6 +11,7 @@ mod group;
 mod history;
 mod native;
 pub(crate) mod w0;
+pub(crate) mod ws;
 use crate::prelude::*;
 
 pub(crate) type PreparedSource = Option<Box<Result<PreparedInbound, SdkError>>>;

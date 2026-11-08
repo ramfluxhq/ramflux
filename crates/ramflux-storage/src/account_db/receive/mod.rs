@@ -28,6 +28,9 @@ mod privacy_restore_tests;
 #[cfg(test)]
 mod privacy_tests;
 pub(crate) mod schema;
+pub(crate) mod settle;
+#[cfg(test)]
+mod settle_tests;
 mod source_gate;
 pub(crate) mod stage;
 #[cfg(test)]

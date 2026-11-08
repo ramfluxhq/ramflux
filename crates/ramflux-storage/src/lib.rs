@@ -33,6 +33,7 @@ pub use account_db::receive::cover::{
     ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveGap,
 };
 pub use account_db::receive::privacy::ReceiveBind;
+pub use account_db::receive::settle::{ReceiveSettle, ReceiveSettleKind, ReceiveSettleResult};
 pub use account_db::receive::stage::{ReceiveStage, ReceiveStageResult};
 pub use account_db::receive::{ReceiveExpectation, ReceiveTransaction};
 mod encryption;
