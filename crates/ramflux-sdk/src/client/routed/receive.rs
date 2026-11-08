@@ -703,6 +703,18 @@ impl RamfluxClient {
         Ok(result)
     }
 
+    /// Joins an open receive transaction. Live [`Self::commit_routed_projection`] stays on its writer.
+    #[allow(dead_code, reason = "P20c join point; actor uses live apply until P20f projection W1")]
+    fn commit_routed_w1_in(
+        &self,
+        tx: &ramflux_storage::ReceiveTransaction<'_>,
+        sequence: u64,
+        context: Commit<'_>,
+    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+        tx.require_open_input(sequence)?;
+        self.persist_routed_projection(context)
+    }
+
     fn persist_routed_projection(
         &self,
         context: Commit<'_>,

@@ -13,7 +13,8 @@
 
 use crate::{RamfluxClient, SdkError};
 use ramflux_storage::{
-    AccountDb, ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
+    AccountDb, ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult,
+    ReceiveTransaction, StorageError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -65,29 +66,27 @@ impl OwnCopyW1<'_> {
         message: &str,
         effect: impl FnOnce() -> Result<T, SdkError>,
     ) -> Result<T, SdkError> {
-        let mut outcome = None;
-        let expected = self.expected;
-        let fenced = db.receive_transaction(expected, self.generation, |tx| {
-            tx.require_open_input(sequence)?;
-            let result = effect();
-            let failed = result.is_err();
-            outcome = Some(result);
-            if failed {
-                return Err(StorageError::Integrity("own-copy effect failed"));
-            }
-            register_sequence_locator(db, message, expected, sequence)?;
-            match tx.bind_logical_message(sequence, message)? {
-                ReceiveBind::Bound | ReceiveBind::Erased => {}
-            }
-            before_commit_fault()?;
-            Ok(())
-        });
-        match (fenced, outcome) {
-            (_, Some(Err(error))) => Err(error),
-            (Err(error), _) => Err(error.into()),
-            (Ok(()), Some(Ok(value))) => Ok(value),
-            (Ok(()), None) => Err(SdkError::LocalBus("own-copy effect did not run".into())),
+        join_own_copy(db, self.expected, self.generation, "own-copy effect failed", |tx| {
+            self.effect_in(tx, sequence, message, effect)
+        })
+    }
+
+    /// Same cut as [`Self::effect`], joining an already-open receive transaction.
+    pub(crate) fn effect_in<T>(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        sequence: u64,
+        message: &str,
+        effect: impl FnOnce() -> Result<T, SdkError>,
+    ) -> Result<T, SdkError> {
+        tx.require_open_input(sequence)?;
+        let value = effect()?;
+        register_sequence_locator(tx.account(), message, self.expected, sequence)?;
+        match tx.bind_logical_message(sequence, message)? {
+            ReceiveBind::Bound | ReceiveBind::Erased => {}
         }
+        before_commit_fault()?;
+        Ok(value)
     }
 
     /// Recovery W1 cut: durable reset work runs inside the same fenced transaction.
@@ -97,24 +96,49 @@ impl OwnCopyW1<'_> {
         sequence: u64,
         effect: impl FnOnce() -> Result<T, SdkError>,
     ) -> Result<T, SdkError> {
-        let mut outcome = None;
-        let fenced = db.receive_transaction(self.expected, self.generation, |tx| {
-            tx.require_open_input(sequence)?;
-            let result = effect();
-            let failed = result.is_err();
-            outcome = Some(result);
-            if failed {
-                return Err(StorageError::Integrity("own-copy recovery failed"));
-            }
-            before_commit_fault()?;
+        join_own_copy(db, self.expected, self.generation, "own-copy recovery failed", |tx| {
+            self.recover_in(tx, sequence, effect)
+        })
+    }
+
+    /// Same cut as [`Self::recover`], joining an already-open receive transaction.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn recover_in<T>(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        sequence: u64,
+        effect: impl FnOnce() -> Result<T, SdkError>,
+    ) -> Result<T, SdkError> {
+        tx.require_open_input(sequence)?;
+        let value = effect()?;
+        before_commit_fault()?;
+        Ok(value)
+    }
+}
+
+fn join_own_copy<T>(
+    db: &AccountDb,
+    expected: ReceiveExpectation<'_>,
+    generation: u64,
+    failed: &'static str,
+    write: impl FnOnce(&ReceiveTransaction<'_>) -> Result<T, SdkError>,
+) -> Result<T, SdkError> {
+    let mut outcome = None;
+    let fenced = db.receive_transaction(expected, generation, |tx| match write(tx) {
+        Ok(value) => {
+            outcome = Some(Ok(value));
             Ok(())
-        });
-        match (fenced, outcome) {
-            (_, Some(Err(error))) => Err(error),
-            (Err(error), _) => Err(error.into()),
-            (Ok(()), Some(Ok(value))) => Ok(value),
-            (Ok(()), None) => Err(SdkError::LocalBus("own-copy recovery did not run".into())),
         }
+        Err(error) => {
+            outcome = Some(Err(error));
+            Err(StorageError::Integrity(failed))
+        }
+    });
+    match (fenced, outcome) {
+        (_, Some(Err(error))) => Err(error),
+        (Err(error), _) => Err(error.into()),
+        (Ok(()), Some(Ok(value))) => Ok(value),
+        (Ok(()), None) => Err(SdkError::LocalBus("own-copy write did not run".into())),
     }
 }
 
@@ -206,8 +230,7 @@ pub(crate) fn with_omit_locator<T>(f: impl FnOnce() -> T) -> T {
 }
 
 impl RamfluxClient {
-    /// Test-only: decrypts an own-copy packet and commits through the dormant W1 adapter.
-    #[cfg(test)]
+    /// Decrypts an own-copy packet and commits through the dormant W1 adapter.
     pub(crate) fn apply_own_copy_w1(
         &self,
         entry: &crate::GatewayInboxEntry,
@@ -222,8 +245,23 @@ impl RamfluxClient {
         gate.effect(db, sequence, message, || self.commit_own_copy_from_entry(entry, manifest))
     }
 
-    /// Test-only: recovery W1 cut for the pair-reset durable writes.
-    #[cfg(test)]
+    /// Same cut as [`Self::apply_own_copy_w1`], joining an already-open receive transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_own_copy_w1_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        entry: &crate::GatewayInboxEntry,
+        manifest: &crate::SdkDeviceManifestResponse,
+        expected: ReceiveExpectation<'_>,
+        sequence: u64,
+        message: &str,
+    ) -> Result<bool, SdkError> {
+        let generation = expected.generation;
+        let gate = OwnCopyW1 { expected, generation };
+        gate.effect_in(tx, sequence, message, || self.commit_own_copy_from_entry(entry, manifest))
+    }
+
+    /// Recovery W1 cut for the pair-reset durable writes.
     pub(crate) fn recover_own_copy_w1(
         &self,
         entry: &crate::GatewayInboxEntry,

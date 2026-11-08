@@ -3,8 +3,8 @@
 
 //! Validate `resume_page` / `FetchEntry` and apply the useful suffix into W2.
 use ramflux_storage::{
-    AccountDb, ReceiveCoverResult, ReceiveExpectation, ReceiveKnownLoss, ReceivePageView,
-    ReceiveReconcileResult, StorageError,
+    AccountDb, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveExpectation,
+    ReceiveKnownLoss, ReceivePageView, ReceiveReconcileResult, ReceiveTransaction, StorageError,
 };
 
 /// Protocol or storage failure while applying a page or point outcome.
@@ -291,6 +291,24 @@ pub(crate) fn apply_point(
         return Ok(ApplyOutcome::Paused { cursor });
     }
     Ok(ApplyOutcome::Covered { cursor })
+}
+
+/// After NeedStage→held W1, the actor advances C over the held sequence (I4, §2.3 step 3).
+pub(crate) fn cover_held(
+    db: &AccountDb,
+    expected: ReceiveExpectation<'_>,
+    generation: u64,
+    sequence: u64,
+) -> Result<ReceiveCoverResult, StorageError> {
+    db.receive_transaction(expected, generation, |tx| cover_held_in(tx, sequence))
+}
+
+/// Same held W2 as [`cover_held`], joining an already-open receive transaction.
+pub(crate) fn cover_held_in(
+    tx: &ReceiveTransaction<'_>,
+    sequence: u64,
+) -> Result<ReceiveCoverResult, StorageError> {
+    tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps: &[], retain_until: 0 })
 }
 
 struct Trimmed<'a> {

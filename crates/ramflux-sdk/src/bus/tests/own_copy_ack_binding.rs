@@ -114,6 +114,13 @@ async fn own_copy_ack_binding() -> Case {
         .await
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn receive_stage_redrive_own_copy() -> Case {
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(case()))))
+        .await
+}
+
 async fn case() -> Case {
     let mut fixture = Box::pin(Fixture::new("own-copy-ack-binding")).await?;
     ledger(&fixture.source, TARGET)?;
@@ -147,9 +154,21 @@ async fn case() -> Case {
 
     assert_eq!(gate(db)?.stage(db, staged(&bytes, SEQUENCE))?, ReceiveStageResult::Staged);
     let expected = gate(db)?.expected;
+    let pre_kill = db.durable_rows_for_test()?;
+    let rolled_packet = run(Fault::BeforeCommit, || {
+        fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE)
+    });
+    assert!(
+        matches!(&rolled_packet, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
+        "{rolled_packet:?}"
+    );
+    assert!(!locator_present(&fixture.source, MESSAGE)?);
+    assert_eq!(db.durable_rows_for_test()?, pre_kill, "kill-before the real packet writes nothing");
     assert!(
         fixture.source.client.apply_own_copy_w1(&entry, &manifest, expected, SEQUENCE, MESSAGE,)?
     );
+    let once_packet = db.durable_rows_for_test()?;
+    assert_ne!(once_packet, pre_kill, "the real control/slot/receipt packet must write");
     assert!(locator_present(&fixture.source, MESSAGE)?);
     let locator = fixture
         .source
@@ -177,70 +196,13 @@ async fn case() -> Case {
         1,
         "re-drive stays a single locator"
     );
+    assert_eq!(
+        fixture.source.client.account_db()?.durable_rows_for_test()?,
+        once_packet,
+        "re-drive of the real packet is exactly one effect"
+    );
 
     let db = fixture.source.client.account_db()?;
-    db.advance_erasure_generation_for_test()?;
-    db.send_direct_message("healthy", "kill-before", "peer", b"before")?;
-    let kill_bytes = unique_entry(3, "kill-before-hash")?;
-    let expected = ReceiveExpectation {
-        target: TARGET,
-        incarnation: INCARNATION,
-        cursor: 0,
-        generation: 1,
-        erasure_generation: db.privacy_erasure_generation()?,
-    };
-    assert_eq!(
-        OwnCopyW1 { expected, generation: 1 }.stage(db, staged(&kill_bytes, 3))?,
-        ReceiveStageResult::Staged
-    );
-    let rolled = run(Fault::BeforeCommit, || {
-        OwnCopyW1 { expected, generation: 1 }.effect(db, 3, "kill-before", || {
-            crate::client::own_device_copy::receipts::remember(
-                db,
-                "own-device/committed-packet/kill-before",
-                "kill-before-fp",
-                now_unix_timestamp().saturating_add(900),
-                false,
-                now_unix_timestamp(),
-            )
-        })
-    });
-    assert!(
-        matches!(&rolled, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
-        "{rolled:?}"
-    );
-    assert!(!db.actor_state_exists(&locator_key("kill-before"))?);
-    assert!(!db.actor_state_exists("own-device/committed-packet/kill-before")?);
-    assert_eq!(db.receive_state_for_test(3)?, (Some("staged".to_owned()), 2));
-
-    let after_state = {
-        OwnCopyW1 { expected, generation: 1 }.effect(db, 3, "kill-before", || {
-            crate::client::own_device_copy::receipts::remember(
-                db,
-                "own-device/committed-packet/kill-before",
-                "kill-before-fp",
-                now_unix_timestamp().saturating_add(900),
-                false,
-                now_unix_timestamp(),
-            )
-        })?;
-        (
-            db.actor_state_exists(&locator_key("kill-before"))?,
-            db.actor_state_exists("own-device/committed-packet/kill-before")?,
-            db.receive_state_for_test(3)?,
-        )
-    };
-    reopen(&mut fixture.source)?;
-    let db = fixture.source.client.account_db()?;
-    assert_eq!(
-        (
-            db.actor_state_exists(&locator_key("kill-before"))?,
-            db.actor_state_exists("own-device/committed-packet/kill-before")?,
-            db.receive_state_for_test(3)?,
-        ),
-        after_state
-    );
-
     db.delete_direct_message("healthy", MESSAGE, "local", "erase-before-wa")?;
     assert!(!locator_present(&fixture.source, MESSAGE)?, "erase before WA must drop the locator");
     assert!(

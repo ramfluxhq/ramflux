@@ -205,8 +205,7 @@ impl RamfluxClient {
     }
 
     /// Decrypts a pending own-copy packet and runs the durable writes (joins an open writer).
-    #[cfg(test)]
-    pub(super) fn commit_own_copy_from_entry(
+    pub(crate) fn commit_own_copy_from_entry(
         &self,
         entry: &GatewayInboxEntry,
         manifest: &SdkDeviceManifestResponse,

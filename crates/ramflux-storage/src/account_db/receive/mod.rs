@@ -99,7 +99,7 @@ impl ReceiveTransaction<'_> {
         Ok(())
     }
 
-    /// Account handle for W1 joiners that persist on this writer connection.
+    /// Account writer this fence is bound to. W1 joiners and `*_in(tx)` adapters persist through this handle.
     #[must_use]
     pub fn account(&self) -> &AccountDb {
         self.db
@@ -135,6 +135,30 @@ impl ReceiveTransaction<'_> {
 }
 
 impl AccountDb {
+    /// Live incarnation for `target`, or `None` when the ledger is unactivated (no table or row).
+    ///
+    /// # Errors
+    /// Returns storage errors other than a missing table or missing row.
+    pub fn receive_epoch(&self, target: &str) -> Result<Option<String>, StorageError> {
+        use rusqlite::OptionalExtension;
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_receive_epoch')",
+            [],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(None);
+        }
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT incarnation_id FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+                rusqlite::params![target],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Executes a ledger phase under generation, incarnation, cursor and erasure fences.
     /// The actor supplies its current generation; the closure performs no network I/O.
     /// # Errors

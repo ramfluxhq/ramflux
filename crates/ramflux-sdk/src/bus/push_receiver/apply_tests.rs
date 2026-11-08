@@ -5,11 +5,11 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 use super::apply::{
     ApplyError, ApplyFault, ApplyLoss, ApplyOutcome, ApplyPage, ApplyPoint, apply_page,
-    apply_point, run as with_reject, validate_page, validate_point,
+    apply_point, cover_held, run as with_reject, validate_page, validate_point,
 };
 use ramflux_storage::{
-    AccountDb, AccountDbKey, AccountIndex, ReceiveExpectation, ReceiveLedgerSnap, ReceiveStage,
-    ReceiveStageResult, StorageError,
+    AccountDb, AccountDbKey, AccountIndex, ReceiveCoverResult, ReceiveExpectation,
+    ReceiveLedgerSnap, ReceiveStage, ReceiveStageResult, StorageError,
 };
 
 struct Harness {
@@ -88,6 +88,40 @@ fn page<'a>(
 
 fn snap(db: &AccountDb) -> Result<ReceiveLedgerSnap, StorageError> {
     db.receive_ledger_snap_for_test("t")
+}
+
+#[test]
+fn held_w1_advances_cursor() -> Result<(), ApplyError> {
+    let harness = open()?;
+    let db = &harness.db;
+    let prefix = [ApplyLoss { from_seq: 1, to_seq: 10, reason: "expired" }];
+    assert_eq!(
+        apply_page(db, expected(db, 0)?, 1, page(0, 10, 20, &[], &prefix, None))?,
+        ApplyOutcome::Covered { cursor: 10 }
+    );
+    stage(db, 10, 12)?;
+    let losses = [
+        ApplyLoss { from_seq: 6, to_seq: 11, reason: "expired" },
+        ApplyLoss { from_seq: 13, to_seq: 20, reason: "nacked" },
+    ];
+    let stale = page(5, 20, 20, &[12], &losses, None);
+    assert_eq!(
+        apply_page(db, expected(db, 10)?, 1, stale)?,
+        ApplyOutcome::NeedStage { sequence: 12, cursor: 11 }
+    );
+    let before = snap(db)?;
+    assert_eq!(before.cursor, 11);
+    assert_eq!(before.receipts, vec![(12, "staged".into())]);
+    assert_eq!(before.intents, Vec::<u64>::new());
+    assert_eq!(before.work, 1);
+
+    assert_eq!(cover_held(db, expected(db, 11)?, 1, 12)?, ReceiveCoverResult::Covered);
+    let after = snap(db)?;
+    assert_eq!(after.cursor, 12, "held W2 must advance C over the held sequence");
+    assert_eq!(after.receipts, vec![(12, "held".into())]);
+    assert_eq!(after.intents, Vec::<u64>::new(), "held cover writes no ACK intent");
+    assert_eq!(after.work, 1, "held cover keeps the work row");
+    Ok(())
 }
 
 #[test]

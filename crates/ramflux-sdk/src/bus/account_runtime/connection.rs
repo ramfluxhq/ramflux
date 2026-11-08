@@ -219,7 +219,23 @@ impl AccountRuntime {
                 if generation != handle.generation() || reply.is_closed() {
                     return Ok(false);
                 }
-                self.apply_receive_entry(*entry, source, backpressure, reply).await?;
+                let active = super::super::push_receiver::apply_w1::is_active(
+                    account.client.account_db()?,
+                    &entry.entry.target_delivery_id,
+                )?;
+                if active {
+                    let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
+                        account,
+                        handle.generation(),
+                        *entry,
+                        source,
+                        backpressure,
+                    ))
+                    .await;
+                    let _ = reply.send(result);
+                } else {
+                    self.apply_receive_entry(*entry, source, backpressure, reply).await?;
+                }
             }
             AccountWork::SettleRetained { turn, sequence, reply, .. } => {
                 if reply.is_closed() {

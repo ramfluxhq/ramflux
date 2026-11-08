@@ -187,6 +187,55 @@ fn bound(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn bound_to(
+    sender: &Fixture,
+    receiver: &mut Fixture,
+    conversation: &str,
+    id: &str,
+    body: &[u8],
+    seq: u64,
+    delivery: &str,
+) -> Result<GatewayInboxEntry, SdkError> {
+    review::trust(receiver, sender)?;
+    review::trust(sender, receiver)?;
+    receiver.client.establish_friend_link("link", &receiver.id, &sender.id)?;
+    let mut msg = message(id, conversation);
+    msg.source_principal_id = sender.id.clone();
+    msg.sender_id = sender.id.clone();
+    msg.recipient_device_id = Some(receiver.id.clone());
+    msg.target_delivery_id = delivery.to_owned();
+    let bundle = receiver
+        .client
+        .load_x3dh_private_state(&receiver.client.local_device_identity(&receiver.id)?)?
+        .bundle;
+    let (mut session, header) =
+        sender.client.create_send_dm_session_from_bundle(&msg, &receiver.id, bundle, &sender.id)?;
+    let ciphertext = session.encrypt(body, dm_associated_data(conversation))?;
+    msg.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: None,
+        schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
+        version: 1,
+        x3dh: header.clone(),
+        ciphertext,
+    })?;
+    let receiving =
+        receiver.client.load_or_create_recv_dm_session(conversation, header.as_ref())?;
+    receiver.client.send_direct_message(
+        conversation,
+        &format!("prior-{id}"),
+        &sender.id,
+        b"prior",
+    )?;
+    receiver.client.persist_dm_session(conversation, &format!("prior-{id}"), "recv", &receiving)?;
+    Ok(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: seq,
+        target_delivery_id: delivery.to_owned(),
+        envelope: gateway_direct_message_envelope(&sender.config()?, &msg, None)?,
+    })
+}
+
 fn a2i_entry(
     sender: &Fixture,
     receiver: &mut Fixture,
@@ -477,6 +526,16 @@ fn legacy_w1_a2i_delivery_id_is_not_local_device() -> Result<(), SdkError> {
 }
 
 #[test]
+fn legacy_w1_dm_delivery_id_is_not_local_device() -> Result<(), SdkError> {
+    hang(cut_dm_delivery_is_not_device)
+}
+
+#[test]
+fn legacy_w1_binding_appeared_redrives() -> Result<(), SdkError> {
+    hang(cut_binding_appeared)
+}
+
+#[test]
 fn legacy_w1_dm_erased_attachment_completes() -> Result<(), SdkError> {
     hang(cut_erased_dm_row)
 }
@@ -493,6 +552,11 @@ fn legacy_w1_generation_erasure_cursor_fences() -> Result<(), SdkError> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_stage_redrive() -> Result<(), SdkError> {
+    hang(redrive)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn receive_stage_redrive_legacy() -> Result<(), SdkError> {
     hang(redrive)
 }
 
@@ -667,6 +731,47 @@ fn cut_a2i_delivery_is_not_device() -> Result<(), SdkError> {
     assert_eq!(snap(&receiver.client, &entry, &conversation)?, post, "A2I applied twice");
     reopen(&mut receiver.client, &receiver.id)?;
     assert_eq!(snap(&receiver.client, &entry, &conversation)?, post);
+    Ok(())
+}
+
+fn cut_dm_delivery_is_not_device() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 248)?;
+    let mut receiver = Fixture::new("bob", 249)?;
+    let delivery = "delivery-bob";
+    assert_ne!(delivery, receiver.id);
+    let conversation = "dm-delivery";
+    let entry = bound_to(&sender, &mut receiver, conversation, "dm-one", b"once", 1, delivery)?;
+    stage_w0(&receiver.client, delivery, &entry)?;
+    let pre = snap(&receiver.client, &entry, conversation)?;
+    apply_success(&receiver.client, &receiver.id, &entry, conversation)?;
+    let post = snap(&receiver.client, &entry, conversation)?;
+    assert!(post.marker, "bound DM was not applied against the local device");
+    assert_eq!(post.messages, pre.messages + 1, "exactly one DM effect");
+    assert_eq!(post.held, pre.held, "bound DM must not be held");
+    apply_success(&receiver.client, &receiver.id, &entry, conversation)?;
+    assert_eq!(snap(&receiver.client, &entry, conversation)?, post, "DM applied twice");
+    reopen(&mut receiver.client, &receiver.id)?;
+    assert_eq!(snap(&receiver.client, &entry, conversation)?, post);
+    Ok(())
+}
+
+fn cut_binding_appeared() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 250)?;
+    let mut receiver = Fixture::new("bob", 252)?;
+    let target = receiver.id.clone();
+    let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let pre = snap(&receiver.client, &entry, "held-a2i")?;
+    let raced = legacy_w1::run(Fault::BindingAppeared, || {
+        apply_a2i(&receiver.client, &receiver.id, &entry)
+    });
+    assert!(matches!(raced, Err(SdkError::LegacyBindingChanged)), "{raced:?}");
+    let mid = snap(&receiver.client, &entry, "held-a2i")?;
+    assert_eq!(mid, pre, "binding-appeared race must write nothing");
+    apply_a2i(&receiver.client, &receiver.id, &entry)?;
+    let post = snap(&receiver.client, &entry, "held-a2i")?;
+    assert!(post.held > pre.held, "redrive without the hook must hold unbound A2I");
+    assert_eq!(post.a2i, 0, "held A2I must not persist a receipt");
     Ok(())
 }
 
