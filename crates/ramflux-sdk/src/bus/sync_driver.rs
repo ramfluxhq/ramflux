@@ -160,6 +160,7 @@ pub(crate) async fn apply_prepared_receive(
 
 pub(crate) fn prepare_receive(
     account: &LocalBusAccountState,
+    generation: u64,
 ) -> Result<super::connection_manager::ReceivePlan, SdkError> {
     account.client.prune_surface_resync_state()?;
     account.client.account_db()?.expire_inbox_holds(now_unix_timestamp())?;
@@ -171,14 +172,21 @@ pub(crate) fn prepare_receive(
         .into_iter()
         .map(|entry| {
             let retry_key = keys.remove(&pending_entry_id(&entry));
-            super::connection_manager::ReceiveEntry { entry, retry_key, replay: false }
+            super::connection_manager::ReceiveEntry { entry, retry_key, replay: false, turn: None }
         })
         .collect();
     let backpressure = Box::new(super::contact_backpressure::Backpressure::load(
         &account.client,
         now_unix_timestamp(),
     )?);
-    Ok(super::connection_manager::ReceivePlan { cursor, limit: 64, retries, backpressure })
+    let db = account.client.account_db()?;
+    let target = account.target_delivery_id.as_str();
+    let turn = if super::push_receiver::apply_w1::is_active(db, target)? {
+        Some(super::push_receiver::apply_w1::capture_turn(db, generation, target)?)
+    } else {
+        None
+    };
+    Ok(super::connection_manager::ReceivePlan { cursor, limit: 64, retries, backpressure, turn })
 }
 
 /// Projection is best-effort; the durable message remains available when its claim cannot be written.

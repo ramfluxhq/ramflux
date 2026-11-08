@@ -128,8 +128,9 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
     /// T25-A4 (OBJ-IPC-01): in-flight bounded DOWNLOAD spools, keyed by `operation_id`.
     pub(crate) object_get_spools: BTreeMap<String, ObjectGetSpoolSession>,
-    /// Cached receive-epoch presence for the current connection generation.
-    pub(crate) receive_active_cache: Option<(u64, bool)>,
+    /// Cached receive-epoch presence for `(connection generation, target)`.
+    /// P24 activation must clear this cache or bump the connection generation.
+    pub(crate) receive_active_cache: Option<(u64, String, bool)>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

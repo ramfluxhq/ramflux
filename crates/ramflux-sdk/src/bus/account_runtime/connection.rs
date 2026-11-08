@@ -4,9 +4,10 @@
 //! Account-writer preparation and conditional application of connection outcomes.
 
 use super::AccountRuntime;
+use crate::bus::state::LocalBusAccountState;
 use crate::bus::{
     actor::AccountCommand,
-    connection_manager::{AccountWork, SessionMetadata},
+    connection_manager::{AccountWork, ReceiveTurn, SessionMetadata},
     mutation_intent::MutationIntent,
 };
 use crate::prelude::{
@@ -238,45 +239,35 @@ impl AccountRuntime {
                     return Ok(false);
                 }
                 let target = entry.entry.target_delivery_id.clone();
-                let generation_now = handle.generation();
-                let (active, turn) = {
-                    let db = account.client.account_db()?;
-                    let active = match account.receive_active_cache {
-                        Some((cached, active)) if cached == generation_now => active,
-                        _ => match super::super::push_receiver::apply_w1::is_active(db, &target) {
-                            Ok(active) => {
-                                account.receive_active_cache = Some((generation_now, active));
-                                active
-                            }
-                            Err(error) => {
-                                let _ = reply.send(Err(error));
-                                return Ok(false);
-                            }
-                        },
-                    };
-                    let turn = match turn {
-                        Some(turn) => *turn,
-                        None => super::super::push_receiver::apply_w1::capture_turn(
-                            db, generation, &target,
-                        )?,
-                    };
-                    (active, turn)
+                let active = match ledger_is_active(account, handle.generation(), &target) {
+                    Ok(active) => active,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return Ok(false);
+                    }
                 };
-                if active {
-                    let current = handle.clone();
-                    let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
-                        account,
-                        &turn,
-                        &|| current.generation(),
-                        *entry,
-                        source,
-                        backpressure,
-                    ))
-                    .await;
-                    let _ = reply.send(result);
-                } else {
+                if !active {
                     self.apply_receive_entry(*entry, source, backpressure, reply).await?;
+                    return Ok(false);
                 }
+                let turn = match page_turn(account, generation, &target, turn) {
+                    Ok(turn) => turn,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return Ok(false);
+                    }
+                };
+                let current = handle.clone();
+                let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
+                    account,
+                    &turn,
+                    &|| current.generation(),
+                    *entry,
+                    source,
+                    backpressure,
+                ))
+                .await;
+                let _ = reply.send(result);
             }
             AccountWork::SettleRetained { generation, turn, sequence, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
@@ -424,6 +415,41 @@ impl AccountRuntime {
         self.start_courier();
         Ok(())
     }
+}
+
+fn ledger_is_active(
+    account: &mut LocalBusAccountState,
+    generation: u64,
+    target: &str,
+) -> Result<bool, SdkError> {
+    match &account.receive_active_cache {
+        Some((cached_gen, cached_target, active))
+            if *cached_gen == generation && cached_target == target =>
+        {
+            return Ok(*active);
+        }
+        _ => {}
+    }
+    let active =
+        super::super::push_receiver::apply_w1::is_active(account.client.account_db()?, target)?;
+    account.receive_active_cache = Some((generation, target.to_owned(), active));
+    Ok(active)
+}
+
+fn page_turn(
+    account: &LocalBusAccountState,
+    generation: u64,
+    target: &str,
+    turn: Option<Box<ReceiveTurn>>,
+) -> Result<ReceiveTurn, SdkError> {
+    if let Some(turn) = turn {
+        return Ok(*turn);
+    }
+    super::super::push_receiver::apply_w1::capture_turn(
+        account.client.account_db()?,
+        generation,
+        target,
+    )
 }
 
 async fn short_step<T>(

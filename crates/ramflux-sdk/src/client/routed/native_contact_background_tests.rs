@@ -90,8 +90,11 @@ async fn prepare_bootstrap(
     let backpressure = Box::new(Backpressure::load(&receiver.client, now_unix_timestamp())?);
     let (sender, mut work) = tokio::sync::mpsc::channel(2);
     let writer = Writer::new(sender, 1);
-    let task =
-        prepare(&writer, ReceiveEntry { entry, retry_key: None, replay: false }, backpressure);
+    let task = prepare(
+        &writer,
+        ReceiveEntry { entry, retry_key: None, replay: false, turn: None },
+        backpressure,
+    );
     tokio::pin!(task);
     loop {
         tokio::select! {

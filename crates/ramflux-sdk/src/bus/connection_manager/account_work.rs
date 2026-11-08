@@ -49,8 +49,10 @@ pub(crate) enum AccountWork {
     },
     ApplyPage {
         generation: u64,
-        /// Prepare-time expectation. `None` on the live sender; the actor captures it
-        /// before any await. Tests may supply a turn to pin cursor/E/generation.
+        /// Prepare-time expectation captured at `PrepareReceive` when the ledger is
+        /// active, so E/erase changes during `source::prepare` stay fenced. `None` on
+        /// the live unactivated path and as a rescan fallback (the actor then captures
+        /// only if active).
         turn: Option<Box<ReceiveTurn>>,
         entry: Box<super::receive::ReceiveEntry>,
         source: crate::bus::sync_driver::source::PreparedSource,

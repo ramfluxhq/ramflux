@@ -300,15 +300,18 @@ pub(crate) fn cover_held(
     generation: u64,
     sequence: u64,
 ) -> Result<ReceiveCoverResult, StorageError> {
-    db.receive_transaction(expected, generation, |tx| cover_held_in(tx, sequence))
+    db.receive_transaction(expected, generation, |tx| cover_held_in(tx, sequence, &[]))
 }
 
 /// Same held W2 as [`cover_held`], joining an already-open receive transaction.
+/// `gaps` are the page's reconciled intervals in `(C, sequence]`; empty only when
+/// `sequence == C + 1`.
 pub(crate) fn cover_held_in(
     tx: &ReceiveTransaction<'_>,
     sequence: u64,
+    gaps: &[ramflux_storage::ReceiveGap<'_>],
 ) -> Result<ReceiveCoverResult, StorageError> {
-    tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps: &[], retain_until: 0 })
+    tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps, retain_until: 0 })
 }
 
 struct Trimmed<'a> {

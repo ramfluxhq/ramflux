@@ -300,13 +300,14 @@ async fn replay(failures: usize, runs: usize, managed: bool) -> TestResult {
         };
         if managed && n == 0 {
             let mut engine = account.session_client().await?;
-            let pressure = crate::bus::sync_driver::prepare_receive(&account)?.backpressure;
+            let pressure = crate::bus::sync_driver::prepare_receive(&account, 1)?.backpressure;
             let (prepared, mut pressure) = sync_driver::apply_prepared_receive(
                 &mut account,
                 crate::bus::connection_manager::ReceiveEntry {
                     entry: c.entry.clone(),
                     retry_key: None,
                     replay: false,
+                    turn: None,
                 },
                 None,
                 pressure,
@@ -429,13 +430,14 @@ async fn refused_forged_ack(tamper: &'static str, reason: &'static str) -> TestR
         now_unix_timestamp(),
     )?;
     let mut engine = account.session_client().await?;
-    let pressure = sync_driver::prepare_receive(&account)?.backpressure;
+    let pressure = sync_driver::prepare_receive(&account, 1)?.backpressure;
     let (prepared, mut pressure) = sync_driver::apply_prepared_receive(
         &mut account,
         crate::bus::connection_manager::ReceiveEntry {
             entry: c.entry.clone(),
             retry_key: None,
             replay: false,
+            turn: None,
         },
         None,
         pressure,

@@ -131,6 +131,11 @@ pub(crate) fn run<T>(fault: Fault, f: impl FnOnce() -> T) -> T {
     f()
 }
 
+#[cfg(test)]
+pub(crate) fn set_fault(fault: Fault) {
+    FAULT.with(|cell| cell.set(fault));
+}
+
 impl RamfluxClient {
     #[cfg(test)]
     pub(crate) fn w1_gate<'a>(

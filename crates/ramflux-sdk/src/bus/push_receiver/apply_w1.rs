@@ -4,15 +4,15 @@
 //! Dormant `ApplyPage` → W1 adapters. Unactivated accounts (no epoch row) stay on the live path.
 #![allow(dead_code)]
 
-use super::apply::cover_held_in;
+use super::apply::{self, ApplyOutcome, cover_held_in};
 use crate::bus::account_runtime::lifecycle_fence;
 use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::PreparedSource;
 use crate::prelude::*;
 use ramflux_storage::{
-    AccountDb, ProjectionStore, ReceiveCoverResult, ReceiveExpectation, ReceiveTransaction,
-    StorageError,
+    AccountDb, ProjectionStore, ReceiveCoverResult, ReceiveExpectation, ReceiveGap, ReceiveStage,
+    ReceiveStageResult, ReceiveTransaction, StorageError,
 };
 
 /// Bounded redrive of `LegacyBindingChanged` before a typed give-up.
@@ -82,6 +82,9 @@ async fn apply_once(
     cross_await().await;
     let entry = &prepared.entry;
     let sequence = entry.inbox_seq;
+    if !admit_open(account, turn, handle_generation(), prepared)? {
+        return Ok(());
+    }
     let local_device = account.gateway_config.device_id.clone();
     let kind = classify(account, entry, source).await?;
     #[cfg(test)]
@@ -122,7 +125,7 @@ async fn apply_once(
                     expected,
                     handle_generation(),
                 )?;
-                cover_if_held(tx, sequence, held)?;
+                cover_if_held(tx, sequence, held, &[])?;
                 Ok(held)
             })?;
             Ok(())
@@ -131,7 +134,7 @@ async fn apply_once(
             let client = &account.client;
             run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 client.apply_legacy_group_hold_w1_in(tx, entry, expected, handle_generation())?;
-                cover_if_held(tx, sequence, true)?;
+                cover_if_held(tx, sequence, true, &[])?;
                 Ok(true)
             })?;
             Ok(())
@@ -188,6 +191,66 @@ async fn classify(
     Ok(Kind::LegacyHold)
 }
 
+/// Reconcile the single-entry page. `NeedStage` writes W0; a staged receipt with
+/// `C < sequence` still proceeds to W1 (binding redrive). `seq == C + 1` after prefix
+/// cover, so held W2 uses empty gaps.
+fn admit_open(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    generation: u64,
+    prepared: &ReceiveEntry,
+) -> Result<bool, SdkError> {
+    let sequence = prepared.entry.inbox_seq;
+    match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
+        ApplyOutcome::NeedStage { sequence: need, .. } if need == sequence => {
+            stage_open(account, turn, generation, prepared)
+        }
+        ApplyOutcome::NeedStage { .. } => {
+            Err(SdkError::InboundRejected("receive page need-stage mismatch".into()))
+        }
+        ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
+            Ok(cursor < sequence)
+        }
+        ApplyOutcome::NeedFetch { .. }
+        | ApplyOutcome::NeedPoint { .. }
+        | ApplyOutcome::Paused { .. } => Ok(false),
+    }
+}
+
+fn stage_open(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    generation: u64,
+    prepared: &ReceiveEntry,
+) -> Result<bool, SdkError> {
+    let json = serde_json::to_vec(&prepared.entry)?;
+    let key = account.client.inbox_admission_key(&prepared.entry)?;
+    let retain_until = now_unix_timestamp() + 300;
+    let first_seen = now_unix_timestamp();
+    run_fenced(account.client.account_db()?, generation, turn, |tx, expected| {
+        match tx.stage(ReceiveStage {
+            target: expected.target,
+            incarnation: expected.incarnation,
+            sequence: prepared.entry.inbox_seq,
+            entry_json: &json,
+            admission_key: &key,
+            retain_until,
+            first_seen,
+        })? {
+            ReceiveStageResult::Staged | ReceiveStageResult::Existing => Ok(true),
+            ReceiveStageResult::Erased => Ok(false),
+            ReceiveStageResult::Conflict { .. } => {
+                Err(SdkError::InboundRejected("receive stage conflict".into()))
+            }
+            ReceiveStageResult::PausedWork
+            | ReceiveStageResult::PausedBytes
+            | ReceiveStageResult::PausedIntents => {
+                Err(SdkError::InboundRejected("receive stage paused".into()))
+            }
+        }
+    })
+}
+
 fn recover_own_copy(
     account: &LocalBusAccountState,
     turn: &ReceiveTurn,
@@ -235,12 +298,46 @@ fn run_fenced(
     }
 }
 
-fn cover_if_held(tx: &ReceiveTransaction<'_>, sequence: u64, held: bool) -> Result<(), SdkError> {
+fn cover_if_held(
+    tx: &ReceiveTransaction<'_>,
+    sequence: u64,
+    held: bool,
+    gaps: &[ReceiveGap<'_>],
+) -> Result<(), SdkError> {
     if !held {
         return Ok(());
     }
-    match cover_held_in(tx, sequence)? {
+    match cover_held_in(tx, sequence, gaps)? {
         ReceiveCoverResult::Covered | ReceiveCoverResult::Paused => Ok(()),
+    }
+}
+
+/// Validate/reconcile the single-entry page before W1. `NeedStage` is the live sequence
+/// this adapter must process; any other outcome is already covered or not this entry.
+fn reconcile_entry(
+    db: &AccountDb,
+    turn: &ReceiveTurn,
+    generation: u64,
+    sequence: u64,
+) -> Result<ApplyOutcome, SdkError> {
+    let entries = [sequence];
+    let covered = sequence.max(turn.cursor);
+    let page = apply::ApplyPage {
+        target: &turn.target,
+        incarnation: &turn.incarnation,
+        after: turn.cursor,
+        covered,
+        issued: covered,
+        settled: 0,
+        entries: if sequence > turn.cursor { &entries } else { &[] },
+        known_losses: &[],
+        oversize_next: None,
+        more: false,
+    };
+    match apply::apply_page(db, turn.expected(), generation, page) {
+        Ok(outcome) => Ok(outcome),
+        Err(apply::ApplyError::Protocol(text)) => Err(SdkError::InboundRejected(text.into())),
+        Err(apply::ApplyError::Storage(error)) => Err(error.into()),
     }
 }
 

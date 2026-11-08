@@ -791,7 +791,7 @@ fn cut_binding_flip() -> Result<(), SdkError> {
         match receiver.client.apply_legacy_a2i_w1_in(tx, &entry, &receiver.id, gate.expected, 1) {
             Ok(is_held) => {
                 if is_held {
-                    cover_held_in(tx, entry.inbox_seq)?;
+                    cover_held_in(tx, entry.inbox_seq, &[])?;
                 }
                 held = Some(is_held);
                 Ok(())
@@ -823,7 +823,7 @@ fn cut_binding_flip() -> Result<(), SdkError> {
         match receiver.client.apply_legacy_a2i_w1_in(tx, &entry, &receiver.id, gate.expected, 1) {
             Ok(is_held) => {
                 if is_held {
-                    cover_held_in(tx, entry.inbox_seq)?;
+                    cover_held_in(tx, entry.inbox_seq, &[])?;
                 }
                 flipped = Some(is_held);
                 Ok(())

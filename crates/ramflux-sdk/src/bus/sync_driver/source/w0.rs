@@ -118,7 +118,7 @@ pub(crate) fn prepare_receive_turn(
         debug_assert_eq!(source.generation, generation);
         debug_assert_eq!(source.expected.generation, turn.generation);
     }
-    crate::bus::sync_driver::prepare_receive(account)
+    crate::bus::sync_driver::prepare_receive(account, generation)
 }
 
 fn actor_turn(

@@ -3,7 +3,7 @@
 
 //! Account receive scheduling uses only ticks, connection establishment, and explicit resync.
 
-use super::{AccountWork, ConnectionHandle, NetworkingState, RuntimeTimeouts};
+use super::{AccountWork, ConnectionHandle, NetworkingState, ReceiveTurn, RuntimeTimeouts};
 use crate::SdkError;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -15,6 +15,8 @@ pub(crate) struct ReceivePlan {
     pub limit: usize,
     pub retries: Vec<ReceiveEntry>,
     pub backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+    /// Prepare-time fence coordinates. `Some` when the receive ledger is active.
+    pub turn: Option<ReceiveTurn>,
 }
 pub(crate) type ReceiveApplied = (
     Option<crate::bus::sync_driver::PreparedAck>,
@@ -25,6 +27,8 @@ pub(crate) struct ReceiveEntry {
     pub entry: crate::GatewayInboxEntry,
     pub retry_key: Option<String>,
     pub replay: bool,
+    /// Prepare-time fence coordinates cloned from `ReceivePlan` when the ledger is active.
+    pub turn: Option<ReceiveTurn>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiveTrigger {
@@ -225,6 +229,7 @@ async fn catch_up(
     let plan = response.await.map_err(|_| handle.pending())??;
     let mut cursor = plan.cursor;
     let mut backpressure = plan.backpressure;
+    let turn = plan.turn;
     let mut retries: std::collections::BTreeMap<_, _> =
         plan.retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
     let mut active = false;
@@ -244,7 +249,7 @@ async fn catch_up(
                 handle,
                 work,
                 generation,
-                ReceiveEntry { entry, retry_key, replay: false },
+                ReceiveEntry { entry, retry_key, replay: false, turn: turn.clone() },
                 call_timeout,
                 backpressure,
             )
@@ -261,7 +266,10 @@ async fn catch_up(
     }
     let mut retries: Vec<_> = retries.into_values().collect();
     retries.sort_by_key(|entry| entry.entry.inbox_seq);
-    for entry in retries {
+    for mut entry in retries {
+        if entry.turn.is_none() {
+            entry.turn = turn.clone();
+        }
         let (accepted, next) =
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;
@@ -308,7 +316,7 @@ async fn rescan(
             handle,
             work,
             generation,
-            ReceiveEntry { entry, retry_key: None, replay: true },
+            ReceiveEntry { entry, retry_key: None, replay: true, turn: None },
             call_timeout,
             backpressure,
         )
@@ -354,7 +362,7 @@ async fn apply_entry(
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::ApplyPage {
         generation,
-        turn: None,
+        turn: entry.turn.clone().map(Box::new),
         entry: Box::new(entry),
         source,
         backpressure,
@@ -424,8 +432,9 @@ pub(crate) async fn test_redrive(
                 }
             };
             match message {
-                AccountWork::PrepareReceive { reply, .. } => {
-                    let _ = reply.send(crate::bus::sync_driver::prepare_receive(account));
+                AccountWork::PrepareReceive { generation, reply, .. } => {
+                    let _ =
+                        reply.send(crate::bus::sync_driver::prepare_receive(account, generation));
                 }
                 AccountWork::Courier(step) => step.apply(account),
                 AccountWork::ApplyPage { entry, source, backpressure, reply, .. } => {
