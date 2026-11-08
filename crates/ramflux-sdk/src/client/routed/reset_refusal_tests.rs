@@ -334,7 +334,7 @@ enum Competing {
 /// the old refusal.
 async fn capacity_interleave_row(competing: Competing) -> TestResult {
     let _clock = crate::time::FixedClock::set(START);
-    let (alice, bob) = Box::pin(pending()).await?;
+    let (alice, mut bob) = Box::pin(pending()).await?;
     crate::time::FixedClock::advance_to(START + 61);
     let local = bob.client.local_device_identity("bob")?;
     let remote = bob.client.device_identity(&fixture_peer_reference(&bob.client, "alice")?)?;
@@ -350,6 +350,8 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
     let db_key = crate::prelude::unwrap_with_vault_secret(&kek, &wrapped)?;
     let index = crate::prelude::AccountIndex::open(bob.client.account_index()?.root())?;
     let second = std::rc::Rc::new(crate::prelude::AccountDb::open(&index, "bob", &db_key)?);
+    // The competing writer reports a busy database at once instead of waiting for it.
+    second.fail_fast_busy_for_test()?;
     // A replacement is a later reset: a different row whose schedule is earlier than the floor
     // the old refusal would impose (`now + 1 s` = START + 62).
     let replacement = serde_json::json!({
@@ -365,7 +367,13 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
                 Competing::Clear => competitor.remove_actor_state(&key),
                 Competing::Replace => competitor.persist_actor_state(&key, &replacement),
             };
-            during.borrow_mut().push(attempt.is_err());
+            during.borrow_mut().push(match attempt {
+                Err(ramflux_storage::StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                    error,
+                    _,
+                ))) => Some((error.code, error.extended_code)),
+                _ => None,
+            });
         }));
     }
     let error = bob.client.pair_control_refused(
@@ -377,7 +385,10 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
     )?;
     assert_eq!(error.to_string(), "gateway session rejected: capacity_retry_after");
     // The competing write could not interleave: it was refused while the transaction was open.
-    assert_eq!(*during.borrow(), vec![true]);
+    assert_eq!(
+        *during.borrow(),
+        vec![Some((rusqlite::ErrorCode::DatabaseBusy, rusqlite::ffi::SQLITE_BUSY))]
+    );
     // The refusal had applied to the original row (floor below its own schedule: unchanged).
     assert_eq!(bob.client.pair_reset_fingerprint(&local, &remote)?, Some(submitted));
     // The competing write now follows the commit.
@@ -390,12 +401,23 @@ async fn capacity_interleave_row(competing: Competing) -> TestResult {
             second.persist_actor_state(&key, &replacement)?;
             assert_eq!(
                 work(&bob.client)?,
-                Some(replacement),
+                Some(replacement.clone()),
                 "a replacement never receives the old refusal"
             );
         }
     }
-    drop((alice, second));
+    // Close the competing writer, genuinely reopen the account, and repeat the final assertions.
+    drop(second);
+    reopen(&mut bob.client)?;
+    match competing {
+        Competing::Clear => assert!(work(&bob.client)?.is_none(), "still absent after reopen"),
+        Competing::Replace => {
+            let kept = work(&bob.client)?.ok_or("replacement after reopen")?;
+            assert_eq!(kept, replacement);
+            assert_eq!(kept["next_at"], START + 10);
+        }
+    }
+    drop(alice);
     Ok(())
 }
 
