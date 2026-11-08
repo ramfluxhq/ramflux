@@ -372,6 +372,72 @@ async fn redrive() -> Result<(), SdkError> {
 
     bootstrap_redrive().await?;
     crate::client::application_outbox::projection_stage_redrive::projection_stage_redrive()?;
+    crate::client::reply_outbox::reply_stage_redrive_tests::reply_stage_redrive()?;
+    let sender = Fixture::new("alice", 131)?;
+    let mut receiver = Fixture::new("bob", 141)?;
+    friend(&mut receiver, &sender)?;
+    reply_pair_admit(&sender, &receiver)?;
+    Ok(())
+}
+
+fn reply_pair_admit(sender: &Fixture, receiver: &Fixture) -> Result<(), SdkError> {
+    let entry = seal_as(
+        sender,
+        receiver,
+        message("reply-reset", "reply-pair"),
+        br#"{"type":"pair.session.reset.v1"}"#,
+        Route::control(),
+    )?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let opened = receiver.client.open_routed(&entry, "bob")?;
+    receiver.client.persist_pair(
+        &opened.local_device,
+        &opened.remote_device,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
+    receiver.client.account_db()?.persist_actor_state(
+        &format!(
+            "{}/reset-pending",
+            crate::RamfluxClient::pair_key(&opened.local_device, &opened.remote_device)?
+        ),
+        &true,
+    )?;
+    let config = receiver.config()?;
+    let body = opened.body.clone();
+    let db = receiver.client.account_db()?;
+    let gate = crate::client::reply_outbox::ReplyOutbox {
+        expected: ReceiveExpectation {
+            target: &receiver.id,
+            incarnation: "e",
+            cursor: 0,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        },
+        generation: 1,
+    };
+    let live =
+        crate::client::reply_outbox::PairLive { config: &config, opened: &opened, body: &body };
+    assert_eq!(
+        gate.admit(
+            db,
+            crate::client::reply_outbox::AdmitRequest {
+                sequence: entry.inbox_seq,
+                auth_key: "pair-live",
+                envelope: crate::client::reply_outbox::reply_outbox_crash_tests::envelope(
+                    "pair-live-env",
+                ),
+                kind: crate::client::reply_outbox::ReplyKind::Pair,
+                response_key: None,
+                message: None,
+                client: &receiver.client,
+                pair: Some(live),
+            },
+        )?,
+        crate::client::reply_outbox::Admit::Admitted
+    );
+    assert!(db.actor_state_exists("gateway/reply-outbox/pair-live")?);
+    assert!(db.actor_state_exists("gateway/reply-transferred/pair-live")?);
     Ok(())
 }
 

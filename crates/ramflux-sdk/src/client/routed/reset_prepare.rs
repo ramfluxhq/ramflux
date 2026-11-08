@@ -41,7 +41,7 @@ pub(crate) struct PairControlDraft {
     fingerprint: Option<serde_json::Value>,
 }
 impl RamfluxClient {
-    pub(super) fn prepare_received_pair_reply(
+    pub(crate) fn prepare_received_pair_reply(
         &self,
         config: &GatewaySessionConfig,
         opened: &super::Opened,

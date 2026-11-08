@@ -4,23 +4,28 @@
 //! DORMANT W1 adapter for durable reply admission (S6b P17). No production caller reaches it:
 //! live `take_surface_resync_answer` still consumes the queued answer, and
 //! `connection_manager` still best-effort submits a RAM pair-reset envelope. The expectation
-//! values come from the caller; P20 supplies them.
+//! values come from the caller; P20 supplies them and calls `admit_in` on the W1 transaction.
 //!
-//! Contract: W0 (`stage`) precedes admission. An authenticated-input-keyed transfer marker and
-//! an IMMUTABLE prepared courier envelope are committed before response state is removed.
-//! Bounded couriers send and retry that unchanged envelope (S6a P7 / P14 `submit_accepted`).
-//! A full outbox refuses and retains W0 as held. Never persist plaintext to make a step
-//! resumable. Network send is not in the transaction.
+//! Contract: W0 (`stage`) precedes admission. An authenticated-input-keyed transfer marker
+//! (envelope id + digest) and an IMMUTABLE prepared courier envelope are committed on the
+//! caller's open receive transaction before response state is removed. Bounded couriers send
+//! and retry that unchanged envelope (S6a P7 / P14 `submit_accepted`). A full outbox returns
+//! `OutboxFull` and retains W0 as held. Markers count toward `MAX_OUTBOX` (256 combined
+//! outbox+marker rows) and are pruned when the courier receipt is terminal. Never persist
+//! plaintext to make a step resumable. Network send is not in the transaction.
 #![allow(dead_code)]
 
+use crate::client::routed::Opened;
+use crate::client::surface::ResyncReply;
 use crate::prelude::*;
 use ramflux_protocol::Envelope;
 use ramflux_storage::{
-    AccountDb, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
+    AccountDb, ReceiveExpectation, ReceiveStage, ReceiveStageResult, ReceiveTransaction,
+    StorageError,
 };
 use serde::{Deserialize, Serialize};
 
-/// Existing courier reply cap (`MAX_REPLIES` on the surface window).
+/// Existing courier reply cap (`MAX_REPLIES` on the surface window). Combined outbox+marker rows.
 pub(crate) const MAX_OUTBOX: u32 = 256;
 /// Backup native/merge/archive already exclude `gateway/%`.
 pub(crate) const OUTBOX: &str = "gateway/reply-outbox/";
@@ -35,6 +40,14 @@ pub(crate) struct PreparedReply {
     pub kind: ReplyKind,
 }
 
+/// Digest-only transfer marker. The courier outbox holds the envelope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TransferMarker {
+    pub envelope_id: String,
+    pub digest: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReplyKind {
@@ -46,6 +59,7 @@ pub(crate) enum ReplyKind {
 pub(crate) enum Admit {
     Admitted,
     Duplicate,
+    OutboxFull,
 }
 
 pub(crate) struct AdmitRequest<'a> {
@@ -55,6 +69,15 @@ pub(crate) struct AdmitRequest<'a> {
     pub kind: ReplyKind,
     pub response_key: Option<&'a str>,
     pub message: Option<&'a str>,
+    pub client: &'a RamfluxClient,
+    pub pair: Option<PairLive<'a>>,
+}
+
+/// Inputs so pair admission calls `prepare_received_pair_reply` rather than trusting the envelope.
+pub(crate) struct PairLive<'a> {
+    pub config: &'a GatewaySessionConfig,
+    pub opened: &'a Opened,
+    pub body: &'a [u8],
 }
 
 pub(crate) struct ReplyOutbox<'a> {
@@ -72,26 +95,49 @@ impl ReplyOutbox<'_> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.stage(input))?)
     }
 
-    /// Admits `envelope` under `auth_key` and then removes `response_key` in the same
-    /// receive transaction. A present marker is Duplicate and never rewrites the envelope.
+    /// Standalone admission when the caller is not already inside a receive transaction.
     pub(crate) fn admit(
         &self,
         db: &AccountDb,
         request: AdmitRequest<'_>,
     ) -> Result<Admit, SdkError> {
-        // BtF: a committed remove *before* the admission transaction loses the reply on crash.
-        if remove_response_before_admission() {
-            if let Some(key) = request.response_key {
-                db.remove_actor_state(key)?;
+        let mut outcome = None;
+        let fenced = db.receive_transaction(self.expected, self.generation, |tx| {
+            let result = self.admit_in(tx, request);
+            let failed = result.is_err();
+            outcome = Some(result);
+            if failed {
+                return Err(StorageError::Integrity("source effect failed"));
             }
-            return Err(SdkError::Storage(StorageError::Integrity(
-                "reply outbox removed response before admission",
-            )));
+            Ok(())
+        });
+        match (fenced, outcome) {
+            (_, Some(Err(error))) => Err(error),
+            (Err(error), _) => Err(error.into()),
+            (Ok(()), Some(Ok(value))) => Ok(value),
+            (Ok(()), None) => Err(SdkError::LocalBus("reply outbox admit did not run".into())),
         }
-        Ok(db.receive_transaction(self.expected, self.generation, |tx| {
-            tx.require_open_input(request.sequence)?;
-            transfer(db, request)
-        })?)
+    }
+
+    /// Admits on the caller's open W1 receive transaction (marker + envelope + response
+    /// removal). P20 joins this with the W1 that creates the reply.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn admit_in(
+        &self,
+        tx: &ReceiveTransaction<'_>,
+        request: AdmitRequest<'_>,
+    ) -> Result<Admit, SdkError> {
+        tx.require_writer()?;
+        tx.require_open_input(request.sequence)?;
+        // Duplicate/immutable are marker-authenticated; the queued reply is already gone.
+        let request = if tx.account().actor_state_exists(&marker_key(request.auth_key))? {
+            request
+        } else if let Some(envelope) = live_checks(&request)? {
+            AdmitRequest { envelope, ..request }
+        } else {
+            request
+        };
+        transfer(tx, request)
     }
 }
 
@@ -103,39 +149,90 @@ fn marker_key(auth_key: &str) -> String {
     format!("{MARKER}{auth_key}")
 }
 
-fn transfer(db: &AccountDb, request: AdmitRequest<'_>) -> Result<Admit, StorageError> {
+fn digest(envelope: &Envelope) -> Result<String, StorageError> {
+    let bytes = serde_json::to_vec(envelope)?;
+    Ok(format!("{}", blake3::hash(&bytes).to_hex()))
+}
+
+fn live_checks(request: &AdmitRequest<'_>) -> Result<Option<Envelope>, SdkError> {
+    match request.kind {
+        ReplyKind::Surface => {
+            let key = request
+                .response_key
+                .ok_or(StorageError::Integrity("reply outbox surface requires a queued reply"))?;
+            let db = request.client.account_db()?;
+            let Some(stored) = db.load_actor_state::<serde_json::Value>(key)? else {
+                return Err(StorageError::Integrity("reply outbox surface reply missing").into());
+            };
+            let reply: ResyncReply = serde_json::from_value(stored.clone())?;
+            if serde_json::to_value(&reply)? != stored {
+                return Err(StorageError::Integrity("reply outbox surface fingerprint").into());
+            }
+            if reply.destination.expires_at <= now_unix_timestamp() {
+                return Err(StorageError::Integrity("reply outbox surface expired").into());
+            }
+            request.client.validate_surface_resync_reply(&reply)?;
+            Ok(None)
+        }
+        ReplyKind::Pair => {
+            let live = request
+                .pair
+                .as_ref()
+                .ok_or(StorageError::Integrity("reply outbox pair requires live prepare"))?;
+            let prepared =
+                request.client.prepare_received_pair_reply(live.config, live.opened, live.body)?;
+            let Some(envelope) = prepared else {
+                return Err(StorageError::Integrity("reply outbox pair is not a reset ack").into());
+            };
+            Ok(Some(envelope))
+        }
+    }
+}
+
+fn transfer(tx: &ReceiveTransaction<'_>, request: AdmitRequest<'_>) -> Result<Admit, SdkError> {
+    let db = tx.account();
     let stored = outbox_key(request.auth_key);
     let marker = marker_key(request.auth_key);
+    let hashed = digest(&request.envelope)?;
     if db.actor_state_exists(&marker)? {
-        let existing: PreparedReply = db
+        let existing: TransferMarker = db
             .load_actor_state(&marker)?
-            .ok_or(StorageError::Integrity("reply outbox marker missing envelope"))?;
-        if existing.envelope != request.envelope || existing.kind != request.kind {
-            return Err(StorageError::Integrity("reply outbox envelope is immutable"));
+            .ok_or(StorageError::Integrity("reply outbox marker missing digest"))?;
+        if existing.envelope_id != request.envelope.envelope_id || existing.digest != hashed {
+            return Err(StorageError::Integrity("reply outbox envelope is immutable").into());
         }
         before_commit_fault()?;
         return Ok(Admit::Duplicate);
     }
-    if db.actor_state_usage(OUTBOX)?.0 >= u64::from(MAX_OUTBOX) {
-        return Err(StorageError::Integrity("reply outbox is full"));
+    let (outbox_rows, _) = db.actor_state_usage(OUTBOX)?;
+    let (marker_rows, _) = db.actor_state_usage(MARKER)?;
+    if outbox_rows.saturating_add(marker_rows) >= u64::from(MAX_OUTBOX) {
+        hold_open(tx, request.sequence)?;
+        before_commit_fault()?;
+        return Ok(Admit::OutboxFull);
     }
     let prepared = PreparedReply {
         envelope_id: request.envelope.envelope_id.clone(),
         envelope: request.envelope,
         kind: request.kind,
     };
+    let transfer = TransferMarker { envelope_id: prepared.envelope_id.clone(), digest: hashed };
     if let Some(message) = request.message {
         db.persist_message_actor_state(message, &stored, &prepared)?;
-        db.persist_message_actor_state(message, &marker, &prepared)?;
+        db.persist_message_actor_state(message, &marker, &transfer)?;
     } else {
         db.persist_actor_state(&stored, &prepared)?;
-        db.persist_actor_state(&marker, &prepared)?;
+        db.persist_actor_state(&marker, &transfer)?;
     }
     if let Some(key) = request.response_key {
         db.remove_actor_state(key)?;
     }
     before_commit_fault()?;
     Ok(Admit::Admitted)
+}
+
+fn hold_open(tx: &ReceiveTransaction<'_>, sequence: u64) -> Result<(), StorageError> {
+    tx.hold_receipt(sequence)
 }
 
 /// Couriers load the next unchanged envelope. Network send stays outside the actor.
@@ -153,10 +250,11 @@ pub(crate) fn due(db: &AccountDb) -> Result<Option<(String, PreparedReply)>, Sdk
     Ok(Some((auth_key, reply)))
 }
 
-/// Submit acknowledgement retires the outbox row and keeps the transfer marker.
+/// Submit acknowledgement retires the outbox row and prunes the transfer marker.
 pub(crate) fn acknowledge(db: &AccountDb, auth_key: &str) -> Result<(), SdkError> {
     db.write_transaction(|| {
         db.remove_actor_state(&outbox_key(auth_key))?;
+        db.remove_actor_state(&marker_key(auth_key))?;
         Ok::<(), StorageError>(())
     })?;
     Ok(())
@@ -167,17 +265,6 @@ fn before_commit_fault() -> Result<(), StorageError> {
         return Err(StorageError::Integrity("reply outbox before-commit"));
     }
     Ok(())
-}
-
-fn remove_response_before_admission() -> bool {
-    #[cfg(test)]
-    {
-        REMOVE_BEFORE.with(std::cell::Cell::get)
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
 }
 
 fn current_fault() -> Fault {
@@ -201,7 +288,6 @@ pub(crate) enum Fault {
 #[cfg(test)]
 thread_local! {
     static FAULT: std::cell::Cell<Fault> = const { std::cell::Cell::new(Fault::None) };
-    static REMOVE_BEFORE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -218,19 +304,6 @@ pub(crate) fn run<T>(fault: Fault, f: impl FnOnce() -> T) -> T {
 }
 
 #[cfg(test)]
-pub(crate) fn with_remove_before_admission<T>(f: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            REMOVE_BEFORE.with(|cell| cell.set(false));
-        }
-    }
-    REMOVE_BEFORE.with(|cell| cell.set(true));
-    let _reset = Reset;
-    f()
-}
-
+pub(crate) mod reply_outbox_crash_tests;
 #[cfg(test)]
-mod reply_outbox_crash_tests;
-#[cfg(test)]
-mod reply_stage_redrive_tests;
+pub(crate) mod reply_stage_redrive_tests;

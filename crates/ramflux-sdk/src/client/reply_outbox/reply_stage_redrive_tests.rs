@@ -3,13 +3,17 @@
 
 //! `reply_stage_redrive` (P13's `receive_stage_redrive` first leg has not landed; the
 //! controller merges these rows after P13). Do not edit `routed/receive.rs` / `sync_driver.rs`.
-#![allow(clippy::unwrap_used, clippy::panic, clippy::needless_pass_by_value)]
+#![allow(
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::needless_pass_by_value
+)]
 
 use super::reply_outbox_crash_tests::{self, Fixture};
 use super::{Admit, AdmitRequest, Fault, OUTBOX, ReplyKind, ReplyOutbox, run};
 use crate::prelude::*;
 use ramflux_storage::{ReceiveExpectation, StorageError};
-use serde_json::json;
 use std::time::Duration;
 
 const BEFORE: &str = "reply outbox before-commit";
@@ -23,8 +27,8 @@ impl Drop for HangGuard {
 }
 
 /// Kill before/after each reply W1, redrive, one envelope, W0 staged.
-#[test]
-fn reply_stage_redrive() -> Result<(), SdkError> {
+/// Folded into `receive_stage_redrive` (P13 is on main).
+pub(crate) fn reply_stage_redrive() -> Result<(), SdkError> {
     let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         if matches!(
@@ -37,7 +41,7 @@ fn reply_stage_redrive() -> Result<(), SdkError> {
     let _hang = HangGuard(Some(cancel));
     let mut fixture = Fixture::new()?;
     redrive(&mut fixture, 1, "surface-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
-    redrive(&mut fixture, 2, "pair-auth", ReplyKind::Pair, None)?;
+    redrive(&mut fixture, 2, "pair-auth", ReplyKind::Surface, Some(SURFACE_RESPONSE))?;
     Ok(())
 }
 
@@ -51,7 +55,7 @@ fn redrive(
     let envelope = reply_outbox_crash_tests::envelope(&format!("{auth_key}-env"));
     reply_outbox_crash_tests::stage(&fixture.client, sequence)?;
     if let Some(key) = response {
-        fixture.client.account_db()?.persist_actor_state(key, &json!({"queued": true}))?;
+        reply_outbox_crash_tests::queue_surface_at(&fixture.client, key)?;
     }
     let db = fixture.client.account_db()?;
     let gate = ReplyOutbox {
@@ -74,6 +78,8 @@ fn redrive(
                 kind,
                 response_key: response,
                 message: None,
+                client: &fixture.client,
+                pair: None,
             },
         )
     }) {
@@ -110,6 +116,8 @@ fn redrive(
                 kind,
                 response_key: response,
                 message: None,
+                client: &fixture.client,
+                pair: None,
             },
         )?,
         Admit::Admitted
@@ -143,6 +151,8 @@ fn redrive(
                 kind,
                 response_key: response,
                 message: None,
+                client: &fixture.client,
+                pair: None,
             },
         )?,
         Admit::Duplicate
