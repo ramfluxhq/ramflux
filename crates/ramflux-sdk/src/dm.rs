@@ -511,12 +511,3 @@ pub(crate) fn a2i_control_conversation_id(
 ) -> String {
     format!("a2i.control:{source_device_id}:{target_device_id}")
 }
-
-/// Dormant S10a P07 candidate. Live `gateway_direct_message_envelope` is unchanged.
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
-{
-    crate::client::report_envelope::produce_kind(
-        crate::client::report_envelope::CandidateKind::DirectMessage,
-    )
-}

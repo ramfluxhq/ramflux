@@ -100,10 +100,10 @@ pub use recovery::{
     RecoveryQuorumMemberKind, RecoveryShare, create_recovery_quorum, recover_secret_from_quorum,
 };
 pub use report_opening::{
-    AssembledReportOpening, COLLAPSE_KEY_INFO, REPORT_OPENING_DOMAIN, ReportA0,
-    ReportDeliveryClass, ReportDeliveryMode, ReportPriority, assemble_report_opening, collapse_key,
-    collapse_tag, cover_collapse_tag, encode_report_a0, frame_report_plaintext,
-    parse_report_plaintext, report_commitment, verify_report_opening,
+    AssembledReportOpening, COLLAPSE_KEY_INFO, ParsedReportPlaintext, REPORT_OPENING_DOMAIN,
+    ReportA0, ReportDeliveryClass, ReportDeliveryMode, ReportFrame, ReportPriority,
+    assemble_report_opening, collapse_key, collapse_tag, cover_collapse_tag, encode_report_a0,
+    frame_report_plaintext, parse_report_plaintext, report_commitment, verify_report_opening,
 };
 pub use signing::{
     CanonicalSignatureBatchItem, CanonicalSignatureSingleKeyBatchItem,

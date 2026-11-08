@@ -178,15 +178,6 @@ impl RamfluxClient {
     }
 }
 
-/// Dormant S10a P07 candidate for own-sent delivery copies.
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
-{
-    crate::client::report_envelope::produce_kind(
-        crate::client::report_envelope::CandidateKind::OwnSentDelivery,
-    )
-}
-
 #[cfg(test)]
 #[path = "own_sent_native_tests.rs"]
 mod native_tests;

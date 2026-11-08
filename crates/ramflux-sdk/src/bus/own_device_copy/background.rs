@@ -461,15 +461,6 @@ fn complete(
     outcome.map(|_| ())
 }
 
-/// Dormant S10a P07 candidate for the own-copy background send path.
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
-{
-    crate::client::report_envelope::produce_kind(
-        crate::client::report_envelope::CandidateKind::OwnDeviceCopyBackground,
-    )
-}
-
 #[cfg(test)]
 pub(crate) async fn drive_once(account: &mut LocalBusAccountState) -> Result<bool, SdkError> {
     let Some(plan) = prepare(account)? else {

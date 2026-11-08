@@ -324,12 +324,3 @@ fn slot_receipt(slot: &SdkObjectKeySlot) -> Result<String, SdkError> {
         ramflux_crypto::blake3_256_base64url("ramflux.sdk.object.slot.receipt.v2", &bytes)
     ))
 }
-
-/// Dormant S10a P07 candidate for pair object-slot seals.
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
-{
-    crate::client::report_envelope::produce_kind(
-        crate::client::report_envelope::CandidateKind::ObjectSlot,
-    )
-}

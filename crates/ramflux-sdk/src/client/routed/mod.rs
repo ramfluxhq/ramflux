@@ -350,27 +350,6 @@ fn invalid(message: &str) -> SdkError {
     SdkError::InboundRejected(message.to_owned())
 }
 
-/// Dormant S10a P07 candidate for routed seal constructors.
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_routed_seal_report()
--> Result<crate::client::report_envelope::CandidateReport, SdkError> {
-    crate::client::report_envelope::produce_kind(
-        crate::client::report_envelope::CandidateKind::RoutedSeal,
-    )
-}
-
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_object_slot_report()
--> Result<crate::client::report_envelope::CandidateReport, SdkError> {
-    object_slot::candidate_report()
-}
-
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_pair_reply_report()
--> Result<crate::client::report_envelope::CandidateReport, SdkError> {
-    reset_prepare::candidate_report()
-}
-
 #[cfg(test)]
 mod tests;
 

@@ -8,14 +8,15 @@
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::{CryptoError, blake3_keyed_derive, hkdf_sha256, random_32};
 
 /// Decision 5 transcript domain. Retired `ramflux.franking_opening.v1` is not reused.
-pub const REPORT_OPENING_DOMAIN: &str = "ramflux.message.report_opening.v1";
+pub const REPORT_OPENING_DOMAIN: &str = ramflux_protocol::domain::REPORT_OPENING;
 /// HKDF info for the per-session collapse key (Decision 4).
-pub const COLLAPSE_KEY_INFO: &str = "ramflux.message.collapse_key.v1";
+pub const COLLAPSE_KEY_INFO: &str = ramflux_protocol::domain::COLLAPSE_KEY;
 
 const OPENING_LEN: usize = 32;
 const LEN_PREFIX: usize = 4;
@@ -86,13 +87,75 @@ impl ReportDeliveryMode {
 }
 
 /// Uniform tag, commitment, opening and S10a body plaintext (no Padme tail).
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssembledReportOpening {
     pub collapse_tag: [u8; 32],
     pub report_commitment: [u8; 32],
-    pub opening: [u8; 32],
-    pub framed_plaintext: Vec<u8>,
+    opening: Zeroizing<[u8; 32]>,
+    framed_plaintext: ReportFrame,
     pub a0: Vec<u8>,
+}
+
+impl AssembledReportOpening {
+    #[must_use]
+    pub fn opening(&self) -> &[u8; 32] {
+        &self.opening
+    }
+
+    #[must_use]
+    pub fn framed_plaintext(&self) -> &[u8] {
+        self.framed_plaintext.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for AssembledReportOpening {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AssembledReportOpening")
+            .field("collapse_tag", &"[REDACTED]")
+            .field("report_commitment", &"[REDACTED]")
+            .field("opening", &"[REDACTED]")
+            .field("framed_plaintext", &"[REDACTED]")
+            .field("a0", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Secret report frame; its Inner and opening bytes are zeroized on drop.
+pub struct ReportFrame(Zeroizing<Vec<u8>>);
+
+impl ReportFrame {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Parsed secret report plaintext; Inner and opening are zeroized on drop.
+pub struct ParsedReportPlaintext {
+    inner: Zeroizing<Vec<u8>>,
+    opening: Zeroizing<[u8; 32]>,
+}
+
+impl ParsedReportPlaintext {
+    #[must_use]
+    pub fn inner(&self) -> &[u8] {
+        &self.inner
+    }
+
+    #[must_use]
+    pub fn opening(&self) -> &[u8; 32] {
+        &self.opening
+    }
+}
+
+impl std::fmt::Debug for ParsedReportPlaintext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ParsedReportPlaintext")
+            .field("inner", &"[REDACTED]")
+            .field("opening", &"[REDACTED]")
+            .finish()
+    }
 }
 
 fn write_u32_lp(out: &mut Vec<u8>, bytes: &[u8], overflow: CryptoError) -> Result<(), CryptoError> {
@@ -125,13 +188,16 @@ pub fn encode_report_a0(fields: &ReportA0<'_>) -> Result<Vec<u8>, CryptoError> {
 ///
 /// # Errors
 /// Returns [`CryptoError::ReportInnerTooLarge`] when Inner exceeds `u32` length.
-pub fn frame_report_plaintext(inner: &[u8], opening: &[u8; 32]) -> Result<Vec<u8>, CryptoError> {
+pub fn frame_report_plaintext(
+    inner: &[u8],
+    opening: &[u8; 32],
+) -> Result<ReportFrame, CryptoError> {
     let inner_len = u32::try_from(inner.len()).map_err(|_| CryptoError::ReportInnerTooLarge)?;
     let mut out = Vec::with_capacity(LEN_PREFIX + inner.len() + OPENING_LEN);
     out.extend_from_slice(&inner_len.to_be_bytes());
     out.extend_from_slice(inner);
     out.extend_from_slice(opening);
-    Ok(out)
+    Ok(ReportFrame(Zeroizing::new(out)))
 }
 
 /// Parses an S10a report plaintext and refuses any trailing padding or HE bytes.
@@ -139,7 +205,7 @@ pub fn frame_report_plaintext(inner: &[u8], opening: &[u8; 32]) -> Result<Vec<u8
 /// # Errors
 /// Returns a distinct report-opening error for short frames, inner-length
 /// mismatch, or trailing padding/header bytes.
-pub fn parse_report_plaintext(frame: &[u8]) -> Result<(Vec<u8>, [u8; 32]), CryptoError> {
+pub fn parse_report_plaintext(frame: &[u8]) -> Result<ParsedReportPlaintext, CryptoError> {
     if frame.len() < LEN_PREFIX + OPENING_LEN {
         return Err(CryptoError::ReportFrameTooShort);
     }
@@ -158,10 +224,10 @@ pub fn parse_report_plaintext(frame: &[u8]) -> Result<(Vec<u8>, [u8; 32]), Crypt
     if frame.len() > expected {
         return Err(CryptoError::ReportPaddingOrHeaderRefused);
     }
-    let inner = frame[LEN_PREFIX..LEN_PREFIX + inner_len].to_vec();
-    let mut opening = [0_u8; OPENING_LEN];
+    let inner = Zeroizing::new(frame[LEN_PREFIX..LEN_PREFIX + inner_len].to_vec());
+    let mut opening = Zeroizing::new([0_u8; OPENING_LEN]);
     opening.copy_from_slice(&frame[LEN_PREFIX + inner_len..]);
-    Ok((inner, opening))
+    Ok(ParsedReportPlaintext { inner, opening })
 }
 
 /// `C = BLAKE3_keyed(kf, LP(domain) || LP(I) || LP(A0))`.
@@ -173,7 +239,7 @@ pub fn report_commitment(
     inner: &[u8],
     a0: &[u8],
 ) -> Result<[u8; 32], CryptoError> {
-    let mut context = Vec::new();
+    let mut context = Zeroizing::new(Vec::new());
     write_u32_lp(&mut context, REPORT_OPENING_DOMAIN.as_bytes(), CryptoError::ReportA0TooLarge)?;
     write_u32_lp(&mut context, inner, CryptoError::ReportInnerTooLarge)?;
     write_u32_lp(&mut context, a0, CryptoError::ReportA0TooLarge)?;
@@ -192,15 +258,19 @@ pub fn verify_report_opening(
     expected: &[u8; 32],
 ) -> Result<(), CryptoError> {
     let actual = report_commitment(opening, inner, a0)?;
-    if actual == *expected { Ok(()) } else { Err(CryptoError::ReportCommitmentMismatch) }
+    if bool::from(actual.ct_eq(expected)) {
+        Ok(())
+    } else {
+        Err(CryptoError::ReportCommitmentMismatch)
+    }
 }
 
 /// Derives `Kcollapse = HKDF-SHA256(SK, salt=pair_binding, info=collapse_key.v1, 32)`.
 ///
 /// # Errors
 /// Returns HKDF/HMAC failures from the shared extractor.
-pub fn collapse_key(sk: &[u8], pair_binding: &[u8]) -> Result<[u8; 32], CryptoError> {
-    let mut key = [0_u8; 32];
+pub fn collapse_key(sk: &[u8], pair_binding: &[u8]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let mut key = Zeroizing::new([0_u8; 32]);
     hkdf_sha256(pair_binding, sk, COLLAPSE_KEY_INFO.as_bytes(), &mut key)?;
     Ok(key)
 }
@@ -216,7 +286,7 @@ pub fn collapse_tag(
 ) -> Result<[u8; 32], CryptoError> {
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(kcollapse)
         .map_err(|_err| CryptoError::HmacFailed)?;
-    let mut tagged = Vec::new();
+    let mut tagged = Zeroizing::new(Vec::new());
     write_u32_lp(&mut tagged, conversation_id, CryptoError::ReportA0TooLarge)?;
     write_u32_lp(&mut tagged, recipient_device_ref, CryptoError::ReportA0TooLarge)?;
     mac.update(&tagged);
@@ -250,7 +320,7 @@ pub fn assemble_report_opening(
     Ok(AssembledReportOpening {
         collapse_tag: *fields.collapse_tag,
         report_commitment,
-        opening: *opening,
+        opening,
         framed_plaintext,
         a0,
     })

@@ -56,7 +56,6 @@ mod private_prekeys;
 mod receipt_bindings;
 pub mod recovery;
 pub(crate) mod reply_outbox;
-pub(crate) mod report_envelope;
 pub(crate) mod routed;
 pub(crate) mod shared_group;
 pub mod storage;

@@ -279,18 +279,7 @@ pub(crate) fn finish_held(
 }
 
 mod background;
-#[cfg(test)]
-pub(crate) use background::candidate_report as candidate_background_report;
 pub(crate) use background::{OwnCopyWork, apply as apply_background, run as run_background};
-
-/// Dormant S10a P07 candidate for own-device copy envelopes.
-#[cfg_attr(not(test), expect(dead_code, reason = "dormant S10a P07 candidate until P24/P25"))]
-pub(crate) fn candidate_report() -> Result<crate::client::report_envelope::CandidateReport, SdkError>
-{
-    crate::client::report_envelope::produce_kind(
-        crate::client::report_envelope::CandidateKind::OwnDeviceCopy,
-    )
-}
 
 #[cfg(test)]
 pub(crate) use background::drive_once;

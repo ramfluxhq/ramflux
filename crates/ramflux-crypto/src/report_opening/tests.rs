@@ -120,7 +120,7 @@ fn frame_wire_bytes_are_u32_length_inner_and_opening() -> Result<(), CryptoError
     expected.extend_from_slice(&1_u32.to_be_bytes());
     expected.extend_from_slice(inner);
     expected.extend_from_slice(&opening);
-    assert_eq!(frame, expected);
+    assert_eq!(frame.as_bytes(), expected);
     Ok(())
 }
 
@@ -129,9 +129,9 @@ fn frame_round_trip_preserves_inner_and_opening() -> Result<(), CryptoError> {
     let inner = VECTOR_INNER;
     let opening = vector_opening();
     let frame = frame_report_plaintext(inner, &opening)?;
-    let (parsed_inner, parsed_opening) = parse_report_plaintext(&frame)?;
-    assert_eq!(parsed_inner, inner);
-    assert_eq!(parsed_opening, opening);
+    let parsed = parse_report_plaintext(frame.as_bytes())?;
+    assert_eq!(parsed.inner(), inner);
+    assert_eq!(parsed.opening(), &opening);
     Ok(())
 }
 
@@ -153,7 +153,7 @@ fn parse_refuses_inner_length_mismatch() {
 
 #[test]
 fn parse_refuses_zero_padding_tail() -> Result<(), CryptoError> {
-    let mut frame = frame_report_plaintext(b"I", &vector_opening())?;
+    let mut frame = frame_report_plaintext(b"I", &vector_opening())?.as_bytes().to_vec();
     frame.push(0);
     let err = parse_report_plaintext(&frame).expect_err("padding");
     assert!(matches!(err, CryptoError::ReportPaddingOrHeaderRefused));
@@ -162,7 +162,7 @@ fn parse_refuses_zero_padding_tail() -> Result<(), CryptoError> {
 
 #[test]
 fn parse_refuses_header_encryption_trailer() -> Result<(), CryptoError> {
-    let mut frame = frame_report_plaintext(b"I", &vector_opening())?;
+    let mut frame = frame_report_plaintext(b"I", &vector_opening())?.as_bytes().to_vec();
     frame.extend_from_slice(&[0x01, 0x00]);
     let err = parse_report_plaintext(&frame).expect_err("he");
     assert!(matches!(err, CryptoError::ReportPaddingOrHeaderRefused));
@@ -262,7 +262,25 @@ fn assemble_binds_frame_a0_and_commitment() -> Result<(), CryptoError> {
     let fields = vector_fields(&envelope_id, &collapse);
     let assembled = assemble_report_opening(VECTOR_INNER, &fields, vector_opening())?;
     assert_eq!(assembled.collapse_tag, collapse);
-    let (inner, opening) = parse_report_plaintext(&assembled.framed_plaintext)?;
-    verify_report_opening(&opening, &inner, &assembled.a0, &assembled.report_commitment)?;
+    let parsed = parse_report_plaintext(assembled.framed_plaintext())?;
+    verify_report_opening(
+        parsed.opening(),
+        parsed.inner(),
+        &assembled.a0,
+        &assembled.report_commitment,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn assembled_report_debug_redacts_secret_plaintext_and_opening() -> Result<(), CryptoError> {
+    let collapse = vector_collapse();
+    let envelope_id = vector_envelope_id();
+    let fields = vector_fields(&envelope_id, &collapse);
+    let assembled = assemble_report_opening(VECTOR_INNER, &fields, vector_opening())?;
+    let debug = format!("{assembled:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("s10a-p07-inner"));
+    assert!(!debug.contains(&hex::encode(vector_opening())));
     Ok(())
 }
