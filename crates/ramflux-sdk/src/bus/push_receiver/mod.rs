@@ -19,6 +19,7 @@ mod apply_tests;
 pub(crate) mod apply_w1;
 #[cfg(test)]
 mod apply_w1_tests;
+pub(crate) mod compat;
 #[cfg(test)]
 mod guard_tests;
 pub(crate) mod keepalive;

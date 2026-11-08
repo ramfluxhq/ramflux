@@ -7,6 +7,8 @@ pub(crate) mod ack;
 mod ack_tests;
 #[cfg(test)]
 mod application_outbox_backup_tests;
+#[cfg(test)]
+mod compat_backup_tests;
 pub(crate) mod cover;
 #[cfg(test)]
 mod cover_tests;

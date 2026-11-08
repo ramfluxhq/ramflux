@@ -29,6 +29,8 @@ pub enum ReceiveCoverKind {
     Terminal,
     /// Held or quarantined: keep work, omit intent, then C = s.
     Held,
+    /// Compat W2: intent + C = s, keep work and receipt until WA or reset (S6b P18).
+    CompatTerminal,
     /// Range-only cover: gaps then C = page.covered, no live receipt.
     GapOnly,
     /// `EntryTooLarge` without a local receipt: oversize gap + intent + C = s.
@@ -60,13 +62,27 @@ impl ReceiveTransaction<'_> {
     /// gaps that overlap a receipt or fall outside `(C, sequence]`, stale writer authority,
     /// and storage failures.
     pub fn cover(&self, input: ReceiveCover<'_>) -> Result<ReceiveCoverResult, StorageError> {
+        self.cover_at(input, crate::unix_now())
+    }
+
+    /// `cover` against an explicit clock, so due-intent scans are tested without sleeps.
+    ///
+    /// # Errors
+    /// Same as [`Self::cover`].
+    pub fn cover_at(
+        &self,
+        input: ReceiveCover<'_>,
+        now: i64,
+    ) -> Result<ReceiveCoverResult, StorageError> {
         self.require_writer()?;
         self.refuse_retired()?;
         self.refuse_frozen()?;
         let gaps = merge_gaps(input.gaps)?;
         let live = match input.kind {
             ReceiveCoverKind::GapOnly | ReceiveCoverKind::Oversize => usize::from(gaps.is_empty()),
-            ReceiveCoverKind::Terminal | ReceiveCoverKind::Held => 1,
+            ReceiveCoverKind::Terminal
+            | ReceiveCoverKind::Held
+            | ReceiveCoverKind::CompatTerminal => 1,
         };
         if gaps.len().saturating_add(live) > BOUNDARY_LIMIT {
             return Err(StorageError::Integrity("receive cover boundary limit"));
@@ -90,7 +106,10 @@ impl ReceiveTransaction<'_> {
             }
         }
         span_page(cursor, input.sequence, input.kind, &gaps)?;
-        if matches!(input.kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Held) {
+        if matches!(
+            input.kind,
+            ReceiveCoverKind::Terminal | ReceiveCoverKind::Held | ReceiveCoverKind::CompatTerminal
+        ) {
             if input.sequence <= cursor {
                 return Err(StorageError::Integrity("receive cover interval outside page"));
             }
@@ -100,6 +119,7 @@ impl ReceiveTransaction<'_> {
                     matches!(disposition.as_deref(), Some("staged" | "held" | "quarantined"))
                 }
                 ReceiveCoverKind::Terminal
+                | ReceiveCoverKind::CompatTerminal
                 | ReceiveCoverKind::GapOnly
                 | ReceiveCoverKind::Oversize => disposition.is_some(),
             };
@@ -107,20 +127,24 @@ impl ReceiveTransaction<'_> {
                 return Err(StorageError::Integrity("receive cover requires a receipt"));
             }
         }
-        if matches!(input.kind, ReceiveCoverKind::Terminal | ReceiveCoverKind::Oversize)
-            && self.intent_slots(input.sequence)? >= SLOT_LIMIT
+        if matches!(
+            input.kind,
+            ReceiveCoverKind::Terminal
+                | ReceiveCoverKind::Oversize
+                | ReceiveCoverKind::CompatTerminal
+        ) && self.intent_slots(input.sequence)? >= SLOT_LIMIT
         {
             return Ok(ReceiveCoverResult::Paused);
         }
         if self.loss_backpressure(&gaps)? {
             return Ok(ReceiveCoverResult::Paused);
         }
-        let now = crate::unix_now();
         for gap in &gaps {
             self.write_gap(gap, now)?;
         }
         match input.kind {
             ReceiveCoverKind::Terminal => self.finish_terminal(input.sequence, now)?,
+            ReceiveCoverKind::CompatTerminal => self.finish_compat_terminal(input.sequence, now)?,
             ReceiveCoverKind::Held => self.mark_held(input.sequence)?,
             ReceiveCoverKind::GapOnly => {}
             ReceiveCoverKind::Oversize => {
@@ -214,19 +238,57 @@ impl ReceiveTransaction<'_> {
 
     /// Inserts the terminal intent if missing, then releases work and receipt (shared with WS).
     pub(crate) fn finish_terminal(&self, sequence: u64, now: i64) -> Result<(), StorageError> {
+        self.insert_ack_intent(sequence, now, now.saturating_add(604_800))?;
+        self.cleanup_settled(sequence)
+    }
+
+    /// Compat W2: intent without releasing the proof copy (work + receipt stay until WA/reset).
+    pub(crate) fn finish_compat_terminal(
+        &self,
+        sequence: u64,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        self.insert_ack_intent(sequence, now, now.saturating_add(604_800))
+    }
+
+    fn insert_ack_intent(
+        &self,
+        sequence: u64,
+        now: i64,
+        expires_at: i64,
+    ) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
         self.db.connection.execute(
             "INSERT OR IGNORE INTO gateway_ack_intent VALUES(?1,?2,?3,?4,0,?5,?6)",
-            params![
-                self.target,
-                self.incarnation,
-                seq.as_slice(),
-                now,
-                now,
-                now.saturating_add(604_800)
-            ],
+            params![self.target, self.incarnation, seq.as_slice(), now, now, expires_at],
         )?;
-        self.cleanup_settled(sequence)
+        Ok(())
+    }
+
+    /// Drops terminal compat rows whose intents this incarnation is abandoning (U→E / new-E).
+    /// Held work without an intent stays for local recovery. Does not write C (P10 owns reset).
+    ///
+    /// # Errors
+    /// Requires the writer transaction; returns SQL errors.
+    pub fn release_compat_on_reset(&self) -> Result<(), StorageError> {
+        self.require_writer()?;
+        self.db.connection.execute(
+            "DELETE FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2
+             AND inbox_seq IN (SELECT inbox_seq FROM gateway_ack_intent
+                               WHERE target_delivery_id=?1 AND incarnation_id=?2)",
+            params![self.target, self.incarnation],
+        )?;
+        self.db.connection.execute(
+            "DELETE FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND incarnation_id=?2
+             AND inbox_seq IN (SELECT inbox_seq FROM gateway_ack_intent
+                               WHERE target_delivery_id=?1 AND incarnation_id=?2)",
+            params![self.target, self.incarnation],
+        )?;
+        self.db.connection.execute(
+            "DELETE FROM gateway_ack_intent WHERE target_delivery_id=?1 AND incarnation_id=?2",
+            params![self.target, self.incarnation],
+        )?;
+        Ok(())
     }
 
     /// Deletes work and receipt so the reserved slot is released. Drops retry and unrouted
@@ -323,13 +385,21 @@ fn span_page(
                 && gaps.last().is_some_and(|gap| gap.to_seq == sequence)
                 && chained(gaps)?
         }
-        ReceiveCoverKind::Terminal | ReceiveCoverKind::Held if start == sequence => gaps.is_empty(),
-        ReceiveCoverKind::Terminal | ReceiveCoverKind::Held => match gaps.last() {
-            None => false,
-            Some(last) => {
-                gaps[0].from_seq == start && successor(last.to_seq)? == sequence && chained(gaps)?
+        ReceiveCoverKind::Terminal | ReceiveCoverKind::Held | ReceiveCoverKind::CompatTerminal
+            if start == sequence =>
+        {
+            gaps.is_empty()
+        }
+        ReceiveCoverKind::Terminal | ReceiveCoverKind::Held | ReceiveCoverKind::CompatTerminal => {
+            match gaps.last() {
+                None => false,
+                Some(last) => {
+                    gaps[0].from_seq == start
+                        && successor(last.to_seq)? == sequence
+                        && chained(gaps)?
+                }
             }
-        },
+        }
     };
     if covered {
         Ok(())
@@ -372,6 +442,55 @@ fn merge_gaps<'a>(gaps: &[ReceiveGap<'a>]) -> Result<Vec<ReceiveGap<'a>>, Storag
         merged.push(gap);
     }
     Ok(merged)
+}
+
+impl crate::AccountDb {
+    /// Due ACK intents in sequence order, capped at `limit` (compat scans 16 per turn).
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn due_ack_intents(
+        &self,
+        target: &str,
+        incarnation: &str,
+        now: i64,
+        limit: u32,
+    ) -> Result<Vec<u64>, StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT inbox_seq FROM gateway_ack_intent
+             WHERE target_delivery_id=?1 AND incarnation_id=?2 AND next_attempt_at<=?3
+             ORDER BY inbox_seq LIMIT ?4",
+        )?;
+        let rows = query.query_map(params![target, incarnation, now, limit], |row| {
+            let bytes: Vec<u8> = row.get(0)?;
+            let seq =
+                <[u8; 8]>::try_from(bytes.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(u64::from_be_bytes(seq))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(StorageError::from)
+    }
+
+    /// Registered receive-work bytes used as the compat content-equality proof.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn receive_work_json(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let seq = sequence.to_be_bytes();
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT entry_json FROM gateway_receive_work
+                 WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+                params![target, incarnation, seq.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
 }
 
 fn before_commit() -> Result<(), StorageError> {

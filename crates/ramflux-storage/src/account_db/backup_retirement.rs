@@ -12,7 +12,8 @@ pub(super) fn archive_outbound_state(db: &rusqlite::Connection) -> rusqlite::Res
 }
 
 /// Backup/restore copies drop `gateway/%` actor rows. Live-account recovery keeps them
-/// (pending application events must survive `retire_outbound_for_recovery`).
+/// (pending application events, compat proof and suspend markers must survive
+/// `retire_outbound_for_recovery`).
 pub(super) fn strip_gateway_actor_state(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     db.execute("DELETE FROM runtime_actor_state WHERE state_kind LIKE 'gateway/%'", [])?;
     Ok(())
