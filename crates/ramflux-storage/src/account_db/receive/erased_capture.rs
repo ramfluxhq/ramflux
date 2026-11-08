@@ -149,6 +149,117 @@ pub(crate) const NON_SOURCE_KINDS: &[&str] = &[
     "conversation_delivery_state",
 ];
 
+/// Tables named by a `footprint_%` trigger that can never hold an erased-input Source tuple.
+/// A Source tuple is the six authenticated fields (principal, device, signing key, payload hash,
+/// `created_at`, `ttl`) read from a stored inbound envelope, so a table qualifies only if it has
+/// no envelope column and no production writer that stores one. Each entry names its writer or
+/// its absence; Source tables are in `SOURCE_KINDS`.
+pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
+    // Envelope-id or cursor pointers: ids and counters only, no envelope body, and no
+    // production writer exists (`schema.rs` creates them; only `tests.rs` lists them).
+    "ack_state",
+    "nack_state",
+    "cursor_checkpoint",
+    "device_inbox_cursor",
+    "event_causal_dependency",
+    // Writers `event_store.rs:176`, `group_pending.rs:294` and `receive/stage.rs:170`: projection
+    // name, version, a last event id and a checkpoint hash; no envelope and no tuple fields.
+    "projection_checkpoint",
+    // Legacy transport stores with no production writer: `raw_envelope_log` keeps only
+    // source_device_id and payload_hash (no principal, signing key or timestamps, so no tuple
+    // can be formed) and `outbox_queue.encrypted_envelope` is outbound; `message_projection`
+    // keeps body_cipher and ids.
+    "raw_envelope_log",
+    "outbox_queue",
+    "message_projection",
+    // Projections of already-opened messages: writer `conversation_projection.rs` (read,
+    // delivery, unread) stores conversation/message ids and times only.
+    "conversation_read_state",
+    "conversation_delivery_state",
+    "conversation_unread_marker",
+    // Writer `receipt_projection`: `conversation_projection.rs:93` stores ids and receipt type;
+    // `rejected_inbox_projection`: `friend.rs:214` stores ids and a reason code.
+    "receipt_projection",
+    "rejected_inbox_projection",
+    // Writer `groups.rs:600`: tombstone ids, scope and epoch only.
+    "group_message_tombstone_projection",
+    // Replay counters keyed by group, epoch, sender and counter (`group_pending.rs:171`):
+    // no payload hash, device or signing key.
+    "group_sender_key_counter_seen",
+    "root_group_sender_key_counter_seen",
+    // The projection itself: writers `messages.rs:77,107` and `deleted_messages.rs:297,456` store
+    // the sender principal, the decrypted local body and typed `MessageMetadata`; the device,
+    // signing key and payload hash are never stored, so no tuple can be formed.
+    "direct_message_projection",
+    // Writers `journal/mod.rs:198` and `surface.rs:30`: the locally rendered message body.
+    "runtime_message_content",
+    // The footprint bindings themselves: copy ids and message ids only.
+    "message_copy_binding",
+    // Transient stages written and consumed by one trigger statement (`message_footprint/
+    // schema.rs` `staged_actor_copy` and `journal_copy`): they carry ids and bindings, or the
+    // journal body whose durable home is `runtime_journal` (a Source). Always empty at rest.
+    "message_footprint_actor_stage",
+    "message_footprint_journal_stage",
+];
+
+/// Why the classification guard refused. It is crate-internal on purpose: a new public
+/// `StorageError` variant would break every downstream exhaustive match.
+#[derive(Debug)]
+pub(crate) enum ClassificationError {
+    /// The unclassified tables and kinds, named exactly.
+    Unclassified(String),
+    Sqlite(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for ClassificationError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
+    }
+}
+
+/// Rejects any table named by a `footprint_%` trigger, and any `message_footprint.kind`, that is
+/// classified neither as a Source nor as a Non-source, so a new store cannot silently escape the
+/// erased-input capture.
+///
+/// # Errors
+/// Returns `Unclassified` naming every unclassified table and kind, or SQLite errors.
+pub(crate) fn classification_guard(db: &Connection) -> Result<(), ClassificationError> {
+    let mut tables: BTreeSet<String> = BTreeSet::new();
+    let mut triggers = db.prepare(
+        "SELECT DISTINCT tbl_name FROM main.sqlite_master \
+         WHERE type='trigger' AND name LIKE 'footprint\\_%' ESCAPE '\\'",
+    )?;
+    for table in triggers.query_map([], |r| r.get::<_, String>(0))? {
+        let table = table?;
+        let known = SOURCE_KINDS.iter().any(|s| s.table == table)
+            || NON_SOURCE_TABLES.contains(&table.as_str());
+        if !known {
+            tables.insert(table);
+        }
+    }
+    let mut kinds: BTreeSet<String> = BTreeSet::new();
+    if has_table(db, "main", "message_footprint")? {
+        let mut found = db.prepare("SELECT DISTINCT kind FROM main.message_footprint")?;
+        for kind in found.query_map([], |r| r.get::<_, String>(0))? {
+            let kind = kind?;
+            let known = SOURCE_KINDS.iter().any(|s| s.kind == kind)
+                || NON_SOURCE_KINDS.contains(&kind.as_str());
+            if !known {
+                kinds.insert(kind);
+            }
+        }
+    }
+    if tables.is_empty() && kinds.is_empty() {
+        return Ok(());
+    }
+    let list = |set: &BTreeSet<String>| set.iter().cloned().collect::<Vec<_>>().join(", ");
+    Err(ClassificationError::Unclassified(format!(
+        "tables [{}]; kinds [{}]",
+        list(&tables),
+        list(&kinds)
+    )))
+}
+
 struct Candidate {
     message: String,
     selector: String,
