@@ -9,6 +9,11 @@ pub enum StorageError {
     AccountWriterBusy(String),
     #[error("segment resource capacity exceeded: {limit}")]
     SegmentResourceCapacity { limit: usize },
+    #[error("unsupported raw quota exceeded for source {source_anchor} ({scope:?})")]
+    UnsupportedRawQuotaExceeded {
+        source_anchor: String,
+        scope: crate::account_db::raw_inner::RawInnerQuotaScope,
+    },
     /// Authentication or integrity verification failed; never used for local I/O.
     #[error("{0}")]
     Integrity(&'static str),

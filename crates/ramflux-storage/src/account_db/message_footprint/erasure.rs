@@ -112,5 +112,8 @@ const BODY: &str = r"
     CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id);
  DELETE FROM runtime_outbox WHERE sequence IN (SELECT CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id AND kind='outbox');
  DELETE FROM message_copy_binding WHERE message_id=NEW.message_id;
+ DELETE FROM raw_inner_copy WHERE copy_id IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='raw_inner');
+ DELETE FROM raw_inner_owner WHERE owner_id=NEW.message_id;
+ DELETE FROM raw_inner_evidence WHERE message_id=NEW.message_id;
  DELETE FROM message_footprint WHERE message_id=NEW.message_id;
 ";

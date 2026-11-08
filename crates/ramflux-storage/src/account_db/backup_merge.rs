@@ -30,9 +30,10 @@ struct RowSelection<'a> {
     newer: &'a str,
     filter: &'a str,
 }
-fn skip_merge_table(table: &str) -> bool {
+fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
     if table.starts_with("runtime_attachment_")
         || table == "object_segment_reference_veto"
+        || (native_data_only && table.starts_with("raw_inner_"))
         || super::backup_selector_admission::is_scratch(table)
     {
         return true;
@@ -252,7 +253,7 @@ impl BackupDatabase {
                     self.merge_objects(&mut report, progress)?;
                     continue;
                 }
-                if skip_merge_table(&table)
+                if skip_merge_table(&table, native_data_only)
                     || (native_data_only && super::backup_native::authority_table(&table))
                 {
                     continue;
@@ -314,7 +315,7 @@ impl BackupDatabase {
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
             self.finish_conversation_counts(&mut report)?;
-            self.link_imported_message_footprints(key)?;
+            self.link_imported_message_footprints(key, native_data_only)?;
             super::mac_subkeys::merge::finish(&self.db, marker_ids)?;
             self.finish_merge()?;
             Ok(report)

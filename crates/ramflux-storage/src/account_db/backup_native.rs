@@ -81,6 +81,47 @@ mod tests {
     use crate::{AccountDb, AccountIndex};
     use serde_json::json;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn add_raw_fixture(source: &AccountDb) -> TestResult {
+        source.write_transaction(|| {
+            source.put_unsupported_raw_copy(crate::RawInnerCopyWrite {
+                owner_id: "unsupported-message",
+                verified_source_anchor: "verified-peer-root",
+                copy_id: "raw-copy",
+                kind: crate::RawInnerCopyKind::OuterInner,
+                bytes: b"native merge must exclude this raw copy",
+                bounded_metadata: b"{}",
+            })
+        })?;
+        Ok(())
+    }
+
+    fn add_local_raw_fixture(local: &AccountDb) -> TestResult {
+        local.write_transaction(|| {
+            local.put_unsupported_raw_copy(crate::RawInnerCopyWrite {
+                owner_id: "unsupported-message",
+                verified_source_anchor: "verified-peer-root",
+                copy_id: "raw-copy",
+                kind: crate::RawInnerCopyKind::OuterInner,
+                bytes: b"local raw copy must remain unchanged",
+                bounded_metadata: b"{}",
+            })
+        })?;
+        Ok(())
+    }
+
+    fn assert_native_raw_copy_unchanged(merged: &BackupDatabase) -> TestResult {
+        assert_eq!(
+            merged.db.query_row(
+                "SELECT raw_bytes FROM raw_inner_copy WHERE copy_id='raw-copy'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0)
+            )?,
+            b"local raw copy must remain unchanged",
+            "native merge must not import or overwrite Unsupported raw copies"
+        );
+        Ok(())
+    }
     #[test]
     fn native_merge_cannot_install_authority_or_resume_saved_outbound_sessions() -> TestResult {
         native_exclusions(false)?;
@@ -100,6 +141,7 @@ mod tests {
         let local_key = AccountDbKey::generate()?;
         let source = AccountDb::open(&source_index, "account", &source_key)?;
         let local = AccountDb::open(&local_index, "account", &local_key)?;
+        add_local_raw_fixture(&local)?;
         let retained = [
             ("identity/custody/anchor", json!({"pins":{"epoch":9,"fenced":true},"revision":9})),
             ("identity/owned_pending_set", json!({"revision":9})),
@@ -121,6 +163,7 @@ mod tests {
         source.persist_actor_state("dm-pair/active/imported", &"imported")?;
         source.persist_actor_state("dm-pair/bootstrap/imported", &json!({"seed":"saved"}))?;
         source.store_message_content("thread", "history", b"inbound history")?;
+        add_raw_fixture(&source)?;
         source.persist_actor_state("own-device/status/imported", &json!({"expires_at":900}))?;
         local.persist_actor_state("own-device/status/local", &json!({"expires_at":900}))?;
         let incoming = root.join("incoming.db");
@@ -176,6 +219,7 @@ mod tests {
             )?,
             b"inbound history"
         );
+        assert_native_raw_copy_unchanged(&merged)?;
         drop(merged);
         drop(local);
         drop(source);

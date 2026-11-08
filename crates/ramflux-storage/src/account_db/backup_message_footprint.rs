@@ -10,10 +10,28 @@ impl BackupDatabase {
     pub(super) fn link_imported_message_footprints(
         &self,
         key: &AccountDbKey,
+        native_data_only: bool,
     ) -> Result<(), StorageError> {
         // Tombstones are unioned here, inside the merge transaction, after the MAC bundle set
         // has been merged and before publication; the generic row merge skips the table.
         super::receive::erased_input::merge_from(&self.db, "incoming")?;
+        if !native_data_only {
+            let raw_conflict: bool = self.db.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM incoming.raw_inner_owner i JOIN main.raw_inner_owner l USING(owner_id)
+                     WHERE i.source_anchor<>l.source_anchor
+                 ) OR EXISTS(
+                     SELECT 1 FROM incoming.raw_inner_copy i JOIN main.raw_inner_copy l USING(copy_id)
+                     WHERE i.owner_id<>l.owner_id OR i.copy_kind<>l.copy_kind
+                        OR i.raw_digest<>l.raw_digest OR i.raw_bytes<>l.raw_bytes
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            if raw_conflict {
+                return Err(StorageError::AuthorizationRejected);
+            }
+        }
         let exists:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='message_footprint')",[],|r|r.get(0))?;
         if !exists {
             return Ok(super::message_footprint::migration::register_imported(&self.db)?);
@@ -44,6 +62,23 @@ impl BackupDatabase {
             if exists {
                 self.db.execute(&format!("INSERT OR IGNORE INTO message_footprint SELECT f.message_id,?1,CAST(a.rowid AS TEXT) FROM incoming.message_footprint f JOIN incoming.{table} r ON r.rowid=CAST(f.locator AS INTEGER) JOIN {table} a ON a.source=?2||'/'||r.source AND a.{key_column}=r.{key_column} WHERE f.kind=?1"),params![kind,source])?;
             }
+        }
+        if !native_data_only {
+            self.db.execute_batch(
+                "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id)
+                 SELECT copy_id,owner_id FROM raw_inner_copy;
+                 INSERT OR IGNORE INTO message_footprint(message_id,kind,locator)
+                 SELECT owner_id,'raw_inner',copy_id FROM raw_inner_copy;
+                 INSERT OR IGNORE INTO message_footprint(message_id,kind,locator)
+                 SELECT message_id,'raw_inner_evidence',message_id FROM raw_inner_evidence;
+                 DELETE FROM raw_inner_copy WHERE owner_id IN
+                    (SELECT message_id FROM direct_message_projection WHERE deleted=1);
+                 DELETE FROM raw_inner_owner WHERE owner_id IN
+                    (SELECT message_id FROM direct_message_projection WHERE deleted=1);
+                 DELETE FROM raw_inner_evidence WHERE message_id IN
+                    (SELECT message_id FROM direct_message_projection WHERE deleted=1);",
+            )?;
+            super::raw_inner::quota::validate_all(&self.db)?;
         }
         Ok(super::message_footprint::migration::register_imported(&self.db)?)
     }

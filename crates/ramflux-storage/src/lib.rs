@@ -85,6 +85,10 @@ pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
 };
+pub use account_db::raw_inner::{
+    KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,
+    RawInnerQuotaScope,
+};
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
 pub use account_index::AccountIndex;

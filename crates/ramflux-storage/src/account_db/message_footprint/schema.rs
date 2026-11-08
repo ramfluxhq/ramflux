@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 pub(super) fn install(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(SCHEMA)?;
+    super::super::raw_inner::schema::install(db)?;
     install_copy_triggers(db)?;
     super::erasure::install(db)?;
     Ok(())
