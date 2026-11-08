@@ -4,8 +4,9 @@
 //! Real POST `/mvp0/envelope-ephemeral` oracle for read-only C1 routing.
 use crate::router_runtime::RouterHandle;
 use ramflux_node_core::{
-    EphemeralDropReason, EphemeralRouteRequest, EphemeralRouteResponse, EphemeralRouteResult,
-    HomeNodeMigrationRecord, SessionDescriptor, SessionLifecycle, SessionPushSessionRequest,
+    EphemeralDispatchObservation, EphemeralDropReason, EphemeralRouteRequest,
+    EphemeralRouteResponse, EphemeralRouteResult, HomeNodeMigrationRecord, SessionDescriptor,
+    SessionLifecycle, SessionPushSessionRequest,
 };
 use ramflux_protocol::{
     DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, ephemeral as proto,
@@ -142,11 +143,27 @@ fn now_ms() -> u64 {
     ramflux_node_core::now_unix_seconds().saturating_mul(1_000)
 }
 
-fn assert_no_dispatch(response: &EphemeralRouteResponse) {
+fn zero_dispatch() -> EphemeralDispatchObservation {
+    EphemeralDispatchObservation { pending_inbox: 0, forwarding_reservations: 0 }
+}
+
+fn dispatch_of(router: &RouterHandle, target: &str) -> EphemeralDispatchObservation {
+    router.state().ephemeral_dispatch_observation(target)
+}
+
+fn assert_no_dispatch(router: &RouterHandle, target: &str, response: &EphemeralRouteResponse) {
     assert!(
         !matches!(response, EphemeralRouteResponse::Online { .. }),
         "zero forwards and enqueues, got {response:?}"
     );
+    assert_eq!(dispatch_of(router, target), zero_dispatch(), "inbox and home-node forwards");
+}
+
+struct NowMsGuard;
+impl Drop for NowMsGuard {
+    fn drop(&mut self) {
+        super::set_ephemeral_now_ms(None);
+    }
 }
 
 fn store_bytes(path: &std::path::Path) -> Vec<u8> {
@@ -156,16 +173,19 @@ fn store_bytes(path: &std::path::Path) -> Vec<u8> {
 fn observe_post(
     router: &RouterHandle,
     path: &std::path::Path,
+    target: &str,
     body: &Value,
 ) -> anyhow::Result<EphemeralRouteResponse> {
     let before = router.state().ephemeral_durable_snapshot()?;
     let before_store = store_bytes(path);
+    let before_dispatch = dispatch_of(router, target);
     let response = post_route(router, body)?;
     anyhow::ensure!(
         router.state().ephemeral_durable_snapshot()? == before,
         "durable snapshot changed"
     );
     anyhow::ensure!(store_bytes(path) == before_store, "redb mutated");
+    anyhow::ensure!(dispatch_of(router, target) == before_dispatch, "forward/enqueue mutated");
     Ok(response)
 }
 
@@ -176,6 +196,7 @@ fn row_accepted_and_read_only() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let before = router.state().ephemeral_durable_snapshot()?;
     let before_store = store_bytes(&path);
+    let before_dispatch = dispatch_of(&router, TARGET);
     let response = post_route(&router, &request_body(&envelope, expires)?)?;
     assert_eq!(
         response,
@@ -183,6 +204,8 @@ fn row_accepted_and_read_only() -> TestResult {
     );
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
     anyhow::ensure!(store_bytes(&path) == before_store);
+    anyhow::ensure!(dispatch_of(&router, TARGET) == before_dispatch);
+    anyhow::ensure!(before_dispatch == zero_dispatch());
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -195,6 +218,8 @@ fn row_non_gateway_peer() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let before = router.state().ephemeral_durable_snapshot()?;
     let before_store = store_bytes(&path);
+    let before_calls = router.state().route_ephemeral_call_count();
+    let before_dispatch = dispatch_of(&router, TARGET);
     let response = mesh(
         &router,
         "POST",
@@ -209,6 +234,9 @@ fn row_non_gateway_peer() -> TestResult {
     );
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
     anyhow::ensure!(store_bytes(&path) == before_store);
+    anyhow::ensure!(router.state().route_ephemeral_call_count() == before_calls);
+    anyhow::ensure!(dispatch_of(&router, TARGET) == before_dispatch);
+    anyhow::ensure!(before_dispatch == zero_dispatch());
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -222,9 +250,9 @@ fn row_deadline_mismatch() -> TestResult {
     let exact = router.state().route_ephemeral(&envelope, expires.saturating_add(1), now_ms());
     assert_eq!(exact, EphemeralRouteResult::DeadlineMismatch);
     let response =
-        observe_post(&router, &path, &request_body(&envelope, expires.saturating_add(1))?)?;
+        observe_post(&router, &path, TARGET, &request_body(&envelope, expires.saturating_add(1))?)?;
     assert_eq!(response, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid });
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, TARGET, &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -238,9 +266,9 @@ fn row_revoked_source() -> TestResult {
     router.state().test_revoke_envelope_source(&envelope);
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::RevokedSource);
-    let response = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let response = observe_post(&router, &path, TARGET, &request_body(&envelope, expires)?)?;
     assert_eq!(response, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid });
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, TARGET, &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -254,9 +282,9 @@ fn row_root_mismatch() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::RootMismatch);
-    let response = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let response = observe_post(&router, &path, TARGET, &request_body(&envelope, expires)?)?;
     assert_eq!(response, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid });
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, TARGET, &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -268,9 +296,10 @@ fn row_offline() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::Dropped(EphemeralDropReason::Offline));
-    let response = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let response =
+        observe_post(&router, &path, "target_offline", &request_body(&envelope, expires)?)?;
     assert_eq!(response, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Offline });
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, "target_offline", &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -285,12 +314,12 @@ fn row_no_map_entry() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::Dropped(EphemeralDropReason::RecipientUnsupported));
-    let response = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let response = observe_post(&router, &path, target, &request_body(&envelope, expires)?)?;
     assert_eq!(
         response,
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::RecipientUnsupported }
     );
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, target, &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -306,12 +335,12 @@ fn row_map_ne_descriptor() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::Dropped(EphemeralDropReason::RecipientUnsupported));
-    let response = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let response = observe_post(&router, &path, target, &request_body(&envelope, expires)?)?;
     assert_eq!(
         response,
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::RecipientUnsupported }
     );
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, target, &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -343,9 +372,9 @@ fn row_not_local() -> TestResult {
     let expires = computed_expires(&envelope, now_ms())?;
     let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
     assert_eq!(exact, EphemeralRouteResult::Dropped(EphemeralDropReason::NotLocal));
-    let response = observe_post(&router, &path, &request_body(&envelope, expires)?)?;
+    let response = observe_post(&router, &path, TARGET, &request_body(&envelope, expires)?)?;
     assert_eq!(response, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::NotLocal });
-    assert_no_dispatch(&response);
+    assert_no_dispatch(&router, TARGET, &response);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -356,6 +385,8 @@ fn row_decode_invalid() -> TestResult {
     establish_capable(&router, TARGET)?;
     let before = router.state().ephemeral_durable_snapshot()?;
     let before_store = store_bytes(&path);
+    let before_calls = router.state().route_ephemeral_call_count();
+    let before_dispatch = dispatch_of(&router, TARGET);
     let response = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: "POST".into(),
@@ -370,6 +401,8 @@ fn row_decode_invalid() -> TestResult {
     assert_eq!(value["reason"], "invalid");
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
     anyhow::ensure!(store_bytes(&path) == before_store);
+    anyhow::ensure!(router.state().route_ephemeral_call_count() == before_calls);
+    anyhow::ensure!(dispatch_of(&router, TARGET) == before_dispatch);
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -410,22 +443,40 @@ fn ephemeral_deadline() -> TestResult {
     let mismatch =
         router.state().route_ephemeral(&mismatch_env, mismatch_expires.saturating_add(1), now_ms());
     assert_eq!(mismatch, EphemeralRouteResult::DeadlineMismatch);
+    let _now = NowMsGuard;
     let http_env = signed_ephemeral("deadline-http", TARGET)?;
     let http_expires = computed_expires(&http_env, now_ms())?;
-    let http = observe_post(&router, &path, &request_body(&http_env, http_expires)?)?;
+    super::set_ephemeral_now_ms(Some(http_expires.saturating_sub(1)));
+    let http = observe_post(&router, &path, TARGET, &request_body(&http_env, http_expires)?)?;
     assert_eq!(
         http,
         EphemeralRouteResponse::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
     );
-    let http_replayed = observe_post(&router, &path, &request_body(&http_env, http_expires)?)?;
+    let http_replayed =
+        observe_post(&router, &path, TARGET, &request_body(&http_env, http_expires)?)?;
     assert_eq!(
         http_replayed,
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Replayed }
     );
-    assert_no_dispatch(&http_replayed);
+    assert_no_dispatch(&router, TARGET, &http_replayed);
+    super::set_ephemeral_now_ms(Some(http_expires));
+    let http_at_d = observe_post(&router, &path, TARGET, &request_body(&http_env, http_expires)?)?;
+    assert_eq!(http_at_d, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired });
+    assert_no_dispatch(&router, TARGET, &http_at_d);
+    let fresh_at_d = signed_ephemeral("deadline-http-d", TARGET)?;
+    let fresh_expires = computed_expires(&fresh_at_d, now_ms())?;
+    super::set_ephemeral_now_ms(Some(fresh_expires));
+    let http_fresh_expired =
+        observe_post(&router, &path, TARGET, &request_body(&fresh_at_d, fresh_expires)?)?;
+    assert_eq!(
+        http_fresh_expired,
+        EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired }
+    );
+    assert_no_dispatch(&router, TARGET, &http_fresh_expired);
     let http_mismatch = observe_post(
         &router,
         &path,
+        TARGET,
         &request_body(&mismatch_env, mismatch_expires.saturating_add(1))?,
     )?;
     assert_eq!(

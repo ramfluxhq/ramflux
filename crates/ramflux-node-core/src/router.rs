@@ -34,6 +34,8 @@ mod ack_batch;
 mod c1_view;
 mod committed_forward;
 mod retention;
+#[cfg(any(test, feature = "test-support"))]
+pub use c1_view::EphemeralDispatchObservation;
 pub use c1_view::EphemeralRouterView;
 
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
@@ -69,6 +71,7 @@ pub struct RouterCore {
     pub(crate) ephemeral_capability: Mutex<crate::ephemeral::EphemeralCapabilityState>,
     pub(crate) ephemeral_replay: Mutex<crate::ephemeral::EphemeralReplaySet>,
     pub(crate) router_boot_id: String,
+    ephemeral_route_calls: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -1466,6 +1469,7 @@ impl RouterCore {
             ephemeral_capability: Mutex::new(crate::ephemeral::EphemeralCapabilityState::default()),
             ephemeral_replay: Mutex::new(crate::ephemeral::EphemeralReplaySet::default()),
             router_boot_id: crate::ephemeral::new_router_boot_id(),
+            ephemeral_route_calls: AtomicU64::new(0),
         };
         for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {
             let index = replay_guard_shard_index(key);
@@ -1944,6 +1948,9 @@ impl Clone for RouterCore {
             *lock_unpoisoned(&cloned.ephemeral_replay) = source.clone();
         }
         cloned.router_boot_id.clone_from(&self.router_boot_id);
+        cloned
+            .ephemeral_route_calls
+            .store(self.ephemeral_route_calls.load(Ordering::Relaxed), Ordering::Relaxed);
         cloned
     }
 }

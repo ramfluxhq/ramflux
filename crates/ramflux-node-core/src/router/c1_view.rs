@@ -14,6 +14,15 @@ use crate::{
 };
 use ramflux_protocol::Envelope;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
+
+/// Inbox and home-node forward occupancy observed around one C1 decision.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EphemeralDispatchObservation {
+    pub pending_inbox: usize,
+    pub forwarding_reservations: usize,
+}
 
 /// Accessors ephemeral modules are allowed to call. Durable persistence
 /// methods on [`RouterCore`] are not visible through this type.
@@ -107,6 +116,10 @@ impl<'a> EphemeralRouterView<'a> {
         self.core.effective_home_node_migration_for_target(target, now_unix_seconds).is_some()
     }
 
+    pub(crate) fn record_route_call(&self) {
+        self.core.ephemeral_route_calls.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub(crate) fn authenticate_ephemeral_source(
         &self,
         envelope: &Envelope,
@@ -196,6 +209,26 @@ impl RouterCore {
         let mut control = lock_unpoisoned(&self.control);
         control.home_node_migrations.insert(identity_commitment, record);
         self.refresh_migration_read_snapshot_from_control(&control);
+    }
+
+    /// Calls into `route_ephemeral` on this process-local router.
+    #[must_use]
+    pub fn route_ephemeral_call_count(&self) -> u64 {
+        self.ephemeral_route_calls.load(Ordering::SeqCst)
+    }
+
+    /// Inbox occupancy and home-node forward reservations for `target`.
+    #[must_use]
+    pub fn ephemeral_dispatch_observation(&self, target: &str) -> EphemeralDispatchObservation {
+        EphemeralDispatchObservation {
+            pending_inbox: self.pending_entries_for_target(target).len(),
+            forwarding_reservations: self
+                .forwarding_reservations
+                .shards
+                .iter()
+                .map(|shard| lock_unpoisoned(shard).len())
+                .sum(),
+        }
     }
 
     /// Test-only: mark the envelope's registered source device revoked.

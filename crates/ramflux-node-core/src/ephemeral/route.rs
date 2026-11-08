@@ -211,6 +211,7 @@ impl crate::EphemeralRouterView<'_> {
         supplied_expires_at_ms: u64,
         now_ms: u64,
     ) -> EphemeralRouteResult {
+        self.record_route_call();
         match deadline(envelope, now_ms) {
             Ok(computed) if computed == supplied_expires_at_ms => {}
             Ok(_) => return EphemeralRouteResult::DeadlineMismatch,
@@ -503,10 +504,15 @@ mod tests {
         router.route_ephemeral(envelope, expires_at_ms, NOW_MS)
     }
 
-    fn assert_no_dispatch(result: &EphemeralRouteResult) {
+    fn assert_no_dispatch(router: &RouterCore, target: &str, result: &EphemeralRouteResult) {
         assert!(
             !matches!(result, EphemeralRouteResult::Online { .. }),
             "zero forwards and enqueues, got {result:?}"
+        );
+        assert_eq!(
+            router.ephemeral_dispatch_observation(target),
+            crate::EphemeralDispatchObservation { pending_inbox: 0, forwarding_reservations: 0 },
+            "inbox and home-node forwards stay empty"
         );
     }
 
@@ -529,8 +535,13 @@ mod tests {
         store_bytes: &[u8],
     ) -> Fallible<EphemeralRouteResult> {
         let before = router.ephemeral_durable_snapshot()?;
+        let before_dispatch = router.ephemeral_dispatch_observation(&envelope.target_delivery_id);
         let result = route(router, envelope, expires_at_ms);
         assert_read_only(router, &before, store_bytes, path)?;
+        assert_eq!(
+            router.ephemeral_dispatch_observation(&envelope.target_delivery_id),
+            before_dispatch
+        );
         Ok(result)
     }
 
@@ -557,7 +568,7 @@ mod tests {
         let d_mismatch =
             observe_route(&router, &mismatch, computed.saturating_add(1), &path, &store_bytes)?;
         assert_eq!(d_mismatch, EphemeralRouteResult::DeadlineMismatch);
-        assert_no_dispatch(&d_mismatch);
+        assert_no_dispatch(&router, TARGET, &d_mismatch);
 
         let mut root_mismatch = signed_ephemeral("root", TARGET)?;
         root_mismatch.ext.ext.insert("source_root_commitment".into(), json!("other-root"));
@@ -565,13 +576,13 @@ mod tests {
         let root_result =
             observe_route(&router, &root_mismatch, root_expires, &path, &store_bytes)?;
         assert_eq!(root_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&root_result);
+        assert_no_dispatch(&router, TARGET, &root_result);
 
         let offline = signed_ephemeral("offline", "target_offline")?;
         let offline_result =
             observe_route(&router, &offline, computed_d(&offline)?, &path, &store_bytes)?;
         assert_eq!(offline_result, EphemeralRouteResult::Dropped(EphemeralDropReason::Offline));
-        assert_no_dispatch(&offline_result);
+        assert_no_dispatch(&router, "target_offline", &offline_result);
 
         let no_map = "target_no_map";
         router.upsert_session(descriptor(no_map, GATEWAY, SESSION))?;
@@ -583,7 +594,7 @@ mod tests {
             no_map_result,
             EphemeralRouteResult::Dropped(EphemeralDropReason::RecipientUnsupported)
         );
-        assert_no_dispatch(&no_map_result);
+        assert_no_dispatch(&router, no_map, &no_map_result);
 
         let mismatch_map = "target_map_ne";
         bind_capable(&router, mismatch_map)?;
@@ -596,7 +607,7 @@ mod tests {
             map_ne_result,
             EphemeralRouteResult::Dropped(EphemeralDropReason::RecipientUnsupported)
         );
-        assert_no_dispatch(&map_ne_result);
+        assert_no_dispatch(&router, mismatch_map, &map_ne_result);
 
         let keys = router.mvp1_identities_snapshot().identity_keys_for_target_delivery_id(TARGET);
         let identity = keys.first().ok_or("identity key")?.clone();
@@ -620,14 +631,14 @@ mod tests {
         let not_local =
             observe_route(&router, &migrated, computed_d(&migrated)?, &path, &store_bytes)?;
         assert_eq!(not_local, EphemeralRouteResult::Dropped(EphemeralDropReason::NotLocal));
-        assert_no_dispatch(&not_local);
+        assert_no_dispatch(&router, TARGET, &not_local);
 
         let revoked = signed_ephemeral("revoked", TARGET)?;
         router.test_revoke_envelope_source(&revoked);
         let revoked_result =
             observe_route(&router, &revoked, computed_d(&revoked)?, &path, &store_bytes)?;
         assert_eq!(revoked_result, EphemeralRouteResult::RevokedSource);
-        assert_no_dispatch(&revoked_result);
+        assert_no_dispatch(&router, TARGET, &revoked_result);
 
         drop(store);
         Ok(())
@@ -758,7 +769,7 @@ mod tests {
         let sig_result =
             observe_route(&router, &bad_sig, computed_d(&bad_sig)?, &path, &store_bytes)?;
         assert_eq!(sig_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&sig_result);
+        assert_no_dispatch(&router, TARGET, &sig_result);
 
         let principal = independently_signed("principal", TARGET, sign_seed(), |envelope| {
             envelope.source_principal_id = "bob".into();
@@ -766,7 +777,7 @@ mod tests {
         let principal_result =
             observe_route(&router, &principal, computed_d(&principal)?, &path, &store_bytes)?;
         assert_eq!(principal_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&principal_result);
+        assert_no_dispatch(&router, TARGET, &principal_result);
 
         let device = independently_signed("device", TARGET, sign_seed(), |envelope| {
             envelope.source_device_id = "alice_laptop".into();
@@ -774,14 +785,14 @@ mod tests {
         let device_result =
             observe_route(&router, &device, computed_d(&device)?, &path, &store_bytes)?;
         assert_eq!(device_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&device_result);
+        assert_no_dispatch(&router, TARGET, &device_result);
 
         let root = independently_signed("root-signed", TARGET, sign_seed(), |envelope| {
             envelope.ext.ext.insert("source_root_commitment".into(), json!("other-root"));
         })?;
         let root_result = observe_route(&router, &root, computed_d(&root)?, &path, &store_bytes)?;
         assert_eq!(root_result, EphemeralRouteResult::RootMismatch);
-        assert_no_dispatch(&root_result);
+        assert_no_dispatch(&router, TARGET, &root_result);
         drop(store);
         Ok(())
     }
@@ -847,7 +858,7 @@ mod tests {
         );
         let second = observe_route(&router, &envelope, expires, &path, &store_bytes)?;
         assert_eq!(second, EphemeralRouteResult::Dropped(EphemeralDropReason::Replayed));
-        assert_no_dispatch(&second);
+        assert_no_dispatch(&router, TARGET, &second);
         assert_eq!(router.ephemeral_replay_len(), 1);
 
         let saturated = RouterCore::new();
