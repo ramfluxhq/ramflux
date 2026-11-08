@@ -224,6 +224,7 @@ fn assert_fault(result: Result<Out, StorageError>) {
 fn atomic_cover_crash_sweep() -> Result<(), StorageError> {
     sweep_interleaved_cover()?;
     cover_when_all_slots_are_receipts()?;
+    pauses_when_slots_are_held_by_other_sequences()?;
     held_keeps_quarantined()?;
     covers_exactly_64_boundaries()?;
     covers_63_gaps_and_one_live()?;
@@ -341,6 +342,52 @@ fn terminal_transfers_reserved_slot(db: &AccountDb) -> Result<(), StorageError> 
     assert!(transferred.intents.iter().any(|row| row.0 == 11));
     assert!(!transferred.receipts.iter().any(|row| row.0 == 11));
     assert_eq!(slots(db)?, slots_pre, "terminal transfers the reserved slot");
+    Ok(())
+}
+
+fn pauses_when_slots_are_held_by_other_sequences() -> Result<(), StorageError> {
+    let (root, db) = setup("w2-capacity-pause")?;
+    db.write_transaction(|| {
+        for n in 1u64..=1024 {
+            db.connection.execute(
+                "INSERT INTO gateway_ack_intent VALUES('t','old',?1,0,0,0,100)",
+                params![n.to_be_bytes().as_slice()],
+            )?;
+        }
+        db.set_projection_checkpoint("gateway_receive_cursor:t", "1023")?;
+        Ok::<(), StorageError>(())
+    })?;
+    insert_receipt(&db, 1025, "staged")?;
+    assert_eq!(slots(&db)?, 1025, "1,024 other intents plus the covered receipt");
+    let pre = snap(&db)?;
+    assert_eq!(cover(&db, 1023, 1025, Kind::Terminal, &[gap(1024, 1024)])?, Out::Paused);
+    assert_eq!(snap(&db)?, pre, "paused cover writes no loss, outbox, intent, work, receipt or C");
+    assert_eq!(slots(&db)?, 1025, "pause keeps the slot count");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn outbox_retry_writes_no_duplicate() -> Result<(), StorageError> {
+    let (root, db) = setup("w2-gap-retry")?;
+    let gaps = [gap(1, 3)];
+    assert_eq!(cover(&db, 0, 3, Kind::GapOnly, &gaps)?, Out::Covered);
+    let done = snap(&db)?;
+    assert_eq!(done.outbox, vec![gap_keys(1, 3, 3, "expired", "unavailable")]);
+    // Replay the same step from the same cursor, as a retry after a lost acknowledgement would.
+    db.write_transaction(|| {
+        db.set_projection_checkpoint("gateway_receive_cursor:t", "0")?;
+        Ok::<(), StorageError>(())
+    })?;
+    let pre = snap(&db)?;
+    assert!(cover(&db, 0, 3, Kind::GapOnly, &gaps).is_err(), "retry of a written gap must fail");
+    let retried = snap(&db)?;
+    assert_eq!(retried, pre, "failed retry writes nothing");
+    assert_eq!(retried.outbox, done.outbox, "exactly one outbox row per gap");
+    assert_eq!(retried.losses, done.losses, "exactly one loss row per gap");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }
 

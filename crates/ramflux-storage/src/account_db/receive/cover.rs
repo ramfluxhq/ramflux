@@ -183,13 +183,13 @@ impl ReceiveTransaction<'_> {
             "classification": gap.classification,
         });
         let keys_json = serde_json::to_string(&keys)?;
+        // Loss rows are append-only and keyed by (target, incarnation, from, to), the same
+        // identity as `source`. The loss INSERT above refuses a duplicate gap before this runs,
+        // so no scan of runtime_outbox is needed.
         self.db.connection.execute(
             "INSERT INTO runtime_outbox(table_name,change_kind,row_id,published,keys_json)
-             SELECT 'gateway_inbox_loss','insert',0,0,?1
-             WHERE NOT EXISTS (
-               SELECT 1 FROM runtime_outbox WHERE json_extract(keys_json,'$.source_key')=?2
-             )",
-            params![keys_json, source],
+             VALUES('gateway_inbox_loss','insert',0,0,?1)",
+            params![keys_json],
         )?;
         Ok(())
     }
