@@ -43,10 +43,6 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         ),
     ),
     (
-        "ephemeral/route.rs:test_revoke_envelope_source",
-        Class::NonIngress("test-support helper; compiled only with test or test-support"),
-    ),
-    (
         "federation_crypto.rs:sign_federated_envelope_forward",
         Class::NonIngress("pure signing helper"),
     ),
@@ -145,6 +141,18 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         "router.rs:refresh_registered_envelope_authority",
         Class::NonIngress("registered-source refresh; not an inbound delivery"),
     ),
+    (
+        "router/c1_view.rs:authenticate_ephemeral_source",
+        Class::NonIngress("ephemeral source verify on the C1 view; no durable delivery"),
+    ),
+    (
+        "router/c1_view.rs:route_ephemeral",
+        Class::NonIngress("RouterCore wrapper onto the read-only C1 view"),
+    ),
+    (
+        "router/c1_view.rs:test_revoke_envelope_source",
+        Class::NonIngress("test-support helper; compiled only with test or test-support"),
+    ),
     ("router/committed_forward.rs:prepare_committed_home_forward", Class::Ingress),
     ("router/sender_fanout.rs:prepare_sender_fanout", Class::Ingress),
     ("router_store/custody.rs:custody_node_history", Class::NonIngress("custody history read")),
@@ -173,7 +181,7 @@ fn durable_ingress_registry_refuses_marked_envelopes() -> Result<(), Box<dyn std
     let sink_count = DURABLE_INGRESS.iter().filter(|(_, class)| *class == Class::Sink).count();
     let non_ingress_count =
         DURABLE_INGRESS.iter().filter(|(_, class)| matches!(class, Class::NonIngress(_))).count();
-    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 35));
+    assert_eq!((ingress_count, sink_count, non_ingress_count), (20, 6, 37));
     for (entry, class) in DURABLE_INGRESS {
         if let Class::NonIngress(reason) = class {
             assert!(!reason.is_empty(), "{entry} needs a NonIngress reason");
