@@ -105,3 +105,29 @@ impl PairingSecrets {
         bytes
     }
 }
+
+/// Owned HPKE Auth secret. Ephemeral KEM DH and AES context stay inside the hpke crate.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct HpkeSecrets {
+    sk: [u8; 32],
+}
+
+impl HpkeSecrets {
+    pub(super) fn new(sk: [u8; 32]) -> Self {
+        Self { sk }
+    }
+
+    /// Wipe the owned HPKE secret and record the explicit cleanup. Drop still zeroizes if this is skipped.
+    pub fn cleanup(&mut self) {
+        self.zeroize();
+        #[cfg(test)]
+        observer::record(self.observed_bytes());
+    }
+
+    #[cfg(test)]
+    fn observed_bytes(&self) -> [u8; 224] {
+        let mut bytes = [0_u8; 224];
+        bytes[..32].copy_from_slice(&self.sk);
+        bytes
+    }
+}

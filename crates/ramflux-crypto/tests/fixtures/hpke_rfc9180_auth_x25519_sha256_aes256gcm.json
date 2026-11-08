@@ -1,0 +1,30 @@
+{
+  "source_url": "https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json",
+  "source_sha256": "61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6",
+  "filter": { "mode": 2, "kem_id": 32, "kdf_id": 1, "aead_id": 2 },
+  "cases": [
+    {
+      "mode": 2,
+      "kem_id": 32,
+      "kdf_id": 1,
+      "aead_id": 2,
+      "info": "4f6465206f6e2061204772656369616e2055726e",
+      "skRm": "47f1eee3670dfaaf27c30a83d06ee9f257af174727c17b35328ef730dfc1cd81",
+      "skSm": "98fdf9b9773578a79d4ba82fbe483c74cc2e3b8d9525d148a18969fd79a74876",
+      "skEm": "805b278cabd22c9dbd461bf25771703eda4950ed3ef35b369163097899555356",
+      "pkRm": "3668d659cec6f338f4f8dc6da6733118d2a633f186a3c1415c895111a8eb7c7d",
+      "pkSm": "4a91c3d0893433f5e31a79fc520f885527a1bc60bf2b0c72693dd7f0b2e41a5a",
+      "pkEm": "9e59f4b1fa5c876f684765290c34e51145894cc4f244342b9fb1a4bdfd8bb426",
+      "enc": "9e59f4b1fa5c876f684765290c34e51145894cc4f244342b9fb1a4bdfd8bb426",
+      "shared_secret": "6579475ca739247fad60b7713b0077f1e966e0eaf6f95bff8fa41e446db4b226",
+      "encryptions": [
+        {
+          "aad": "436f756e742d30",
+          "ct": "10b964283ac2cc0bdc4c85ab617291b446bf3832e9359b2c3a0facc50ea75a3c1afd08aeaacd6041d02eb560ec",
+          "nonce": "41da94323642095905a34938",
+          "pt": "4265617574792069732074727574682c20747275746820626561757479"
+        }
+      ]
+    }
+  ]
+}

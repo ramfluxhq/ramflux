@@ -6,7 +6,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::{
     DeviceBranch, IdentityRoot, RecoveryQuorumMemberKind, RecoverySecret, RecoveryShare,
     X3dhOutput, X25519KeyPair, create_device_branch, create_identity_root,
-    custody::pairing::{EstablishedSas, PairingSecrets, PendingSas},
+    custody::pairing::{EstablishedSas, HpkeSecrets, PairingSecrets, PendingSas},
 };
 
 fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
@@ -20,6 +20,7 @@ fn long_lived_secret_types_implement_zeroize_on_drop() {
     assert_zeroize_on_drop::<RecoveryShare>();
     assert_zeroize_on_drop::<RecoverySecret>();
     assert_zeroize_on_drop::<PairingSecrets>();
+    assert_zeroize_on_drop::<HpkeSecrets>();
     assert_zeroize_on_drop::<PendingSas>();
     assert_zeroize_on_drop::<EstablishedSas>();
 }

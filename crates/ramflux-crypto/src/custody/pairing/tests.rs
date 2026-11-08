@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    EstablishedSas, PairingRole, PendingSas, SAS_EMOJI, commit, emoji_from_indices,
+    EstablishedSas, HpkeReceiver, HpkeSender, MAX_HPKE_PLAINTEXT, PairingRole, PendingSas,
+    SAS_EMOJI, TransferHpkeAad, commit, emoji_from_indices, hpke::open_rfc9180_auth_vector,
     last_wiped_pairing_bytes, sas::sha256, take_pairing_secret_cleanups,
 };
 use crate::{CryptoError, X25519KeyPair};
@@ -20,6 +21,9 @@ const INIT_SECRET: [u8; 32] = [7; 32];
 const RESP_SECRET: [u8; 32] = [8; 32];
 const INIT_SALT: [u8; 32] = [11; 32];
 const RESP_SALT: [u8; 32] = [12; 32];
+const HPKE_SENDER_SK: [u8; 32] = [21; 32];
+const HPKE_RECIP_SK: [u8; 32] = [22; 32];
+const HPKE_TH: [u8; 32] = [31; 32];
 
 /// Independent Matrix SAS table (glyph, English name, scalar code points including VS16).
 const INDEPENDENT_SAS_EMOJI: [(&str, &str, &[u32]); 64] = [
@@ -630,6 +634,15 @@ fn pairing_owned_secret_cleanup_all_exits() -> Result {
     transcript_error_after_dh_exit()?;
     assert_eq!(take_pairing_secret_cleanups(), 1, "common_binding");
     assert_wiped_bytes();
+    hpke_cancel_exit()?;
+    assert_eq!(take_pairing_secret_cleanups(), 1, "hpke_cancel");
+    assert_wiped_bytes();
+    hpke_open_fail_exit()?;
+    assert_eq!(take_pairing_secret_cleanups(), 2, "hpke_open_fail");
+    assert_wiped_bytes();
+    hpke_success_exit()?;
+    assert_eq!(take_pairing_secret_cleanups(), 2, "hpke_success");
+    assert_wiped_bytes();
     Ok(())
 }
 
@@ -758,4 +771,175 @@ fn transcript_error_after_dh_exit() -> Result {
     let frozen = sha256(&context_commitment_preimage(&peer, &RESP_SALT)?);
     initiator.store_peer_commitment(PairingRole::Responder, frozen)?;
     expect_pairing(initiator.establish(&peer, &RESP_SALT).map(|_| ()), "common_binding")
+}
+
+#[test]
+fn pairing_hpke_auth_suite_and_context_bindings() -> Result {
+    rfc_vector_exact_suite()?;
+    application_one_seal_open()?;
+    wrong_sender_recipient_info_aad_role()?;
+    max_payload_bound()?;
+    second_seal_and_open_rejected()?;
+    Ok(())
+}
+
+fn rfc_vector_exact_suite() -> Result {
+    let json: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/hpke_rfc9180_auth_x25519_sha256_aes256gcm.json"
+    )))
+    .map_err(|_| CryptoError::Pairing("json"))?;
+    let cases = json["cases"].as_array().ok_or(CryptoError::Pairing("json"))?;
+    let matched: Vec<&serde_json::Value> = cases
+        .iter()
+        .filter(|case| {
+            case["mode"] == 2 && case["kem_id"] == 32 && case["kdf_id"] == 1 && case["aead_id"] == 2
+        })
+        .collect();
+    if matched.is_empty() {
+        return Err(CryptoError::Pairing("hpke_kat_empty"));
+    }
+    assert_eq!(matched.len(), 1);
+    let case = matched[0];
+    let encryptions = case["encryptions"].as_array().ok_or(CryptoError::Pairing("json"))?;
+    let packet = &encryptions[0];
+    let opened = open_rfc9180_auth_vector(
+        &hex32(case["skRm"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
+        &hex32(case["pkSm"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
+        &hex32(case["enc"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
+        &decode_hex(case["info"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
+        &decode_hex(packet["aad"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
+        &decode_hex(packet["ct"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
+    )?;
+    assert_eq!(*opened, decode_hex(packet["pt"].as_str().ok_or(CryptoError::Pairing("json"))?)?);
+    Ok(())
+}
+
+fn application_one_seal_open() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let sender_pk = X25519KeyPair::from_seed(HPKE_SENDER_SK).public;
+    let aad = sample_aad();
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &aad)?;
+    let enc = sender.enc();
+    let ciphertext = sender.seal(b"transfer-body")?;
+    let mut receiver = HpkeReceiver::setup(&HPKE_RECIP_SK, &sender_pk, &enc, &HPKE_TH, &aad)?;
+    let opened = receiver.open(&ciphertext)?;
+    assert_eq!(&opened[..], b"transfer-body");
+    sender.cleanup();
+    receiver.cleanup();
+    Ok(())
+}
+
+fn wrong_sender_recipient_info_aad_role() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let sender_pk = X25519KeyPair::from_seed(HPKE_SENDER_SK).public;
+    let aad = sample_aad();
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &aad)?;
+    let enc = sender.enc();
+    let ciphertext = sender.seal(b"transfer-body")?;
+    sender.cleanup();
+    let other_pk = X25519KeyPair::from_seed([23; 32]).public;
+    expect_pairing(
+        HpkeReceiver::setup(&HPKE_RECIP_SK, &other_pk, &enc, &HPKE_TH, &aad)
+            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        "hpke_open",
+    )?;
+    expect_pairing(
+        HpkeReceiver::setup(&[24; 32], &sender_pk, &enc, &HPKE_TH, &aad)
+            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        "hpke_open",
+    )?;
+    expect_pairing(
+        HpkeReceiver::setup(&HPKE_RECIP_SK, &sender_pk, &enc, &[30; 32], &aad)
+            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        "hpke_open",
+    )?;
+    let mut bad_aad = aad;
+    bad_aad.transfer_id = [9; 32];
+    expect_pairing(
+        HpkeReceiver::setup(&HPKE_RECIP_SK, &sender_pk, &enc, &HPKE_TH, &bad_aad)
+            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        "hpke_open",
+    )?;
+    expect_pairing(
+        HpkeReceiver::setup(&HPKE_SENDER_SK, &recipient_pk, &enc, &HPKE_TH, &aad)
+            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        "hpke_open",
+    )?;
+    Ok(())
+}
+
+fn max_payload_bound() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let sender_pk = X25519KeyPair::from_seed(HPKE_SENDER_SK).public;
+    let aad = sample_aad();
+    let max = vec![7_u8; MAX_HPKE_PLAINTEXT];
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &aad)?;
+    let enc = sender.enc();
+    let ciphertext = sender.seal(&max)?;
+    let mut receiver = HpkeReceiver::setup(&HPKE_RECIP_SK, &sender_pk, &enc, &HPKE_TH, &aad)?;
+    let opened = receiver.open(&ciphertext)?;
+    assert_eq!(opened.len(), MAX_HPKE_PLAINTEXT);
+    sender.cleanup();
+    receiver.cleanup();
+    let mut oversize = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &aad)?;
+    expect_pairing(oversize.seal(&vec![7_u8; MAX_HPKE_PLAINTEXT + 1]).map(|_| ()), "payload_size")?;
+    Ok(())
+}
+
+fn second_seal_and_open_rejected() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let sender_pk = X25519KeyPair::from_seed(HPKE_SENDER_SK).public;
+    let aad = sample_aad();
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &aad)?;
+    let enc = sender.enc();
+    let ciphertext = sender.seal(b"once")?;
+    expect_pairing(sender.seal(b"twice").map(|_| ()), "already_used")?;
+    let mut receiver = HpkeReceiver::setup(&HPKE_RECIP_SK, &sender_pk, &enc, &HPKE_TH, &aad)?;
+    drop(receiver.open(&ciphertext)?);
+    expect_pairing(receiver.open(&ciphertext).map(|_| ()), "already_used")?;
+    Ok(())
+}
+
+fn sample_aad() -> TransferHpkeAad {
+    TransferHpkeAad { transfer_id: [1; 32], current_record_hash: [2; 32], device_set_epoch: 7 }
+}
+
+fn hex32(value: &str) -> Result<[u8; 32]> {
+    <[u8; 32]>::try_from(decode_hex(value)?).map_err(|_| CryptoError::Pairing("hex"))
+}
+
+fn hpke_cancel_exit() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &sample_aad())?;
+    sender.cleanup();
+    Ok(())
+}
+
+fn hpke_open_fail_exit() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &sample_aad())?;
+    let enc = sender.enc();
+    let ciphertext = sender.seal(b"x")?;
+    sender.cleanup();
+    let other_pk = X25519KeyPair::from_seed([23; 32]).public;
+    expect_pairing(
+        HpkeReceiver::setup(&HPKE_RECIP_SK, &other_pk, &enc, &HPKE_TH, &sample_aad())
+            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        "hpke_open",
+    )
+}
+
+fn hpke_success_exit() -> Result {
+    let recipient_pk = X25519KeyPair::from_seed(HPKE_RECIP_SK).public;
+    let sender_pk = X25519KeyPair::from_seed(HPKE_SENDER_SK).public;
+    let aad = sample_aad();
+    let mut sender = HpkeSender::setup(&HPKE_SENDER_SK, &recipient_pk, &HPKE_TH, &aad)?;
+    let enc = sender.enc();
+    let ciphertext = sender.seal(b"ok")?;
+    let mut receiver = HpkeReceiver::setup(&HPKE_RECIP_SK, &sender_pk, &enc, &HPKE_TH, &aad)?;
+    drop(receiver.open(&ciphertext)?);
+    sender.cleanup();
+    receiver.cleanup();
+    Ok(())
 }
