@@ -184,6 +184,21 @@ async fn establish_echoed(
     session_push: bool,
     ephemeral: bool,
 ) -> TestResult<crate::GatewaySessionRuntime> {
+    establish_echoed_auth(
+        fixture,
+        session_push,
+        ephemeral,
+        crate::session_push::tests::negotiation::auth(session_push)?,
+    )
+    .await
+}
+
+async fn establish_echoed_auth(
+    fixture: &mut Fixture,
+    session_push: bool,
+    ephemeral: bool,
+    auth: ramflux_node_core::GatewayAuthFrame,
+) -> TestResult<crate::GatewaySessionRuntime> {
     fixture.context.hub.readiness.seed_echo_for_test(session_push, ephemeral);
     let context = fixture.context.clone();
     let source = crate::session_push::tests::support::runtime()?.source_identity;
@@ -198,7 +213,6 @@ async fn establish_echoed(
         target_delivery_id: "target".into(),
         revoked: false,
     };
-    let auth = crate::session_push::tests::negotiation::auth(session_push)?;
     let open = open_frame(None)?;
     let task = tokio::spawn(async move {
         let mut send = Sink(Arc::new(Mutex::new(Vec::new())));
@@ -242,6 +256,30 @@ async fn ephemeral_submit_follows_router_advertisement() -> TestResult {
     let written =
         run_loop(&mut advertised, &runtime, vec![frame_bytes(&submit_frame(ok))?], None).await?;
     anyhow::ensure!(written == vec![dropped("did-advertise", "invalid")], "{written:?}");
+    Ok(())
+}
+
+/// Client `capability_scope` claiming `gateway.ephemeral.v1` cannot flip the flag when the
+/// router does not advertise it. Submit is P03's exact nack; persisted state is unchanged.
+#[tokio::test(flavor = "current_thread")]
+async fn ephemeral_client_claim_without_router_advertise_is_p03() -> TestResult {
+    let mut fixture = Fixture::new("pre16-forged-cap")?;
+    let auth = crate::session_push::tests::negotiation::auth_claiming_ephemeral(true)?;
+    anyhow::ensure!(
+        auth.device_proof
+            .capability_scope
+            .iter()
+            .any(|c| c == ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY)
+    );
+    let runtime = establish_echoed_auth(&mut fixture, true, false, auth).await?;
+    anyhow::ensure!(!runtime.ephemeral);
+    anyhow::ensure!(!crate::ephemeral::negotiated(&runtime));
+    let baseline = persisted(&fixture.context)?;
+    let off = submit(&runtime, "forged-cap", 5, |_| {})?;
+    let written =
+        run_loop(&mut fixture, &runtime, vec![frame_bytes(&submit_frame(off))?], None).await?;
+    anyhow::ensure!(written == vec![p03_nack()], "{written:?}");
+    anyhow::ensure!(persisted(&fixture.context)? == baseline, "forged claim changed state");
     Ok(())
 }
 

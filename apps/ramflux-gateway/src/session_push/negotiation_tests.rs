@@ -19,6 +19,22 @@ pub(crate) fn auth(scope: bool) -> anyhow::Result<ramflux_node_core::GatewayAuth
     );
     Ok(value)
 }
+
+/// Client `capability_scope` includes `gateway.ephemeral.v1`. Router advertisement still gates.
+pub(crate) fn auth_claiming_ephemeral(
+    session_push: bool,
+) -> anyhow::Result<ramflux_node_core::GatewayAuthFrame> {
+    let mut value = auth(session_push)?;
+    value
+        .device_proof
+        .capability_scope
+        .push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    value.device_proof.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &ramflux_protocol::signed_bytes(&value.device_proof)?,
+        [4; 32],
+    );
+    Ok(value)
+}
 pub(super) fn descriptor() -> ramflux_node_core::SessionDescriptor {
     ramflux_node_core::SessionDescriptor {
         target_delivery_id: "target".into(),
