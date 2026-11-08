@@ -143,6 +143,30 @@ pub(super) fn current(
     })
 }
 
+/// Every retained bundle's selector for one tuple, matching `carry_work_tombstones`.
+pub(super) fn all_selectors(
+    db: &AccountDb,
+    principal: &str,
+    device: &str,
+    payload: &str,
+) -> Result<Vec<String>, StorageError> {
+    let (principal, device, payload) =
+        (principal.to_owned(), device.to_owned(), payload.to_owned());
+    on(db, move |raw| {
+        let tuple = ErasedTuple {
+            principal: &principal,
+            device: &device,
+            signing_key_id: "key",
+            payload_hash: &payload,
+        };
+        let value = tuple.canonical()?;
+        Ok(super::super::mac_subkeys::bundle_macs(raw, LABEL, &value)?
+            .into_iter()
+            .map(|(_, selector)| selector)
+            .collect())
+    })
+}
+
 fn binding_id(bundle: &str, selector: &str, expires_at: i64) -> String {
     format!("erased-input:{bundle}:{selector}:{expires_at}")
 }

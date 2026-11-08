@@ -6,7 +6,7 @@
 //! merge, as in production.
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
 use super::erased_capture::classification_guard;
-use super::erased_capture_tests::{current, full};
+use super::erased_capture_tests::{all_selectors, current, full};
 use super::erased_input_union_tests::{Pair, expiry, pair};
 use super::stage_tests::{bytes, input, run};
 use super::w0_replay_support::{Tuple, assert_erased_after_reopen, install};
@@ -459,12 +459,11 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         carrier.send_direct_message("thread", id, "peer", b"x")?;
     }
     let extra = seed_extra(&carrier, &p.local, now)?;
-    let mut incoming_work_selector = None;
+    let mut incoming_work_selectors = Vec::new();
     for (n, f) in (1_i64..).zip(&families) {
         seed_local(&carrier, f, n, now)?;
         if f.kind == "receive_work" {
-            let (_, selector) = current(&carrier, "ip", "id", &f.payload)?;
-            incoming_work_selector = Some(selector);
+            incoming_work_selectors = all_selectors(&carrier, "ip", "id", &f.payload)?;
         }
     }
     let contact = Family::new("contact_message_request");
@@ -500,11 +499,18 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     merged.merge_backup(&incoming, &incoming_snapshot.key, || Ok(()))?;
     let mut expected: Vec<Want> = Vec::new();
     for f in &families {
-        let selector = if f.kind == "receive_work" {
-            incoming_work_selector.clone().expect("receive_work seeded")
-        } else {
-            current(&p.local, "ip", "id", &f.payload)?.1
-        };
+        if f.kind == "receive_work" {
+            for selector in &incoming_work_selectors {
+                expected.push(Want {
+                    kind: f.kind,
+                    selector: selector.clone(),
+                    expires_at: now + 3_900,
+                    payload: f.payload.clone(),
+                });
+            }
+            continue;
+        }
+        let (_, selector) = current(&p.local, "ip", "id", &f.payload)?;
         expected.push(Want {
             kind: f.kind,
             selector,
