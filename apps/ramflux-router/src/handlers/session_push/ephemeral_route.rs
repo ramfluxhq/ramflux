@@ -473,6 +473,7 @@ fn ephemeral_deadline() -> TestResult {
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired }
     );
     assert_no_dispatch(&router, TARGET, &http_fresh_expired);
+    super::set_ephemeral_now_ms(Some(mismatch_expires.saturating_sub(1)));
     let http_mismatch = observe_post(
         &router,
         &path,
