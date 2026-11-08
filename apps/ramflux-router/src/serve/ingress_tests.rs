@@ -2,6 +2,11 @@
 // Copyright (c) 2026 Span Brain
 //! The router's real async QUIC ingress keeps `/source` bodies byte-exact (P25 N5b).
 use super::{RouterAsyncMeshPeerAuth, router_async_mesh_quic_connection_loop};
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+use ramflux_transport::{
+    MeshQuicRawPost, mesh_quic_post_postcard_with_peer_ca_pems_async,
+    mesh_quic_post_raw_with_peer_ca_pems_async,
+};
 use ramflux_transport::{MeshQuicServer, MeshTlsConfig, mesh_quic_exchange_raw_frame};
 use std::{
     collections::BTreeSet,
@@ -648,13 +653,6 @@ struct IngressEffects {
     database: Vec<u8>,
     seen: bool,
     pending: usize,
-    replay_checks: u64,
-    replay_writes: u64,
-    submit_started: u64,
-    submit_completed: u64,
-    target_local: u64,
-    target_remote: u64,
-    accepted: u64,
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -676,19 +674,32 @@ fn ingress_effect_snapshot(
         i64::try_from(ramflux_node_core::now_unix_seconds())?,
     )?;
     let pending = router.state().resume(&envelope.target_delivery_id, 0, 10).len();
-    let metrics = ramflux_node_core::node_perf_snapshot();
-    Ok(IngressEffects {
-        database: std::fs::read(db_path)?,
-        seen,
-        pending,
-        replay_checks: metrics.router_replay_guard_checks_total,
-        replay_writes: metrics.router_replay_guard_redb_writes_total,
-        submit_started: metrics.router_submit_started_total,
-        submit_completed: metrics.router_submit_completed_total,
-        target_local: metrics.router_submit_target_local_total,
-        target_remote: metrics.router_submit_target_remote_total,
-        accepted: metrics.router_envelope_accepted_total,
+    Ok(IngressEffects { database: std::fs::read(db_path)?, seen, pending })
+}
+
+#[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+async fn json_quic_post_raw(
+    endpoint: &str,
+    tls: &MeshTlsConfig,
+    ca_pem: &str,
+    path: &str,
+    body: &impl serde::Serialize,
+) -> Result<Vec<u8>, ramflux_transport::TransportError> {
+    let admission = Arc::new(tokio::sync::Semaphore::new(1))
+        .acquire_owned()
+        .await
+        .map_err(|error| ramflux_transport::TransportError::Http(error.to_string()))?;
+    mesh_quic_post_raw_with_peer_ca_pems_async(MeshQuicRawPost {
+        endpoint,
+        path,
+        tls,
+        server_name: "ramflux-router",
+        peer_ca_pems: &[ca_pem.to_owned()],
+        value: body,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(15),
+        admission,
     })
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1248,22 +1259,48 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
                 created_at,
                 duplicate_extension,
             })?;
-            let response = fixture_wait(
-                tokio::time::timeout(
-                    Duration::from_secs(15),
-                    json_quic_post(
-                        &endpoint,
-                        &pki.gateway,
-                        &pki.ca_pem,
-                        "/mvp0/envelope",
-                        &body,
-                    ),
-                )
-                .await,
-                "compio JSON I-JSON refusal",
-            )??;
-            assert_eq!(response.status, 400);
-            assert_eq!(serde_json::to_vec(&response.body)?, EXPECTED_BODY);
+            if duplicate_extension {
+                let response = fixture_wait(
+                    tokio::time::timeout(
+                        Duration::from_secs(15),
+                        json_quic_post(
+                            &endpoint,
+                            &pki.gateway,
+                            &pki.ca_pem,
+                            "/mvp0/envelope",
+                            &body,
+                        ),
+                    )
+                    .await,
+                    "compio JSON duplicate-key refusal",
+                )??;
+                assert_eq!(response.status, 400);
+                assert_eq!(serde_json::to_vec(&response.body)?, EXPECTED_BODY);
+            } else {
+                let response = fixture_wait(
+                    tokio::time::timeout(
+                        Duration::from_secs(15),
+                        json_quic_post_raw(
+                            &endpoint,
+                            &pki.gateway,
+                            &pki.ca_pem,
+                            "/mvp0/envelope",
+                            &EnvelopeWire {
+                                envelope: candidate,
+                                created_at,
+                                duplicate_extension: false,
+                            },
+                        ),
+                    )
+                    .await,
+                    "compio raw JSON I-JSON refusal",
+                )??;
+                assert_eq!(
+                    response,
+                    br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#,
+                    "raw JSON refusal frame must match the independent wire literal"
+                );
+            }
             assert_eq!(ingress_effect_snapshot(&router, &db_path, &envelope)?, before);
 
             let before = ingress_effect_snapshot(&router, &db_path, &envelope)?;
@@ -1294,33 +1331,42 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
             "ijson-compio-json-control",
             "target_alice",
         )?;
-        let accepted_body = serde_json::to_vec(&EnvelopeWire {
+        let safe_integer_body = serde_json::to_vec(&EnvelopeWire {
             envelope: &accepted_json,
-            created_at: None,
+            created_at: Some(9_007_199_254_740_991),
             duplicate_extension: false,
         })?;
+        let safe_integer_decoded =
+            ramflux_protocol::decode_signed_envelope_ijson(&safe_integer_body)?;
+        assert_eq!(safe_integer_decoded.created_at, 9_007_199_254_740_991);
         assert_eq!(
-            ramflux_protocol::decode_signed_envelope_ijson(&accepted_body)?,
-            accepted_json
+            serde_json::to_vec(&EnvelopeWire {
+                envelope: &safe_integer_decoded,
+                created_at: Some(9_007_199_254_740_991),
+                duplicate_extension: false,
+            })?,
+            safe_integer_body,
+            "accepted 2^53−1 envelope must decode and re-encode byte-identically"
         );
+        let accepted_before = ingress_effect_snapshot(&router, &db_path, &accepted_json)?;
         let response = fixture_wait(
             tokio::time::timeout(
                 Duration::from_secs(15),
-                json_quic_post(
+                json_quic_post_raw(
                     &endpoint,
                     &pki.gateway,
                     &pki.ca_pem,
                     "/mvp0/envelope",
-                    &accepted_body,
+                    &EnvelopeWire {
+                        envelope: &accepted_json,
+                        created_at: None,
+                        duplicate_extension: false,
+                    },
                 ),
             )
             .await,
             "compio JSON accepted control",
         )??;
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body["outcome"], "online");
-        assert_eq!(response.body["target_delivery_id"], "target_alice");
-        let response_wire = serde_json::to_vec(&response.body)?;
         let incarnation_id = router
             .state()
             .session_push_status("target_alice")
@@ -1330,9 +1376,14 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
             .created_at
             .saturating_add(i64::from(accepted_json.ttl));
         let expected_json_wire = format!(
-            r#"{{"cursor":null,"inbox_seq":1,"incarnation_id":"{incarnation_id}","outcome":"online","retain_until":{retain_until},"target_delivery_id":"target_alice"}}"#
+            r#"{{"status":200,"body":{{"cursor":null,"inbox_seq":1,"incarnation_id":"{incarnation_id}","outcome":"online","retain_until":{retain_until},"target_delivery_id":"target_alice"}}}}"#
         );
-        assert_eq!(response_wire, expected_json_wire.as_bytes());
+        assert_eq!(response, expected_json_wire.as_bytes());
+        let accepted_after = ingress_effect_snapshot(&router, &db_path, &accepted_json)?;
+        assert_ne!(
+            accepted_after.database, accepted_before.database,
+            "accepted control must move the always-active store effect probe"
+        );
 
         let accepted_postcard = crate::router_runtime::tests::current_envelope(
             "ijson-compio-postcard-control",
@@ -1341,22 +1392,22 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
         let response = fixture_wait(
             tokio::time::timeout(
                 Duration::from_secs(15),
-                postcard_post(
+                mesh_quic_post_postcard_with_peer_ca_pems_async::<_, Box<serde_json::value::RawValue>>(
                     &endpoint,
+                    "/mvp0/envelope",
                     &pki.gateway,
-                    &pki.ca_pem,
-                    &accepted_postcard,
-                    None,
-                    false,
+                    "ramflux-router",
+                    std::slice::from_ref(&pki.ca_pem),
+                    &EnvelopeWire {
+                        envelope: &accepted_postcard,
+                        created_at: None,
+                        duplicate_extension: false,
+                    },
                 ),
             )
             .await,
             "compio postcard accepted control",
         )??;
-        assert_eq!(response["outcome"], "online");
-        assert_eq!(response["target_delivery_id"], "target_alice");
-        assert_eq!(response["inbox_seq"], 2);
-        let response_wire = serde_json::to_vec(&response)?;
         let incarnation_id = router
             .state()
             .session_push_status("target_alice")
@@ -1368,7 +1419,11 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
         let expected_postcard_wire = format!(
             r#"{{"cursor":null,"inbox_seq":2,"incarnation_id":"{incarnation_id}","outcome":"online","retain_until":{retain_until},"target_delivery_id":"target_alice"}}"#
         );
-        assert_eq!(response_wire, expected_postcard_wire.as_bytes());
+        assert_eq!(
+            response.get().as_bytes(),
+            expected_postcard_wire.as_bytes(),
+            "raw postcard response payload must match the independent byte literal"
+        );
         Ok::<(), Box<dyn std::error::Error>>(())
     });
     drop(router);
