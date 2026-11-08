@@ -34,7 +34,9 @@ pub(super) fn gap_keys_json(
     }))?)
 }
 
-fn loss_journal_event(keys: &serde_json::Value) -> (String, serde_json::Value, Option<String>) {
+pub(super) fn loss_journal_event(
+    keys: &serde_json::Value,
+) -> (String, serde_json::Value, Option<String>) {
     let mut body = serde_json::Map::new();
     for name in [
         "source_key",
@@ -65,7 +67,7 @@ impl ReceiveTransaction<'_> {
             |row| row.get(0),
         )?;
         let pending: i64 = self.db.connection.query_row(
-            "SELECT coalesce(sum(length(keys_json)),0) FROM runtime_outbox
+            "SELECT coalesce(sum(length(CAST(keys_json AS BLOB))),0) FROM runtime_outbox
              WHERE published=0 AND table_name='gateway_inbox_loss'
                AND json_extract(keys_json,'$.target')=?1",
             params![self.target],
