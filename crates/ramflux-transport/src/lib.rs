@@ -57,6 +57,8 @@ pub use mesh_http::{
     mesh_http_post_json_with_peer_ca_pems, mesh_http_post_status_body, read_mesh_http_request,
     write_mesh_json_response, write_mesh_text_response,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use mesh_quic::mesh_quic_post_postcard_raw_body_with_peer_ca_pems_async;
 pub use mesh_quic::{
     MeshQuicAcceptedBiStream, MeshQuicAcceptedRequest, MeshQuicAcceptedWireRequest,
     MeshQuicConnection, MeshQuicPostcardAcceptedRequest, MeshQuicRawPost, MeshQuicServer,
