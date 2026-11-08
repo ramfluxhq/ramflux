@@ -8,6 +8,7 @@
 use super::erased_capture_tests::{current, full};
 use super::erased_input_union_tests::{Pair, assert_refused, expiry, merge, pair};
 use super::stage_tests::{bytes, input, run};
+use super::w0_replay_support::{Tuple, assert_erased, assert_erased_after_reopen, install};
 use crate::{AccountDb, BackupDatabase, StorageError};
 use rusqlite::params;
 use serde_json::{Value, json};
@@ -16,6 +17,12 @@ use serde_json::{Value, json};
 struct Expect {
     selector: String,
     expires_at: i64,
+    /// The tuple a replay repeats at W0.
+    tuple: Tuple,
+}
+
+fn tuple(principal: &str, device: &str, payload: &str) -> Tuple {
+    (principal.to_owned(), device.to_owned(), payload.to_owned())
 }
 
 fn both_have_message(p: &Pair) -> Result<(), StorageError> {
@@ -51,7 +58,7 @@ fn seed_binding(p: &Pair, payload: &str, now: i64) -> Result<Expect, StorageErro
         "INSERT INTO message_copy_binding VALUES(?1,'M')",
         params![format!("erased-input:{bundle}:{selector}:{expires_at}")],
     )?;
-    Ok(Expect { selector, expires_at })
+    Ok(Expect { selector, expires_at, tuple: tuple("lp", "ld", payload) })
 }
 
 /// Local `routed/committed` copy (source ii) bound to M through its payload.
@@ -65,7 +72,7 @@ fn seed_routed(p: &Pair, payload: &str, now: i64) -> Result<Expect, StorageError
         &json!({"routing":{"message_id":"M"},"entry":{"envelope":full("rp","rd",payload,now,3600)}}),
     )?;
     let (_, selector) = current(&p.local, "rp", "rd", payload)?;
-    Ok(Expect { selector, expires_at: now + 3_900 })
+    Ok(Expect { selector, expires_at: now + 3_900, tuple: tuple("rp", "rd", payload) })
 }
 
 /// Live staged work (source iii) owned through its payload binding.
@@ -78,7 +85,7 @@ fn seed_work(p: &Pair, payload: &str, now: i64) -> Result<Expect, StorageError> 
         params![format!("payload:{payload}")],
     )?;
     let (_, selector) = current(&p.local, "wp", "wd", payload)?;
-    Ok(Expect { selector, expires_at: now + 3_900 })
+    Ok(Expect { selector, expires_at: now + 3_900, tuple: tuple("wp", "wd", payload) })
 }
 
 fn delete_incoming(p: &Pair) -> Result<(), StorageError> {
@@ -138,6 +145,13 @@ fn check_with(
     let reopened = BackupDatabase::open(&path, &key)?;
     verify(&reopened.db)?;
     drop(reopened);
+    if present {
+        // W0: a fresh-sequence replay of each tombstoned tuple is erased, immediately and after
+        // reopen of the restored account.
+        let tuples: Vec<Tuple> = expected.iter().map(|e| e.tuple.clone()).collect();
+        let index = install(&p.root, "w0-installed", &path, &key)?;
+        assert_erased_after_reopen(&index, &key, &tuples)?;
+    }
     Ok(())
 }
 
@@ -204,6 +218,8 @@ fn erased_input_restore_union_lifecycle_local_sources() -> Result<(), StorageErr
     gone(&merged.db)?;
     drop(merged);
     gone(&BackupDatabase::open(&path, &key)?.db)?;
+    let index = install(&p.root, "w0-installed", &path, &key)?;
+    assert_erased_after_reopen(&index, &key, std::slice::from_ref(&vii.tuple))?;
     // (viii) Over-capture is discarded: M ends the merge live, so no row exists for its tuples.
     let p = pair("erased-life-viii")?;
     both_have_message(&p)?;
@@ -237,7 +253,7 @@ fn source_binding(p: &Pair, payload: &str, expires_at: i64) -> Result<Expect, St
         "INSERT INTO message_copy_binding VALUES(?1,'M')",
         params![format!("erased-input:{bundle}:{selector}:{expires_at}")],
     )?;
-    Ok(Expect { selector, expires_at })
+    Ok(Expect { selector, expires_at, tuple: tuple("sp", "sd", payload) })
 }
 
 /// Local deletion of M with nothing to capture: M is deleted and has no tuple source.
@@ -266,7 +282,12 @@ fn erased_input_restore_union_lifecycle_incoming_sources() -> Result<(), Storage
             params![format!("erased-input:{bundle}:{selector}:{at}")],
         )?;
     }
-    check(&p, &[Expect { selector, expires_at: now + 900 }], true, true)?;
+    check(
+        &p,
+        &[Expect { selector, expires_at: now + 900, tuple: tuple("sp", "sd", "pivb") }],
+        true,
+        true,
+    )?;
     // (x) Incoming-only legacy source: the only tuple is a routed/committed copy on the
     // incoming side. Selectors use the local bundle.
     let p = pair("erased-life-x")?;
@@ -278,7 +299,12 @@ fn erased_input_restore_union_lifecycle_incoming_sources() -> Result<(), Storage
         &json!({"routing":{"message_id":"M"},"entry":{"envelope":full("xp","xd","px",now,3600)}}),
     )?;
     let (_, selector) = current(&p.local, "xp", "xd", "px")?;
-    check(&p, &[Expect { selector, expires_at: now + 3_900 }], true, true)?;
+    check(
+        &p,
+        &[Expect { selector, expires_at: now + 3_900, tuple: tuple("xp", "xd", "px") }],
+        true,
+        true,
+    )?;
     Ok(())
 }
 
@@ -316,6 +342,7 @@ fn erased_input_restore_union_lifecycle_imported_binding_then_local_delete()
         )?,
         i.expires_at
     );
+    assert_erased(&restored, std::slice::from_ref(&i.tuple), 1_000)?;
     drop(restored);
     let again = AccountDb::open(&index, "account", &key)?;
     assert_eq!(
@@ -327,6 +354,7 @@ fn erased_input_restore_union_lifecycle_imported_binding_then_local_delete()
         i.expires_at,
         "after reopen"
     );
+    assert_erased(&again, std::slice::from_ref(&i.tuple), 2_000)?;
     Ok(())
 }
 
