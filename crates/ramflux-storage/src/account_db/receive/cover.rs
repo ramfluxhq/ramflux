@@ -9,6 +9,9 @@ use rusqlite::{OptionalExtension, params};
 
 const BOUNDARY_LIMIT: usize = 64;
 const SLOT_LIMIT: i64 = 1024;
+const GAP_REASONS: &[&str] =
+    &["expired", "ack_window_overflow", "nacked", "aborted", "oversize", "unknown"];
+const GAP_CLASSIFICATIONS: &[&str] = &["unavailable", "legacy_unverified"];
 
 /// Inclusive missing interval with no local receipt. Adjacent same-reason ranges merge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,7 +96,9 @@ impl ReceiveTransaction<'_> {
                 return Err(StorageError::Integrity("receive cover requires a receipt"));
             }
         }
-        if input.kind == ReceiveCoverKind::Terminal && self.intent_slots()? >= SLOT_LIMIT {
+        if input.kind == ReceiveCoverKind::Terminal
+            && self.intent_slots(input.sequence)? >= SLOT_LIMIT
+        {
             return Ok(ReceiveCoverResult::Paused);
         }
         let now = crate::unix_now();
@@ -131,10 +136,16 @@ impl ReceiveTransaction<'_> {
         ).optional()?)
     }
 
-    fn intent_slots(&self) -> Result<i64, StorageError> {
+    fn intent_slots(&self, sequence: u64) -> Result<i64, StorageError> {
+        let seq = sequence.to_be_bytes();
         Ok(self.db.connection.query_row(
-            "SELECT count(*) FROM (SELECT incarnation_id,inbox_seq FROM gateway_ack_intent WHERE target_delivery_id=?1 UNION SELECT incarnation_id,inbox_seq FROM gateway_receive_receipt WHERE target_delivery_id=?1)",
-            params![self.target],
+            "SELECT count(*) FROM (
+               SELECT incarnation_id,inbox_seq FROM gateway_ack_intent WHERE target_delivery_id=?1
+               UNION
+               SELECT incarnation_id,inbox_seq FROM gateway_receive_receipt
+                WHERE target_delivery_id=?1 AND NOT (incarnation_id=?2 AND inbox_seq=?3)
+             )",
+            params![self.target, self.incarnation, seq.as_slice()],
             |row| row.get(0),
         )?)
     }
@@ -161,18 +172,24 @@ impl ReceiveTransaction<'_> {
             "receive-gap:{}:{}:{}:{}",
             self.target, self.incarnation, gap.from_seq, gap.to_seq
         );
-        self.db.append_journal(
-            &source,
-            "receive.gap",
-            &serde_json::json!({
-                "from_seq": gap.from_seq,
-                "to_seq": gap.to_seq,
-                "count": count,
-                "reason": gap.reason,
-                "classification": gap.classification,
-            }),
-            now,
-            None,
+        let keys = serde_json::json!({
+            "source_key": source,
+            "target": self.target,
+            "incarnation": self.incarnation,
+            "from_seq": gap.from_seq,
+            "to_seq": gap.to_seq,
+            "count": count,
+            "reason": gap.reason,
+            "classification": gap.classification,
+        });
+        let keys_json = serde_json::to_string(&keys)?;
+        self.db.connection.execute(
+            "INSERT INTO runtime_outbox(table_name,change_kind,row_id,published,keys_json)
+             SELECT 'gateway_inbox_loss','insert',0,0,?1
+             WHERE NOT EXISTS (
+               SELECT 1 FROM runtime_outbox WHERE json_extract(keys_json,'$.source_key')=?2
+             )",
+            params![keys_json, source],
         )?;
         Ok(())
     }
@@ -204,7 +221,7 @@ impl ReceiveTransaction<'_> {
     fn mark_held(&self, sequence: u64) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
         self.db.connection.execute(
-            "UPDATE gateway_receive_receipt SET disposition='held' WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+            "UPDATE gateway_receive_receipt SET disposition='held' WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3 AND disposition='staged'",
             params![self.target, self.incarnation, seq.as_slice()],
         )?;
         Ok(())
@@ -254,12 +271,12 @@ fn span_page(
                 && chained(gaps)?
         }
         ReceiveCoverKind::Terminal | ReceiveCoverKind::Held if start == sequence => gaps.is_empty(),
-        ReceiveCoverKind::Terminal | ReceiveCoverKind::Held => {
-            !gaps.is_empty()
-                && gaps[0].from_seq == start
-                && gaps.last().is_some_and(|gap| successor(gap.to_seq).ok() == Some(sequence))
-                && chained(gaps)?
-        }
+        ReceiveCoverKind::Terminal | ReceiveCoverKind::Held => match gaps.last() {
+            None => false,
+            Some(last) => {
+                gaps[0].from_seq == start && successor(last.to_seq)? == sequence && chained(gaps)?
+            }
+        },
     };
     if covered {
         Ok(())
@@ -276,6 +293,12 @@ fn merge_gaps<'a>(gaps: &[ReceiveGap<'a>]) -> Result<Vec<ReceiveGap<'a>>, Storag
         let _ = interval_count(gap.from_seq, gap.to_seq)?;
         if gap.reason.is_empty() || gap.classification.is_empty() {
             return Err(StorageError::Integrity("receive cover interval missing reason"));
+        }
+        if !GAP_REASONS.contains(&gap.reason) {
+            return Err(StorageError::Integrity("receive cover interval unknown reason"));
+        }
+        if !GAP_CLASSIFICATIONS.contains(&gap.classification) {
+            return Err(StorageError::Integrity("receive cover interval unknown classification"));
         }
         if let Some(last) = merged.last_mut() {
             if gap.from_seq <= last.to_seq {
