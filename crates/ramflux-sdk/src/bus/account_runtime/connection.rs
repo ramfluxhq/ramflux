@@ -442,14 +442,13 @@ fn page_turn(
     target: &str,
     turn: Option<Box<ReceiveTurn>>,
 ) -> Result<ReceiveTurn, SdkError> {
-    if let Some(turn) = turn {
-        return Ok(*turn);
-    }
-    super::super::push_receiver::apply_w1::capture_turn(
-        account.client.account_db()?,
-        generation,
-        target,
-    )
+    let db = account.client.account_db()?;
+    let mut turn = match turn {
+        Some(turn) => *turn,
+        None => super::super::push_receiver::apply_w1::capture_turn(db, generation, target)?,
+    };
+    super::super::push_receiver::apply_w1::refresh_cursor(db, &mut turn)?;
+    Ok(turn)
 }
 
 async fn short_step<T>(

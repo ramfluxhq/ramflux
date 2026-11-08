@@ -5,7 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use super::apply_w1::{
-    self, apply_page, binding_give_up, routed_refused, set_after_classify, set_cross_await,
+    self, apply_page, binding_attempts, binding_give_up, queue_legacy_hold, routed_refused,
+    set_after_classify, set_cross_await,
 };
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
@@ -45,9 +46,15 @@ fn turn(
     apply_w1::capture_turn(db, generation, &account.target_delivery_id)
 }
 
-fn envelope(target: &str, payload: &str, principal: &str, device: &str) -> serde_json::Value {
+fn envelope(
+    target: &str,
+    payload: &str,
+    principal: &str,
+    device: &str,
+    seq: u64,
+) -> serde_json::Value {
     json!({
-        "inbox_seq": 1,
+        "inbox_seq": seq,
         "target_delivery_id": target,
         "envelope": {
             "schema": "test",
@@ -56,7 +63,7 @@ fn envelope(target: &str, payload: &str, principal: &str, device: &str) -> serde
             "signing_key_id": "key",
             "signature_alg": "ed25519",
             "signature": "sig",
-            "envelope_id": "env-1",
+            "envelope_id": format!("env-{seq}"),
             "source_principal_id": principal,
             "source_device_id": device,
             "target_delivery_id": target,
@@ -65,24 +72,23 @@ fn envelope(target: &str, payload: &str, principal: &str, device: &str) -> serde
             "ttl": 60,
             "created_at": 1,
             "encrypted_payload": payload,
-            "payload_hash": "H1"
+            "payload_hash": format!("H{seq}")
         }
     })
 }
 
 fn prepared(target: &str, payload: &str) -> ReceiveEntry {
-    ReceiveEntry {
-        entry: serde_json::from_value(envelope(target, payload, "source", "device"))
-            .expect("entry"),
-        retry_key: None,
-        replay: false,
-        turn: None,
-    }
+    prepared_from(target, payload, "source", "device")
 }
 
 fn prepared_from(target: &str, payload: &str, principal: &str, device: &str) -> ReceiveEntry {
+    dummy_seq(target, payload, principal, device, 1)
+}
+
+fn dummy_seq(target: &str, payload: &str, principal: &str, device: &str, seq: u64) -> ReceiveEntry {
     ReceiveEntry {
-        entry: serde_json::from_value(envelope(target, payload, principal, device)).expect("entry"),
+        entry: serde_json::from_value(envelope(target, payload, principal, device, seq))
+            .expect("entry"),
         retry_key: None,
         replay: false,
         turn: None,
@@ -135,12 +141,33 @@ async fn drive_with_turn(
 }
 
 fn own_dummy(account: &crate::bus::state::LocalBusAccountState) -> ReceiveEntry {
-    prepared_from(
+    own_dummy_at(account, 1)
+}
+
+fn own_dummy_at(account: &crate::bus::state::LocalBusAccountState, seq: u64) -> ReceiveEntry {
+    dummy_seq(
         &account.target_delivery_id,
         &encode_base64url(b"legacy-a2i-dummy"),
         &account.gateway_config.principal_id,
         &account.gateway_config.device_id,
+        seq,
     )
+}
+
+fn unrouted_journals(db: &AccountDb) -> Result<usize, SdkError> {
+    Ok(db
+        .journal_after(0, 128)?
+        .into_iter()
+        .filter(|event| event.topic == "message.unrouted")
+        .count())
+}
+
+fn cursor(account: &crate::bus::state::LocalBusAccountState) -> Result<u64, SdkError> {
+    Ok(account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&account.target_delivery_id)?
+        .cursor)
 }
 
 fn reopen(account: &mut crate::bus::state::LocalBusAccountState) -> Result<(), SdkError> {
@@ -229,6 +256,13 @@ async fn legacy_binding_changed_gives_up_after_three() -> Result<(), SdkError> {
         matches!(error, Some(SdkError::InboundRejected(text)) if text == binding_give_up()),
         "give-up must be the typed error through apply_page: {error:?}"
     );
+    assert_eq!(binding_attempts(), 3, "give-up is exactly three binding attempts");
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1),
+        "W0 stays staged"
+    );
+    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 0, "no hold journal");
     Ok(())
 }
 
@@ -251,7 +285,7 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
     let _clock = crate::time::FixedClock::set(START);
     let mut harness = open()?;
     let sends = attach_counter(&mut harness.account);
-    queue_unbound_answers(std::iter::repeat_n(false, 8));
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
     legacy_w1::set_fault(Fault::BeforeCommit);
     let entry = own_dummy(&harness.account);
     let cut = drive(&mut harness.account, entry.clone(), || 1).await;
@@ -281,11 +315,20 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
         (Some("held".into()), 1),
         "one held effect after expiry"
     );
+    assert_eq!(
+        harness
+            .account
+            .client
+            .account_db()?
+            .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?
+            .cursor,
+        1
+    );
     assert_eq!(sends.load(Ordering::SeqCst), 0);
 
     let mut missing = open()?;
     let sends = attach_counter(&mut missing.account);
-    queue_unbound_answers(std::iter::repeat_n(false, 8));
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
     legacy_w1::set_fault(Fault::BeforeCommit);
     let entry = own_dummy(&missing.account);
     let cut = drive(&mut missing.account, entry.clone(), || 1).await;
@@ -322,7 +365,7 @@ fn complete_w0(db: &AccountDb) {
 async fn receive_stage_redrive() -> Result<(), SdkError> {
     let mut harness = open()?;
     let sends = attach_counter(&mut harness.account);
-    queue_unbound_answers(std::iter::repeat_n(false, 8));
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
     legacy_w1::set_fault(Fault::BeforeCommit);
     let entry = own_dummy(&harness.account);
     let cut = drive(&mut harness.account, entry.clone(), || 1).await;
@@ -336,6 +379,15 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
     assert!(once.0.is_none(), "W1 writes no ACK intent");
     let held = harness.account.client.account_db()?.receive_state_for_test(1)?;
     assert_eq!(held, (Some("held".into()), 1), "one held effect");
+    assert_eq!(
+        harness
+            .account
+            .client
+            .account_db()?
+            .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?
+            .cursor,
+        1
+    );
     reopen(&mut harness.account)?;
     assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, held);
     let again = drive(&mut harness.account, entry, || 1).await?;
@@ -349,7 +401,7 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
 async fn held_admission_stage_crash() -> Result<(), SdkError> {
     let mut blocked = open()?;
     let sends = attach_counter(&mut blocked.account);
-    queue_unbound_answers(std::iter::repeat_n(false, 8));
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
     legacy_w1::set_fault(Fault::BeforeCommit);
     let entry = own_dummy(&blocked.account);
     let cut = drive(&mut blocked.account, entry.clone(), || 1).await;
@@ -370,6 +422,7 @@ async fn held_admission_stage_crash() -> Result<(), SdkError> {
         blocked.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("held".into()), 1)
     );
+    assert_eq!(cursor(&blocked.account)?, 1);
     assert_eq!(sends.load(Ordering::SeqCst), 0);
 
     let mut unbound = open()?;
@@ -396,6 +449,7 @@ async fn held_admission_stage_crash() -> Result<(), SdkError> {
         (Some("held".into()), 1)
     );
     assert_eq!(sends.load(Ordering::SeqCst), 0);
+    assert_eq!(cursor(&unbound.account)?, 1);
     Ok(())
 }
 
@@ -423,5 +477,54 @@ async fn erasure_late_stage_and_process() -> Result<(), SdkError> {
         "erasure refuses without resurrecting content"
     );
     assert_eq!(sends.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn held_entries_cover_cursor_in_one_pass() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let start = turn(&harness.account, 1)?;
+    let mut progress = 0_u32;
+    for seq in [1_u64, 3, 4] {
+        let entry = own_dummy_at(&harness.account, seq);
+        drive_with_turn(&mut harness.account, &start, entry, || 1).await?;
+        progress += 1;
+    }
+    assert_eq!(progress, 3, "one pass commits every entry");
+    let db = harness.account.client.account_db()?;
+    assert_eq!(cursor(&harness.account)?, 4);
+    let held = db
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?
+        .receipts
+        .into_iter()
+        .filter(|(_, disposition)| disposition == "held")
+        .count();
+    assert_eq!(held, 3, "three held receipts");
+    assert_eq!(unrouted_journals(db)?, 3, "one unrouted journal per hold");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2i_receipt_inbound_rejected_is_not_a_hold() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_unbound_answers(std::iter::repeat_n(false, 4));
+    let entry = own_dummy(&harness.account);
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::InboundRejected(text))
+                if text == "identity authority: device metadata absent"
+        ),
+        "receipt load InboundRejected stays a rejection: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
+    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 0);
+    assert_eq!(cursor(&harness.account)?, 0);
     Ok(())
 }

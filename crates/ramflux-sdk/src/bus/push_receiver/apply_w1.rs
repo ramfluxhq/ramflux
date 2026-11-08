@@ -56,14 +56,24 @@ pub(crate) async fn apply_page(
     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
 ) -> Result<ReceiveApplied, SdkError> {
     let mut source = source.map(|prepared| *prepared).transpose()?;
+    let mut turn = turn.clone();
+    refresh_cursor(account.client.account_db()?, &mut turn)?;
     let mut attempts = 0;
+    #[cfg(test)]
+    BINDING_TRIES.with(|cell| cell.set(0));
     loop {
-        match Box::pin(apply_once(account, turn, handle_generation, &prepared, source.as_mut()))
-            .await
+        match Box::pin(apply_once(
+            account,
+            &mut turn,
+            handle_generation,
+            &prepared,
+            source.as_mut(),
+        ))
+        .await
         {
             Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
             Err(SdkError::PairRecoveryRequired) => {
-                recover_own_copy(account, turn, handle_generation(), &prepared.entry)?;
+                recover_own_copy(account, &turn, handle_generation(), &prepared.entry)?;
                 break;
             }
             Err(error) => return Err(error),
@@ -75,7 +85,7 @@ pub(crate) async fn apply_page(
 
 async fn apply_once(
     account: &mut LocalBusAccountState,
-    turn: &ReceiveTurn,
+    turn: &mut ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
     prepared: &ReceiveEntry,
     source: Option<&mut crate::client::routed::PreparedInbound>,
@@ -150,7 +160,12 @@ fn hold_unrouted(
         let gate = LegacyW1 { expected, generation };
         let hold = SourceHold { expected, generation };
         match gate.effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at))? {
-            HoldDisposition::HeldLocal { .. } => Ok(true),
+            HoldDisposition::HeldLocal { .. } => {
+                // SourceHold.admit_hold settle(Held) already covers C+1 in this
+                // transaction (P07). A second Held cover refuses "outside page"
+                // and rolls the hold, journal and cover back together.
+                Ok(true)
+            }
             HoldDisposition::Paused => Ok(false),
         }
     })?;
@@ -193,6 +208,10 @@ async fn classify(
     if account.client.v2_blocks_legacy(&reference)? {
         return Ok(Kind::LegacyHold);
     }
+    #[cfg(test)]
+    if take_legacy_hold() {
+        return Ok(Kind::LegacyHold);
+    }
     if let Some(conversation) =
         account.client.legacy_routing_binding(&account.gateway_config.device_id, entry)?
     {
@@ -203,33 +222,32 @@ async fn classify(
     }
     match account.client.load_legacy_a2i_receipt(entry) {
         Ok(Some(_)) => return Ok(Kind::LegacyA2i),
-        Ok(None) | Err(SdkError::InboundRejected(_)) => {}
+        Ok(None) => {}
         Err(error) => return Err(error),
     }
     Ok(Kind::LegacyHold)
 }
 
-/// Reconcile the single-entry page. `NeedStage` writes W0; a staged receipt with
-/// `C < sequence` still proceeds to W1 (binding redrive). `seq == C + 1` after prefix
-/// cover, so held W2 uses empty gaps.
+/// Reconcile the single-entry page. `NeedStage` writes W0 using the cursor returned
+/// after any gap-prefix cover. Already-covered sequences skip W1.
 fn admit_open(
     account: &LocalBusAccountState,
-    turn: &ReceiveTurn,
+    turn: &mut ReceiveTurn,
     generation: u64,
     prepared: &ReceiveEntry,
 ) -> Result<bool, SdkError> {
     let sequence = prepared.entry.inbox_seq;
     match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
-        ApplyOutcome::NeedStage { sequence: need, .. } if need == sequence => {
+        ApplyOutcome::NeedStage { sequence: need, cursor } if need == sequence => {
+            turn.cursor = cursor;
             stage_open(account, turn, generation, prepared)
         }
         ApplyOutcome::NeedStage { .. } => {
             Err(SdkError::InboundRejected("receive page need-stage mismatch".into()))
         }
-        ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
-            Ok(cursor < sequence)
-        }
-        ApplyOutcome::NeedFetch { .. }
+        ApplyOutcome::Covered { .. }
+        | ApplyOutcome::AlreadyCovered { .. }
+        | ApplyOutcome::NeedFetch { .. }
         | ApplyOutcome::NeedPoint { .. }
         | ApplyOutcome::Paused { .. } => Ok(false),
     }
@@ -361,11 +379,19 @@ fn reconcile_entry(
 
 fn note_binding_changed(attempts: &mut u32) -> Result<(), SdkError> {
     *attempts += 1;
+    #[cfg(test)]
+    BINDING_TRIES.with(|cell| cell.set(*attempts));
     if *attempts >= BINDING_ATTEMPTS {
         Err(SdkError::InboundRejected(BINDING_GIVE_UP.into()))
     } else {
         Ok(())
     }
+}
+
+/// Keep prepare-time E/erase/generation and reread C so a prior cover in this pass can commit.
+pub(crate) fn refresh_cursor(db: &AccountDb, turn: &mut ReceiveTurn) -> Result<(), SdkError> {
+    turn.cursor = read_cursor(db, &turn.target)?;
+    Ok(())
 }
 
 fn read_cursor(db: &AccountDb, target: &str) -> Result<u64, SdkError> {
@@ -378,6 +404,30 @@ fn read_cursor(db: &AccountDb, target: &str) -> Result<u64, SdkError> {
 thread_local! {
     static CROSS_AWAIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
     static AFTER_CLASSIFY: std::cell::Cell<Option<fn(&AccountDb)>> = const { std::cell::Cell::new(None) };
+    static BINDING_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static LEGACY_HOLD: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_legacy_hold() -> bool {
+    LEGACY_HOLD.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        if queue.is_empty() { false } else { queue.remove(0) }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn queue_legacy_hold(answers: impl IntoIterator<Item = bool>) {
+    LEGACY_HOLD.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        queue.clear();
+        queue.extend(answers);
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn binding_attempts() -> u32 {
+    BINDING_TRIES.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

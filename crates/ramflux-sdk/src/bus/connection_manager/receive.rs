@@ -268,9 +268,7 @@ async fn catch_up(
     let mut retries: Vec<_> = retries.into_values().collect();
     retries.sort_by_key(|entry| entry.entry.inbox_seq);
     for mut entry in retries {
-        if entry.turn.is_none() {
-            entry.turn = turn.clone();
-        }
+        entry.turn = None;
         let (accepted, next) =
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;
