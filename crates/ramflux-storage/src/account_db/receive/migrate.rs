@@ -6,6 +6,7 @@
 //! Dormant until P24 activation wires it. Entry points require the caller's writer.
 use super::ReceiveTransaction;
 use super::cover::ReceiveGap;
+use super::stage::{ReceiveStageResult, bind_receive_entry, receive_capacity};
 use crate::{AccountDb, ProjectionStore, StorageError};
 use rusqlite::params;
 
@@ -118,9 +119,38 @@ impl AccountDb {
         if sequence == 0 || entry.is_empty() {
             return Ok(());
         }
-        let seq = sequence.to_be_bytes();
+        let Ok(envelope) = bind_receive_entry(input.target, sequence, entry, admission) else {
+            self.set_projection_checkpoint(
+                &format!("gateway_receive_migrate:{}:{sequence}", input.target),
+                "skipped",
+            )?;
+            return Ok(());
+        };
+        if self.erased_input_matches_at(&envelope, at)? {
+            let seq = sequence.to_be_bytes();
+            self.connection.execute(
+                "INSERT OR IGNORE INTO gateway_receive_receipt VALUES(?1,?2,?3,'erased',?4,?5)",
+                params![
+                    input.target,
+                    input.incarnation,
+                    seq.as_slice(),
+                    at.saturating_add(604_800),
+                    at
+                ],
+            )?;
+            return Ok(());
+        }
         let length = i64::try_from(entry.len())
             .map_err(|_| StorageError::Integrity("receive entry byte bound"))?;
+        if let Some(paused) = receive_capacity(self, input.target, length)? {
+            return Err(StorageError::Integrity(match paused {
+                ReceiveStageResult::PausedWork => "receive migrate work capacity",
+                ReceiveStageResult::PausedBytes => "receive migrate byte capacity",
+                ReceiveStageResult::PausedIntents => "receive migrate intent capacity",
+                _ => "receive migrate capacity",
+            }));
+        }
+        let seq = sequence.to_be_bytes();
         self.connection.execute(
             "INSERT OR IGNORE INTO gateway_receive_receipt VALUES(?1,?2,?3,'held',?4,?5)",
             params![
@@ -150,13 +180,16 @@ impl ReceiveTransaction<'_> {
         self.refuse_retired()?;
         self.refuse_frozen()?;
         if settled > issued {
-            return Err(StorageError::Integrity("receive reset settled prefix invalid"));
+            return Err(StorageError::Integrity("receive migrate settled prefix invalid"));
         }
         let uncertain = self.epoch_u64(
             "SELECT legacy_uncertain_through FROM gateway_receive_epoch WHERE target_delivery_id=?1",
         )?;
-        if uncertain == issued {
-            return Ok(());
+        if uncertain != 0 {
+            if uncertain == issued {
+                return Ok(());
+            }
+            return Err(StorageError::Integrity("receive migrate fence is one-shot"));
         }
         let cursor = self.db.receive_cursor(self.target)?;
         let present = self.receipts_in(cursor, settled)?;

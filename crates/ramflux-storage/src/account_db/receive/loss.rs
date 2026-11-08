@@ -188,11 +188,24 @@ impl AccountDb {
         &self,
         limit: u32,
     ) -> Result<Vec<(i64, serde_json::Value)>, StorageError> {
+        self.pending_loss_outbox_for(None, None, limit)
+    }
+
+    /// Unpublished loss outbox rows, optionally filtered to one target and incarnation.
+    pub(super) fn pending_loss_outbox_for(
+        &self,
+        target: Option<&str>,
+        incarnation: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(i64, serde_json::Value)>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT sequence,keys_json FROM runtime_outbox
-             WHERE published=0 AND table_name='gateway_inbox_loss' ORDER BY sequence LIMIT ?1",
+             WHERE published=0 AND table_name='gateway_inbox_loss'
+               AND (?1 IS NULL OR json_extract(keys_json,'$.target')=?1)
+               AND (?2 IS NULL OR json_extract(keys_json,'$.incarnation')=?2)
+             ORDER BY sequence LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![limit.min(256)], |row| {
+        let rows = statement.query_map(params![target, incarnation, limit.min(256)], |row| {
             let sequence: i64 = row.get(0)?;
             let keys: String = row.get(1)?;
             Ok((sequence, keys))

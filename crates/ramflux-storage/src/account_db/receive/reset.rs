@@ -37,6 +37,10 @@ impl ReceiveResetReason {
 pub struct ReceiveReset<'a> {
     pub new_incarnation: &'a str,
     pub settled: u64,
+    /// Issued watermark of the after=0 page; `settled` must satisfy `0 ≤ S ≤ issued`.
+    pub issued: u64,
+    /// Page cursor; only `after=0` is valid for this first-page reset.
+    pub after: u64,
     pub reason: ReceiveResetReason,
 }
 
@@ -69,71 +73,63 @@ impl AccountDb {
         incarnation: &str,
         at: i64,
     ) -> Result<u32, StorageError> {
-        self.write_transaction(|| {
-            let mut published = 0u32;
-            loop {
-                let batch = self.pending_incarnation_loss(target, incarnation, 256)?;
-                if batch.is_empty() {
-                    return Ok(published);
-                }
-                for (sequence, keys) in batch {
-                    let source = keys
-                        .get("source_key")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
-                        .to_owned();
-                    if source.is_empty() {
-                        return Err(StorageError::Integrity("receive gap source missing"));
-                    }
-                    let body = loss_journal_body(&keys);
-                    let _event: JournalEvent =
-                        self.insert_journal(&source, "receive.gap", &body, at, None)?;
-                    self.connection.execute(
-                        "UPDATE runtime_outbox SET published=1 WHERE sequence=?1 AND published=0",
-                        params![sequence],
-                    )?;
-                    published = published.saturating_add(1);
-                }
+        let mut published = 0u32;
+        loop {
+            let batch = self.pending_loss_outbox_for(Some(target), Some(incarnation), 256)?;
+            if batch.is_empty() {
+                return Ok(published);
             }
-        })
+            for (sequence, keys) in batch {
+                let _events: Vec<JournalEvent> =
+                    self.journal_outbox(sequence, &[super::loss::loss_journal_event(&keys)], at)?;
+                published = published.saturating_add(1);
+            }
+        }
     }
 
-    fn pending_incarnation_loss(
-        &self,
-        target: &str,
-        incarnation: &str,
-        limit: u32,
-    ) -> Result<Vec<(i64, serde_json::Value)>, StorageError> {
-        let mut statement = self.connection.prepare(
-            "SELECT sequence,keys_json FROM runtime_outbox
-             WHERE published=0 AND table_name='gateway_inbox_loss'
-               AND json_extract(keys_json,'$.target')=?1
-               AND json_extract(keys_json,'$.incarnation')=?2
-             ORDER BY sequence LIMIT ?3",
-        )?;
-        let rows = statement.query_map(params![target, incarnation, limit.min(256)], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (sequence, keys) = row?;
-            out.push((sequence, serde_json::from_str(&keys)?));
+    /// Pause diagnostic written when the 65th retired-E transition is refused.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn receive_pause(&self, target: &str) -> Result<Option<String>, StorageError> {
+        self.projection_checkpoint(&pause_name(target))
+    }
+
+    /// Recovery clears the retired-fence pause so a later reset may run.
+    ///
+    /// # Errors
+    /// Requires an open writer transaction.
+    pub fn clear_receive_pause(&self, target: &str) -> Result<(), StorageError> {
+        if self.connection.is_autocommit()? {
+            return Err(StorageError::AuthorizationRejected);
         }
-        Ok(out)
+        self.connection.execute(
+            "DELETE FROM projection_checkpoint WHERE projection_name=?1",
+            params![pause_name(target)],
+        )?;
+        Ok(())
     }
 }
 
 impl ReceiveTransaction<'_> {
     /// Atomic expected-E reset: C=S, activated=S, fence=S, one `inbox_reset` event,
     /// old work local-only, terminal compat rows released. WJ must have already run.
+    /// Empty U with C=0 initializes the first verified E without `inbox_reset`.
     ///
     /// # Errors
-    /// Requires the writer; refuses a retired inbox, an empty new E, and S overflow.
+    /// Requires the writer; refuses a retired inbox, a retired new E, an empty new E,
+    /// `after != 0`, and `S > issued`.
     pub fn reset(&self, input: ReceiveReset<'_>) -> Result<ReceiveResetResult, StorageError> {
         self.require_writer()?;
         self.refuse_retired()?;
         if input.new_incarnation.is_empty() {
-            return Err(StorageError::Integrity("receive migrate identity missing"));
+            return Err(StorageError::Integrity("receive reset identity missing"));
+        }
+        if input.after != 0 {
+            return Err(StorageError::Integrity("receive reset after must be zero"));
+        }
+        if input.settled > input.issued {
+            return Err(StorageError::Integrity("receive reset settled prefix invalid"));
         }
         if self.unpublished_old_loss()? != 0 {
             return Ok(ReceiveResetResult::PausedLoss);
@@ -142,6 +138,9 @@ impl ReceiveTransaction<'_> {
             return Ok(ReceiveResetResult::Reset);
         }
         let mut retired = self.retired_names()?;
+        if retired.iter().any(|was| was == input.new_incarnation) {
+            return Err(StorageError::Integrity("receive reset incarnation is retired"));
+        }
         if !retired.iter().any(|was| was == self.incarnation) {
             if retired.len() >= RETIRED_FENCE_CAP {
                 self.db.set_projection_checkpoint(&pause_name(self.target), PAUSE_FENCE)?;
@@ -151,6 +150,8 @@ impl ReceiveTransaction<'_> {
             retired.push(self.incarnation.to_owned());
         }
         let cursor = self.db.receive_cursor(self.target)?;
+        let verified = self.incarnation_verified()?;
+        let initialize = !verified && cursor == 0;
         self.release_terminal_compat()?;
         self.db.connection.execute(
             "DELETE FROM gateway_ack_intent WHERE target_delivery_id=?1 AND incarnation_id=?2",
@@ -177,18 +178,23 @@ impl ReceiveTransaction<'_> {
             &format!("gateway_receive_cursor:{}", self.target),
             &input.settled.to_string(),
         )?;
-        let body = serde_json::json!({
-            "target_delivery_id": self.target,
-            "old_incarnation": self.incarnation,
-            "new_incarnation": input.new_incarnation,
-            "old_cursor": cursor,
-            "reason": input.reason.as_str(),
-            "classification": "legacy_unverified",
-        });
-        let source =
-            format!("inbox_reset:{}:{}:{}", self.target, self.incarnation, input.new_incarnation);
-        let _event =
-            self.db.insert_journal(&source, "inbox.reset", &body, crate::unix_now(), None)?;
+        self.clear_freeze()?;
+        if !initialize {
+            let body = serde_json::json!({
+                "target_delivery_id": self.target,
+                "old_incarnation": self.incarnation,
+                "new_incarnation": input.new_incarnation,
+                "old_cursor": cursor,
+                "reason": input.reason.as_str(),
+                "classification": "legacy_unverified",
+            });
+            let source = format!(
+                "inbox_reset:{}:{}:{}",
+                self.target, self.incarnation, input.new_incarnation
+            );
+            let _event =
+                self.db.insert_journal(&source, "inbox.reset", &body, crate::unix_now(), None)?;
+        }
         before_reset_commit()?;
         Ok(ReceiveResetResult::Reset)
     }
@@ -196,9 +202,10 @@ impl ReceiveTransaction<'_> {
     /// Same-E issued<C freezes receive/settlement with `cursor_ahead` until recover.
     ///
     /// # Errors
-    /// Requires the writer.
+    /// Requires the writer. Refuses a retired incarnation.
     pub fn observe_issued(&self, issued: u64) -> Result<ReceiveIssued, StorageError> {
         self.require_writer()?;
+        self.refuse_retired()?;
         if self.frozen()? {
             return Ok(ReceiveIssued::Frozen);
         }
@@ -217,11 +224,7 @@ impl ReceiveTransaction<'_> {
     /// Requires the writer.
     pub fn recover_cursor_ahead(&self) -> Result<(), StorageError> {
         self.require_writer()?;
-        self.db.connection.execute(
-            "DELETE FROM projection_checkpoint WHERE projection_name=?1",
-            params![freeze_name(self.target)],
-        )?;
-        Ok(())
+        self.clear_freeze()
     }
 
     /// Cover, stage and live settle refuse a frozen inbox.
@@ -249,6 +252,23 @@ impl ReceiveTransaction<'_> {
             params![self.target, self.incarnation],
             |row| row.get(0),
         )?)
+    }
+
+    fn incarnation_verified(&self) -> Result<bool, StorageError> {
+        let verified: i64 = self.db.connection.query_row(
+            "SELECT incarnation_verified FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+            params![self.target],
+            |row| row.get(0),
+        )?;
+        Ok(verified != 0)
+    }
+
+    fn clear_freeze(&self) -> Result<(), StorageError> {
+        self.db.connection.execute(
+            "DELETE FROM projection_checkpoint WHERE projection_name=?1",
+            params![freeze_name(self.target)],
+        )?;
+        Ok(())
     }
 
     fn retired_names(&self) -> Result<Vec<String>, StorageError> {
@@ -292,25 +312,6 @@ fn freeze_name(target: &str) -> String {
 
 fn pause_name(target: &str) -> String {
     format!("gateway_receive_pause:{target}")
-}
-
-fn loss_journal_body(keys: &serde_json::Value) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    for name in [
-        "source_key",
-        "target",
-        "incarnation",
-        "from_seq",
-        "to_seq",
-        "count",
-        "reason",
-        "classification",
-    ] {
-        if let Some(value) = keys.get(name) {
-            body.insert(name.to_owned(), value.clone());
-        }
-    }
-    serde_json::Value::Object(body)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

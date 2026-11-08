@@ -6,9 +6,9 @@ use super::ReceiveTransaction;
 use crate::{ProjectionStore, StorageError};
 use rusqlite::{OptionalExtension, params};
 
-const WORK_LIMIT: i64 = 1024;
-const BYTE_LIMIT: i64 = 64 * 1024 * 1024;
-const ENTRY_LIMIT: usize = 1_048_576;
+pub(super) const WORK_LIMIT: i64 = 1024;
+pub(super) const BYTE_LIMIT: i64 = 64 * 1024 * 1024;
+pub(super) const ENTRY_LIMIT: usize = 1_048_576;
 
 /// Authenticated, normalized delivery bytes. The caller authenticates before W0.
 #[derive(Clone, Copy, Debug)]
@@ -72,23 +72,12 @@ impl ReceiveTransaction<'_> {
         if input.target != self.target || input.incarnation != self.incarnation {
             return Err(StorageError::Integrity("receive stage authority mismatch"));
         }
-        if input.sequence == 0 {
-            return Err(StorageError::Integrity("receive sequence must be positive"));
-        }
-        if input.entry_json.is_empty() || input.entry_json.len() > ENTRY_LIMIT {
-            return Err(StorageError::Integrity("receive entry byte bound"));
-        }
-        if input.admission_key.is_empty() {
-            return Err(StorageError::Integrity("receive admission key missing"));
-        }
-        let entry: Entry = serde_json::from_slice(input.entry_json)
-            .map_err(|_| StorageError::Integrity("receive entry encoding"))?;
-        if entry.inbox_seq != input.sequence
-            || entry.target_delivery_id != input.target
-            || entry.envelope.target_delivery_id != input.target
-        {
-            return Err(StorageError::Integrity("receive entry binding"));
-        }
+        let envelope = bind_receive_entry(
+            input.target,
+            input.sequence,
+            input.entry_json,
+            input.admission_key,
+        )?;
         let seq = input.sequence.to_be_bytes();
         let key = params![input.target, input.incarnation, seq.as_slice()];
         let disposition: Option<String> = self.db.connection.query_row(
@@ -114,27 +103,12 @@ impl ReceiveTransaction<'_> {
         if disposition.is_some() {
             return Err(StorageError::Integrity("receive receipt missing work"));
         }
-        // All incarnations count. A receipt and intent for the same key reserve one slot.
-        let (count, bytes): (i64, i64) = self.db.connection.query_row(
-            "SELECT count(*),coalesce(sum(byte_len),0) FROM gateway_receive_work WHERE target_delivery_id=?1",
-            params![input.target], |r| Ok((r.get(0)?,r.get(1)?)),
-        )?;
-        if count >= WORK_LIMIT {
-            return Ok(ReceiveStageResult::PausedWork);
-        }
         let length = i64::try_from(input.entry_json.len())
             .map_err(|_| StorageError::Integrity("receive entry byte bound"))?;
-        if bytes > BYTE_LIMIT - length {
-            return Ok(ReceiveStageResult::PausedBytes);
+        if let Some(paused) = receive_capacity(self.db, input.target, length)? {
+            return Ok(paused);
         }
-        let slots: i64 = self.db.connection.query_row(
-            "SELECT count(*) FROM (SELECT incarnation_id,inbox_seq FROM gateway_ack_intent WHERE target_delivery_id=?1 UNION SELECT incarnation_id,inbox_seq FROM gateway_receive_receipt WHERE target_delivery_id=?1)",
-            params![input.target], |r| r.get(0),
-        )?;
-        if slots >= WORK_LIMIT {
-            return Ok(ReceiveStageResult::PausedIntents);
-        }
-        if self.db.erased_input_matches_at(&entry.envelope, now)? {
+        if self.db.erased_input_matches_at(&envelope, now)? {
             self.record_erased_replay(input)?;
             return Ok(ReceiveStageResult::Erased);
         }
@@ -214,4 +188,59 @@ impl ReceiveTransaction<'_> {
         )?;
         Ok(true)
     }
+}
+
+/// Shared entry binding used by live stage and direct-migration import.
+pub(super) fn bind_receive_entry(
+    target: &str,
+    sequence: u64,
+    entry_json: &[u8],
+    admission_key: &str,
+) -> Result<ramflux_protocol::Envelope, StorageError> {
+    if sequence == 0 {
+        return Err(StorageError::Integrity("receive sequence must be positive"));
+    }
+    if entry_json.is_empty() || entry_json.len() > ENTRY_LIMIT {
+        return Err(StorageError::Integrity("receive entry byte bound"));
+    }
+    if admission_key.is_empty() {
+        return Err(StorageError::Integrity("receive admission key missing"));
+    }
+    let entry: Entry = serde_json::from_slice(entry_json)
+        .map_err(|_| StorageError::Integrity("receive entry encoding"))?;
+    if entry.inbox_seq != sequence
+        || entry.target_delivery_id != target
+        || entry.envelope.target_delivery_id != target
+    {
+        return Err(StorageError::Integrity("receive entry binding"));
+    }
+    Ok(entry.envelope)
+}
+
+/// Work/byte/intent caps counted across every incarnation of `target`.
+pub(super) fn receive_capacity(
+    db: &crate::AccountDb,
+    target: &str,
+    extra_len: i64,
+) -> Result<Option<ReceiveStageResult>, StorageError> {
+    let (count, bytes): (i64, i64) = db.connection.query_row(
+        "SELECT count(*),coalesce(sum(byte_len),0) FROM gateway_receive_work WHERE target_delivery_id=?1",
+        params![target],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if count >= WORK_LIMIT {
+        return Ok(Some(ReceiveStageResult::PausedWork));
+    }
+    if bytes > BYTE_LIMIT - extra_len {
+        return Ok(Some(ReceiveStageResult::PausedBytes));
+    }
+    let slots: i64 = db.connection.query_row(
+        "SELECT count(*) FROM (SELECT incarnation_id,inbox_seq FROM gateway_ack_intent WHERE target_delivery_id=?1 UNION SELECT incarnation_id,inbox_seq FROM gateway_receive_receipt WHERE target_delivery_id=?1)",
+        params![target],
+        |r| r.get(0),
+    )?;
+    if slots >= WORK_LIMIT {
+        return Ok(Some(ReceiveStageResult::PausedIntents));
+    }
+    Ok(None)
 }

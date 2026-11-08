@@ -91,6 +91,7 @@ fn held_seqs(db: &AccountDb) -> Result<Vec<u64>, StorageError> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn legacy_prior_crash_classification() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("migrate-direct")?;
     db.set_projection_checkpoint("gateway_receive_cursor:t", "10")?;
@@ -123,6 +124,13 @@ fn legacy_prior_crash_classification() -> Result<(), StorageError> {
     assert_eq!(reset_count(&db)?, 0);
     db.receive_transaction(expect(&db, "e", 10)?, 1, |tx| tx.fence_first_page(20, 30))?;
     assert_eq!(unverified_seqs(&db)?, (11..=20).collect::<Vec<_>>(), "exactly once");
+    match db.receive_transaction(expect(&db, "e", 10)?, 1, |tx| tx.fence_first_page(20, 40)) {
+        Err(StorageError::Integrity("receive migrate fence is one-shot")) => {}
+        other => panic!("different P: {other:?}"),
+    }
+    assert_eq!(unverified_seqs(&db)?, (11..=20).collect::<Vec<_>>());
+    let (_, _, _, _, uncertain) = epoch(&db)?;
+    assert_eq!(uncertain, 30, "fence unchanged after a different P");
     drop(db);
     std::fs::remove_dir_all(&root)?;
 
@@ -161,6 +169,8 @@ fn legacy_prior_crash_classification() -> Result<(), StorageError> {
         tx.reset(ReceiveReset {
             new_incarnation: "e",
             settled: 30,
+            issued: 30,
+            after: 0,
             reason: ReceiveResetReason::IncarnationFirstVerified,
         })
     })?;
@@ -185,6 +195,113 @@ fn legacy_prior_crash_classification() -> Result<(), StorageError> {
         |row| row.get(0),
     )?;
     assert!(reason.contains("incarnation_first_verified"), "{reason}");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn direct_migration_shares_stage_validation() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("migrate-tombstone")?;
+    let wire = bytes(5);
+    let entry: serde_json::Value = serde_json::from_slice(&wire).expect("entry");
+    let envelope: ramflux_protocol::Envelope =
+        serde_json::from_value(entry["envelope"].clone()).expect("envelope");
+    db.record_erased_input(
+        &super::erased_input::ErasedTuple::from_envelope(&envelope),
+        crate::unix_now(),
+        60,
+    )?;
+    db.hold_unrouted("u5", 5, &wire, crate::unix_now())?;
+    assert_eq!(
+        db.write_transaction(
+            || db.migrate_direct(ReceiveMigrate { target: "t", incarnation: "e" })
+        )?,
+        ReceiveMigrateResult::Migrated
+    );
+    let disposition: String = db.connection.query_row(
+        "SELECT disposition FROM gateway_receive_receipt WHERE target_delivery_id='t' AND inbox_seq=?1",
+        params![5u64.to_be_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(disposition, "erased");
+    let work: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE target_delivery_id='t'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(work, 0, "tombstoned import writes no work");
+    drop(db);
+    std::fs::remove_dir_all(&root)?;
+
+    let (root, db) = crate::tests::test_db("migrate-cap")?;
+    db.install_receive_ledger_schema()?;
+    db.write_transaction(|| {
+        for n in 1u64..=1024 {
+            db.connection.execute(
+                "INSERT INTO gateway_receive_receipt VALUES('t','old',?1,'held',100,1)",
+                params![n.to_be_bytes().as_slice()],
+            )?;
+            db.connection.execute(
+                "INSERT INTO gateway_receive_work VALUES('t','old',?1,x'00','key',1)",
+                params![n.to_be_bytes().as_slice()],
+            )?;
+        }
+        Ok::<(), StorageError>(())
+    })?;
+    db.hold_unrouted("u1025", 1025, &bytes(1025), 1)?;
+    match db
+        .write_transaction(|| db.migrate_direct(ReceiveMigrate { target: "t", incarnation: "e" }))
+    {
+        Err(StorageError::Integrity("receive migrate work capacity")) => {}
+        other => panic!("cap: {other:?}"),
+    }
+    let exists: i64 = db.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM gateway_receive_epoch WHERE target_delivery_id='t')",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(exists, 0, "capacity refusal writes no epoch");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn migrate_and_fence_negatives() -> Result<(), StorageError> {
+    let (root, db) = crate::tests::test_db("migrate-neg")?;
+    match db.migrate_direct(ReceiveMigrate { target: "t", incarnation: "e" }) {
+        Err(StorageError::AuthorizationRejected) => {}
+        other => panic!("autocommit: {other:?}"),
+    }
+    match db
+        .write_transaction(|| db.migrate_direct(ReceiveMigrate { target: "", incarnation: "e" }))
+    {
+        Err(StorageError::Integrity("receive migrate identity missing")) => {}
+        other => panic!("empty identity: {other:?}"),
+    }
+    assert_eq!(
+        db.write_transaction(
+            || db.migrate_direct(ReceiveMigrate { target: "t", incarnation: "e" })
+        )?,
+        ReceiveMigrateResult::Migrated
+    );
+    match db.receive_transaction(expect(&db, "e", 0)?, 1, |tx| tx.fence_first_page(20, 10)) {
+        Err(StorageError::Integrity("receive migrate settled prefix invalid")) => {}
+        other => panic!("S>P: {other:?}"),
+    }
+    db.receive_transaction(expect(&db, "e", 0)?, 1, |tx| tx.fence_first_page(10, 10))?;
+    let (_, _, _, _, uncertain) = epoch(&db)?;
+    assert_eq!(uncertain, 10, "S==P fences once");
+    db.set_projection_checkpoint("gateway_receive_cursor:t", "10")?;
+    assert_eq!(
+        db.receive_transaction(expect(&db, "e", 10)?, 1, |tx| tx.observe_issued(1))?,
+        super::reset::ReceiveIssued::Frozen
+    );
+    match db.receive_transaction(expect(&db, "e", 10)?, 1, |tx| tx.fence_first_page(10, 10)) {
+        Err(StorageError::Integrity(super::reset::CURSOR_AHEAD)) => {}
+        other => panic!("frozen fence: {other:?}"),
+    }
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())
