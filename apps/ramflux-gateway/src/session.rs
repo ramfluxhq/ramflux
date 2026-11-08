@@ -1298,7 +1298,7 @@ async fn route_non_durable_submit(
 ) -> anyhow::Result<()> {
     use ramflux_protocol::ephemeral::{DeliveryMode, classify_delivery_mode};
     if classify_delivery_mode(&submit.envelope) == DeliveryMode::Ephemeral
-        && crate::ephemeral::negotiated()
+        && crate::ephemeral::negotiated(runtime)
     {
         return crate::ephemeral::handle_submit(send, context, runtime, submit).await;
     }

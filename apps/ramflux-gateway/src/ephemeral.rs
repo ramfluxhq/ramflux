@@ -208,18 +208,10 @@ pub(crate) fn is_non_durable(submit: &ramflux_node_core::GatewaySubmitFrame) -> 
         != ramflux_protocol::ephemeral::DeliveryMode::Durable
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Test-only stand-in for the establishment echo that P10 will provide.
-    pub(crate) static NEGOTIATED_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub(crate) fn negotiated() -> bool {
-    #[cfg(test)]
-    if NEGOTIATED_FOR_TEST.with(std::cell::Cell::get) {
-        return true;
-    }
-    GatewaySessionRuntime::ephemeral_negotiated()
+/// Session runtime's P10 flag: true only after the router echoed `gateway.ephemeral.v1`.
+#[must_use]
+pub(crate) fn negotiated(runtime: &GatewaySessionRuntime) -> bool {
+    runtime.ephemeral_negotiated()
 }
 
 /// Session ingress for a non-durable submit: one typed result, never the durable mesh.
@@ -233,7 +225,7 @@ pub(crate) async fn handle_submit(
     let mut enqueue = HubEnqueue { hub: &context.hub };
     handle_submit_with(
         send,
-        &SubmitIngress { runtime, negotiated: negotiated(), now_ms: now_ms() },
+        &SubmitIngress { runtime, negotiated: negotiated(runtime), now_ms: now_ms() },
         submit,
         &mut route,
         &mut enqueue,

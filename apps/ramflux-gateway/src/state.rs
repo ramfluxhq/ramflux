@@ -80,11 +80,11 @@ pub(crate) struct GatewaySessionRuntime {
 }
 
 impl GatewaySessionRuntime {
-    /// Dormant gate: P10 replaces this with the establishment echo of `gateway.ephemeral.v1`
-    /// once the session carries that state.
+    /// True when establishment echoed `gateway.ephemeral.v1` onto this session (P10).
+    /// Production stays dormant until a router advertises that capability.
     #[must_use]
-    pub(crate) const fn ephemeral_negotiated() -> bool {
-        false
+    pub(crate) const fn ephemeral_negotiated(&self) -> bool {
+        self.ephemeral
     }
 }
 

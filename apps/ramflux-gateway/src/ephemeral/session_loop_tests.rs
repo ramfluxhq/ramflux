@@ -8,10 +8,9 @@ use super::handler_tests::{accepted, dropped, now_ms, submit};
 use super::tests::{EnqueueRecorder, RouteRecorder, TestResult, admit_ok, guard_10s, mutated};
 use super::{
     EPHEMERAL_RATE_BURST, EPHEMERAL_RATE_FULL_REFILL_MS, EphemeralRate, EphemeralRateRegistry,
-    NEGOTIATED_FOR_TEST,
 };
 use crate::session::submit_fixtures::test_runtime;
-use crate::session_push::tests::support::{Fixture, Sink, Source, sink};
+use crate::session_push::tests::support::{Fixture, ID, Sink, Source, sink};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -75,7 +74,8 @@ fn submit_frame(
 #[tokio::test(flavor = "current_thread")]
 async fn ephemeral_session_loop_persists_nothing() -> TestResult {
     let mut fixture = Fixture::new("p09-session-loop")?;
-    let runtime = test_runtime()?;
+    let mut runtime = test_runtime()?;
+    runtime.ephemeral = true;
     let context = fixture.context.clone();
     // The addressee is live on this gateway, so an accepted ephemeral really enqueues.
     let (target_send, _target_frames) = sink();
@@ -84,7 +84,6 @@ async fn ephemeral_session_loop_persists_nothing() -> TestResult {
     let baseline = persisted(&context)?;
     let online = json!({"outcome":"online","gateway_id":"ramflux-gateway"});
 
-    NEGOTIATED_FOR_TEST.with(|negotiated| negotiated.set(true));
     let ok = submit(&runtime, "loop-accepted", 5, |_| {})?;
     let written =
         run_loop(&mut fixture, &runtime, vec![frame_bytes(&submit_frame(ok))?], Some(online))
@@ -110,7 +109,7 @@ async fn ephemeral_session_loop_persists_nothing() -> TestResult {
     anyhow::ensure!(written == vec![p03_nack()], "{written:?}");
     anyhow::ensure!(persisted(&context)? == baseline, "invalid-mode submit changed state");
 
-    NEGOTIATED_FOR_TEST.with(|negotiated| negotiated.set(false));
+    runtime.ephemeral = false;
     let off = submit(&runtime, "loop-unsupported", 5, |_| {})?;
     let written =
         run_loop(&mut fixture, &runtime, vec![frame_bytes(&submit_frame(off))?], None).await?;
@@ -177,6 +176,73 @@ async fn establish(
     anyhow::ensure!(cursor.path == "/mvp0/cursor/target", "{}", cursor.path);
     cursor.respond.send((200, Value::Null)).map_err(|_| anyhow::anyhow!("router gone"))?;
     guard_10s("establish", task).await?
+}
+
+/// Real establishment: `runtime.ephemeral` is the router's capability echo, not a test latch.
+async fn establish_echoed(
+    fixture: &mut Fixture,
+    session_push: bool,
+    ephemeral: bool,
+) -> TestResult<crate::GatewaySessionRuntime> {
+    fixture.context.hub.readiness.seed_echo_for_test(session_push, ephemeral);
+    let context = fixture.context.clone();
+    let source = crate::session_push::tests::support::runtime()?.source_identity;
+    let key = ramflux_node_core::DeviceAuthKeyResponse {
+        custody_authority: None,
+        root_public_key: None,
+        signed_device_set: None,
+        principal_id: "principal".into(),
+        device_id: "device".into(),
+        device_epoch: 1,
+        branch_public_key: "branch".into(),
+        target_delivery_id: "target".into(),
+        revoked: false,
+    };
+    let auth = crate::session_push::tests::negotiation::auth(session_push)?;
+    let open = open_frame(None)?;
+    let task = tokio::spawn(async move {
+        let mut send = Sink(Arc::new(Mutex::new(Vec::new())));
+        crate::session::establish_gateway_session(&mut send, &context, &open, &auth, key, source)
+            .await
+    });
+    let req = fixture.next().await?;
+    let reply = if req.path == "/s1/session" {
+        let mut reply = req.body.clone();
+        reply["incarnation_id"] = json!(ID);
+        reply
+    } else {
+        req.body.clone()
+    };
+    req.respond.send((200, reply)).map_err(|_| anyhow::anyhow!("router gone"))?;
+    let cursor = fixture.next().await?;
+    anyhow::ensure!(cursor.path == "/mvp0/cursor/target", "{}", cursor.path);
+    cursor.respond.send((200, Value::Null)).map_err(|_| anyhow::anyhow!("router gone"))?;
+    guard_10s("establish echoed", task).await?
+}
+
+/// Router does not advertise `gateway.ephemeral.v1` → P03 nack; advertised → ephemeral path.
+#[tokio::test(flavor = "current_thread")]
+async fn ephemeral_submit_follows_router_advertisement() -> TestResult {
+    let mut no_ad = Fixture::new("pre16-no-advertise")?;
+    let runtime = establish_echoed(&mut no_ad, true, false).await?;
+    anyhow::ensure!(!runtime.ephemeral);
+    anyhow::ensure!(!crate::ephemeral::negotiated(&runtime));
+    let off = submit(&runtime, "no-advertise", 5, |_| {})?;
+    let written =
+        run_loop(&mut no_ad, &runtime, vec![frame_bytes(&submit_frame(off))?], None).await?;
+    anyhow::ensure!(written == vec![p03_nack()], "{written:?}");
+
+    let mut advertised = Fixture::new("pre16-advertise")?;
+    let runtime = establish_echoed(&mut advertised, true, true).await?;
+    anyhow::ensure!(runtime.ephemeral);
+    anyhow::ensure!(crate::ephemeral::negotiated(&runtime));
+    let ok = submit(&runtime, "did-advertise", 5, |_| {})?;
+    // Establishment fixture identities differ from the P09 submit helper, so admission
+    // refuses as invalid; the frame is still the ephemeral result, never P03's nack.
+    let written =
+        run_loop(&mut advertised, &runtime, vec![frame_bytes(&submit_frame(ok))?], None).await?;
+    anyhow::ensure!(written == vec![dropped("did-advertise", "invalid")], "{written:?}");
+    Ok(())
 }
 
 async fn admit_n(

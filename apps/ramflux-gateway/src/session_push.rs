@@ -65,6 +65,13 @@ impl Readiness {
     pub(crate) fn suppress_discovery_for_test(&self) {
         self.started.store(true, Ordering::Release);
     }
+    /// Test router advertisement: session-push and optional `gateway.ephemeral.v1`.
+    #[cfg(test)]
+    pub(crate) fn seed_echo_for_test(&self, session_push: bool, ephemeral: bool) {
+        self.started.store(true, Ordering::Release);
+        self.ready.store(session_push, Ordering::Release);
+        self.ephemeral.store(session_push && ephemeral, Ordering::Release);
+    }
     pub(crate) fn start_with_hub(
         self: &Arc<Self>,
         router: &RouterMeshClient,

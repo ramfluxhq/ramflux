@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod ephemeral_negotiation;
 #[path = "negotiation_tests.rs"]
-mod negotiation;
+pub(crate) mod negotiation;
 #[cfg(feature = "itest-local-mint")]
 #[path = "submit_tests.rs"]
 mod submit;

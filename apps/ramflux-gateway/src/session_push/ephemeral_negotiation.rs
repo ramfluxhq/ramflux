@@ -88,9 +88,7 @@ fn capable_reply(body: &Value) -> Value {
 }
 
 fn seed_echo(fixture: &Fixture, session_push: bool, ephemeral: bool) {
-    fixture.context.hub.readiness.started.store(true, Ordering::Release);
-    fixture.context.hub.readiness.ready.store(session_push, Ordering::Release);
-    fixture.context.hub.readiness.ephemeral.store(session_push && ephemeral, Ordering::Release);
+    fixture.context.hub.readiness.seed_echo_for_test(session_push, ephemeral);
 }
 
 async fn establish(
