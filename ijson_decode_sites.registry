@@ -792,10 +792,11 @@ crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 2 | E 
 crates/ramflux-storage/src/account_db/read_model.rs | client_audit_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/receive/erased_capture.rs | tuple_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/receive/hold.rs | load_holds | 1 | E | excluded=local hold rows written by this crate; outside the signed-envelope closure
-crates/ramflux-storage/src/account_db/receive/loss.rs | pending_loss_outbox | 1 | E | excluded=local receive-loss index keys; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/loss.rs | pending_loss_outbox_for | 1 | E | excluded=local receive-loss index keys; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/receive/migrate.rs | seq_from_entry | 1 | D | admitted-before-persist; legacy inbox row written by this crate is not an ingress decoder
 crates/ramflux-storage/src/account_db/receive/mod.rs | retired_incarnations | 1 | E | excluded=local retired-incarnation storage metadata; outside the signed-envelope closure
 crates/ramflux-storage/src/account_db/receive/settle.rs | settle_retained_for | 1 | E | excluded=local retained-work rows written by this crate; outside the signed-envelope closure
-crates/ramflux-storage/src/account_db/receive/stage.rs | stage_inner | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-storage/src/account_db/receive/stage.rs | bind_receive_entry | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-storage/src/account_db/replay_markers.rs | canonical_envelope | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/control.rs | list_actor_states | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/runtime/control.rs | load_actor_state | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
