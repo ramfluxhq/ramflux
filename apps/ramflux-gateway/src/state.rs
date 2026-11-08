@@ -33,7 +33,7 @@ pub(crate) struct NotifyHttpClient {
     pub(crate) endpoint: String,
     pub(crate) signer: ramflux_node_core::NodeServiceSigningKey,
     pub(crate) mesh: Option<NotifyMeshClient>,
-    /// Per-client wake observer. Clones share the counter so spawn_blocking is visible.
+    /// Per-client wake observer. Clones share the counter so `spawn_blocking` is visible.
     #[cfg(test)]
     pub(crate) wake_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }

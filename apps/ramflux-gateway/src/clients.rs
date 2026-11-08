@@ -594,25 +594,6 @@ pub(crate) mod tests {
 
     use super::*;
 
-    pub(crate) fn durable_notify_wake_once(
-        envelope: &ramflux_protocol::Envelope,
-        target_delivery_id: &str,
-    ) -> anyhow::Result<()> {
-        let (endpoint, received) =
-            spawn_notify_http_echo_server().map_err(|error| anyhow::anyhow!("{error}"))?;
-        let client = NotifyHttpClient {
-            endpoint: format!("http://{endpoint}"),
-            signer: ramflux_node_core::NodeServiceSigningKey::from_seed([0x51; 32]),
-            mesh: None,
-            wake_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        };
-        notify_offline_wake(&client, target_delivery_id, envelope)?;
-        received
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|_| anyhow::anyhow!("notify wake was not received"))?;
-        Ok(())
-    }
-
     #[test]
     fn mesh_endpoint_defaults_keep_router_and_notify_quic_with_opt_out() {
         assert_eq!(
