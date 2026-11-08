@@ -91,6 +91,8 @@ pub(crate) struct LocalBusAccountState {
         Option<std::sync::Arc<dyn super::connection_manager::SessionConnector>>,
     #[cfg(test)]
     pub(crate) test_transfer_hook: Option<std::sync::Arc<super::transfer_slots::test_hooks::Hook>>,
+    #[cfg(test)]
+    pub(crate) test_pre_send_hold: Option<ramflux_storage::PreSendObjectHold>,
     /// Per-account relay QUIC connection pool (T24-A2), shared via `Arc`. Lazily built on first
     /// relay transfer and then owned by the account for its whole lifetime; each relay request
     /// takes only an `Arc::clone` (never moving the instance out), so a cancelled or failing
@@ -167,6 +169,8 @@ impl LocalBusAccountState {
             test_connector: None,
             #[cfg(test)]
             test_transfer_hook: None,
+            #[cfg(test)]
+            test_pre_send_hold: None,
             relay_quic_pool: None,
             gateway_config,
             principal_commitment,
@@ -217,6 +221,8 @@ impl LocalBusAccountState {
             test_connector: None,
             #[cfg(test)]
             test_transfer_hook: None,
+            #[cfg(test)]
+            test_pre_send_hold: None,
             relay_quic_pool: None,
             gateway_config,
             principal_commitment,

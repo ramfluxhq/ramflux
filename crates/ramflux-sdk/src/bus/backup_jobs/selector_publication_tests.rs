@@ -25,7 +25,6 @@ struct Fixture {
     root: Root,
     payload_only: bool,
     reader: ramflux_storage::AccountDb,
-    hold: Option<ramflux_storage::PreSendObjectHold>,
     wire: String,
     manifest: String,
 }
@@ -46,13 +45,12 @@ impl Fixture {
         let mut donor = ramflux_sync::ObjectStore::new();
         let object = donor.put_encrypted_object("publication-wire", b"publication-private-body")?;
         let key = donor.object_key(&object.object_id)?;
-        let hold = if payload_only {
+        if payload_only {
             db.retain_object(
                 &object.object_id,
                 &object.manifest_hash,
                 ramflux_storage::ObjectRetention::PreSend { expires_at: i64::MAX },
             )?;
-            None
         } else {
             for (message, selector, hash) in [
                 ("survivor", object.object_id.as_str(), "wire-reference"),
@@ -66,8 +64,7 @@ impl Fixture {
             }
             db.persist_actor_state(&format!("attachment/reference/{ALIAS}"), &json!({"reference":{"object_id":object.object_id,"manifest_hash":object.manifest_hash}}))?;
             db.set_object_tombstoned(ALIAS)?;
-            None
-        };
+        }
         db.upsert_object(&ObjectWrite {
             object_id: &object.object_id,
             manifest_hash: &object.manifest_hash,
@@ -86,7 +83,6 @@ impl Fixture {
             root,
             payload_only,
             reader,
-            hold,
             wire: object.object_id,
             manifest: object.manifest_hash,
         })
@@ -97,15 +93,12 @@ impl Fixture {
         let wire = self.wire.clone();
         let manifest = self.manifest.clone();
         let payload_only = self.payload_only;
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let initial: crate::bus::actor::AccountInitializer = Box::new(move |index| {
-            let state = super::native_tests::initialize(&root, index)?;
-            let hold = if payload_only {
-                Some(state.client.account_db()?.pre_send_object_hold(&wire, &manifest)?)
-            } else {
-                None
-            };
-            sender.send(hold).map_err(|_| SdkError::LocalBus("fixture receiver dropped".into()))?;
+            let mut state = super::native_tests::initialize(&root, index)?;
+            if payload_only {
+                state.test_pre_send_hold =
+                    Some(state.client.account_db()?.pre_send_object_hold(&wire, &manifest)?);
+            }
             Ok(state)
         });
         let supervisor = crate::bus::supervisor::Supervisor::from_initializers(
@@ -113,18 +106,14 @@ impl Fixture {
             vec![("account".into(), initial)],
             Some("account".into()),
         )?;
-        self.hold = guard(
-            receiver.recv_timeout(Duration::from_secs(120)),
-            "actor fixture initialization timed out",
-        )?;
         supervisor.start_test_event_router();
         Ok(supervisor)
     }
     async fn erase(&mut self, supervisor: &crate::bus::supervisor::Supervisor) -> TestResult {
-        if let Some(hold) = self.hold.take() {
+        if self.payload_only {
             // Release on the account actor: the hold shares the actor's SQLite connection.
             let actor = supervisor.account_actor("account").ok_or("actor")?;
-            actor.release_pre_send_hold(hold).await?;
+            actor.release_pre_send_hold().await?;
             assert!(matches!(
                 self.reader.check_object_identity(&self.wire, &self.manifest),
                 Err(ramflux_storage::StorageError::ObjectErased)

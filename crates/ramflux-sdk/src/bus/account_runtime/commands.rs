@@ -90,8 +90,15 @@ impl AccountRuntime {
                 let _ = release.await;
             }
             #[cfg(test)]
-            super::super::actor::PrivateCommand::ReleasePreSendHold { hold, reply } => {
-                let _ = reply.send(hold.release().map_err(SdkError::from));
+            super::super::actor::PrivateCommand::ReleasePreSendHold { reply } => {
+                let result = self
+                    .state
+                    .accounts
+                    .get_mut(&self.id)
+                    .and_then(|account| account.test_pre_send_hold.take())
+                    .ok_or_else(|| SdkError::LocalBus("fixture pre-send hold missing".into()))
+                    .and_then(|hold| hold.release().map_err(SdkError::from));
+                let _ = reply.send(result);
             }
             super::super::actor::PrivateCommand::NativeUnlock {
                 passphrase,

@@ -29,7 +29,6 @@ pub(super) enum PrivateCommand {
     },
     #[cfg(test)]
     ReleasePreSendHold {
-        hold: Box<ramflux_storage::PreSendObjectHold>,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
     NativeUnlock {
@@ -235,12 +234,9 @@ impl AccountActor {
     /// Releases a pre-send hold on the actor so it never shares the account connection across
     /// threads (the connection tracks one transaction at a time and is not a cross-thread lock).
     #[cfg(test)]
-    pub(super) async fn release_pre_send_hold(
-        &self,
-        hold: ramflux_storage::PreSendObjectHold,
-    ) -> Result<(), SdkError> {
+    pub(super) async fn release_pre_send_hold(&self) -> Result<(), SdkError> {
         let (reply, response) = oneshot::channel();
-        self.send_private(PrivateCommand::ReleasePreSendHold { hold: Box::new(hold), reply })?;
+        self.send_private(PrivateCommand::ReleasePreSendHold { reply })?;
         response.await.map_err(|_| stopped())?
     }
 

@@ -5,6 +5,13 @@
 use super::*;
 
 /// Owns a bounded, provisional retention claim until send success converts it to message edges.
+///
+/// This guard is thread-affine because its cleanup uses the account actor's SQLite connection.
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<ramflux_storage::PreSendObjectHold>();
+/// ```
 pub struct PreSendObjectHold {
     connection: crate::database::Connection,
     segment_cleanup_pending: Arc<std::sync::atomic::AtomicBool>,
@@ -13,6 +20,7 @@ pub struct PreSendObjectHold {
     armed: bool,
     resources: resources::Resources,
     generations: generation::Resources,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl PreSendObjectHold {
@@ -97,6 +105,7 @@ impl AccountDb {
             armed: true,
             resources: Arc::clone(&self.object_retirement.resources),
             generations: Arc::clone(&self.object_retirement.generations),
+            _not_send: std::marker::PhantomData,
         })
     }
 }
