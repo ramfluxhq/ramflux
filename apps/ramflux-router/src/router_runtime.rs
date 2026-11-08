@@ -26,6 +26,9 @@ pub(crate) struct TokioRouterRuntime {
     /// Fixture-scoped, always-active ingress observation; compiled only into unit tests.
     #[cfg(test)]
     ingress_probe: IngressProbe,
+    /// Per-router injected clock for ephemeral HTTP tests. Production stays None.
+    #[cfg(test)]
+    ephemeral_now_ms: std::sync::Mutex<Option<u64>>,
 }
 
 #[cfg(test)]
@@ -76,6 +79,8 @@ impl TokioRouterRuntime {
             migration_drain: std::sync::OnceLock::new(),
             #[cfg(test)]
             ingress_probe: IngressProbe::default(),
+            #[cfg(test)]
+            ephemeral_now_ms: std::sync::Mutex::new(None),
         }
     }
 }
@@ -172,6 +177,29 @@ impl RouterHandle {
     pub(crate) fn store(&self) -> &ramflux_node_core::RouterRedbStore {
         match self {
             Self::Tokio(runtime) => runtime.store.as_ref(),
+        }
+    }
+
+    /// Inject the ephemeral HTTP clock for this router only.
+    #[cfg(test)]
+    pub(crate) fn set_ephemeral_now_ms(&self, now_ms: Option<u64>) {
+        match self {
+            Self::Tokio(runtime) => {
+                *runtime
+                    .ephemeral_now_ms
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = now_ms;
+            }
+        }
+    }
+
+    /// Test clock for `/mvp0/envelope-ephemeral`, or `None` for the wall clock.
+    #[cfg(test)]
+    pub(crate) fn ephemeral_now_ms(&self) -> Option<u64> {
+        match self {
+            Self::Tokio(runtime) => {
+                *runtime.ephemeral_now_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
         }
     }
 

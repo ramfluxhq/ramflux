@@ -117,19 +117,13 @@ fn bound_nack(
     }
 }
 
-#[cfg(test)]
-static EPHEMERAL_NOW_MS: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
-
-#[cfg(test)]
-pub(crate) fn set_ephemeral_now_ms(now_ms: Option<u64>) {
-    *EPHEMERAL_NOW_MS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = now_ms;
-}
-
-fn envelope_now_ms() -> u64 {
+fn envelope_now_ms(router: &crate::router_runtime::RouterHandle) -> u64 {
     #[cfg(test)]
-    if let Some(now) = *EPHEMERAL_NOW_MS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+    if let Some(now) = router.ephemeral_now_ms() {
         return now;
     }
+    #[cfg(not(test))]
+    let _router = router;
     ramflux_node_core::now_unix_seconds().saturating_mul(1_000)
 }
 
@@ -138,8 +132,11 @@ fn envelope_ephemeral(
     router: &crate::router_runtime::RouterHandle,
 ) -> anyhow::Result<MeshResponse> {
     let request = ramflux_protocol::parse_i_json::<ramflux_node_core::EphemeralRouteRequest>(body)?;
-    let result =
-        router.state().route_ephemeral(&request.envelope, request.expires_at_ms, envelope_now_ms());
+    let result = router.state().route_ephemeral(
+        &request.envelope,
+        request.expires_at_ms,
+        envelope_now_ms(router),
+    );
     reply(&result.into_response())
 }
 

@@ -159,10 +159,10 @@ fn assert_no_dispatch(router: &RouterHandle, target: &str, response: &EphemeralR
     assert_eq!(dispatch_of(router, target), zero_dispatch(), "inbox and home-node forwards");
 }
 
-struct NowMsGuard;
-impl Drop for NowMsGuard {
+struct NowMsGuard<'a>(&'a RouterHandle);
+impl Drop for NowMsGuard<'_> {
     fn drop(&mut self) {
-        super::set_ephemeral_now_ms(None);
+        self.0.set_ephemeral_now_ms(None);
     }
 }
 
@@ -450,10 +450,10 @@ fn ephemeral_deadline() -> TestResult {
     let mismatch =
         router.state().route_ephemeral(&mismatch_env, mismatch_expires.saturating_add(1), now_ms());
     assert_eq!(mismatch, EphemeralRouteResult::DeadlineMismatch);
-    let _now = NowMsGuard;
+    let _now = NowMsGuard(&router);
     let http_env = signed_ephemeral("deadline-http", TARGET)?;
     let http_expires = computed_expires(&http_env, now_ms())?;
-    super::set_ephemeral_now_ms(Some(http_expires.saturating_sub(1)));
+    router.set_ephemeral_now_ms(Some(http_expires.saturating_sub(1)));
     let http = observe_post(&router, &path, TARGET, &request_body(&http_env, http_expires)?)?;
     assert_eq!(
         http,
@@ -466,13 +466,13 @@ fn ephemeral_deadline() -> TestResult {
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Replayed }
     );
     assert_no_dispatch(&router, TARGET, &http_replayed);
-    super::set_ephemeral_now_ms(Some(http_expires));
+    router.set_ephemeral_now_ms(Some(http_expires));
     let http_at_d = observe_post(&router, &path, TARGET, &request_body(&http_env, http_expires)?)?;
     assert_eq!(http_at_d, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired });
     assert_no_dispatch(&router, TARGET, &http_at_d);
     let fresh_at_d = signed_ephemeral("deadline-http-d", TARGET)?;
     let fresh_expires = computed_expires(&fresh_at_d, now_ms())?;
-    super::set_ephemeral_now_ms(Some(fresh_expires));
+    router.set_ephemeral_now_ms(Some(fresh_expires));
     let http_fresh_expired =
         observe_post(&router, &path, TARGET, &request_body(&fresh_at_d, fresh_expires)?)?;
     assert_eq!(
@@ -480,7 +480,7 @@ fn ephemeral_deadline() -> TestResult {
         EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired }
     );
     assert_no_dispatch(&router, TARGET, &http_fresh_expired);
-    super::set_ephemeral_now_ms(Some(mismatch_expires.saturating_sub(1)));
+    router.set_ephemeral_now_ms(Some(mismatch_expires.saturating_sub(1)));
     let http_mismatch = observe_post(
         &router,
         &path,
