@@ -402,7 +402,7 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
     let families: Vec<Family> = kinds.iter().map(|k| Family::new(k)).collect();
     // The local account holds every message and deletes it: it has no source of its own.
     let mut messages: Vec<String> = families.iter().map(|f| f.message.clone()).collect();
-    messages.extend(["A".to_owned(), "L".to_owned()]);
+    messages.extend(["A".to_owned(), "L".to_owned(), "LA".to_owned()]);
     messages.extend(EXTRA_MESSAGES.map(str::to_owned));
     for id in &messages {
         p.local.send_direct_message("thread", id, "peer", b"x")?;
@@ -491,6 +491,30 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         |r| r.get(0),
     )?;
     assert_eq!(unfootprinted, 0, "the legacy replay row has no footprint");
+    // Rule C archived_actor: an archived legacy/replay row with no footprint.
+    carrier.send_direct_message("thread", "LA", "peer", b"x")?;
+    carrier
+        .connection
+        .execute("INSERT INTO message_copy_binding VALUES('payload:p-legacy-archived','LA')", [])?;
+    carrier.connection.execute(
+        "INSERT INTO backup_archived_actor_state VALUES('s','legacy/replay/committed/archived',?1)",
+        params![body("p-legacy-archived", now)],
+    )?;
+    let archived_rowid: i64 = carrier.connection.query_row(
+        "SELECT rowid FROM backup_archived_actor_state WHERE state_kind='legacy/replay/committed/archived'",
+        [],
+        |r| r.get(0),
+    )?;
+    carrier.connection.execute(
+        "DELETE FROM message_footprint WHERE kind='archived_actor' AND locator=?1",
+        params![archived_rowid.to_string()],
+    )?;
+    let unfootprinted_archived: i64 = carrier.connection.query_row(
+        "SELECT count(*) FROM message_footprint WHERE kind='archived_actor' AND locator=?1",
+        params![archived_rowid.to_string()],
+        |r| r.get(0),
+    )?;
+    assert_eq!(unfootprinted_archived, 0, "the archived legacy replay row has no footprint");
     let incoming = p.root.join("incoming.db");
     let incoming_snapshot = carrier.write_backup_snapshot(&incoming)?;
     let path = p.root.join("merged.db");
@@ -522,6 +546,7 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         ("archived_actor", "p-archived"),
         ("archived_event", "p-archived-event"),
         ("legacy_replay_rule_c", "p-legacy"),
+        ("legacy_replay_rule_c_archived", "p-legacy-archived"),
     ] {
         let (_, selector) = current(&p.local, "ip", "id", payload)?;
         expected.push(Want {
@@ -543,6 +568,12 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         // Every footprint store and kind that the seeded databases carry is classified.
         classification_guard(db).expect("every footprint store and kind is classified");
         assert_eq!(tombstone_count(db)?, i64::try_from(expected.len()).expect("count"));
+        let archived: i64 = db.query_row(
+            "SELECT count(*) FROM backup_archived_actor_state WHERE state_kind='group-transfer/p-archived'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(archived, 0, "both archived group-transfer copies are erased");
         Ok(())
     };
     verify(&merged.db)?;

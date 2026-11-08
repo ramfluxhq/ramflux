@@ -48,11 +48,24 @@ impl ReceiveTransaction<'_> {
     /// # Errors
     /// Rejects invalid normalized input, stale transaction authority and storage failures.
     pub fn stage(&self, input: ReceiveStage<'_>) -> Result<ReceiveStageResult, StorageError> {
-        self.require_writer()?;
-        self.db.write_transaction(|| self.stage_inner(input))
+        self.stage_at(input, crate::unix_now())
     }
 
-    fn stage_inner(&self, input: ReceiveStage<'_>) -> Result<ReceiveStageResult, StorageError> {
+    /// `stage` against an explicit clock, so expiry boundaries are tested without sleeps.
+    pub(crate) fn stage_at(
+        &self,
+        input: ReceiveStage<'_>,
+        now: i64,
+    ) -> Result<ReceiveStageResult, StorageError> {
+        self.require_writer()?;
+        self.db.write_transaction(|| self.stage_inner(input, now))
+    }
+
+    fn stage_inner(
+        &self,
+        input: ReceiveStage<'_>,
+        now: i64,
+    ) -> Result<ReceiveStageResult, StorageError> {
         if input.target != self.target || input.incarnation != self.incarnation {
             return Err(StorageError::Integrity("receive stage authority mismatch"));
         }
@@ -118,7 +131,7 @@ impl ReceiveTransaction<'_> {
         if slots >= WORK_LIMIT {
             return Ok(ReceiveStageResult::PausedIntents);
         }
-        if self.db.erased_input_matches(&entry.envelope)? {
+        if self.db.erased_input_matches_at(&entry.envelope, now)? {
             self.record_erased_replay(input)?;
             return Ok(ReceiveStageResult::Erased);
         }

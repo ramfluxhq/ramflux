@@ -36,6 +36,10 @@ pub(super) fn input(bytes: &[u8], sequence: u64) -> ReceiveStage<'_> {
     }
 }
 pub(super) fn run(db: &AccountDb, input: ReceiveStage<'_>) -> Result<R, StorageError> {
+    run_at(db, input, crate::unix_now())
+}
+
+pub(super) fn run_at(db: &AccountDb, input: ReceiveStage<'_>, now: i64) -> Result<R, StorageError> {
     db.receive_transaction(
         ReceiveExpectation {
             target: "t",
@@ -45,7 +49,7 @@ pub(super) fn run(db: &AccountDb, input: ReceiveStage<'_>) -> Result<R, StorageE
             erasure_generation: db.privacy_erasure_generation()?,
         },
         1,
-        |tx| tx.stage(input),
+        |tx| tx.stage_at(input, now),
     )
 }
 fn clear(db: &AccountDb) -> Result<(), StorageError> {

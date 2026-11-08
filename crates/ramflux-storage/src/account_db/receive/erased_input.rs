@@ -3,15 +3,17 @@
 
 //! Tombstones of deleted authenticated inputs. A row holds only MAC selectors, the bundle that
 //! produced each, and an expiry; it never holds an id, ciphertext or message link.
-//! `record_erased_input` is the store API; live capture inserts the same rows through SQL.
-#![allow(dead_code)]
+//! Live capture inserts those rows through SQL; `record_erased_input` is the test store API.
 use crate::{AccountDb, StorageError};
 use rusqlite::params;
 
 const LABEL: &[u8] = b"ramflux/deleted-envelope/v1";
 /// Router clock skew and envelope TTL caps (`ramflux-node-core` replay guard), plus slack.
+#[cfg(test)]
 const MAX_CLOCK_SKEW: i64 = 120;
+#[cfg(test)]
 const MAX_ENVELOPE_TTL: i64 = 604_800;
+#[cfg(test)]
 const SLACK: i64 = 300;
 /// Expired rows removed by each write.
 pub(crate) const SWEEP: i64 = 64;
@@ -64,6 +66,7 @@ impl AccountDb {
     ///
     /// # Errors
     /// Returns storage or canonicalization errors.
+    #[cfg(test)]
     pub(crate) fn record_erased_input(
         &self,
         tuple: &ErasedTuple<'_>,
@@ -74,6 +77,7 @@ impl AccountDb {
     }
 
     /// `record_erased_input` against an explicit clock, so boundaries are tested without sleeps.
+    #[cfg(test)]
     pub(crate) fn record_erased_input_at(
         &self,
         tuple: &ErasedTuple<'_>,
@@ -105,6 +109,7 @@ impl AccountDb {
     ///
     /// # Errors
     /// Returns storage or canonicalization errors.
+    #[cfg(test)]
     pub(crate) fn erased_input_matches(
         &self,
         envelope: &ramflux_protocol::Envelope,

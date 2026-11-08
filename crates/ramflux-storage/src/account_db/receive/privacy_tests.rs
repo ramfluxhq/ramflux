@@ -6,7 +6,7 @@
 use super::ReceiveExpectation;
 use super::privacy::ReceiveBind;
 use super::stage_tests::{
-    entry, footprints, input, locator, receipt_state, run, setup, work_for, work_rows,
+    entry, footprints, input, locator, receipt_state, run, run_at, setup, work_for, work_rows,
 };
 use crate::{AccountDb, StorageError};
 use rusqlite::params;
@@ -222,11 +222,18 @@ fn fresh_sequence_replay_of_an_erased_tuple() -> Result<(), StorageError> {
     let other_device = fresh_entry(8, "HK", "kp", "other-device");
     assert_eq!(run(&db, input(&other_device, 8))?, R::Staged);
     assert_eq!(work_for(&db, 8)?, 1);
-    // (n) An expired tombstone no longer erases: the same tuple stages again.
-    db.connection.execute("UPDATE receive_erased_input SET expires_at=1", [])?;
-    let expired = fresh_entry(9, "HK", "kp", "kd");
-    assert_eq!(run(&db, input(&expired, 9))?, R::Staged);
+    // (n) Exact expiry boundary at W0: live means expires_at > now. Inclusive at both ends,
+    // pinned through stage_at so the test does not wait on the wall clock.
+    let now = crate::unix_now();
+    db.connection.execute("UPDATE receive_erased_input SET expires_at=?1", params![now])?;
+    let at_now = fresh_entry(9, "HK", "kp", "kd");
+    assert_eq!(run_at(&db, input(&at_now, 9), now)?, R::Staged);
     assert_eq!(work_for(&db, 9)?, 1);
+    db.connection.execute("UPDATE receive_erased_input SET expires_at=?1", params![now + 1])?;
+    let at_plus = fresh_entry(10, "HK", "kp", "kd");
+    assert_eq!(run_at(&db, input(&at_plus, 10), now)?, R::Erased);
+    assert_eq!(work_for(&db, 10)?, 0);
+    assert_eq!(receipt_state(&db, 10)?.as_deref(), Some("erased"));
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

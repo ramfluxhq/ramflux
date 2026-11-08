@@ -307,16 +307,20 @@ fn parse_binding(copy_id: &str) -> Result<(String, String, i64), StorageError> {
     Ok((bundle.to_owned(), selector.to_owned(), expires_at))
 }
 
-/// Live message -> payload hashes bound to it (`P_X(M)`).
+/// Message -> payload hashes bound to it (`P_X(M)`). Local capture reads live rows only;
+/// incoming also reads leftover copies of already-deleted messages so a mid-merge re-fire
+/// still yields a tombstone.
 fn payload_sets(
     db: &Connection,
     schema: &str,
     only: Option<&BTreeSet<&str>>,
+    include_deleted: bool,
 ) -> rusqlite::Result<BTreeMap<String, BTreeSet<String>>> {
     let scope = in_list("b", only);
+    let deleted = if include_deleted { "" } else { " AND m.deleted=0" };
     let mut query = db.prepare(&format!(
         "SELECT b.message_id,substr(b.copy_id,9) FROM {schema}.message_copy_binding b \
-         JOIN {schema}.direct_message_projection m ON m.message_id=b.message_id AND m.deleted=0 \
+         JOIN {schema}.direct_message_projection m ON m.message_id=b.message_id{deleted} \
          WHERE b.copy_id GLOB 'payload:*'{scope}"
     ))?;
     let mut sets: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -464,7 +468,7 @@ fn collect(
     only: Option<&BTreeSet<&str>>,
 ) -> Result<Vec<Candidate>, StorageError> {
     let schema = side.schema();
-    let payloads = payload_sets(db, schema, only)?;
+    let payloads = payload_sets(db, schema, only, side == Side::Incoming)?;
     let binding_scope = in_list("b", only);
     let footprint_scope = in_list("f", only);
     let mut found: Vec<Candidate> = Vec::new();
@@ -513,10 +517,11 @@ fn collect(
             } else {
                 String::new()
             };
+            let live_only = if side == Side::Incoming { "" } else { " AND m.deleted=0" };
             format!(
                 "SELECT f.message_id,CAST(t.{col} AS BLOB) FROM {schema}.message_footprint f \
                  JOIN {schema}.{table} t ON {locator}=f.locator \
-                 JOIN {schema}.direct_message_projection m ON m.message_id=f.message_id AND m.deleted=0 \
+                 JOIN {schema}.direct_message_projection m ON m.message_id=f.message_id{live_only} \
                  WHERE f.kind='{kind}'{footprint_scope}{legacy}",
                 col = source.column,
                 table = source.table,

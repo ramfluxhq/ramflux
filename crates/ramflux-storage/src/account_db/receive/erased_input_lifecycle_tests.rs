@@ -198,6 +198,9 @@ fn erased_input_restore_union_lifecycle_local_sources() -> Result<(), StorageErr
     p.source
         .connection
         .execute("INSERT INTO message_copy_binding VALUES('payload:pvii-copy','M')", [])?;
+    let (_, copy_selector) = current(&p.local, "rp", "rd", "pvii-copy")?;
+    let copy_tuple = tuple("rp", "rd", "pvii-copy");
+    let copy_expires_at = now + 3_900;
     let before: i64 = p.source.connection.query_row(
         "SELECT count(*) FROM runtime_actor_state WHERE state_kind='routed/committed/pvii-copy'",
         [],
@@ -213,13 +216,14 @@ fn erased_input_restore_union_lifecycle_local_sources() -> Result<(), StorageErr
         )?;
         assert_eq!(rows, 0, "the re-fired copy is erased by the merge");
         assert_eq!(expiry(db, &vii.selector)?, Some(vii.expires_at));
+        assert_eq!(expiry(db, &copy_selector)?, Some(copy_expires_at));
         Ok(())
     };
     gone(&merged.db)?;
     drop(merged);
     gone(&BackupDatabase::open(&path, &key)?.db)?;
     let index = install(&p.root, "w0-installed", &path, &key)?;
-    assert_erased_after_reopen(&index, &key, std::slice::from_ref(&vii.tuple))?;
+    assert_erased_after_reopen(&index, &key, &[vii.tuple.clone(), copy_tuple])?;
     // (viii) Over-capture is discarded: M ends the merge live, so no row exists for its tuples.
     let p = pair("erased-life-viii")?;
     both_have_message(&p)?;
