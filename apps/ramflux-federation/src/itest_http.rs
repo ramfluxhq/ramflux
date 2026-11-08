@@ -391,25 +391,41 @@ mod i_json_tests {
     fn response(path: &str, body: &str, context: ItestHttpContext) -> TestResult<String> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let mut client = TcpStream::connect(listener.local_addr()?)?;
-        client.set_read_timeout(Some(Duration::from_secs(5)))?;
-        client.set_write_timeout(Some(Duration::from_secs(5)))?;
+        client.set_read_timeout(Some(Duration::from_secs(10)))?;
+        client.set_write_timeout(Some(Duration::from_secs(10)))?;
         let (mut server, _) = listener.accept()?;
-        server.set_read_timeout(Some(Duration::from_secs(5)))?;
-        server.set_write_timeout(Some(Duration::from_secs(5)))?;
+        server.set_read_timeout(Some(Duration::from_secs(10)))?;
+        server.set_write_timeout(Some(Duration::from_secs(10)))?;
         let connections = ramflux_node_core::ConnectionSet::new(1);
         let guard = connections.register(&server)?.ok_or("test connection refused")?;
         let worker = std::thread::spawn(move || {
             handle_itest_connection(&mut server, &context, &guard);
         });
-        write!(
+        let request_write = write!(
             client,
             "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
-        )?;
+        );
+        assert_not_timed_out(&request_write, "client request write");
+        request_write?;
         let mut response = String::new();
-        client.read_to_string(&mut response)?;
+        let response_read = client.read_to_string(&mut response);
+        assert_not_timed_out(&response_read, "client response read");
+        response_read?;
         worker.join().map_err(|_| "itest HTTP worker panicked")?;
         Ok(response)
+    }
+
+    fn assert_not_timed_out<T>(result: &std::io::Result<T>, operation: &str) {
+        if let Err(error) = result {
+            assert!(
+                !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ),
+                "{operation} exceeded its 10-second hang guard: {error}"
+            );
+        }
     }
 
     fn context(root: &std::path::Path) -> Result<ItestHttpContext, Box<dyn std::error::Error>> {

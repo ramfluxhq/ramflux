@@ -597,7 +597,10 @@ async fn handle_mesh_quic_request(
             inbound_transport: MeshInboundTransport::Quic,
         },
     )?;
-    if (200..300).contains(&response.status) || response.body["reason_code"] == "capacity" {
+    if (200..300).contains(&response.status)
+        || response.body["reason_code"] == "capacity"
+        || response.body["reason_code"] == "i_json_rejected"
+    {
         accepted
             .write_json_response(response.status, &response.body)
             .await
@@ -657,7 +660,10 @@ async fn handle_mesh_compio_quic_request(
             inbound_transport: MeshInboundTransport::Quic,
         },
     )?;
-    if (200..300).contains(&response.status) || response.body["reason_code"] == "capacity" {
+    if (200..300).contains(&response.status)
+        || response.body["reason_code"] == "capacity"
+        || response.body["reason_code"] == "i_json_rejected"
+    {
         accepted
             .write_json_response(response.status, &response.body)
             .await
@@ -1054,12 +1060,20 @@ pub(crate) mod tests {
         source_seed: [u8; 32],
     ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>>
     {
+        signed_forward_for_mesh_at(source_seed, unix_now_seconds()?)
+    }
+
+    pub(crate) fn signed_forward_for_mesh_at(
+        source_seed: [u8; 32],
+        created_at: i64,
+    ) -> Result<ramflux_node_core::FederatedEnvelopeForwardRequest, Box<dyn std::error::Error>>
+    {
         use ramflux_node_core::test_support::federation_fixtures::root_bound_forward;
         let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
         let mut forward = root_bound_forward(&root, "device", None, "ijson-signed-forward")?;
         forward.source_node_id = "node-b".to_owned();
         forward.target_node_id = "node-a".to_owned();
-        forward.envelope.created_at = unix_now_seconds()?;
+        forward.envelope.created_at = created_at;
         forward.envelope.ext.ext.insert("x_probe".to_owned(), serde_json::json!("v"));
         forward.envelope.signed.signature = ramflux_crypto::sign_canonical_bytes(
             &ramflux_protocol::envelope_sender_signed_bytes(&forward.envelope)?,
@@ -1305,14 +1319,19 @@ pub(crate) mod tests {
             &valid_text[..value_start],
             &valid_text[value_start + value_len..]
         );
+        let upper_bound_text = serde_json::to_string(&signed_forward_for_mesh_at(
+            source_seed,
+            9_007_199_254_740_991,
+        )?)?;
         let rows = [
-            ("duplicate", duplicate_text.as_str(), false),
-            ("unsafe_integer", unsafe_created_at.as_str(), false),
-            ("control", valid_text.as_str(), true),
+            ("duplicate", duplicate_text.as_str(), Expected::IJsonRefusal),
+            ("unsafe_integer", unsafe_created_at.as_str(), Expected::IJsonRefusal),
+            ("upper_bound", upper_bound_text.as_str(), Expected::ReachedHandler),
+            ("control", valid_text.as_str(), Expected::Accepted),
         ];
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
 
-        for (label, text, accepted) in rows {
+        for (label, text, expected) in rows {
             let (mut context, store_path) =
                 test_mesh_server_context("federation-ijson-compio-quic")?;
             context.state = Arc::new(crate::SharedFederationTrustState::new(
@@ -1344,25 +1363,40 @@ pub(crate) mod tests {
             let router_calls = router.finish()?;
             let seen_after = store.inbound_forward_seen_count()?;
 
-            if accepted {
-                let parsed: ramflux_transport::GatewayQuicResponse =
-                    serde_json::from_slice(&response)?;
-                assert_eq!(parsed.status, 200, "{label} control: {parsed:?}");
-                assert!(parsed.body["accepted"].as_bool().unwrap_or(false), "{label} control");
-                assert_eq!(router_calls, 1, "{label} router calls");
-                assert_eq!(seen_after, seen_before + 1, "{label} seen rows");
-            } else {
-                assert_eq!(response, REFUSAL_FRAME, "{label} exact D3 refusal frame");
-                assert_eq!(router_calls, 0, "{label} router calls");
-                assert_eq!(seen_after, seen_before, "{label} seen rows");
+            match expected {
+                Expected::Accepted => {
+                    let parsed: ramflux_transport::GatewayQuicResponse =
+                        serde_json::from_slice(&response)?;
+                    assert_eq!(parsed.status, 200, "{label} control: {parsed:?}");
+                    assert!(parsed.body["accepted"].as_bool().unwrap_or(false), "{label} control");
+                    assert_eq!(router_calls, 1, "{label} router calls");
+                    assert_eq!(seen_after, seen_before + 1, "{label} seen rows");
+                    assert_eq!(store.list_pending_outbound(100)?, pending_before, "{label} spool");
+                }
+                Expected::IJsonRefusal => {
+                    assert_eq!(response, REFUSAL_FRAME, "{label} exact D3 refusal frame");
+                    assert_eq!(router_calls, 0, "{label} router calls");
+                    assert_eq!(seen_after, seen_before, "{label} seen rows");
+                    assert_eq!(store.list_pending_outbound(100)?, pending_before, "{label} spool");
+                }
+                Expected::ReachedHandler => {
+                    assert_ne!(response, REFUSAL_FRAME, "{label} must pass the strict decoder");
+                }
             }
-            assert_eq!(store.list_pending_outbound(100)?, pending_before, "{label} spool");
             drop(store);
             cleanup_store(&store_path);
         }
 
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
+    #[derive(Clone, Copy)]
+    enum Expected {
+        IJsonRefusal,
+        ReachedHandler,
+        Accepted,
     }
 
     fn issue_rsa_mesh_certificates(
