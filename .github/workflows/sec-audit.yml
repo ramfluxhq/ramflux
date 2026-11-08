@@ -40,7 +40,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
 
+      # Install cargo-deny from crates.io (same pinned version the action used) instead of the
+      # action's GitHub-release tarball download, so a release-asset outage cannot block the gate.
+      - name: Install cargo-deny
+        working-directory: /tmp
+        run: cargo install cargo-deny --locked --version 0.19.8
+
       - name: Cargo deny
-        uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe
-        with:
-          command: check advisories bans licenses sources
+        run: cargo deny --all-features check advisories bans licenses sources
