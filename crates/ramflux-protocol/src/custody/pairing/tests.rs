@@ -500,3 +500,5 @@ mod native_relay;
 mod channel_local;
 
 mod local_vectors;
+
+mod channel_transfer_bounds;

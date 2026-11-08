@@ -59,6 +59,30 @@ payload = dict(schema='ramflux.identity.transfer.payload.v1', version=1, transfe
 objects['TransferPayload'] = payload
 for kind, total, count in [('hpke',819200,100), ('candidate',524288,64)]:
     objects['Channel_'+kind] = obj('Channel', invitation_id=b(1), transcript_hash=b(2), payload=dict(kind='artifact_chunk', object_kind=kind, object_id=b(1), index=count-1, count=count, total_bytes=total, bytes=b(1,8192)))
+# Reach the complete HPKE envelope cap independently. Vary only a valid Ref id's
+# JSON escaping to land on a base64 ciphertext length that exactly fills 819200.
+for escaped in range(129):
+    sender = ref('p')
+    sender['device_id'] = '"'*escaped + 'x'*(128-escaped)
+    binding = dict(schema='ramflux.identity.transfer_binding.v1', version=1, transfer_id=b(1), transcript_hash=b(2), current_record_hash=b(3), device_set_epoch=U, sender_device_ref=sender, sender_hpke_key=b(8), recipient_hpke_key=b(9), issued_at=U-300, expires_at=U)
+    hpke = dict(schema='ramflux.identity.transfer.hpke.v1', version=1, transfer_id=b(1), transcript_hash=b(2), current_record_hash=b(3), device_set_epoch=U, sender_binding=signed(binding), enc=b(10), ciphertext='')
+    cipher_chars = 819200 - len(canon(hpke).encode())
+    residue = cipher_chars % 4
+    if residue == 0:
+        raw_size = cipher_chars // 4 * 3
+    elif residue == 2:
+        raw_size = cipher_chars // 4 * 3 + 1
+    elif residue == 3:
+        raw_size = cipher_chars // 4 * 3 + 2
+    else:
+        continue
+    if 16 <= raw_size <= 1_048_592:
+        hpke['ciphertext'] = b(0, raw_size)
+        if len(canon(hpke).encode()) == 819200:
+            objects['HpkeEnvelopeMax'] = hpke
+            break
+else:
+    raise AssertionError('could not construct exact HPKE envelope maximum')
 encoded = {key: dict(wire=canon(value), size=len(canon(value).encode())) for key,value in objects.items()}
 result = json.dumps(encoded, ensure_ascii=False, indent=2, sort_keys=True) + '\n'
 path = ROOT / 'maxima.json'
