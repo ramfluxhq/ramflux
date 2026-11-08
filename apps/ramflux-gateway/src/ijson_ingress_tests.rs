@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+use std::collections::VecDeque;
 use std::io::Read;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
+
+use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 
 const EXPECTED_HTTP_BODY: &[u8] = br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#;
 const EXPECTED_SESSION_NACK: &[u8] = br#"{"frame_type":"nack","reason":"gateway_request_invalid"}"#;
@@ -110,8 +113,27 @@ struct FakeRouter {
     client: crate::RouterMeshClient,
     calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-    task: std::thread::JoinHandle<Result<(), String>>,
+    wake: SocketAddr,
+    exited: std::sync::mpsc::Receiver<Result<(), String>>,
+    task: std::thread::JoinHandle<()>,
     cert_root: std::path::PathBuf,
+}
+
+impl FakeRouter {
+    /// Stops the blocking accept loop and waits at most 10 s for the router thread to exit.
+    fn finish(self) -> anyhow::Result<()> {
+        self.stop.store(true, Ordering::Release);
+        // A blocking accept returns only for a connection, so wake it after raising the flag.
+        let _ = TcpStream::connect(self.wake);
+        let result = self
+            .exited
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| anyhow::anyhow!("fake router did not stop within 10 s"))?;
+        self.task.join().map_err(|_| anyhow::anyhow!("fake router thread panicked"))?;
+        result.map_err(anyhow::Error::msg)?;
+        std::fs::remove_dir_all(&self.cert_root)?;
+        Ok(())
+    }
 }
 
 fn fake_router() -> anyhow::Result<FakeRouter> {
@@ -142,8 +164,8 @@ fn fake_router() -> anyhow::Result<FakeRouter> {
     std::fs::write(&client_tls.service_cert, &cert_pem)?;
     std::fs::write(&client_tls.service_key, &key_pem)?;
     let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &router_tls)?;
-    server.set_nonblocking(true)?;
-    let endpoint = server.local_addr()?.to_string();
+    let wake = server.local_addr()?;
+    let endpoint = wake.to_string();
     let client = crate::RouterMeshClient {
         endpoint,
         server_name: "ramflux-router".into(),
@@ -157,12 +179,19 @@ fn fake_router() -> anyhow::Result<FakeRouter> {
     let server_stop = Arc::clone(&stop);
     let gateway_ca = cert_pem;
     let server_tls = router_tls.clone();
-    let task = std::thread::spawn(move || -> Result<(), String> {
-        while !server_stop.load(Ordering::Acquire) {
-            match server
-                .accept_authenticated_with_pem_roots(&server_tls, std::slice::from_ref(&gateway_ca))
-            {
-                Ok(mut accepted) => {
+    let (exited_tx, exited) = std::sync::mpsc::channel();
+    let task = std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            while !server_stop.load(Ordering::Acquire) {
+                // Blocking accept: the stop path wakes it with a connection and then exits.
+                if let Ok(mut accepted) = server.accept_authenticated_with_pem_roots(
+                    &server_tls,
+                    std::slice::from_ref(&gateway_ca),
+                ) {
+                    // The stop wake-up connection is not a router request.
+                    if server_stop.load(Ordering::Acquire) {
+                        break;
+                    }
                     let request = ramflux_transport::read_mesh_http_request(&mut accepted.stream)
                         .map_err(|error| error.to_string())?
                         .ok_or("missing gateway request")?;
@@ -191,12 +220,12 @@ fn fake_router() -> anyhow::Result<FakeRouter> {
                     ramflux_transport::close_mesh_server_stream(&mut accepted.stream)
                         .map_err(|error| error.to_string())?;
                 }
-                Err(_) => std::thread::sleep(Duration::from_millis(5)),
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        let _ = exited_tx.send(result);
     });
-    Ok(FakeRouter { client, calls, stop, task, cert_root })
+    Ok(FakeRouter { client, calls, stop, wake, exited, task, cert_root })
 }
 
 fn http_request(
@@ -229,14 +258,16 @@ fn http_request(
     Ok((status, body.as_bytes().to_vec()))
 }
 
-fn http_rows_refuse_before_router() -> anyhow::Result<()> {
-    let fake = fake_router()?;
+fn http_rows_refuse_before_router(
+    router: &crate::RouterMeshClient,
+    calls: &AtomicUsize,
+) -> anyhow::Result<()> {
     for row in Row::ALL {
-        let baseline = fake.calls.load(Ordering::Acquire);
+        let baseline = calls.load(Ordering::Acquire);
         let nested = with_duplicate_extension(row.body(42)?)?;
-        let (status, body) = http_request(&fake.client, row.path(), nested)?;
+        let (status, body) = http_request(router, row.path(), nested)?;
         assert_eq!(
-            fake.calls.load(Ordering::Acquire),
+            calls.load(Ordering::Acquire),
             baseline,
             "router call on {} duplicate",
             row.path()
@@ -245,9 +276,9 @@ fn http_rows_refuse_before_router() -> anyhow::Result<()> {
         assert_eq!(body, EXPECTED_HTTP_BODY, "nested duplicate at {}", row.path());
 
         let unsafe_integer = with_timestamp(row, row.body(42)?, 9_007_199_254_740_992)?;
-        let (status, body) = http_request(&fake.client, row.path(), unsafe_integer)?;
+        let (status, body) = http_request(router, row.path(), unsafe_integer)?;
         assert_eq!(
-            fake.calls.load(Ordering::Acquire),
+            calls.load(Ordering::Acquire),
             baseline,
             "router call on {} unsafe integer",
             row.path()
@@ -256,22 +287,16 @@ fn http_rows_refuse_before_router() -> anyhow::Result<()> {
         assert_eq!(body, EXPECTED_HTTP_BODY, "unsafe integer at {}", row.path());
 
         let control = with_timestamp(row, row.body(42)?, 9_007_199_254_740_991)?;
-        let (status, body) = http_request(&fake.client, row.path(), control)?;
+        let (status, body) = http_request(router, row.path(), control)?;
         assert_eq!(status, "HTTP/1.1 200 OK", "safe endpoint at {}", row.path());
         assert!(!body.windows(b"i_json_rejected".len()).any(|window| window == b"i_json_rejected"));
         assert_eq!(
-            fake.calls.load(Ordering::Acquire),
+            calls.load(Ordering::Acquire),
             baseline + 1,
             "safe endpoint did not reach router at {}",
             row.path()
         );
     }
-    fake.stop.store(true, Ordering::Release);
-    fake.task
-        .join()
-        .map_err(|_| anyhow::anyhow!("fake router thread panicked"))?
-        .map_err(anyhow::Error::msg)?;
-    std::fs::remove_dir_all(fake.cert_root)?;
     Ok(())
 }
 
@@ -283,7 +308,117 @@ fn session_frame(timestamp: i64) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&ramflux_node_core::GatewayClientFrame::Submit { submit })?)
 }
 
-async fn tcp_session_frames_refuse_i_json() -> anyhow::Result<()> {
+/// Gateway context whose router is the counting fake, so every refusal can be checked for zero calls.
+fn context_with_router(
+    router: &crate::RouterMeshClient,
+) -> anyhow::Result<crate::GatewayQuicContext> {
+    let mut context = crate::session::tests::test_gateway_context()?;
+    context.router = router.clone();
+    Ok(context)
+}
+
+fn open_frame() -> anyhow::Result<ramflux_node_core::GatewayOpenFrame> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "protocol_version":ramflux_node_core::GATEWAY_SESSION_PROTOCOL_VERSION,"transport_kind":"quic_quinn","client_instance_id":"client","device_id":"device","target_delivery_id":"target","stream_nonce":"nonce","previous_session_id":null,"resume_token_hash":null,"last_seen_inbox_seq":null,"max_inflight_downstream":4,"max_inflight_upstream":4,"pre_auth_cookie":null,"pre_auth_now":null,"source_ip_hash":null
+    }))?)
+}
+
+/// Auth frame whose nested `device_epoch` token is supplied verbatim, so the fixture can carry
+/// a duplicate key or an unsafe integer.
+fn auth_frame_bytes(device_epoch: &str) -> Vec<u8> {
+    format!(
+        r#"{{"frame_type":"auth","auth":{{"signed_request":{{"schema":"ramflux.signed_request.v1","version":1,"domain":"ramflux.signed_request.v1","ext":{{}},"signing_key_id":"device","signature_alg":"ed25519","signature":"unused","source_device_id":"device","request_id":"auth","method":"POST","path":"/gateway/session/auth","device_proof_hash":"unused","body_hash":"unused","nonce":"nonce","created_at":1,"expires_at":2}},"device_proof":{{"schema":"ramflux.device_proof.v1","version":1,"domain":"ramflux.device_proof.v1","ext":{{}},"signing_key_id":"device","signature_alg":"ed25519","signature":"unused","principal_id":"alice","device_id":"device","device_epoch":{device_epoch},"branch_proof_hash":"unused","capability_scope":["gateway.session"],"nonce":"nonce","expires_at":2}}}}}}"#
+    )
+    .into_bytes()
+}
+
+type Future<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
+
+struct QueueSource(VecDeque<Vec<u8>>);
+
+impl GatewaySessionFrameSource for QueueSource {
+    fn recv_frame(&mut self) -> Future<'_, Vec<u8>> {
+        let next = self.0.pop_front();
+        Box::pin(async move {
+            next.ok_or_else(|| {
+                TransportError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+            })
+        })
+    }
+}
+
+struct RecordingSink(Arc<Mutex<Vec<Vec<u8>>>>);
+
+impl GatewaySessionFrameSink for RecordingSink {
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn send_frame<'a>(&'a mut self, body: &'a [u8]) -> Future<'a, ()> {
+        Box::pin(async move {
+            self.0.lock().map_err(|_| TransportError::LockPoisoned)?.push(body.to_vec());
+            Ok(())
+        })
+    }
+}
+
+/// Auth frames after a valid Open: the I-JSON refusal must write the exact Nack and end the
+/// session cleanly, with no router call. The 2^53-1 control must pass I-JSON and reach auth
+/// source admission, which refuses it without router IO because the fixture has no source root.
+async fn auth_frame_rows_refuse_i_json(
+    router: &crate::RouterMeshClient,
+    calls: &AtomicUsize,
+) -> anyhow::Result<()> {
+    let refused = [
+        ("nested duplicate device_epoch", auth_frame_bytes("1,\"device_epoch\":1")),
+        ("unsafe integer device_epoch", auth_frame_bytes("9007199254740992")),
+    ];
+    for (label, body) in refused {
+        let baseline = calls.load(Ordering::Acquire);
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        // Assert on the Nack before propagating the session result, so a regressed fix fails on
+        // the exact-Nack assertion rather than on the propagated I-JSON error.
+        let outcome = crate::session::handle_gateway_session_transport(
+            Box::new(RecordingSink(Arc::clone(&frames))),
+            Box::new(QueueSource(VecDeque::from([body]))),
+            context_with_router(router)?,
+            ramflux_node_core::GatewayClientFrame::Open { open: open_frame()? },
+        )
+        .await;
+        let frames = frames.lock().map_err(|_| anyhow::anyhow!("frame mutex"))?;
+        assert_eq!(frames.len(), 1, "{label}: exactly one Nack frame expected");
+        assert_eq!(frames[0], EXPECTED_SESSION_NACK, "{label}: exact I-JSON Nack expected");
+        assert_eq!(calls.load(Ordering::Acquire), baseline, "{label}: router call");
+        outcome?;
+    }
+
+    let baseline = calls.load(Ordering::Acquire);
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    crate::session::handle_gateway_session_transport(
+        Box::new(RecordingSink(Arc::clone(&frames))),
+        Box::new(QueueSource(VecDeque::from([auth_frame_bytes("9007199254740991")]))),
+        context_with_router(router)?,
+        ramflux_node_core::GatewayClientFrame::Open { open: open_frame()? },
+    )
+    .await?;
+    let frames = frames.lock().map_err(|_| anyhow::anyhow!("frame mutex"))?;
+    assert_eq!(frames.len(), 1, "safe auth control: exactly one Nack frame expected");
+    assert_eq!(
+        serde_json::from_slice::<ramflux_node_core::GatewayServerFrame>(&frames[0])?,
+        ramflux_node_core::GatewayServerFrame::Nack {
+            reason: "gateway_auth_source_rejected".into()
+        },
+        "safe auth control must reach auth source admission"
+    );
+    assert_eq!(calls.load(Ordering::Acquire), baseline, "safe auth control router call");
+    Ok(())
+}
+
+async fn tcp_session_frames_refuse_i_json(
+    router: &crate::RouterMeshClient,
+    calls: &AtomicUsize,
+) -> anyhow::Result<()> {
     let root = std::env::temp_dir().join(format!(
         "ramflux-gateway-ijson-session-{}",
         ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8])
@@ -300,7 +435,7 @@ async fn tcp_session_frames_refuse_i_json() -> anyhow::Result<()> {
     std::fs::write(&tls.service_key, cert.signing_key.serialize_pem())?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let context = crate::session::tests::test_gateway_context()?;
+    let context = context_with_router(router)?;
     let listener_context = crate::serve::GatewayListenerContext {
         custody: context.custody,
         node_id: context.node_id,
@@ -324,6 +459,7 @@ async fn tcp_session_frames_refuse_i_json() -> anyhow::Result<()> {
         (session_frame(9_007_199_254_740_992)?, true),
         (session_frame(9_007_199_254_740_991)?, false),
     ] {
+        let baseline = calls.load(Ordering::Acquire);
         let (_, mut stream) = ramflux_transport::TcpTlsGatewayClient::connect(
             "127.0.0.1:0".parse()?,
             address,
@@ -339,9 +475,19 @@ async fn tcp_session_frames_refuse_i_json() -> anyhow::Result<()> {
         )
         .await;
         assert!(received.is_ok(), "gateway TCP session fixture timed out after 15 s");
-        let frame = received.map_err(anyhow::Error::from)??;
+        // Read the Nack before the connection can close; a closed stream then fails the exact-Nack
+        // assertion below rather than surfacing as a bare TLS error.
+        let frame = match received {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(error)) => format!("stream closed without a frame: {error}").into_bytes(),
+            Err(_elapsed) => Vec::new(),
+        };
+        assert_eq!(calls.load(Ordering::Acquire), baseline, "router call on session frame");
         if refused {
-            assert_eq!(frame, EXPECTED_SESSION_NACK);
+            assert_eq!(
+                frame, EXPECTED_SESSION_NACK,
+                "refused session frame must receive the exact Nack"
+            );
         } else {
             assert_ne!(frame, EXPECTED_SESSION_NACK, "safe frame must pass initial I-JSON decode");
             let response: ramflux_node_core::GatewayServerFrame = serde_json::from_slice(&frame)?;
@@ -359,15 +505,26 @@ async fn tcp_session_frames_refuse_i_json() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn gateway_ijson_ingress_refuses_unsafe_integer() -> anyhow::Result<()> {
+    let fake = fake_router()?;
+    let router = fake.client.clone();
+    let calls = Arc::clone(&fake.calls);
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-        tokio::task::spawn_blocking(http_rows_refuse_before_router)
-            .await
-            .map_err(|error| anyhow::anyhow!("HTTP fixture panicked: {error}"))??;
-        tcp_session_frames_refuse_i_json().await?;
+        let http_router = router.clone();
+        let http_calls = Arc::clone(&calls);
+        tokio::task::spawn_blocking(move || {
+            http_rows_refuse_before_router(&http_router, &http_calls)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("HTTP fixture panicked: {error}"))??;
+        auth_frame_rows_refuse_i_json(&router, &calls).await?;
+        tcp_session_frames_refuse_i_json(&router, &calls).await?;
         Ok::<(), anyhow::Error>(())
     })
     .await;
+    // Always stop the fake router, even when a fixture failed, so no thread outlives the test.
+    let stopped = fake.finish();
     assert!(outcome.is_ok(), "gateway I-JSON fixtures timed out after 30 s");
     outcome.map_err(anyhow::Error::from)??;
+    stopped?;
     Ok(())
 }

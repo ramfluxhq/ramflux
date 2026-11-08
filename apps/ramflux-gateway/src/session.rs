@@ -543,6 +543,16 @@ pub(crate) async fn read_gateway_auth_frame(
                     ramflux_transport::write_gateway_session_json(send, &response).await?;
                     return Ok(None);
                 }
+                if ramflux_protocol::is_i_json_rejection(&error) {
+                    write_gateway_frame(
+                        send,
+                        &ramflux_node_core::GatewayServerFrame::Nack {
+                            reason: "gateway_request_invalid".into(),
+                        },
+                    )
+                    .await?;
+                    return Ok(None);
+                }
                 return Err(error.into());
             }
         };
