@@ -118,6 +118,10 @@ impl ReceiveTransaction<'_> {
         if slots >= WORK_LIMIT {
             return Ok(ReceiveStageResult::PausedIntents);
         }
+        if self.db.erased_input_matches(&entry.envelope)? {
+            self.record_erased_replay(input)?;
+            return Ok(ReceiveStageResult::Erased);
+        }
         self.db.connection.execute(
             "INSERT INTO gateway_receive_receipt VALUES(?1,?2,?3,'staged',?4,?5)",
             params![
@@ -150,6 +154,24 @@ impl ReceiveTransaction<'_> {
             return Ok(ReceiveStageResult::Erased);
         }
         Ok(ReceiveStageResult::Staged)
+    }
+
+    /// A live erased-input tombstone for this exact authenticated tuple means the input was erased
+    /// before it was ever admitted: record only an `erased` receipt, never work or an admission
+    /// key, so the replay costs one slot and carries no content.
+    fn record_erased_replay(&self, input: ReceiveStage<'_>) -> Result<(), StorageError> {
+        let seq = input.sequence.to_be_bytes();
+        self.db.connection.execute(
+            "INSERT INTO gateway_receive_receipt VALUES(?1,?2,?3,'erased',?4,?5)",
+            params![
+                input.target,
+                input.incarnation,
+                seq.as_slice(),
+                input.retain_until,
+                input.first_seen
+            ],
+        )?;
+        Ok(())
     }
 
     fn record_conflict(&self, input: ReceiveStage<'_>) -> Result<bool, StorageError> {
