@@ -901,6 +901,30 @@ async fn router_ijson_ingress_refuses_unsafe_integer() -> TestResult {
                 created_at,
                 duplicate_extension,
             })?;
+            if duplicate_extension && path == "/mvp0/envelope" {
+                let request_frame = json_quic_frame(path, &body)?;
+                let response_frame = fixture_wait(
+                    tokio::time::timeout(
+                        Duration::from_secs(15),
+                        ramflux_transport::mesh_quic_exchange_raw_response_frame(
+                            &endpoint,
+                            if federation_peer { &pki.federation } else { &pki.gateway },
+                            "ramflux-router",
+                            &[pki.ca_pem.clone()],
+                            &request_frame,
+                            Instant::now() + Duration::from_secs(10),
+                        ),
+                    )
+                    .await,
+                    "raw nested-duplicate JSON QUIC refusal",
+                )??;
+                assert_eq!(
+                    response_frame,
+                    br#"{"status":400,"body":{"error":"i_json_rejected","reason_code":"i_json_rejected"}}"#,
+                    "nested-duplicate refusal must match the independent raw response frame"
+                );
+                continue;
+            }
             let response = fixture_wait(
                 tokio::time::timeout(
                     Duration::from_secs(15),

@@ -65,6 +65,8 @@ pub use mesh_quic::{
     mesh_quic_post_json_with_peer_ca_pems_async, mesh_quic_post_postcard_with_peer_ca_pems_async,
     mesh_quic_post_raw_with_peer_ca_pems_async,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use mesh_quic_limited::mesh_quic_exchange_raw_response_frame;
 pub use mesh_quic_limited::{
     LIMITED_ENVELOPE_SLACK, MeshQuicLimitedIngress, MeshQuicLimitedRequest,
     MeshQuicLimitedResponder, mesh_quic_exchange_raw_frame,
