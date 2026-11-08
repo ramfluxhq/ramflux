@@ -50,6 +50,8 @@ mod network_tests;
 mod safety;
 pub use safety::{safety_fingerprint, safety_number};
 
+pub mod pairing;
+
 mod contact;
 pub use contact::verify_contact_consent;
 

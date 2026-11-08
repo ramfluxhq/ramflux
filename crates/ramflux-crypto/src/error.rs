@@ -59,4 +59,19 @@ pub enum CryptoError {
     TransparencyProofFailed,
     #[error("invalid home node migration proof: {0}")]
     InvalidHomeNodeMigrationProof(&'static str),
+    #[error("pairing rejected: {0}")]
+    Pairing(&'static str),
+}
+
+impl From<ramflux_protocol::custody::pairing::WireError> for CryptoError {
+    fn from(error: ramflux_protocol::custody::pairing::WireError) -> Self {
+        use ramflux_protocol::custody::pairing::WireError;
+        Self::Pairing(match error {
+            WireError::Field(name) => name,
+            WireError::Json => "json",
+            WireError::Shape => "shape",
+            WireError::Size => "size",
+            WireError::NonCanonical => "noncanonical",
+        })
+    }
 }
