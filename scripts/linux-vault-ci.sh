@@ -165,7 +165,13 @@ PY
   # only traversal where needed and restore the exact ACLs before user removal.
   ancestor="$(dirname "$workspace")"
   while :; do
-    if ! run_bounded 10 'private-user workspace traversal check' runuser -u "$fixture_user" -- test -x "$ancestor"; then
+    if run_bounded 10 'private-user workspace traversal check' runuser -u "$fixture_user" -- test -x "$ancestor"; then
+      :
+    else
+      status=$?
+      if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+        exit "$status"
+      fi
       getfacl -p "$ancestor" >> "$fixture/ancestor-acls"
       setfacl -m "u:$fixture_user:x" "$ancestor"
     fi
