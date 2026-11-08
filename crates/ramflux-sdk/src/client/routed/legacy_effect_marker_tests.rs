@@ -12,7 +12,9 @@
 )]
 use super::*;
 use crate::bus::sync_driver::source::w0::SourceW0;
+use crate::client::dm::LegacyReceive;
 use crate::client::legacy_w1::{self, Fault, LegacyW1};
+use crate::dm::SdkDmAttachmentEnvelope;
 use ramflux_storage::{ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError};
 use std::time::Duration;
 
@@ -40,18 +42,26 @@ impl Drop for HangGuard {
     }
 }
 
-async fn hang<T>(future: impl Future<Output = Result<T, SdkError>>) -> Result<T, SdkError> {
+/// Watcher aborts the process after 120s so a hang fails this test. Completing work
+/// cancels the watcher; a watcher panic is joined and resumed on the test thread.
+fn hang<T>(f: impl FnOnce() -> T) -> T {
     let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
+    let watcher = std::thread::spawn(move || {
         if matches!(
-            cancelled.recv_timeout(Duration::from_secs(30)),
+            cancelled.recv_timeout(Duration::from_secs(120)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
-            panic!("30-second hang guard expired");
+            eprintln!("120-second hang guard expired");
+            std::process::abort();
         }
     });
-    let _guard = HangGuard(Some(cancel));
-    future.await
+    let guard = HangGuard(Some(cancel));
+    let value = f();
+    drop(guard);
+    match watcher.join() {
+        Ok(()) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 fn reopen(client: &mut RamfluxClient, id: &str) -> Result<(), SdkError> {
@@ -181,6 +191,18 @@ fn a2i_entry(
     receiver: &mut Fixture,
     seq: u64,
 ) -> Result<GatewayInboxEntry, SdkError> {
+    let target = receiver.id.clone();
+    a2i_sealed(sender, receiver, seq, &target, true, None)
+}
+
+fn a2i_sealed(
+    sender: &Fixture,
+    receiver: &mut Fixture,
+    seq: u64,
+    event_target: &str,
+    persist_session: bool,
+    envelope_id: Option<&str>,
+) -> Result<GatewayInboxEntry, SdkError> {
     review::trust(receiver, sender)?;
     review::trust(sender, receiver)?;
     let conversation = a2i_control_conversation_id(&sender.id, &receiver.id);
@@ -190,7 +212,7 @@ fn a2i_entry(
         event_id: format!("a2i-{seq}"),
         event_type: "a2i.control".into(),
         source_device_id: sender.id.clone(),
-        target_device_id: receiver.id.clone(),
+        target_device_id: event_target.to_owned(),
         control_domain: "message".into(),
         action: "test".into(),
         subject_base64: String::new(),
@@ -198,6 +220,10 @@ fn a2i_entry(
         acknowledged: false,
     };
     let mut msg = message(&format!("a2i:{seq}"), &conversation);
+    if let Some(envelope_id) = envelope_id {
+        msg.envelope_id = envelope_id.to_owned();
+        msg.message_id = envelope_id.to_owned();
+    }
     msg.source_principal_id = sender.id.clone();
     msg.sender_id = sender.id.clone();
     msg.recipient_device_id = Some(receiver.id.clone());
@@ -217,9 +243,12 @@ fn a2i_entry(
         x3dh: header.clone(),
         ciphertext,
     })?;
-    let receiving =
-        receiver.client.load_or_create_recv_dm_session(&conversation, header.as_ref())?;
-    receiver.client.persist_dm_session(&conversation, "a2i-prior", "recv", &receiving)?;
+    if persist_session {
+        let receiving =
+            receiver.client.load_or_create_recv_dm_session(&conversation, header.as_ref())?;
+        receiver.client.send_direct_message(&conversation, "a2i-prior", &sender.id, b"prior")?;
+        receiver.client.persist_dm_session(&conversation, "a2i-prior", "recv", &receiving)?;
+    }
     Ok(GatewayInboxEntry {
         forwarded: false,
         inbox_seq: seq,
@@ -233,7 +262,9 @@ fn apply_success(
     entry: &GatewayInboxEntry,
     conversation: &str,
 ) -> Result<(), SdkError> {
-    receiver.apply_legacy_success_w1(entry, conversation)
+    let db = receiver.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
+    receiver.apply_legacy_success_w1(entry, conversation, gate.expected, gate.generation)
 }
 
 fn apply_reject(
@@ -241,15 +272,21 @@ fn apply_reject(
     entry: &GatewayInboxEntry,
     conversation: &str,
 ) -> Result<(), SdkError> {
-    receiver.apply_legacy_reject_w1(entry, conversation)
+    let db = receiver.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
+    receiver.apply_legacy_reject_w1(entry, conversation, gate.expected, gate.generation)
 }
 
 fn apply_a2i(receiver: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
-    receiver.apply_legacy_a2i_w1(entry)
+    let db = receiver.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
+    receiver.apply_legacy_a2i_w1(entry, gate.expected, gate.generation)
 }
 
 fn apply_hold(receiver: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
-    receiver.apply_legacy_group_hold_w1(entry)
+    let db = receiver.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &entry.target_delivery_id)?;
+    receiver.apply_legacy_group_hold_w1(entry, gate.expected, gate.generation)
 }
 
 fn assert_fault(result: Result<(), SdkError>) {
@@ -336,10 +373,10 @@ fn cut_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), SdkE
 
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_effect_marker_atomic() -> Result<(), SdkError> {
-    Box::pin(hang(atomic())).await
+    hang(atomic)
 }
 
-async fn atomic() -> Result<(), SdkError> {
+fn atomic() -> Result<(), SdkError> {
     let receiver = Fixture::new("bob", 21)?;
     let db = receiver.client.account_db()?;
     db.install_receive_ledger_schema()?;
@@ -393,12 +430,37 @@ async fn atomic() -> Result<(), SdkError> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn legacy_stage_redrive() -> Result<(), SdkError> {
-    Box::pin(hang(redrive())).await
+#[test]
+fn legacy_w1_a2i_endpoint_mismatch() -> Result<(), SdkError> {
+    hang(cut_a2i_endpoint_mismatch)
 }
 
-async fn redrive() -> Result<(), SdkError> {
+#[test]
+fn legacy_w1_a2i_payload_reuse() -> Result<(), SdkError> {
+    hang(cut_a2i_payload_reuse)
+}
+
+#[test]
+fn legacy_w1_a2i_routing_hold() -> Result<(), SdkError> {
+    hang(cut_a2i_routing_hold)
+}
+
+#[test]
+fn legacy_w1_effect_error_rollback() -> Result<(), SdkError> {
+    hang(cut_effect_error_rollback)
+}
+
+#[test]
+fn legacy_w1_generation_erasure_cursor_fences() -> Result<(), SdkError> {
+    hang(cut_w1_fences)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_stage_redrive() -> Result<(), SdkError> {
+    hang(redrive)
+}
+
+fn redrive() -> Result<(), SdkError> {
     let sender = Fixture::new("alice", 111)?;
     let mut receiver = Fixture::new("bob", 121)?;
     let entry = bound(&sender, &mut receiver, "redrive", "redrive-success", b"once", 1)?;
@@ -464,5 +526,172 @@ fn redrive_a2i(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<(), 
     reopen(&mut receiver.client, &receiver.id)?;
     apply_a2i(&receiver.client, entry)?;
     assert_eq!(snap(&receiver.client, entry, &conversation)?, once);
+    Ok(())
+}
+
+fn assert_inbound(result: Result<(), SdkError>, text: &str) {
+    match result {
+        Err(SdkError::InboundRejected(got)) if got == text => {}
+        other => panic!("expected InboundRejected({text:?}), got {other:?}"),
+    }
+}
+
+fn stored_body(
+    client: &RamfluxClient,
+    conversation: &str,
+    message: &str,
+) -> Result<Vec<u8>, SdkError> {
+    client
+        .direct_messages(conversation)?
+        .into_iter()
+        .find(|row| row.message_id == message)
+        .map(|row| row.encrypted_body)
+        .ok_or_else(|| SdkError::LocalBus(format!("missing {message}")))
+}
+
+fn cut_a2i_endpoint_mismatch() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 201)?;
+    let mut receiver = Fixture::new("bob", 211)?;
+    let entry = a2i_sealed(&sender, &mut receiver, 1, "carol", true, None)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    assert_inbound(apply_a2i(&receiver.client, &entry), "legacy A2I endpoint mismatch");
+    Ok(())
+}
+
+fn cut_a2i_payload_reuse() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 221)?;
+    let mut receiver = Fixture::new("bob", 231)?;
+    let entry = a2i_entry(&sender, &mut receiver, 1)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    apply_a2i(&receiver.client, &entry)?;
+    let target = receiver.id.clone();
+    let envelope_id = entry.envelope.envelope_id.clone();
+    let reused = a2i_sealed(&sender, &mut receiver, 2, &target, false, Some(&envelope_id))?;
+    assert_inbound(apply_a2i(&receiver.client, &reused), "legacy A2I envelope id reused");
+    Ok(())
+}
+
+fn cut_a2i_routing_hold() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 241)?;
+    let mut receiver = Fixture::new("bob", 251)?;
+    let target = receiver.id.clone();
+    let entry = a2i_sealed(&sender, &mut receiver, 1, &target, false, None)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let pre = snap(&receiver.client, &entry, "held-a2i")?;
+    apply_a2i(&receiver.client, &entry)?;
+    let post = snap(&receiver.client, &entry, "held-a2i")?;
+    assert!(post.held > pre.held, "unbound A2I must remain held");
+    assert_eq!(post.a2i, 0, "held A2I must not persist a receipt");
+    assert_eq!(post.cursor, 0);
+    Ok(())
+}
+
+fn cut_effect_error_rollback() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 162)?;
+    let mut receiver = Fixture::new("bob", 172)?;
+    let entry = bound(&sender, &mut receiver, "effect-err", "effect-one", b"hello", 1)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let pre = snap(&receiver.client, &entry, "effect-err")?;
+    let (_, session, _) = receiver.client.decrypt_legacy_entry("effect-err", &entry)?;
+    let db = receiver.client.account_db()?;
+    let gate = RamfluxClient::w1_gate(db, &receiver.id)?;
+    let failed: Result<(), SdkError> = gate.effect(db, entry.inbox_seq, None, || {
+        receiver.client.persist_dm_session(
+            "effect-err",
+            &entry.envelope.envelope_id,
+            "recv",
+            &session,
+        )?;
+        Err(SdkError::LocalBus("legacy content failed".into()))
+    });
+    match &failed {
+        Err(SdkError::LocalBus(text)) if text == "legacy content failed" => {}
+        other => panic!("expected original LocalBus, got {other:?}"),
+    }
+    reopen(&mut receiver.client, &receiver.id)?;
+    assert_eq!(snap(&receiver.client, &entry, "effect-err")?, pre);
+    Ok(())
+}
+
+fn cut_w1_fences() -> Result<(), SdkError> {
+    let sender = Fixture::new("alice", 182)?;
+    let mut receiver = Fixture::new("bob", 192)?;
+    let entry = bound(&sender, &mut receiver, "fence", "fence-one", b"hello", 1)?;
+    stage_w0(&receiver.client, &receiver.id, &entry)?;
+    let db = receiver.client.account_db()?;
+    let target = receiver.id.clone();
+    let erasure = db.privacy_erasure_generation()?;
+    let expected = ReceiveExpectation {
+        target: &target,
+        incarnation: INCARNATION,
+        cursor: 0,
+        generation: 1,
+        erasure_generation: erasure,
+    };
+    let generation =
+        LegacyW1 { expected: ReceiveExpectation { generation: 9, ..expected }, generation: 1 };
+    let generation_err = generation.effect(db, entry.inbox_seq, None, || Ok(()));
+    assert!(
+        matches!(generation_err, Err(SdkError::Storage(StorageError::AuthorizationRejected))),
+        "{generation_err:?}"
+    );
+    let cursor = LegacyW1 { expected: ReceiveExpectation { cursor: 9, ..expected }, generation: 1 };
+    let cur = cursor.effect(db, entry.inbox_seq, None, || Ok(()));
+    assert!(matches!(cur, Err(SdkError::Storage(StorageError::AuthorizationRejected))), "{cur:?}");
+    let erased = LegacyW1 {
+        expected: ReceiveExpectation { erasure_generation: -1, ..expected },
+        generation: 1,
+    };
+    let erase = erased.effect(db, entry.inbox_seq, None, || Ok(()));
+    assert!(matches!(erase, Err(SdkError::ObjectErased)), "{erase:?}");
+    Ok(())
+}
+
+fn attachment_wrapper() -> Result<Vec<u8>, SdkError> {
+    Ok(serde_json::to_vec(&SdkDmAttachmentEnvelope {
+        schema: "ramflux.sdk.dm_attachment_envelope.v1".into(),
+        version: 1,
+        body_base64: ramflux_protocol::encode_base64url(b"inner-text"),
+        attachments: Vec::new(),
+    })?)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_w1_attachment_body_matches_live() -> Result<(), SdkError> {
+    let wrapper = attachment_wrapper()?;
+    let sender = Fixture::new("alice", 203)?;
+    let mut w1_receiver = Fixture::new("bob", 213)?;
+    let w1_entry = bound(&sender, &mut w1_receiver, "attach-w1", "attach-w1", &wrapper, 1)?;
+    stage_w0(&w1_receiver.client, &w1_receiver.id, &w1_entry)?;
+    apply_success(&w1_receiver.client, &w1_entry, "attach-w1")?;
+    let w1_body = stored_body(&w1_receiver.client, "attach-w1", &w1_entry.envelope.envelope_id)?;
+    assert_eq!(w1_body, b"inner-text", "W1 must store the decoded attachment body");
+
+    let live_sender = Fixture::new("alice", 204)?;
+    let mut live_receiver = Fixture::new("bob", 223)?;
+    let live_entry =
+        bound(&live_sender, &mut live_receiver, "attach-live", "attach-live", &wrapper, 1)?;
+    let mut engine = GatewaySessionEngine::with_test_transport(
+        live_receiver.config()?,
+        Box::new(super::NoNetwork),
+    );
+    let pool = review::pool()?;
+    live_receiver
+        .client
+        .receive_legacy_entry(
+            &mut engine,
+            &pool,
+            live_entry.clone(),
+            LegacyReceive {
+                conversation_id: "attach-live",
+                auto_fetch_attachments: false,
+                relay_service_key_base64: None,
+            },
+        )
+        .await?;
+    let live_body =
+        stored_body(&live_receiver.client, "attach-live", &live_entry.envelope.envelope_id)?;
+    assert_eq!(live_body, w1_body);
+    assert_eq!(live_body, b"inner-text");
     Ok(())
 }

@@ -6,6 +6,7 @@
 use crate::client::identity_authority::HeadUse;
 use crate::prelude::*;
 mod legacy_receive;
+pub(crate) use legacy_receive::{LegacyDmDecrypt, LegacyDmPrepared};
 mod post_send;
 pub(crate) struct LegacyReceive<'a> {
     pub conversation_id: &'a str,
@@ -417,6 +418,7 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         target: &str,
         session: &ramflux_crypto::DmSession,
+        persist_cursor: bool,
     ) -> Result<bool, SdkError> {
         if let Some(reason) = self.friend_rejection_reason(&entry.envelope.source_principal_id)? {
             self.account_db()?.reject_inbox_message(
@@ -426,8 +428,7 @@ impl RamfluxClient {
                 &reason,
                 now_unix_timestamp(),
             )?;
-            // Rejection recorded: commit the advanced recv ratchet, then the cursor.
-            self.commit_legacy_receive(conversation, entry, target, session)?;
+            self.commit_legacy_terminal(conversation, entry, target, session, persist_cursor)?;
             return Ok(true);
         }
         Ok(false)
@@ -438,16 +439,31 @@ impl RamfluxClient {
         conversation: &str,
         target: &str,
         session: &ramflux_crypto::DmSession,
+        persist_cursor: bool,
     ) -> Result<(), SdkError> {
         let key = self.legacy_committed_key(entry)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             db.dead_letter_inbox(&key,&serde_json::to_vec(entry)?,&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"error_code":"legacy_control_rejected"}),now_unix_timestamp())?;
-            self.commit_legacy_receive(conversation,entry,target,session)?;
+            self.commit_legacy_terminal(conversation,entry,target,session,persist_cursor)?;
             db.remove_unrouted(&key)?;
             db.remove_unrouted(&entry.envelope.envelope_id)?;
             Ok::<_,SdkError>(())
         })
+    }
+    fn commit_legacy_terminal(
+        &self,
+        conversation: &str,
+        entry: &GatewayInboxEntry,
+        target: &str,
+        session: &ramflux_crypto::DmSession,
+        persist_cursor: bool,
+    ) -> Result<(), SdkError> {
+        if persist_cursor {
+            self.commit_legacy_receive(conversation, entry, target, session)
+        } else {
+            self.commit_legacy_effect(conversation, entry, session)
+        }
     }
     fn commit_legacy_receive(
         &self,

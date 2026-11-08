@@ -130,33 +130,12 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<A2iControlEvent>, SdkError> {
-        let expected = a2i_control_conversation_id(
-            &entry.envelope.source_device_id,
-            &engine.config().device_id,
-        );
-        if self.legacy_routing_binding(&engine.config().device_id, entry)?.as_deref()
-            != Some(expected.as_str())
-        {
-            self.account_db()?.hold_unrouted(
-                &entry.envelope.envelope_id,
-                entry.inbox_seq,
-                &serde_json::to_vec(&entry)?,
-                now_unix_timestamp(),
-            )?;
+        if self.hold_unbound_legacy_a2i(&engine.config().device_id, entry)? {
             self.persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
             return Ok(None);
         }
         self.ensure_inbound_device(engine.config(), entry).await?;
-        let receipt_key = format!(
-            "legacy/a2i/{}",
-            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
-        );
-        if let Some(receipt) =
-            self.account_db()?.load_actor_state::<LegacyControlReceipt>(&receipt_key)?
-        {
-            if receipt.payload_hash != entry.envelope.payload_hash {
-                return Err(SdkError::InboundRejected("legacy A2I envelope id reused".to_owned()));
-            }
+        if let Some(receipt) = self.load_legacy_a2i_receipt(entry)? {
             self.finish_a2i_receive(engine, entry).await?;
             let event = self
                 .account_db()?
@@ -167,11 +146,71 @@ impl RamfluxClient {
                 .unwrap_or(receipt.event);
             return Ok((!event.acknowledged).then_some(event));
         }
+        let opened = self.decrypt_bound_legacy_a2i(&engine.config().device_id, entry)?;
+        self.account_db()?.write_transaction(|| self.persist_legacy_a2i_effect(entry, &opened))?;
+        self.finish_a2i_receive(engine, entry).await?;
+        Ok(Some(opened.event))
+    }
 
-        let conversation_id = a2i_control_conversation_id(
-            &entry.envelope.source_device_id,
-            &engine.config().device_id,
-        );
+    pub(crate) fn legacy_a2i_receipt_key(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<String, SdkError> {
+        Ok(format!(
+            "legacy/a2i/{}",
+            self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+        ))
+    }
+
+    pub(crate) fn legacy_a2i_is_unbound(
+        &self,
+        local_device: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        let expected = a2i_control_conversation_id(&entry.envelope.source_device_id, local_device);
+        Ok(self.legacy_routing_binding(local_device, entry)?.as_deref() != Some(expected.as_str()))
+    }
+
+    /// True when the entry has no exact A2I device-pair binding and was held unrouted.
+    pub(crate) fn hold_unbound_legacy_a2i(
+        &self,
+        local_device: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<bool, SdkError> {
+        if !self.legacy_a2i_is_unbound(local_device, entry)? {
+            return Ok(false);
+        }
+        self.account_db()?.hold_unrouted(
+            &entry.envelope.envelope_id,
+            entry.inbox_seq,
+            &serde_json::to_vec(&entry)?,
+            now_unix_timestamp(),
+        )?;
+        Ok(true)
+    }
+
+    /// Existing receipt, or `InboundRejected` when the envelope id is reused with a new payload.
+    pub(crate) fn load_legacy_a2i_receipt(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<LegacyControlReceipt>, SdkError> {
+        let Some(receipt) = self
+            .account_db()?
+            .load_actor_state::<LegacyControlReceipt>(&self.legacy_a2i_receipt_key(entry)?)?
+        else {
+            return Ok(None);
+        };
+        reject_legacy_a2i_payload_reuse(&receipt, entry)?;
+        Ok(Some(receipt))
+    }
+
+    pub(crate) fn decrypt_bound_legacy_a2i(
+        &self,
+        local_device: &str,
+        entry: &GatewayInboxEntry,
+    ) -> Result<LegacyA2iOpened, SdkError> {
+        let conversation_id =
+            a2i_control_conversation_id(&entry.envelope.source_device_id, local_device);
         let ciphertext_bytes = ramflux_protocol::decode_base64url(
             &entry.envelope.encrypted_payload,
         )
@@ -182,35 +221,38 @@ impl RamfluxClient {
         let body = session.decrypt(&envelope.ciphertext, dm_associated_data(&conversation_id))?;
         let mut event: A2iControlEvent = serde_json::from_slice(&body)?;
         if event.source_device_id != entry.envelope.source_device_id
-            || event.target_device_id != engine.config().device_id
+            || event.target_device_id != local_device
         {
             return Err(SdkError::InboundRejected("legacy A2I endpoint mismatch".to_owned()));
         }
         let source = self.bind_received_a2i_event(&mut event, entry)?;
-        self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-            self.append_gateway_delivery(entry)?;
-            self.account_db()?.persist_actor_state(
-                &receipt_key,
-                &LegacyControlReceipt {
-                    event: event.clone(),
-                    payload_hash: entry.envelope.payload_hash.clone(),
-                },
-            )?;
+        Ok(LegacyA2iOpened { conversation_id, session, event, source })
+    }
 
-            self.persist_dm_session(
-                &conversation_id,
-                &entry.envelope.envelope_id,
-                "recv",
-                &session,
-            )?;
-            self.account_db()?.persist_actor_state(
-                &crate::client::routed::control::a2i_key(&source, &event.event_id)?,
-                &event,
-            )?;
-            Ok(())
-        })?;
-        self.finish_a2i_receive(engine, entry).await?;
-        Ok(Some(event))
+    pub(crate) fn persist_legacy_a2i_effect(
+        &self,
+        entry: &GatewayInboxEntry,
+        opened: &LegacyA2iOpened,
+    ) -> Result<(), SdkError> {
+        self.append_gateway_delivery(entry)?;
+        self.account_db()?.persist_actor_state(
+            &self.legacy_a2i_receipt_key(entry)?,
+            &LegacyControlReceipt {
+                event: opened.event.clone(),
+                payload_hash: entry.envelope.payload_hash.clone(),
+            },
+        )?;
+        self.persist_dm_session(
+            &opened.conversation_id,
+            &entry.envelope.envelope_id,
+            "recv",
+            &opened.session,
+        )?;
+        self.account_db()?.persist_actor_state(
+            &crate::client::routed::control::a2i_key(&opened.source, &opened.event.event_id)?,
+            &opened.event,
+        )?;
+        Ok(())
     }
     async fn finish_a2i_receive(
         &mut self,
@@ -226,4 +268,22 @@ impl RamfluxClient {
 pub(crate) struct LegacyControlReceipt {
     pub event: A2iControlEvent,
     pub payload_hash: String,
+}
+
+pub(crate) struct LegacyA2iOpened {
+    pub conversation_id: String,
+    pub session: ramflux_crypto::DmSession,
+    pub event: A2iControlEvent,
+    pub source: ramflux_crypto::RootQualifiedDeviceRef,
+}
+
+/// Shared payload-hash check used by live receive and dormant W1.
+pub(crate) fn reject_legacy_a2i_payload_reuse(
+    receipt: &LegacyControlReceipt,
+    entry: &GatewayInboxEntry,
+) -> Result<(), SdkError> {
+    if receipt.payload_hash != entry.envelope.payload_hash {
+        return Err(SdkError::InboundRejected("legacy A2I envelope id reused".to_owned()));
+    }
+    Ok(())
 }

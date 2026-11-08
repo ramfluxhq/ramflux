@@ -4,6 +4,28 @@
 //! Legacy receive preserves terminal checkpoints while carrying attachment admission.
 use super::*;
 
+pub(crate) struct LegacyDmMessage {
+    pub projection_body: Vec<u8>,
+    pub metadata: Option<MessageMetadata>,
+    pub import_refs: Vec<SdkDmAttachmentRef>,
+}
+
+pub(crate) enum LegacyDmPrepared {
+    Finished,
+    Message(Box<LegacyDmMessage>),
+}
+
+pub(crate) struct LegacyDmDecrypt<'a> {
+    pub conversation: &'a str,
+    pub entry: &'a GatewayInboxEntry,
+    pub target: &'a str,
+    pub session: &'a ramflux_crypto::DmSession,
+    pub envelope: &'a SdkDmEncryptedEnvelope,
+    pub decrypted: &'a ramflux_crypto::DmDecryptionOutput,
+    pub consume_erased: bool,
+    pub persist_cursor: bool,
+}
+
 impl RamfluxClient {
     pub(crate) async fn receive_legacy_entry(
         &mut self,
@@ -49,77 +71,35 @@ impl RamfluxClient {
             return Ok(None);
         }
         let (envelope, session, decrypted) = self.decrypt_legacy_entry(conversation_id, &entry)?;
-        let body = decrypted.plaintext.clone();
         // T21-A2a: the advanced recv session (ratchet) is NOT persisted here. It is committed
         // only once this inbox entry reaches its success terminal state, immediately before the
         // receive cursor advances. If any downstream step fails, the local `session` is dropped
         // so the persisted ratchet snapshot and cursor stay unchanged and the same ciphertext
         // can be re-decrypted on a later `dm read`.
-        if self.reject_legacy_control(
-            &entry,
-            conversation_id,
-            engine.target_delivery_id(),
-            &session,
-            &body,
-        )? {
-            return Ok(None);
-        }
-        if self
-            .apply_receipt_event_plaintext(
-                &body,
-                &self.authenticated_device_identity(HeadUse::NewAuthorization, &entry)?,
-                conversation_id,
-            )?
-            .is_some()
-        {
-            // Receipt applied: commit the advanced recv ratchet, then the cursor.
-            self.commit_legacy_receive(
-                conversation_id,
-                &entry,
-                engine.target_delivery_id(),
-                &session,
-            )?;
-            return Ok(None);
-        }
-        if self.reject_legacy_peer(
-            conversation_id,
-            &entry,
-            engine.target_delivery_id(),
-            &session,
-        )? {
-            return Ok(None);
-        }
-        let (projection_body, attachment_refs) = decode_dm_attachment_body(&body)?;
-        let metadata = franking_report_metadata_for_delivery(
-            conversation_id,
-            &entry,
-            &envelope,
-            &decrypted,
-            None,
-        )?;
-        let admitted = self.prepare_legacy_attachment_imports_mode(
-            &attachment_refs,
-            &entry.envelope.source_principal_id,
-            conversation_id,
-            &entry.envelope.envelope_id,
+        let prepared = self.prepare_legacy_dm_after_decrypt(&LegacyDmDecrypt {
+            conversation: conversation_id,
+            entry: &entry,
+            target: engine.target_delivery_id(),
+            session: &session,
+            envelope: &envelope,
+            decrypted: &decrypted,
             consume_erased,
-        )?;
-        let import_refs = if consume_erased { &admitted } else { &attachment_refs };
+            persist_cursor: true,
+        })?;
+        let LegacyDmPrepared::Message(prepared) = prepared else {
+            return Ok(None);
+        };
+        let LegacyDmMessage { projection_body, metadata, import_refs } = *prepared;
         let attachments = self
-            .import_legacy_attachments(engine, pool, import_refs, options, consume_erased)
+            .import_legacy_attachments(engine, pool, &import_refs, options, consume_erased)
             .await?;
-        self.append_plaintext_projection_once(
+        self.persist_legacy_dm_projection(
             conversation_id,
-            &entry.envelope.envelope_id,
             &entry,
             &projection_body,
             metadata.as_ref(),
+            &engine.config().principal_id,
         )?;
-        if self.account_db()?.client_record("conversation", conversation_id)?.is_none() {
-            self.account_db()?.persist_client_record("conversation",conversation_id,&serde_json::json!({
-                    "kind":"direct","title":null,"group_id":null,"participants":[engine.config().principal_id,entry.envelope.source_principal_id],"direct_route":null
-                }))?;
-        }
         // Attachment processing reached success: only now do we commit the
         // advanced recv ratchet, then advance the cursor. A failed attachment import/ACK above
         // returns before this point, leaving the persisted ratchet snapshot and cursor intact so
@@ -139,18 +119,104 @@ impl RamfluxClient {
         }))
     }
 
-    fn reject_legacy_control(
+    pub(crate) fn prepare_legacy_dm_after_decrypt(
         &self,
-        entry: &GatewayInboxEntry,
+        input: &LegacyDmDecrypt<'_>,
+    ) -> Result<LegacyDmPrepared, SdkError> {
+        let body = &input.decrypted.plaintext;
+        if self.reject_legacy_control(input)? {
+            return Ok(LegacyDmPrepared::Finished);
+        }
+        if self
+            .apply_receipt_event_plaintext(
+                body,
+                &self.authenticated_device_identity(HeadUse::NewAuthorization, input.entry)?,
+                input.conversation,
+            )?
+            .is_some()
+        {
+            self.commit_legacy_terminal(
+                input.conversation,
+                input.entry,
+                input.target,
+                input.session,
+                input.persist_cursor,
+            )?;
+            return Ok(LegacyDmPrepared::Finished);
+        }
+        if self.reject_legacy_peer(
+            input.conversation,
+            input.entry,
+            input.target,
+            input.session,
+            input.persist_cursor,
+        )? {
+            return Ok(LegacyDmPrepared::Finished);
+        }
+        let (projection_body, attachment_refs) = decode_dm_attachment_body(body)?;
+        let metadata = franking_report_metadata_for_delivery(
+            input.conversation,
+            input.entry,
+            input.envelope,
+            input.decrypted,
+            None,
+        )?;
+        let admitted = self.prepare_legacy_attachment_imports_mode(
+            &attachment_refs,
+            &input.entry.envelope.source_principal_id,
+            input.conversation,
+            &input.entry.envelope.envelope_id,
+            input.consume_erased,
+        )?;
+        Ok(LegacyDmPrepared::Message(Box::new(LegacyDmMessage {
+            projection_body,
+            metadata,
+            import_refs: if input.consume_erased { admitted } else { attachment_refs },
+        })))
+    }
+
+    pub(crate) fn persist_legacy_dm_projection(
+        &self,
         conversation: &str,
-        target: &str,
-        session: &ramflux_crypto::DmSession,
-        body: &[u8],
-    ) -> Result<bool, SdkError> {
-        match self.project_legacy_contact_control(entry, body) {
+        entry: &GatewayInboxEntry,
+        projection_body: &[u8],
+        metadata: Option<&MessageMetadata>,
+        principal_id: &str,
+    ) -> Result<(), SdkError> {
+        self.append_plaintext_projection_once(
+            conversation,
+            &entry.envelope.envelope_id,
+            entry,
+            projection_body,
+            metadata,
+        )?;
+        if self.account_db()?.client_record("conversation", conversation)?.is_none() {
+            self.account_db()?.persist_client_record(
+                "conversation",
+                conversation,
+                &serde_json::json!({
+                    "kind": "direct",
+                    "title": null,
+                    "group_id": null,
+                    "participants": [principal_id, entry.envelope.source_principal_id],
+                    "direct_route": null
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reject_legacy_control(&self, input: &LegacyDmDecrypt<'_>) -> Result<bool, SdkError> {
+        match self.project_legacy_contact_control(input.entry, &input.decrypted.plaintext) {
             Ok(()) => Ok(false),
             Err(SdkError::InboundRejected(_)) => {
-                self.quarantine_legacy_control(entry, conversation, target, session)?;
+                self.quarantine_legacy_control(
+                    input.entry,
+                    input.conversation,
+                    input.target,
+                    input.session,
+                    input.persist_cursor,
+                )?;
                 Ok(true)
             }
             Err(error) => Err(error),

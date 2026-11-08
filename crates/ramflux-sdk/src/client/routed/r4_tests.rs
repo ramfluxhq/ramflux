@@ -383,6 +383,102 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
     Ok(())
 }
 
+fn sealed_legacy_a2i(
+    alice: &Fixture,
+    bob: &mut Fixture,
+    event_target: &str,
+    event_id: &str,
+) -> Result<(GatewayInboxEntry, A2iControlEvent), SdkError> {
+    trust(bob, alice)?;
+    let conversation = a2i_control_conversation_id("alice", "bob");
+    let mut msg = from(alice, bob, event_id, &conversation);
+    let event = A2iControlEvent {
+        source_principal_id: None,
+        source_principal_commitment: None,
+        event_id: event_id.to_owned(),
+        event_type: "a2i.control".to_owned(),
+        source_device_id: "alice".to_owned(),
+        target_device_id: event_target.to_owned(),
+        control_domain: "message".to_owned(),
+        action: "test".to_owned(),
+        subject_base64: String::new(),
+        created_at: 1,
+        acknowledged: false,
+    };
+    let (mut sending, header) = alice.client.create_send_dm_session_from_bundle(
+        &msg,
+        "bob",
+        bob.client.load_x3dh_private_state(&bob.client.local_device_identity("bob")?)?.bundle,
+        "alice",
+    )?;
+    let receiving = bob.client.load_or_create_recv_dm_session(&conversation, header.as_ref())?;
+    bob.client.send_direct_message(&conversation, "prior", "alice", b"prior")?;
+    bob.client.persist_dm_session(&conversation, "prior", "recv", &receiving)?;
+    msg.encrypted_body = serde_json::to_vec(&SdkDmEncryptedEnvelope {
+        source_principal_commitment: None,
+        schema: "ramflux.sdk.dm_x3dh_envelope.v1".to_owned(),
+        version: 1,
+        x3dh: header,
+        ciphertext: sending
+            .encrypt(&serde_json::to_vec(&event)?, dm_associated_data(&conversation))?,
+    })?;
+    Ok((
+        GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: "bob".to_owned(),
+            envelope: gateway_direct_message_envelope(&alice.config()?, &msg, None)?,
+        },
+        event,
+    ))
+}
+
+#[tokio::test]
+async fn legacy_a2i_rejects_envelope_id_reused_with_different_payload() -> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    let (entry, _) = sealed_legacy_a2i(&alice, &mut bob, "bob", "legacy-reuse")?;
+    let (mut engine, _) = Inbox::engine(bob.config()?, vec![entry.clone()])?;
+    bob.client.receive_a2i_control_events(&mut engine, 16).await?;
+    let mut reused = entry.clone();
+    reused.inbox_seq = 2;
+    let raw = ramflux_protocol::decode_base64url(&reused.envelope.encrypted_payload)
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let mut packet: SdkDmEncryptedEnvelope = serde_json::from_slice(&raw)?;
+    packet.source_principal_commitment = Some("reuse".into());
+    reused.envelope.encrypted_payload =
+        ramflux_protocol::encode_base64url(serde_json::to_vec(&packet)?);
+    reused.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        reused.envelope.encrypted_payload.as_bytes(),
+    );
+    reused.envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
+        alice.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?,
+        &reused.envelope,
+    )?;
+    let (mut engine, _) = Inbox::engine(bob.config()?, vec![reused])?;
+    let reused = bob.client.receive_a2i_control_events(&mut engine, 16).await;
+    assert!(
+        matches!(&reused, Err(SdkError::InboundRejected(text)) if text == "legacy A2I envelope id reused"),
+        "{reused:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_a2i_rejects_endpoint_mismatch() -> Result<(), SdkError> {
+    let alice = Fixture::new("alice", 41)?;
+    let mut bob = Fixture::new("bob", 61)?;
+    let (entry, _) = sealed_legacy_a2i(&alice, &mut bob, "carol", "legacy-endpoint")?;
+    let (mut engine, _) = Inbox::engine(bob.config()?, vec![entry])?;
+    let mismatched = bob.client.receive_a2i_control_events(&mut engine, 16).await;
+    assert!(
+        matches!(&mismatched, Err(SdkError::InboundRejected(text)) if text == "legacy A2I endpoint mismatch"),
+        "{mismatched:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_receipt_sender_must_participate_in_the_authenticated_conversation()
 -> Result<(), SdkError> {
