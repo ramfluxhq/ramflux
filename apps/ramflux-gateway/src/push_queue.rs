@@ -111,8 +111,6 @@ struct Inner {
     #[cfg(test)]
     accesses: Arc<std::sync::atomic::AtomicUsize>,
     clock: AtomicU64,
-    #[cfg(test)]
-    bypass_transient_bound: AtomicBool,
 }
 enum Next {
     Frame(Frame),
@@ -156,8 +154,6 @@ impl PushQueue {
                 #[cfg(test)]
                 accesses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 clock: AtomicU64::new(0),
-                #[cfg(test)]
-                bypass_transient_bound: AtomicBool::new(false),
             }),
         }
     }
@@ -279,14 +275,7 @@ impl PushQueue {
             return TransientAdmission::Closed;
         }
         let (frames, used) = state.transient_occupancy();
-        #[cfg(test)]
-        let bypass = self.inner.bypass_transient_bound.load(Ordering::SeqCst);
-        #[cfg(not(test))]
-        let bypass = false;
-        if !bypass
-            && (frames >= TRANSIENT_FRAME_CAP
-                || bytes.len() > TRANSIENT_BYTE_CAP.saturating_sub(used))
-        {
+        if frames >= TRANSIENT_FRAME_CAP || bytes.len() > TRANSIENT_BYTE_CAP.saturating_sub(used) {
             return TransientAdmission::QueueFull;
         }
         state.transient_frames = state.transient_frames.saturating_add(1);
@@ -299,10 +288,6 @@ impl PushQueue {
     #[cfg(test)]
     pub(crate) fn ephemeral_len(&self) -> usize {
         self.inner.state.lock().map_or(0, |state| state.transient_occupancy().0)
-    }
-    #[cfg(test)]
-    pub(crate) fn set_bypass_transient_bound(&self, bypass: bool) {
-        self.inner.bypass_transient_bound.store(bypass, Ordering::SeqCst);
     }
     fn overflow(&self, seq: u64) -> Admission {
         self.inner.hint_watermark.fetch_max(seq, Ordering::AcqRel);

@@ -598,6 +598,8 @@ mod tests {
     const DEDUP_ENTRY: usize = 72;
     const EXPIRES_AT_MS: u64 = 1_005_000;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     fn clocks(local_now_ms: u64, monotonic_ms: u64) -> ReceiverClock {
         ReceiverClock { local_now_ms, monotonic_ms }
     }
@@ -666,6 +668,11 @@ mod tests {
             "expires_at_ms": expires_at_ms,
         }))
         .ok()
+    }
+
+    fn frame_builds(envelope: &Envelope, expires_at_ms: u64) -> Result<Vec<u8>, std::io::Error> {
+        complete_frame_bytes(envelope, expires_at_ms)
+            .ok_or_else(|| std::io::Error::other("frame builds"))
     }
 
     fn admit(rx: &mut EphemeralReceiver, envelope: &Envelope, now_ms: u64) -> ReceiverAdmit {
@@ -781,12 +788,10 @@ mod tests {
         assert_eq!(rx.dedup_len(), CHANNEL_FRAMES);
     }
 
-    fn row_whole_frame_cap() {
+    fn row_whole_frame_cap() -> Result<(), Box<dyn std::error::Error>> {
         let mut at_cap = EphemeralReceiver::new();
         let exact = pad_to_frame_len("bytes-32768", MAX_FRAME);
-        let Some(exact_bytes) = complete_frame_bytes(&exact, EXPIRES_AT_MS) else {
-            return;
-        };
+        let exact_bytes = frame_builds(&exact, EXPIRES_AT_MS)?;
         assert_eq!(exact_bytes.len(), MAX_FRAME);
         assert!(matches!(
             admit_bytes(&mut at_cap, &exact_bytes, NOW_MS, MONOTONIC_MS),
@@ -800,9 +805,7 @@ mod tests {
 
         let mut over = EphemeralReceiver::new();
         let too_big = pad_to_frame_len("bytes-32769", OVERSIZE_FRAME);
-        let Some(over_bytes) = complete_frame_bytes(&too_big, EXPIRES_AT_MS) else {
-            return;
-        };
+        let over_bytes = frame_builds(&too_big, EXPIRES_AT_MS)?;
         assert_eq!(over_bytes.len(), OVERSIZE_FRAME);
         assert_eq!(
             admit_bytes(&mut over, &over_bytes, NOW_MS, MONOTONIC_MS),
@@ -810,15 +813,14 @@ mod tests {
         );
         assert_eq!(over.occupancy(), (0, 0));
         assert_eq!(over.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_aggregate_byte_cap() {
+    fn row_aggregate_byte_cap() -> Result<(), Box<dyn std::error::Error>> {
         let mut rx = EphemeralReceiver::new();
         for i in 0..8 {
             let envelope = pad_to_frame_len(&format!("agg-{i}"), MAX_FRAME);
-            let Some(bytes) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
-                return;
-            };
+            let bytes = frame_builds(&envelope, EXPIRES_AT_MS)?;
             assert_eq!(bytes.len(), MAX_FRAME);
             assert!(matches!(
                 admit_bytes(&mut rx, &bytes, NOW_MS, MONOTONIC_MS),
@@ -828,15 +830,14 @@ mod tests {
         assert_eq!(rx.occupancy(), (8, CHANNEL_BYTES));
         assert_eq!(CHANNEL_BYTES.saturating_add(1), OVERSIZE_CHANNEL);
         let extra = signed(|e| e.envelope_id = "agg-8".to_owned());
-        let Some(extra_bytes) = complete_frame_bytes(&extra, EXPIRES_AT_MS) else {
-            return;
-        };
+        let extra_bytes = frame_builds(&extra, EXPIRES_AT_MS)?;
         assert!(extra_bytes.len() >= OVERSIZE_CHANNEL.saturating_sub(CHANNEL_BYTES));
         assert_eq!(
             admit_bytes(&mut rx, &extra_bytes, NOW_MS, MONOTONIC_MS),
             ReceiverAdmit::DroppedNew
         );
         assert_eq!(rx.occupancy(), (8, CHANNEL_BYTES));
+        Ok(())
     }
 
     fn row_negative_received_byte_vector() {
@@ -851,11 +852,9 @@ mod tests {
         assert_eq!(rx.dedup_len(), 0);
     }
 
-    fn row_whitespace_padded_over_cap_refused() {
+    fn row_whitespace_padded_over_cap_refused() -> Result<(), Box<dyn std::error::Error>> {
         let envelope = signed(|e| e.envelope_id = "padded".to_owned());
-        let Some(compact) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
-            return;
-        };
+        let compact = frame_builds(&envelope, EXPIRES_AT_MS)?;
         assert!(compact.len() < OVERSIZE_FRAME);
         let mut padded = compact.clone();
         padded.resize(OVERSIZE_FRAME, b' ');
@@ -872,13 +871,12 @@ mod tests {
         );
         assert_eq!(padded_rx.occupancy(), (0, 0));
         assert_eq!(padded_rx.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_independent_received_byte_identity() {
+    fn row_independent_received_byte_identity() -> Result<(), Box<dyn std::error::Error>> {
         let envelope = signed(|e| e.envelope_id = "identity".to_owned());
-        let Some(bytes) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, EXPIRES_AT_MS)?;
         let mut rx = EphemeralReceiver::new();
         assert!(matches!(
             admit_bytes(&mut rx, &bytes, NOW_MS, MONOTONIC_MS),
@@ -896,6 +894,7 @@ mod tests {
         );
         assert_eq!(invalid, br#"{"frame_type":"ephemeral","envelope":{"#.to_vec());
         assert_eq!(bad.occupancy(), (0, 0));
+        Ok(())
     }
 
     fn row_inflight_counts() {
@@ -1005,12 +1004,10 @@ mod tests {
         })
     }
 
-    fn row_hold_release_delivers_once() {
+    fn row_hold_release_delivers_once() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = hold_envelope();
-        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
-            return;
-        };
+        let original = frame_builds(&envelope, 1_003_000)?;
         let first = admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS);
         assert!(matches!(first, ReceiverAdmit::Held(_)));
         assert_eq!(rx.hold_len(), 1);
@@ -1024,6 +1021,7 @@ mod tests {
             ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
         );
         assert_eq!(admit_at(&mut rx, &envelope, 1_002_000, MONOTONIC_MS), ReceiverAdmit::Duplicate);
+        Ok(())
     }
 
     fn row_hold_cap_boundaries() {
@@ -1056,12 +1054,10 @@ mod tests {
         assert_eq!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Empty);
     }
 
-    fn row_resigned_retry_does_not_mutate_hold() {
+    fn row_resigned_retry_does_not_mutate_hold() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let original_env = hold_envelope();
-        let Some(original) = complete_frame_bytes(&original_env, 1_003_000) else {
-            return;
-        };
+        let original = frame_builds(&original_env, 1_003_000)?;
         assert!(matches!(
             admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
             ReceiverAdmit::Held(_)
@@ -1084,14 +1080,13 @@ mod tests {
             ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
         );
         assert_eq!(admit_at(&mut rx, &retry, 1_002_000, 51_000), ReceiverAdmit::Duplicate);
+        Ok(())
     }
 
-    fn row_hold_released_by_time_alone() {
+    fn row_hold_released_by_time_alone() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = hold_envelope();
-        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
-            return;
-        };
+        let original = frame_builds(&envelope, 1_003_000)?;
         assert!(matches!(
             admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
             ReceiverAdmit::Held(_)
@@ -1102,6 +1097,7 @@ mod tests {
         );
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 1);
+        Ok(())
     }
 
     fn row_hold_cap_by_monotonic_alone() {
@@ -1115,12 +1111,10 @@ mod tests {
         assert_eq!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Duplicate);
     }
 
-    fn row_one_terminal_per_ciphertext() {
+    fn row_one_terminal_per_ciphertext() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = hold_envelope();
-        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
-            return;
-        };
+        let original = frame_builds(&envelope, 1_003_000)?;
         assert!(matches!(
             admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
             ReceiverAdmit::Held(_)
@@ -1136,14 +1130,13 @@ mod tests {
         assert_eq!(admit(&mut rx, &envelope, 1_002_000), ReceiverAdmit::Duplicate);
         assert_eq!(admit(&mut rx, &envelope, 1_003_000), ReceiverAdmit::Expired);
         assert_eq!(rx.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_pop_rechecks_signed_start_after_promotion() {
+    fn row_pop_rechecks_signed_start_after_promotion() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = hold_envelope();
-        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
-            return;
-        };
+        let original = frame_builds(&envelope, 1_003_000)?;
         assert!(matches!(
             admit_bytes(&mut rx, &original, 1_000_000, 50_000),
             ReceiverAdmit::Held(_)
@@ -1157,42 +1150,39 @@ mod tests {
             rx.pop(1_002_000, 51_001),
             ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
         );
+        Ok(())
     }
 
-    fn row_received_deadline_zero_refused() {
+    fn row_received_deadline_zero_refused() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = signed(|e| e.envelope_id = "dl-zero".to_owned());
-        let Some(bytes) = complete_frame_bytes(&envelope, 0) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, 0)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
         );
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_received_deadline_max_refused() {
+    fn row_received_deadline_max_refused() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = signed(|e| e.envelope_id = "dl-max".to_owned());
-        let Some(bytes) = complete_frame_bytes(&envelope, u64::MAX) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, u64::MAX)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
         );
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_received_deadline_match_pop_returns_verified_d() {
+    fn row_received_deadline_match_pop_returns_verified_d() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = signed(|e| e.envelope_id = "dl-match".to_owned());
-        let Some(bytes) = complete_frame_bytes(&envelope, 1_005_000) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, 1_005_000)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Displayed { expires_at_ms: 1_005_000 }
@@ -1201,18 +1191,17 @@ mod tests {
             rx.pop(1_000_000, 50_000),
             ReceiverDequeue::Delivered { bytes, expires_at_ms: 1_005_000 }
         );
+        Ok(())
     }
 
-    fn row_hold_received_deadline_zero_refused() {
+    fn row_hold_received_deadline_zero_refused() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = signed(|e| {
             e.envelope_id = "hold-dl-zero".to_owned();
             e.created_at = 1_002;
             e.ttl = 1;
         });
-        let Some(bytes) = complete_frame_bytes(&envelope, 0) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, 0)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
@@ -1220,18 +1209,17 @@ mod tests {
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_hold_received_deadline_max_refused() {
+    fn row_hold_received_deadline_max_refused() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = signed(|e| {
             e.envelope_id = "hold-dl-max".to_owned();
             e.created_at = 1_002;
             e.ttl = 1;
         });
-        let Some(bytes) = complete_frame_bytes(&envelope, u64::MAX) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, u64::MAX)?;
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
@@ -1239,22 +1227,22 @@ mod tests {
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 0);
+        Ok(())
     }
 
-    fn row_hold_received_deadline_match_held() {
+    fn row_hold_received_deadline_match_held() -> TestResult {
         let mut rx = EphemeralReceiver::new();
         let envelope = hold_envelope();
-        let Some(bytes) = complete_frame_bytes(&envelope, 1_003_000) else {
-            return;
-        };
+        let bytes = frame_builds(&envelope, 1_003_000)?;
         assert!(matches!(admit_bytes(&mut rx, &bytes, 1_000_000, 50_000), ReceiverAdmit::Held(_)));
         assert_eq!(rx.hold_len(), 1);
         assert_eq!(rx.occupancy().0, 1);
         assert_eq!(rx.dedup_len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn ephemeral_receiver_bounds_and_lock() {
+    fn ephemeral_receiver_bounds_and_lock() -> TestResult {
         let mut flags = EphemeralReceiver::new();
         flags.set_poll_retry_metadata(false);
         flags.set_size_reserialized(false);
@@ -1263,30 +1251,31 @@ mod tests {
         row_dedup_bound_drops_new();
         row_conflicting_hash_rejected();
         row_channel_frame_cap();
-        row_whole_frame_cap();
-        row_aggregate_byte_cap();
+        row_whole_frame_cap()?;
+        row_aggregate_byte_cap()?;
         row_negative_received_byte_vector();
-        row_whitespace_padded_over_cap_refused();
-        row_independent_received_byte_identity();
+        row_whitespace_padded_over_cap_refused()?;
+        row_independent_received_byte_identity()?;
         row_inflight_counts();
         row_generation_lock_iled();
         row_expiry_frees_dedup();
         row_pop_delivers_at_deadline_minus_one();
         row_pop_drops_expired_at_deadline();
-        row_hold_release_delivers_once();
+        row_hold_release_delivers_once()?;
         row_hold_cap_boundaries();
         row_duplicate_while_held_not_double_delivered();
-        row_resigned_retry_does_not_mutate_hold();
-        row_hold_released_by_time_alone();
+        row_resigned_retry_does_not_mutate_hold()?;
+        row_hold_released_by_time_alone()?;
         row_hold_cap_by_monotonic_alone();
-        row_one_terminal_per_ciphertext();
-        row_pop_rechecks_signed_start_after_promotion();
-        row_received_deadline_zero_refused();
-        row_received_deadline_max_refused();
-        row_received_deadline_match_pop_returns_verified_d();
-        row_hold_received_deadline_zero_refused();
-        row_hold_received_deadline_max_refused();
-        row_hold_received_deadline_match_held();
+        row_one_terminal_per_ciphertext()?;
+        row_pop_rechecks_signed_start_after_promotion()?;
+        row_received_deadline_zero_refused()?;
+        row_received_deadline_max_refused()?;
+        row_received_deadline_match_pop_returns_verified_d()?;
+        row_hold_received_deadline_zero_refused()?;
+        row_hold_received_deadline_max_refused()?;
+        row_hold_received_deadline_match_held()?;
+        Ok(())
     }
 
     fn row_live_duplicate_before_d() {

@@ -111,15 +111,11 @@ async fn capable_hub_frames(
     target: &str,
 ) -> Fallible<(Arc<GatewaySessionHub>, Arc<Mutex<Vec<Value>>>)> {
     let hub = Arc::new(GatewaySessionHub::default());
-    hub.set_skip_deadline_equality(false);
     let (send, frames) = sink();
     hub.register_ephemeral(target.to_owned(), SESSION.to_owned(), send, Some(ID.into()), 32)
         .await?;
     anyhow::ensure!(hub.ephemeral_flag(target).await == Some(true));
     hub.set_queue_clock(target, NOW_LIVE_MS).await;
-    if let Some(entry) = hub.snapshot().await.get(target) {
-        entry.queue.set_bypass_transient_bound(false);
-    }
     Ok((hub, frames))
 }
 
@@ -186,17 +182,42 @@ async fn row_durable_wake_positive_control() -> TestResult {
     Ok(())
 }
 
-async fn row_ephemeral_forward_does_not_wake() -> TestResult {
-    let context = crate::session::tests::test_gateway_context()?;
-    let (send, _frames) = sink();
-    context
+async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext) -> TestResult {
+    let listener = crate::serve::GatewayListenerContext {
+        custody: context.custody.clone(),
+        node_id: context.node_id.clone(),
+        gateway_id: context.gateway_id.clone(),
+        peers: context.peers.clone(),
+        router: context.router.clone(),
+        notify: context.notify.clone(),
+        #[cfg(feature = "itest-local-mint")]
+        relay_service_key: context.relay_service_key.clone(),
+        state: context.state.clone(),
+        store: context.store.clone(),
+        hub: context.hub.clone(),
+    };
+    let now_seconds = ramflux_node_core::now_unix_seconds();
+    let now_ms = now_seconds.saturating_mul(1_000);
+    let mut forward = request(TARGET, TARGET, "env-nowake");
+    forward.envelope.created_at = i64::try_from(now_seconds)?;
+    forward.envelope.ttl = 5;
+    forward.expires_at_ms = now_ms.saturating_add(5_000);
+    let (recipient, received) = sink();
+    listener
         .hub
-        .register_ephemeral(TARGET.into(), SESSION.into(), send, Some(ID.into()), 32)
+        .register_ephemeral(TARGET.into(), SESSION.into(), recipient, Some(ID.into()), 32)
         .await?;
-    context.hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
-    let reply = handle_at(&context.hub, request(TARGET, TARGET, "env-nowake"), NOW_LIVE_MS).await?;
+    assert_eq!(listener.notify.wake_count(), 0);
+    let request = ramflux_transport::GatewayQuicRequest {
+        method: "POST".into(),
+        path: PATH.into(),
+        body: serde_json::to_value(forward)?,
+    };
+    let reply = crate::serve::handle_gateway_forward_request(&request, &listener).await?;
     assert!(reply.delivered);
-    assert_eq!(context.notify.wake_count(), 0);
+    assert_eq!(listener.hub.ephemeral_queued(TARGET).await, 1);
+    assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);
+    assert_eq!(listener.notify.wake_count(), 0);
     Ok(())
 }
 
@@ -700,28 +721,51 @@ fn row_map_queue_full() {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn final_registration_capability() -> TestResult {
+    let wake_context = crate::session::tests::test_gateway_context()?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_path_is_same_node_forward();
     row_map_queue_full();
     row_durable_wake_positive_control().await?;
-    row_ephemeral_forward_does_not_wake().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
+    row_ephemeral_forward_does_not_wake(&wake_context).await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_writer_emits_transient().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_sixty_fifth_frame_queue_full().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_byte_cap_ninth_max_frame_queue_full().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_forward_target_differs_from_hub().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_forward_target_differs_from_envelope().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_capable_token_replaced_after_c1().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_capability_absent().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_no_hub_entry_offline().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_enqueues_on_a_after_router_move().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_drops_when_a_closed().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_expired_at_d().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_refused_when_clock_reaches_d().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_queued_before_d().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_deadline_mismatch_invalid().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_durable_mode_invalid().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_frame_32768_accepted_32769_invalid().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_marker_required_exact_error().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_id_bounds_exact_errors_and_inclusive_positives().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     row_isolated_p01_predicates().await?;
+    assert_eq!(wake_context.notify.wake_count(), 0);
     Ok(())
 }

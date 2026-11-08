@@ -520,7 +520,7 @@ async fn handle_gateway_forward_mesh_request(
     Ok(())
 }
 
-async fn handle_gateway_forward_request(
+pub(crate) async fn handle_gateway_forward_request(
     request: &ramflux_transport::GatewayQuicRequest,
     context: &GatewayListenerContext,
 ) -> anyhow::Result<GatewayForwardDeliverResponse> {

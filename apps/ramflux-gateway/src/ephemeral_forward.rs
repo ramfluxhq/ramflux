@@ -119,7 +119,7 @@ pub(crate) async fn handle_at(
     for id in [&request.source_gateway_id, &request.target_delivery_id] {
         anyhow::ensure!(!id.is_empty() && id.len() <= 256, "invalid forwarding identity");
     }
-    if let Some(outcome) = pre_enqueue_refusal(&request, now_ms, skip_deadline_equality(hub)) {
+    if let Some(outcome) = pre_enqueue_refusal(&request, now_ms) {
         return Ok(map_forward(finish_without_wake(outcome)));
     }
     let bytes = frame_bytes(&request.envelope, request.expires_at_ms)
@@ -139,31 +139,14 @@ pub(crate) async fn handle_at(
     Ok(map_forward(outcome))
 }
 
-fn skip_deadline_equality(
-    #[cfg_attr(not(test), allow(unused_variables))] hub: &GatewaySessionHub,
-) -> bool {
-    #[cfg(test)]
-    {
-        hub.skip_deadline_equality()
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
-}
-
 fn pre_enqueue_refusal(
     request: &GatewayForwardEphemeralRequest,
     now_ms: u64,
-    skip_deadline_equality: bool,
 ) -> Option<EphemeralEnqueueOutcome> {
     match deadline(&request.envelope, now_ms) {
         Err(EphemeralModeError::Expired) => Some(EphemeralEnqueueOutcome::Expired),
         Err(_) => Some(EphemeralEnqueueOutcome::Invalid),
         Ok(computed) => {
-            if skip_deadline_equality {
-                return None;
-            }
             if computed == request.expires_at_ms {
                 None
             } else {

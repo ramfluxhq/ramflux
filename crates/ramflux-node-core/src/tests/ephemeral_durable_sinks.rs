@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Static guard: ephemeral modules may import only what the allow-list names.
+//! Static guard: ephemeral modules and the C1 view may name only allow-listed imports.
 //!
 //! Production modules are discovered by walking `crates/*/src` and
 //! `apps/*/src` for `.rs` files whose path contains `ephemeral` or
 //! `transient`, plus named read-only view files (`router/c1_view.rs`) that
 //! sit outside those needles. Test-only files are excluded. Each ephemeral
-//! module passes two layers; view files pass the durable-sink symbol scan:
+//! module passes two layers; view files pass the same import allow-list and
+//! durable-sink symbol scan:
 //!
 //! 1. Import allow-list. Every `use` path and every module-style path
 //!    expression (`a::b::c(..)`) must start with an entry of
-//!    `ALLOWED_IMPORT_PREFIXES`. Glob imports are refused.
+//!    `ALLOWED_IMPORT_PREFIXES` or the view-specific allow-list. Glob imports
+//!    are refused.
 //! 2. Forbidden-symbol scan over the normalised text, with `use` aliases
 //!    expanded. This is a second layer, not the proof.
 //!
@@ -166,10 +168,35 @@ const DISCOVERY_ROOTS: &[&str] = &["crates", "apps"];
 /// Path fragments that select a production module.
 const DISCOVERY_NEEDLES: &[&str] = &["ephemeral", "transient"];
 
-/// Read-only views that do not match the discovery needles. They are scanned
-/// for durable-sink symbols so the C1 view cannot grow `target_shard` or
-/// publication writes without this guard failing.
+/// Read-only views that do not match the discovery needles.
 const EXTRA_READ_ONLY_VIEWS: &[&str] = &["crates/ramflux-node-core/src/router/c1_view.rs"];
+
+/// Imports and module paths the C1 view is allowed to name. Keep this list
+/// narrower than the general ephemeral allow-list: this module is the boundary
+/// around `RouterCore`'s durable internals.
+const C1_VIEW_ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
+    ("crate::router::RouterCore", "wrapped router type; fields remain private to this view"),
+    ("crate::router::lock_unpoisoned", "in-memory lock helper"),
+    ("crate::EnvelopeAuthorityReason", "source-refusal reason enum"),
+    ("crate::EphemeralReassertionError", "capability reassertion error enum"),
+    ("crate::EphemeralRegistrationItem", "capability reassertion input type"),
+    ("crate::EphemeralReplayAdmit", "volatile replay admission result"),
+    ("crate::EphemeralRouteGate", "route gate result"),
+    ("crate::EphemeralRouteResult", "read-only route result"),
+    ("crate::EphemeralDurableSnapshot", "test-only snapshot value"),
+    ("crate::HomeNodeMigrationRecord", "migration test fixture type"),
+    ("crate::NodeCoreError", "source verification error type"),
+    ("crate::SessionDescriptor", "read-only live session descriptor"),
+    ("crate::SessionLifecycle", "session lifecycle enum"),
+    ("crate::ephemeral::EphemeralCapabilityState", "volatile capability state"),
+    ("crate::ephemeral::EphemeralReplaySet", "volatile replay state"),
+    ("ramflux_protocol::Envelope", "protocol envelope type"),
+    ("ramflux_protocol::qualified_device_id", "pure device selector construction"),
+    ("serde_json::Value", "JSON value type"),
+    ("serde_json::to_vec", "in-memory snapshot serialization"),
+    ("std::sync::Mutex", "in-memory capability/replay locks"),
+    ("std::sync::atomic::Ordering", "atomic ordering for volatile counters"),
+];
 
 /// Symbols a read-only view must not name in production items.
 const VIEW_FORBIDDEN_SYMBOLS: &[&str] = &["target_shard", "publication", "begin_write", "save"];
@@ -333,6 +360,18 @@ fn view_sink_hits(src: &str) -> Vec<&'static str> {
         .chain(FORBIDDEN_SYMBOLS.iter().copied())
         .filter(|symbol| has_symbol(&text, symbol))
         .collect()
+}
+
+fn scan_c1_view(src: &str, modules: &BTreeSet<String>) -> Result<Vec<&'static str>, String> {
+    let collapsed = normalised_items(src);
+    check_allow_list_with(
+        &collapsed,
+        "crates/ramflux-node-core/src/router/c1_view.rs",
+        "crate::router::c1_view",
+        modules,
+        C1_VIEW_ALLOWED_IMPORT_PREFIXES,
+    )?;
+    Ok(view_sink_hits(src))
 }
 
 /// Comments and strings stripped, `#[cfg(test)]` items removed, whitespace collapsed.
@@ -833,10 +872,10 @@ fn planted_spellings(symbol: &str) -> [(&'static str, String); 3] {
 }
 
 /// True when `path` starts with an allow-listed prefix on whole segments.
-fn is_allowed_path(path: &str) -> bool {
+fn is_allowed_path(path: &str, allowed_import_prefixes: &[(&str, &str)]) -> bool {
     let first = path.split("::").next().unwrap_or_default();
     PRIMITIVE_TYPES.contains(&first)
-        || ALLOWED_IMPORT_PREFIXES.iter().any(|(prefix, _)| {
+        || allowed_import_prefixes.iter().any(|(prefix, _)| {
             path == *prefix || path.strip_prefix(*prefix).is_some_and(|rest| rest.starts_with("::"))
         })
 }
@@ -874,6 +913,16 @@ fn check_allow_list(
     file_module: &str,
     modules: &BTreeSet<String>,
 ) -> Result<(), String> {
+    check_allow_list_with(text, label, file_module, modules, ALLOWED_IMPORT_PREFIXES)
+}
+
+fn check_allow_list_with(
+    text: &str,
+    label: &str,
+    file_module: &str,
+    modules: &BTreeSet<String>,
+    allowed_import_prefixes: &[(&str, &str)],
+) -> Result<(), String> {
     let spans = inline_mod_spans(text);
     for (at, body) in use_bodies(text) {
         let module = module_at(file_module, &spans, at);
@@ -887,7 +936,7 @@ fn check_allow_list(
                 format!("import {base} not on the ephemeral allow-list in {label}: {reason}")
             })?;
             let shown = if is_glob { format!("{path}::*") } else { path.clone() };
-            if !is_allowed_path(&shown) {
+            if !is_allowed_path(&shown, allowed_import_prefixes) {
                 return Err(format!("import {shown} not on the ephemeral allow-list in {label}"));
             }
             if is_glob {
@@ -900,7 +949,7 @@ fn check_allow_list(
         let path = normalise_target(&module, &token, modules).map_err(|reason| {
             format!("import {token} not on the ephemeral allow-list in {label}: {reason}")
         })?;
-        if !is_allowed_path(&path) {
+        if !is_allowed_path(&path, allowed_import_prefixes) {
             return Err(format!("import {path} not on the ephemeral allow-list in {label}"));
         }
     }
@@ -1042,7 +1091,9 @@ fn c1_view_has_no_durable_sinks() -> TestResult {
         );
         let path = root.join(rel);
         let source = std::fs::read_to_string(&path)?;
-        let hits = view_sink_hits(&source);
+        let src_dir = crate_src_of(&root, &path)?;
+        let modules = load_crate_modules(&src_dir)?;
+        let hits = scan_c1_view(&source, &modules).map_err(io::Error::other)?;
         if !hits.is_empty() {
             return Err(
                 io::Error::other(format!("{rel} names durable-sink symbols: {hits:?}")).into()
@@ -1056,6 +1107,58 @@ fn c1_view_has_no_durable_sinks() -> TestResult {
 fn c1_view_scan_refuses_target_shard() {
     let hits = view_sink_hits("fn leak() { self.core.target_shard(\"t\"); }\n");
     assert!(hits.contains(&"target_shard"), "view scan must see target_shard, got {hits:?}");
+}
+
+#[test]
+fn c1_view_scan_refuses_durable_store_write_symbol() {
+    let hits = view_sink_hits("fn leak() { store.begin_write(); }\n");
+    assert!(hits.contains(&"begin_write"), "view scan must see durable writes, got {hits:?}");
+}
+
+#[test]
+fn c1_view_scan_refuses_publication_symbol() {
+    let hits = view_sink_hits("fn leak() { let _ = inbox.publication; }\n");
+    assert!(hits.contains(&"publication"), "view scan must see publication access, got {hits:?}");
+}
+
+#[test]
+fn c1_view_import_allow_list_refuses_globs() -> TestResult {
+    let root = workspace_root()?;
+    let src_dir = root.join("crates/ramflux-node-core/src");
+    let modules = load_crate_modules(&src_dir)?;
+    let error = match scan_c1_view("use crate::router::*;\n", &modules) {
+        Err(error) => error,
+        Ok(hits) => {
+            return Err(
+                io::Error::other(format!("C1 view accepted a glob import: {hits:?}")).into()
+            );
+        }
+    };
+    assert_eq!(
+        error,
+        "import crate::router::* not on the ephemeral allow-list in crates/ramflux-node-core/src/router/c1_view.rs"
+    );
+    Ok(())
+}
+
+#[test]
+fn c1_view_import_allow_list_refuses_router_store() -> TestResult {
+    let root = workspace_root()?;
+    let src_dir = root.join("crates/ramflux-node-core/src");
+    let modules = load_crate_modules(&src_dir)?;
+    let error = match scan_c1_view("use crate::router_store::RouterRedbStore;\n", &modules) {
+        Err(error) => error,
+        Ok(hits) => {
+            return Err(
+                io::Error::other(format!("C1 view accepted a store import: {hits:?}")).into()
+            );
+        }
+    };
+    assert_eq!(
+        error,
+        "import crate::router_store::RouterRedbStore not on the ephemeral allow-list in crates/ramflux-node-core/src/router/c1_view.rs"
+    );
+    Ok(())
 }
 
 #[test]
