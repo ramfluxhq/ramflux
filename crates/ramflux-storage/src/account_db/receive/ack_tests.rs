@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! WA batch settlement: intents survive lost replies; never ACK above C; `invalid_seq`
-//! is terminal; a stale-E batch cannot delete a new-E intent.
+//! is terminal and revalidates; a stale-E batch cannot delete a new-E intent; a terminal
+//! outcome releases compat work in the same transaction; the wire batch shape is exact.
 #![allow(clippy::expect_used, clippy::panic)]
 use super::ack::{
     ReceiveAckApply, ReceiveAckApplyResult, ReceiveAckOutcome, ReceiveAckResult, run as with_fault,
@@ -147,7 +148,7 @@ fn ack_lost_before_and_after_commit() -> Result<(), StorageError> {
                 ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::Uncertain },
             ],
         )?,
-        ReceiveAckApplyResult::Applied { settled: 0 }
+        ReceiveAckApplyResult::Applied { settled: 0, revalidate: false }
     );
     assert_eq!(intents(&db, "e")?, vec![1, 2], "lost reply after WR retains");
     assert_eq!(
@@ -161,7 +162,7 @@ fn ack_lost_before_and_after_commit() -> Result<(), StorageError> {
                 ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::AlreadySettled },
             ],
         )?,
-        ReceiveAckApplyResult::Applied { settled: 2 }
+        ReceiveAckApplyResult::Applied { settled: 2, revalidate: false }
     );
     assert_eq!(intents(&db, "e")?, Vec::<u64>::new());
     drop(db);
@@ -200,7 +201,8 @@ fn invalid_seq_terminal() -> Result<(), StorageError> {
             10,
             &[ReceiveAckResult { sequence: 1, outcome: ReceiveAckOutcome::InvalidSeq }],
         )?,
-        ReceiveAckApplyResult::Applied { settled: 1 }
+        ReceiveAckApplyResult::Applied { settled: 1, revalidate: true },
+        "invalid_seq asks the caller to revalidate E"
     );
     assert_eq!(intents(&db, "e")?, Vec::<u64>::new());
     let events: i64 = db.connection.query_row(
@@ -244,8 +246,241 @@ fn delayed_old_incarnation_ack() -> Result<(), StorageError> {
             now: now(),
         })
     })?;
-    assert_eq!(outcome, ReceiveAckApplyResult::ResetRequired);
+    assert_eq!(outcome, ReceiveAckApplyResult::StaleIncarnation, "old-E outcome is dropped");
     assert_eq!(intents(&db, "e2")?, vec![1], "stale-E batch leaves the new-E intent");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn apply_raw(
+    db: &AccountDb,
+    cursor: u64,
+    sequences: &[u64],
+    results: &[ReceiveAckResult],
+) -> Result<ReceiveAckApplyResult, StorageError> {
+    db.receive_transaction(expect(db, "e", cursor)?, 1, |tx| {
+        tx.apply_ack_results(ReceiveAckApply { incarnation: "e", sequences, results, now: 10 })
+    })
+}
+
+fn rows_for(sequences: &[u64]) -> Vec<ReceiveAckResult> {
+    sequences.iter().map(|seq| terminal(*seq)).collect()
+}
+
+fn integrity(result: Result<ReceiveAckApplyResult, StorageError>, text: &'static str) {
+    let error = result.expect_err("refused");
+    assert!(matches!(&error, StorageError::Integrity(got) if *got == text), "{error:?}");
+}
+
+#[test]
+fn ack_batch_shape_refusals_are_exact() -> Result<(), StorageError> {
+    const SHAPE: &str = "receive ack batch must be 1..=64 positive seqs";
+    const ORDER: &str = "receive ack batch must be strictly increasing";
+    let (root, db) = setup("ack-shape")?;
+    cover_range(&db, 3)?;
+    integrity(apply_raw(&db, 3, &[], &[]), SHAPE);
+    integrity(apply_raw(&db, 3, &[0], &rows_for(&[0])), SHAPE);
+    let over: Vec<u64> = (1..=65).collect();
+    integrity(apply_raw(&db, 3, &over, &rows_for(&over)), SHAPE);
+    integrity(apply_raw(&db, 3, &[2, 1], &rows_for(&[2, 1])), ORDER);
+    integrity(apply_raw(&db, 3, &[1, 1], &rows_for(&[1, 1])), ORDER);
+    assert_eq!(intents(&db, "e")?, vec![1, 2, 3], "a refused batch writes nothing");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn ack_result_set_must_match_the_batch() -> Result<(), StorageError> {
+    const EXACT: &str = "receive ack result set must be exact";
+    let (root, db) = setup("ack-exact")?;
+    cover_range(&db, 3)?;
+    integrity(apply_raw(&db, 3, &[1, 2], &rows_for(&[1])), EXACT);
+    integrity(apply_raw(&db, 3, &[1], &rows_for(&[1, 2])), EXACT);
+    integrity(apply_raw(&db, 3, &[1, 2], &rows_for(&[2, 1])), EXACT);
+    integrity(apply_raw(&db, 3, &[1, 2], &rows_for(&[1, 3])), EXACT);
+    assert_eq!(intents(&db, "e")?, vec![1, 2, 3], "a refused batch writes nothing");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn ack_batch_of_exactly_64_is_accepted() -> Result<(), StorageError> {
+    let (root, db) = setup("ack-64")?;
+    cover_range(&db, 64)?;
+    let batch = due(&db, "e", 64, now(), true)?;
+    assert_eq!(batch, (1..=64).collect::<Vec<u64>>());
+    assert_eq!(
+        apply_raw(&db, 64, &batch, &rows_for(&batch))?,
+        ReceiveAckApplyResult::Applied { settled: 64, revalidate: false }
+    );
+    assert_eq!(intents(&db, "e")?, Vec::<u64>::new());
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+fn next_attempt(db: &AccountDb) -> Result<(i64, i64), StorageError> {
+    Ok(db.connection.query_row(
+        "SELECT attempts,next_attempt_at FROM gateway_ack_intent WHERE inbox_seq=x'0000000000000001'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
+#[test]
+fn transient_backoff_stays_within_one_to_sixty_seconds() -> Result<(), StorageError> {
+    let (root, db) = setup("ack-backoff")?;
+    cover_range(&db, 1)?;
+    let transient = [ReceiveAckResult { sequence: 1, outcome: ReceiveAckOutcome::Transient }];
+    let mut delays = Vec::new();
+    for attempt in 0..9 {
+        let at = 1_000 + attempt;
+        assert_eq!(
+            apply(&db, "e", 1, at, &transient)?,
+            ReceiveAckApplyResult::Applied { settled: 0, revalidate: false }
+        );
+        let (attempts, next) = next_attempt(&db)?;
+        assert_eq!(attempts, attempt + 1, "transient retains and counts");
+        delays.push(next - at);
+    }
+    assert_eq!(delays, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    assert_eq!(intents(&db, "e")?, vec![1], "transient never deletes");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn selected_batch_is_ascending_after_a_retry_reorders_it() -> Result<(), StorageError> {
+    let (root, db) = setup("ack-reorder")?;
+    cover_range(&db, 3)?;
+    let base = crate::unix_now();
+    let retry = |sequence, at| {
+        apply(
+            &db,
+            "e",
+            3,
+            at,
+            &[ReceiveAckResult { sequence, outcome: ReceiveAckOutcome::Transient }],
+        )
+    };
+    retry(1, base + 10)?;
+    retry(2, base + 10)?;
+    retry(2, base + 10)?;
+    let order: Vec<u64> = {
+        let mut query = db.connection.prepare(
+            "SELECT inbox_seq FROM gateway_ack_intent ORDER BY next_attempt_at,inbox_seq",
+        )?;
+        let rows = query.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|row| Ok(u64::from_be_bytes(row?.as_slice().try_into().expect("seq"))))
+            .collect::<Result<_, rusqlite::Error>>()?
+    };
+    assert_eq!(order, vec![3, 1, 2], "the retry really reorders the age order");
+    let batch = due(&db, "e", 3, base + 100, true)?;
+    assert_eq!(batch, vec![1, 2, 3], "the wire batch is ascending");
+    assert!(
+        apply_raw(&db, 3, &batch, &rows_for(&batch)).is_ok(),
+        "the selected batch passes the wire validation"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn expired_intents_are_dropped_locally_without_network() -> Result<(), StorageError> {
+    let (root, db) = setup("ack-expiry")?;
+    cover_range(&db, 2)?;
+    db.seed_compat_terminal_for_test("t", "e", 1, &bytes(1))?;
+    db.connection.execute(
+        "UPDATE gateway_ack_intent SET expires_at=50 WHERE inbox_seq=x'0000000000000001'",
+        [],
+    )?;
+    assert_eq!(
+        due(&db, "e", 2, now(), true)?,
+        vec![2],
+        "the expired intent never goes on the wire"
+    );
+    assert_eq!(intents(&db, "e")?, vec![2], "expiry deletes the intent locally");
+    assert_eq!(db.receive_state_for_test(1)?, (None, 0), "expiry releases its compat rows");
+    let events: i64 = db.connection.query_row(
+        "SELECT count(*) FROM runtime_journal WHERE topic='inbox.receive_failure' AND json_extract(CAST(body_json AS TEXT),'$.reason')='ack_expired'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(events, 1, "expiry emits one diagnostic");
+    assert_eq!(due(&db, "e", 2, now(), true)?, vec![2]);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn terminal_settlement_releases_compat_work_in_one_transaction() -> Result<(), StorageError> {
+    let (root, db) = setup("ack-release")?;
+    cover_range(&db, 2)?;
+    db.seed_compat_terminal_for_test("t", "e", 1, &bytes(1))?;
+    db.seed_held_receive_for_test("t", "e", 5, &bytes(5))?;
+    let rows = [terminal(1), terminal(2)];
+    let rolled = with_fault(true, || apply(&db, "e", 2, 10, &rows));
+    assert!(matches!(&rolled, Err(StorageError::Integrity("receive ack before-commit"))));
+    assert_eq!(intents(&db, "e")?, vec![1, 2], "rollback keeps the intent");
+    assert_eq!(db.receive_state_for_test(1)?, (Some("completed".to_owned()), 2), "and its work");
+    assert_eq!(
+        apply(&db, "e", 2, 10, &rows)?,
+        ReceiveAckApplyResult::Applied { settled: 2, revalidate: false }
+    );
+    assert_eq!(intents(&db, "e")?, Vec::<u64>::new());
+    assert_eq!(db.receive_state_for_test(1)?.0, None, "the compat receipt is released");
+    assert_eq!(db.receive_state_for_test(5)?, (Some("held".to_owned()), 1), "only held work stays");
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn wa_release_then_kill_around_reset_leaves_zero_orphans_after_reopen() -> Result<(), StorageError>
+{
+    use super::reset::{FaultKind, ReceiveReset, ReceiveResetReason, run as reset_fault};
+    let (root, db) = setup("ack-reset-orphans")?;
+    cover_range(&db, 2)?;
+    db.seed_compat_terminal_for_test("t", "e", 1, &bytes(1))?;
+    assert_eq!(
+        apply(&db, "e", 2, 10, &[terminal(1), terminal(2)])?,
+        ReceiveAckApplyResult::Applied { settled: 2, revalidate: false }
+    );
+    // A terminal compat row WA never settled, plus a held row the reset must keep.
+    db.seed_compat_terminal_for_test("t", "e", 3, &bytes(3))?;
+    db.seed_held_receive_for_test("t", "e", 5, &bytes(5))?;
+    let reset = |db: &AccountDb| {
+        db.receive_transaction(expect(db, "e", 2)?, 1, |tx| {
+            tx.reset(ReceiveReset {
+                new_incarnation: "n",
+                settled: 1,
+                issued: 1,
+                after: 0,
+                reason: ReceiveResetReason::RouterReset,
+            })
+        })
+    };
+    let killed = reset_fault(FaultKind::BeforeCommit, || reset(&db));
+    assert!(matches!(&killed, Err(StorageError::Integrity("receive reset before-commit"))));
+    assert_eq!(db.receive_state_for_test(3)?.0.as_deref(), Some("completed"), "kill rolls back");
+    assert_eq!(reset(&db)?, super::reset::ReceiveResetResult::Reset);
+    drop(db);
+    let index = crate::AccountIndex::open(&root)?;
+    let db = AccountDb::open(
+        &index,
+        "acct",
+        &crate::AccountDbKey::derive("acct", b"storage-test-secret"),
+    )?;
+    let snap = db.receive_ledger_snap_for_test("t")?;
+    assert_eq!(snap.intents, Vec::<u64>::new());
+    assert_eq!(snap.receipts, vec![(5, "held".to_owned())], "zero orphan compat receipts");
+    assert_eq!(snap.work, 1, "zero orphan work: only the held row");
     drop(db);
     std::fs::remove_dir_all(root)?;
     Ok(())

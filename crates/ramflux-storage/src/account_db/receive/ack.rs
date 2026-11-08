@@ -2,10 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! WA: one sorted positive max-64 ACK-intent batch with an exact result set.
-//! Terminal outcomes delete the named intent; uncertainty retains; `invalid_seq`
-//! diagnoses and revalidates; mismatch asks the caller for P10 reset; expiry is
-//! diagnostic only. Held work is never selected. Seq > C is refused. Dormant
-//! until P20e/P20g/P24 wire the actor flush.
+//! A terminal outcome settles in ONE transaction: the intent is deleted and its
+//! terminal compat work/receipt rows are released. Uncertainty retains; `invalid_seq`
+//! diagnoses and asks the caller to revalidate E; mismatch asks the caller for P10
+//! reset; a result for an old incarnation is dropped; an expired intent is dropped
+//! locally without network traffic. Held work is never selected. Seq > C is refused.
+//! Dormant until P20e/P20g/P24 wire the actor flush.
 use super::ReceiveTransaction;
 use crate::StorageError;
 use rusqlite::params;
@@ -24,19 +26,20 @@ const BACKOFF_MAX: i64 = 60;
 pub enum ReceiveAckOutcome {
     /// Router retired the row.
     Acked,
-    /// Already gone at the router (including timeout-after-write).
+    /// The router answered that the row was already retired (an explicit reply only).
     AlreadySettled,
     /// Held locally while the router dropped the row.
     NotFound,
-    /// Named seq is not valid for this E; delete once and revalidate.
+    /// Named seq is not valid for this E; delete once, diagnose and revalidate E.
     InvalidSeq,
     /// Transient rejection; backoff 1..60s.
     Transient,
     /// Incarnation mismatch; caller runs P10, no intent is deleted.
     Mismatch,
-    /// Lost send or lost reply; retain the intent.
+    /// Lost send, lost reply, or timeout-after-write: retain the intent. The caller also
+    /// retires the session; nothing here may map a lost response to a terminal outcome.
     Uncertain,
-    /// Intent `expires_at` elapsed; diagnostic only, never marks a receipt.
+    /// Intent `expires_at` elapsed (reported by the caller); diagnostic only, never marks.
     Expired,
 }
 
@@ -56,32 +59,38 @@ pub struct ReceiveAckApply<'a> {
     pub now: i64,
 }
 
-/// WA either settles, asks for reset, or refuses the batch shape.
+/// WA either settles, drops a stale batch, or asks for reset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReceiveAckApplyResult {
-    Applied { settled: usize },
+    /// `settled` intents were terminal. `revalidate` is set when a result was
+    /// `invalid_seq`: the caller must revalidate incarnation E.
+    Applied { settled: usize, revalidate: bool },
+    /// The batch was built under an older incarnation: the outcome is dropped, no write.
+    StaleIncarnation,
+    /// The router reported an incarnation mismatch: the caller runs P10 reset.
     ResetRequired,
 }
 
 impl ReceiveTransaction<'_> {
-    /// Account handle for in-tx locator marking (nested writes are SAVEPOINT).
-    #[must_use]
-    pub const fn account(&self) -> &crate::AccountDb {
-        self.db
-    }
-
-    /// Due intents at or below C, never held/quarantined/staged work, oldest first.
+    /// Due intents at or below C, never held/quarantined/staged work, never expired.
+    /// Returned sorted ascending by `inbox_seq` (the wire order), unique.
     ///
     /// # Errors
     /// Requires the writer; returns SQL errors.
     pub fn due_ack_intents(&self, now: i64, limit: u32) -> Result<Vec<u64>, StorageError> {
+        let mut out = self.due_by_age(now, limit)?;
+        out.sort_unstable();
+        Ok(out)
+    }
+
+    fn due_by_age(&self, now: i64, limit: u32) -> Result<Vec<u64>, StorageError> {
         self.require_writer()?;
         let cursor = self.ack_cursor()?.to_be_bytes();
         let cap = i64::from(limit.min(64));
         let mut query = self.db.connection.prepare(
             "SELECT i.inbox_seq FROM gateway_ack_intent i
              WHERE i.target_delivery_id=?1 AND i.incarnation_id=?2
-               AND i.next_attempt_at<=?3 AND i.inbox_seq<=?4
+               AND i.next_attempt_at<=?3 AND i.inbox_seq<=?4 AND i.expires_at>?3
                AND NOT EXISTS (
                  SELECT 1 FROM gateway_receive_receipt r
                   WHERE r.target_delivery_id=i.target_delivery_id
@@ -102,26 +111,59 @@ impl ReceiveTransaction<'_> {
         Ok(out)
     }
 
-    /// 16 due, oldest age ≥ 1s, or `force` (Connected / before catch-up).
+    /// Drops every intent whose `expires_at` has passed, locally: no network traffic, one
+    /// diagnostic each, terminal compat rows released, own-copy locators never marked.
+    /// Returns the expired sequences ascending.
+    ///
+    /// # Errors
+    /// Requires the writer; returns SQL errors.
+    pub fn expire_ack_intents(&self, now: i64) -> Result<Vec<u64>, StorageError> {
+        self.require_writer()?;
+        let mut query = self.db.connection.prepare(
+            "SELECT inbox_seq FROM gateway_ack_intent
+             WHERE target_delivery_id=?1 AND incarnation_id=?2 AND expires_at<=?3
+             ORDER BY inbox_seq",
+        )?;
+        let rows = query.query_map(params![self.target, self.incarnation, now], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        let mut expired = Vec::new();
+        for seq in rows {
+            expired.push(u64_from_seq(&seq?)?);
+        }
+        drop(query);
+        for sequence in &expired {
+            self.settle_intent(*sequence)?;
+            self.diagnose(*sequence, now, ReceiveAckOutcome::Expired)?;
+        }
+        Ok(expired)
+    }
+
+    /// Local expiry first, then 16 due, oldest age >= 1s, or `force` (Connected / before
+    /// catch-up). The returned batch is always sorted ascending and unique, whatever the
+    /// retry order of the selected intents.
     ///
     /// # Errors
     /// Requires the writer; returns SQL errors.
     pub fn select_ack_batch(&self, now: i64, force: bool) -> Result<Vec<u64>, StorageError> {
-        let due = self.due_ack_intents(now, 64)?;
+        self.expire_ack_intents(now)?;
+        let mut due = self.due_by_age(now, 64)?;
         if due.is_empty() {
             return Ok(due);
         }
-        if force {
-            return Ok(due);
+        let ready = force
+            || due.len() >= ACK_FLUSH_COUNT
+            || self
+                .oldest_due_created_at(now)?
+                .is_some_and(|created| now.saturating_sub(created) >= ACK_FLUSH_SECS);
+        if !ready {
+            return Ok(Vec::new());
         }
-        if due.len() >= ACK_FLUSH_COUNT {
-            return Ok(due.into_iter().take(ACK_FLUSH_COUNT).collect());
+        if !force {
+            due.truncate(ACK_FLUSH_COUNT);
         }
-        let oldest = self.oldest_due_created_at(now)?;
-        if oldest.is_some_and(|created| now.saturating_sub(created) >= ACK_FLUSH_SECS) {
-            return Ok(due);
-        }
-        Ok(Vec::new())
+        due.sort_unstable();
+        Ok(due)
     }
 
     /// Apply an exact result set. Uncertain retains. Mismatch writes nothing.
@@ -132,6 +174,20 @@ impl ReceiveTransaction<'_> {
     pub fn apply_ack_results(
         &self,
         input: ReceiveAckApply<'_>,
+    ) -> Result<ReceiveAckApplyResult, StorageError> {
+        self.apply_ack_results_with(input, |_| Ok(()))
+    }
+
+    /// [`Self::apply_ack_results`] plus `after`: caller effects that must commit with the
+    /// settlement (own-copy marking). `after` runs only when results were applied, and the
+    /// commit fault hook runs after it, as the last step before COMMIT.
+    ///
+    /// # Errors
+    /// As [`Self::apply_ack_results`], plus any error from `after`.
+    pub fn apply_ack_results_with(
+        &self,
+        input: ReceiveAckApply<'_>,
+        after: impl FnOnce(&Self) -> Result<(), StorageError>,
     ) -> Result<ReceiveAckApplyResult, StorageError> {
         self.require_writer()?;
         validate_batch(input.sequences)?;
@@ -145,7 +201,7 @@ impl ReceiveTransaction<'_> {
             return Err(StorageError::Integrity("receive ack result set must be exact"));
         }
         if input.incarnation != self.incarnation {
-            return Ok(ReceiveAckApplyResult::ResetRequired);
+            return Ok(ReceiveAckApplyResult::StaleIncarnation);
         }
         if input.results.iter().any(|row| row.outcome == ReceiveAckOutcome::Mismatch) {
             return Ok(ReceiveAckApplyResult::ResetRequired);
@@ -158,8 +214,11 @@ impl ReceiveTransaction<'_> {
         for row in input.results {
             settled += usize::from(self.apply_one(row, input.now)?);
         }
+        let revalidate =
+            input.results.iter().any(|row| row.outcome == ReceiveAckOutcome::InvalidSeq);
+        after(self)?;
         before_commit()?;
-        Ok(ReceiveAckApplyResult::Applied { settled })
+        Ok(ReceiveAckApplyResult::Applied { settled, revalidate })
     }
 
     fn apply_one(&self, row: &ReceiveAckResult, now: i64) -> Result<bool, StorageError> {
@@ -169,7 +228,7 @@ impl ReceiveTransaction<'_> {
             | ReceiveAckOutcome::NotFound
             | ReceiveAckOutcome::InvalidSeq
             | ReceiveAckOutcome::Expired => {
-                self.delete_intent(row.sequence)?;
+                self.settle_intent(row.sequence)?;
                 if matches!(row.outcome, ReceiveAckOutcome::InvalidSeq | ReceiveAckOutcome::Expired)
                 {
                     self.diagnose(row.sequence, now, row.outcome)?;
@@ -211,11 +270,26 @@ impl ReceiveTransaction<'_> {
         Ok(())
     }
 
-    fn delete_intent(&self, sequence: u64) -> Result<(), StorageError> {
+    /// One transaction step: delete the intent and release its terminal compat work and
+    /// receipt (work first, it references the receipt). Held/staged rows are untouched.
+    fn settle_intent(&self, sequence: u64) -> Result<(), StorageError> {
         let seq = sequence.to_be_bytes();
+        let key = params![self.target, self.incarnation, seq.as_slice()];
         self.db.connection.execute(
             "DELETE FROM gateway_ack_intent WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
-            params![self.target, self.incarnation, seq.as_slice()],
+            key,
+        )?;
+        self.db.connection.execute(
+            "DELETE FROM gateway_receive_work WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3
+             AND EXISTS (SELECT 1 FROM gateway_receive_receipt r
+                          WHERE r.target_delivery_id=?1 AND r.incarnation_id=?2 AND r.inbox_seq=?3
+                            AND r.disposition IN ('completed','rejected'))",
+            key,
+        )?;
+        self.db.connection.execute(
+            "DELETE FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3
+             AND disposition IN ('completed','rejected')",
+            key,
         )?;
         Ok(())
     }

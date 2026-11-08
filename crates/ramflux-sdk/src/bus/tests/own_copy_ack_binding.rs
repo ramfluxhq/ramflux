@@ -8,13 +8,15 @@
     clippy::needless_pass_by_value
 )]
 //! `own_copy_ack_binding` (P14 first leg + P21 WA): W1 registers an erased/backup-safe (T,E,s)
-//! locator; W2 removes work; a lost ACK retains; `already_settled` WA marks the locator and
-//! drops the intent; erasure visits the marked locator. Kill-around-commit for the own-copy
+//! locator carrying the existing replay-marker/receipt keys; W2 removes work; a lost ACK retains
+//! everything unmarked; `already_settled` WA marks the existing replay marker, receipt and
+//! locator and drops the intent in one transaction; erasure visits the marked locator. Kill-around-commit for the own-copy
 //! transaction and the recovery W1 cut.
 
 use super::fixture::{Case, Fixture};
 use super::receive_own_copy::own_copy;
 use crate::bus::push_receiver::ack_batch::SourceWa;
+use crate::client::own_device_copy::receipts::own_copy_acknowledged;
 use crate::client::own_device_copy::w1::{
     self, Fault, OwnCopyW1, locator_key, run, with_omit_locator,
 };
@@ -148,7 +150,7 @@ async fn case() -> Case {
     )?;
 
     let db = fixture.source.client.account_db()?;
-    let refused = gate(db)?.effect(db, SEQUENCE, MESSAGE, || Ok(()));
+    let refused = gate(db)?.effect(db, SEQUENCE, MESSAGE, None, || Ok(()));
     assert!(
         matches!(&refused, Err(SdkError::Storage(StorageError::Integrity(text))) if *text == INTEGRITY),
         "{refused:?}"
@@ -182,6 +184,13 @@ async fn case() -> Case {
     assert_eq!(locator.target, TARGET);
     assert_eq!(locator.incarnation, INCARNATION);
     assert_eq!(locator.sequence, SEQUENCE);
+    let binding = fixture.source.client.own_copy_ack_binding(&entry)?.ok_or("binding")?;
+    assert_eq!(locator.ack.as_ref(), Some(&binding), "W1 stores the existing marker keys");
+    assert_eq!(
+        own_copy_acknowledged(fixture.source.client.account_db()?, &binding)?,
+        (Some(false), Some(false)),
+        "the committed own copy starts unacknowledged"
+    );
     assert_eq!(
         fixture.source.client.account_db()?.receive_state_for_test(SEQUENCE)?,
         (Some("staged".to_owned()), 1)
@@ -241,14 +250,41 @@ async fn case() -> Case {
                 now: now_unix_timestamp(),
             },
         )?,
-        ReceiveAckApplyResult::Applied { settled: 0 }
+        ReceiveAckApplyResult::Applied { settled: 0, revalidate: false }
     );
     let locator =
         db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
     assert!(!locator.acknowledged, "lost ACK reply retains the locator unmarked");
+    assert_eq!(
+        own_copy_acknowledged(db, &binding)?,
+        (Some(false), Some(false)),
+        "a lost reply leaves the replay marker and receipt unacknowledged"
+    );
     assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
     let settled =
         [ReceiveAckResult { sequence: SEQUENCE, outcome: ReceiveAckOutcome::AlreadySettled }];
+    // A fault after the last own-copy mark, right before COMMIT, rolls back every mark.
+    let killed = crate::bus::push_receiver::ack_batch::run(|| {
+        wa.apply(
+            db,
+            ReceiveAckApply {
+                incarnation: INCARNATION,
+                sequences: &[SEQUENCE],
+                results: &settled,
+                now: now_unix_timestamp(),
+            },
+        )
+    });
+    assert!(
+        matches!(&killed, Err(SdkError::Storage(StorageError::Integrity(text)))
+            if *text == "wa settlement before-commit"),
+        "{killed:?}"
+    );
+    assert_eq!(own_copy_acknowledged(db, &binding)?, (Some(false), Some(false)));
+    let locator =
+        db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
+    assert!(!locator.acknowledged, "the killed settlement left the locator unmarked");
+    assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, vec![SEQUENCE]);
     assert_eq!(
         wa.apply(
             db,
@@ -259,11 +295,16 @@ async fn case() -> Case {
                 now: now_unix_timestamp(),
             },
         )?,
-        ReceiveAckApplyResult::Applied { settled: 1 }
+        ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
     );
     let locator =
         db.load_actor_state::<w1::SequenceLocator>(&locator_key(MESSAGE))?.ok_or("locator")?;
     assert!(locator.acknowledged, "already_settled WA marks the locator");
+    assert_eq!(
+        own_copy_acknowledged(db, &binding)?,
+        (Some(true), Some(true)),
+        "the same transaction marks the existing replay marker and receipt"
+    );
     assert_eq!(db.receive_ledger_snap_for_test(TARGET)?.intents, Vec::<u64>::new());
 
     db.delete_direct_message("healthy", MESSAGE, "local", "erase-before-wa")?;
@@ -311,10 +352,11 @@ async fn case() -> Case {
         OwnCopyW1 { expected, generation: 1 }.stage(pair_db, staged(&pair_bytes, 5))?,
         ReceiveStageResult::Staged
     );
-    let pair = OwnCopyW1 { expected, generation: 1 }.effect(pair_db, 5, "pair-recovery", || {
-        pair_db.persist_actor_state("dm-pair/reset-work/l1", &json!({"pending": true}))?;
-        Err::<(), SdkError>(SdkError::PairRecoveryRequired)
-    });
+    let pair =
+        OwnCopyW1 { expected, generation: 1 }.effect(pair_db, 5, "pair-recovery", None, || {
+            pair_db.persist_actor_state("dm-pair/reset-work/l1", &json!({"pending": true}))?;
+            Err::<(), SdkError>(SdkError::PairRecoveryRequired)
+        });
     assert!(matches!(&pair, Err(SdkError::PairRecoveryRequired)), "{pair:?}");
     assert!(
         !pair_db.actor_state_exists("dm-pair/reset-work/l1")?,
@@ -343,7 +385,7 @@ async fn case() -> Case {
         ReceiveStageResult::Staged
     );
     with_omit_locator(|| {
-        OwnCopyW1 { expected, generation: 1 }.effect(db, 4, "omit-locator", || {
+        OwnCopyW1 { expected, generation: 1 }.effect(db, 4, "omit-locator", None, || {
             crate::client::own_device_copy::receipts::remember(
                 db,
                 "own-device/committed-packet/omit-locator",

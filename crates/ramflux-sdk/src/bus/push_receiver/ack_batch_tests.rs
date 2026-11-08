@@ -108,6 +108,7 @@ fn persist_locator(
         incarnation: "e".to_owned(),
         sequence,
         acknowledged: false,
+        ack: None,
     };
     db.persist_message_actor_state(message, &locator_key(message), &locator)?;
     Ok(locator)
@@ -141,12 +142,17 @@ fn compat_intent_transition() -> TestResult {
     cover_terminal(&db, 0, 1)?;
     db.seed_compat_terminal_for_test("t", "e", 1, &wire(1))?;
     let rows = [ReceiveAckResult { sequence: 1, outcome: ReceiveAckOutcome::Acked }];
-    assert_eq!(apply_rows(&db, "e", 1, &rows)?, ReceiveAckApplyResult::Applied { settled: 1 });
+    assert_eq!(
+        apply_rows(&db, "e", 1, &rows)?,
+        ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
+    );
     let snap = db.receive_ledger_snap_for_test("t")?;
     assert_eq!(snap.intents, Vec::<u64>::new(), "WA drops the intent");
-    assert_eq!(snap.work, 1, "terminal compat work stays until reset");
+    assert_eq!(snap.work, 0, "the terminal settlement releases its compat work with the intent");
+    assert!(snap.receipts.is_empty(), "and its compat receipt");
     db.rewrite_receive_incarnation_for_test("t", "e", "u", false)?;
     db.set_projection_checkpoint("gateway_receive_cursor:t", "1")?;
+    db.seed_compat_terminal_for_test("t", "u", 3, &wire(3))?;
     db.seed_held_receive_for_test("t", "u", 2, &wire(2))?;
     db.publish_pending_receive_loss("t", "u", ramflux_storage::unix_now())?;
     let reset = db.receive_transaction(expected(&db, "u", 1)?, 1, |tx| {
@@ -161,7 +167,7 @@ fn compat_intent_transition() -> TestResult {
     assert_eq!(reset, ReceiveResetResult::Reset);
     let snap = db.receive_ledger_snap_for_test("t")?;
     assert!(
-        !snap.receipts.iter().any(|(seq, disposition)| *seq == 1 && disposition == "completed"),
+        !snap.receipts.iter().any(|(seq, disposition)| *seq == 3 && disposition == "completed"),
         "U→E releases terminal compat work"
     );
     assert_eq!(snap.work, 1, "held work is retained");
@@ -177,7 +183,10 @@ fn own_copy_locator_terminal_and_expiry() -> TestResult {
     cover_terminal(&db, 0, 1)?;
     persist_locator(&db, "expired", 1)?;
     let expired = [ReceiveAckResult { sequence: 1, outcome: ReceiveAckOutcome::Expired }];
-    assert_eq!(apply_rows(&db, "e", 1, &expired)?, ReceiveAckApplyResult::Applied { settled: 1 });
+    assert_eq!(
+        apply_rows(&db, "e", 1, &expired)?,
+        ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
+    );
     let locator =
         db.load_actor_state::<SequenceLocator>(&locator_key("expired"))?.expect("locator");
     assert!(!locator.acknowledged, "expiry never marks");
@@ -186,7 +195,10 @@ fn own_copy_locator_terminal_and_expiry() -> TestResult {
     cover_terminal(&db, 1, 2)?;
     persist_locator(&db, "settled", 2)?;
     let settled = [ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::AlreadySettled }];
-    assert_eq!(apply_rows(&db, "e", 2, &settled)?, ReceiveAckApplyResult::Applied { settled: 1 });
+    assert_eq!(
+        apply_rows(&db, "e", 2, &settled)?,
+        ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
+    );
     let locator =
         db.load_actor_state::<SequenceLocator>(&locator_key("settled"))?.expect("locator");
     assert!(locator.acknowledged, "already_settled marks the locator");
@@ -194,7 +206,10 @@ fn own_copy_locator_terminal_and_expiry() -> TestResult {
     cover_terminal(&db, 2, 3)?;
     persist_locator(&db, "gone", 3)?;
     let gone = [ReceiveAckResult { sequence: 3, outcome: ReceiveAckOutcome::NotFound }];
-    assert_eq!(apply_rows(&db, "e", 3, &gone)?, ReceiveAckApplyResult::Applied { settled: 1 });
+    assert_eq!(
+        apply_rows(&db, "e", 3, &gone)?,
+        ReceiveAckApplyResult::Applied { settled: 1, revalidate: false }
+    );
     let locator = db.load_actor_state::<SequenceLocator>(&locator_key("gone"))?.expect("locator");
     assert!(locator.acknowledged, "not_found marks the locator");
     drop(db);

@@ -139,43 +139,89 @@ impl RamfluxClient {
         Ok(Replay { key, fingerprint, committed })
     }
 
-    /// Called only after the gateway confirms this exact inbox entry's ACK.
+    /// Legacy live ACK path only (the gateway inbox ACK helper): called after the gateway confirms this
+    /// exact inbox entry's ACK. The WA path never calls it; it marks through the locator's
+    /// [`OwnCopyAckBinding`] inside the settlement transaction. Retired with the legacy path.
     pub(crate) fn record_own_copy_ack(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
-        if entry.envelope.delivery_class != ramflux_protocol::DeliveryClass::SelfDeviceControl {
-            return Ok(());
+        match self.own_copy_ack_binding(entry)? {
+            Some(binding) => Ok(mark_own_copy_acknowledged(self.account_db()?, &binding)?),
+            None => Ok(()),
         }
-        // Malformed/quarantined controls still need ACKs; only an existing commit can be marked.
+    }
+
+    /// The existing replay-marker and receipt keys an own-copy entry commits to, for the W1
+    /// locator. `None` for non-own-copy or malformed controls (they still get ACKs, but there
+    /// is nothing to mark).
+    pub(crate) fn own_copy_ack_binding(
+        &self,
+        entry: &GatewayInboxEntry,
+    ) -> Result<Option<OwnCopyAckBinding>, SdkError> {
+        if entry.envelope.delivery_class != ramflux_protocol::DeliveryClass::SelfDeviceControl {
+            return Ok(None);
+        }
         let Ok(bytes) = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(raw) = bytes.strip_prefix(PREFIX).filter(|_| bytes.len() <= MAX_PACKET_BYTES)
         else {
-            return Ok(());
+            return Ok(None);
         };
         let Ok(packet) = ramflux_protocol::parse_i_json::<OwnDeviceMessage>(raw) else {
-            return Ok(());
+            return Ok(None);
         };
         let db = self.account_db()?;
         let target = self.owned_device_identity()?;
-        let key = replay_key(db, &target, entry, &packet.id)?;
-        let Some(mut committed) = db.load_actor_state::<Committed>(&key)? else {
-            return Ok(());
-        };
-        let fingerprint =
-            packet_fingerprint(db, &ramflux_protocol::hash_base64url(DOMAIN, &bytes))?;
-        if committed.fingerprint != fingerprint {
-            return Ok(());
-        }
-        committed.acknowledged = true;
-        db.persist_actor_state(&key, &committed)?;
-        let receipt_key = format!("{RECEIPTS}{}", packet.id);
-        if let Some(mut receipt) = db.load_actor_state::<Receipt>(&receipt_key)? {
-            receipt.acknowledged = true;
-            db.persist_bound_message_actor_state(&receipt_key, &receipt)?;
-        }
-        Ok(())
+        Ok(Some(OwnCopyAckBinding {
+            committed_key: replay_key(db, &target, entry, &packet.id)?,
+            receipt_key: format!("{RECEIPTS}{}", packet.id),
+            fingerprint: packet_fingerprint(db, &ramflux_protocol::hash_base64url(DOMAIN, &bytes))?,
+        }))
     }
+}
+
+/// Opaque keys of the existing own-copy replay marker and receipt, stored in the W1 locator so
+/// a terminal WA result marks them without the inbox entry. No body, no content.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnCopyAckBinding {
+    pub committed_key: String,
+    pub receipt_key: String,
+    pub fingerprint: String,
+}
+
+/// Marks the existing `Committed` replay marker and `Receipt` acknowledged. A missing marker or
+/// a fingerprint mismatch is left untouched (nothing committed under that key to acknowledge).
+/// Runs inside the caller's transaction.
+pub(crate) fn mark_own_copy_acknowledged(
+    db: &AccountDb,
+    binding: &OwnCopyAckBinding,
+) -> Result<(), ramflux_storage::StorageError> {
+    let Some(mut committed) = db.load_actor_state::<Committed>(&binding.committed_key)? else {
+        return Ok(());
+    };
+    if committed.fingerprint != binding.fingerprint {
+        return Ok(());
+    }
+    committed.acknowledged = true;
+    db.persist_actor_state(&binding.committed_key, &committed)?;
+    if let Some(mut receipt) = db.load_actor_state::<Receipt>(&binding.receipt_key)? {
+        receipt.acknowledged = true;
+        db.persist_bound_message_actor_state(&binding.receipt_key, &receipt)?;
+    }
+    Ok(())
+}
+
+/// Test support: whether the replay marker / receipt carry the acknowledged flag.
+#[cfg(test)]
+pub(crate) fn own_copy_acknowledged(
+    db: &AccountDb,
+    binding: &OwnCopyAckBinding,
+) -> Result<(Option<bool>, Option<bool>), ramflux_storage::StorageError> {
+    Ok((
+        db.load_actor_state::<Committed>(&binding.committed_key)?.map(|row| row.acknowledged),
+        db.load_actor_state::<Receipt>(&binding.receipt_key)?.map(|row| row.acknowledged),
+    ))
 }
 
 #[cfg(test)]

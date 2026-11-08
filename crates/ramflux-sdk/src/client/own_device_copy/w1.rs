@@ -11,6 +11,7 @@
 //! is the same W1 cut. Never persist plaintext to make a step resumable.
 #![allow(dead_code)]
 
+use super::receipts::OwnCopyAckBinding;
 use crate::{RamfluxClient, SdkError};
 use ramflux_storage::{
     AccountDb, ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult,
@@ -31,6 +32,10 @@ pub(crate) struct SequenceLocator {
     /// Set only by WA on a terminal router result. Expiry never sets this.
     #[serde(default)]
     pub acknowledged: bool,
+    /// Keys of the existing replay marker and receipt that WA marks in the settlement
+    /// transaction. Stored at W1 so the marking never needs the inbox entry.
+    #[serde(default)]
+    pub ack: Option<OwnCopyAckBinding>,
 }
 
 /// Locator actor key bound to `message` so erase visits it.
@@ -55,7 +60,8 @@ impl OwnCopyW1<'_> {
         Ok(db.receive_transaction(self.expected, self.generation, |tx| tx.stage(input))?)
     }
 
-    /// Runs the own-copy durable writes, then registers the (T,E,s) locator and binds the
+    /// Runs the own-copy durable writes, then registers the (T,E,s) locator (carrying the
+    /// `ack` binding of the replay marker and receipt the effect committed) and binds the
     /// staged input to `message`, all inside one receive transaction.
     ///
     /// Error contract: any error from `effect` rolls back every write it made, and that error
@@ -67,10 +73,11 @@ impl OwnCopyW1<'_> {
         db: &AccountDb,
         sequence: u64,
         message: &str,
+        ack: Option<OwnCopyAckBinding>,
         effect: impl FnOnce() -> Result<T, SdkError>,
     ) -> Result<T, SdkError> {
         join_own_copy(db, self.expected, self.generation, "own-copy effect failed", |tx| {
-            self.effect_in(tx, sequence, message, effect)
+            self.effect_in(tx, sequence, message, ack, effect)
         })
     }
 
@@ -80,11 +87,12 @@ impl OwnCopyW1<'_> {
         tx: &ReceiveTransaction<'_>,
         sequence: u64,
         message: &str,
+        ack: Option<OwnCopyAckBinding>,
         effect: impl FnOnce() -> Result<T, SdkError>,
     ) -> Result<T, SdkError> {
         tx.require_open_input(sequence)?;
         let value = effect()?;
-        register_sequence_locator(tx.account(), message, self.expected, sequence)?;
+        register_sequence_locator(tx.account(), message, self.expected, sequence, ack)?;
         match tx.bind_logical_message(sequence, message)? {
             ReceiveBind::Bound | ReceiveBind::Erased => {}
         }
@@ -150,12 +158,14 @@ fn register_sequence_locator(
     message: &str,
     expected: ReceiveExpectation<'_>,
     sequence: u64,
+    ack: Option<OwnCopyAckBinding>,
 ) -> Result<(), StorageError> {
     let locator = SequenceLocator {
         target: expected.target.to_owned(),
         incarnation: expected.incarnation.to_owned(),
         sequence,
         acknowledged: false,
+        ack,
     };
     let key = locator_key(message);
     if omit_locator_registration() {
@@ -246,7 +256,8 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let generation = expected.generation;
         let gate = OwnCopyW1 { expected, generation };
-        gate.effect(db, sequence, message, || self.commit_own_copy_from_entry(entry, manifest))
+        let ack = self.own_copy_ack_binding(entry)?;
+        gate.effect(db, sequence, message, ack, || self.commit_own_copy_from_entry(entry, manifest))
     }
 
     /// Same cut as [`Self::apply_own_copy_w1`], joining an already-open receive transaction.
@@ -262,7 +273,10 @@ impl RamfluxClient {
     ) -> Result<bool, SdkError> {
         let generation = expected.generation;
         let gate = OwnCopyW1 { expected, generation };
-        gate.effect_in(tx, sequence, message, || self.commit_own_copy_from_entry(entry, manifest))
+        let ack = self.own_copy_ack_binding(entry)?;
+        gate.effect_in(tx, sequence, message, ack, || {
+            self.commit_own_copy_from_entry(entry, manifest)
+        })
     }
 
     /// Recovery W1 cut for the pair-reset durable writes.

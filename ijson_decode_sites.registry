@@ -613,7 +613,7 @@ crates/ramflux-sdk/src/client/own_contact.rs | receive_own_contact_outcome | 1 |
 crates/ramflux-sdk/src/client/own_contact/tombstone.rs | receive_own_contact_tombstone | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/own_device_copy.rs | open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/own_device_copy.rs | prepare_own_copy_draft_until | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/client/own_device_copy/receipts.rs | record_own_copy_ack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/own_device_copy/receipts.rs | own_copy_ack_binding | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/own_device_copy/receive.rs | prepare_own_receive | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/own_device_group_restore.rs | restore_own_sender_key | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/own_device_sync.rs | apply_own_history_plaintext_mode | 1 | D | admitted-before-persist; stored row is not an ingress decoder

@@ -3,11 +3,13 @@
 
 //! DORMANT WA executor (S6b P21). Live `Writer::apply` / per-entry ACK is unchanged
 //! until P24/P25. P20e/P20g wire the actor flush. One sorted positive max-64 batch
-//! with an exact result set; uncertainty retains; own-copy locators are marked only
-//! on a terminal router result.
+//! with an exact result set; uncertainty retains. On a terminal router result the
+//! settlement transaction also marks the existing own-copy replay marker and receipt
+//! (through the W1 locator's stored binding) and the locator flag.
 #![allow(dead_code)]
 
 use crate::SdkError;
+use crate::client::own_device_copy::receipts::mark_own_copy_acknowledged;
 use crate::client::own_device_copy::w1::{LOCATORS, SequenceLocator};
 use ramflux_storage::{
     AccountDb, ReceiveAckApply, ReceiveAckApplyResult, ReceiveAckOutcome, ReceiveExpectation,
@@ -34,18 +36,19 @@ impl SourceWa<'_> {
         tx.select_ack_batch(now, force)
     }
 
-    /// Apply an exact result set inside `tx` and mark locators for terminal outcomes.
+    /// Apply an exact result set inside `tx`. Terminal outcomes also mark the own-copy
+    /// replay marker, receipt and locator in the same transaction; the fault hook runs after
+    /// those marks, right before COMMIT.
     ///
     /// # Errors
-    /// Returns storage refusals from [`ReceiveTransaction::apply_ack_results`].
+    /// Returns storage refusals from [`ReceiveTransaction::apply_ack_results_with`].
     pub(crate) fn apply_in(
         &self,
         tx: &ReceiveTransaction<'_>,
         input: ReceiveAckApply<'_>,
     ) -> Result<ReceiveAckApplyResult, StorageError> {
         let _ = self;
-        let result = tx.apply_ack_results(input)?;
-        if matches!(result, ReceiveAckApplyResult::Applied { .. }) {
+        tx.apply_ack_results_with(input, |tx| {
             for row in input.results {
                 if marks_locator(row.outcome) {
                     mark_locator(
@@ -56,8 +59,8 @@ impl SourceWa<'_> {
                     )?;
                 }
             }
-        }
-        Ok(result)
+            before_commit()
+        })
     }
 
     /// Select due intents (16 / 1s / force).
@@ -110,10 +113,50 @@ fn mark_locator(
             && locator.sequence == sequence
             && !locator.acknowledged
         {
+            if let Some(binding) = &locator.ack {
+                mark_own_copy_acknowledged(db, binding)?;
+            }
             locator.acknowledged = true;
             let message = key.strip_prefix(LOCATORS).unwrap_or("");
             db.persist_message_actor_state(message, &key, &locator)?;
         }
     }
     Ok(())
+}
+
+fn before_commit() -> Result<(), StorageError> {
+    if fault_armed() {
+        return Err(StorageError::Integrity("wa settlement before-commit"));
+    }
+    Ok(())
+}
+
+fn fault_armed() -> bool {
+    #[cfg(test)]
+    {
+        FAULT.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `write` with the WA before-commit fault armed (after the last own-copy mark).
+#[cfg(test)]
+pub(crate) fn run<T>(write: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAULT.with(|slot| slot.set(false));
+        }
+    }
+    FAULT.with(|slot| slot.set(true));
+    let _reset = Reset;
+    write()
 }
