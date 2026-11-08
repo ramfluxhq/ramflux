@@ -143,7 +143,7 @@ pub(super) fn current(
     })
 }
 
-/// Every retained bundle's selector for one tuple, matching `carry_work_tombstones`.
+/// Every retained bundle's selector for one tuple, matching the erased-input binding rule.
 pub(super) fn all_selectors(
     db: &AccountDb,
     principal: &str,

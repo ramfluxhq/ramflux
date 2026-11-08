@@ -129,7 +129,9 @@ impl AccountDb {
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
             super::backup_selector_admission::drop_scratch(&target)?;
             super::home_migration::strip_from_backup(&target)?;
-            super::receive::ledger_backup::sanitize_backup(&target)?;
+            if let Err(error) = super::receive::ledger_backup::sanitize_backup(&target) {
+                return Ok(Err(error));
+            }
             target.execute("DELETE FROM object_segment_resource", [])?;
             // Historical archives have no native physical progress to clear.
             let native:bool=target.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='object_segment_file')",[],|r|r.get(0))?;
@@ -140,8 +142,8 @@ impl AccountDb {
             // Domain history, keys and object payloads were copied by SQLite itself.
             let counts=read_counts(&target)?;
             target.close().map_err(|(_, error)| error)?;
-            Ok(counts)
-        })?;
+            Ok(Ok(counts))
+        })??;
         std::fs::File::open(destination)?.sync_all()?;
         Ok(AccountBackupSnapshot { key, counts })
     }

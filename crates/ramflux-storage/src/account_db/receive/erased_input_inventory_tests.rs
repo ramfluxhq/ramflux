@@ -396,8 +396,8 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         "receive_work",
     ];
     assert_covers_source_kinds(&kinds, &[]);
-    // Merge admits schema v15, so `receive_work` is an incoming Source family. The snapshot
-    // strips the work rows after recording tombstones under the incoming account's MAC bundles.
+    // Merge admits schema v15, so `receive_work` is an incoming Source family. The snapshot turns
+    // bound work into bindings on its message; the merge tombstones it once that message is deleted.
     let p = pair("erased-inventory-incoming")?;
     let families: Vec<Family> = kinds.iter().map(|k| Family::new(k)).collect();
     // The local account holds every message and deletes it: it has no source of its own.
@@ -585,5 +585,30 @@ fn erased_input_source_inventory_incoming() -> Result<(), StorageError> {
         expected.iter().map(|w| ("ip".to_owned(), "id".to_owned(), w.payload.clone())).collect();
     let index = install(&p.root, "w0-installed", &path, &target.key)?;
     assert_erased_after_reopen(&index, &target.key, &tuples)?;
+    Ok(())
+}
+
+#[test]
+fn erased_input_incoming_schema_16_is_refused_as_too_new() -> Result<(), StorageError> {
+    // Merge admits schema v15. A v16 incoming generation is refused with the exact version pair.
+    let p = pair("erased-inventory-incoming-v16")?;
+    p.source.install_receive_ledger_schema()?;
+    p.source
+        .connection
+        .execute("INSERT INTO schema_migration VALUES(16,0,'future','future','future')", [])?;
+    let incoming = p.root.join("incoming.db");
+    let snapshot = p.source.write_backup_snapshot(&incoming)?;
+    let path = p.root.join("merged.db");
+    let target = p.local.write_backup_snapshot(&path)?;
+    let mut merged = BackupDatabase::open(&path, &target.key)?;
+    let refused = merged.merge_backup(&incoming, &snapshot.key, || Ok(()));
+    assert!(
+        matches!(
+            &refused,
+            Err(StorageError::AccountSchemaTooNew { schema_version: 16, supported: 15 })
+        ),
+        "{:?}",
+        refused.err()
+    );
     Ok(())
 }

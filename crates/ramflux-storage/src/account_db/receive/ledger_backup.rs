@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Strip the receive ledger from a published backup, merged generation or restore copy.
-//! Tombstones and `erased-input:` bindings stay; C/E and work do not.
+//! Tombstones and `erased-input:` bindings stay; C/E, work and work footprints do not. Pending
+//! work becomes a binding on its message first, never a tombstone.
 use crate::StorageError;
 use rusqlite::{Connection, params};
 
@@ -14,19 +15,15 @@ const LEDGER_TABLES: [&str; 5] = [
     "gateway_receive_epoch",
 ];
 
-/// Carries bound work tuples into `receive_erased_input`, then deletes ledger rows, receive-work
-/// footprints and receive cursor/conflict checkpoints. Schema rows stay so a later installer is
-/// checksum-idempotent.
+/// Converts pending bound work into bindings, then deletes ledger rows, receive-work footprints and
+/// receive cursor/conflict checkpoints. Schema rows stay so a later installer is checksum-idempotent.
 ///
 /// # Errors
 /// Returns storage, MAC or SQLite errors.
-pub(crate) fn sanitize_backup(db: &Connection) -> rusqlite::Result<()> {
-    super::erased_capture::carry_work_tombstones(db, crate::unix_now()).map_err(storage_sql)?;
-    strip_receive_ledger(db)
-}
-
-fn storage_sql(error: StorageError) -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+pub(crate) fn sanitize_backup(db: &Connection) -> Result<(), StorageError> {
+    super::erased_capture::bind_pending_work(db, crate::unix_now())?;
+    strip_receive_ledger(db)?;
+    Ok(())
 }
 
 fn strip_receive_ledger(db: &Connection) -> rusqlite::Result<()> {
