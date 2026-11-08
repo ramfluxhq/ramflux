@@ -16,6 +16,8 @@ pub(super) struct Schedule {
     pub interval: Duration,
 }
 impl Schedule {
+    /// Live 250 ms–5 s tick. Candidate replacement is
+    /// [`crate::bus::push_receiver::sweep::SweepSetting`] (`RAMFLUX_SESSION_SAFETY_SWEEP_SECS`).
     pub fn new() -> Result<Self, SdkError> {
         fn milliseconds(key: &str, default: u64) -> Result<Duration, SdkError> {
             let value = std::env::var(key).map_or(Ok(default), |v| {
@@ -34,6 +36,12 @@ impl Schedule {
         self.interval =
             if active { self.min } else { self.interval.saturating_mul(2).min(self.max) };
     }
+}
+
+/// P23 replacement for [`Schedule::new`]. Live receive still constructs [`Schedule`].
+#[allow(dead_code, reason = "P24 activation reads this in place of Schedule::new")]
+pub(crate) fn session_safety_sweep() -> crate::bus::push_receiver::sweep::SweepSetting {
+    crate::bus::push_receiver::sweep::SweepSetting::from_process()
 }
 
 pub(crate) async fn run(account: &mut LocalBusAccountState) -> Result<usize, SdkError> {

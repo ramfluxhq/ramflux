@@ -24,3 +24,6 @@ mod guard_tests;
 pub(crate) mod reorder;
 #[cfg(test)]
 mod reorder_tests;
+pub(crate) mod sweep;
+#[cfg(test)]
+mod sweep_tests;

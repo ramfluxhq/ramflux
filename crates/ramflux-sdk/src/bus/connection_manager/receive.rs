@@ -103,6 +103,84 @@ pub(super) async fn run(
     }
 }
 
+/// Candidate P23 loop: Connected catch-up within 100 ms, then an anchored sweep.
+/// Live [`run`] keeps the 250 ms–5 s tick until P24 activation.
+#[allow(dead_code, reason = "P24 activation replaces live receive::run with this loop")]
+pub(super) async fn run_anchored(
+    handle: ConnectionHandle,
+    work: mpsc::Sender<AccountWork>,
+    limits: RuntimeTimeouts,
+    setting: crate::bus::push_receiver::sweep::SweepSetting,
+    mode: crate::bus::push_receiver::sweep::SweepMode,
+) {
+    use crate::bus::push_receiver::sweep::{Planner, ResumeKind};
+    let mut stop = handle.stop.subscribe();
+    let mut planner = Planner::new(&setting, mode);
+    let origin = Instant::now();
+    loop {
+        let snapshot = handle.snapshot();
+        let now_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let view = crate::bus::push_receiver::sweep::View {
+            live: snapshot.state == NetworkingState::Live,
+            generation: snapshot.generation,
+            resync: handle.resync_needed(),
+        };
+        if let Some(kind) = planner.decide(now_ms, view) {
+            let trigger = match kind {
+                ResumeKind::Connected => ReceiveTrigger::Connected,
+                ResumeKind::Sweep => ReceiveTrigger::Tick,
+                ResumeKind::Resync => ReceiveTrigger::Resync,
+            };
+            tracing::trace!(?trigger, generation = snapshot.generation, "account receive pass");
+            #[cfg(test)]
+            handle
+                .shared
+                .receive_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((trigger, false));
+            let epoch = handle.resync_epoch();
+            let pass = timeout(
+                limits.sync,
+                pass_anchored(&handle, &work, snapshot.generation, trigger, limits.call),
+            );
+            let result = tokio::select! {biased;_=stop.changed()=>break,result=pass=>result};
+            planner.note_generation(snapshot.generation);
+            match result {
+                Ok(Ok(_)) => {
+                    handle.resync_applied(snapshot.generation, epoch);
+                    #[cfg(test)]
+                    handle
+                        .shared
+                        .receive_trace
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push((trigger, true));
+                    #[cfg(test)]
+                    handle.shared.receive_completed.notify_one();
+                    planner.note_completed(now_ms, false);
+                }
+                Ok(Err(error)) => tracing::debug!(%error,"receive pass deferred"),
+                Err(_) => tracing::debug!("receive pass deadline expired"),
+            }
+            continue;
+        }
+        let wait = planner
+            .wake_at_ms(now_ms)
+            .and_then(|ms| origin.checked_add(std::time::Duration::from_millis(ms)));
+        tokio::select! {biased;
+            _ = stop.changed() => break,
+            () = handle.receive_wake() => {}
+            () = async {
+                match wait {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+    }
+}
+
 async fn pass(
     handle: &ConnectionHandle,
     work: &mpsc::Sender<AccountWork>,
@@ -110,6 +188,30 @@ async fn pass(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<bool, SdkError> {
+    let (active, backpressure) = catch_up(handle, work, generation, trigger, call_timeout).await?;
+    let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
+    Ok(active || more)
+}
+
+/// Candidate catch-up: same Resume pages as live, without the contact-floor rescan.
+#[allow(dead_code, reason = "P24 activation uses this in place of pass+rescan")]
+async fn pass_anchored(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    call_timeout: std::time::Duration,
+) -> Result<bool, SdkError> {
+    Ok(catch_up(handle, work, generation, trigger, call_timeout).await?.0)
+}
+
+async fn catch_up(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    call_timeout: std::time::Duration,
+) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::PrepareReceive { generation, trigger, reply })
         .await
@@ -159,8 +261,7 @@ async fn pass(
         active |= accepted;
         backpressure = next;
     }
-    let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
-    Ok(active || more)
+    Ok((active, backpressure))
 }
 
 /// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one
