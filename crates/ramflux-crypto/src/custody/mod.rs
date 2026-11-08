@@ -15,7 +15,9 @@ mod pins;
 pub use pins::{
     AuthorityPins, CustodyConflictAlert, CustodyConflictEvidence, CustodyConflictKind, PinOutcome,
 };
+mod anchor;
 mod validate;
+pub use anchor::validate_native_account_anchor;
 mod verify;
 pub use keys::{MasterKey, SelfSigningKey};
 pub use phrase::RecoveryPhrase;

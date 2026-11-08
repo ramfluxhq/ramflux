@@ -618,6 +618,15 @@ message Entity {
   reserved 5;
   reserved "unknown";
 }
+// Mentions (AGENT-PARTICIPANT-02). ENTITY_MENTION.value is a native account
+// anchor: exactly 43 ASCII characters, the unpadded base64url encoding of
+// exactly 32 bytes. At most 16 mentions. The decoder rejects padding, aliases,
+// a missing value, zero length, overflow, out-of-text spans, overlapping spans
+// and unsorted mention spans (strictly increasing Unicode-scalar offsets). It
+// never sorts or clamps a received message. The encoder alone normalizes order
+// before signing. Mention-bearing text authored under this contract is at most
+// 8192 UTF-8 bytes; that cap does not lower the general Message text limit.
+// Offsets remain Unicode scalars across emoji and combining sequences.
 message Thumbnail {
   string mime_type = 1;
   uint32 width = 2;
@@ -2962,6 +2971,9 @@ construct a scalar-to-byte index once, then validate at most 4,096 ranges in
 linear work. Only Web/iOS adapters translate to UTF-16 code units. For example
 `A😀é` has scalar offsets 0,1,2 and UTF-16 offsets 0,1,3. An unrecognized Entity.kind number makes the whole message Unsupported, preserving exact bytes.
 No renderer interprets an unknown entity as a URL or command.
+`ENTITY_MENTION` rows additionally follow the mention contract on Entity above
+(43-character canonical native anchors, ≤16 mentions, sorted non-overlapping
+scalar spans, mention-bearing text ≤8192 UTF-8 bytes).
 
 Layer 1 Message media uses MediaRef fields 1–6. Layer 2 adds inline_thumbnail
 (field 7) and the scalar entity contract. Large_manifest (field 8), and its

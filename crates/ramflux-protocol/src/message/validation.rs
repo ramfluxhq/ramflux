@@ -5,7 +5,7 @@
 //! Native field value sets and proof validation stay with the named §3.1 owners:
 //! Surface P15, Call P16, Task P17, own-history P18 and `SelfSync` P19. No result
 //! from this module authorizes side effects or ACK; authenticated retention is P10.
-use super::{Content, Message, Service, ServiceAction, content, registry};
+use super::{Content, Entity, EntityKind, Message, Service, ServiceAction, content, registry};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum complete exact Inner bytes.
@@ -20,6 +20,14 @@ pub const MAX_ENTITIES: usize = 4096;
 pub const MAX_MEDIA: usize = 32;
 /// Maximum reaction-token UTF-8 bytes.
 pub const MAX_REACTION_BYTES: usize = 64;
+/// Maximum `ENTITY_MENTION` rows on one Message.
+pub const MAX_MENTIONS: usize = 16;
+/// UTF-8 byte cap for mention-bearing text under this contract; general text stays `MAX_TEXT_BYTES`.
+pub const MAX_MENTION_TEXT_BYTES: usize = 8192;
+/// Unpadded base64url length of a 32-byte native account anchor.
+pub const NATIVE_ACCOUNT_ANCHOR_CHARS: usize = 43;
+/// Decoded native account anchor size.
+pub const NATIVE_ACCOUNT_ANCHOR_BYTES: usize = 32;
 
 /// Invalid/unsafe structural input; Unsupported remains a separate scan outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -48,6 +56,38 @@ pub enum ValidationError {
     /// The caller attempted typed decode of an unsupported body.
     #[error("body requires an unsupported schema")]
     Unsupported,
+    /// An `ENTITY_MENTION` row failed a named mention-span rule.
+    #[error("invalid mention: {0}")]
+    Mention(MentionError),
+}
+
+/// Exact mention-span rule that failed. Decoder never sorts or clamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MentionError {
+    /// More than [`MAX_MENTIONS`] mention rows.
+    #[error("mention count exceeds 16")]
+    Count,
+    /// Mention-bearing UTF-8 text exceeds [`MAX_MENTION_TEXT_BYTES`].
+    #[error("mention-bearing text exceeds 8192 bytes")]
+    TextLimit,
+    /// Mention `value` is absent.
+    #[error("mention is missing a native account anchor")]
+    Missing,
+    /// Mention `value` is not a canonical 43-character native account anchor.
+    #[error("mention anchor is not a canonical 43-character native account")]
+    Anchor,
+    /// Mention `length` is zero.
+    #[error("mention span has zero length")]
+    ZeroLength,
+    /// Mention span overflows or ends past the Unicode-scalar text length.
+    #[error("mention span is outside the text")]
+    Span,
+    /// Two mention spans share a Unicode scalar.
+    #[error("mention spans overlap")]
+    Overlap,
+    /// Mention rows are not strictly increasing by scalar offset.
+    #[error("mention spans are unsorted")]
+    Order,
 }
 
 /// Structural recognition; unsupported bytes must be retained exactly by callers.
@@ -167,7 +207,8 @@ pub fn validate_service(service: &Service) -> Result<(), ValidationError> {
 
 /// Validate Unicode-scalar entity ranges in one pass over text plus entity rows.
 /// # Errors
-/// Returns an error for invalid bounds, unknown entity kinds or mixed sealed content.
+/// Returns an error for invalid bounds, unknown entity kinds, mixed sealed content
+/// or a failed mention-span rule.
 pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
     if message.text.len() > MAX_TEXT_BYTES
         || message.entities.len() > MAX_ENTITIES
@@ -184,8 +225,12 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
     {
         return Err(ValidationError::Content);
     }
+    validate_mention_spans(message)?;
     let scalars = message.text.chars().count();
     for entity in &message.entities {
+        if entity.kind == EntityKind::EntityMention as i32 {
+            continue;
+        }
         if !(1..=6).contains(&entity.kind) {
             return Err(ValidationError::Unsupported);
         }
@@ -206,4 +251,230 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
         }
     }
     Ok(())
+}
+
+fn mention_rule(error: MentionError) -> ValidationError {
+    ValidationError::Mention(error)
+}
+
+/// Canonical 32-byte native account: 43 unpadded base64url characters, no aliases.
+fn canonical_native_account_anchor(value: &str) -> Result<(), ValidationError> {
+    if value.len() != NATIVE_ACCOUNT_ANCHOR_CHARS {
+        return Err(mention_rule(MentionError::Anchor));
+    }
+    let raw = crate::decode_base64url(value).map_err(|_| mention_rule(MentionError::Anchor))?;
+    if raw.len() != NATIVE_ACCOUNT_ANCHOR_BYTES || crate::encode_base64url(&raw) != value {
+        return Err(mention_rule(MentionError::Anchor));
+    }
+    Ok(())
+}
+
+fn mention_span_end(entity: &Entity) -> Result<u32, ValidationError> {
+    if entity.length == 0 {
+        return Err(mention_rule(MentionError::ZeroLength));
+    }
+    entity.offset.checked_add(entity.length).ok_or(mention_rule(MentionError::Span))
+}
+
+fn mention_spans_overlap(left: &Entity, right: &Entity) -> Result<bool, ValidationError> {
+    let left_end = mention_span_end(left)?;
+    let right_end = mention_span_end(right)?;
+    Ok(left.offset < right_end && right.offset < left_end)
+}
+
+fn mention_spans_are_sorted(mentions: &[&Entity]) -> bool {
+    mentions.windows(2).all(|pair| pair[1].offset > pair[0].offset)
+}
+
+fn validate_mention_spans(message: &Message) -> Result<(), ValidationError> {
+    let mentions: Vec<&Entity> = message
+        .entities
+        .iter()
+        .filter(|entity| entity.kind == EntityKind::EntityMention as i32)
+        .collect();
+    if mentions.is_empty() {
+        return Ok(());
+    }
+    if message.text.len() > MAX_MENTION_TEXT_BYTES {
+        return Err(mention_rule(MentionError::TextLimit));
+    }
+    if mentions.len() > MAX_MENTIONS {
+        return Err(mention_rule(MentionError::Count));
+    }
+    let scalars = message.text.chars().count();
+    for entity in &mentions {
+        let Some(value) = entity.value.as_deref() else {
+            return Err(mention_rule(MentionError::Missing));
+        };
+        canonical_native_account_anchor(value)?;
+        let end = mention_span_end(entity)?;
+        if usize::try_from(end).map_err(|_| mention_rule(MentionError::Span))? > scalars {
+            return Err(mention_rule(MentionError::Span));
+        }
+    }
+    for (index, right) in mentions.iter().enumerate() {
+        for left in &mentions[..index] {
+            if mention_spans_overlap(left, right)? {
+                return Err(mention_rule(MentionError::Overlap));
+            }
+        }
+    }
+    if !mention_spans_are_sorted(&mentions) {
+        return Err(mention_rule(MentionError::Order));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode_base64url;
+    use prost::Message as _;
+
+    type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn anchor(byte: u8) -> String {
+        encode_base64url([byte; NATIVE_ACCOUNT_ANCHOR_BYTES])
+    }
+
+    fn mention(offset: u32, length: u32, byte: u8) -> Entity {
+        Entity { offset, length, kind: EntityKind::EntityMention as i32, value: Some(anchor(byte)) }
+    }
+
+    fn filled_mentions() -> Message {
+        let count = u32::try_from(MAX_MENTIONS).unwrap_or(0);
+        Message {
+            text: "abcdefghijklmnop".into(),
+            entities: (0_u32..count)
+                .zip(1_u8..)
+                .map(|(offset, byte)| mention(offset, 1, byte))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn assert_rule(message: &Message, error: MentionError) {
+        assert_eq!(validate_message(message), Err(ValidationError::Mention(error)));
+    }
+
+    #[test]
+    fn agent_mentions_bind_root_with_scalar_spans() -> Result {
+        let message = filled_mentions();
+        validate_message(&message)?;
+        assert_eq!(message.entities.len(), MAX_MENTIONS);
+        assert!(message.entities.iter().all(|entity| {
+            entity.value.as_deref().is_some_and(|value| value.len() == NATIVE_ACCOUNT_ANCHOR_CHARS)
+        }));
+
+        let max_text = Message {
+            text: "x".repeat(MAX_MENTION_TEXT_BYTES),
+            entities: filled_mentions().entities,
+            ..Default::default()
+        };
+        validate_message(&max_text)?;
+
+        let emoji =
+            Message {
+                text: "A😀é".into(), entities: vec![mention(1, 1, 7)], ..Default::default()
+            };
+        validate_message(&emoji)?;
+        let combining = Message {
+            text: "e\u{301}".into(),
+            entities: vec![mention(1, 1, 8)],
+            ..Default::default()
+        };
+        validate_message(&combining)?;
+
+        let body = message.encode_to_vec();
+        let inner = super::super::Inner { layer: 2, kind: 1, body, identity: None };
+        let wire = inner.encode_to_vec();
+        let decoded = super::super::Inner::decode(wire.as_slice())?;
+        assert_eq!(decoded.encode_to_vec(), wire);
+        let decoded_message = Message::decode(decoded.body.as_slice())?;
+        validate_message(&decoded_message)?;
+        assert_eq!(decoded_message.encode_to_vec(), message.encode_to_vec());
+
+        let mut unsorted = filled_mentions();
+        unsorted.entities.swap(0, 1);
+        let unsorted_bytes = unsorted.encode_to_vec();
+        let unsorted_decoded = Message::decode(unsorted_bytes.as_slice())?;
+        assert_eq!(
+            validate_message(&unsorted_decoded),
+            Err(ValidationError::Mention(MentionError::Order))
+        );
+
+        let mut over = filled_mentions();
+        over.text.push('q');
+        over.entities.push(mention(16, 1, 17));
+        assert_rule(&over, MentionError::Count);
+
+        let mut aliased = filled_mentions();
+        let canonical = aliased.entities[0].value.clone().ok_or("anchor")?;
+        let alias = canonical.replace('-', "+").replace('_', "/");
+        if alias == canonical {
+            aliased.entities[0].value = Some(anchor(255).replace('_', "/"));
+        } else {
+            aliased.entities[0].value = Some(alias);
+        }
+        assert_rule(&aliased, MentionError::Anchor);
+        Ok(())
+    }
+
+    #[test]
+    fn mention_rules_have_positive_bounds_and_exact_errors() {
+        assert_eq!(validate_message(&filled_mentions()), Ok(()));
+        let exact_anchor = mention(0, 1, 9);
+        assert_eq!(exact_anchor.value.as_deref().map(str::len), Some(NATIVE_ACCOUNT_ANCHOR_CHARS));
+        assert_eq!(
+            validate_message(&Message {
+                text: "x".into(),
+                entities: vec![exact_anchor],
+                ..Default::default()
+            }),
+            Ok(())
+        );
+
+        let mut missing = filled_mentions();
+        missing.entities[0].value = None;
+        assert_rule(&missing, MentionError::Missing);
+
+        let mut short = filled_mentions();
+        short.entities[0].value = Some(anchor(1)[..42].into());
+        assert_rule(&short, MentionError::Anchor);
+
+        let mut long = filled_mentions();
+        long.entities[0].value = Some(format!("{}=", anchor(1)));
+        assert_rule(&long, MentionError::Anchor);
+
+        let mut zero = filled_mentions();
+        zero.entities[0].length = 0;
+        assert_rule(&zero, MentionError::ZeroLength);
+
+        let mut outside = filled_mentions();
+        outside.entities[0].offset = 16;
+        assert_rule(&outside, MentionError::Span);
+
+        let mut overflow = filled_mentions();
+        overflow.entities[0].offset = u32::MAX;
+        overflow.entities[0].length = 1;
+        assert_rule(&overflow, MentionError::Span);
+
+        let mut overlap = filled_mentions();
+        overlap.entities[1].offset = 0;
+        overlap.entities[1].length = 2;
+        assert_rule(&overlap, MentionError::Overlap);
+
+        let mut unsorted = filled_mentions();
+        unsorted.entities.swap(0, 1);
+        assert_rule(&unsorted, MentionError::Order);
+
+        assert_rule(
+            &Message {
+                text: "x".repeat(MAX_MENTION_TEXT_BYTES + 1),
+                entities: vec![mention(0, 1, 1)],
+                ..Default::default()
+            },
+            MentionError::TextLimit,
+        );
+    }
 }
