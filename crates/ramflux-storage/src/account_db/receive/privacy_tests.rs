@@ -129,7 +129,78 @@ fn erasure_late_stage_and_process() -> Result<(), StorageError> {
     );
     drop(db);
     std::fs::remove_dir_all(root)?;
+    fresh_sequence_replay_of_an_erased_tuple()?;
     already_seen_unprojected_collision_stays_staged()
+}
+
+/// A work entry whose authenticated tuple is exactly (principal, device, key, payload) and whose
+/// lifetime is fresh, so its erasure leaves a live tombstone.
+fn fresh_entry(sequence: u64, payload: &str, principal: &str, device: &str) -> Vec<u8> {
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&super::stage_tests::bytes(sequence)).expect("entry fixture");
+    v["envelope"]["payload_hash"] = json!(payload);
+    v["envelope"]["source_principal_id"] = json!(principal);
+    v["envelope"]["source_device_id"] = json!(device);
+    v["envelope"]["envelope_id"] = json!(format!("env-{sequence}"));
+    v["envelope"]["created_at"] = json!(crate::unix_now());
+    v["envelope"]["ttl"] = json!(3600);
+    serde_json::to_vec(&v).expect("entry encoding")
+}
+
+/// Cells (k)-(n): a fresh-sequence replay of an erased tuple is `Erased` at W0 (the letters
+/// continue the card's (j)-(m) after lane 2's cell (j)). Each holds immediately and after reopen.
+fn fresh_sequence_replay_of_an_erased_tuple() -> Result<(), StorageError> {
+    let (root, db) = setup("w0-fresh-replay")?;
+    db.connection.disable_background_checkpoints_for_test();
+    // (k) Staged work of A, then A is deleted: the tuple is tombstoned. A new coordinate with the
+    // same tuple is erased with no work and no admission key.
+    db.send_direct_message("thread", "A", "peer", b"secret")?;
+    db.connection.execute("INSERT INTO message_copy_binding VALUES('payload:HK','A')", [])?;
+    let first = fresh_entry(1, "HK", "kp", "kd");
+    assert_eq!(run(&db, input(&first, 1))?, R::Staged);
+    db.delete_direct_message("thread", "A", "local", "delete-k")?;
+    let replay = fresh_entry(5, "HK", "kp", "kd");
+    assert_eq!(run(&db, input(&replay, 5))?, R::Erased);
+    assert_eq!(receipt_state(&db, 5)?.as_deref(), Some("erased"));
+    assert_eq!(work_for(&db, 5)?, 0);
+    assert!(!footprints(&db)?.iter().any(|(_, at)| *at == locator(5)));
+    let admission: i64 = db.connection.query_row(
+        "SELECT count(*) FROM gateway_receive_work WHERE inbox_seq=?1",
+        params![5_u64.to_be_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(admission, 0, "no work row, so no admission key is stored");
+    let db = reopen(&root, db)?;
+    db.connection.disable_background_checkpoints_for_test();
+    let again = fresh_entry(6, "HK", "kp", "kd");
+    assert_eq!(run(&db, input(&again, 6))?, R::Erased);
+    assert_eq!(receipt_state(&db, 6)?.as_deref(), Some("erased"));
+    assert_eq!(work_for(&db, 6)?, 0);
+    // (l) A routed copy is the source: its tuple is tombstoned by deleting the message.
+    db.send_direct_message("thread", "R", "peer", b"secret")?;
+    db.connection.execute("INSERT INTO message_copy_binding VALUES('payload:HL','R')", [])?;
+    let routed = serde_json::from_slice::<serde_json::Value>(&fresh_entry(2, "HL", "lp", "ld"))
+        .expect("routed fixture");
+    db.persist_actor_state(
+        "routed/committed/HL",
+        &json!({"routing":{"message_id":"R"},"entry":{"envelope":routed["envelope"]}}),
+    )?;
+    db.delete_direct_message("thread", "R", "local", "delete-l")?;
+    let routed_replay = fresh_entry(7, "HL", "lp", "ld");
+    assert_eq!(run(&db, input(&routed_replay, 7))?, R::Erased);
+    assert_eq!(work_for(&db, 7)?, 0);
+    // (m) The match is exact: the same payload from another device is a different tuple.
+    let other_device = fresh_entry(8, "HK", "kp", "other-device");
+    assert_eq!(run(&db, input(&other_device, 8))?, R::Staged);
+    assert_eq!(work_for(&db, 8)?, 1);
+    // (n) An expired tombstone no longer erases: the same tuple stages again.
+    db.connection.execute("UPDATE receive_erased_input SET expires_at=1", [])?;
+    let expired = fresh_entry(9, "HK", "kp", "kd");
+    assert_eq!(run(&db, input(&expired, 9))?, R::Staged);
+    assert_eq!(work_for(&db, 9)?, 1);
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 /// Cell (d), run inside `erasure_late_stage_and_process` on its own database.
