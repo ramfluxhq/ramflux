@@ -387,7 +387,9 @@ fn row_decode_invalid() -> TestResult {
     let before_store = store_bytes(&path);
     let before_calls = router.state().route_ephemeral_call_count();
     let before_dispatch = dispatch_of(&router, TARGET);
-    let response = super::super::handle_mesh_request_value(
+    // A malformed body is refused by the strict I-JSON ingress (P03), which the serve layer
+    // maps to the exact D3 400 body; it no longer reaches the route as a "dropped/invalid" row.
+    let Err(error) = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: "POST".into(),
             path: "/mvp0/envelope-ephemeral".into(),
@@ -395,10 +397,15 @@ fn row_decode_invalid() -> TestResult {
         },
         &router,
         "ramflux-gateway",
-    )?;
-    let value: Value = serde_json::from_slice(&response.body)?;
-    assert_eq!(value["outcome"], "dropped");
-    assert_eq!(value["reason"], "invalid");
+    ) else {
+        anyhow::bail!("malformed ephemeral route body must be refused by strict ingress");
+    };
+    let body = super::super::i_json_rejection(&error)
+        .ok_or_else(|| anyhow::anyhow!("expected the strict I-JSON refusal, got {error:#}"))?;
+    assert_eq!(
+        serde_json::to_vec(&body)?,
+        br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#
+    );
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
     anyhow::ensure!(store_bytes(&path) == before_store);
     anyhow::ensure!(router.state().route_ephemeral_call_count() == before_calls);
