@@ -47,6 +47,7 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("crate::lock_unpoisoned", "mutex lock helper (no I/O)"),
     ("ramflux_protocol", "protocol wire types and canonical encoding (no storage dependency)"),
     ("ramflux_crypto::verify_canonical_signature", "signature verification only (no storage)"),
+    ("blake3::Hasher::new_derive_key", "pure hasher constructor (no I/O)"),
     ("serde::Deserialize", "derive trait (no I/O)"),
     ("serde::Serialize", "derive trait (no I/O)"),
     ("serde_json::Value", "JSON value type (no I/O)"),
