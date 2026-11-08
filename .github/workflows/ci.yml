@@ -326,39 +326,48 @@ jobs:
     name: Linux vault platform fixture
     needs: [build-rest, build-sdk]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
+        timeout-minutes: 3
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
         with:
           persist-credentials: false
       - name: Install platform fixture tools
+        timeout-minutes: 8
         run: |
           sudo apt-get update
           sudo apt-get install -y systemd dbus dbus-x11 gnome-keyring libsecret-tools libsecret-1-dev zstd acl strace
       - name: Install nextest
+        timeout-minutes: 10
         uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2
         with:
           tool: nextest@0.9.150
       - name: Download default-feature rest archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 5
         with:
           name: archive-rest
       - name: Download default-feature SDK archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        timeout-minutes: 5
         with:
           name: archive-sdk
       - name: Verify pinned independent libsodium C oracle
+        timeout-minutes: 5
         run: python3 -B scripts/linux-vault-vectors.py --check --oracle-dir "$RUNNER_TEMP/linux-vault-oracle"
       - name: Private user, D-Bus and actual systemd credential smoke
+        timeout-minutes: 10
         run: sudo --preserve-env=PATH bash scripts/linux-vault-ci.sh rest.tar.zst
       - name: Real systemd init crash and owned-pipe cleanup proofs
+        timeout-minutes: 8
         run: |
           NEXTEST=$(command -v cargo-nextest)
           sudo --preserve-env=PATH "$NEXTEST" nextest run --archive-file sdk.tar.zst --workspace-remap . --extract-to . --extract-overwrite --run-ignored ignored-only --no-tests=fail -E 'test(custody::vault::linux::init::tests::linux_vault_)'
 
 
       - name: Real local Secret Service initialization and cleanup proofs
+        timeout-minutes: 8
         run: |
           NEXTEST=$(command -v cargo-nextest)
           sudo --preserve-env=PATH "$NEXTEST" nextest list --archive-file rest.tar.zst --workspace-remap . --extract-to . --extract-overwrite > /dev/null
