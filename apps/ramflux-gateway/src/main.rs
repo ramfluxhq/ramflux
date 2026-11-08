@@ -12,6 +12,8 @@ mod durable_mode;
 mod ephemeral;
 mod ephemeral_forward;
 mod hub_index;
+#[cfg(all(test, feature = "itest-http"))]
+mod ijson_ingress_tests;
 mod ingress;
 mod issued_probe;
 #[cfg(feature = "itest-http")]

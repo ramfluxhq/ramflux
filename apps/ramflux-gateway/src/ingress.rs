@@ -10,8 +10,19 @@ pub(crate) enum Ingress {
 pub(crate) fn parse(bytes: &[u8], source: std::net::IpAddr) -> anyhow::Result<Ingress> {
     match parse_inner(bytes, source) {
         Ok(ingress) => Ok(ingress),
-        Err(error) => registration_rejection(bytes)
-            .map_or(Err(error), |response| Ok(Ingress::Rejected(response))),
+        Err(error) => {
+            if let Some(response) = registration_rejection(bytes) {
+                return Ok(Ingress::Rejected(response));
+            }
+            if error.chain().any(ramflux_protocol::is_i_json_rejection) {
+                return Ok(Ingress::Rejected(serde_json::json!(
+                    ramflux_node_core::GatewayServerFrame::Nack {
+                        reason: "gateway_request_invalid".into(),
+                    }
+                )));
+            }
+            Err(error)
+        }
     }
 }
 /// Lenient decoding classifies a rejected frame only; it can never admit any request.
@@ -50,7 +61,11 @@ mod tests {
     fn quinn_tcp_and_compio_ingress_share_strict_shape_and_size_checks() -> anyhow::Result<()> {
         let source = "127.0.0.1".parse()?;
         let duplicate=br#"{"method":"POST","path":"/mvp2/device-set","body":{"record":{"device_set_epoch":1,"device_set_epoch":2}}}"#;
-        assert!(parse(duplicate, source).is_err());
+        assert!(matches!(
+            parse(duplicate, source)?,
+            Ingress::Rejected(response)
+                if response == serde_json::json!({"frame_type":"nack","reason":"gateway_request_invalid"})
+        ));
         assert!(parse(&vec![b' '; 1024 * 1024 + 1], source).is_err());
         assert!(parse(br#"{"method":"POST","path":"/mvp2/device-set","body":{"record":{"principal_commitment":"victim"}}}"#,source).is_err());
         assert!(matches!(

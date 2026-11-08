@@ -164,7 +164,13 @@ pub(crate) fn dispatch_protected_itest_request(
             )?;
         }
         ("POST", "/mvp0/envelope") => {
-            let envelope: ramflux_protocol::Envelope = serde_json::from_slice(&request.body)?;
+            let Some(envelope) = decode_or_refuse_i_json(
+                stream,
+                ramflux_protocol::decode_signed_envelope_ijson(&request.body),
+            )?
+            else {
+                return Ok(());
+            };
             if ramflux_protocol::ephemeral::require_durable(&envelope).is_err() {
                 ramflux_node_core::write_itest_json_response(
                     stream,
@@ -180,13 +186,25 @@ pub(crate) fn dispatch_protected_itest_request(
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp0/ack") => {
-            let ack: ramflux_protocol::Ack = serde_json::from_slice(&request.body)?;
+            let Some(ack) = decode_or_refuse_i_json(
+                stream,
+                ramflux_protocol::decode_signed_ack_ijson(&request.body),
+            )?
+            else {
+                return Ok(());
+            };
             let response: ramflux_node_core::RouterAckResponse =
                 router_post_json(router, "/mvp0/ack", &ack)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
         }
         ("POST", "/mvp0/nack") => {
-            let nack: ramflux_protocol::Nack = serde_json::from_slice(&request.body)?;
+            let Some(nack) = decode_or_refuse_i_json(
+                stream,
+                ramflux_protocol::decode_signed_nack_ijson(&request.body),
+            )?
+            else {
+                return Ok(());
+            };
             let response: ramflux_node_core::InboxCursorResponse =
                 router_post_json(router, "/mvp0/nack", &nack)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
@@ -366,8 +384,15 @@ pub(crate) fn handle_mvp10_itest_request(
 ) -> anyhow::Result<()> {
     match (method, path) {
         ("POST", "/mvp10/own-devices/fanout") => {
-            let request: ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest =
-                serde_json::from_slice(body)?;
+            let Some(request) = decode_or_refuse_i_json(
+                stream,
+                ramflux_protocol::parse_i_json::<ramflux_node_core::ItestMvp10OwnDeviceFanoutRequest>(
+                    body,
+                ),
+            )?
+            else {
+                return Ok(());
+            };
             let response: ramflux_node_core::ItestMvp10OwnDeviceFanoutResponse =
                 router_post_json(router, "/mvp10/own-devices/fanout", &request)?;
             ramflux_node_core::write_itest_json_response(stream, "200 OK", &response)?;
@@ -377,6 +402,25 @@ pub(crate) fn handle_mvp10_itest_request(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "itest-http")]
+fn decode_or_refuse_i_json<T>(
+    stream: &mut TcpStream,
+    decoded: Result<T, ramflux_protocol::ProtocolError>,
+) -> anyhow::Result<Option<T>> {
+    match decoded {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if ramflux_protocol::is_i_json_rejection(&error) => {
+            ramflux_node_core::write_itest_json_response(
+                stream,
+                "400 Bad Request",
+                &ramflux_protocol::i_json_rejection_body(),
+            )?;
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(feature = "itest-http")]
