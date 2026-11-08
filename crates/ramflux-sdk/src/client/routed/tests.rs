@@ -902,3 +902,5 @@ mod revocation_receive_tests;
 
 #[path = "effect_marker_tests.rs"]
 mod effect_marker_tests;
+#[path = "legacy_effect_marker_tests.rs"]
+mod legacy_effect_marker;

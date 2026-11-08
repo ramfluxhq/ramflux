@@ -223,7 +223,7 @@ impl RamfluxClient {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct LegacyControlReceipt {
-    event: A2iControlEvent,
-    payload_hash: String,
+pub(crate) struct LegacyControlReceipt {
+    pub event: A2iControlEvent,
+    pub payload_hash: String,
 }

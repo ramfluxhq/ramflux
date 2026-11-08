@@ -35,6 +35,7 @@ pub mod home_migration;
 pub mod identity;
 pub mod identity_authority;
 pub(crate) mod inbox_failure;
+pub(crate) mod legacy_w1;
 pub mod mcp_a2ui;
 mod native_branch;
 mod native_safety;

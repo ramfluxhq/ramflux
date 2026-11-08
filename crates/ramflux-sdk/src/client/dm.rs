@@ -375,7 +375,7 @@ impl RamfluxClient {
         Ok(false)
     }
 
-    fn decrypt_legacy_entry(
+    pub(crate) fn decrypt_legacy_entry(
         &self,
         conversation_id: &str,
         entry: &GatewayInboxEntry,
@@ -457,10 +457,20 @@ impl RamfluxClient {
         session: &ramflux_crypto::DmSession,
     ) -> Result<(), SdkError> {
         self.account_db()?.write_transaction(|| -> Result<(), SdkError> {
-            self.persist_dm_session(conversation, &entry.envelope.envelope_id, "recv", session)?;
-            self.persist_legacy_committed(entry, conversation)?;
+            self.commit_legacy_effect(conversation, entry, session)?;
             self.persist_gateway_receive_cursor(target, entry.inbox_seq)
         })
+    }
+
+    /// Ratchet + terminal marker only. Cursor/ACK stay off this cut (ledger WA).
+    pub(crate) fn commit_legacy_effect(
+        &self,
+        conversation: &str,
+        entry: &GatewayInboxEntry,
+        session: &ramflux_crypto::DmSession,
+    ) -> Result<(), SdkError> {
+        self.persist_dm_session(conversation, &entry.envelope.envelope_id, "recv", session)?;
+        self.persist_legacy_committed(entry, conversation)
     }
 
     /// # Errors
