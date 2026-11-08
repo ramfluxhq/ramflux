@@ -651,6 +651,10 @@ struct IngressEffects {
     database: Vec<u8>,
     seen: bool,
     pending: usize,
+    /// Router submit calls (decoded envelopes handed to the router handle).
+    calls: usize,
+    /// Dispatches into the router engine, after the durable-mode check.
+    dispatches: usize,
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -672,7 +676,8 @@ fn ingress_effect_snapshot(
         i64::try_from(ramflux_node_core::now_unix_seconds())?,
     )?;
     let pending = router.state().resume(&envelope.target_delivery_id, 0, 10).len();
-    Ok(IngressEffects { database: std::fs::read(db_path)?, seen, pending })
+    let (calls, dispatches) = router.ingress_probe();
+    Ok(IngressEffects { database: std::fs::read(db_path)?, seen, pending, calls, dispatches })
 }
 
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -1297,7 +1302,13 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
                     "raw JSON refusal frame must match the independent wire literal"
                 );
             }
-            assert_eq!(ingress_effect_snapshot(&router, &db_path, &envelope)?, before);
+            let after = ingress_effect_snapshot(&router, &db_path, &envelope)?;
+            assert_eq!(
+                (after.calls, after.dispatches),
+                (0, 0),
+                "a refused row must make zero router calls and zero dispatches"
+            );
+            assert_eq!(after, before);
 
             let before = ingress_effect_snapshot(&router, &db_path, &envelope)?;
             let response = fixture_wait(
@@ -1321,7 +1332,13 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
                 payload, EXPECTED_BODY,
                 "compio postcard refusal payload must match the independent byte literal"
             );
-            assert_eq!(ingress_effect_snapshot(&router, &db_path, &envelope)?, before);
+            let after = ingress_effect_snapshot(&router, &db_path, &envelope)?;
+            assert_eq!(
+                (after.calls, after.dispatches),
+                (0, 0),
+                "a refused row must make zero router calls and zero dispatches"
+            );
+            assert_eq!(after, before);
         }
 
         let accepted_json = crate::router_runtime::tests::current_envelope(
@@ -1381,6 +1398,22 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
             accepted_after.database, accepted_before.database,
             "accepted control must move the always-active store effect probe"
         );
+        assert!(
+            accepted_after.seen && !accepted_before.seen,
+            "accepted control must move the seen-delivery probe"
+        );
+        assert!(
+            accepted_after.pending > accepted_before.pending,
+            "accepted control must move the pending probe"
+        );
+        assert!(
+            accepted_after.calls > accepted_before.calls,
+            "accepted control must move the router-call probe"
+        );
+        assert!(
+            accepted_after.dispatches > accepted_before.dispatches,
+            "accepted control must move the dispatch probe"
+        );
 
         let accepted_postcard = crate::router_runtime::tests::current_envelope(
             "ijson-compio-postcard-control",
@@ -1415,6 +1448,11 @@ fn compio_router_ijson_live_wire_refusals_precede_effects() -> TestResult {
             .saturating_add(i64::from(accepted_postcard.ttl));
         let expected_postcard_wire = format!(
             r#"{{"outcome":"online","target_delivery_id":"target_alice","inbox_seq":2,"cursor":null,"incarnation_id":"{incarnation_id}","retain_until":{retain_until}}}"#
+        );
+        assert_eq!(
+            router.ingress_probe(),
+            (2, 2),
+            "both accepted controls (JSON and postcard) reached the router exactly once"
         );
         let (accepted_status, accepted_payload) = response;
         assert_eq!(accepted_status, 200);
