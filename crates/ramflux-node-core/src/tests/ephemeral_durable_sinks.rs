@@ -36,8 +36,8 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("crate::NodeCoreError", "error type, crate root re-export (type only)"),
     ("crate::EnvelopeAuthorityReason", "authority refusal enum, crate root re-export (type only)"),
     (
-        "crate::RouterCore",
-        "router handle type named in signatures; sinks on it are caught by layer 2",
+        "crate::EphemeralRouterView",
+        "narrow read-only C1 view; durable sinks on RouterCore are not in scope",
     ),
     (
         "crate::EphemeralRegistrationItem",
@@ -45,7 +45,13 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ),
     ("crate::SessionLifecycle", "session lifecycle enum, crate root re-export (type only)"),
     ("crate::lock_unpoisoned", "mutex lock helper (no I/O)"),
-    ("ramflux_protocol", "protocol wire types and canonical encoding (no storage dependency)"),
+    ("ramflux_protocol::Envelope", "protocol envelope type (no storage)"),
+    ("ramflux_protocol::Priority", "protocol priority enum (no storage)"),
+    ("ramflux_protocol::ephemeral", "ephemeral mode types and deadline helper (no storage)"),
+    (
+        "ramflux_protocol::envelope_sender_signed_bytes",
+        "canonical sender-signed bytes (no storage)",
+    ),
     ("ramflux_crypto::verify_canonical_signature", "signature verification only (no storage)"),
     ("blake3::Hasher::new_derive_key", "pure hasher constructor (no I/O)"),
     ("serde::Deserialize", "derive trait (no I/O)"),
@@ -1254,6 +1260,46 @@ fn std_fs_import_is_refused() -> TestResult {
         "use std::fs::write;\nfn sink() { write(\"x\", b\"x\"); }\n",
         "import std::fs::write not on the ephemeral allow-list in src/ephemeral.rs",
     )
+}
+
+/// Reviewer r7 M1: `crate::RouterCore` plus publication traversal is refused
+/// by the allow-list (the view type does not expose `target_shard`).
+const R7_PUBLICATION_SINK: &str = r#"
+fn sink(router: &crate::RouterCore, target: &str) {
+    let shard = router.target_shard(target);
+    if let (Some(core), Some(id)) =
+        (&shard.inbox.publication, shard.inbox.incarnation_id(target))
+    {
+        let _ = core.reserve(target, id, &[]);
+    }
+}
+"#;
+
+#[test]
+fn router_core_publication_sink_is_refused() -> TestResult {
+    expect_refusal(
+        R7_PUBLICATION_SINK,
+        "import crate::RouterCore not on the ephemeral allow-list in src/ephemeral.rs",
+    )
+}
+
+/// The r7 fixture planted in a real ephemeral module is refused exactly.
+#[test]
+fn real_ephemeral_module_with_router_core_publication_sink_is_refused() -> TestResult {
+    let root = workspace_root()?;
+    let rel = "crates/ramflux-node-core/src/ephemeral/route.rs";
+    let src_dir = root.join("crates/ramflux-node-core/src");
+    let modules = load_crate_modules(&src_dir)?;
+    let mut src = std::fs::read_to_string(root.join(rel))?;
+    src.push_str(R7_PUBLICATION_SINK);
+    let Err(err) = scan_file(&src, rel, "crate::ephemeral::route", &modules) else {
+        return Err("a real ephemeral module naming crate::RouterCore must be refused".into());
+    };
+    assert_eq!(
+        err,
+        "import crate::RouterCore not on the ephemeral allow-list in crates/ramflux-node-core/src/ephemeral/route.rs"
+    );
+    Ok(())
 }
 
 /// Adding `use std::fs::write;` to a real ephemeral module is refused.

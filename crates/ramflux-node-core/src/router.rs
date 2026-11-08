@@ -31,8 +31,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod ack_batch;
+mod c1_view;
 mod committed_forward;
 mod retention;
+pub use c1_view::EphemeralRouterView;
 
 const ROUTER_TARGET_SHARD_COUNT: usize = 64;
 const ROUTER_REPLAY_GUARD_SHARD_COUNT: usize = 64;

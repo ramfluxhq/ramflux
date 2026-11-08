@@ -4,9 +4,7 @@
 //! Read-only ephemeral route authority (C1). No store write, no foreign-head apply.
 //! Volatile replay set (D3) lives on `RouterCore` outside snapshot/save.
 
-#[cfg(any(test, feature = "test-support"))]
-use crate::HomeNodeMigrationRecord;
-use crate::{EnvelopeAuthorityReason, NodeCoreError, RouterCore, lock_unpoisoned};
+use crate::lock_unpoisoned;
 use ramflux_protocol::ephemeral::{EphemeralModeError, deadline};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
@@ -204,7 +202,7 @@ pub struct EphemeralDurableSnapshot {
     pub local_home_node_id: Vec<u8>,
 }
 
-impl RouterCore {
+impl crate::EphemeralRouterView<'_> {
     /// Read-only ephemeral route: recompute D, verify source without E1, then C1.
     #[must_use]
     pub fn route_ephemeral(
@@ -227,7 +225,7 @@ impl RouterCore {
             return result;
         }
         let now_secs = i64::try_from(now_ms / 1_000).unwrap_or(i64::MAX);
-        if self.ephemeral_target_not_local(&envelope.target_delivery_id, now_secs) {
+        if self.target_not_local(&envelope.target_delivery_id, now_secs) {
             return EphemeralRouteResult::Dropped(EphemeralDropReason::NotLocal);
         }
         match self.route_gate(&envelope.target_delivery_id) {
@@ -245,92 +243,6 @@ impl RouterCore {
             crate::EphemeralRouteGate::RecipientUnsupported => {
                 EphemeralRouteResult::Dropped(EphemeralDropReason::RecipientUnsupported)
             }
-        }
-    }
-
-    fn authenticate_ephemeral_source(
-        &self,
-        envelope: &ramflux_protocol::Envelope,
-    ) -> Result<(), EphemeralRouteResult> {
-        let root = envelope
-            .ext
-            .ext
-            .get("source_root_commitment")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(EphemeralRouteResult::RootMismatch)?;
-        let lookup = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
-            .map_err(|_| EphemeralRouteResult::RootMismatch)?;
-        let control = lock_unpoisoned(&self.control);
-        let Some(authority) = control
-            .mvp1_identities
-            .resolve_device_selector(&lookup)
-            .and_then(|identity| control.mvp1_identities.device_auth_key(&identity))
-        else {
-            return Err(EphemeralRouteResult::RootMismatch);
-        };
-        match authority.verify_envelope_source(envelope) {
-            Ok(_) => Ok(()),
-            Err(NodeCoreError::SourceAuthorityRefused {
-                reason_code: EnvelopeAuthorityReason::Revoked,
-            }) => Err(EphemeralRouteResult::RevokedSource),
-            Err(_) => Err(EphemeralRouteResult::RootMismatch),
-        }
-    }
-
-    fn ephemeral_target_not_local(&self, target: &str, now_unix_seconds: i64) -> bool {
-        self.effective_home_node_migration_for_target(target, now_unix_seconds).is_some()
-    }
-
-    /// Durable identities, replay guard and foreign-device heads as observed bytes.
-    ///
-    /// # Errors
-    /// Returns an error when a snapshot field cannot be encoded.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn ephemeral_durable_snapshot(&self) -> Result<EphemeralDurableSnapshot, NodeCoreError> {
-        let snap = self.snapshot();
-        Ok(EphemeralDurableSnapshot {
-            identities: serde_json::to_vec(&snap.mvp1_identities)
-                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
-            replay: serde_json::to_vec(&snap.replay_guard_state)
-                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
-            foreign_device_heads: serde_json::to_vec(&snap.foreign_device_heads)
-                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
-            sessions: serde_json::to_vec(&snap.registry)
-                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
-            home_node_migrations: serde_json::to_vec(&snap.home_node_migrations)
-                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
-            local_home_node_id: serde_json::to_vec(&self.local_home_node_id())
-                .map_err(|error| NodeCoreError::SnapshotSerialization(error.to_string()))?,
-        })
-    }
-
-    /// Test-only: record an effective home-node migration for `identity_commitment`.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_put_home_node_migration(
-        &self,
-        identity_commitment: String,
-        record: HomeNodeMigrationRecord,
-    ) {
-        let mut control = lock_unpoisoned(&self.control);
-        control.home_node_migrations.insert(identity_commitment, record);
-        self.refresh_migration_read_snapshot_from_control(&control);
-    }
-
-    /// Test-only: mark the envelope's registered source device revoked.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test_revoke_envelope_source(&self, envelope: &ramflux_protocol::Envelope) {
-        let Some(root) =
-            envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let Ok(lookup) = ramflux_protocol::qualified_device_id(root, &envelope.source_device_id)
-        else {
-            return;
-        };
-        let mut control = lock_unpoisoned(&self.control);
-        if let Some(identity) = control.mvp1_identities.resolve_device_selector(&lookup) {
-            control.mvp1_identities.revoked_devices.insert(identity.storage_key().to_owned());
         }
     }
 
@@ -377,7 +289,7 @@ impl RouterCore {
         deadline_unix: u64,
         now_ms: u64,
     ) -> EphemeralReplayAdmit {
-        lock_unpoisoned(&self.ephemeral_replay).admit(
+        lock_unpoisoned(self.replay_state()).admit(
             digest,
             DeadlineSecs::from_unix(deadline_unix),
             now_ms,
@@ -386,12 +298,12 @@ impl RouterCore {
 
     #[cfg(test)]
     pub(crate) fn ephemeral_replay_len(&self) -> usize {
-        lock_unpoisoned(&self.ephemeral_replay).by_digest.len()
+        lock_unpoisoned(self.replay_state()).by_digest.len()
     }
 
     #[cfg(test)]
     pub(crate) fn ephemeral_replay_contains_live(&self, digest: &[u8; 32], now_ms: u64) -> bool {
-        lock_unpoisoned(&self.ephemeral_replay).contains_live(digest, now_ms)
+        lock_unpoisoned(self.replay_state()).contains_live(digest, now_ms)
     }
 }
 
@@ -406,10 +318,8 @@ mod tests {
         DeadlineSecs, EPHEMERAL_REPLAY_BOUND, EphemeralReplayAdmit, EphemeralRouteRequest,
         EphemeralRouteResponse, ephemeral_replay_digest,
     };
-    use super::{
-        EphemeralDropReason, EphemeralDurableSnapshot, EphemeralRouteResult,
-        HomeNodeMigrationRecord, RouterCore, deadline,
-    };
+    use super::{EphemeralDropReason, EphemeralDurableSnapshot, EphemeralRouteResult, deadline};
+    use crate::{HomeNodeMigrationRecord, RouterCore};
     use crate::{
         IDENTITY_BIND_AUDIENCE, IDENTITY_BIND_CAPABILITY, IdentityRegisterRequest, RouterRedbStore,
         SessionDescriptor, SessionLifecycle, source_ip_hash,

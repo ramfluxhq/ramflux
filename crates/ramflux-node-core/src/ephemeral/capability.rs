@@ -120,28 +120,22 @@ fn run_after_session_hook(target: &str) {
     }
 }
 
-impl crate::RouterCore {
+impl crate::EphemeralRouterView<'_> {
     /// W1: every (re)establishment clears `map[T]` and records `T` in this boot.
     pub fn clear_ephemeral_capability(&self, target: &str) {
-        lock_unpoisoned(&self.ephemeral_capability).clear_on_establishment(target);
+        lock_unpoisoned(self.capability_state()).clear_on_establishment(target);
     }
 
     /// W2: record capability from this registration's own `ephemeral` advertisement.
     pub fn bind_ephemeral_capability(&self, target: &str, gateway_id: &str, session_id: &str) {
         let recorded =
-            lock_unpoisoned(&self.ephemeral_capability).bind(target, gateway_id, session_id);
+            lock_unpoisoned(self.capability_state()).bind(target, gateway_id, session_id);
         if !recorded {
             tracing::debug!(
                 target_delivery_id = target,
                 "ephemeral capability map full; flag not recorded"
             );
         }
-    }
-
-    /// Process-local boot identifier advertised on the capabilities reply.
-    #[must_use]
-    pub fn router_boot_id(&self) -> &str {
-        &self.router_boot_id
     }
 
     /// Restore map entries after a restart. Retries are idempotent.
@@ -160,7 +154,7 @@ impl crate::RouterCore {
         boot_id: &str,
         items: &[crate::EphemeralRegistrationItem],
     ) -> Result<usize, EphemeralReassertionError> {
-        if boot_id != self.router_boot_id {
+        if boot_id != self.boot_id() {
             return Err(EphemeralReassertionError::BootMismatch);
         }
         if items.len() > EPHEMERAL_REASSERTION_ITEM_BOUND {
@@ -180,7 +174,7 @@ impl crate::RouterCore {
             return false;
         }
         let descriptor = self.session(target);
-        let mut state = lock_unpoisoned(&self.ephemeral_capability);
+        let mut state = lock_unpoisoned(self.capability_state());
         if state.established_in_boot.len() >= EPHEMERAL_CAPABILITY_BOUND
             || state.established_in_boot.contains(target)
         {
@@ -204,11 +198,11 @@ impl crate::RouterCore {
 
     /// C1: capability-gated route for `T`. Lazily drops a stale map entry.
     pub fn route_gate(&self, target: &str) -> EphemeralRouteGate {
-        let observed = lock_unpoisoned(&self.ephemeral_capability).map.get(target).cloned();
+        let observed = lock_unpoisoned(self.capability_state()).map.get(target).cloned();
         let descriptor = self.session(target);
         #[cfg(test)]
         run_after_session_hook(target);
-        let mut state = lock_unpoisoned(&self.ephemeral_capability);
+        let mut state = lock_unpoisoned(self.capability_state());
         let current = state.map.get(target).cloned();
         if let Some(descriptor) = descriptor.as_ref()
             && descriptor.lifecycle == SessionLifecycle::Live
@@ -235,28 +229,28 @@ impl crate::RouterCore {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn ephemeral_map_len(&self) -> usize {
-        lock_unpoisoned(&self.ephemeral_capability).map.len()
+        lock_unpoisoned(self.capability_state()).map.len()
     }
 
     /// Inspection: whether `target` has a capability map entry.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn ephemeral_map_contains(&self, target: &str) -> bool {
-        lock_unpoisoned(&self.ephemeral_capability).map.contains_key(target)
+        lock_unpoisoned(self.capability_state()).map.contains_key(target)
     }
 
     /// Inspection: occupancy of `established_in_boot`.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn established_in_boot_len(&self) -> usize {
-        lock_unpoisoned(&self.ephemeral_capability).established_in_boot.len()
+        lock_unpoisoned(self.capability_state()).established_in_boot.len()
     }
 
     /// Inspection: whether `target` was established in this boot.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn established_in_boot_contains(&self, target: &str) -> bool {
-        lock_unpoisoned(&self.ephemeral_capability).established_in_boot.contains(target)
+        lock_unpoisoned(self.capability_state()).established_in_boot.contains(target)
     }
 }
 
