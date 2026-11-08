@@ -71,6 +71,8 @@ pub enum ReceiverDropReason {
     WrongSource,
     #[error("ephemeral envelope signature does not verify")]
     BadSignature,
+    #[error("received frame deadline does not match authenticated expiry")]
+    ReceivedDeadlineMismatch,
 }
 
 /// Receiver lifetime decision at one injected clock reading.

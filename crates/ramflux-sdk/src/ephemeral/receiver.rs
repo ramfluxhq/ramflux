@@ -3,10 +3,9 @@
 
 //! Bounded in-memory ephemeral receiver channel, dedup, generation lock, I-LED.
 
-use super::lifetime::poll_stored_hold;
-use super::{
+use super::lifetime::{
     HoldLease, ReceiverClock, ReceiverDropReason, ReceiverLifetime, admit_authenticated_ciphertext,
-    authenticate,
+    authenticate, poll_stored_hold,
 };
 use ramflux_protocol::Envelope;
 use serde::Deserialize;
@@ -27,6 +26,11 @@ pub const RECEIVER_DEDUP_BUDGET_BYTES: usize = RECEIVER_DEDUP_BOUND * RECEIVER_D
 /// Inclusive whole-frame cap for one complete received frame.
 pub const RECEIVER_MAX_FRAME_BYTES: usize = 32_768;
 
+const TEST_POLL_RETRY_METADATA: u8 = 1 << 0;
+const TEST_SIZE_RESERIALIZED: u8 = 1 << 1;
+const TEST_SKIP_START_RECHECK: u8 = 1 << 2;
+const TEST_SKIP_DEADLINE_COMPARE: u8 = 1 << 3;
+
 /// Outcome of admitting one authenticated ephemeral envelope into the receiver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
@@ -45,7 +49,7 @@ pub enum ReceiverAdmit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[must_use]
 pub enum ReceiverDequeue {
-    Delivered(Vec<u8>),
+    Delivered { bytes: Vec<u8>, expires_at_ms: u64 },
     Dropped(ReceiverDropReason),
     Empty,
 }
@@ -82,6 +86,7 @@ struct DedupEntry {
 struct ChannelEntry {
     digest: [u8; 32],
     bytes: Vec<u8>,
+    created_at: i64,
     expires_at_ms: u64,
 }
 
@@ -106,9 +111,7 @@ pub struct EphemeralReceiver {
     holds: HashMap<[u8; 32], HeldEntry>,
     ledger: LedgerProbe,
     #[cfg(test)]
-    poll_retry_metadata: bool,
-    #[cfg(test)]
-    size_reserialized: bool,
+    test_flags: u8,
 }
 
 fn digest_key(source_device_id: &str, envelope_id: &str) -> [u8; 32] {
@@ -253,20 +256,38 @@ impl EphemeralReceiver {
         match handoff.lifetime {
             ReceiverLifetime::Drop(ReceiverDropReason::Expired) => ReceiverAdmit::Expired,
             ReceiverLifetime::Drop(reason) => ReceiverAdmit::Drop(reason),
-            ReceiverLifetime::Hold(lease) => self.admit_hold(
-                digest,
-                HeldEntry {
-                    created_at: envelope.created_at,
-                    ttl_seconds: envelope.ttl,
-                    expires_at_ms: lease.expires_at_ms,
-                    lease,
-                    payload,
-                    bytes: bytes.to_vec(),
-                },
-                counted,
-            ),
+            ReceiverLifetime::Hold(lease) => {
+                if self.deadline_mismatch(frame.expires_at_ms, lease.expires_at_ms) {
+                    return ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch);
+                }
+                self.admit_hold(
+                    digest,
+                    HeldEntry {
+                        created_at: envelope.created_at,
+                        ttl_seconds: envelope.ttl,
+                        expires_at_ms: lease.expires_at_ms,
+                        lease,
+                        payload,
+                        bytes: bytes.to_vec(),
+                    },
+                    counted,
+                )
+            }
             ReceiverLifetime::Display { expires_at_ms } => {
-                self.admit_display(digest, payload, expires_at_ms, bytes, counted)
+                if self.deadline_mismatch(frame.expires_at_ms, expires_at_ms) {
+                    return ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch);
+                }
+                self.admit_display(
+                    digest,
+                    payload,
+                    ChannelEntry {
+                        digest,
+                        bytes: bytes.to_vec(),
+                        created_at: envelope.created_at,
+                        expires_at_ms,
+                    },
+                    counted,
+                )
             }
         }
     }
@@ -295,9 +316,17 @@ impl EphemeralReceiver {
             self.dedup.remove(&entry.digest);
             return ReceiverDequeue::Dropped(ReceiverDropReason::Expired);
         }
+        if !self.skips_start_recheck() {
+            let start_ms = i128::from(entry.created_at) * 1_000;
+            if i128::from(now_wall) < start_ms {
+                self.channel.push_front(entry);
+                return ReceiverDequeue::Empty;
+            }
+        }
         let bytes = entry.bytes.clone();
+        let expires_at_ms = entry.expires_at_ms;
         self.inflight = Some(entry);
-        ReceiverDequeue::Delivered(bytes)
+        ReceiverDequeue::Delivered { bytes, expires_at_ms }
     }
 
     /// Release the in-flight frame from occupancy. Dedup remains until exclusive D.
@@ -387,7 +416,12 @@ impl EphemeralReceiver {
                     return ReceiverAdmit::DroppedNew;
                 };
                 self.record_terminal(digest, payload, expires_at_ms);
-                self.channel.push_back(ChannelEntry { digest, bytes: held.bytes, expires_at_ms });
+                self.channel.push_back(ChannelEntry {
+                    digest,
+                    bytes: held.bytes,
+                    created_at: held.created_at,
+                    expires_at_ms,
+                });
                 ReceiverAdmit::Displayed { expires_at_ms }
             }
             ReceiverLifetime::Drop(reason) => {
@@ -423,16 +457,16 @@ impl EphemeralReceiver {
         &mut self,
         digest: [u8; 32],
         payload: [u8; 32],
-        expires_at_ms: u64,
-        bytes: &[u8],
+        entry: ChannelEntry,
         counted: usize,
     ) -> ReceiverAdmit {
         if self.cannot_retain(counted) || self.dedup_saturated() {
             return ReceiverAdmit::DroppedNew;
         }
+        let expires_at_ms = entry.expires_at_ms;
         self.record_terminal(digest, payload, expires_at_ms);
         self.channel_bytes = self.channel_bytes.saturating_add(counted);
-        self.channel.push_back(ChannelEntry { digest, bytes: bytes.to_vec(), expires_at_ms });
+        self.channel.push_back(entry);
         ReceiverAdmit::Displayed { expires_at_ms }
     }
 
@@ -448,7 +482,7 @@ impl EphemeralReceiver {
 
     fn counted_frame_len(&self, original: &[u8], envelope: &Envelope, expires_at_ms: u64) -> usize {
         #[cfg(test)]
-        if self.size_reserialized {
+        if self.sizes_reserialized() {
             return encode_complete_frame(envelope, expires_at_ms)
                 .map_or(original.len(), |encoded| encoded.len());
         }
@@ -457,37 +491,67 @@ impl EphemeralReceiver {
     }
 
     fn sizes_reserialized(&self) -> bool {
-        let _ = self;
+        self.test_flag(TEST_SIZE_RESERIALIZED)
+    }
+
+    fn polls_retry_metadata(&self) -> bool {
+        self.test_flag(TEST_POLL_RETRY_METADATA)
+    }
+
+    fn deadline_mismatch(&self, wrapper_expires_at_ms: u64, authenticated_d: u64) -> bool {
+        if self.skips_deadline_compare() {
+            return false;
+        }
+        wrapper_expires_at_ms != authenticated_d
+    }
+
+    fn skips_start_recheck(&self) -> bool {
+        self.test_flag(TEST_SKIP_START_RECHECK)
+    }
+
+    fn skips_deadline_compare(&self) -> bool {
+        self.test_flag(TEST_SKIP_DEADLINE_COMPARE)
+    }
+
+    fn test_flag(&self, bit: u8) -> bool {
         #[cfg(test)]
         {
-            self.size_reserialized
+            self.test_flags & bit != 0
         }
         #[cfg(not(test))]
         {
+            let _ = (self, bit);
             false
         }
     }
 
-    fn polls_retry_metadata(&self) -> bool {
-        let _ = self;
-        #[cfg(test)]
-        {
-            self.poll_retry_metadata
-        }
-        #[cfg(not(test))]
-        {
-            false
+    #[cfg(test)]
+    fn set_test_flag(&mut self, bit: u8, value: bool) {
+        if value {
+            self.test_flags |= bit;
+        } else {
+            self.test_flags &= !bit;
         }
     }
 
     #[cfg(test)]
     pub fn set_poll_retry_metadata(&mut self, value: bool) {
-        self.poll_retry_metadata = value;
+        self.set_test_flag(TEST_POLL_RETRY_METADATA, value);
     }
 
     #[cfg(test)]
     pub fn set_size_reserialized(&mut self, value: bool) {
-        self.size_reserialized = value;
+        self.set_test_flag(TEST_SIZE_RESERIALIZED, value);
+    }
+
+    #[cfg(test)]
+    pub fn set_skip_start_recheck(&mut self, value: bool) {
+        self.set_test_flag(TEST_SKIP_START_RECHECK, value);
+    }
+
+    #[cfg(test)]
+    pub fn set_skip_deadline_compare(&mut self, value: bool) {
+        self.set_test_flag(TEST_SKIP_DEADLINE_COMPARE, value);
     }
 }
 
@@ -630,7 +694,7 @@ mod tests {
     }
 
     fn drain(rx: &mut EphemeralReceiver, now_ms: u64) {
-        if let ReceiverDequeue::Delivered(_) = rx.pop(now_ms, MONOTONIC_MS) {
+        if let ReceiverDequeue::Delivered { .. } = rx.pop(now_ms, MONOTONIC_MS) {
             rx.complete();
         }
     }
@@ -731,7 +795,7 @@ mod tests {
         assert_eq!(at_cap.occupancy(), (1, MAX_FRAME));
         assert_eq!(
             at_cap.pop(NOW_MS, MONOTONIC_MS),
-            ReceiverDequeue::Delivered(exact_bytes.clone())
+            ReceiverDequeue::Delivered { bytes: exact_bytes.clone(), expires_at_ms: EXPIRES_AT_MS }
         );
 
         let mut over = EphemeralReceiver::new();
@@ -820,7 +884,10 @@ mod tests {
             admit_bytes(&mut rx, &bytes, NOW_MS, MONOTONIC_MS),
             ReceiverAdmit::Displayed { .. }
         ));
-        assert_eq!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Delivered(bytes.clone()));
+        assert_eq!(
+            rx.pop(NOW_MS, MONOTONIC_MS),
+            ReceiverDequeue::Delivered { bytes: bytes.clone(), expires_at_ms: EXPIRES_AT_MS }
+        );
         let invalid = br#"{"frame_type":"ephemeral","envelope":{"#.to_vec();
         let mut bad = EphemeralReceiver::new();
         assert_eq!(
@@ -837,7 +904,7 @@ mod tests {
             let envelope = signed(|e| e.envelope_id = format!("q-{i}"));
             assert!(matches!(admit(&mut rx, &envelope, NOW_MS), ReceiverAdmit::Displayed { .. }));
         }
-        assert!(matches!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Delivered(_)));
+        assert!(matches!(rx.pop(NOW_MS, MONOTONIC_MS), ReceiverDequeue::Delivered { .. }));
         assert_eq!(rx.occupancy().0, CHANNEL_FRAMES);
         let extra = signed(|e| e.envelope_id = "q-extra".to_owned());
         assert_eq!(admit(&mut rx, &extra, NOW_MS), ReceiverAdmit::DroppedNew);
@@ -905,7 +972,10 @@ mod tests {
             admit(&mut rx, &envelope, 1_000_999),
             ReceiverAdmit::Displayed { expires_at_ms: 1_001_000 }
         );
-        assert!(matches!(rx.pop(1_000_999, MONOTONIC_MS), ReceiverDequeue::Delivered(_)));
+        assert!(matches!(
+            rx.pop(1_000_999, MONOTONIC_MS),
+            ReceiverDequeue::Delivered { expires_at_ms: 1_001_000, .. }
+        ));
         assert_eq!(rx.occupancy().0, 1);
     }
 
@@ -949,7 +1019,10 @@ mod tests {
         rx.poll(1_002_000, MONOTONIC_MS);
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 1);
-        assert_eq!(rx.pop(1_002_000, MONOTONIC_MS), ReceiverDequeue::Delivered(original));
+        assert_eq!(
+            rx.pop(1_002_000, MONOTONIC_MS),
+            ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
+        );
         assert_eq!(admit_at(&mut rx, &envelope, 1_002_000, MONOTONIC_MS), ReceiverAdmit::Duplicate);
     }
 
@@ -1006,7 +1079,10 @@ mod tests {
         assert_eq!(rx.pop(1_001_000, 51_000), ReceiverDequeue::Empty);
         rx.poll(1_002_000, 51_000);
         assert_eq!(rx.hold_len(), 0);
-        assert_eq!(rx.pop(1_002_000, 51_000), ReceiverDequeue::Delivered(original));
+        assert_eq!(
+            rx.pop(1_002_000, 51_000),
+            ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
+        );
         assert_eq!(admit_at(&mut rx, &retry, 1_002_000, 51_000), ReceiverAdmit::Duplicate);
     }
 
@@ -1020,7 +1096,10 @@ mod tests {
             admit_bytes(&mut rx, &original, NOW_MS, MONOTONIC_MS),
             ReceiverAdmit::Held(_)
         ));
-        assert_eq!(rx.pop(1_002_000, MONOTONIC_MS), ReceiverDequeue::Delivered(original));
+        assert_eq!(
+            rx.pop(1_002_000, MONOTONIC_MS),
+            ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
+        );
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 1);
     }
@@ -1049,11 +1128,79 @@ mod tests {
         rx.poll(1_002_000, MONOTONIC_MS);
         assert_eq!(rx.hold_len(), 0);
         assert_eq!(rx.dedup_len(), 1);
-        assert_eq!(rx.pop(1_002_000, MONOTONIC_MS), ReceiverDequeue::Delivered(original));
+        assert_eq!(
+            rx.pop(1_002_000, MONOTONIC_MS),
+            ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
+        );
         rx.complete();
         assert_eq!(admit(&mut rx, &envelope, 1_002_000), ReceiverAdmit::Duplicate);
         assert_eq!(admit(&mut rx, &envelope, 1_003_000), ReceiverAdmit::Expired);
         assert_eq!(rx.dedup_len(), 0);
+    }
+
+    fn row_pop_rechecks_signed_start_after_promotion() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = hold_envelope();
+        let Some(original) = complete_frame_bytes(&envelope, 1_003_000) else {
+            return;
+        };
+        assert!(matches!(
+            admit_bytes(&mut rx, &original, 1_000_000, 50_000),
+            ReceiverAdmit::Held(_)
+        ));
+        rx.poll(1_002_000, 51_000);
+        assert_eq!(rx.hold_len(), 0);
+        let occupancy = rx.occupancy();
+        assert_eq!(rx.pop(1_001_000, 51_001), ReceiverDequeue::Empty);
+        assert_eq!(rx.occupancy(), occupancy);
+        assert_eq!(
+            rx.pop(1_002_000, 51_001),
+            ReceiverDequeue::Delivered { bytes: original, expires_at_ms: 1_003_000 }
+        );
+    }
+
+    fn row_received_deadline_zero_refused() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| e.envelope_id = "dl-zero".to_owned());
+        let Some(bytes) = complete_frame_bytes(&envelope, 0) else {
+            return;
+        };
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.dedup_len(), 0);
+    }
+
+    fn row_received_deadline_max_refused() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| e.envelope_id = "dl-max".to_owned());
+        let Some(bytes) = complete_frame_bytes(&envelope, u64::MAX) else {
+            return;
+        };
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.dedup_len(), 0);
+    }
+
+    fn row_received_deadline_match_pop_returns_verified_d() {
+        let mut rx = EphemeralReceiver::new();
+        let envelope = signed(|e| e.envelope_id = "dl-match".to_owned());
+        let Some(bytes) = complete_frame_bytes(&envelope, 1_005_000) else {
+            return;
+        };
+        assert_eq!(
+            admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
+            ReceiverAdmit::Displayed { expires_at_ms: 1_005_000 }
+        );
+        assert_eq!(
+            rx.pop(1_000_000, 50_000),
+            ReceiverDequeue::Delivered { bytes, expires_at_ms: 1_005_000 }
+        );
     }
 
     #[test]
@@ -1061,6 +1208,8 @@ mod tests {
         let mut flags = EphemeralReceiver::new();
         flags.set_poll_retry_metadata(false);
         flags.set_size_reserialized(false);
+        flags.set_skip_start_recheck(false);
+        flags.set_skip_deadline_compare(false);
         row_dedup_bound_drops_new();
         row_conflicting_hash_rejected();
         row_channel_frame_cap();
@@ -1081,6 +1230,10 @@ mod tests {
         row_hold_released_by_time_alone();
         row_hold_cap_by_monotonic_alone();
         row_one_terminal_per_ciphertext();
+        row_pop_rechecks_signed_start_after_promotion();
+        row_received_deadline_zero_refused();
+        row_received_deadline_max_refused();
+        row_received_deadline_match_pop_returns_verified_d();
     }
 
     fn row_live_duplicate_before_d() {
@@ -1165,6 +1318,8 @@ mod tests {
         let mut flags = EphemeralReceiver::new();
         flags.set_poll_retry_metadata(false);
         flags.set_size_reserialized(false);
+        flags.set_skip_start_recheck(false);
+        flags.set_skip_deadline_compare(false);
         row_live_duplicate_before_d();
         row_router_restart_receiver_survives();
         row_repeated_restarts_duplicate_only_before_d();
