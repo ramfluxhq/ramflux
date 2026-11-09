@@ -87,37 +87,196 @@ pub fn read_http_request_with_limits(
     limits: HttpRequestLimits,
     accepted_at: std::time::Instant,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+    read_http_request_with_route_limits(stream, limits, limits, |_, _| false, accepted_at)
+}
+
+/// Classify on the request line, then apply pairing or ordinary header/body/deadline caps.
+/// Pairing admission never buffers a body past its 16KiB cap.
+/// # Errors
+/// Returns 400 for invalid framing, 413 for limits, 408 for timeouts, or a socket error.
+pub fn read_http_request_with_route_limits(
+    stream: &mut TcpStream,
+    ordinary: HttpRequestLimits,
+    pairing: HttpRequestLimits,
+    is_pairing: impl Fn(&str, &str) -> bool,
+    accepted_at: std::time::Instant,
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+    let line_deadline = accepted_at
+        .checked_add(ordinary.request_timeout.min(pairing.request_timeout))
+        .ok_or_else(|| rejected("400 Bad Request"))?;
+    let Some((raw, _)) = read_until_marker(
+        stream,
+        Vec::new(),
+        ordinary.max_header_bytes,
+        ordinary.read_timeout.min(pairing.read_timeout),
+        line_deadline,
+        find_http_request_line_end,
+    )?
+    else {
+        return Ok(None);
+    };
+    let (method, path) = parse_http_request_line(&raw)?;
+    let limits = if is_pairing(&method, &path) { pairing } else { ordinary };
+    finish_classified_request(stream, limits, accepted_at, raw, method, path)
+}
+
+struct ClassifiedHttp {
+    raw: Vec<u8>,
+    header_end: usize,
+    method: String,
+    path: String,
+    parsed: ParsedHttpHeaders,
+}
+
+fn finish_classified_request(
+    stream: &mut TcpStream,
+    limits: HttpRequestLimits,
+    accepted_at: std::time::Instant,
+    raw: Vec<u8>,
+    method: String,
+    path: String,
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     let deadline = accepted_at
         .checked_add(limits.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
-    let mut raw = Vec::new();
-    let mut chunk = [0u8; 512];
-    let header_end = loop {
-        if let Some(end) = find_http_header_end(&raw) {
-            if end + http_header_separator_len(&raw, end) > limits.max_header_bytes {
-                return Err(rejected("413 Payload Too Large"));
-            }
-            break end;
-        }
-        let space = limits.max_header_bytes.saturating_sub(raw.len()).min(chunk.len());
-        if space == 0 {
-            return Err(rejected("413 Payload Too Large"));
-        }
-        let bytes = request_read(stream, &mut chunk[..space], limits.read_timeout, deadline)?;
-        if bytes == 0 {
-            return if raw.is_empty() { Ok(None) } else { Err(rejected("400 Bad Request")) };
-        }
-        raw.extend_from_slice(&chunk[..bytes]);
+    let Some((raw, header_end)) = read_http_headers_capped(
+        stream,
+        raw,
+        limits.max_header_bytes,
+        limits.read_timeout,
+        deadline,
+    )?
+    else {
+        return Ok(None);
     };
+    if header_end + http_header_separator_len(&raw, header_end) > limits.max_header_bytes {
+        return Err(rejected("413 Payload Too Large"));
+    }
     let header =
         std::str::from_utf8(&raw[..header_end]).map_err(|_| rejected("400 Bad Request"))?;
     let mut lines = header.lines();
-    let mut parts = lines.next().ok_or_else(|| rejected("400 Bad Request"))?.split_whitespace();
+    let _ = lines.next();
+    let parsed = parse_http_header_fields(lines, limits.max_body_bytes)?;
+    finish_http_request(
+        stream,
+        limits,
+        accepted_at,
+        ClassifiedHttp { raw, header_end, method, path, parsed },
+    )
+}
+
+fn parse_http_request_line(raw: &[u8]) -> Result<(String, String), NodeCoreError> {
+    let end = find_http_request_line_end(raw).ok_or_else(|| rejected("400 Bad Request"))?;
+    let line = std::str::from_utf8(&raw[..end]).map_err(|_| rejected("400 Bad Request"))?;
+    let mut parts = line.split_whitespace();
     let method = parts.next().ok_or_else(|| rejected("400 Bad Request"))?.to_owned();
     let path = parts.next().ok_or_else(|| rejected("400 Bad Request"))?.to_owned();
     if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) || parts.next().is_some() {
         return Err(rejected("400 Bad Request"));
     }
+    Ok((method, path))
+}
+
+fn find_http_request_line_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(2)
+        .position(|window| window == b"\r\n")
+        .or_else(|| raw.iter().position(|&byte| byte == b'\n'))
+}
+
+fn read_http_headers_capped(
+    stream: &mut TcpStream,
+    raw: Vec<u8>,
+    header_cap: usize,
+    read_timeout: Duration,
+    deadline: std::time::Instant,
+) -> Result<Option<(Vec<u8>, usize)>, NodeCoreError> {
+    let Some((raw, end)) =
+        read_until_marker(stream, raw, header_cap, read_timeout, deadline, find_http_header_end)?
+    else {
+        return Ok(None);
+    };
+    if end + http_header_separator_len(&raw, end) > header_cap {
+        return Err(rejected("413 Payload Too Large"));
+    }
+    Ok(Some((raw, end)))
+}
+
+fn read_until_marker(
+    stream: &mut TcpStream,
+    mut raw: Vec<u8>,
+    cap: usize,
+    read_timeout: Duration,
+    deadline: std::time::Instant,
+    marker: impl Fn(&[u8]) -> Option<usize>,
+) -> Result<Option<(Vec<u8>, usize)>, NodeCoreError> {
+    let mut chunk = [0u8; 512];
+    loop {
+        if let Some(end) = marker(&raw) {
+            return Ok(Some((raw, end)));
+        }
+        let space = cap.saturating_sub(raw.len()).min(chunk.len());
+        if space == 0 {
+            return Err(rejected("413 Payload Too Large"));
+        }
+        let bytes = request_read(stream, &mut chunk[..space], read_timeout, deadline)?;
+        if bytes == 0 {
+            return if raw.is_empty() { Ok(None) } else { Err(rejected("400 Bad Request")) };
+        }
+        raw.extend_from_slice(&chunk[..bytes]);
+    }
+}
+
+fn finish_http_request(
+    stream: &mut TcpStream,
+    limits: HttpRequestLimits,
+    accepted_at: std::time::Instant,
+    classified: ClassifiedHttp,
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+    let deadline = accepted_at
+        .checked_add(limits.request_timeout)
+        .ok_or_else(|| rejected("400 Bad Request"))?;
+    if std::time::Instant::now() >= deadline {
+        return Err(rejected("408 Request Timeout"));
+    }
+    let parsed = classified.parsed;
+    let body_start =
+        classified.header_end + http_header_separator_len(&classified.raw, classified.header_end);
+    let mut body =
+        classified.raw[body_start..].iter().take(parsed.length).copied().collect::<Vec<_>>();
+    let mut chunk = [0u8; 512];
+    while body.len() < parsed.length {
+        let remaining = (parsed.length - body.len()).min(chunk.len());
+        let bytes = request_read(stream, &mut chunk[..remaining], limits.read_timeout, deadline)?;
+        if bytes == 0 {
+            return Err(rejected("400 Bad Request"));
+        }
+        body.extend_from_slice(&chunk[..bytes]);
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(rejected("408 Request Timeout"));
+    }
+    Ok(Some(NodeHttpRequest {
+        method: classified.method,
+        path: classified.path,
+        body,
+        keep_alive: parsed.keep_alive,
+        source_ip_hash: stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string())),
+        pre_auth_cookie: parsed.pre_auth_cookie,
+        pre_auth_now: parsed.pre_auth_now,
+    }))
+}
+
+struct ParsedHttpHeaders {
+    length: usize,
+    keep_alive: bool,
+    pre_auth_cookie: Option<String>,
+    pre_auth_now: Option<u64>,
+}
+
+fn parse_http_header_fields(
+    lines: std::str::Lines<'_>,
+    max_body_bytes: usize,
+) -> Result<ParsedHttpHeaders, NodeCoreError> {
     let mut content_length = None;
     let mut keep_alive = false;
     let mut pre_auth_cookie = None;
@@ -133,7 +292,7 @@ pub fn read_http_request_with_limits(
                 return Err(rejected("400 Bad Request"));
             }
             let length: u64 = value.parse().map_err(|_| rejected("413 Payload Too Large"))?;
-            if length > limits.max_body_bytes as u64 {
+            if length > max_body_bytes as u64 {
                 return Err(rejected("413 Payload Too Large"));
             }
             content_length =
@@ -148,29 +307,12 @@ pub fn read_http_request_with_limits(
             pre_auth_now = Some(value.parse().map_err(|_| rejected("400 Bad Request"))?);
         }
     }
-    let length = content_length.unwrap_or(0);
-    let body_start = header_end + http_header_separator_len(&raw, header_end);
-    let mut body = raw[body_start..].iter().take(length).copied().collect::<Vec<_>>();
-    while body.len() < length {
-        let remaining = (length - body.len()).min(chunk.len());
-        let bytes = request_read(stream, &mut chunk[..remaining], limits.read_timeout, deadline)?;
-        if bytes == 0 {
-            return Err(rejected("400 Bad Request"));
-        }
-        body.extend_from_slice(&chunk[..bytes]);
-    }
-    if std::time::Instant::now() >= deadline {
-        return Err(rejected("408 Request Timeout"));
-    }
-    Ok(Some(NodeHttpRequest {
-        method,
-        path,
-        body,
+    Ok(ParsedHttpHeaders {
+        length: content_length.unwrap_or(0),
         keep_alive,
-        source_ip_hash: stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string())),
         pre_auth_cookie,
         pre_auth_now,
-    }))
+    })
 }
 fn request_read(
     stream: &mut TcpStream,

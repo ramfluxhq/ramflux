@@ -227,6 +227,7 @@ fn public_listener_has_no_admin_routes_even_with_valid_token() -> TestResult {
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     for path in [
         "/s8/federation/forward",
@@ -290,6 +291,7 @@ fn public_discovery_and_router_client_reads_preserve_payloads() -> TestResult {
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let worker =
         std::thread::spawn(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -464,6 +466,7 @@ fn public_failures_hide_internal_details_and_unsupported_post_is_not_proxied() -
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let context = public.clone();
     let response = request("GET", "/mvp1/prekey/root", "", move |stream| {
@@ -488,6 +491,7 @@ fn public_connection_limit_rejects_excess_and_releases_after_success_and_error()
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let active = ramflux_node_core::ConnectionSet::new(1);
     let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(2, 16, 32));
@@ -560,6 +564,7 @@ fn public_request_rate_limit_returns_generic_429_and_ignores_forwarding_headers(
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let active = ramflux_node_core::ConnectionSet::new(8);
     let source_limits = PublicSourceLimits::new(
@@ -644,6 +649,7 @@ fn source_slot_releases_after_error_and_timeout_and_full_idle_table_admits() -> 
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let active = ramflux_node_core::ConnectionSet::new(8);
     let source_limits = PublicSourceLimits::new(PublicSourceLimitConfig::for_test(1, 16, 4));
@@ -723,6 +729,7 @@ fn disabled_source_limits_allow_same_source_until_global_cap() -> TestResult {
     let public = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let active = ramflux_node_core::ConnectionSet::new(2);
     let source_limits = PublicSourceLimits::new(

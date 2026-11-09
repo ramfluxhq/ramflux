@@ -37,6 +37,7 @@ fn oversized_headers_receive_a_bounded_413_or_reset_on_both_listeners() -> TestR
                     let context = FederationPublicHttpContext {
                         router: admin.router,
                         discovery: admin.discovery,
+                        pairing: None,
                     };
                     handle_public_connection_with_limits(
                         &mut server,

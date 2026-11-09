@@ -13,6 +13,7 @@ fn reset_after_connect_does_not_delay_the_next_public_accept()
     let context = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
@@ -83,6 +84,7 @@ fn whole_public_listener_serves_concurrent_client_after_reset_burst()
     let context = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;

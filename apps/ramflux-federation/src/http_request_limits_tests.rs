@@ -39,6 +39,7 @@ fn oversized_and_malformed_requests_are_rejected_and_public_service_stays_alive(
     let context = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let limits = crate::http_limits::defaults(true);
     for (length, status) in [
@@ -78,6 +79,7 @@ fn sixty_four_header_and_body_tricklers_release_slots_at_whole_request_deadline(
     let context = FederationPublicHttpContext {
         router: admin.router.clone(),
         discovery: admin.discovery.clone(),
+        pairing: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let active = ramflux_node_core::ConnectionSet::new(64);

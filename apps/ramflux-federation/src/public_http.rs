@@ -5,6 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 
 use crate::http_response::HttpResponse;
+use crate::pairing_http::PairingHttpSurface;
 use crate::public_source_limits::{
     PublicSourceLimitConfig, PublicSourceLimits, SourceConnectionPermit,
 };
@@ -15,6 +16,7 @@ use crate::{FederationDiscoverySurface, RouterMeshClient, router_get_json};
 pub(crate) struct FederationPublicHttpContext {
     pub(crate) router: Arc<RouterMeshClient>,
     pub(crate) discovery: FederationDiscoverySurface,
+    pub(crate) pairing: Option<Arc<PairingHttpSurface>>,
 }
 
 pub(crate) fn serve_public_http(
@@ -284,8 +286,15 @@ fn public_response(
     source_permit: Option<&SourceConnectionPermit>,
     admission: &mut RequestAdmission<'_>,
 ) -> Result<Option<HttpResponse>, ramflux_node_core::NodeCoreError> {
-    let Some(request) =
-        ramflux_node_core::read_http_request_with_limits(stream, limits, accepted_at)?
+    let pairing_on = context.pairing.is_some();
+    let pairing_limits = if pairing_on { crate::pairing_http::pairing_limits() } else { limits };
+    let Some(request) = ramflux_node_core::read_http_request_with_route_limits(
+        stream,
+        limits,
+        pairing_limits,
+        |_, path| pairing_on && crate::pairing_http::pairing_route("", path),
+        accepted_at,
+    )?
     else {
         return Ok(None);
     };
@@ -313,6 +322,19 @@ fn public_response(
         {
             let response: serde_json::Value = router_get_json(router, path)?;
             HttpResponse::json(&response)?
+        }
+        (method, path) if crate::pairing_http::pairing_route(method, path) => {
+            match &context.pairing {
+                Some(surface) => {
+                    let source = stream
+                        .peer_addr()
+                        .map_or(std::net::IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED), |addr| {
+                            addr.ip()
+                        });
+                    crate::pairing_http::respond(surface, source, &request, false)
+                }
+                None => HttpResponse::text("404 Not Found", "not found"),
+            }
         }
         _ => HttpResponse::text("404 Not Found", "not found"),
     };

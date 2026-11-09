@@ -82,6 +82,10 @@ impl NodePairingClock {
     pub fn new(wall: Arc<dyn ramflux_core::Clock>) -> Self {
         Self { wall, origin: Instant::now() }
     }
+    #[must_use]
+    pub fn system() -> Self {
+        Self::new(Arc::new(ramflux_core::SystemClock))
+    }
 }
 
 impl PairingClock for NodePairingClock {

@@ -308,6 +308,10 @@ pub enum CustodyServerFrame {
     HomeMigration {
         response: Box<crate::home_migration::Response>,
     },
+    /// Dormant native pairing reply. Never a session, publication, or account grant.
+    Pairing {
+        reply: Box<super::pairing::native::PairingReply>,
+    },
     Closed,
     Refused {
         code: CustodyRefusal,

@@ -21,6 +21,7 @@ pub(crate) fn defaults(public: bool) -> HttpRequestLimits {
 }
 pub(crate) fn configured(public: bool) -> Result<HttpRequestLimits, NodeCoreError> {
     ramflux_node_core::home_migration_enabled()?;
+    ramflux_node_core::device_pairing_enabled()?;
     let mut limits = defaults(public);
     let prefix = if public { "RAMFLUX_FEDERATION_PUBLIC" } else { "RAMFLUX_FEDERATION_ADMIN" };
     limits.max_header_bytes =

@@ -127,6 +127,11 @@ impl FederationDiscoverySurface {
         {
             record.client_capabilities.push(ramflux_node_core::HOME_MIGRATION_CAPABILITY.into());
         }
+        if ramflux_node_core::DEVICE_PAIRING_RELEASE_GATE
+            && ramflux_node_core::device_pairing_enabled().unwrap_or(false)
+        {
+            record.client_capabilities.push(ramflux_node_core::DEVICE_PAIRING_CAPABILITY.into());
+        }
         let bytes = ramflux_protocol::client_discovery_signing_bytes(&record)
             .map_err(|source| ramflux_node_core::NodeCoreError::ItestJson(source.to_string()))?;
         record.signature =

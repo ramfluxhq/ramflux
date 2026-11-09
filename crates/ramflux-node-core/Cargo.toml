@@ -59,6 +59,8 @@ rustix = { version = "1.1", features = ["process"] }
 tracing-subscriber = { workspace = true }
 curve25519-dalek = "5.0.0"
 ed25519-dalek = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [lints]
 workspace = true

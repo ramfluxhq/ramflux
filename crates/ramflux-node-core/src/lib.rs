@@ -233,6 +233,10 @@ pub use home_migration_service::{HomeMigrationMesh, HomeMigrationService};
 
 mod home_migration_release;
 pub use home_migration_release::{HOME_MIGRATION_RELEASE_GATE, home_migration_enabled};
+mod device_pairing_release;
+pub use device_pairing_release::{
+    DEVICE_PAIRING_CAPABILITY, DEVICE_PAIRING_RELEASE_GATE, device_pairing_enabled,
+};
 
 pub use router_store::sender_retry;
 

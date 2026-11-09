@@ -10,6 +10,8 @@ use super::{
     custody_session_action_hash, holder, invalid, object_hash, persistence, target,
     validate_bundle, verify_branch_proof_v3, verify_node_identity_record,
 };
+use ramflux_protocol::custody::DeviceRef;
+use ramflux_protocol::custody::pairing::PairingWire;
 pub(super) struct ProofAttempt {
     pub action: CustodyProofAction,
     pub proof: Box<Envelope<BranchProofV3>>,
@@ -49,6 +51,13 @@ impl CustodyService {
             && (binding_mode == BindingMode::NoChannelBinding || self.migration.is_none())
         {
             return Err(CustodyRefusal::BindingRefused);
+        }
+        if matches!(
+            action,
+            CustodyProofAction::PairingIssue { .. } | CustodyProofAction::PairingCreate { .. }
+        ) && self.pairing.is_none()
+        {
+            return Err(CustodyRefusal::Unsupported);
         }
         if !self.node.envelope().body.channel_binding_modes.contains(&binding_mode)
             || (binding_mode == BindingMode::NoChannelBinding && !self.allow_unbound)
@@ -269,10 +278,15 @@ impl CustodyService {
             None
         };
         match attempt.action {
-            CustodyProofAction::PrekeyStatus { .. }
-            | CustodyProofAction::RegisterUpdate { .. }
-            | CustodyProofAction::PairingIssue { .. }
-            | CustodyProofAction::PairingCreate { .. } => Err(CustodyRefusal::Unsupported.into()),
+            CustodyProofAction::PrekeyStatus { .. } | CustodyProofAction::RegisterUpdate { .. } => {
+                Err(CustodyRefusal::Unsupported.into())
+            }
+            CustodyProofAction::PairingIssue { request } => {
+                self.finish_pairing_issue(&proof.body.device_ref, authority, *request)
+            }
+            CustodyProofAction::PairingCreate { request } => {
+                self.finish_pairing_create(&proof.body.device_ref, authority, *request)
+            }
             CustodyProofAction::HomeMigration { control_hash, publication, purpose } => {
                 let session = CustodySession {
                     session_id: String::new(),
@@ -339,6 +353,42 @@ impl CustodyService {
                 let session = self.leases().open(session, holder, now, tick)?;
                 Ok(CustodyServerFrame::SessionEstablished { session })
             }
+        }
+    }
+    fn finish_pairing_issue(
+        &self,
+        device_ref: &DeviceRef,
+        authority: &VerifiedRecord,
+        mut request: ramflux_protocol::custody::pairing::native::Issue,
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
+        request.normalize();
+        request.validate().map_err(|_| CustodyRefusal::InvalidInput)?;
+        require_current_primary(device_ref, authority, &request.spec.primary_ref)?;
+        let store = self.pairing.as_ref().ok_or(CustodyRefusal::Unsupported)?;
+        let mut store = store.lock().map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
+        match store.issue(request.spec) {
+            Ok(issued) => Ok(pairing_frame(
+                ramflux_protocol::custody::pairing::native::NativeReply::Issued(Box::new(issued)),
+            )),
+            Err(error) => Ok(pairing_failure(error)),
+        }
+    }
+    fn finish_pairing_create(
+        &self,
+        device_ref: &DeviceRef,
+        authority: &VerifiedRecord,
+        mut request: ramflux_protocol::custody::pairing::native::Create,
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
+        request.normalize();
+        request.validate().map_err(|_| CustodyRefusal::InvalidInput)?;
+        require_current_primary(device_ref, authority, &request.spec.primary_ref)?;
+        let store = self.pairing.as_ref().ok_or(CustodyRefusal::Unsupported)?;
+        let mut store = store.lock().map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
+        match store.create(request) {
+            Ok(created) => Ok(pairing_frame(
+                ramflux_protocol::custody::pairing::native::NativeReply::Created(Box::new(created)),
+            )),
+            Err(error) => Ok(pairing_failure(error)),
         }
     }
     pub(super) fn request(
@@ -583,6 +633,46 @@ impl CustodyService {
             inbox_seq: cursor.last_acknowledged_inbox_seq.ok_or(CustodyRefusal::InvalidInput)?,
         })
     }
+}
+
+fn require_current_primary(
+    device_ref: &DeviceRef,
+    authority: &VerifiedRecord,
+    spec_primary: &DeviceRef,
+) -> Result<(), CustodyRefusal> {
+    let current = &authority.envelope().body.master_certificate.body.primary_device_ref;
+    if device_ref != current || spec_primary != current {
+        return Err(CustodyRefusal::BindingRefused);
+    }
+    Ok(())
+}
+
+fn pairing_frame(
+    reply: ramflux_protocol::custody::pairing::native::NativeReply,
+) -> CustodyServerFrame {
+    CustodyServerFrame::Pairing {
+        reply: Box::new(ramflux_protocol::custody::pairing::native::PairingReply {
+            schema: "ramflux.pairing.PairingReply.v2".into(),
+            version: 2,
+            reply,
+        }),
+    }
+}
+
+fn pairing_failure(error: crate::pairing_relay::PairingRelayError) -> CustodyServerFrame {
+    pairing_frame(ramflux_protocol::custody::pairing::native::NativeReply::Failure(
+        ramflux_protocol::custody::pairing::native::Failure {
+            schema: "ramflux.pairing.Failure.v2".into(),
+            version: 2,
+            code: error.code().into(),
+            retry_after_ms: match error {
+                crate::pairing_relay::PairingRelayError::Busy { retry_after_ms } => {
+                    Some(retry_after_ms)
+                }
+                _ => None,
+            },
+        },
+    ))
 }
 
 #[cfg(test)]

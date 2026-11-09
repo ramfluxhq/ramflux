@@ -23,6 +23,7 @@ mod http_worker_tests;
 mod itest_http;
 mod key_migration;
 mod mesh;
+mod pairing_http;
 mod public_http;
 mod public_source_limits;
 mod state;
@@ -64,6 +65,7 @@ fn main() {
 
 fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreError> {
     ramflux_node_core::home_migration_enabled()?;
+    ramflux_node_core::device_pairing_enabled()?;
     if std::env::args().any(|arg| arg == "--health-check") {
         println!("{service}:healthy");
         return Ok(());
@@ -126,15 +128,7 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
             &mesh_observability,
             &discovery,
         )?;
-        let public_addr = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1:18082".to_owned());
-        public_http::serve_public_http(
-            &public_addr,
-            public_http::FederationPublicHttpContext {
-                router: Arc::clone(&router),
-                discovery: discovery.clone(),
-            },
-        )?;
+        serve_public_surface(&router, &discovery, node_signing_seed)?;
         let admin_addr = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_ADMIN_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:18089".to_owned());
         serve_admin_http(
@@ -163,6 +157,39 @@ fn run_service(service: &'static str) -> Result<(), ramflux_node_core::NodeCoreE
         return Ok(());
     }
     shutdown.wait_and_finalize(|| Ok(()))
+}
+
+fn serve_public_surface(
+    router: &Arc<RouterMeshClient>,
+    discovery: &FederationDiscoverySurface,
+    node_signing_seed: [u8; 32],
+) -> Result<(), ramflux_node_core::NodeCoreError> {
+    let public_addr = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:18082".to_owned());
+    public_http::serve_public_http(
+        &public_addr,
+        public_http::FederationPublicHttpContext {
+            router: Arc::clone(router),
+            discovery: discovery.clone(),
+            pairing: open_pairing_surface(node_signing_seed, &discovery.node_id)?,
+        },
+    )
+}
+
+fn open_pairing_surface(
+    node_signing_seed: [u8; 32],
+    node_id: &str,
+) -> Result<Option<Arc<pairing_http::PairingHttpSurface>>, ramflux_node_core::NodeCoreError> {
+    if !ramflux_node_core::device_pairing_enabled()? {
+        return Ok(None);
+    }
+    let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
+        .unwrap_or_else(|_| format!("https://{node_id}"));
+    Ok(Some(Arc::new(pairing_http::PairingHttpSurface::open(
+        node_signing_seed,
+        origin,
+        pairing_http::allow_plain_http(),
+    )?)))
 }
 
 fn finish_shutdown(

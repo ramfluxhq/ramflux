@@ -135,7 +135,7 @@ impl Driver {
             },
         )?)
     }
-    fn attempt(
+    pub(crate) fn attempt(
         &self,
         service: &crate::CustodyService,
         router: &RouterCore,
@@ -164,7 +164,7 @@ impl Driver {
             NOW,
         ))
     }
-    fn run(
+    pub(crate) fn run(
         &self,
         service: &crate::CustodyService,
         router: &RouterCore,

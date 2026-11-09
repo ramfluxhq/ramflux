@@ -3421,6 +3421,8 @@ dependencies = [
  "ramflux-protocol",
  "redb",
  "rustix",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.11.1",

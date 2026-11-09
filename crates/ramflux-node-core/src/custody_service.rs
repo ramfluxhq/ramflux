@@ -16,7 +16,10 @@ use ramflux_protocol::custody::{
     CustodySessionAction, DeviceRef, Envelope, Publication, RelayAcceptance, custody_action_hash,
     custody_session_action_hash, decode, object_hash,
 };
-use std::{sync::Mutex, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 /// Actual client-facing connection evidence, supplied only by the TLS listener.
 /// No deserializer or forwarded-header constructor exists.
@@ -52,6 +55,7 @@ pub struct CustodyService {
     leases: Mutex<CustodyLeases>,
     admission: Mutex<()>,
     migration: Option<crate::HomeMigrationService>,
+    pairing: Option<Arc<Mutex<crate::pairing_relay::PairingRelayStore>>>,
 }
 pub(crate) struct ProofFailure {
     code: CustodyRefusal,
@@ -143,7 +147,21 @@ impl CustodyService {
             leases: Mutex::new(CustodyLeases::with_issuance_settings(settings)),
             admission: Mutex::new(()),
             migration: None,
+            pairing: None,
         })
+    }
+    /// Attach the process-local pairing relay. Issue/Create stay on the verified proof path.
+    #[must_use]
+    pub fn with_pairing_relay(
+        mut self,
+        store: Arc<Mutex<crate::pairing_relay::PairingRelayStore>>,
+    ) -> Self {
+        self.pairing = Some(store);
+        self
+    }
+    #[must_use]
+    pub fn pairing_relay(&self) -> Option<&Arc<Mutex<crate::pairing_relay::PairingRelayStore>>> {
+        self.pairing.as_ref()
     }
     /// Attach migration only with the custody listener's independently verified node signer.
     /// # Errors
