@@ -553,16 +553,22 @@ impl RouterRedbStore {
         Self::open_with_wal_root(path, wal_root.as_deref(), false)
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_with_wal(
+    /// Opens a router store with an explicit WAL root.
+    ///
+    /// # Errors
+    /// Returns an error when validation, serialization, storage, or state checks fail.
+    pub fn open_with_wal(
         path: impl AsRef<Path>,
         wal_root: impl AsRef<Path>,
     ) -> Result<Self, NodeCoreError> {
         Self::open_with_wal_root(path, Some(wal_root.as_ref()), true)
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
+    /// Opens a router store without a WAL.
+    ///
+    /// # Errors
+    /// Returns an error when validation, serialization, storage, or state checks fail.
+    pub fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         Self::open_with_wal_root(path, None, true)
     }
 

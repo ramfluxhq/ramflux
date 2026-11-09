@@ -15,10 +15,16 @@ use serde_json::json;
 pub(crate) fn erase_through_retention(db: &AccountDb) -> Result<(), SdkError> {
     let before = db.privacy_erasure_generation()?;
     let owner = format!("erase-owner-{before}");
+    db.send_direct_message("thread", &owner, "peer", b"body")?;
+    erase_message_through_retention(db, &owner)
+}
+
+/// Erases `owner` through the real object-retention trigger (same generation bump).
+pub(crate) fn erase_message_through_retention(db: &AccountDb, owner: &str) -> Result<(), SdkError> {
+    let before = db.privacy_erasure_generation()?;
     let alias = format!("erase-alias-{before}");
     let hash = format!("erase-ref-{before}");
     let wire = format!("erase-wire-{before}");
-    db.send_direct_message("thread", &owner, "peer", b"body")?;
     db.register_object_reference(
         ObjectReferenceAdmission::FreshMessage,
         &ObjectReferenceOwner {
@@ -26,9 +32,9 @@ pub(crate) fn erase_through_retention(db: &AccountDb) -> Result<(), SdkError> {
             wire_id: &wire,
             manifest_hash: "manifest",
             selector: &alias,
-            message_id: &owner,
+            message_id: owner,
             reference: &json!({"object_id": wire.as_str(), "slot": hash.as_str()}),
-            metadata: &json!({"object_id": alias.as_str(), "message_id": owner.as_str()}),
+            metadata: &json!({"object_id": alias.as_str(), "message_id": owner}),
         },
     )?;
     db.persist_actor_state(
@@ -39,7 +45,7 @@ pub(crate) fn erase_through_retention(db: &AccountDb) -> Result<(), SdkError> {
     let slot = format!("attachment/reference-by-slot/{alias}");
     db.persist_actor_state(&slot, &json!(alias))?;
     db.register_object_reference_actor(&hash, &slot)?;
-    db.delete_direct_message("thread", &owner, "local", "erase-tombstone")?;
+    db.delete_direct_message("thread", owner, "local", "erase-tombstone")?;
     assert!(db.privacy_erasure_generation()? > before, "real erase advances the generation");
     Ok(())
 }

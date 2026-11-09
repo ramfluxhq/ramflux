@@ -582,6 +582,10 @@ fn run_fenced(
         lifecycle_fence::commit(db, handle_generation, expected, |tx| match write(tx, expected) {
             Ok(held) => {
                 #[cfg(test)]
+                if let Some(hook) = BEFORE_COMMIT_HOOK.with(std::cell::Cell::take) {
+                    hook(tx.account());
+                }
+                #[cfg(test)]
                 if let Some(text) = BEFORE_COMMIT.with(std::cell::Cell::take) {
                     outcome = Some(Err(SdkError::Storage(StorageError::Integrity(text))));
                     return Err(StorageError::Integrity(text));
@@ -697,6 +701,8 @@ thread_local! {
     static SKIP_FETCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MANIFEST_AWAIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
     static BEFORE_COMMIT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static BEFORE_COMMIT_HOOK: std::cell::Cell<Option<fn(&AccountDb)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -879,6 +885,11 @@ pub(crate) fn set_manifest_await(hook: fn()) {
 #[cfg(test)]
 pub(crate) fn set_before_commit(text: &'static str) {
     BEFORE_COMMIT.with(|cell| cell.set(Some(text)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_commit_hook(hook: fn(&AccountDb)) {
+    BEFORE_COMMIT_HOOK.with(|cell| cell.set(Some(hook)));
 }
 
 #[cfg(test)]

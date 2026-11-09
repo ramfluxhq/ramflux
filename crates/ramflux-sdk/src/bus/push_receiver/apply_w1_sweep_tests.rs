@@ -3,16 +3,14 @@
 
 //! W1 commit sweep, real erase, manifest wait, `COVERED_BELOW`, nothing-owed (S6b P20f r5B).
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
-// Env toggle for `RouterRedbStore::open` WAL vs redb-only (`RAMFLUX_ROUTER_WAL`).
-#![allow(unsafe_code)]
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
     self, apply_page, queue_legacy_hold, queue_own_copy, queue_policy_kind, queue_projection,
-    set_after_classify, set_before_commit, set_manifest_await, set_projection_error,
-    set_projection_key,
+    set_after_classify, set_before_commit, set_before_commit_hook, set_manifest_await,
+    set_projection_error, set_projection_key,
 };
-use super::erase_support::erase_through_retention;
+use super::erase_support::{erase_message_through_retention, erase_through_retention};
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
@@ -20,13 +18,15 @@ use crate::client::a2i::queue_unbound_answers;
 use crate::client::identity_authority::test_support;
 use crate::client::own_device_copy::PREFIX;
 use crate::client::routed::{Committed, Kind, Routing};
-use crate::dm::{SdkDmEncryptedEnvelope, dm_associated_data, dm_device_id_hash};
+use crate::dm::{
+    SdkDmEncryptedEnvelope, dm_associated_data, dm_device_id_hash, gateway_direct_message_envelope,
+};
 use crate::gateway::GatewaySessionTransportKind;
 use crate::prelude::*;
 use ramflux_crypto::DmSession;
 use ramflux_node_core::{InboxEntry, RouterCore, RouterRedbStore};
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveFailureKind, StorageError};
+use ramflux_storage::{AccountDb, ReceiveFailureKind, StorageError};
 use ramflux_sync::SyncError;
 use ramflux_transport::TransportError;
 use serde_json::json;
@@ -255,42 +255,14 @@ fn erase_pending(db: &AccountDb) {
     erase_through_retention(db).expect("erase");
 }
 
+fn arm_w1_erase(_db: &AccountDb) {
+    set_before_commit_hook(erase_pending);
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Wal,
     RedbOnly,
-}
-
-struct RouterWalMode {
-    previous: Option<String>,
-}
-
-impl RouterWalMode {
-    fn apply(mode: Mode) -> Self {
-        let previous = std::env::var("RAMFLUX_ROUTER_WAL").ok();
-        let value = match mode {
-            Mode::Wal => "1",
-            Mode::RedbOnly => "0",
-        };
-        // SAFETY: named gates run `apply_w1` with `--test-threads=1`, so this
-        // process-wide toggle is not concurrent.
-        unsafe {
-            std::env::set_var("RAMFLUX_ROUTER_WAL", value);
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for RouterWalMode {
-    fn drop(&mut self) {
-        // SAFETY: same single-threaded test contract as `apply`.
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("RAMFLUX_ROUTER_WAL", value),
-                None => std::env::remove_var("RAMFLUX_ROUTER_WAL"),
-            }
-        }
-    }
 }
 
 fn router_err(error: &ramflux_node_core::NodeCoreError) -> SdkError {
@@ -312,6 +284,14 @@ fn pin_mode(path: &Path, mode: Mode) {
         Mode::Wal => assert!(wal.exists(), "WAL root {wal:?}"),
         Mode::RedbOnly => assert!(!wal.exists(), "redb-only has no WAL root {wal:?}"),
     }
+}
+
+fn open_router(path: &Path, mode: Mode) -> Result<RouterRedbStore, SdkError> {
+    match mode {
+        Mode::Wal => RouterRedbStore::open_with_wal(path, wal_dir(path)),
+        Mode::RedbOnly => RouterRedbStore::open_without_wal(path),
+    }
+    .map_err(|error| router_err(&error))
 }
 
 fn as_inbox(entry: &crate::GatewayInboxEntry) -> InboxEntry {
@@ -342,9 +322,13 @@ fn remove_router_row(store: &RouterRedbStore) -> Result<usize, SdkError> {
     store.sweep_delivery_retention(i64::MAX, false).map_err(|error| router_err(&error))
 }
 
-fn kill_reopen(path: &Path, store: RouterRedbStore) -> Result<RouterRedbStore, SdkError> {
+fn kill_reopen(
+    path: &Path,
+    store: RouterRedbStore,
+    mode: Mode,
+) -> Result<RouterRedbStore, SdkError> {
     drop(store);
-    RouterRedbStore::open_existing(path).map_err(|error| router_err(&error))
+    open_router(path, mode)
 }
 
 fn durable_pending(
@@ -353,7 +337,7 @@ fn durable_pending(
     target: &str,
     mode: Mode,
 ) -> Result<(RouterRedbStore, Vec<InboxEntry>), SdkError> {
-    let store = kill_reopen(path, store)?;
+    let store = kill_reopen(path, store, mode)?;
     pin_mode(path, mode);
     let rows = pending_rows(&store, target)?;
     assert_eq!(rows.len(), 1, "inbox row survived {mode:?} kill/reopen");
@@ -368,9 +352,23 @@ fn row_removed(
 ) -> Result<(), SdkError> {
     let removed = remove_router_row(&store)?;
     assert!(removed >= 1, "real router row removed: {removed}");
-    let store = kill_reopen(path, store)?;
+    let store = kill_reopen(path, store, mode)?;
     assert!(pending_rows(&store, target)?.is_empty(), "{mode:?} row gone after reopen");
     Ok(())
+}
+
+fn receive_from_inbox(row: &InboxEntry) -> ReceiveEntry {
+    ReceiveEntry {
+        entry: crate::GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: row.inbox_seq,
+            target_delivery_id: row.target_delivery_id.clone(),
+            envelope: row.envelope.clone(),
+        },
+        retry_key: None,
+        replay: false,
+        turn: None,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -440,22 +438,38 @@ fn legacy_dm_entry(
         x3dh: None,
         ciphertext,
     };
-    let mut entry = dummy_seq(
-        &account.target_delivery_id,
-        &encode_base64url(serde_json::to_vec(&inner)?),
-        &account.gateway_config.principal_id,
-        &local,
-        1,
-    );
-    entry.entry.envelope.created_at = now_unix_timestamp();
-    entry.entry.envelope.ttl = 86_400;
-    Ok(entry)
+    let message = GatewayDirectMessage {
+        conversation_id: "legacy-dm-sweep".into(),
+        message_id: "legacy-dm-one".into(),
+        envelope_id: "legacy-dm-one".into(),
+        source_principal_id: account.gateway_config.principal_id.clone(),
+        sender_id: local.clone(),
+        recipient_device_id: Some(local.clone()),
+        recipient_principal_commitment: None,
+        target_delivery_id: account.target_delivery_id.clone(),
+        encrypted_body: serde_json::to_vec(&inner)?,
+        created_at: now_unix_timestamp(),
+        ttl: 86_400,
+    };
+    Ok(ReceiveEntry {
+        entry: crate::GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: account.target_delivery_id.clone(),
+            envelope: gateway_direct_message_envelope(&account.gateway_config, &message, None)?,
+        },
+        retry_key: None,
+        replay: false,
+        turn: None,
+    })
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct Ledger {
     state: (Option<String>, i64),
     cursor: u64,
     journals: usize,
+    holds: u64,
     work: i64,
     intents: Vec<u64>,
 }
@@ -467,17 +481,52 @@ fn ledger(account: &crate::bus::state::LocalBusAccountState) -> Result<Ledger, S
         state: db.receive_state_for_test(1)?,
         cursor: snap.cursor,
         journals: unrouted_journals(db)?,
+        holds: db.unrouted_count()?,
         work: snap.work,
         intents: snap.intents,
     })
 }
 
-fn same_ledger(got: &Ledger, want: &Ledger) {
-    assert_eq!(got.state, want.state, "hold/receipt disposition");
-    assert_eq!(got.cursor, want.cursor, "cursor");
-    assert_eq!(got.journals, want.journals, "unrouted journals");
-    assert_eq!(got.work, want.work, "work rows");
-    assert_eq!(got.intents, want.intents, "ack intents");
+fn expected_ledger(sweep: Sweep) -> Ledger {
+    match sweep {
+        Sweep::OwnCopy | Sweep::LegacyDm | Sweep::Projection => Ledger {
+            state: (Some("staged".into()), 1),
+            cursor: 0,
+            journals: 0,
+            holds: 0,
+            work: 1,
+            intents: Vec::new(),
+        },
+        Sweep::LegacyHold => Ledger {
+            state: (Some("held".into()), 1),
+            cursor: 1,
+            journals: 1,
+            holds: 1,
+            work: 1,
+            intents: Vec::new(),
+        },
+        Sweep::A2i => Ledger {
+            state: (Some("held".into()), 1),
+            cursor: 1,
+            journals: 0,
+            holds: 1,
+            work: 1,
+            intents: Vec::new(),
+        },
+        Sweep::Failure => {
+            Ledger { state: (None, 0), cursor: 1, journals: 0, holds: 0, work: 0, intents: vec![1] }
+        }
+    }
+}
+
+fn assert_ledger(got: &Ledger, sweep: Sweep) {
+    let want = expected_ledger(sweep);
+    assert_eq!(got.state, want.state, "{sweep:?} hold/receipt disposition");
+    assert_eq!(got.cursor, want.cursor, "{sweep:?} cursor");
+    assert_eq!(got.journals, want.journals, "{sweep:?} message.unrouted journals");
+    assert_eq!(got.holds, want.holds, "{sweep:?} hold rows");
+    assert_eq!(got.work, want.work, "{sweep:?} work rows");
+    assert_eq!(got.intents, want.intents, "{sweep:?} ack intents");
 }
 
 async fn redrive_once(
@@ -501,8 +550,7 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     let entry = sweep_entry(sweep, &harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let path = router_path(harness.root.path());
-    let _wal = RouterWalMode::apply(mode);
-    let store = RouterRedbStore::open(&path).map_err(|error| router_err(&error))?;
+    let store = open_router(&path, mode)?;
     seed_router_row(&store, &entry.entry)?;
     pin_mode(&path, mode);
     set_after_classify(arm_w1_cut);
@@ -520,16 +568,17 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
         harness.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("staged".into()), 1)
     );
-    let store = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?.0;
+    let (store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
+    let recovered = receive_from_inbox(&rows[0]);
+    reopen(&mut harness.account)?;
+    arm_sweep(sweep, &harness.account, &entry)?;
+    let _ = drive(&mut harness.account, recovered, || 1).await?;
+    assert_ledger(&ledger(&harness.account)?, sweep);
+    reopen(&mut harness.account)?;
+    arm_sweep(sweep, &harness.account, &entry)?;
+    redrive_once(&mut harness.account, entry.clone()).await?;
+    assert_ledger(&ledger(&harness.account)?, sweep);
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
-    reopen(&mut harness.account)?;
-    arm_sweep(sweep, &harness.account, &entry)?;
-    let _ = drive_disk(&mut harness.account, 1, || 1).await?;
-    let once = ledger(&harness.account)?;
-    reopen(&mut harness.account)?;
-    arm_sweep(sweep, &harness.account, &entry)?;
-    redrive_once(&mut harness.account, entry).await?;
-    same_ledger(&ledger(&harness.account)?, &once);
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
 }
@@ -540,18 +589,17 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     let entry = sweep_entry(sweep, &harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let path = router_path(harness.root.path());
-    let _wal = RouterWalMode::apply(mode);
-    let store = RouterRedbStore::open(&path).map_err(|error| router_err(&error))?;
+    let store = open_router(&path, mode)?;
     seed_router_row(&store, &entry.entry)?;
     pin_mode(&path, mode);
     let _ = drive(&mut harness.account, entry.clone(), || 1).await?;
-    let once = ledger(&harness.account)?;
-    let store = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?.0;
-    row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
+    let (store, rows) = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?;
+    let recovered = receive_from_inbox(&rows[0]);
     reopen(&mut harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
-    redrive_once(&mut harness.account, entry).await?;
-    same_ledger(&ledger(&harness.account)?, &once);
+    redrive_once(&mut harness.account, recovered).await?;
+    assert_ledger(&ledger(&harness.account)?, sweep);
+    row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
 }
@@ -607,24 +655,44 @@ fn content_rows(db: &AccountDb) -> Result<Vec<String>, SdkError> {
         .collect())
 }
 
+thread_local! {
+    static ERASE_MESSAGE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn erase_pending_message(db: &AccountDb) {
+    let owner = ERASE_MESSAGE.with(|cell| cell.borrow().clone()).expect("pending message");
+    erase_message_through_retention(db, &owner).expect("erase pending message");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError> {
     let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    set_after_classify(erase_pending);
-    let entry = own_dummy(&harness.account);
-    let refused = drive(&mut harness.account, entry, || 1).await;
+    let owner = "pending-w1".to_owned();
+    harness.account.client.send_direct_message("thread", &owner, "peer", b"body")?;
+    let mut entry = own_dummy(&harness.account);
+    entry.entry.envelope.envelope_id = owner.clone();
+    ERASE_MESSAGE.with(|cell| cell.replace(Some(owner.clone())));
+    queue_own_copy();
+    set_after_classify(erase_pending_message);
+    let refused = drive(&mut harness.account, entry.clone(), || 1).await;
     let error = refused.as_ref().err();
     assert!(matches!(error, Some(SdkError::ObjectErased)), "erase while W1 pending: {error:?}");
-    let staged = harness.account.client.account_db()?.receive_state_for_test(1)?;
-    assert_eq!(staged, (Some("staged".into()), 1));
-    let content = content_rows(harness.account.client.account_db()?)?;
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
     reopen(&mut harness.account)?;
-    assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, staged);
-    assert_eq!(content_rows(harness.account.client.account_db()?)?, content);
+    queue_own_copy();
+    let _ = drive_disk(&mut harness.account, 1, || 1).await?;
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("erased".into()), 0),
+        "erased-only receipt settlement"
+    );
+    let content = content_rows(harness.account.client.account_db()?)?;
     assert!(
         content.iter().any(|row| row.starts_with("direct_message_projection|")
-            && row.contains("erase-owner-")
+            && row.contains(&owner)
             && row.contains("|1|0|0|")),
         "erased projection stays deleted: {content:?}"
     );
@@ -635,40 +703,27 @@ async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError>
     Ok(())
 }
 
-fn late_erase_in(
-    db: &AccountDb,
-    expected: ReceiveExpectation<'_>,
-    generation: u64,
-) -> Result<(), SdkError> {
-    match db.receive_transaction(expected, generation, |tx| {
-        tx.require_writer()?;
-        erase_through_retention(tx.account()).map_err(|error| match error {
-            SdkError::Storage(storage) => storage,
-            _ => StorageError::Integrity("late erase failed"),
-        })?;
-        Ok(())
-    }) {
-        Err(StorageError::ObjectErased) => Ok(()),
-        other => Err(SdkError::LocalBus(format!("late fence: {other:?}"))),
-    }
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn late_w0_fence_refuses_erase_during_stage() -> Result<(), SdkError> {
-    let harness = open()?;
-    let prepared = turn(&harness.account, 1)?;
-    late_erase_in(harness.account.client.account_db()?, prepared.expected(), 1)
+    let mut harness = open()?;
+    set_before_commit_hook(erase_pending);
+    let entry = own_dummy(&harness.account);
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(matches!(error, Some(SdkError::ObjectErased)), "late W0 fence: {error:?}");
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn late_w1_fence_refuses_erase_during_commit() -> Result<(), SdkError> {
     let mut harness = open()?;
     queue_legacy_hold(std::iter::repeat_n(true, 8));
-    set_after_classify(arm_w1_cut);
+    set_after_classify(arm_w1_erase);
     let entry = own_dummy(&harness.account);
-    let _ = drive(&mut harness.account, entry, || 1).await;
-    let prepared = turn(&harness.account, 1)?;
-    late_erase_in(harness.account.client.account_db()?, prepared.expected(), 1)
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(matches!(error, Some(SdkError::ObjectErased)), "late W1 fence: {error:?}");
+    Ok(())
 }
 
 fn injected_io() -> SdkError {
@@ -895,7 +950,7 @@ async fn manifest_wait_drives_real_cache_verified_fetch() -> Result<(), SdkError
     set_manifest_await(bump_generation);
     let entry = own_copy_packet(&harness.account)?;
     let refused = drive(&mut harness.account, entry, current_generation).await;
-    server.abort();
+    server.await.map_err(|error| SdkError::LocalBus(error.to_string()))??;
     let error = refused.as_ref().err();
     assert!(
         matches!(error, Some(SdkError::Storage(StorageError::AuthorizationRejected))),
@@ -907,7 +962,11 @@ async fn manifest_wait_drives_real_cache_verified_fetch() -> Result<(), SdkError
     );
     assert_eq!(cursor(&harness.account)?, 0);
     let after = harness.account.client.account_db()?.durable_rows_for_test()?;
-    assert!(after.len() >= before.len(), "W0 rows exist; before was used: {}", before.len());
+    assert!(
+        after.iter().any(|row| !before.contains(row)),
+        "manifest wait wrote rows beyond before={}: {after:?}",
+        before.len()
+    );
     Ok(())
 }
 
