@@ -40,6 +40,22 @@ pub struct PairingHttpResponse {
     pub body: Vec<u8>,
 }
 
+/// Federation→node pairing forward over the existing mesh JSON channel.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingMeshForward {
+    pub body: String,
+    pub source: String,
+}
+
+/// Node pairing reply carried as mesh JSON. Inner `status` is the public HTTP status line.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingMeshReply {
+    pub body: String,
+    pub status: String,
+}
+
 /// Dispatch a pairing HTTP body. Headers, cookies and admin tokens are ignored: they cannot
 /// authorize an account. The bearer in the closed body is the only credential.
 #[must_use]
@@ -106,4 +122,48 @@ fn failure(error: PairingRelayError) -> PairingHttpResponse {
 
 fn text(status: &'static str, body: &str) -> PairingHttpResponse {
     PairingHttpResponse { status, body: body.as_bytes().to_vec() }
+}
+
+/// Dispatch a mesh-forwarded pairing body against the node-owned store.
+#[must_use]
+pub fn handle_pairing_mesh(
+    store: &Mutex<PairingRelayStore>,
+    path: &str,
+    forward: &PairingMeshForward,
+) -> PairingMeshReply {
+    let reply = match (forward.source.parse::<IpAddr>(), decode_forward_body(&forward.body)) {
+        (Ok(source), Some(body)) => handle_pairing_http(store, source, "POST", path, &body),
+        _ => text("400 Bad Request", "request rejected"),
+    };
+    PairingMeshReply {
+        status: reply.status.to_owned(),
+        body: ramflux_protocol::encode_base64url(&reply.body),
+    }
+}
+
+/// Encode a public pairing body for the federation→node mesh forward.
+#[must_use]
+pub fn encode_pairing_mesh_body(body: &[u8]) -> String {
+    ramflux_protocol::encode_base64url(body)
+}
+
+/// Decode a mesh pairing body. `None` when the body is not base64url.
+#[must_use]
+pub fn decode_forward_body(body: &str) -> Option<Vec<u8>> {
+    ramflux_protocol::decode_base64url(body).ok()
+}
+
+/// Map a mesh pairing status line onto the public HTTP static set.
+#[must_use]
+pub fn pairing_status_line(status: &str) -> &'static str {
+    match status {
+        "200 OK" => "200 OK",
+        "400 Bad Request" => "400 Bad Request",
+        "404 Not Found" => "404 Not Found",
+        "405 Method Not Allowed" => "405 Method Not Allowed",
+        "408 Request Timeout" => "408 Request Timeout",
+        "413 Payload Too Large" => "413 Payload Too Large",
+        "503 Service Unavailable" => "503 Service Unavailable",
+        _ => "502 Bad Gateway",
+    }
 }

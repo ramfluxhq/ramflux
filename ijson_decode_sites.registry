@@ -172,6 +172,7 @@ apps/ramflux-router/src/lifecycle.rs | handle_mvp7_federated_tombstone | 1 | E |
 apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_cancel | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_event | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/lifecycle.rs | handle_mvp7_lifecycle_finalize | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-router/src/pairing_mesh.rs | route | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/serve.rs | submit_raw_envelope | 1 | A | strict=decode_signed_envelope_ijson; admission=A ingress boundary
 apps/rf/src/handlers/a2ui.rs | handle_a2ui | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
 apps/rf/src/handlers/a2ui.rs | handle_a2ui | 2 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here

@@ -21,6 +21,8 @@ pub struct NodeHttpRequest {
     pub source_ip_hash: Option<String>,
     pub pre_auth_cookie: Option<String>,
     pub pre_auth_now: Option<u64>,
+    pub forwarded_proto: Option<String>,
+    pub forwarded_for: Option<String>,
 }
 
 pub struct NodeHttpResponse {
@@ -102,7 +104,7 @@ pub fn read_http_request_with_route_limits(
     accepted_at: std::time::Instant,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     let line_deadline = accepted_at
-        .checked_add(ordinary.request_timeout.min(pairing.request_timeout))
+        .checked_add(ordinary.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
     let Some((raw, _)) = read_until_marker(
         stream,
@@ -263,6 +265,8 @@ fn finish_http_request(
         source_ip_hash: stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string())),
         pre_auth_cookie: parsed.pre_auth_cookie,
         pre_auth_now: parsed.pre_auth_now,
+        forwarded_proto: parsed.forwarded_proto,
+        forwarded_for: parsed.forwarded_for,
     }))
 }
 
@@ -271,6 +275,8 @@ struct ParsedHttpHeaders {
     keep_alive: bool,
     pre_auth_cookie: Option<String>,
     pre_auth_now: Option<u64>,
+    forwarded_proto: Option<String>,
+    forwarded_for: Option<String>,
 }
 
 fn parse_http_header_fields(
@@ -281,6 +287,8 @@ fn parse_http_header_fields(
     let mut keep_alive = false;
     let mut pre_auth_cookie = None;
     let mut pre_auth_now = None;
+    let mut forwarded_proto = None;
+    let mut forwarded_for = None;
     for line in lines {
         let (name, value) = line.split_once(':').ok_or_else(|| rejected("400 Bad Request"))?;
         let value = value.trim();
@@ -305,6 +313,16 @@ fn parse_http_header_fields(
             pre_auth_cookie = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("X-Ramflux-PreAuth-Now") {
             pre_auth_now = Some(value.parse().map_err(|_| rejected("400 Bad Request"))?);
+        } else if name.eq_ignore_ascii_case("X-Forwarded-Proto") {
+            if forwarded_proto.is_some() {
+                return Err(rejected("400 Bad Request"));
+            }
+            forwarded_proto = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("X-Forwarded-For") {
+            if forwarded_for.is_some() {
+                return Err(rejected("400 Bad Request"));
+            }
+            forwarded_for = Some(value.to_owned());
         }
     }
     Ok(ParsedHttpHeaders {
@@ -312,6 +330,8 @@ fn parse_http_header_fields(
         keep_alive,
         pre_auth_cookie,
         pre_auth_now,
+        forwarded_proto,
+        forwarded_for,
     })
 }
 fn request_read(

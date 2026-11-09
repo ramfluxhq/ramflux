@@ -385,7 +385,10 @@ fn prove_tampered_issue(
     service: &crate::CustodyService,
     router: &RouterCore,
     store: &RouterRedbStore,
+    relay: &Mutex<PairingRelayStore>,
 ) -> TestResult {
+    let before = locked(relay)?.stats();
+    let accounted = locked(relay)?.accounted_bytes();
     let challenge = driver.challenge(service, router, store, issue_action(driver, WALL)?)?;
     let mut bad = driver.proof(&challenge)?;
     bad.body.record_hash = encode_base64url([0; 32]);
@@ -393,6 +396,41 @@ fn prove_tampered_issue(
         driver.attempt(service, router, store, issue_action(driver, WALL)?, bad)?,
         CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, .. }
     ));
+    {
+        let store = locked(relay)?;
+        assert_eq!(store.stats().slots, before.slots);
+        assert_eq!(store.accounted_bytes(), accounted);
+        assert_eq!(store.accounted_bytes(), store.measured_bytes());
+    }
+    Ok(())
+}
+
+fn prove_spec_primary_mismatch(
+    driver: &custody_sessions::Driver,
+    service: &crate::CustodyService,
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    relay: &Mutex<PairingRelayStore>,
+) -> TestResult {
+    let before = locked(relay)?.stats();
+    let accounted = locked(relay)?.accounted_bytes();
+    let mut action = issue_action(driver, WALL)?;
+    match &mut action {
+        CustodyProofAction::PairingIssue { request } => {
+            request.spec.primary_ref.device_id = "secondary".into();
+        }
+        other => return Err(format!("issue action: {other:?}").into()),
+    }
+    assert!(matches!(
+        driver.run(service, router, store, action)?,
+        CustodyServerFrame::Refused { code: CustodyRefusal::BindingRefused, .. }
+    ));
+    {
+        let store = locked(relay)?;
+        assert_eq!(store.stats().slots, before.slots);
+        assert_eq!(store.accounted_bytes(), accounted);
+        assert_eq!(store.accounted_bytes(), store.measured_bytes());
+    }
     Ok(())
 }
 
@@ -528,7 +566,8 @@ fn pairing_root_free_routes_cannot_authorize_account() -> TestResult {
         CustodyServerFrame::Published { .. }
     ));
     let before = locked(&relay)?.stats();
-    prove_tampered_issue(&driver, &service, &router, &store)?;
+    prove_tampered_issue(&driver, &service, &router, &store, &relay)?;
+    prove_spec_primary_mismatch(&driver, &service, &router, &store, &relay)?;
     let issued = run_issue(&driver, &service, &router, &store, WALL)?;
     let created = run_create(&driver, &service, &router, &store, issued.ticket.clone(), WALL)?;
     assert_eq!(created.request_id, issued.ticket.body.create_id);
@@ -539,9 +578,15 @@ fn pairing_root_free_routes_cannot_authorize_account() -> TestResult {
         issued.ticket.clone(),
     )?;
 
+    let slots_before_expired = locked(&relay)?.stats().slots;
     let issued2 = run_issue(&driver, &service, &router, &store, WALL)?;
     clock.advance_secs(301);
     retired_create(&driver, &service, &router, &store, issued2.ticket.clone(), WALL)?;
+    {
+        let held = locked(&relay)?;
+        assert_eq!(held.stats().slots, slots_before_expired);
+        assert_eq!(held.accounted_bytes(), held.measured_bytes());
+    }
 
     let prior = relay_store(Arc::clone(&clock))?;
     let prior_boot = prior.boot_id().to_owned();

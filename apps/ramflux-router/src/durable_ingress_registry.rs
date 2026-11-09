@@ -624,6 +624,8 @@ fn refuse_itest_http_edge(
         source_ip_hash: None,
         pre_auth_cookie: None,
         pre_auth_now: None,
+        forwarded_proto: None,
+        forwarded_for: None,
     };
     let handled = crate::handlers::handle_itest_mvp0_request(&mut server, &request, handle)?;
     assert!(handled, "{entry} did not handle /mvp0/envelope");

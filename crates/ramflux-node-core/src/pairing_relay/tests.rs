@@ -409,7 +409,10 @@ fn fill_role_queue(
         store.send(&send_body(created, role, token, seq))?;
     }
     match store.send(&send_body(created, role, token, 2)) {
-        Err(err) => exact(err, "Busy"),
+        Err(err) => {
+            exact(err, "Busy")?;
+            books_match(store)
+        }
         Ok(_) => Err(PairingRelayError::invalid("queue")),
     }
 }

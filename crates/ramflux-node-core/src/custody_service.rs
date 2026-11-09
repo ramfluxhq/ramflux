@@ -159,6 +159,27 @@ impl CustodyService {
         self.pairing = Some(store);
         self
     }
+    /// Production pairing attach: default-off env gate, then one node-owned store.
+    /// # Errors
+    /// Rejects an invalid pairing opt-in or a store that cannot open.
+    pub fn with_pairing_relay_if_enabled(
+        self,
+        node_seed: [u8; 32],
+        public_origin: String,
+    ) -> Result<Self, crate::NodeCoreError> {
+        if !crate::device_pairing_enabled()? {
+            return Ok(self);
+        }
+        let store = crate::pairing_relay::PairingRelayStore::new(
+            crate::pairing_relay::PairingRelayConfig {
+                clock: Arc::new(crate::pairing_relay::NodePairingClock::system()),
+                node_seed,
+                public_origin,
+            },
+        )
+        .map_err(|error| crate::NodeCoreError::ItestHttp(error.to_string()))?;
+        Ok(self.with_pairing_relay(Arc::new(Mutex::new(store))))
+    }
     #[must_use]
     pub fn pairing_relay(&self) -> Option<&Arc<Mutex<crate::pairing_relay::PairingRelayStore>>> {
         self.pairing.as_ref()

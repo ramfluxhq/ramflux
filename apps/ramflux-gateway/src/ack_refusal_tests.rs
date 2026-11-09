@@ -113,6 +113,8 @@ fn http_refusal(router: &crate::RouterMeshClient) -> anyhow::Result<()> {
         source_ip_hash: None,
         pre_auth_cookie: None,
         pre_auth_now: None,
+        forwarded_proto: None,
+        forwarded_for: None,
     };
     crate::itest_http::dispatch_protected_itest_request(&mut server, router, &request)?;
     drop(server);

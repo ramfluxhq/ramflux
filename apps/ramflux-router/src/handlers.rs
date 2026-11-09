@@ -430,6 +430,11 @@ fn handle_mesh_request_inner(
     peer_service_id: &str,
 ) -> anyhow::Result<MeshResponse> {
     let ramflux_transport::MeshHttpRequest { method, path, body } = request;
+    if let Some(response) =
+        crate::pairing_mesh::route(peer_service_id, &method, &path, &body, router)?
+    {
+        return Ok(response);
+    }
     if method == "POST"
         && path == "/mvp10/own-devices/fanout"
         && peer_service_id != "ramflux-gateway"
@@ -1556,6 +1561,8 @@ mod tests {
                 source_ip_hash: None,
                 pre_auth_cookie: None,
                 pre_auth_now: None,
+                forwarded_proto: None,
+                forwarded_for: None,
             };
             assert!(!handle_itest_admin_request(&mut stream, &request, &handle)?);
         }
@@ -1579,6 +1586,8 @@ mod tests {
                 source_ip_hash: None,
                 pre_auth_cookie: None,
                 pre_auth_now: None,
+                forwarded_proto: None,
+                forwarded_for: None,
             },
             &handle,
         )?);

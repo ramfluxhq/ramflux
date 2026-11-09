@@ -400,12 +400,18 @@ impl RouterHandle {
             if crate::home_migration::enabled()? {
                 anyhow::bail!("migration requires RAMFLUX_CUSTODY_NODE_RECORD_FILE");
             }
+            if ramflux_node_core::device_pairing_enabled()? {
+                anyhow::bail!("pairing requires RAMFLUX_CUSTODY_NODE_RECORD_FILE");
+            }
             self.store().validate_home_migration_runtime(None)?;
             return Ok(());
         };
         if path.trim().is_empty() {
             if crate::home_migration::enabled()? {
                 anyhow::bail!("migration requires RAMFLUX_CUSTODY_NODE_RECORD_FILE");
+            }
+            if ramflux_node_core::device_pairing_enabled()? {
+                anyhow::bail!("pairing requires RAMFLUX_CUSTODY_NODE_RECORD_FILE");
             }
             self.store().validate_home_migration_runtime(None)?;
             return Ok(());
@@ -436,6 +442,16 @@ impl RouterHandle {
         )?;
         if let Some(migration) = migration {
             service = service.with_home_migration(migration)?;
+        }
+        if ramflux_node_core::device_pairing_enabled()? {
+            let seed = config
+                .node_service_signing_seed_b64url
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("pairing requires the node service signing seed"))?;
+            let seed = ramflux_node_core::decode_node_service_signing_seed(seed.as_str())?;
+            let origin = ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_ORIGIN")
+                .unwrap_or_else(|_| format!("https://{}", config.node_id));
+            service = service.with_pairing_relay_if_enabled(seed, origin)?;
         }
         let Self::Tokio(runtime) = self;
         let service = Arc::new(service);
@@ -491,6 +507,12 @@ impl RouterHandle {
                 ramflux_node_core::now_unix_seconds(),
             )
             .map_err(Into::into)
+    }
+    pub(crate) fn pairing_relay(
+        &self,
+    ) -> Option<Arc<std::sync::Mutex<ramflux_node_core::pairing_relay::PairingRelayStore>>> {
+        let Self::Tokio(runtime) = self;
+        runtime.custody.get().and_then(|service| service.pairing_relay().cloned())
     }
     pub(crate) fn custody(
         &self,

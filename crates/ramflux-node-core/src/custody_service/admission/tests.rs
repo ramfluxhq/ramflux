@@ -145,3 +145,40 @@ fn revoked_during_grant_closes_new_session_before_reply() -> Result<(), Box<dyn 
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn require_current_primary_rejects_either_mismatched_half() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = 1_760_000_000;
+    let path = std::env::temp_dir().join(format!(
+        "custody-primary-halves-{}.redb",
+        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
+    ));
+    {
+        let store = crate::RouterRedbStore::open_without_wal(&path)?;
+        let router = crate::RouterCore::new();
+        store.bootstrap_router(&router)?;
+        let driver = Driver::new("primary-halves", 11)?;
+        let service = CustodyService::new(driver.node.clone(), false, &store, now)?;
+        assert!(matches!(
+            driver.run(&service, &router, &store, driver.publish())?,
+            CustodyServerFrame::Published { .. }
+        ));
+        let authority =
+            router.verify_custody_possession_authority(&driver.publication, now, false)?;
+        let current = driver.reference.clone();
+        let mut other = current.clone();
+        other.device_id = "secondary".into();
+        super::require_current_primary(&current, &authority, &current)?;
+        assert_eq!(
+            super::require_current_primary(&other, &authority, &current),
+            Err(CustodyRefusal::BindingRefused)
+        );
+        assert_eq!(
+            super::require_current_primary(&current, &authority, &other),
+            Err(CustodyRefusal::BindingRefused)
+        );
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}

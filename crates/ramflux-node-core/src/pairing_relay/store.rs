@@ -325,6 +325,7 @@ impl PairingRelayStore {
                 && let Ok(out) = direction_mut(live, &send.role)
             {
                 out.frames.truncate(snapshot.2);
+                out.frames.shrink_to(snapshot.2);
                 out.last_send = snapshot.0;
                 out.next_send_seq = snapshot.1;
             }

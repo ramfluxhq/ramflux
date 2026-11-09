@@ -8,11 +8,14 @@ mod bytes;
 mod http;
 mod limits;
 mod store;
+mod tls;
 
 pub use http::{
     PAIRING_CLAIM_PATH, PAIRING_CLOSE_PATH, PAIRING_HTTP_PREFIX, PAIRING_MAX_BODY_BYTES,
     PAIRING_MAX_HEADER_BYTES, PAIRING_POLL_PATH, PAIRING_REQUEST_TIMEOUT, PAIRING_SEND_PATH,
-    PairingHttpResponse, handle_pairing_http, is_pairing_path, pairing_http_limits,
+    PairingHttpResponse, PairingMeshForward, PairingMeshReply, decode_forward_body,
+    encode_pairing_mesh_body, handle_pairing_http, handle_pairing_mesh, is_pairing_path,
+    pairing_http_limits, pairing_status_line,
 };
 pub use limits::{
     AllocatorStats, CLAIM_GRACE_MS, ENTRY_OVERHEAD, HOUR_MS, INVITATION_LIFETIME_SECS,
@@ -22,6 +25,9 @@ pub use limits::{
     PairingClock, PairingRelayError, SLACK_BYTES, TestPairingClock, claim_source_prefixes,
 };
 pub use store::{PairingRelayConfig, PairingRelayStore};
+pub use tls::{
+    pairing_client_addr, pairing_request_is_tls, parse_trusted_proxies, trusted_proxies_from_env,
+};
 
 #[cfg(test)]
 mod tests;
