@@ -5,18 +5,25 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
 use super::apply_w1::{
-    self, apply_page, binding_attempts, binding_give_up, queue_legacy_hold, routed_refused,
-    set_after_classify, set_cross_await,
+    self, apply_page, binding_attempts, binding_give_up, covered_below, force_covered_below,
+    force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy, queue_policy_kind,
+    queue_projection, queue_terminal_reply, routed_refused, set_after_classify, set_before_commit,
+    set_cross_await, set_manifest_await, set_projection_key,
 };
-use crate::bus::connection_manager::receive::bind_retry_turn;
+use super::erase_support::erase_through_retention;
+use crate::bus::connection_manager::receive::bind_retry_turns;
 use crate::bus::connection_manager::{ReceiveEntry, ReceiveTurn};
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::runtime_tests;
+use crate::bus::sync_driver::source::failure::{self as source_failure, SourceFailure};
 use crate::client::a2i::queue_unbound_answers;
+use crate::client::application_outbox::{ApplicationEvent, OUTBOX};
 use crate::client::legacy_w1::{self, Fault};
+use crate::client::reply_outbox::MARKER;
+use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::{AccountDb, StorageError};
+use ramflux_storage::{AccountDb, ReceiveFailureKind, StorageError};
 use ramflux_transport::TransportError;
 use serde_json::json;
 use std::cell::Cell;
@@ -155,6 +162,21 @@ fn own_dummy_at(account: &crate::bus::state::LocalBusAccountState, seq: u64) -> 
     )
 }
 
+fn live_dummy(account: &crate::bus::state::LocalBusAccountState) -> ReceiveEntry {
+    let mut prepared = own_dummy(account);
+    prepared.entry.envelope.created_at = now_unix_timestamp();
+    prepared.entry.envelope.ttl = 86_400;
+    prepared
+}
+
+/// A live entry whose wire signature has the right shape, so only a directory miss
+/// (not an immutable wire error) can make it retryable.
+fn retryable_entry(account: &crate::bus::state::LocalBusAccountState) -> ReceiveEntry {
+    let mut entry = live_dummy(account);
+    entry.entry.envelope.signed.signature = encode_base64url([7u8; 64]);
+    entry
+}
+
 fn unrouted_journals(db: &AccountDb) -> Result<usize, SdkError> {
     Ok(db
         .journal_after(0, 128)?
@@ -175,6 +197,28 @@ fn reopen(account: &mut crate::bus::state::LocalBusAccountState) -> Result<(), S
     account.client.active_account_db = None;
     account.client.unlock_account("acct", b"actor-test-secret")?;
     Ok(())
+}
+
+fn from_disk(
+    account: &crate::bus::state::LocalBusAccountState,
+    sequence: u64,
+) -> Result<ReceiveEntry, SdkError> {
+    let json = account.client.account_db()?.staged_entry_json_for_test(sequence)?;
+    Ok(ReceiveEntry {
+        entry: serde_json::from_slice(&json)?,
+        retry_key: None,
+        replay: false,
+        turn: None,
+    })
+}
+
+async fn drive_disk(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    sequence: u64,
+    generation: impl Fn() -> u64 + 'static,
+) -> Result<crate::bus::connection_manager::ReceiveApplied, SdkError> {
+    let recovered = from_disk(account, sequence)?;
+    drive(account, recovered, generation).await
 }
 
 struct CountSends {
@@ -309,7 +353,7 @@ async fn staging_survives_router_expiry() -> Result<(), SdkError> {
         (Some("staged".into()), 1),
         "W0 survives router retention and reopen"
     );
-    let recovered = drive(&mut harness.account, entry, || 1).await?;
+    let recovered = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(recovered.0.is_none(), "recovery writes no ACK intent");
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
@@ -376,7 +420,8 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
         matches!(error, Some(SdkError::Storage(StorageError::Integrity(text))) if *text == BEFORE),
         "{error:?}"
     );
-    let once = drive(&mut harness.account, entry.clone(), || 1).await?;
+    reopen(&mut harness.account)?;
+    let once = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(once.0.is_none(), "W1 writes no ACK intent");
     let held = harness.account.client.account_db()?.receive_state_for_test(1)?;
     assert_eq!(held, (Some("held".into()), 1), "one held effect");
@@ -391,7 +436,7 @@ async fn receive_stage_redrive() -> Result<(), SdkError> {
     );
     reopen(&mut harness.account)?;
     assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, held);
-    let again = drive(&mut harness.account, entry, || 1).await?;
+    let again = drive_disk(&mut harness.account, 1, || 1).await?;
     assert!(again.0.is_none());
     assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, held);
     assert_eq!(sends.load(Ordering::SeqCst), 0);
@@ -417,7 +462,7 @@ async fn held_admission_stage_crash() -> Result<(), SdkError> {
         (Some("staged".into()), 1)
     );
     reopen(&mut blocked.account)?;
-    let held = drive(&mut blocked.account, entry, || 1).await?;
+    let held = drive_disk(&mut blocked.account, 1, || 1).await?;
     assert!(held.0.is_none());
     assert_eq!(
         blocked.account.client.account_db()?.receive_state_for_test(1)?,
@@ -443,7 +488,7 @@ async fn held_admission_stage_crash() -> Result<(), SdkError> {
         (Some("staged".into()), 1)
     );
     reopen(&mut unbound.account)?;
-    let held = drive(&mut unbound.account, entry, || 1).await?;
+    let held = drive_disk(&mut unbound.account, 1, || 1).await?;
     assert!(held.0.is_none());
     assert_eq!(
         unbound.account.client.account_db()?.receive_state_for_test(1)?,
@@ -459,8 +504,8 @@ async fn erasure_late_stage_and_process() -> Result<(), SdkError> {
     let mut harness = open()?;
     let sends = attach_counter(&mut harness.account);
     let prepared_turn = turn(&harness.account, 1)?;
+    erase_through_retention(harness.account.client.account_db()?)?;
     let before = harness.account.client.account_db()?.durable_rows_for_test()?;
-    harness.account.client.account_db()?.advance_erasure_generation_for_test()?;
     queue_unbound_answers(std::iter::repeat_n(false, 8));
     let entry = own_dummy(&harness.account);
     let refused = drive_with_turn(&mut harness.account, &prepared_turn, entry, || 1).await;
@@ -535,14 +580,12 @@ async fn retry_keeps_prepare_turn_after_erasure() -> Result<(), SdkError> {
     let mut harness = open()?;
     let sends = attach_counter(&mut harness.account);
     let prepared = turn(&harness.account, 1)?;
-    let mut retry = own_dummy(&harness.account);
-    bind_retry_turn(&mut retry, Some(&prepared));
+    let mut retries = vec![own_dummy(&harness.account)];
+    bind_retry_turns(&mut retries, Some(&prepared));
+    let retry = retries.into_iter().next().expect("one retry");
+    erase_through_retention(harness.account.client.account_db()?)?;
     let before = harness.account.client.account_db()?.durable_rows_for_test()?;
-    harness.account.client.account_db()?.advance_erasure_generation_for_test()?;
-    let retry_turn = match retry.turn.clone() {
-        Some(bound) => bound,
-        None => turn(&harness.account, 1)?,
-    };
+    let retry_turn = retry.turn.clone().expect("bind_retry_turn keeps the prepare turn");
     let refused = drive_with_turn(&mut harness.account, &retry_turn, retry, || 1).await;
     let error = refused.as_ref().err();
     assert!(
@@ -574,5 +617,505 @@ async fn already_covered_sequence_skips_w1() -> Result<(), SdkError> {
         (Some("held".into()), 1)
     );
     assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, journals);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn covered_below_sequence_is_integrity() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let before = harness.account.client.account_db()?.durable_rows_for_test()?;
+    force_covered_below();
+    let entry = own_dummy(&harness.account);
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text))) if *text == covered_below()
+        ),
+        "C < seq must refuse: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.durable_rows_for_test()?,
+        before,
+        "covered-below writes nothing"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failure_policy_stage_crash() -> Result<(), SdkError> {
+    retryable_failure_cut().await?;
+    deterministic_failure_cut().await?;
+    Ok(())
+}
+
+async fn retryable_failure_cut() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    queue_policy_kind(ReceiveFailureKind::Retryable);
+    let entry = retryable_entry(&harness.account);
+    let cut = drive(&mut harness.account, entry, || 1).await;
+    source_failure::set_fault(source_failure::Fault::None);
+    let error = cut.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text)))
+                if *text == "source failure before-commit"
+        ),
+        "W1 retryable admit cut: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1),
+        "W0 survives the retryable cut"
+    );
+    reopen(&mut harness.account)?;
+    queue_policy_kind(ReceiveFailureKind::Retryable);
+    let recovered = drive_disk(&mut harness.account, 1, || 1).await?;
+    assert!(recovered.0.is_none());
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("held".into()), 1)
+    );
+    assert_eq!(cursor(&harness.account)?, 1);
+    Ok(())
+}
+
+async fn deterministic_failure_cut() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    queue_policy_kind(ReceiveFailureKind::Deterministic);
+    let entry = live_dummy(&harness.account);
+    let cut = drive(&mut harness.account, entry, || 1).await;
+    source_failure::set_fault(source_failure::Fault::None);
+    let error = cut.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text)))
+                if *text == "source failure before-commit"
+        ),
+        "W1 deterministic admit cut: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1),
+        "W0 survives the deterministic cut"
+    );
+    reopen(&mut harness.account)?;
+    queue_policy_kind(ReceiveFailureKind::Deterministic);
+    let recovered = drive_disk(&mut harness.account, 1, || 1).await?;
+    assert!(recovered.0.is_none());
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (None, 0),
+        "deterministic recovery settles the staged copy"
+    );
+    assert_eq!(cursor(&harness.account)?, 1);
+    let snap = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    assert_eq!(snap.intents, vec![1]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn held_local_expiry_and_eviction_crash() -> Result<(), SdkError> {
+    const START: i64 = 1_700_000_000;
+    let _clock = crate::time::FixedClock::set(START);
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let entry = own_dummy(&harness.account);
+    drive(&mut harness.account, entry, || 1).await?;
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("held".into()), 1)
+    );
+    let pre = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    let prepared = turn(&harness.account, 1)?;
+    source_failure::set_fault(source_failure::Fault::BeforeCommit);
+    crate::time::FixedClock::advance_to(START + 604_800);
+    let gate = SourceFailure { expected: prepared.expected(), generation: 1 };
+    let cut = gate.expire_holds(harness.account.client.account_db()?, START + 604_800);
+    source_failure::set_fault(source_failure::Fault::None);
+    let error = cut.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text)))
+                if *text == "source failure before-commit"
+        ),
+        "expiry cut: {error:?}"
+    );
+    assert_eq!(
+        harness
+            .account
+            .client
+            .account_db()?
+            .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?,
+        pre,
+        "expiry cut writes nothing"
+    );
+    reopen(&mut harness.account)?;
+    let prepared = turn(&harness.account, 1)?;
+    let gate = SourceFailure { expected: prepared.expected(), generation: 1 };
+    let settled = gate.expire_holds(harness.account.client.account_db()?, START + 604_800)?;
+    assert_eq!(settled, vec![1]);
+    let done = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    assert_eq!(done.work, 0, "expired hold is gone");
+    assert_eq!(done.intents, vec![1]);
+    assert_eq!(done.cursor, 1);
+    Ok(())
+}
+
+fn erase_pending(db: &AccountDb) {
+    erase_through_retention(db).expect("erase");
+}
+
+fn arm_w1_cut(_db: &AccountDb) {
+    set_before_commit("apply page w1 before-commit");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn erase_while_w1_pending_is_object_erased() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    set_after_classify(erase_pending);
+    let entry = own_dummy(&harness.account);
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(
+        matches!(error, Some(SdkError::ObjectErased)),
+        "erase while W1 is pending must be ObjectErased: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1),
+        "W0 stays after the refused W1"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn manifest_wait_refuses_stale_generation() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let before = harness.account.client.account_db()?.durable_rows_for_test()?;
+    GENERATION.with(|cell| cell.set(1));
+    queue_manifest_wait();
+    set_manifest_await(bump_generation);
+    let entry = own_dummy(&harness.account);
+    let refused = drive(&mut harness.account, entry, current_generation).await;
+    let error = refused.as_ref().err();
+    assert!(
+        matches!(error, Some(SdkError::Storage(StorageError::AuthorizationRejected))),
+        "manifest wait generation bump must refuse W1: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1),
+        "W0 committed before the manifest wait"
+    );
+    assert_eq!(cursor(&harness.account)?, 0);
+    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 0);
+    let _ = before;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn w1_before_commit_sweep_keeps_w0() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    set_after_classify(arm_w1_cut);
+    let entry = own_dummy(&harness.account);
+    let cut = drive(&mut harness.account, entry, || 1).await;
+    let error = cut.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text)))
+                if *text == "apply page w1 before-commit"
+        ),
+        "W1 kill before COMMIT: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
+    reopen(&mut harness.account)?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let recovered = drive_disk(&mut harness.account, 1, || 1).await?;
+    assert!(recovered.0.is_none());
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("held".into()), 1)
+    );
+    assert_eq!(cursor(&harness.account)?, 1);
+    assert_eq!(unrouted_journals(harness.account.client.account_db()?)?, 1);
+    Ok(())
+}
+
+fn persist_projection_receipt_at(
+    account: &crate::bus::state::LocalBusAccountState,
+    entry: &crate::GatewayInboxEntry,
+    key: &str,
+) -> Result<(), SdkError> {
+    let receipt = Committed {
+        routing: Routing {
+            kind: Kind::Direct,
+            conversation_id: "thread".to_owned(),
+            group_id: None,
+            message_id: "projection-owner".to_owned(),
+            group_message_id: None,
+            attachments: false,
+        },
+        entry: entry.clone(),
+        projected: false,
+    };
+    account.client.account_db()?.persist_actor_state(key, &receipt)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn need_point_is_not_yet_wired_and_records_no_loss() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    force_need_point();
+    let entry = live_dummy(&harness.account);
+    let before = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    let error = refused.as_ref().err();
+    assert!(
+        matches!(error, Some(SdkError::LocalBus(text)) if text.starts_with("NotYetWired")),
+        "NeedPoint without a real FetchEntry must be a typed NotYetWired: {error:?}"
+    );
+    assert_eq!(
+        harness
+            .account
+            .client
+            .account_db()?
+            .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?,
+        before,
+        "no fabricated loss, cover or retain_until"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projection_w1_admits_outbox() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    let key = "authenticated-projection-key".to_owned();
+    persist_projection_receipt_at(&harness.account, &entry.entry, &key)?;
+    set_projection_key(&key);
+    queue_projection();
+    drive(&mut harness.account, entry, || 1).await?;
+    let stored: Option<ApplicationEvent> =
+        harness.account.client.account_db()?.load_actor_state(&format!("{OUTBOX}{key}"))?;
+    assert!(stored.is_some(), "projection W1 writes the application outbox");
+    assert_eq!(cursor(&harness.account)?, 0, "projection admits without covering C");
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projection_w1_before_commit_keeps_w0() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    let key = "authenticated-projection-key";
+    persist_projection_receipt_at(&harness.account, &entry.entry, key)?;
+    set_projection_key(key);
+    queue_projection();
+    set_after_classify(arm_w1_cut);
+    let cut = drive(&mut harness.account, entry, || 1).await;
+    let error = cut.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text)))
+                if *text == "apply page w1 before-commit"
+        ),
+        "projection W1 kill: {error:?}"
+    );
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settle_terminal_prunes_reply_marker() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    let key = harness.account.client.inbox_admission_key(&entry.entry)?;
+    harness
+        .account
+        .client
+        .account_db()?
+        .persist_actor_state(&format!("{MARKER}{key}"), &json!({"id": "marker"}))?;
+    queue_terminal_reply();
+    drive(&mut harness.account, entry, || 1).await?;
+    let marker: Option<serde_json::Value> =
+        harness.account.client.account_db()?.load_actor_state(&format!("{MARKER}{key}"))?;
+    assert!(marker.is_none(), "W0 terminal prunes the reply transfer marker");
+    assert_eq!(cursor(&harness.account)?, 1);
+    assert_eq!(harness.account.client.account_db()?.receive_state_for_test(1)?, (None, 0));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn projection_refuses_unverified_key() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    // A receipt exists at the unverified-hash key; it must still never be projected.
+    let unverified = harness.account.client.inbox_admission_key(&entry.entry)?;
+    assert!(unverified.starts_with("inbox/unverified/"));
+    persist_projection_receipt_at(&harness.account, &entry.entry, &unverified)?;
+    queue_projection();
+    let refused = drive(&mut harness.account, entry, || 1).await;
+    assert!(refused.is_err(), "unauthenticated entry must not project");
+    let stored: Option<ApplicationEvent> =
+        harness.account.client.account_db()?.load_actor_state(&format!("{OUTBOX}{unverified}"))?;
+    assert!(stored.is_none(), "no outbox row under an unverified key");
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn own_copy_success_without_authenticated_identity_commits_w1() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    let identity = harness.account.client.authenticated_committed_key(
+        crate::client::identity_authority::HeadUse::NewAuthorization,
+        &entry.entry,
+    );
+    assert!(
+        identity.is_err(),
+        "fixture must lack a root-qualified authenticated identity: {identity:?}"
+    );
+    queue_own_copy();
+    drive(&mut harness.account, entry.clone(), || 1).await?;
+    let locator: Option<serde_json::Value> =
+        harness.account.client.account_db()?.load_actor_state(
+            &crate::client::own_device_copy::w1::locator_key(&entry.entry.envelope.envelope_id),
+        )?;
+    assert!(locator.is_some(), "own-copy W1 commits; missing identity is nothing owed");
+    Ok(())
+}
+
+fn marker_present(
+    account: &crate::bus::state::LocalBusAccountState,
+    key: &str,
+) -> Result<bool, SdkError> {
+    Ok(account
+        .client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&format!("{MARKER}{key}"))?
+        .is_some())
+}
+
+fn seed_marker(
+    account: &crate::bus::state::LocalBusAccountState,
+    key: &str,
+) -> Result<(), SdkError> {
+    account
+        .client
+        .account_db()?
+        .persist_actor_state(&format!("{MARKER}{key}"), &json!({"id": "marker"}))?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn deterministic_reject_prunes_reply_marker() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = retryable_entry(&harness.account);
+    let key = harness.account.client.inbox_admission_key(&entry.entry)?;
+    seed_marker(&harness.account, &key)?;
+    queue_policy_kind(ReceiveFailureKind::Retryable);
+    drive(&mut harness.account, entry.clone(), || 1).await?;
+    assert!(marker_present(&harness.account, &key)?, "a held retry keeps the marker");
+    let mut harness = open()?;
+    let entry = retryable_entry(&harness.account);
+    let key = harness.account.client.inbox_admission_key(&entry.entry)?;
+    seed_marker(&harness.account, &key)?;
+    queue_policy_kind(ReceiveFailureKind::Deterministic);
+    drive(&mut harness.account, entry, || 1).await?;
+    assert!(!marker_present(&harness.account, &key)?, "rejected W0 prunes the marker");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hold_expiry_prunes_reply_marker() -> Result<(), SdkError> {
+    const START: i64 = 1_700_000_000;
+    let _clock = crate::time::FixedClock::set(START);
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let entry = own_dummy(&harness.account);
+    let key = harness.account.client.inbox_admission_key(&entry.entry)?;
+    drive(&mut harness.account, entry, || 1).await?;
+    seed_marker(&harness.account, &key)?;
+    crate::time::FixedClock::advance_to(START + 604_800);
+    let plan = crate::bus::sync_driver::prepare_receive(&harness.account, 1)?;
+    assert!(plan.turn.is_some());
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (None, 0),
+        "expired hold settled"
+    );
+    assert!(!marker_present(&harness.account, &key)?, "expiry prunes the marker");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settle_retained_prunes_reply_marker() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let entry = own_dummy(&harness.account);
+    let key = harness.account.client.inbox_admission_key(&entry.entry)?;
+    drive(&mut harness.account, entry, || 1).await?;
+    seed_marker(&harness.account, &key)?;
+    let prepared = turn(&harness.account, 1)?;
+    crate::bus::account_runtime::settle_retained(&mut harness.account, 1, &prepared, 1)?;
+    assert!(!marker_present(&harness.account, &key)?, "retained terminal settle prunes");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_ledger_expiry_still_runs_on_activated_accounts() -> Result<(), SdkError> {
+    const START: i64 = 1_700_000_000;
+    let _clock = crate::time::FixedClock::set(START);
+    let harness = open()?;
+    let db = harness.account.client.account_db()?;
+    // An unrouted row older than the 7-day trim has no ledger work: only the non-ledger
+    // part of expire_inbox_holds can remove it.
+    db.hold_unrouted("stale-key", 7, b"{}", START - 8 * 24 * 60 * 60)?;
+    assert!(db.unrouted_count()? > 0);
+    crate::bus::sync_driver::prepare_receive(&harness.account, 1)?;
+    assert_eq!(
+        harness.account.client.account_db()?.unrouted_count()?,
+        0,
+        "activated prepare_receive still trims expired unrouted rows"
+    );
     Ok(())
 }

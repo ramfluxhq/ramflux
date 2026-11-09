@@ -251,14 +251,39 @@ impl crate::AccountDb {
         Ok(())
     }
 
-    /// Test support: advances the private-erasure generation as an erase would.
+    /// Test support: W0 `entry_json` for disk recovery of a staged sequence.
     ///
     /// # Errors
-    /// Returns storage errors.
-    pub fn advance_erasure_generation_for_test(&self) -> Result<(), StorageError> {
-        self.connection
-            .execute("UPDATE account_erasure_generation SET generation=generation+1", [])?;
-        Ok(())
+    /// Returns SQL errors when the work row is missing.
+    pub fn staged_entry_json_for_test(&self, sequence: u64) -> Result<Vec<u8>, StorageError> {
+        let seq = sequence.to_be_bytes();
+        Ok(self.connection.query_row(
+            "SELECT entry_json FROM gateway_receive_work WHERE inbox_seq=?1",
+            params![seq.as_slice()],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Test support: insert dummy ACK intents so W2 cover can pause at the slot cap.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn insert_ack_intents_for_test(
+        &self,
+        target: &str,
+        incarnation: &str,
+        through: u64,
+    ) -> Result<(), StorageError> {
+        self.write_transaction(|| {
+            for n in 1u64..=through {
+                self.connection.execute(
+                    "INSERT INTO gateway_ack_intent VALUES(?1,?2,?3,0,0,0,100)",
+                    params![target, incarnation, n.to_be_bytes().as_slice()],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Test support: pin ACK-intent clocks so flush-timing tests do not wait on the wall clock.

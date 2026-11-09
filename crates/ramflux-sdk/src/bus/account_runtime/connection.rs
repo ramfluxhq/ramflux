@@ -604,7 +604,7 @@ fn apply_metadata(
 
 /// WS settlement of a retained terminal entry inside the lifecycle fence (moved out of
 /// `apply_receive_turn` unchanged to keep it under the line limit).
-fn settle_retained(
+pub(crate) fn settle_retained(
     account: &mut LocalBusAccountState,
     generation: u64,
     turn: &super::super::connection_manager::ReceiveTurn,
@@ -613,6 +613,7 @@ fn settle_retained(
     let db = account.client.account_db()?;
     let expected = turn.expected();
     super::lifecycle_fence::commit(db, generation, expected, |tx| {
+        let key = tx.work_admission_key(sequence)?;
         match crate::bus::sync_driver::source::ws::SourceWs::settle_in(
             tx,
             ramflux_storage::ReceiveSettle {
@@ -620,8 +621,13 @@ fn settle_retained(
                 kind: ramflux_storage::ReceiveSettleKind::Terminal,
             },
         )? {
-            ramflux_storage::ReceiveSettleResult::Settled
-            | ramflux_storage::ReceiveSettleResult::Held => Ok(()),
+            ramflux_storage::ReceiveSettleResult::Settled => {
+                if let Some(key) = key {
+                    crate::client::reply_outbox::ReplyOutbox::prune_marker_in(tx, &key)?;
+                }
+                Ok(())
+            }
+            ramflux_storage::ReceiveSettleResult::Held => Ok(()),
             ramflux_storage::ReceiveSettleResult::Paused => {
                 Err(ramflux_storage::StorageError::Integrity("settle retained paused"))
             }

@@ -158,16 +158,38 @@ pub(crate) async fn apply_prepared_receive(
     Ok((acknowledgement, backpressure))
 }
 
+/// Shared hold expiry for push and compat receive. Activated accounts expire ledger holds
+/// under the captured turn and still run every non-ledger part of `expire_inbox_holds`.
+fn expire_receive_holds(
+    db: &ramflux_storage::AccountDb,
+    target: &str,
+    generation: u64,
+    now: i64,
+) -> Result<Option<super::connection_manager::ReceiveTurn>, SdkError> {
+    if !super::push_receiver::apply_w1::is_active(db, target)? {
+        db.expire_inbox_holds(now)?;
+        return Ok(None);
+    }
+    let turn = super::push_receiver::apply_w1::capture_turn(db, generation, target)?;
+    source::failure::SourceFailure { expected: turn.expected(), generation }
+        .expire_holds(db, now)?;
+    db.expire_inbox_holds_non_ledger(now)?;
+    Ok(Some(turn))
+}
+
 pub(crate) fn prepare_receive(
     account: &LocalBusAccountState,
     generation: u64,
 ) -> Result<super::connection_manager::ReceivePlan, SdkError> {
     account.client.prune_surface_resync_state()?;
-    account.client.account_db()?.expire_inbox_holds(now_unix_timestamp())?;
+    let db = account.client.account_db()?;
+    let target = account.target_delivery_id.as_str();
+    let now = now_unix_timestamp();
+    let turn = expire_receive_holds(db, target, generation, now)?;
     redrive_if_state_changed(&account.client)?;
     let cursor = account.client.gateway_receive_cursor(&account.target_delivery_id)?;
     let mut entries = Vec::new();
-    let mut keys = append_pending_entries(account, &mut entries, now_unix_timestamp())?;
+    let mut keys = append_pending_entries(account, &mut entries, now)?;
     let retries = entries
         .into_iter()
         .map(|entry| {
@@ -175,17 +197,8 @@ pub(crate) fn prepare_receive(
             super::connection_manager::ReceiveEntry { entry, retry_key, replay: false, turn: None }
         })
         .collect();
-    let backpressure = Box::new(super::contact_backpressure::Backpressure::load(
-        &account.client,
-        now_unix_timestamp(),
-    )?);
-    let db = account.client.account_db()?;
-    let target = account.target_delivery_id.as_str();
-    let turn = if super::push_receiver::apply_w1::is_active(db, target)? {
-        Some(super::push_receiver::apply_w1::capture_turn(db, generation, target)?)
-    } else {
-        None
-    };
+    let backpressure =
+        Box::new(super::contact_backpressure::Backpressure::load(&account.client, now)?);
     Ok(super::connection_manager::ReceivePlan { cursor, limit: 64, retries, backpressure, turn })
 }
 
@@ -225,7 +238,12 @@ pub(crate) async fn receive(
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
     account.client.account_db()?.refuse_legacy_receive()?;
     account.client.prune_surface_resync_state()?;
-    account.client.account_db()?.expire_inbox_holds(now)?;
+    expire_receive_holds(
+        account.client.account_db()?,
+        account.target_delivery_id.as_str(),
+        1,
+        now,
+    )?;
     redrive_if_state_changed(&account.client)?;
     let pool = account.relay_quic_pool()?;
     let cursor = account.client.gateway_receive_cursor(engine.target_delivery_id())?;

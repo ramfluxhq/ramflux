@@ -147,7 +147,7 @@ fn cells(
     // (d) A preparation released after an erase (its expectation predates it) writes nothing.
     let db = account.client.account_db()?;
     let stale = gate(db)?;
-    db.advance_erasure_generation_for_test()?;
+    crate::bus::push_receiver::erase_support::erase_through_retention(db)?;
     let erased = run(account, &stale);
     assert!(matches!(erased, Err(SdkError::ObjectErased)), "{erased:?}");
     assert_eq!(called.get(), 2);
@@ -473,7 +473,7 @@ async fn history(fixture: &mut Fixture) -> Case {
     // A preparation released after an erase writes nothing, and a late W1 bind erases the input.
     let db = account.client.account_db()?;
     let stale = gate(db)?;
-    db.advance_erasure_generation_for_test()?;
+    crate::bus::push_receiver::erase_support::erase_through_retention(db)?;
     let calls = Cell::new(0_u32);
     let released = stale.effect(db, S, || {
         calls.set(1);

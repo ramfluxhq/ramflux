@@ -980,3 +980,65 @@ fn hold_keeps_quarantined(client: &RamfluxClient) -> Result<(), SdkError> {
     assert_eq!(disposition.as_deref(), Some("quarantined"));
     Ok(())
 }
+
+#[test]
+fn surface_admit_requires_config_and_material() -> Result<(), SdkError> {
+    let _hang = hang_guard();
+    let fixture = Fixture::new()?;
+    let config = session_config(&fixture.client)?;
+    let surface = envelope("surface-env");
+    stage(&fixture.client, SURFACE_SEQ)?;
+    queue_surface(&fixture.client, &fixture.peer)?;
+    let pre = snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?;
+    assert!(pre.response);
+    assert!(!pre.outbox);
+    assert_eq!(pre.work, 1);
+    assert_eq!(pre.disposition.as_deref(), Some("staged"));
+
+    assert_integrity(
+        gate(fixture.client.account_db()?)?.admit(
+            fixture.client.account_db()?,
+            req(
+                &fixture.client,
+                SURFACE_SEQ,
+                SURFACE_KEY,
+                surface.clone(),
+                ReplyKind::Surface,
+                Some(SURFACE_RESPONSE),
+                Some(MESSAGE),
+                None,
+                Some(live_material()),
+            ),
+        ),
+        "reply outbox surface requires session config",
+    );
+    assert_eq!(
+        snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?,
+        pre,
+        "config None leaves response and W0 unchanged"
+    );
+
+    assert_integrity(
+        gate(fixture.client.account_db()?)?.admit(
+            fixture.client.account_db()?,
+            req(
+                &fixture.client,
+                SURFACE_SEQ,
+                SURFACE_KEY,
+                surface,
+                ReplyKind::Surface,
+                Some(SURFACE_RESPONSE),
+                Some(MESSAGE),
+                Some(&config),
+                None,
+            ),
+        ),
+        "reply outbox surface requires send material",
+    );
+    assert_eq!(
+        snap(&fixture.client, SURFACE_KEY, SURFACE_SEQ)?,
+        pre,
+        "material None leaves response and W0 unchanged"
+    );
+    Ok(())
+}

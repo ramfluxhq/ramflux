@@ -21,6 +21,8 @@ pub(crate) mod apply_w1;
 mod apply_w1_tests;
 pub(crate) mod compat;
 #[cfg(test)]
+pub(crate) mod erase_support;
+#[cfg(test)]
 mod guard_tests;
 pub(crate) mod keepalive;
 #[cfg(test)]

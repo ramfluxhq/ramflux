@@ -8,13 +8,34 @@ impl AccountDb {
     /// # Errors
     /// Returns SQLite or journal serialization errors.
     pub fn expire_inbox_holds(&self, at: i64) -> Result<(), StorageError> {
+        self.expire_inbox_holds_inner(at, true)
+    }
+
+    /// Non-ledger expiry: legacy hold release, retry dead-letter (skipping keys that
+    /// still have ledger admission work), dead-letter GC, unrouted trim, legacy cleanup
+    /// and policy cleanup. Ledger-owned retry keys are left untouched here.
+    ///
+    /// `trim_expired_unrouted` still calls `try_settle_admission` unfenced for expired
+    /// unrouted rows whose keys the fenced pass did not cover (another target or
+    /// incarnation, or a receipt that is not yet due). CARRY: fence that settle.
+    /// # Errors
+    /// Returns SQLite or journal serialization errors.
+    pub fn expire_inbox_holds_non_ledger(&self, at: i64) -> Result<(), StorageError> {
+        self.expire_inbox_holds_inner(at, false)
+    }
+
+    fn expire_inbox_holds_inner(&self, at: i64, settle_ledger: bool) -> Result<(), StorageError> {
         self.write_transaction(|| {
             self.release_expired_legacy_inbox(at)?;
             let mut q=self.connection.prepare("SELECT r.envelope_key,r.entry_json FROM runtime_inbox_retry r JOIN runtime_inbox_policy p USING(envelope_key) WHERE p.expires_at<=?1 AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind='inbox/legacy-held/'||p.envelope_key)")?;
             let rows=q.query_map(params![at],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             drop(q);
             for (key,entry) in rows {
-                if self.settle_admission(&key, crate::ReceiveFailureReason::HeldExpired, at)? {
+                if settle_ledger {
+                    if self.settle_admission(&key, crate::ReceiveFailureReason::HeldExpired, at)? {
+                        continue;
+                    }
+                } else if self.has_admission_work(&key)? {
                     continue;
                 }
                 if self.has_staged_only_admission(&key)? {

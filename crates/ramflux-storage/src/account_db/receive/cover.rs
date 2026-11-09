@@ -310,6 +310,23 @@ impl ReceiveTransaction<'_> {
         Ok(())
     }
 
+    /// Admission key of the staged work row for `sequence`, if any.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn work_admission_key(&self, sequence: u64) -> Result<Option<String>, StorageError> {
+        Ok(self
+            .db
+            .connection
+            .query_row(
+                "SELECT admission_key FROM gateway_receive_work
+                 WHERE target_delivery_id=?1 AND incarnation_id=?2 AND inbox_seq=?3",
+                params![self.target, self.incarnation, sequence.to_be_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Deletes work and receipt so the reserved slot is released. Drops retry and unrouted
     /// rows for that admission key only when no other live work uses it (P07 helper).
     pub(crate) fn cleanup_settled(&self, sequence: u64) -> Result<(), StorageError> {

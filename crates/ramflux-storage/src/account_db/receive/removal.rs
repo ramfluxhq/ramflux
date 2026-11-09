@@ -143,12 +143,21 @@ impl ReceiveTransaction<'_> {
     /// # Errors
     /// Returns settle or SQL errors.
     pub fn expire_holds(&self, at: i64) -> Result<Vec<u64>, StorageError> {
+        Ok(self.expire_holds_keyed(at)?.into_iter().map(|(sequence, _)| sequence).collect())
+    }
+
+    /// Same as [`Self::expire_holds`], also returning each settled sequence's admission key so
+    /// the caller can prune per-key terminal state in this transaction.
+    ///
+    /// # Errors
+    /// Returns settle or SQL errors.
+    pub fn expire_holds_keyed(&self, at: i64) -> Result<Vec<(u64, String)>, StorageError> {
         self.require_writer()?;
         let due = self.due_failure_holds(at)?;
         let mut settled = Vec::new();
-        for sequence in due {
+        for (sequence, key) in due {
             match self.settle_failure(sequence, ReceiveFailureReason::HeldExpired, at)? {
-                ReceiveSettleResult::Settled => settled.push(sequence),
+                ReceiveSettleResult::Settled => settled.push((sequence, key)),
                 ReceiveSettleResult::Paused => {
                     return Err(StorageError::Integrity("hold expiry coverage paused"));
                 }
@@ -176,9 +185,9 @@ impl ReceiveTransaction<'_> {
         }
     }
 
-    fn due_failure_holds(&self, at: i64) -> Result<Vec<u64>, StorageError> {
+    fn due_failure_holds(&self, at: i64) -> Result<Vec<(u64, String)>, StorageError> {
         let sql = format!(
-            "SELECT w.inbox_seq FROM gateway_receive_work w
+            "SELECT w.inbox_seq,w.admission_key FROM gateway_receive_work w
              JOIN gateway_receive_receipt r USING(target_delivery_id,incarnation_id,inbox_seq)
              LEFT JOIN runtime_inbox_policy p ON p.envelope_key=w.admission_key
              WHERE w.target_delivery_id=?1 AND w.incarnation_id=?2
@@ -188,17 +197,17 @@ impl ReceiveTransaction<'_> {
         );
         let mut query = self.db.connection.prepare(&sql)?;
         let rows = query.query_map(params![self.target, self.incarnation, at], |row| {
-            row.get::<_, Vec<u8>>(0)
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let bytes = row?;
+            let (bytes, key) = row?;
             let seq = u64::from_be_bytes(
                 bytes
                     .try_into()
                     .map_err(|_| StorageError::Integrity("receive sequence encoding"))?,
             );
-            out.push(seq);
+            out.push((seq, key));
         }
         Ok(out)
     }
@@ -329,6 +338,10 @@ impl AccountDb {
             |row| row.get(0),
         )?;
         Ok(any && self.admission_work(key, true)?.is_empty())
+    }
+
+    pub(crate) fn has_admission_work(&self, key: &str) -> Result<bool, StorageError> {
+        Ok(!self.admission_work(key, false)?.is_empty())
     }
 
     fn admission_work(

@@ -9,12 +9,17 @@ use crate::bus::account_runtime::lifecycle_fence;
 use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::PreparedSource;
+use crate::bus::sync_driver::source::failure::SourceFailure;
 use crate::bus::sync_driver::source::hold::{HoldDisposition, SourceHold};
+use crate::client::application_outbox::{Admit, AdmitRequest, ApplicationOutbox};
+use crate::client::inbox_failure::{deterministic, verified_failure_policy, wire_signature_error};
 use crate::client::legacy_w1::LegacyW1;
+use crate::client::reply_outbox::{MARKER, ReplyOutbox};
 use crate::prelude::*;
 use ramflux_storage::{
-    AccountDb, ProjectionStore, ReceiveCoverResult, ReceiveExpectation, ReceiveGap, ReceiveStage,
-    ReceiveStageResult, ReceiveTransaction, StorageError,
+    AccountDb, ProjectionStore, ReceiveCoverResult, ReceiveExpectation, ReceiveFailure,
+    ReceiveFailureKind, ReceiveGap, ReceiveStage, ReceiveStageResult, ReceiveTransaction,
+    StorageError,
 };
 
 /// Bounded redrive of `LegacyBindingChanged` before a typed give-up.
@@ -22,6 +27,7 @@ const BINDING_ATTEMPTS: u32 = 3;
 const BINDING_GIVE_UP: &str = "legacy binding changed after 3 attempts";
 const ROUTED_REFUSED: &str = "receive ledger refuses live routed apply";
 const COVERED_BELOW: &str = "receive page covered below sequence";
+const NOT_YET_WIRED: &str = "NotYetWired";
 
 /// True when `target` has a receive-epoch row. Missing table or row is the live unactivated path.
 pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> {
@@ -99,7 +105,13 @@ async fn apply_once(
         return Ok(());
     }
     let local_device = account.gateway_config.device_id.clone();
-    let kind = classify(account, entry, source).await?;
+    let kind = match classify(account, entry, source).await {
+        Ok(kind) => kind,
+        Err(error) => match failure_of(&error, entry)? {
+            Some((kind, code)) => Kind::PolicyFailure(kind, code),
+            None => return Err(error),
+        },
+    };
     #[cfg(test)]
     after_classify(account.client.account_db()?);
     match kind {
@@ -107,14 +119,18 @@ async fn apply_once(
         Kind::OwnCopy(manifest) => {
             let message = entry.envelope.envelope_id.clone();
             let client = &account.client;
+            let key = client.inbox_admission_key(entry)?;
             run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 client.apply_own_copy_w1_in(tx, entry, &manifest, expected, sequence, &message)?;
+                project_if_committed(tx, client, entry, sequence, expected)?;
+                ReplyOutbox::prune_marker_in(tx, &key)?;
                 Ok(false)
             })?;
             Ok(())
         }
         Kind::LegacyDm { conversation } => {
             let client = &account.client;
+            let key = client.inbox_admission_key(entry)?;
             run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 client.apply_legacy_success_w1_in(
                     tx,
@@ -124,12 +140,15 @@ async fn apply_once(
                     expected,
                     handle_generation(),
                 )?;
+                project_if_committed(tx, client, entry, sequence, expected)?;
+                ReplyOutbox::prune_marker_in(tx, &key)?;
                 Ok(false)
             })?;
             Ok(())
         }
         Kind::LegacyA2i => {
             let client = &account.client;
+            let key = client.inbox_admission_key(entry)?;
             run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 let held = client.apply_legacy_a2i_w1_in(
                     tx,
@@ -139,12 +158,60 @@ async fn apply_once(
                     handle_generation(),
                 )?;
                 cover_if_held(tx, sequence, held, &[])?;
+                if !held {
+                    ReplyOutbox::prune_marker_in(tx, &key)?;
+                }
                 Ok(held)
             })?;
             Ok(())
         }
         Kind::LegacyHold => hold_unrouted(account, turn, handle_generation, entry, sequence),
+        Kind::PolicyFailure(kind, code) => {
+            admit_failure(account, turn, handle_generation, entry, sequence, (kind, code))
+        }
+        Kind::Projection => project_application(account, turn, handle_generation, entry, sequence),
+        Kind::TerminalReply => {
+            settle_reply_terminal(account, turn, handle_generation, entry, sequence)
+        }
     }
+}
+
+fn admit_failure(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+    (kind, error_code): (ReceiveFailureKind, &'static str),
+) -> Result<(), SdkError> {
+    let key = account.client.inbox_admission_key(entry)?;
+    let json = serde_json::to_vec(entry)?;
+    let at = now_unix_timestamp();
+    // The verified sender policy, exactly as live retry admission builds it.
+    let policy =
+        verified_failure_policy(&account.client, &account.gateway_config.device_id, entry, at)?;
+    run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, expected| {
+        let _ = expected;
+        match SourceFailure::admit_in(
+            tx,
+            ReceiveFailure {
+                sequence,
+                admission_key: &key,
+                entry: &json,
+                kind,
+                error_code,
+                at,
+                policy: policy.policy(),
+            },
+        )? {
+            ramflux_storage::ReceiveFailureResult::Held => {}
+            ramflux_storage::ReceiveFailureResult::Rejected => {
+                ReplyOutbox::prune_marker_in(tx, &key)?;
+            }
+        }
+        Ok(true)
+    })?;
+    Ok(())
 }
 
 fn hold_unrouted(
@@ -179,6 +246,9 @@ enum Kind {
     LegacyDm { conversation: String },
     LegacyA2i,
     LegacyHold,
+    PolicyFailure(ReceiveFailureKind, &'static str),
+    Projection,
+    TerminalReply,
 }
 
 async fn classify(
@@ -191,7 +261,11 @@ async fn classify(
     }
     if let Some(root) = account.client.own_device_receive_manifest_request(entry)? {
         #[cfg(test)]
-        cross_await().await;
+        manifest_await().await;
+        #[cfg(test)]
+        if skip_manifest_fetch() {
+            return Ok(Kind::LegacyHold);
+        }
         let manifest = account
             .client
             .cache_verified_device_manifest(
@@ -201,6 +275,30 @@ async fn classify(
             )
             .await?;
         return Ok(Kind::OwnCopy(Box::new(manifest)));
+    }
+    #[cfg(test)]
+    if take_manifest_wait() {
+        manifest_await().await;
+        return Ok(Kind::LegacyHold);
+    }
+    #[cfg(test)]
+    if let Some(error) = take_classify_error() {
+        return Err(error);
+    }
+    #[cfg(test)]
+    if take_own_copy() {
+        return Ok(Kind::OwnCopy(Box::new(dummy_own_copy_manifest())));
+    }
+    #[cfg(test)]
+    if take_projection() {
+        return Ok(Kind::Projection);
+    }
+    #[cfg(test)]
+    if take_terminal_reply() {
+        return Ok(Kind::TerminalReply);
+    }
+    if let Some(kind) = settled_routed_kind(account, entry)? {
+        return Ok(kind);
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
         return Ok(Kind::Routed);
@@ -229,6 +327,62 @@ async fn classify(
     Ok(Kind::LegacyHold)
 }
 
+/// An authenticated entry that an earlier routed commit already settled. A transferred
+/// reply marker ranks above a pending projection: W0 then only needs its terminal cover
+/// (the projection already transferred with the reply). A committed receipt without a
+/// marker means only the application projection is still owed. Unauthenticated entries
+/// and key-derivation failures other than storage never match; storage errors propagate.
+fn settled_routed_kind(
+    account: &LocalBusAccountState,
+    entry: &GatewayInboxEntry,
+) -> Result<Option<Kind>, SdkError> {
+    let auth_key = match account.client.authenticated_committed_key(
+        crate::client::identity_authority::HeadUse::NewAuthorization,
+        entry,
+    ) {
+        Ok(key) => key,
+        Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
+        Err(_) => return Ok(None),
+    };
+    let db = account.client.account_db()?;
+    if db.actor_state_exists(&format!("{MARKER}{auth_key}"))? {
+        return Ok(Some(Kind::TerminalReply));
+    }
+    if db.load_actor_state::<crate::client::routed::Committed>(&auth_key)?.is_some() {
+        return Ok(Some(Kind::Projection));
+    }
+    Ok(None)
+}
+
+/// Maps a classification error to a failure-policy admission. Shares live
+/// `quarantine_failure`'s wire-signature, `deterministic()` and oversized-retry
+/// mapping, and differs in three ways: this adapter propagates `InboundRejected`
+/// (live dead-letters it as `routing_rejected`); it has no `routed_seen_marker`
+/// short-circuit; it defers only `InboundPending` (live defers every
+/// non-deterministic error). Local state refusals and everything else keep W0
+/// staged and propagate.
+fn failure_of(
+    error: &SdkError,
+    entry: &GatewayInboxEntry,
+) -> Result<Option<(ReceiveFailureKind, &'static str)>, SdkError> {
+    if matches!(error, SdkError::InboundRejected(_)) {
+        return Ok(None);
+    }
+    // Immutable malformed signature bytes cannot become valid after a directory refresh.
+    let wire = wire_signature_error(entry);
+    let error = wire.as_ref().unwrap_or(error);
+    if let Some(code) = deterministic(error) {
+        return Ok(Some((ReceiveFailureKind::Deterministic, code)));
+    }
+    if crate::bus::sync_driver::inbound_failure_kind(error) == "InboundPending" {
+        if serde_json::to_vec(entry)?.len() > 1024 * 1024 {
+            return Ok(Some((ReceiveFailureKind::Deterministic, "oversized_retry")));
+        }
+        return Ok(Some((ReceiveFailureKind::Retryable, "inbound_pending")));
+    }
+    Ok(None)
+}
+
 /// Reconcile the single-entry page. `NeedStage` writes W0 using the cursor returned
 /// after any gap-prefix cover. `Covered`/`AlreadyCovered` with C >= seq skip W1.
 /// A cover that leaves C behind seq is a plan bug.
@@ -252,12 +406,106 @@ fn admit_open(
         {
             Err(SdkError::Storage(StorageError::Integrity(COVERED_BELOW)))
         }
+        ApplyOutcome::NeedPoint { seq, cursor } => {
+            turn.cursor = cursor;
+            fetch_point(account, turn, generation, seq)?;
+            Ok(false)
+        }
         ApplyOutcome::Covered { .. }
         | ApplyOutcome::AlreadyCovered { .. }
         | ApplyOutcome::NeedFetch { .. }
-        | ApplyOutcome::NeedPoint { .. }
         | ApplyOutcome::Paused { .. } => Ok(false),
     }
+}
+
+/// A point the router could not stage needs a real `FetchEntry` reply (Entry/TooLarge/Gone).
+/// That fetch is not wired until P24b2, and `reconcile_entry` never yields `NeedPoint`
+/// while `oversize_next` is `None`, so this refuses rather than invent a loss or a
+/// `retain_until`. No W0 terminal path exists here until the fetch lands.
+fn fetch_point(
+    _account: &LocalBusAccountState,
+    _turn: &mut ReceiveTurn,
+    _generation: u64,
+    seq: u64,
+) -> Result<(), SdkError> {
+    Err(SdkError::LocalBus(format!("{NOT_YET_WIRED}: fetch point {seq}")))
+}
+
+fn project_application(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let client = &account.client;
+    // Only an authenticated admission key may key the outbox: an unverified-hash key never
+    // reaches `ApplicationOutbox` (and a derivation failure is an error, not a skip).
+    let key = projection_key(client, entry)?;
+    run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
+        project_with_key(tx, client, entry, sequence, expected, &key)?;
+        Ok(false)
+    })?;
+    Ok(())
+}
+
+pub(super) fn project_if_committed(
+    tx: &ReceiveTransaction<'_>,
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+    expected: ReceiveExpectation<'_>,
+) -> Result<(), SdkError> {
+    // Own-copy and legacy-DM success: a missing authenticated identity means
+    // nothing is owed. Storage errors still propagate. `project_application`
+    // (the Kind::Projection arm) keeps failing on the same derivation error.
+    let auth_key = match projection_key(client, entry) {
+        Ok(key) => key,
+        Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
+        Err(_) => return Ok(()),
+    };
+    if tx.account().load_actor_state::<crate::client::routed::Committed>(&auth_key)?.is_none() {
+        return Ok(());
+    }
+    project_with_key(tx, client, entry, sequence, expected, &auth_key)
+}
+
+/// The authenticated admission key; derivation failure is an error, never a fallback key.
+fn projection_key(client: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
+    #[cfg(test)]
+    if let Some(key) = PROJECTION_KEY.with(std::cell::RefCell::take) {
+        return Ok(key);
+    }
+    client.authenticated_committed_key(
+        crate::client::identity_authority::HeadUse::NewAuthorization,
+        entry,
+    )
+}
+
+fn project_with_key(
+    tx: &ReceiveTransaction<'_>,
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+    expected: ReceiveExpectation<'_>,
+    auth_key: &str,
+) -> Result<(), SdkError> {
+    let gate = ApplicationOutbox { expected, generation: expected.generation };
+    match gate.admit_in(tx, &AdmitRequest { sequence, auth_key, entry, client })? {
+        Admit::Admitted | Admit::Duplicate | Admit::OutboxFull => Ok(()),
+    }
+}
+
+fn settle_reply_terminal(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let key = account.client.inbox_admission_key(entry)?;
+    let gate = ReplyOutbox { expected: turn.expected(), generation: handle_generation() };
+    gate.settle_terminal(account.client.account_db()?, sequence, &key)
 }
 
 fn stage_open(
@@ -325,6 +573,11 @@ fn run_fenced(
     let fenced =
         lifecycle_fence::commit(db, handle_generation, expected, |tx| match write(tx, expected) {
             Ok(held) => {
+                #[cfg(test)]
+                if let Some(text) = BEFORE_COMMIT.with(std::cell::Cell::take) {
+                    outcome = Some(Err(SdkError::Storage(StorageError::Integrity(text))));
+                    return Err(StorageError::Integrity(text));
+                }
                 outcome = Some(Ok(held));
                 Ok(())
             }
@@ -363,6 +616,14 @@ fn reconcile_entry(
     generation: u64,
     sequence: u64,
 ) -> Result<ApplyOutcome, SdkError> {
+    #[cfg(test)]
+    if FORCE_COVERED_BELOW.with(std::cell::Cell::take) {
+        return Ok(ApplyOutcome::Covered { cursor: sequence.saturating_sub(1) });
+    }
+    #[cfg(test)]
+    if FORCE_NEED_POINT.with(std::cell::Cell::take) {
+        return Ok(ApplyOutcome::NeedPoint { seq: sequence, cursor: turn.cursor });
+    }
     let entries = [sequence];
     let covered = sequence.max(turn.cursor);
     let page = apply::ApplyPage {
@@ -413,6 +674,19 @@ thread_local! {
     static AFTER_CLASSIFY: std::cell::Cell<Option<fn(&AccountDb)>> = const { std::cell::Cell::new(None) };
     static BINDING_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static LEGACY_HOLD: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    static FORCE_COVERED_BELOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_NEED_POINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PROJECTION_KEY: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    static CLASSIFY_ERROR: std::cell::RefCell<Option<SdkError>> =
+        const { std::cell::RefCell::new(None) };
+    static PROJECTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static OWN_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TERMINAL_REPLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MANIFEST_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SKIP_FETCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MANIFEST_AWAIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static BEFORE_COMMIT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -470,6 +744,130 @@ pub(crate) const fn binding_give_up() -> &'static str {
 #[cfg(test)]
 pub(crate) const fn routed_refused() -> &'static str {
     ROUTED_REFUSED
+}
+
+#[cfg(test)]
+pub(crate) const fn covered_below() -> &'static str {
+    COVERED_BELOW
+}
+
+#[cfg(test)]
+pub(crate) fn force_covered_below() {
+    FORCE_COVERED_BELOW.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn force_need_point() {
+    FORCE_NEED_POINT.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn queue_projection() {
+    PROJECTION.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+fn take_projection() -> bool {
+    PROJECTION.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+pub(crate) fn queue_terminal_reply() {
+    TERMINAL_REPLY.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+fn take_terminal_reply() -> bool {
+    TERMINAL_REPLY.with(std::cell::Cell::take)
+}
+
+/// Injects the classification error that production `failure_of` then maps for real.
+/// `Exhausted` injects `ReplayMismatch`, which classifies as Deterministic
+/// `replay_mismatch`; no test drives a true exhausted-retry policy through this hook.
+#[cfg(test)]
+pub(crate) fn queue_policy_kind(kind: ReceiveFailureKind) {
+    let error = match kind {
+        ReceiveFailureKind::Retryable => SdkError::InboundPending("directory miss".into()),
+        ReceiveFailureKind::Deterministic => {
+            SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed)
+        }
+        ReceiveFailureKind::Exhausted => SdkError::ReplayMismatch,
+    };
+    CLASSIFY_ERROR.with(|cell| cell.replace(Some(error)));
+}
+
+#[cfg(test)]
+pub(crate) fn queue_own_copy() {
+    OWN_COPY.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+fn take_own_copy() -> bool {
+    OWN_COPY.with(std::cell::Cell::take)
+}
+
+/// Dummy directory material for the own-copy classify hook. `commit_own_copy_from_entry`
+/// returns `Ok(false)` on the dummy payload before reading this value.
+#[cfg(test)]
+fn dummy_own_copy_manifest() -> crate::SdkDeviceManifestResponse {
+    crate::SdkDeviceManifestResponse {
+        custody: None,
+        signed_device_set: None,
+        principal_id: String::new(),
+        principal_commitment: String::new(),
+        root_public_key: String::new(),
+        devices: Vec::new(),
+    }
+}
+
+/// Stands in for the identity authority's answer only; admission itself is the real path.
+#[cfg(test)]
+pub(crate) fn set_projection_key(key: &str) {
+    PROJECTION_KEY.with(|cell| cell.replace(Some(key.to_owned())));
+}
+
+#[cfg(test)]
+fn take_classify_error() -> Option<SdkError> {
+    CLASSIFY_ERROR.with(std::cell::RefCell::take)
+}
+
+#[cfg(test)]
+pub(crate) fn queue_manifest_wait() {
+    MANIFEST_WAIT.with(|cell| cell.set(true));
+    SKIP_FETCH.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+fn take_manifest_wait() -> bool {
+    MANIFEST_WAIT.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+fn skip_manifest_fetch() -> bool {
+    SKIP_FETCH.with(std::cell::Cell::take)
+}
+
+#[cfg(test)]
+async fn manifest_await() {
+    tokio::task::yield_now().await;
+    if let Some(hook) = MANIFEST_AWAIT.with(std::cell::Cell::take) {
+        hook();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_manifest_await(hook: fn()) {
+    MANIFEST_AWAIT.with(|cell| cell.set(Some(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_commit(text: &'static str) {
+    BEFORE_COMMIT.with(|cell| cell.set(Some(text)));
+}
+
+#[cfg(test)]
+pub(crate) const fn failure_before_commit() -> &'static str {
+    "source failure before-commit"
 }
 
 #[cfg(test)]

@@ -147,6 +147,17 @@ impl ReplyOutbox<'_> {
         transfer(tx, request)
     }
 
+    /// Prunes the transfer marker for `auth_key` on the caller's open receive transaction.
+    /// Every W0 terminal path calls this in the same transaction as its terminal settle.
+    pub(crate) fn prune_marker_in(
+        tx: &ReceiveTransaction<'_>,
+        auth_key: &str,
+    ) -> Result<(), StorageError> {
+        tx.require_writer()?;
+        tx.account().remove_actor_state(&marker_key(auth_key))?;
+        Ok(())
+    }
+
     /// W0 terminal cover and marker prune in one writer transaction.
     pub(crate) fn settle_terminal(
         &self,
@@ -291,8 +302,7 @@ fn prune_on_terminal(
     if covered != ReceiveCoverResult::Covered {
         return Err(StorageError::Integrity("reply outbox terminal cover paused"));
     }
-    tx.account().remove_actor_state(&marker_key(auth_key))?;
-    Ok(())
+    ReplyOutbox::prune_marker_in(tx, auth_key)
 }
 
 fn before_commit_fault() -> Result<(), StorageError> {

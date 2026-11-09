@@ -38,6 +38,13 @@ pub(crate) fn bind_retry_turn(entry: &mut ReceiveEntry, pass_turn: Option<&Recei
         entry.turn = pass_turn.cloned();
     }
 }
+
+/// `pass` binds every leftover retry with the prepare-time turn before `apply_entry`.
+pub(crate) fn bind_retry_turns(retries: &mut [ReceiveEntry], pass_turn: Option<&ReceiveTurn>) {
+    for entry in retries {
+        bind_retry_turn(entry, pass_turn);
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiveTrigger {
     Tick,
@@ -274,8 +281,8 @@ async fn catch_up(
     }
     let mut retries: Vec<_> = retries.into_values().collect();
     retries.sort_by_key(|entry| entry.entry.inbox_seq);
-    for mut entry in retries {
-        bind_retry_turn(&mut entry, turn.as_ref());
+    bind_retry_turns(&mut retries, turn.as_ref());
+    for entry in retries {
         let (accepted, next) =
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;

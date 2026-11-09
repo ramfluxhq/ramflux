@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod commands;
 mod connection;
+#[cfg(test)]
+pub(crate) use connection::settle_retained;
 mod directory;
 pub(super) mod fetches;
 pub(crate) mod head_refresh;

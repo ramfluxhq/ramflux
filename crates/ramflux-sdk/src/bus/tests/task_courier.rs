@@ -910,6 +910,9 @@ mod receive_w0;
 #[path = "lifecycle_fence.rs"]
 mod lifecycle_fence;
 
+#[path = "receive_settle_arm.rs"]
+mod receive_settle_arm;
+
 #[path = "receive_ws.rs"]
 mod receive_ws;
 
@@ -917,8 +920,6 @@ mod receive_ws;
 mod receive_hold;
 #[path = "receive_incarnation.rs"]
 mod receive_incarnation;
-#[path = "receive_settle_arm.rs"]
-mod receive_settle_arm;
 
 #[path = "receive_failure.rs"]
 mod receive_failure;
