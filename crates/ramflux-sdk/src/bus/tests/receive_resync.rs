@@ -334,15 +334,15 @@ async fn recover(
 ) -> Case<BTreeSet<String>> {
     let mut acked = BTreeSet::new();
     respond_page(io, entries, 0, 64)?;
-    let completion = tokio::time::timeout(
-        Duration::from_secs(45),
-        handle.test_wait_receive(ReceiveTrigger::Resync),
-    );
+    // Subscriber and no-subscriber overflow both run receive::run's Resync pass.
+    // (Resync, true) is recorded only when that pass returns Ok; wait for it, and
+    // panic after 10s of silence rather than a total-time cap on the work.
+    let completion = handle.test_wait_receive(ReceiveTrigger::Resync);
     tokio::pin!(completion);
     loop {
         tokio::select! {
-            frame = io.output.recv() => {
-                match frame.ok_or("session output closed")? {
+            result = tokio::time::timeout(Duration::from_secs(10), io.output.recv()) => {
+                match recovery_frame(result, handle, acked.len())? {
                     GatewayClientFrame::Resume { resume } => respond_page(io, entries, resume.after_inbox_seq, resume.limit)?,
                     GatewayClientFrame::Ack { ack } => {
                         let index = entries.iter().position(|entry| entry.envelope.envelope_id == ack.envelope_id).ok_or("unexpected ACK")?;
@@ -371,13 +371,29 @@ async fn recover(
                     other => return Err(format!("unexpected recovery frame {}", serde_json::to_value(other)?["frame_type"]).into()),
                 }
             }
-            result = &mut completion => {
-                assert!(result.is_ok(), "timed out awaiting Resync receive completion event");
-                break;
-            }
+            () = &mut completion => break,
         }
     }
     Ok(acked)
+}
+
+fn recovery_frame(
+    result: Result<Option<GatewayClientFrame>, tokio::time::error::Elapsed>,
+    handle: &ConnectionHandle,
+    acked: usize,
+) -> Case<GatewayClientFrame> {
+    assert!(
+        result.is_ok(),
+        "timed out awaiting recovery frame or Resync receive completion; acked={} trace={:?} profile={:?}",
+        acked,
+        handle.test_receive_trace(),
+        handle.test_receive_profile()
+    );
+    match result {
+        Ok(Some(frame)) => Ok(frame),
+        Ok(None) => Err("session output closed".into()),
+        Err(error) => Err(Box::new(error)),
+    }
 }
 async fn wait_until(mut predicate: impl FnMut() -> bool) -> Case {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
