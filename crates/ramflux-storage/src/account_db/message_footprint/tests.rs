@@ -265,7 +265,7 @@ fn assert_erased(db: &AccountDb, forbidden: &[String]) -> Result<(), StorageErro
         };
         let quoted = table.replace('"', "\"\"");
         let mut q = raw.prepare(&format!("SELECT * FROM \"{quoted}\"{filter}"))?;
-        let names = q.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
+        let names = q.column_names().map(ToString::to_string).collect::<Vec<_>>();
         let rows = q
             .query_map([], |r| {
                 (0..names.len())

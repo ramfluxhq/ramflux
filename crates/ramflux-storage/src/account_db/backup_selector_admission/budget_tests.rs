@@ -191,21 +191,21 @@ fn add_candidates(live: &AccountDb, m: usize) -> TestResult {
     Ok(())
 }
 
-fn calibrate(target: &BackupDatabase, n: i64, m: usize) -> TestResult {
+fn calibrate(target: &mut BackupDatabase, n: i64, m: usize) -> TestResult {
     // Known scan on the exact worker connection proves the grouped meter is live.
-    let (calibration, calibration_steps) = target.measure_restore_vm_steps(|| {
-        target.db.query_row("SELECT sum(length(copy_id)) FROM main.message_copy_binding", [], |r| {
+    let (calibration, calibration_steps) = target.measure_restore_vm_steps(|db| {
+        db.query_row("SELECT sum(length(copy_id)) FROM main.message_copy_binding", [], |r| {
             r.get::<_, i64>(0)
         })
     });
     assert!(calibration? > 0 && calibration_steps > 0);
-    let (error, _) = target
-        .measure_restore_vm_steps(|| target.db.execute_batch("SELECT * FROM missing_meter_table"));
+    let (error, _) =
+        target.measure_restore_vm_steps(|db| db.execute_batch("SELECT * FROM missing_meter_table"));
     assert!(error.is_err());
     // A removed progress handler cannot touch this independent counter.
     // Positive, repeatable calibration after an error exercises handler reset.
-    let (_, repeated) = target.measure_restore_vm_steps(|| {
-        target.db.query_row("SELECT sum(length(copy_id)) FROM main.message_copy_binding", [], |r| {
+    let (_, repeated) = target.measure_restore_vm_steps(|db| {
+        db.query_row("SELECT sum(length(copy_id)) FROM main.message_copy_binding", [], |r| {
             r.get::<_, i64>(0)
         })
     });
@@ -217,7 +217,7 @@ fn calibrate(target: &BackupDatabase, n: i64, m: usize) -> TestResult {
 
 type Candidate = (String, String, String, String);
 fn measure_candidates(
-    target: &BackupDatabase,
+    target: &mut BackupDatabase,
     candidates: &[Candidate],
 ) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
     let mut measured = Vec::new();
@@ -264,15 +264,15 @@ fn measure_candidates(
         "DELETE FROM backup_selector_admission WHERE side='target' AND selector=?1",
         [&target_candidate.2],
     )?;
-    let (result, grouped) = target.measure_restore_vm_steps(|| -> Result<(), StorageError> {
+    let (result, grouped) = target.measure_restore_vm_steps(|db| -> Result<(), StorageError> {
         let (hash, message, selector, commitment) = &target_candidate;
-        graph::classify_owner(&target.db, "target", hash, message, selector, commitment)?;
-        graph::classify_selector(&target.db, "target", selector, commitment)?;
+        graph::classify_owner(db, "target", hash, message, selector, commitment)?;
+        graph::classify_selector(db, "target", selector, commitment)?;
         for (hash, message, selector, commitment) in candidates {
-            graph::classify_owner(&target.db, "incoming", hash, message, selector, commitment)?;
+            graph::classify_owner(db, "incoming", hash, message, selector, commitment)?;
         }
         for (_, _, selector, commitment) in candidates {
-            graph::classify_selector(&target.db, "incoming", selector, commitment)?;
+            graph::classify_selector(db, "incoming", selector, commitment)?;
         }
         Ok(())
     });

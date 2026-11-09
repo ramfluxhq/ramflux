@@ -12,7 +12,7 @@ struct ProgressReset<'a>(&'a AccountDb);
 impl Drop for ProgressReset<'_> {
     fn drop(&mut self) {
         let _ = self.0.connection.call(|connection| {
-            connection.progress_handler(0, None::<fn() -> bool>);
+            connection.progress_handler(0, None::<fn() -> bool>)?;
             Ok(())
         });
     }
@@ -37,7 +37,7 @@ impl AccountDb {
                     counter.fetch_add(1, Ordering::Relaxed);
                     false
                 }),
-            );
+            )?;
             Ok(())
         })?;
         let reset = ProgressReset(self);

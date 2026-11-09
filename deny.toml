@@ -30,6 +30,12 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
+# rusqlite 0.41 bundled-sqlcipher uses sqlcipher-src (SQLCipher amalgamation +
+# SQLite blessing + libtomcrypt WTFPL). MIT/BSD-3-Clause of that crate already
+# match the allow list; the two extra licenses are crate-scoped.
+exceptions = [
+    { crate = "sqlcipher-src", allow = ["blessing", "WTFPL"] },
+]
 
 [bans]
 multiple-versions = "allow"

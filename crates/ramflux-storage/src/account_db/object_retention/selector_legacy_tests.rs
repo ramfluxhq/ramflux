@@ -298,7 +298,7 @@ fn e19_legacy_delete_cut_before_commit() -> Result<(), StorageError> {
                     assert!(std::fs::write(&marker, b"legacy cleanup reached").is_ok());
                     std::process::abort();
                 }
-            }));
+            }))?;
             Ok(())
         })?;
         db.delete_direct_message("thread", "message", "local", "delete")?;

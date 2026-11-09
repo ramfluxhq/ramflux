@@ -58,7 +58,23 @@ impl AccountDb {
         ] {
             self.connection.execute_batch(&format!("INSERT OR IGNORE INTO runtime_inbox_policy SELECT envelope_key,CASE WHEN json_valid(CAST(entry_json AS TEXT)) THEN coalesce(json_extract(CAST(entry_json AS TEXT),'$.envelope.source_device_id'),envelope_key) ELSE envelope_key END,0,{time},{time}+30,{attempts},'none','',0,0 FROM {table} LIMIT 64;"))?;
         }
-        let changed=["principal_id","signing_public_key","x25519_identity_public"].iter().map(|f|format!("json_extract(CAST(t.state_json AS TEXT),'$.{f}') IS json_extract(CAST(NEW.state_json AS TEXT),'$.{f}')")).collect::<Vec<_>>().join(" AND ");
+        // SQLite 3.53 evaluates json_extract in WHEN even when the LIKE guard is false.
+        let json = |alias: &str| {
+            format!(
+                "CASE WHEN json_valid(CAST({alias} AS TEXT)) THEN CAST({alias} AS TEXT) ELSE '{{}}' END"
+            )
+        };
+        let changed = ["principal_id", "signing_public_key", "x25519_identity_public"]
+            .iter()
+            .map(|field| {
+                format!(
+                    "json_extract({},'$.{field}') IS json_extract({},'$.{field}')",
+                    json("t.state_json"),
+                    json("NEW.state_json")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
         for (action, timing, guard) in [
             (
                 "insert",

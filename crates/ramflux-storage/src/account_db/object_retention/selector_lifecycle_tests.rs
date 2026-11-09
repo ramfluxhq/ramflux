@@ -411,7 +411,7 @@ fn e1_message_delete_cut_before_commit_rolls_back() -> Result<(), StorageError> 
                     assert!(std::fs::write(&marker, b"captured").is_ok());
                     std::process::abort();
                 }
-            }));
+            }))?;
             Ok(())
         })?;
         db.delete_direct_message("thread", "m1", "local", "delete")?;
@@ -485,9 +485,9 @@ fn selector_projection_outbox_drain_budget() -> Result<(), StorageError> {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     false
                 }),
-            );
+            )?;
             let outcome = raw.execute_batch(super::selector_erasure::DRAIN);
-            raw.progress_handler(0, None::<fn() -> bool>);
+            raw.progress_handler(0, None::<fn() -> bool>)?;
             outcome?;
             Ok(steps.load(std::sync::atomic::Ordering::Relaxed))
         })?;

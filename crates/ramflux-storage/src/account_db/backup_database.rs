@@ -428,29 +428,28 @@ mod observation;
 #[cfg(test)]
 impl BackupDatabase {
     /// Measures only this restore worker's connection; reset also on error or unwind.
-    pub(crate) fn measure_restore_vm_steps<T>(&self, operation: impl FnOnce() -> T) -> (T, u64) {
+    pub(crate) fn measure_restore_vm_steps<T>(
+        &mut self,
+        operation: impl FnOnce(&rusqlite::Connection) -> T,
+    ) -> (T, u64) {
         use std::sync::{
             Arc,
             atomic::{AtomicU64, Ordering},
         };
-        struct Reset<'a>(&'a rusqlite::Connection);
-        impl Drop for Reset<'_> {
-            fn drop(&mut self) {
-                self.0.progress_handler(0, None::<fn() -> bool>);
-            }
-        }
         let steps = Arc::new(AtomicU64::new(0));
         let counter = steps.clone();
-        self.db.progress_handler(
+        let _ = self.db.progress_handler(
             1,
             Some(move || {
                 counter.fetch_add(1, Ordering::Relaxed);
                 false
             }),
         );
-        let reset = Reset(&self.db);
-        let result = operation();
-        drop(reset);
-        (result, steps.load(Ordering::Relaxed))
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&self.db)));
+        let _ = self.db.progress_handler(0, None::<fn() -> bool>);
+        match result {
+            Ok(value) => (value, steps.load(Ordering::Relaxed)),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 }

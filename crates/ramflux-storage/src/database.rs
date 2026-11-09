@@ -413,7 +413,7 @@ pub(crate) trait Parameters {
 
 fn owned(value: &dyn ToSql) -> Result<Value> {
     match value.to_sql()? {
-        ToSqlOutput::Borrowed(value) => Ok(value.into()),
+        ToSqlOutput::Borrowed(value) => Value::try_from(value).map_err(|_| Error::InvalidQuery),
         ToSqlOutput::Owned(value) => Ok(value),
         _ => Err(Error::InvalidQuery),
     }

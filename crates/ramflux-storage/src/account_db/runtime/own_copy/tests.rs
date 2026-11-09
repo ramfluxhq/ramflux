@@ -59,8 +59,8 @@ fn delivery_plans_search_indexes_and_one_copy_has_one_cleanup_step()
     db.connection.call(|connection| {
         connection.trace_v2(
             rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
-            Some(|event| trace(&event)),
-        );
+            Some(|event: rusqlite::trace::TraceEvent<'_>| trace(&event)),
+        )?;
         CLEANUPS.with(|count| count.set(0));
         Ok(())
     })?;
@@ -75,7 +75,10 @@ fn delivery_plans_search_indexes_and_one_copy_has_one_cleanup_step()
         &serde_json::json!({"expires_at":99_999}),
     )?;
     let steps = db.connection.call(|connection| {
-        connection.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+        connection.trace_v2(
+            rusqlite::trace::TraceEventCodes::empty(),
+            None::<fn(rusqlite::trace::TraceEvent<'_>)>,
+        )?;
         Ok(CLEANUPS.with(Cell::get))
     })?;
     println!("one copy at 18,000 rows: cleanup_steps={steps}");

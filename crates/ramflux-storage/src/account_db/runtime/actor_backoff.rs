@@ -6,6 +6,11 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::params;
 
+/// SQLite 3.53 `json_extract` errors on malformed input even inside
+/// `CASE WHEN json_valid`. Feed extract a validated document so missing
+/// or damaged retry metadata stays eligible (value 0), matching 0.37.
+const RETRY_JSON: &str = "CASE WHEN json_valid(CAST(retry.state_json AS TEXT)) THEN CAST(retry.state_json AS TEXT) ELSE '{}' END";
+
 impl AccountDb {
     /// Read eligible keys without letting backed-off rows occupy a page slot.
     ///
@@ -22,16 +27,14 @@ impl AccountDb {
     ) -> Result<Vec<String>, StorageError> {
         let end = super::control::namespace_end(prefix)?;
         let _backoff_end = super::control::namespace_end(backoff_prefix)?;
-        let mut query = self.connection.prepare(
+        let mut query = self.connection.prepare(&format!(
             "SELECT item.state_kind FROM runtime_actor_state item
              LEFT JOIN runtime_actor_state retry ON retry.state_kind=?3||item.state_kind
              WHERE item.state_kind>=?1 AND item.state_kind<?2
-             AND CASE WHEN json_valid(CAST(retry.state_json AS TEXT))
-                 THEN min(COALESCE(CAST(json_extract(CAST(retry.state_json AS TEXT),'$.next_at') AS INTEGER),0),
-                     COALESCE(CAST(json_extract(CAST(retry.state_json AS TEXT),'$.expires_at') AS INTEGER),0))
-                 ELSE 0 END<=?4
-             ORDER BY item.state_kind LIMIT ?5",
-        )?;
+             AND min(COALESCE(CAST(json_extract({RETRY_JSON},'$.next_at') AS INTEGER),0),
+                 COALESCE(CAST(json_extract({RETRY_JSON},'$.expires_at') AS INTEGER),0))<=?4
+             ORDER BY item.state_kind LIMIT ?5"
+        ))?;
         Ok(query
             .query_map(params![prefix, end, backoff_prefix, now, limit.min(4096)], |row| {
                 row.get(0)
@@ -52,15 +55,15 @@ impl AccountDb {
     ) -> Result<(), StorageError> {
         let end = super::control::namespace_end(backoff_prefix)?;
         self.connection.execute(
-            "DELETE FROM runtime_actor_state WHERE state_kind IN (
+            &format!(
+                "DELETE FROM runtime_actor_state WHERE state_kind IN (
                 SELECT retry.state_kind FROM runtime_actor_state retry
                 WHERE retry.state_kind>=?1 AND retry.state_kind<?2 AND (
                     NOT EXISTS(SELECT 1 FROM runtime_actor_state item
                         WHERE item.state_kind=substr(retry.state_kind,length(?1)+1))
-                    OR CASE WHEN json_valid(CAST(retry.state_json AS TEXT))
-                        THEN COALESCE(CAST(json_extract(CAST(retry.state_json AS TEXT),'$.expires_at') AS INTEGER),0)
-                        ELSE 0 END<=?3)
-                ORDER BY retry.state_kind LIMIT ?4)",
+                    OR COALESCE(CAST(json_extract({RETRY_JSON},'$.expires_at') AS INTEGER),0)<=?3)
+                ORDER BY retry.state_kind LIMIT ?4)"
+            ),
             params![backoff_prefix, end, now, limit.min(4096)],
         )?;
         Ok(())

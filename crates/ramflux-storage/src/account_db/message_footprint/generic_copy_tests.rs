@@ -177,7 +177,7 @@ fn scan_table(
 ) -> rusqlite::Result<()> {
     let quoted = table.replace('"', "\"\"");
     let mut rows = raw.prepare(&format!("SELECT * FROM \"{quoted}\""))?;
-    let names = rows.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
+    let names = rows.column_names().map(ToString::to_string).collect::<Vec<_>>();
     let values = rows
         .query_map([], |row| {
             (0..names.len())

@@ -175,7 +175,7 @@ pub(super) fn assert_erased(db: &Connection, forbidden: &[String], message: &str
             };
         let quoted = table.replace('"', "\"\"");
         let mut q = db.prepare(&format!("SELECT * FROM \"{quoted}\"{filter}"))?;
-        let names = q.column_names().iter().map(ToString::to_string).collect::<Vec<_>>();
+        let names = q.column_names().map(ToString::to_string).collect::<Vec<_>>();
         let mut rows = q.query([])?;
         while let Some(row) = rows.next()? {
             let source_table = names
