@@ -19,7 +19,7 @@ pub use store::RecoveryCeremony;
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
     accept_publication, account_exists, export_agent_credentials, failed_setup, failed_setup_error,
-    list_accounts, load_data_account, reconcile_incomplete_markers,
+    list_accounts, load_data_account, reconcile_incomplete_markers, reserve_pairing_account,
 };
 pub(crate) use store::{finish_recovery, pending_restore};
 pub use vault::{

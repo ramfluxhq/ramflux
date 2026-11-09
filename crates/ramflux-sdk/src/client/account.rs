@@ -112,28 +112,36 @@ impl RamfluxClient {
         local_account_id: &str,
         secret: &[u8],
     ) -> Result<(), SdkError> {
-        let born =
-            if crate::custody::account_exists(self.account_index()?.root(), local_account_id)? {
-                let account = crate::custody::load_data_account(
-                    self.account_index()?.root(),
-                    local_account_id,
-                    crate::custody::network_now()?,
-                )
-                .map_err(|error| match error {
-                    SdkError::Io(ref cause) if cause.kind() == std::io::ErrorKind::NotFound => {
-                        SdkError::NetworkingPending
+        let root = self.account_index()?.root().to_path_buf();
+        let born = if crate::custody::account_exists(&root, local_account_id)? {
+            match crate::custody::load_data_account(
+                &root,
+                local_account_id,
+                crate::custody::network_now()?,
+            ) {
+                Ok(account) => {
+                    if self.account_index()?.account(local_account_id)?.principal_commitment
+                        != account.record().body.account_anchor
+                    {
+                        return Err(SdkError::CustodySetupInvalid);
                     }
-                    error => error,
-                })?;
-                if self.account_index()?.account(local_account_id)?.principal_commitment
-                    != account.record().body.account_anchor
-                {
-                    return Err(SdkError::CustodySetupInvalid);
+                    Some(Box::new(account))
                 }
-                Some(Box::new(account))
-            } else {
-                None
-            };
+                Err(SdkError::Io(ref cause)) if cause.kind() == std::io::ErrorKind::NotFound => {
+                    if crate::custody::pairing::recipient::unadmitted_data_unlock(
+                        &root,
+                        local_account_id,
+                    )? {
+                        None
+                    } else {
+                        return Err(SdkError::NetworkingPending);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         // Custody validation comes first; key wrapping and vault access share writer ownership.
         let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
         let wrapped = self.account_index()?.load_wrapped_db_key(local_account_id)?;

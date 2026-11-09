@@ -4,13 +4,30 @@
 //! Ordinary unlocked account state using public native authority and independent node pins.
 use super::state::{LocalBusAccountState, LocalBusDaemonState};
 use crate::client::identity_authority::HeadUse;
+use crate::custody::pairing::local_credential::{LocalCredentialProvider, acquire_unlock};
 use crate::{
     AccountNetworkingReason, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
     LocalBusCreatedAccount, LocalBusCreatedAccountState, RamfluxClient, SdkError,
 };
 use ramflux_protocol::custody::CustodyRefusal;
+use ramflux_protocol::custody::pairing::local_dto::CredentialRequest;
 use std::{net::SocketAddr, path::PathBuf};
 use zeroize::Zeroizing;
+
+/// Annex E private provider then the ordinary native unlock path. Dispatch wiring is P16.
+#[allow(dead_code)]
+pub(crate) fn unlock_from_provider(
+    state: &mut LocalBusDaemonState,
+    id: &str,
+    expected: &CredentialRequest,
+    provider: &dyn LocalCredentialProvider,
+    home_node_id: Option<String>,
+) -> Result<LocalBusCreatedAccount, SdkError> {
+    let secret = acquire_unlock(expected, provider)?;
+    let passphrase = std::str::from_utf8(secret.as_bytes())
+        .map_err(|_| SdkError::PairingField("credential_utf8"))?;
+    unlock(state, id, Zeroizing::new(passphrase.to_owned()), home_node_id)
+}
 
 pub(super) fn unlock(
     state: &mut LocalBusDaemonState,
@@ -425,4 +442,46 @@ pub(super) fn record_networking_at(
     super::networking_events::record(account, &native, now)?;
     account.client.born_v3_account = Some(Box::new(native));
     Ok(())
+}
+
+#[cfg(test)]
+mod pairing_provider_unlock {
+    use super::*;
+    use crate::LocalBusConfig;
+    use crate::custody::pairing::local_credential::{CredentialOutcome, LocalCredentialProvider};
+    use ramflux_protocol::encode_base64url;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    struct Refuse;
+
+    impl LocalCredentialProvider for Refuse {
+        fn provide(&self, _: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
+            Ok(CredentialOutcome::Refused)
+        }
+    }
+
+    #[test]
+    fn provider_refusal_does_not_open_native_unlock() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let mut state = LocalBusDaemonState {
+            account_index: None,
+            nodes: crate::node::NodeStore::default(),
+            config: LocalBusConfig::new(root.path().join("bus.sock"), root.path()),
+            accounts: BTreeMap::new(),
+            active_account_id: None,
+            attended_accounts: BTreeSet::new(),
+            subscribers: BTreeMap::new(),
+        };
+        let expected = CredentialRequest {
+            local_account_id: "acct".into(),
+            reservation_id: encode_base64url([1_u8; 32]),
+            frontend_generation: 1,
+            action: "unlock".into(),
+        };
+        let Err(error) = unlock_from_provider(&mut state, "acct", &expected, &Refuse, None) else {
+            return Err("expected VaultUnavailable".into());
+        };
+        assert!(matches!(error, SdkError::PairingCode("VaultUnavailable")));
+        Ok(())
+    }
 }

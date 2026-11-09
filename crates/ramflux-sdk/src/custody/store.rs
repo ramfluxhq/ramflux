@@ -486,6 +486,14 @@ fn directory(root: &Path, id: &str) -> Result<PathBuf, SdkError> {
     valid_id(id)?;
     Ok(root.join("custody_accounts").join(id))
 }
+pub(crate) fn reserve_pairing_account(
+    root: &Path,
+    id: &str,
+    anchor: &str,
+) -> Result<PathBuf, SdkError> {
+    genesis::reserve_account(root, id, anchor)
+}
+
 pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
     // This query also guards legacy paths: do not impose new identifier rules on them.
     if valid_id(id).is_err() {
