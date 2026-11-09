@@ -147,16 +147,26 @@ thread_local! {
     static FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+struct FaultReset;
+#[cfg(test)]
+impl Drop for FaultReset {
+    fn drop(&mut self) {
+        FAULT.with(|slot| slot.set(false));
+    }
+}
+
 /// Runs `write` with the WA before-commit fault armed (after the last own-copy mark).
 #[cfg(test)]
 pub(crate) fn run<T>(write: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            FAULT.with(|slot| slot.set(false));
-        }
-    }
     FAULT.with(|slot| slot.set(true));
-    let _reset = Reset;
+    let _reset = FaultReset;
     write()
+}
+
+/// Holds the WA before-commit fault across an async actor flush.
+#[cfg(test)]
+pub(crate) fn arm_fault() -> impl Drop {
+    FAULT.with(|slot| slot.set(true));
+    FaultReset
 }

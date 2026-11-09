@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 mod account_runtime;
+#[cfg(test)]
+pub(crate) use account_runtime::apply_ack_flush;
 mod ack_cache;
 mod actor;
 mod attachment_scheduler;

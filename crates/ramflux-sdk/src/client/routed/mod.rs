@@ -27,7 +27,7 @@ pub(crate) mod group_directory;
 mod legacy;
 pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
-pub(crate) use receive::Delivery;
+pub(crate) use receive::{Delivery, JoinedW1};
 mod pair_lifecycle;
 mod prepared;
 mod recovery;

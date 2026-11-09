@@ -974,6 +974,9 @@ mod receive_w0;
 #[path = "lifecycle_fence.rs"]
 mod lifecycle_fence;
 
+#[path = "wa_actor.rs"]
+mod wa_actor;
+
 #[path = "receive_settle_arm.rs"]
 mod receive_settle_arm;
 

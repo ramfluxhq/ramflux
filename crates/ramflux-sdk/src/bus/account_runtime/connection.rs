@@ -494,7 +494,7 @@ async fn short_step<T>(
     tokio::time::timeout(limit, future).await.map_err(|_| attempt_timeout())?
 }
 
-fn apply_ack_flush(
+pub(crate) fn apply_ack_flush(
     account: &LocalBusAccountState,
     generation: u64,
     force: bool,

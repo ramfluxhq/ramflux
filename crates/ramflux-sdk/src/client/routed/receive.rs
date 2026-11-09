@@ -65,8 +65,24 @@ pub(crate) struct Commit<'a> {
     )>,
     receipt: &'a str,
     consume_erased: bool,
-    /// Pending-contact hold: the ledger cover is Held, not Terminal.
+    /// Prepare-time pending-contact hold. Joining cover uses the commit-time
+    /// decision returned by [`RamfluxClient::commit_routed_w1_in`].
+    #[expect(dead_code, reason = "prepare-time hold is recorded; cover uses commit-time pending")]
     pub contact_held: bool,
+}
+
+/// Plaintext, admitted attachment slots, and commit-time pending-contact hold.
+type RoutedW1Persist = (Option<Vec<u8>>, Vec<usize>, bool);
+
+/// One joining persist: project, cover an already-applied sequence, or bootstrap.
+pub(crate) enum JoinedW1<'a> {
+    Project(Commit<'a>),
+    Cover,
+    ContactBootstrap {
+        entry: &'a GatewayInboxEntry,
+        manifest: &'a crate::prekey::SdkDeviceManifestResponse,
+        local: &'a str,
+    },
 }
 
 impl RamfluxClient {
@@ -117,15 +133,15 @@ impl RamfluxClient {
         }
         Ok(())
     }
-    async fn apply_contact_request_entry(
+    async fn prepare_contact_request_manifest(
         &self,
         config: &crate::GatewaySessionConfig,
         entry: &GatewayInboxEntry,
         prepared: Option<crate::prekey::SdkDeviceManifestResponse>,
-    ) -> Result<Delivery, SdkError> {
+    ) -> Result<crate::prekey::SdkDeviceManifestResponse, SdkError> {
         if let Some(candidate) = prepared {
             self.confirm_contact_candidate_manifest(entry, &candidate)?;
-            return self.commit_contact_request_bootstrap(entry, &candidate, &config.device_id);
+            return Ok(candidate);
         }
         let manifest = self.contact_request_candidate(config, entry).await?;
         if manifest.custody.is_some()
@@ -135,6 +151,16 @@ impl RamfluxClient {
             self.prepare_native_contact_control(config, entry, &route, &body, Some(&manifest))
                 .await?;
         }
+        Ok(manifest)
+    }
+
+    async fn apply_contact_request_entry(
+        &self,
+        config: &crate::GatewaySessionConfig,
+        entry: &GatewayInboxEntry,
+        prepared: Option<crate::prekey::SdkDeviceManifestResponse>,
+    ) -> Result<Delivery, SdkError> {
+        let manifest = self.prepare_contact_request_manifest(config, entry, prepared).await?;
         self.commit_contact_request_bootstrap(entry, &manifest, &config.device_id)
     }
 
@@ -219,12 +245,12 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true>(
+        self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments, prepared: None },
-            Self::commit_routed_projection,
+            Self::legacy_persist,
         )
         .await
     }
@@ -236,12 +262,12 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         prepared: Result<super::PreparedInbound, SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true>(
+        self.apply_routed_entry_with_source::<true, false>(
             engine,
             pool,
             entry,
             ApplyOpts { attachments: false, prepared: Some(prepared) },
-            Self::commit_routed_projection,
+            Self::legacy_persist,
         )
         .await
     }
@@ -253,9 +279,9 @@ impl RamfluxClient {
         pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
         prepared: Option<Result<super::PreparedInbound, SdkError>>,
-        persist: impl FnOnce(&Self, Commit<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
+        persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true>(
+        self.apply_routed_entry_with_source::<true, true>(
             engine,
             pool,
             entry,
@@ -265,27 +291,102 @@ impl RamfluxClient {
         .await
     }
 
-    async fn apply_routed_entry_with_source<const CONSUME_ERASED: bool>(
+    fn legacy_persist(
+        &self,
+        write: JoinedW1<'_>,
+    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+        match write {
+            JoinedW1::Project(ctx) => self.commit_routed_projection(ctx),
+            JoinedW1::Cover | JoinedW1::ContactBootstrap { .. } => {
+                Err(invalid("legacy persist requires a projection commit"))
+            }
+        }
+    }
+
+    fn joined_cover<const JOINING: bool>(
+        &self,
+        persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
+        delivery: Delivery,
+    ) -> Result<Delivery, SdkError> {
+        if JOINING {
+            persist(self, JoinedW1::Cover)?;
+        }
+        Ok(delivery)
+    }
+
+    async fn apply_contact_request_for<const JOINING: bool>(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        entry: &GatewayInboxEntry,
+        prepared: Option<super::PreparedInbound>,
+        persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
+    ) -> Result<Delivery, SdkError> {
+        let candidate = prepared.and_then(|value| value.candidate);
+        if !JOINING {
+            return self.apply_contact_request_entry(engine.config(), entry, candidate).await;
+        }
+        let local = engine.config().device_id.clone();
+        let manifest =
+            self.prepare_contact_request_manifest(engine.config(), entry, candidate).await?;
+        persist(self, JoinedW1::ContactBootstrap { entry, manifest: &manifest, local: &local })?;
+        self.finish_pair_retirement()?;
+        let source =
+            Self::device_identity_from_manifest(&manifest, &entry.envelope.source_device_id)?;
+        let receipt = super::committed::committed_key(&source, &entry.envelope.envelope_id)?;
+        Ok(self.committed_routed_delivery(&receipt, entry)?.unwrap_or(Delivery {
+            routing: None,
+            plaintext: None,
+            call_control: false,
+            pair_reply: None,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "mirrors the live own-history confirm path")]
+    async fn confirm_or_refuse_own_history<const JOINING: bool>(
+        &mut self,
+        engine: &mut impl GatewaySessionAccess,
+        pool: &ramflux_transport::RelayQuicPool,
+        entry: &GatewayInboxEntry,
+        opened: &Opened,
+        body: &[u8],
+        native_prepared: bool,
+        history: Option<crate::client::own_device_sync::receive_job::HistoryCompletion>,
+    ) -> Result<(), SdkError> {
+        let local = opened.local_device.device_id();
+        if native_prepared {
+            if let Some(sync) =
+                Self::routed_own_history_envelope(entry, &opened.routing, body, local)?
+            {
+                self.confirm_prepared_own_history(&sync, history.as_ref())?;
+            }
+            return Ok(());
+        }
+        if JOINING {
+            if Self::routed_own_history_envelope(entry, &opened.routing, body, local)?.is_some() {
+                return Err(invalid("own-device history import refused on an activated ledger"));
+            }
+            return Ok(());
+        }
+        self.import_routed_own_history(engine, pool, entry, opened, body).await
+    }
+
+    async fn apply_routed_entry_with_source<const CONSUME_ERASED: bool, const JOINING: bool>(
         &mut self,
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
         opts: ApplyOpts,
-        persist: impl FnOnce(&Self, Commit<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
+        persist: impl FnOnce(&Self, JoinedW1<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
         let consume_erased = CONSUME_ERASED;
         let ApplyOpts { attachments, prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
-            return Ok(delivery);
+            return self.joined_cover::<JOINING>(persist, delivery);
         }
         let mut prepared = prepared.transpose()?;
         if decode(&entry.envelope)?.schema == crate::client::contact_requests::ENVELOPE_SCHEMA {
             return self
-                .apply_contact_request_entry(
-                    engine.config(),
-                    entry,
-                    prepared.and_then(|value| value.candidate),
-                )
+                .apply_contact_request_for::<JOINING>(engine, entry, prepared, persist)
                 .await;
         }
         let history = prepared.as_mut().and_then(|prepared| prepared.history.take());
@@ -293,7 +394,7 @@ impl RamfluxClient {
             self.prepare_routed_authority(engine, entry, prepared).await?;
         let commit = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
         if let Some(delivery) = self.committed_routed_delivery(&commit, entry)? {
-            return Ok(delivery);
+            return self.joined_cover::<JOINING>(persist, delivery);
         }
         let mut opened = self.open_authorized_routed_entry(engine, entry, native_prepared).await?;
         let (body, refs) = if opened.routing.attachments {
@@ -310,18 +411,16 @@ impl RamfluxClient {
             opened.local_device.device_id(),
             &opened.bundle_hash,
         )?;
-        if native_prepared {
-            if let Some(sync) = Self::routed_own_history_envelope(
-                entry,
-                &opened.routing,
-                &body,
-                opened.local_device.device_id(),
-            )? {
-                self.confirm_prepared_own_history(&sync, history.as_ref())?;
-            }
-        } else {
-            self.import_routed_own_history(engine, pool, entry, &opened, &body).await?;
-        }
+        self.confirm_or_refuse_own_history::<JOINING>(
+            engine,
+            pool,
+            entry,
+            &opened,
+            &body,
+            native_prepared,
+            history,
+        )
+        .await?;
         let metadata = routed_message_metadata(&opened, entry, &envelope, &aad)?;
         let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
@@ -338,7 +437,7 @@ impl RamfluxClient {
             .await?;
         let (plaintext, admitted) = persist(
             self,
-            Commit {
+            JoinedW1::Project(Commit {
                 opened: &opened,
                 entry,
                 body: &body,
@@ -351,7 +450,7 @@ impl RamfluxClient {
                 receipt: &commit,
                 consume_erased,
                 contact_held: held,
-            },
+            }),
         )?;
         self.finish_pair_retirement()?;
         let refs = if consume_erased { admitted_refs(&refs, admitted) } else { refs };
@@ -656,66 +755,90 @@ impl RamfluxClient {
         local: &str,
     ) -> Result<Delivery, SdkError> {
         let delivery = self.account_db()?.write_transaction(|| {
-            // Candidate authentication supplies receipt scope without resurrecting requester caches.
-            let source = Self::device_identity_from_manifest(manifest,&entry.envelope.source_device_id)?;
-            let packet = decode(&entry.envelope)?;
-            if packet.source_principal_commitment.as_deref() != Some(source.root_commitment()) {
-                return Err(invalid("contact receipt root mismatch"));
-            }
-            let device = manifest.devices.iter().find(|d| d.device_id == entry.envelope.source_device_id)
-                .ok_or_else(|| invalid("contact receipt device missing"))?;
-            super::verify_sender_record(entry,&serde_json::json!({"principal_id":manifest.principal_id,"signing_public_key":device.branch_public_key}))?;
-            let receipt = super::committed::committed_key(&source,&entry.envelope.envelope_id)?;
-            if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
-                if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {
-                    return Err(invalid("contact envelope id reused with another payload"));
-                }
-                return Ok(Delivery {
-                    routing: Some(committed.routing),
-                    plaintext: None,
-                    call_control: false,
-                    pair_reply: None,
-                });
-            }
-            // A malformed request cannot leave a cached root or device, pair state, consent,
-            // or message projection behind. Candidate authentication preceded this transaction.
-            let first_seen =
-                self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
-            self.remember_contact_request_cache(manifest)?;
-            self.persist_root_verified_directory(manifest)?;
-            if first_seen {
-                // A requester's root comes from the network, never from an imported card.
-                self.mark_lookup_root(&manifest.principal_id)?;
-            }
-
-            let opened = self.open_routed(entry, local)?;
-            let control = self.verify_contact_control(entry, &opened.routing, &opened.body)?;
-            if control.body.kind != crate::client::contact_requests::Decision::Request {
-                return Err(invalid("stranger envelope can only carry a contact request"));
-            }
-            self.confirm_routed_context(&opened.routing, entry)?;
-            self.commit_routed_projection(Commit {
-                opened: &opened,
-                entry,
-                body: &opened.body,
-                metadata: None,
-                membership: None,
-                shared_group: None,
-                local_target: None,
-                slots: &[],
-                references: Vec::new(),
-                receipt: &receipt,
-                consume_erased: false,
-                contact_held: false,
-            })?;
-            // Fault after the marker and every effect, so the rollback must undo both.
-            #[cfg(test)]
-            commit_fault::take(commit_fault::Kind::Bootstrap)?;
-            Ok(Delivery { routing: Some(opened.routing), plaintext: None, call_control: false, pair_reply: None })
-
+            self.commit_contact_request_bootstrap_in(entry, manifest, local)
         })?;
         self.finish_pair_retirement()?;
         Ok(delivery)
+    }
+
+    /// Bootstrap writes that join an open receive transaction (generation-checked by the caller).
+    pub(crate) fn commit_contact_request_bootstrap_in(
+        &self,
+        entry: &GatewayInboxEntry,
+        manifest: &crate::prekey::SdkDeviceManifestResponse,
+        local: &str,
+    ) -> Result<Delivery, SdkError> {
+        // Candidate authentication supplies receipt scope without resurrecting requester caches.
+        let source =
+            Self::device_identity_from_manifest(manifest, &entry.envelope.source_device_id)?;
+        let packet = decode(&entry.envelope)?;
+        if packet.source_principal_commitment.as_deref() != Some(source.root_commitment()) {
+            return Err(invalid("contact receipt root mismatch"));
+        }
+        let device = manifest
+            .devices
+            .iter()
+            .find(|d| d.device_id == entry.envelope.source_device_id)
+            .ok_or_else(|| invalid("contact receipt device missing"))?;
+        super::verify_sender_record(
+            entry,
+            &serde_json::json!({
+                "principal_id": manifest.principal_id,
+                "signing_public_key": device.branch_public_key
+            }),
+        )?;
+        let receipt = super::committed::committed_key(&source, &entry.envelope.envelope_id)?;
+        if let Some(committed) = self.account_db()?.load_actor_state::<Committed>(&receipt)? {
+            if committed.entry.envelope.payload_hash != entry.envelope.payload_hash {
+                return Err(invalid("contact envelope id reused with another payload"));
+            }
+            return Ok(Delivery {
+                routing: Some(committed.routing),
+                plaintext: None,
+                call_control: false,
+                pair_reply: None,
+            });
+        }
+        // A malformed request cannot leave a cached root or device, pair state, consent,
+        // or message projection behind. Candidate authentication preceded this transaction.
+        let first_seen =
+            self.account_db()?.client_record("identity", &manifest.principal_id)?.is_none();
+        self.remember_contact_request_cache(manifest)?;
+        self.persist_root_verified_directory(manifest)?;
+        if first_seen {
+            // A requester's root comes from the network, never from an imported card.
+            self.mark_lookup_root(&manifest.principal_id)?;
+        }
+
+        let opened = self.open_routed(entry, local)?;
+        let control = self.verify_contact_control(entry, &opened.routing, &opened.body)?;
+        if control.body.kind != crate::client::contact_requests::Decision::Request {
+            return Err(invalid("stranger envelope can only carry a contact request"));
+        }
+        self.confirm_routed_context(&opened.routing, entry)?;
+        self.persist_routed_projection(Commit {
+            opened: &opened,
+            entry,
+            body: &opened.body,
+            metadata: None,
+            membership: None,
+            shared_group: None,
+            local_target: None,
+            slots: &[],
+            references: Vec::new(),
+            receipt: &receipt,
+            consume_erased: false,
+            contact_held: false,
+        })?;
+        // Fault after the marker and every effect, so the rollback must undo both.
+        #[cfg(test)]
+        commit_fault::take(commit_fault::Kind::Bootstrap)?;
+        Ok(Delivery {
+            routing: Some(opened.routing),
+            plaintext: None,
+            call_control: false,
+            pair_reply: None,
+        })
     }
     fn commit_routed_pair_context(
         &self,
@@ -760,24 +883,25 @@ impl RamfluxClient {
         &self,
         context: Commit<'_>,
     ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
-        self.account_db()?.write_transaction(|| self.persist_routed_projection(context))
+        let (plaintext, admitted, _held) =
+            self.account_db()?.write_transaction(|| self.persist_routed_projection(context))?;
+        self.finish_pair_retirement()?;
+        Ok((plaintext, admitted))
     }
 
     /// Joins an open receive transaction. Live [`Self::commit_routed_projection`] stays on its writer.
+    /// The bool is the commit-time pending-contact hold used for the ledger cover.
     pub(crate) fn commit_routed_w1_in(
         &self,
         tx: &ramflux_storage::ReceiveTransaction<'_>,
         sequence: u64,
         context: Commit<'_>,
-    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+    ) -> Result<RoutedW1Persist, SdkError> {
         tx.require_open_input(sequence)?;
         self.persist_routed_projection(context)
     }
 
-    fn persist_routed_projection(
-        &self,
-        context: Commit<'_>,
-    ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
+    fn persist_routed_projection(&self, context: Commit<'_>) -> Result<RoutedW1Persist, SdkError> {
         let Commit {
             opened,
             entry,
@@ -796,7 +920,7 @@ impl RamfluxClient {
             && self.account_db()?.message_is_deleted(&opened.routing.message_id)?
         {
             self.persist_routed_seen(entry)?;
-            return Ok((None, Vec::new()));
+            return Ok((None, Vec::new(), false));
         }
         let mut admitted = Vec::new();
         if let Some(shared) = shared_group {
@@ -873,7 +997,7 @@ impl RamfluxClient {
             commit_fault::take(commit_fault::Kind::Pair)?;
             commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
         }
-        Ok((plaintext, admitted))
+        Ok((plaintext, admitted, pending))
     }
 
     fn persist_routed_marker(

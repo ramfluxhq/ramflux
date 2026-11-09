@@ -38,8 +38,12 @@ pub(super) struct Gateway {
     pub stall_submit: bool,
     pub inbox: Vec<GatewayInboxEntry>,
     pub acked: BTreeSet<String>,
+    /// Raw `ack_batch` sequence count (every wire send, including duplicates).
+    pub ack_sends: usize,
     /// Last seen inbox target, kept after the router row is cleared so `ack_batch` can reply.
     pub ack_target: String,
+    /// When set, `ack_batch` fails so the actor records Uncertain.
+    pub ack_fail: bool,
     pub resumes: Vec<u64>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
@@ -544,6 +548,10 @@ fn ack_batch_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value
         .map(|seq| seq.as_u64().ok_or("ack_batch seq"))
         .collect::<Result<Vec<_>, _>>()?;
     let mut gateway = shared.lock().map_err(|_| "gateway")?;
+    if gateway.ack_fail {
+        return Err("ack_batch failed".into());
+    }
+    gateway.ack_sends = gateway.ack_sends.saturating_add(seqs.len());
     if gateway.ack_target.is_empty() {
         gateway.ack_target = gateway
             .inbox
@@ -602,6 +610,7 @@ fn acknowledged_cursor(
     ack: ramflux_protocol::Ack,
 ) -> Case<GatewayCursor> {
     let mut gateway = shared.lock().map_err(|_| "gateway")?;
+    gateway.ack_sends = gateway.ack_sends.saturating_add(1);
     gateway.acked.insert(ack.envelope_id.clone());
     let inbox_seq = gateway
         .inbox

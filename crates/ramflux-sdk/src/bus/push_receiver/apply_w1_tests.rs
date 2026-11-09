@@ -4,7 +4,6 @@
 //! `ApplyPage` fence, binding retry, and routed refusal (S6b P20f / P20c r2 CARRY).
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
-use super::ack_batch::SourceWa;
 use super::apply_w1::{
     self, after_w1_cut, apply_page, binding_attempts, binding_give_up, covered_below,
     force_covered_below, force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy,
@@ -25,8 +24,7 @@ use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::encode_base64url;
 use ramflux_storage::{
-    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveAckApply, ReceiveAckApplyResult,
-    ReceiveAckOutcome, ReceiveAckResult, ReceiveFailureKind, ReceiveMigrate, StorageError,
+    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveFailureKind, ReceiveMigrate, StorageError,
 };
 use ramflux_transport::TransportError;
 use serde_json::json;
@@ -1170,35 +1168,6 @@ fn snap(
     Ok(account.client.account_db()?.receive_ledger_snap_for_test(&account.target_delivery_id)?)
 }
 
-fn select_due(
-    account: &crate::bus::state::LocalBusAccountState,
-    now: i64,
-    force: bool,
-) -> Result<Vec<u64>, SdkError> {
-    let db = account.client.account_db()?;
-    let prepared = turn(account, 1)?;
-    SourceWa { expected: prepared.expected(), generation: 1 }.select(db, now, force)
-}
-
-fn apply_wa(
-    account: &crate::bus::state::LocalBusAccountState,
-    rows: &[ReceiveAckResult],
-    now: i64,
-) -> Result<ReceiveAckApplyResult, SdkError> {
-    let db = account.client.account_db()?;
-    let prepared = turn(account, 1)?;
-    let sequences: Vec<u64> = rows.iter().map(|row| row.sequence).collect();
-    SourceWa { expected: prepared.expected(), generation: 1 }.apply(
-        db,
-        ReceiveAckApply {
-            incarnation: &prepared.incarnation,
-            sequences: &sequences,
-            results: rows,
-            now,
-        },
-    )
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn terminal_cover_cut_rolls_w1_with_receipt() -> Result<(), SdkError> {
     let mut harness = open()?;
@@ -1243,88 +1212,6 @@ async fn second_connected_no_redelivery() -> Result<(), SdkError> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn never_ack_above_c() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    queue_legacy_hold(std::iter::repeat_n(true, 8));
-    let held_entry = own_dummy(&harness.account);
-    drive(&mut harness.account, held_entry, || 1).await?;
-    assert_eq!(cursor(&harness.account)?, 1);
-    let now = now_unix_timestamp();
-    assert_eq!(select_due(&harness.account, now, true)?, Vec::<u64>::new(), "held never selected");
-    let above = apply_wa(
-        &harness.account,
-        &[ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::Acked }],
-        now,
-    )
-    .expect_err("seq>C");
-    assert!(
-        matches!(
-            above,
-            SdkError::Storage(StorageError::Integrity("receive ack sequence exceeds cursor"))
-        ),
-        "{above:?}"
-    );
-    queue_own_copy();
-    let next = own_dummy_at(&harness.account, 2);
-    drive(&mut harness.account, next, || 1).await?;
-    assert_eq!(select_due(&harness.account, now_unix_timestamp(), true)?, vec![2]);
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn ack_batch_timing() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    for sequence in 1..=16 {
-        queue_own_copy();
-        let entry = own_dummy_at(&harness.account, sequence);
-        drive(&mut harness.account, entry, || 1).await?;
-    }
-    harness.account.client.account_db()?.set_ack_intent_clock_for_test(100, 100)?;
-    assert_eq!(select_due(&harness.account, 100, false)?, (1..=16).collect::<Vec<_>>());
-    let mut three = open()?;
-    for sequence in 1..=3 {
-        queue_own_copy();
-        let entry = own_dummy_at(&three.account, sequence);
-        drive(&mut three.account, entry, || 1).await?;
-    }
-    three.account.client.account_db()?.set_ack_intent_clock_for_test(100, 100)?;
-    assert_eq!(select_due(&three.account, 100, false)?, Vec::<u64>::new());
-    assert_eq!(select_due(&three.account, 101, false)?, vec![1, 2, 3]);
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn ack_lost_before_and_after_commit() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    for sequence in 1..=2 {
-        queue_own_copy();
-        let entry = own_dummy_at(&harness.account, sequence);
-        drive(&mut harness.account, entry, || 1).await?;
-    }
-    let rows = [
-        ReceiveAckResult { sequence: 1, outcome: ReceiveAckOutcome::Uncertain },
-        ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::Uncertain },
-    ];
-    let now = now_unix_timestamp();
-    assert_eq!(select_due(&harness.account, now, true)?, vec![1, 2], "select does not delete");
-    let lost = super::ack_batch::run(|| apply_wa(&harness.account, &rows, now));
-    assert!(
-        matches!(
-            &lost,
-            Err(SdkError::Storage(StorageError::Integrity("wa settlement before-commit")))
-        ),
-        "{lost:?}"
-    );
-    assert_eq!(snap(&harness.account)?.intents, vec![1, 2], "abort after apply rolls back");
-    assert_eq!(
-        apply_wa(&harness.account, &rows, now)?,
-        ReceiveAckApplyResult::Applied { settled: 0, revalidate: false }
-    );
-    assert_eq!(snap(&harness.account)?.intents, vec![1, 2], "lost reply after WR retains");
-    Ok(())
-}
-
 #[test]
 fn inactive_account_skips_w2_and_ack_flush() -> Result<(), SdkError> {
     let root = tempfile::tempdir().expect("tmp");
@@ -1335,5 +1222,10 @@ fn inactive_account_skips_w2_and_ack_flush() -> Result<(), SdkError> {
     assert!(!apply_w1::is_active(db, &target)?, "inactive discriminator skips the ledger route");
     assert!(db.receive_epoch(&target)?.is_none());
     assert!(db.projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?.is_none());
+    let reply = crate::bus::apply_ack_flush(&account, 1, true, now_unix_timestamp(), None)?;
+    assert!(
+        matches!(reply, crate::bus::connection_manager::AckFlushReply::Inactive),
+        "inactive AckFlush must return Inactive, got {reply:?}"
+    );
     Ok(())
 }

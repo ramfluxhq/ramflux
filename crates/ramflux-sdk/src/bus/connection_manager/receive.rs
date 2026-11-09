@@ -10,7 +10,7 @@ use super::{
 use crate::SdkError;
 use crate::gateway::push_point::BatchReply;
 use crate::gateway::session_push::{AckOutcome, AckResult};
-use ramflux_storage::{ReceiveAckOutcome, ReceiveAckResult};
+use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveAckOutcome, ReceiveAckResult};
 use tokio::{
     sync::{mpsc, oneshot},
     time::{Instant, timeout},
@@ -271,6 +271,7 @@ async fn catch_up(
     let mut active = false;
     let limit = plan.limit.min(RECEIVE_PAGE_LIMIT);
     let mut pages = 0_u32;
+    let mut applied = 0_usize;
     loop {
         let entries = handle
             .call(
@@ -294,6 +295,12 @@ async fn catch_up(
             .await?;
             active |= accepted;
             backpressure = next;
+            if turn.is_some() {
+                applied = applied.saturating_add(1);
+                if applied.is_multiple_of(ACK_FLUSH_COUNT) {
+                    flush_acks(handle, work, generation, false, call_timeout).await?;
+                }
+            }
         }
         pages = pages.saturating_add(1);
         if catch_up_yields(pages) {
@@ -321,6 +328,18 @@ async fn catch_up(
             .await?;
     }
     Ok((active, backpressure))
+}
+
+/// Test entry to `catch_up` with an explicit trigger (Tick does not force the 16/1s gate).
+#[cfg(test)]
+pub(crate) async fn test_catch_up(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    call_timeout: std::time::Duration,
+) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+    catch_up(handle, work, generation, trigger, call_timeout).await
 }
 
 /// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one
@@ -442,7 +461,7 @@ async fn apply_entry(
 }
 
 /// Select a due WA batch (16 / 1s / `force`), send `ack_batch` on a Push session, apply.
-async fn flush_acks(
+pub(crate) async fn flush_acks(
     handle: &ConnectionHandle,
     work: &mpsc::Sender<AccountWork>,
     generation: u64,

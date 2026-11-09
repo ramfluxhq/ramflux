@@ -203,12 +203,28 @@ async fn apply_routed_w1(
             &pool,
             &prepared.entry,
             source.map(Ok),
-            |client, ctx| {
-                let held = ctx.contact_held;
-                run_fenced(client.account_db()?, generation, turn, |tx, _| {
-                    let projected = client.commit_routed_w1_in(tx, sequence, ctx)?;
-                    cover_w1_outcome(tx, sequence, held, &[])?;
-                    Ok(projected)
+            |client, write| {
+                run_fenced(client.account_db()?, generation, turn, |tx, _| match write {
+                    crate::client::routed::JoinedW1::Project(ctx) => {
+                        let (projected, admitted, held) =
+                            client.commit_routed_w1_in(tx, sequence, ctx)?;
+                        cover_w1_outcome(tx, sequence, held, &[])?;
+                        Ok((projected, admitted))
+                    }
+                    crate::client::routed::JoinedW1::Cover => {
+                        cover_w1_outcome(tx, sequence, false, &[])?;
+                        Ok((None, Vec::new()))
+                    }
+                    crate::client::routed::JoinedW1::ContactBootstrap {
+                        entry,
+                        manifest,
+                        local,
+                    } => {
+                        tx.require_open_input(sequence)?;
+                        client.commit_contact_request_bootstrap_in(entry, manifest, local)?;
+                        cover_w1_outcome(tx, sequence, false, &[])?;
+                        Ok((None, Vec::new()))
+                    }
                 })
             },
         )
@@ -748,7 +764,7 @@ thread_local! {
     static CLASSIFY_ERROR: std::cell::RefCell<Option<SdkError>> =
         const { std::cell::RefCell::new(None) };
     static PROJECTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static OWN_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static OWN_COPY: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TERMINAL_REPLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MANIFEST_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SKIP_FETCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -863,12 +879,25 @@ pub(crate) fn queue_policy_kind(kind: ReceiveFailureKind) {
 
 #[cfg(test)]
 pub(crate) fn queue_own_copy() {
-    OWN_COPY.with(|cell| cell.set(true));
+    queue_own_copy_n(1);
+}
+
+#[cfg(test)]
+pub(crate) fn queue_own_copy_n(n: u32) {
+    OWN_COPY.with(|cell| cell.set(n));
 }
 
 #[cfg(test)]
 fn take_own_copy() -> bool {
-    OWN_COPY.with(std::cell::Cell::take)
+    OWN_COPY.with(|cell| {
+        let n = cell.get();
+        if n == 0 {
+            false
+        } else {
+            cell.set(n - 1);
+            true
+        }
+    })
 }
 
 /// Dummy directory material for the own-copy classify hook. `commit_own_copy_from_entry`

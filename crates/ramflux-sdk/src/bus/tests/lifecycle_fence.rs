@@ -25,14 +25,14 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
-const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
+pub(super) const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
 const CONVERSATION: &str = "healthy";
 
-fn limits() -> RuntimeTimeouts {
+pub(super) fn limits() -> RuntimeTimeouts {
     RuntimeTimeouts::held_for_test()
 }
 
-fn open_account(
+pub(super) fn open_account(
     root: &Path,
     config: &GatewaySessionConfig,
     commitment: &str,
@@ -51,7 +51,10 @@ fn open_account(
     Ok(account)
 }
 
-fn runtime_for(account: LocalBusAccountState, root: &Path) -> super::super::AccountRuntime {
+pub(super) fn runtime_for(
+    account: LocalBusAccountState,
+    root: &Path,
+) -> super::super::AccountRuntime {
     let (commands, receiver) = mpsc::channel(8);
     let (stop, shutdown) = watch::channel(false);
     let (events, mut batches) = mpsc::channel::<EventBatch>(64);
@@ -97,7 +100,9 @@ fn runtime_for(account: LocalBusAccountState, root: &Path) -> super::super::Acco
     }
 }
 
-fn account_of(runtime: &super::super::AccountRuntime) -> Result<&LocalBusAccountState, SdkError> {
+pub(super) fn account_of(
+    runtime: &super::super::AccountRuntime,
+) -> Result<&LocalBusAccountState, SdkError> {
     runtime.state.accounts.get("sender").ok_or(SdkError::LocalBus("account".into()))
 }
 
@@ -105,12 +110,25 @@ fn messages(runtime: &super::super::AccountRuntime) -> Result<usize, SdkError> {
     Ok(account_of(runtime)?.client.direct_messages(CONVERSATION)?.len())
 }
 
-fn acked(gateway: &std::sync::Mutex<super::fixture::Gateway>) -> Result<usize, SdkError> {
-    Ok(gateway.lock().map_err(|_| SdkError::LocalBus("gateway".into()))?.acked.len())
+pub(super) fn acked(
+    gateway: &std::sync::Mutex<super::fixture::Gateway>,
+) -> Result<usize, SdkError> {
+    Ok(gateway.lock().map_err(|_| SdkError::LocalBus("gateway".into()))?.ack_sends)
+}
+
+fn no_pending_intents(runtime: &super::super::AccountRuntime) -> bool {
+    let Ok(account) = account_of(runtime) else {
+        return false;
+    };
+    let Ok(db) = account.client.account_db() else {
+        return false;
+    };
+    db.receive_ledger_snap_for_test(&account.target_delivery_id)
+        .is_ok_and(|snap| snap.intents.is_empty())
 }
 
 /// Dormant W0 staging: the router delivered this entry and its durable copy is on disk.
-fn stage(account: &LocalBusAccountState, entry: &GatewayInboxEntry) -> Case {
+pub(super) fn stage(account: &LocalBusAccountState, entry: &GatewayInboxEntry) -> Case {
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
     let _ = db.activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: PUSH_E })?;
@@ -138,7 +156,9 @@ fn stage(account: &LocalBusAccountState, entry: &GatewayInboxEntry) -> Case {
 
 /// The Push coordinates `actor_turn` reads. The handle owns the live engine, so a dormant
 /// engine stands in as the coordinate carrier and is moved to the reopened account.
-fn push_engine(mut engine: GatewaySessionEngine) -> Result<GatewaySessionEngine, SdkError> {
+pub(super) fn push_engine(
+    mut engine: GatewaySessionEngine,
+) -> Result<GatewaySessionEngine, SdkError> {
     engine.mode = SessionMode::Push {
         incarnation: IncarnationId::try_from(PUSH_E.to_owned())
             .map_err(|error| SdkError::LocalBus(error.to_string()))?,
@@ -146,7 +166,7 @@ fn push_engine(mut engine: GatewaySessionEngine) -> Result<GatewaySessionEngine,
     Ok(engine)
 }
 
-fn generation_of(runtime: &super::super::AccountRuntime) -> Result<u64, SdkError> {
+pub(super) fn generation_of(runtime: &super::super::AccountRuntime) -> Result<u64, SdkError> {
     Ok(account_of(runtime)?
         .connection
         .as_ref()
@@ -156,7 +176,7 @@ fn generation_of(runtime: &super::super::AccountRuntime) -> Result<u64, SdkError
 
 /// Drives the connection work the way `serve` does until `done` holds. Returns the first
 /// `ApplyPage` instead of applying it when `hold` is set (a held page/result).
-async fn pump(
+pub(super) async fn pump(
     runtime: &mut super::super::AccountRuntime,
     hold: bool,
     mut done: impl FnMut(&super::super::AccountRuntime) -> bool,
@@ -180,7 +200,7 @@ async fn pump(
 }
 
 /// Drives connection work until no new work arrives for `quiet`.
-async fn pump_quiet(
+pub(super) async fn pump_quiet(
     runtime: &mut super::super::AccountRuntime,
     quiet: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -274,8 +294,20 @@ async fn held() -> Case {
     assert!(runtime.state.accounts.is_empty(), "lock closes the account");
     drop(reply);
 
-    // Unlock: reopen from disk; the runtime starts the connection at a new generation.
-    runtime.state.accounts.insert("sender".into(), open_account(&root, &config, &commitment)?);
+    // Real `account.unlock` loads the account from disk; rebind the loopback Push engine.
+    let (unlock_reply, unlock_response) = oneshot::channel();
+    let mut unlock =
+        command("account.unlock", serde_json::json!({"passphrase":"actor-test-secret"}));
+    unlock.reply = Some(unlock_reply);
+    runtime.apply(unlock).await?;
+    unlock_response.await??;
+    runtime.stop_connection().await;
+    while runtime.connection_work.try_recv().is_ok() {}
+    {
+        let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
+        account.gateway_config = config.clone();
+        account.target_delivery_id = config.target_delivery_id.clone();
+    }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
     let g2 = generation_of(&runtime)?;
@@ -337,7 +369,9 @@ async fn held() -> Case {
         })
         .await?;
     assert_eq!(messages(&runtime)?, 1, "unlock-recovery applies exactly once");
-    pump(&mut runtime, false, |_| acked(&gateway).ok() == Some(1)).await?;
+    pump(&mut runtime, false, |rt| acked(&gateway).is_ok_and(|n| n >= 1) && no_pending_intents(rt))
+        .await?;
+    pump_quiet(&mut runtime, Duration::from_millis(50)).await?;
     assert_eq!(acked(&gateway)?, 1, "exactly one ACK on the wire");
 
     // (c) second Connected after apply+ACK: 0 new messages, 0 new ACKs.
