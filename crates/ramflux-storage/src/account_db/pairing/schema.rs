@@ -11,6 +11,7 @@ pub(crate) const TABLES: [&str; 5] =
 pub(crate) const LIVE_CAP: i64 = 3;
 pub(crate) const TERMINAL_CAP: i64 = 128;
 pub(crate) const LIVE_ROW_MAX: usize = 65_536;
+pub(crate) const DESCRIPTOR_MAX: usize = 16_000;
 pub(crate) const TERMINAL_ROW_MAX: usize = 1_024;
 pub(crate) const FLOOR_ROW_MAX: usize = 1_024;
 pub(crate) const ADOPTION_ROW_MAX: usize = 2_048;
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS pairing_live (
  local_seq INTEGER NOT NULL CHECK(typeof(local_seq)='integer' AND local_seq>=1 AND local_seq<=9007199254740991),
  generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=1 AND generation<=9007199254740991),
  role TEXT NOT NULL CHECK(role IN ('initiator','responder')),
- descriptor BLOB NOT NULL CHECK(typeof(descriptor)='blob' AND length(descriptor)>0 AND length(descriptor)<=65536),
+ descriptor BLOB NOT NULL CHECK(typeof(descriptor)='blob' AND length(descriptor)>0 AND length(descriptor)<=16000),
  phase TEXT NOT NULL CHECK(phase IN ('invited','commitments','revealed','sas_pending','mutually_confirmed','proposal_pending','prepared','submitted','acknowledged','locally_installed','completed','cancelled','expired','rejected')),
  context BLOB CHECK(context IS NULL OR (typeof(context)='blob' AND length(context)>0 AND length(context)<=57344)),
  transcript_hash TEXT CHECK(transcript_hash IS NULL OR (typeof(transcript_hash)='text' AND length(transcript_hash)=43)),
@@ -127,6 +128,6 @@ END;
 /// Returns SQLite errors.
 pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(SCHEMA)?;
-    let _ = (PHASES, TERMINAL_TTL_SECONDS);
+    let _ = PHASES;
     Ok(())
 }

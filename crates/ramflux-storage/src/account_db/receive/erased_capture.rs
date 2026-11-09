@@ -147,6 +147,7 @@ pub(crate) const NON_SOURCE_KINDS: &[&str] = &[
     "group_sender_key_counter_seen",
     "conversation_read_state",
     "conversation_delivery_state",
+    "operation",
 ];
 
 /// Tables named by a `footprint_%` trigger that can never hold an erased-input Source tuple.
@@ -208,6 +209,9 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     // journal body whose durable home is `runtime_journal` (a Source). Always empty at rest.
     "message_footprint_actor_stage",
     "message_footprint_journal_stage",
+    // Writer `runtime/operations.rs`: operation_id, fingerprint, operation_kind and
+    // response_json. The footprint trigger is `json_copy` kind `operation`; no inbound envelope.
+    "runtime_operation",
 ];
 
 /// Why the classification guard refused. It is crate-internal on purpose: a new public

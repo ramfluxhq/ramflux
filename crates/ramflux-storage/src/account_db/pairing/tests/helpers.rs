@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use super::super::journal::{AdoptionRow, FloorRow, LiveRow};
+use super::super::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 use crate::StorageError;
+use ramflux_protocol::PrincipalKind;
 use ramflux_protocol::custody::pairing::native::Invitation;
 use ramflux_protocol::custody::pairing::{Common, PairingWire, RoleContext};
-use ramflux_protocol::custody::{DeviceRef, Envelope};
+use ramflux_protocol::custody::{
+    CustodyKind, DeviceRef, DeviceSet, Envelope, MasterCertificate, Profile, Publication,
+    SectionHashes, object_hash,
+};
 use ramflux_protocol::{canonical_json_bytes, domain, encode_base64url};
 
 pub(super) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -81,12 +85,6 @@ pub(super) fn invitation() -> Invitation {
     }
 }
 
-pub(super) fn descriptor() -> TestResult<Vec<u8>> {
-    invitation().validate()?;
-    let envelope = Envelope { body: invitation(), signature: encode_base64url([7; 64]) };
-    Ok(canonical_json_bytes(&envelope)?)
-}
-
 pub(super) fn role(role: &str, id: &str) -> RoleContext {
     RoleContext {
         schema: "ramflux.pairing.RoleContext.v2".into(),
@@ -118,15 +116,23 @@ pub(super) fn context_bytes() -> TestResult<Vec<u8>> {
 }
 
 pub(super) fn invited() -> TestResult<LiveRow> {
+    invited_ids(20, 1, 1)
+}
+
+pub(super) fn invited_ids(operation: u8, invitation_n: u8, local_seq: u64) -> TestResult<LiveRow> {
+    let mut body = invitation();
+    body.invitation_id = h(invitation_n);
+    body.validate()?;
+    let envelope = Envelope { body, signature: encode_base64url([7; 64]) };
     Ok(LiveRow {
         account_id: "acct".into(),
-        operation_id: h(20),
-        invitation_id: h(1),
+        operation_id: h(operation),
+        invitation_id: h(invitation_n),
         issuer_seq: 1,
-        local_seq: 1,
+        local_seq,
         generation: 1,
         role: "initiator".into(),
-        descriptor: descriptor()?,
+        descriptor: canonical_json_bytes(&envelope)?,
         phase: "invited".into(),
         context: None,
         transcript_hash: None,
@@ -158,4 +164,113 @@ pub(super) fn adoption(role: &str, primary: Option<&str>) -> TestResult<Adoption
         data_vault_ref: "vault-data".into(),
         primary_vault_ref: primary.map(str::to_owned),
     })
+}
+
+pub(super) fn publication() -> TestResult<(Vec<u8>, String, u64)> {
+    publication_at(7)
+}
+
+pub(super) fn publication_at(epoch: u64) -> TestResult<(Vec<u8>, String, u64)> {
+    let record = Envelope {
+        body: DeviceSet {
+            schema: "ramflux.identity.signed_device_set.v3".into(),
+            version: 3,
+            principal_id: "principal".into(),
+            account_anchor: h(2),
+            principal_kind: PrincipalKind::Human,
+            origin: "native".into(),
+            custody_mode: "local_human".into(),
+            device_set_epoch: epoch,
+            previous_record_hash: None,
+            issued_at: 1,
+            master_certificate: Envelope {
+                body: MasterCertificate {
+                    schema: "ramflux.identity.master_certificate.v1".into(),
+                    version: 1,
+                    account_anchor: h(2),
+                    principal_id: "principal".into(),
+                    principal_kind: PrincipalKind::Human,
+                    master_public_key: h(3),
+                    self_signing_public_key: h(4),
+                    primary_device_ref: device("dev-a"),
+                    custody_kind: CustodyKind::LocalHuman,
+                    scopes: vec!["device_set".into()],
+                    range_index: 1,
+                    issued_at: 1,
+                    cert_id: h(5),
+                    legacy_binding_hash: None,
+                    previous_certificate_hash: None,
+                },
+                signature: encode_base64url([7; 64]),
+            },
+            legacy_binding: None,
+            profile: Profile {
+                kind: PrincipalKind::Human,
+                display_name: "alice".into(),
+                custodian: None,
+            },
+            devices: vec![],
+            delegations: vec![],
+            revoked_delegation_ids: vec![],
+            migration: None,
+            revoked_device_checkpoint: None,
+            section_hashes: SectionHashes {
+                profile: h(10),
+                devices: h(11),
+                delegations: h(12),
+                revoked_delegation_ids: h(13),
+                migration: h(14),
+                revoked_device_checkpoint: h(15),
+            },
+        },
+        signature: encode_base64url([8; 64]),
+    };
+    let candidate_hash = object_hash(&record)?;
+    let bytes = canonical_json_bytes(&Publication { record, compacted_ids: None })?;
+    Ok((bytes, candidate_hash, epoch))
+}
+
+pub(super) fn head() -> TestResult<HeadRow> {
+    let (candidate, candidate_hash, _) = publication()?;
+    Ok(HeadRow {
+        account_id: "acct".into(),
+        operation_id: h(20),
+        invitation_id: Some(h(1)),
+        generation: 1,
+        kind: "enroll".into(),
+        base_record_hash: h(4),
+        base_epoch: 1,
+        publisher_ref: ref_bytes("dev-a")?,
+        candidate,
+        candidate_hash,
+        state: "prepared".into(),
+        ack: None,
+        recipient_ref: Some(ref_bytes("dev-b")?),
+        revoked_ref: None,
+        created_at: 1,
+    })
+}
+
+pub(super) fn ack_bytes(record_hash: &str, device_set_epoch: u64) -> TestResult<Vec<u8>> {
+    #[derive(serde::Serialize)]
+    struct HeadAck<'a> {
+        record_hash: &'a str,
+        device_set_epoch: u64,
+    }
+    Ok(canonical_json_bytes(&HeadAck { record_hash, device_set_epoch })?)
+}
+
+pub(super) fn terminal() -> TerminalRow {
+    TerminalRow {
+        account_id: "acct".into(),
+        operation_id: h(20),
+        invitation_id: h(1),
+        issuer_seq: 1,
+        local_seq: 1,
+        generation: 1,
+        outcome: "completed".into(),
+        record_hash: Some(h(4)),
+        finished_at: 4_000_000_000,
+        cleanup: "done".into(),
+    }
 }

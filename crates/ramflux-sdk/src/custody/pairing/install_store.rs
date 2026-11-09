@@ -103,6 +103,7 @@ impl Install {
         b32(&self.account_anchor, "account_anchor")?;
         b32(&self.operation_id, "operation_id")?;
         require_ref(&self.recipient_ref)?;
+        require(self.recipient_ref.account_anchor == self.account_anchor, "ref.account_anchor")?;
         require(matches!(self.recipient_mode.as_str(), "new" | "existing"), "recipient_mode")?;
         require(
             matches!(
@@ -113,6 +114,11 @@ impl Install {
         )?;
         optional_b32(self.record_hash.as_deref(), "record_hash")?;
         optional_b32(self.prior_record_hash.as_deref(), "prior_record_hash")?;
+        match self.recipient_mode.as_str() {
+            "new" => require(self.prior_record_hash.is_none(), "prior_record_hash")?,
+            "existing" => require(self.prior_record_hash.is_some(), "prior_record_hash")?,
+            _ => {}
+        }
         ident(&self.branch_vault_ref, "branch_vault_ref")?;
         ident(&self.data_vault_ref, "data_vault_ref")?;
         match self.primary_vault_ref.as_deref() {
@@ -171,7 +177,9 @@ impl Install {
             require(self.install_purpose == "transfer_source", "cleanup_pending")?;
             let cleanup = self.cleanup_ref.as_deref().ok_or(field("cleanup_ref"))?;
             ident(cleanup, "cleanup_ref")?;
-            require_ref(self.cleanup_owner_ref.as_ref().ok_or(field("cleanup_owner_ref"))?)?;
+            let owner = self.cleanup_owner_ref.as_ref().ok_or(field("cleanup_owner_ref"))?;
+            require_ref(owner)?;
+            require(owner.account_anchor == self.account_anchor, "ref.account_anchor")?;
             require(cleanup != self.branch_vault_ref, "cleanup_ref")?;
             require(cleanup != self.data_vault_ref, "cleanup_ref")?;
             require(Some(cleanup) != self.primary_vault_ref.as_deref(), "cleanup_ref")?;

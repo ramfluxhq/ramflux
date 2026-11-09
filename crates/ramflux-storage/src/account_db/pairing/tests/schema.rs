@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use super::super::schema::{HEAD_ROW_MAX, LIVE_ROW_MAX, TABLES};
-use super::helpers::{TestResult, h};
+use super::super::schema::{DESCRIPTOR_MAX, HEAD_ROW_MAX, TABLES};
+use super::helpers::{TestResult, floor, h};
 use crate::schema::migrate_account_db;
 use rusqlite::params;
 
@@ -45,6 +45,13 @@ pub(super) fn old_open_creates_tables() -> TestResult {
         )?;
         assert_eq!(n, 1, "{table}");
     }
+    db.put_pairing_floor(&floor())?;
+    migrate_account_db(&db.connection)?;
+    let kept = db.pairing_floor()?.ok_or("floor after migrate")?;
+    assert_eq!(kept.issued_seq, 3);
+    migrate_account_db(&db.connection)?;
+    let again = db.pairing_floor()?.ok_or("floor after remigrate")?;
+    assert_eq!(again, kept);
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
@@ -56,14 +63,23 @@ pub(super) fn caps_and_sql_bounds() -> TestResult {
     insert_dummy_live(&db, 2)?;
     let fourth = insert_dummy_live(&db, 3);
     assert!(fourth.is_err(), "live cap");
-    let oversize = db.connection.execute(
+    db.connection.execute("DELETE FROM pairing_live", [])?;
+    let at_max = db.connection.execute(
         "INSERT INTO pairing_live(
           account_id,operation_id,invitation_id,issuer_seq,local_seq,generation,role,descriptor,
           phase,base_record_hash,base_epoch,expires_at)
          VALUES('acct',?1,?2,1,10,1,'initiator',?3,'invited',?4,1,1)",
-        params![h(40), h(41), vec![1_u8; LIVE_ROW_MAX + 1], h(4)],
+        params![h(40), h(41), vec![1_u8; DESCRIPTOR_MAX], h(4)],
     );
-    assert!(oversize.is_err(), "live row max");
+    assert!(at_max.is_ok(), "descriptor max");
+    let oversize = db.connection.execute(
+        "INSERT INTO pairing_live(
+          account_id,operation_id,invitation_id,issuer_seq,local_seq,generation,role,descriptor,
+          phase,base_record_hash,base_epoch,expires_at)
+         VALUES('acct',?1,?2,1,11,1,'initiator',?3,'invited',?4,1,1)",
+        params![h(42), h(43), vec![1_u8; DESCRIPTOR_MAX + 1], h(4)],
+    );
+    assert!(oversize.is_err(), "descriptor +1");
     let head_over = db.connection.execute(
         "INSERT INTO pairing_head(
           account_id,operation_id,generation,kind,base_record_hash,base_epoch,publisher_ref,

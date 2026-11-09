@@ -891,7 +891,16 @@ fn preservation_contexts(all: &Value) -> TestResult {
     let abort = channel(common, &digest, json!({"kind":"abort","reason":"InvalidInput"}));
     c.phase = "proposal_pending";
     decode_value::<Channel>(&abort)?.validate_context(&c)?;
+    c.phase = "mutually_confirmed";
+    decode_value::<Channel>(&abort)?.validate_context(&c)?;
+    c.phase = "prepared";
+    decode_value::<Channel>(&abort)?.validate_context(&c)?;
     c.phase = "invited";
+    assert_eq!(
+        decode_value::<Channel>(&abort)?.validate_context(&c),
+        Err(WireError::Field("channel_phase"))
+    );
+    c.phase = "submitted";
     assert_eq!(
         decode_value::<Channel>(&abort)?.validate_context(&c),
         Err(WireError::Field("channel_phase"))

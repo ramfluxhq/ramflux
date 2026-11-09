@@ -293,10 +293,7 @@ fn database_digest(db: &Connection) -> Result<[u8; 32], StorageError> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for table in tables {
         digest.update(table.as_bytes());
-        let mut query = db.prepare(&format!(
-            "SELECT * FROM \"{}\" ORDER BY rowid",
-            table.replace('\"', "\"\"")
-        ))?;
+        let mut query = db.prepare(&table_select_sql(db, &table)?)?;
         let count = query.column_count();
         let mut rows = query.query([])?;
         while let Some(row) = rows.next()? {
@@ -327,6 +324,31 @@ fn database_digest(db: &Connection) -> Result<[u8; 32], StorageError> {
         }
     }
     Ok(digest.finalize().into())
+}
+
+/// Walk every table in a stable order. WITHOUT ROWID tables have no `rowid`.
+fn table_select_sql(db: &rusqlite::Connection, table: &str) -> rusqlite::Result<String> {
+    let quoted = table.replace('"', "\"\"");
+    let ddl: String = db.query_row(
+        "SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name=?1",
+        rusqlite::params![table],
+        |row| row.get(0),
+    )?;
+    if ddl.to_ascii_uppercase().contains("WITHOUT ROWID") {
+        let mut query =
+            db.prepare("SELECT name FROM pragma_table_info(?1) WHERE pk>0 ORDER BY pk")?;
+        let columns: Vec<String> = query
+            .query_map(rusqlite::params![table], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let order = columns
+            .into_iter()
+            .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!("SELECT * FROM \"{quoted}\" ORDER BY {order}"))
+    } else {
+        Ok(format!("SELECT * FROM \"{quoted}\" ORDER BY rowid"))
+    }
 }
 
 #[test]

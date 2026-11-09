@@ -779,8 +779,8 @@ crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 1 | E 
 crates/ramflux-storage/src/account_db/object_retention/legacy.rs | step | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_ack | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_context | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_descriptor | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_publication | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_descriptor | 1 | E | excluded=local pairing journal rows written by this crate; outside the signed-envelope closure
+crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_publication | 1 | E | excluded=local pairing journal rows written by this crate; outside the signed-envelope closure
 crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_ref | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/read_model.rs | client_audit_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/receive/erased_capture.rs | tuple_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

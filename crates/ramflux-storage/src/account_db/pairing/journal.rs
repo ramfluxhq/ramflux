@@ -3,13 +3,13 @@
 
 //! Closed pairing row codecs. Nested protocol values reuse [`PairingWire`]; no secret serde.
 use super::schema::{
-    ADOPTION_ROW_MAX, FLOOR_ROW_MAX, HEAD_ROW_MAX, ID_MAX, LIVE_CAP, LIVE_ROW_MAX, TERMINAL_CAP,
-    TERMINAL_ROW_MAX,
+    ADOPTION_ROW_MAX, DESCRIPTOR_MAX, FLOOR_ROW_MAX, HEAD_ROW_MAX, ID_MAX, LIVE_CAP, LIVE_ROW_MAX,
+    TERMINAL_CAP, TERMINAL_ROW_MAX, TERMINAL_TTL_SECONDS,
 };
 use crate::{AccountDb, StorageError};
 use ramflux_protocol::custody::pairing::native::{Failure, Invitation};
 use ramflux_protocol::custody::pairing::{PairingWire, RoleContext, WireError};
-use ramflux_protocol::custody::{DeviceRef, Envelope, Publication};
+use ramflux_protocol::custody::{DeviceRef, Envelope, Publication, object_hash};
 use ramflux_protocol::{
     MAX_SAFE_JSON_INTEGER, canonical_json_bytes, decode_base64url, encode_base64url, parse_i_json,
 };
@@ -219,16 +219,19 @@ impl LiveRow {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), StorageError> {
+        require(self.encoded_size() <= LIVE_ROW_MAX, "size")?;
         self.validate_keys()?;
         self.validate_phase_refs()?;
-        decode_descriptor(&self.descriptor)?;
+        let envelope = decode_descriptor(&self.descriptor)?;
+        require(envelope.body.invitation_id == self.invitation_id, "invitation_id")?;
+        require(envelope.body.issuer_seq == self.issuer_seq, "issuer_seq")?;
         if let Some(bytes) = &self.context {
             decode_context(bytes)?;
         }
         if let Some(bytes) = &self.result {
             decode_failure(bytes)?;
         }
-        require(self.encoded_size() <= LIVE_ROW_MAX, "size")
+        Ok(())
     }
 
     fn validate_keys(&self) -> Result<(), StorageError> {
@@ -259,6 +262,7 @@ impl LiveRow {
         let early = matches!(self.phase.as_str(), "invited" | "commitments");
         require(early == self.context.is_none(), "context")?;
         require(self.context.is_none() == self.transcript_hash.is_none(), "transcript_hash")?;
+        let abort = matches!(self.phase.as_str(), "cancelled" | "expired" | "rejected");
         let needs_proposal = matches!(
             self.phase.as_str(),
             "proposal_pending"
@@ -268,15 +272,24 @@ impl LiveRow {
                 | "locally_installed"
                 | "completed"
         );
-        require(needs_proposal == self.proposal_hash.is_some(), "proposal_hash")?;
+        if !abort {
+            require(needs_proposal == self.proposal_hash.is_some(), "proposal_hash")?;
+        }
         self.validate_candidate_state()
     }
 
     fn validate_candidate_state(&self) -> Result<(), StorageError> {
+        let abort = matches!(self.phase.as_str(), "cancelled" | "expired" | "rejected");
         let needs_candidate = matches!(
             self.phase.as_str(),
             "prepared" | "submitted" | "acknowledged" | "locally_installed" | "completed"
         );
+        if abort {
+            if let Some(id) = &self.candidate_id {
+                require(id == &self.operation_id, "candidate_id")?;
+            }
+            return Ok(());
+        }
         require(needs_candidate == self.candidate_id.is_some(), "candidate_id")?;
         if needs_candidate {
             require(
@@ -325,6 +338,7 @@ impl HeadRow {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), StorageError> {
+        require(self.row_len() <= HEAD_ROW_MAX, "size")?;
         ident(&self.account_id, "account_id")?;
         b32(&self.operation_id, "operation_id")?;
         optional_b32(self.invitation_id.as_deref(), "invitation_id")?;
@@ -334,13 +348,14 @@ impl HeadRow {
         b32(&self.base_record_hash, "base_record_hash")?;
         integer(self.base_epoch, "base_epoch")?;
         decode_ref(&self.publisher_ref, "publisher_ref")?;
-        decode_publication(&self.candidate)?;
+        let publication = decode_publication(&self.candidate)?;
         b32(&self.candidate_hash, "candidate_hash")?;
+        let hash = object_hash(&publication.record).map_err(|_| field("candidate_hash"))?;
+        require(hash == self.candidate_hash, "candidate_hash")?;
         require(matches!(self.state.as_str(), "prepared" | "submitted" | "acknowledged"), "state")?;
         integer(self.created_at, "created_at")?;
         self.validate_kind_arms()?;
-        self.validate_ack()?;
-        require(self.row_len() <= HEAD_ROW_MAX, "size")
+        self.validate_ack(publication.record.body.device_set_epoch)
     }
 
     fn validate_kind_arms(&self) -> Result<(), StorageError> {
@@ -365,9 +380,13 @@ impl HeadRow {
         Ok(())
     }
 
-    fn validate_ack(&self) -> Result<(), StorageError> {
+    fn validate_ack(&self, epoch: u64) -> Result<(), StorageError> {
         match (self.state.as_str(), &self.ack) {
-            ("acknowledged", Some(bytes)) => decode_ack(bytes),
+            ("acknowledged", Some(bytes)) => {
+                let ack = decode_ack(bytes)?;
+                require(ack.record_hash == self.candidate_hash, "ack")?;
+                require(ack.device_set_epoch == epoch, "ack")
+            }
             ("acknowledged", None) | (_, Some(_)) => Err(field("ack")),
             (_, None) => Ok(()),
         }
@@ -424,6 +443,15 @@ impl AdoptionRow {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), StorageError> {
+        let n = self.account_id.len()
+            + self.operation_id.len()
+            + self.record_hash.len()
+            + self.local_ref.len()
+            + self.local_role.len()
+            + self.branch_vault_ref.len()
+            + self.data_vault_ref.len()
+            + self.primary_vault_ref.as_ref().map_or(0, String::len);
+        require(n <= ADOPTION_ROW_MAX, "size")?;
         ident(&self.account_id, "account_id")?;
         b32(&self.operation_id, "operation_id")?;
         b32(&self.record_hash, "record_hash")?;
@@ -437,15 +465,7 @@ impl AdoptionRow {
             "secondary" => require(self.primary_vault_ref.is_none(), "primary_vault_ref")?,
             _ => {}
         }
-        let n = self.account_id.len()
-            + self.operation_id.len()
-            + self.record_hash.len()
-            + self.local_ref.len()
-            + self.local_role.len()
-            + self.branch_vault_ref.len()
-            + self.data_vault_ref.len()
-            + self.primary_vault_ref.as_ref().map_or(0, String::len);
-        require(n <= ADOPTION_ROW_MAX, "size")
+        Ok(())
     }
 }
 
@@ -480,7 +500,7 @@ pub fn decode_adoption(row: &AdoptionRow) -> Result<(), StorageError> {
 }
 
 fn decode_descriptor(bytes: &[u8]) -> Result<Envelope<Invitation>, StorageError> {
-    bounded(bytes, LIVE_ROW_MAX, "descriptor")?;
+    bounded(bytes, DESCRIPTOR_MAX, "descriptor")?;
     let envelope: Envelope<Invitation> = parse_i_json(bytes).map_err(|_| field("descriptor"))?;
     envelope.body.validate().map_err(|error| map_wire(&error))?;
     let raw = decode_base64url(&envelope.signature).map_err(|_| field("signature"))?;
@@ -518,7 +538,7 @@ fn decode_publication(bytes: &[u8]) -> Result<Publication, StorageError> {
     Ok(value)
 }
 
-fn decode_ack(bytes: &[u8]) -> Result<(), StorageError> {
+fn decode_ack(bytes: &[u8]) -> Result<HeadAck, StorageError> {
     bounded(bytes, 1_024, "ack")?;
     let ack: HeadAck = parse_i_json(bytes).map_err(|_| field("ack"))?;
     b32(&ack.record_hash, "ack")?;
@@ -526,21 +546,47 @@ fn decode_ack(bytes: &[u8]) -> Result<(), StorageError> {
     if canonical_json_bytes(&ack).map_err(|_| field("json"))? != bytes {
         return Err(field("noncanonical"));
     }
-    Ok(())
+    Ok(ack)
 }
 
 impl AccountDb {
+    fn require_account(&self, account_id: &str) -> Result<(), StorageError> {
+        require(account_id == self.local_account_id, "account_id")
+    }
+
+    fn purge_expired_terminal(&self) -> Result<(), StorageError> {
+        let cutoff = self.now_unix().saturating_sub(TERMINAL_TTL_SECONDS);
+        self.connection.execute(
+            "DELETE FROM pairing_terminal WHERE account_id=?1 AND finished_at<=?2",
+            params![self.local_account_id, cutoff],
+        )?;
+        Ok(())
+    }
+
     /// Persist a validated floor row.
     ///
     /// # Errors
     /// Returns the exact invalid field or SQLite errors.
     pub fn put_pairing_floor(&self, row: &FloorRow) -> Result<(), StorageError> {
         decode_floor(row)?;
+        self.require_account(&row.account_id)?;
+        let existing: Option<(String, i64, i64)> = self
+            .connection
+            .query_row(
+                "SELECT account_anchor,issued_seq,next_generation FROM pairing_floor WHERE account_id=?1",
+                params![row.account_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((anchor, issued, generation)) = existing {
+            require(anchor == row.account_anchor, "account_anchor")?;
+            require(row.issued_seq >= issued.cast_unsigned(), "issued_seq")?;
+            require(row.next_generation >= generation.cast_unsigned(), "next_generation")?;
+        }
         self.connection.execute(
             "INSERT INTO pairing_floor(account_id,account_anchor,issued_seq,next_generation)
              VALUES(?1,?2,?3,?4)
              ON CONFLICT(account_id) DO UPDATE SET
-              account_anchor=excluded.account_anchor,
               issued_seq=excluded.issued_seq,
               next_generation=excluded.next_generation",
             params![
@@ -559,6 +605,7 @@ impl AccountDb {
     /// Returns the exact invalid field, live cap, or SQLite errors.
     pub fn put_pairing_live(&self, row: &LiveRow) -> Result<(), StorageError> {
         decode_live(row)?;
+        self.require_account(&row.account_id)?;
         let count: i64 = self.connection.query_row(
             "SELECT count(*) FROM pairing_live WHERE account_id=?1 AND operation_id<>?2",
             params![row.account_id, row.operation_id],
@@ -614,6 +661,34 @@ impl AccountDb {
     /// Returns the exact invalid field or SQLite errors.
     pub fn put_pairing_head(&self, row: &HeadRow) -> Result<(), StorageError> {
         decode_head(row)?;
+        self.require_account(&row.account_id)?;
+        let existing: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT operation_id,candidate_hash FROM pairing_head WHERE account_id=?1",
+                params![row.account_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((operation_id, candidate_hash)) = &existing {
+            if operation_id == &row.operation_id && candidate_hash != &row.candidate_hash {
+                return Err(field("candidate_hash"));
+            }
+            if operation_id == &row.operation_id {
+                self.connection.execute(
+                    "UPDATE pairing_head SET state=?1,ack=?2
+                     WHERE account_id=?3 AND operation_id=?4 AND candidate_hash=?5",
+                    params![
+                        row.state,
+                        row.ack,
+                        row.account_id,
+                        row.operation_id,
+                        row.candidate_hash
+                    ],
+                )?;
+                return Ok(());
+            }
+        }
         self.connection.execute(
             "INSERT INTO pairing_head(
               account_id,operation_id,invitation_id,generation,kind,base_record_hash,base_epoch,
@@ -652,6 +727,8 @@ impl AccountDb {
     /// Returns the exact invalid field, terminal cap, or SQLite errors.
     pub fn put_pairing_terminal(&self, row: &TerminalRow) -> Result<(), StorageError> {
         decode_terminal(row)?;
+        self.require_account(&row.account_id)?;
+        self.purge_expired_terminal()?;
         let count: i64 = self.connection.query_row(
             "SELECT count(*) FROM pairing_terminal WHERE account_id=?1 AND operation_id<>?2",
             params![row.account_id, row.operation_id],
@@ -689,6 +766,7 @@ impl AccountDb {
     /// Returns the exact invalid field or SQLite errors.
     pub fn put_pairing_adoption(&self, row: &AdoptionRow) -> Result<(), StorageError> {
         decode_adoption(row)?;
+        self.require_account(&row.account_id)?;
         self.connection.execute(
             "INSERT INTO pairing_adoption(
               account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,
@@ -756,11 +834,51 @@ impl AccountDb {
     /// # Errors
     /// Returns SQLite errors.
     pub fn pairing_terminal_count(&self) -> Result<i64, StorageError> {
+        self.purge_expired_terminal()?;
         Ok(self.connection.query_row(
             "SELECT count(*) FROM pairing_terminal WHERE account_id=?1",
             params![self.local_account_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// Load the in-flight head, if present.
+    ///
+    /// # Errors
+    /// Returns SQLite errors or a malformed stored row.
+    pub fn pairing_head(&self) -> Result<Option<HeadRow>, StorageError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT account_id,operation_id,invitation_id,generation,kind,base_record_hash,base_epoch,
+                        publisher_ref,candidate,candidate_hash,state,ack,recipient_ref,revoked_ref,created_at
+                 FROM pairing_head WHERE account_id=?1",
+                params![self.local_account_id],
+                |r| {
+                    Ok(HeadRow {
+                        account_id: r.get(0)?,
+                        operation_id: r.get(1)?,
+                        invitation_id: r.get(2)?,
+                        generation: r.get::<_, i64>(3)?.cast_unsigned(),
+                        kind: r.get(4)?,
+                        base_record_hash: r.get(5)?,
+                        base_epoch: r.get::<_, i64>(6)?.cast_unsigned(),
+                        publisher_ref: r.get(7)?,
+                        candidate: r.get(8)?,
+                        candidate_hash: r.get(9)?,
+                        state: r.get(10)?,
+                        ack: r.get(11)?,
+                        recipient_ref: r.get(12)?,
+                        revoked_ref: r.get(13)?,
+                        created_at: r.get::<_, i64>(14)?.cast_unsigned(),
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(row) = &row {
+            row.validate()?;
+        }
+        Ok(row)
     }
 
     /// Load the adoption marker, if present.

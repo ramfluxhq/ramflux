@@ -118,6 +118,22 @@ fn cleanup_and_id_ref_size_negatives() -> Result<(), SdkError> {
     id.recipient_ref.device_id.clear();
     field(&encode(&id), "ref.device_id");
     field_decode(&decode(&vec![b'x'; LIMIT + 1]), "size");
+    let mut mode = base("enroll", "reserved");
+    mode.recipient_mode = "existing".into();
+    field(&encode(&mode), "prior_record_hash");
+    mode.prior_record_hash = Some(h(4));
+    encode(&mode)?;
+    mode.recipient_mode = "new".into();
+    field(&encode(&mode), "prior_record_hash");
+    let mut anchor = base("enroll", "reserved");
+    anchor.recipient_ref.account_anchor = h(9);
+    field(&encode(&anchor), "ref.account_anchor");
+    let mut pending_anchor = base("transfer_source", "cleanup_pending");
+    pending_anchor.record_hash = Some(h(4));
+    pending_anchor.cleanup_ref = Some("old-mgmt".into());
+    pending_anchor.cleanup_owner_ref =
+        Some(DeviceRef { account_anchor: h(9), device_id: "dev-a".into(), device_epoch: 1 });
+    field(&encode(&pending_anchor), "ref.account_anchor");
     Ok(())
 }
 

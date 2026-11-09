@@ -43,13 +43,18 @@ pub(crate) fn merge_floor(db: &Connection) -> Result<(), StorageError> {
     )?;
     let local: Option<(String, String, i64, i64)> = db
         .query_row(
-            "SELECT account_id,account_anchor,issued_seq,next_generation FROM pairing_floor LIMIT 1",
-            [],
+            "SELECT account_id,account_anchor,issued_seq,next_generation FROM pairing_floor WHERE account_id=?1",
+            params![incoming.0],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
     match local {
         None => {
+            let other: i64 =
+                db.query_row("SELECT count(*) FROM pairing_floor", [], |row| row.get(0))?;
+            if other > 0 {
+                return Err(StorageError::PairingField("account_id"));
+            }
             db.execute(
                 "INSERT INTO pairing_floor(account_id,account_anchor,issued_seq,next_generation)
                  VALUES(?1,?2,?3,?4)",
@@ -91,10 +96,13 @@ fn incoming_floor_exists(db: &Connection) -> rusqlite::Result<bool> {
     if !attached {
         return Ok(false);
     }
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='pairing_floor')
-         AND EXISTS(SELECT 1 FROM incoming.pairing_floor)",
+    let present: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM incoming.sqlite_master WHERE type='table' AND name='pairing_floor')",
         [],
         |row| row.get(0),
-    )
+    )?;
+    if !present {
+        return Ok(false);
+    }
+    db.query_row("SELECT EXISTS(SELECT 1 FROM incoming.pairing_floor)", [], |row| row.get(0))
 }

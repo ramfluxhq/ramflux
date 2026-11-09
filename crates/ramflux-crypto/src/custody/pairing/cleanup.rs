@@ -119,18 +119,20 @@ impl HpkeSecrets {
     /// # Errors
     /// Returns `RandomUnavailable` when the CSPRNG cannot fill 32 bytes.
     pub fn new() -> Result<Self, CryptoError> {
-        let mut sk = [0_u8; 32];
-        getrandom::fill(&mut sk)
+        let mut secrets = Self { sk: [0_u8; 32] };
+        getrandom::fill(&mut secrets.sk)
             .map_err(|error| CryptoError::RandomUnavailable(error.to_string()))?;
-        Ok(Self { sk })
+        Ok(secrets)
     }
 
     /// Copy a known seed then wipe the caller buffer. Used by KATs and cleanup proofs.
+    #[cfg(test)]
     #[must_use]
-    pub fn from_seed(sk: &mut [u8; 32]) -> Self {
-        let owned = *sk;
+    pub(crate) fn from_seed(sk: &mut [u8; 32]) -> Self {
+        let mut secrets = Self { sk: [0_u8; 32] };
+        secrets.sk.copy_from_slice(sk);
         sk.zeroize();
-        Self { sk: owned }
+        secrets
     }
 
     pub(super) fn as_bytes(&self) -> &[u8; 32] {
@@ -149,5 +151,20 @@ impl HpkeSecrets {
         let mut bytes = [0_u8; 224];
         bytes[..32].copy_from_slice(&self.sk);
         bytes
+    }
+}
+
+#[cfg(test)]
+mod new_tests {
+    use super::HpkeSecrets;
+    use crate::CryptoError;
+
+    #[test]
+    fn new_fills_owned_seed_and_cleanup_wipes() -> Result<(), CryptoError> {
+        let mut secrets = HpkeSecrets::new()?;
+        assert_ne!(secrets.sk, [0_u8; 32]);
+        secrets.cleanup();
+        assert_eq!(secrets.sk, [0_u8; 32]);
+        Ok(())
     }
 }
