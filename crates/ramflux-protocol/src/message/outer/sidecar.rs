@@ -101,14 +101,34 @@ struct CandidateX3dh {
 /// # Errors
 /// Unknown nested fields, identifier overflow, or malformed JSON.
 pub fn decode_candidate_sidecar(bytes: &[u8]) -> Result<(), OuterProfileError> {
-    let value: Value = crate::parse_i_json(bytes).map_err(|_| OuterProfileError::Malformed)?;
-    decode_sidecar_value(&value)
+    decode_candidate_sidecar_in(bytes, false)
 }
 
-pub(super) fn decode_sidecar_value(value: &Value) -> Result<(), OuterProfileError> {
+fn decode_candidate_sidecar_in(bytes: &[u8], compact: bool) -> Result<(), OuterProfileError> {
+    let value: Value = crate::parse_i_json(bytes).map_err(|_| OuterProfileError::Malformed)?;
+    decode_sidecar_value(&value, compact)
+}
+
+/// Decode a compact-form sidecar: strict like [`decode_candidate_sidecar`], and the
+/// legacy `ciphertext.ciphertext` field must be empty (the raw AEAD bytes ride outside).
+///
+/// # Errors
+/// Everything [`decode_candidate_sidecar`] refuses, plus
+/// [`OuterProfileError::CompactCiphertextField`] for a non-empty field.
+pub fn decode_compact_candidate_sidecar(bytes: &[u8]) -> Result<(), OuterProfileError> {
+    decode_candidate_sidecar_in(bytes, true)
+}
+
+pub(super) fn decode_sidecar_value(value: &Value, compact: bool) -> Result<(), OuterProfileError> {
     let sidecar: CandidateSidecar =
         serde_json::from_value(value.clone()).map_err(|error| map_strict_decode(&error))?;
-    sidecar.check_caps()
+    sidecar.check_caps()?;
+    if compact
+        && sidecar.ciphertext.as_ref().is_some_and(|ciphertext| !ciphertext.ciphertext.is_empty())
+    {
+        return Err(OuterProfileError::CompactCiphertextField);
+    }
+    Ok(())
 }
 
 fn map_strict_decode(error: &serde_json::Error) -> OuterProfileError {

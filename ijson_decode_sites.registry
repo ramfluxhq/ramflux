@@ -360,7 +360,7 @@ crates/ramflux-protocol/src/message/outer/mod.rs | cryptobox_from_sidecar | 1 | 
 crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 1 | E | excluded=dormant candidate outer; becomes class A at P24 activation
 crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 2 | E | excluded=dormant candidate outer; becomes class A at P24 activation
 crates/ramflux-protocol/src/message/outer/mod.rs | live_cryptobox | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_candidate_sidecar | 1 | E | excluded=dormant candidate sidecar; becomes class A at P24 activation
+crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_candidate_sidecar_in | 1 | E | excluded=dormant candidate sidecar; becomes class A at P24 activation
 crates/ramflux-protocol/src/message/outer/sidecar.rs | decode_sidecar_value | 1 | E | excluded=dormant candidate sidecar; becomes class A at P24 activation
 crates/ramflux-protocol/src/message/protojson.rs | from_protojson | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/message/scanner.rs | validate_string | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

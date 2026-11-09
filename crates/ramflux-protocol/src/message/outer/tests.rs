@@ -9,9 +9,9 @@ use super::{
     MAX_OUTER_METADATA_BYTES, MAX_UNPADDED_PLAINTEXT_BYTES, MESSAGE_SCHEMA_V1_PROFILE,
     NamedDeliveryMode, OuterProfileError, REPORT_OPENING_BYTES, SealedSendSizes, TemporaryRatchet,
     accept_after_size_preflight, advertised_client_protocol_versions, compact_cryptobox_bytes,
-    decode_candidate_outer_ijson, decode_candidate_sidecar, decode_compact_cryptobox,
-    discover_verified_message_schema, encode_compact_cryptobox, validate_candidate_delivery_mode,
-    wire_encrypted_payload,
+    decode_candidate_outer_ijson, decode_candidate_sidecar, decode_compact_candidate_sidecar,
+    decode_compact_cryptobox, discover_verified_message_schema, encode_compact_cryptobox,
+    validate_candidate_delivery_mode, wire_encrypted_payload,
 };
 use crate::schema_profile::{
     ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
@@ -570,4 +570,16 @@ fn canonical_header_bytes_are_refused_at_encrypted_header_cap()
         Err(OuterProfileError::PayloadTooLarge)
     );
     Ok(())
+}
+
+#[test]
+fn compact_sidecar_refuses_non_empty_legacy_ciphertext_field() {
+    let empty = serde_json::to_vec(&json!({"ciphertext": {"ciphertext": []}})).unwrap_or_default();
+    assert_eq!(decode_compact_candidate_sidecar(&empty), Ok(()));
+    let full = serde_json::to_vec(&json!({"ciphertext": {"ciphertext": [0]}})).unwrap_or_default();
+    assert_eq!(
+        decode_compact_candidate_sidecar(&full),
+        Err(OuterProfileError::CompactCiphertextField)
+    );
+    assert_eq!(decode_candidate_sidecar(&full), Ok(()));
 }

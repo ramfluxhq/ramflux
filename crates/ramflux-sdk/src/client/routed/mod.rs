@@ -461,7 +461,7 @@ pub(crate) fn decode(
     let decoded =
         if let Ok(compact) = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes) {
             if !compact.sidecar.is_empty() {
-                ramflux_protocol::message::outer::decode_candidate_sidecar(compact.sidecar)
+                ramflux_protocol::message::outer::decode_compact_candidate_sidecar(compact.sidecar)
                     .map_err(|error| invalid(&error.to_string()))?;
             }
             let mut decoded: SdkDmEncryptedEnvelope = serde_json::from_slice(compact.sidecar)?;

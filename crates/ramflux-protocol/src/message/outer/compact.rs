@@ -91,7 +91,7 @@ pub fn compact_cryptobox_bytes(encrypted_body: &[u8]) -> Result<Vec<u8>, OuterPr
     if !value.is_object() || value.get("ciphertext").and_then(|c| c.get("ciphertext")).is_none() {
         return Ok(encrypted_body.to_vec());
     }
-    decode_sidecar_value(&value)?;
+    decode_sidecar_value(&value, false)?;
     compact_from_nested_value(&value)
 }
 

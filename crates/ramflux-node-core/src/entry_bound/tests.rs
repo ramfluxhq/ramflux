@@ -282,3 +282,54 @@ fn candidate_source_principal_commitment_cap() -> Result<(), Box<dyn std::error:
         other => Err(format!("exact identifier error, got {other:?}").into()),
     }
 }
+
+fn set_sidecar_field(
+    envelope: &ramflux_protocol::Envelope,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
+    let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes)?;
+    let mut sidecar: serde_json::Value = serde_json::from_slice(compact.sidecar)?;
+    edit(&mut sidecar);
+    let rebuilt = ramflux_protocol::message::outer::encode_compact_cryptobox(
+        compact.ciphertext,
+        &serde_json::to_vec(&sidecar)?,
+    )?;
+    let mut out = envelope.clone();
+    out.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    out.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        out.encrypted_payload.as_bytes(),
+    );
+    Ok(out)
+}
+
+#[test]
+fn candidate_250kb_legacy_ciphertext_field_is_refused_when_non_empty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let base = compact_250kb_envelope()?;
+    check_entry_bound(&base)?;
+    let zeros = vec![0_u8; 200 * 1024];
+    let padded = set_sidecar_field(&base, |sidecar| {
+        sidecar["ciphertext"]["ciphertext"] = serde_json::json!(zeros);
+    })?;
+    assert!(single_entry_frame_size(&padded)? <= ENTRY_FRAME_BYTE_CAP);
+    match check_entry_bound(&padded) {
+        Err(NodeCoreError::InvalidConfiguration(message))
+            if message == "compact candidate sidecar ciphertext field must be empty" =>
+        {
+            Ok(())
+        }
+        other => Err(format!("exact non-empty ciphertext error, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn candidate_250kb_top_level_pad_is_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let padded = set_sidecar_field(&compact_250kb_envelope()?, |sidecar| {
+        sidecar["pad"] = serde_json::json!("p".repeat(100 * 1024));
+    })?;
+    unknown_nested_field(check_entry_bound(&padded))
+}

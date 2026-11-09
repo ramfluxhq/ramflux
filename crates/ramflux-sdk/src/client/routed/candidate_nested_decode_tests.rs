@@ -98,3 +98,56 @@ fn sdk_decode_refuses_source_principal_commitment_over_identifier_cap() -> Resul
         other => Err(invalid(&format!("exact identifier error, got {other:?}"))),
     }
 }
+
+fn rewrite_sidecar(
+    envelope: &ramflux_protocol::Envelope,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
+        .map_err(|_| invalid("payload"))?;
+    let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut sidecar: serde_json::Value =
+        serde_json::from_slice(compact.sidecar).map_err(|error| invalid(&error.to_string()))?;
+    edit(&mut sidecar);
+    let rebuilt = ramflux_protocol::message::outer::encode_compact_cryptobox(
+        compact.ciphertext,
+        &serde_json::to_vec(&sidecar)?,
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    let mut out = envelope.clone();
+    out.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    out.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        out.encrypted_payload.as_bytes(),
+    );
+    Ok(out)
+}
+
+#[test]
+fn sdk_decode_refuses_non_empty_legacy_ciphertext_on_real_250kb_envelope() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let entry = sealed_250kb()?;
+    decode(&entry.envelope)?;
+    let padded = rewrite_sidecar(&entry.envelope, |sidecar| {
+        sidecar["ciphertext"]["ciphertext"] = serde_json::json!(vec![0_u8; 200 * 1024]);
+    })?;
+    match decode(&padded) {
+        Err(SdkError::InboundRejected(message))
+            if message == "compact candidate sidecar ciphertext field must be empty" =>
+        {
+            Ok(())
+        }
+        other => Err(invalid(&format!("exact non-empty ciphertext error, got {other:?}"))),
+    }
+}
+
+#[test]
+fn sdk_decode_refuses_top_level_pad_on_real_250kb_envelope() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let entry = sealed_250kb()?;
+    let padded = rewrite_sidecar(&entry.envelope, |sidecar| {
+        sidecar["pad"] = serde_json::json!("p".repeat(100 * 1024));
+    })?;
+    unknown_field(decode(&padded))
+}
