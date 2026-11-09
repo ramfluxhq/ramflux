@@ -220,6 +220,36 @@ impl Drop for ChildGuard {
     }
 }
 
+struct ShutdownLogReader {
+    receiver: mpsc::Receiver<String>,
+    shutdown_complete: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<String>,
+}
+
+fn spawn_shutdown_log_reader(stdout: std::process::ChildStdout) -> ShutdownLogReader {
+    let (sender, receiver) = mpsc::channel();
+    let shutdown_complete = Arc::new(AtomicBool::new(false));
+    let drain_signal = Arc::clone(&shutdown_complete);
+    let thread = std::thread::spawn(move || {
+        let mut logs = String::new();
+        for line in std::io::BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if line.contains("graceful shutdown complete") {
+                        drain_signal.store(true, Ordering::SeqCst);
+                    }
+                    logs.push_str(&line);
+                    logs.push('\n');
+                    let _ = sender.send(line);
+                }
+                Err(_) => break,
+            }
+        }
+        logs
+    });
+    ShutdownLogReader { receiver, shutdown_complete, thread }
+}
+
 #[cfg(feature = "itest-http")]
 fn seed_request_case(
     service: &str,
@@ -254,25 +284,11 @@ fn run_case(
     }
     let mut child = ChildGuard(command.spawn()?);
     let stdout = child.0.stdout.take().ok_or("missing stdout")?;
-    let (log_sender, log_receiver) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut logs = String::new();
-        for line in std::io::BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    logs.push_str(&line);
-                    logs.push('\n');
-                    let _ = log_sender.send(line);
-                }
-                Err(_) => break,
-            }
-        }
-        logs
-    });
-    if let Err(error) = wait_for_ready(&log_receiver, service, Duration::from_secs(10)) {
+    let log_reader = spawn_shutdown_log_reader(stdout);
+    if let Err(error) = wait_for_ready(&log_reader.receiver, service, Duration::from_secs(10)) {
         let _ = child.0.kill();
         let _ = child.0.wait();
-        let mut logs = reader.join().map_err(|_| "stdout reader panicked")?;
+        let mut logs = log_reader.thread.join().map_err(|_| "stdout reader panicked")?;
         if let Some(mut stderr) = child.0.stderr.take() {
             stderr.read_to_string(&mut logs)?;
         }
@@ -282,7 +298,12 @@ fn run_case(
         std::fs::write(fixture.root.join("connection-failures").join(stage), b"fail once")?;
     }
     let probe = if mode == "probe" {
-        Some(start_request_probe(&fixture.probe_addr, fixture.probe_udp)?)
+        Some(start_request_probe(
+            &fixture.probe_addr,
+            fixture.probe_udp,
+            service == "ramflux-gateway",
+            Arc::clone(&log_reader.shutdown_complete),
+        )?)
     } else {
         None
     };
@@ -309,7 +330,7 @@ fn run_case(
     if let Some(probe) = probe {
         probe.join().map_err(|_| "request probe panicked")??;
     }
-    let mut logs = reader.join().map_err(|_| "stdout reader panicked")?;
+    let mut logs = log_reader.thread.join().map_err(|_| "stdout reader panicked")?;
     if let Some(mut stderr) = child.0.stderr.take() {
         stderr.read_to_string(&mut logs)?;
     }
@@ -404,6 +425,8 @@ fn wait_for_ready(
 fn start_request_probe(
     addr: &str,
     udp: bool,
+    wait_for_drain: bool,
+    shutdown_complete: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<Result<(), std::io::Error>>, std::io::Error> {
     if udp {
         let socket = UdpSocket::bind("127.0.0.1:0")?;
@@ -425,8 +448,49 @@ fn start_request_probe(
         }
     };
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+    stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n")?;
+    if wait_for_drain {
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    }
     Ok(std::thread::spawn(move || {
-        stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n")?;
+        if wait_for_drain {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !shutdown_complete.load(Ordering::SeqCst) {
+                assert!(
+                    Instant::now() < deadline,
+                    "gateway shutdown-complete signal exceeded 10-second hang guard"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let close_deadline = Instant::now() + Duration::from_secs(10);
+            let mut response = [0; 1024];
+            loop {
+                let remaining = close_deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "gateway socket did not close within the 10-second hang guard"
+                );
+                stream.set_read_timeout(Some(remaining))?;
+                match stream.read(&mut response) {
+                    Ok(0) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ) =>
+                    {
+                        assert!(
+                            Instant::now() < close_deadline,
+                            "gateway socket did not close within the 10-second hang guard"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         Ok(())
     }))
 }
@@ -748,9 +812,10 @@ fn signal_and_wait(
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() >= Duration::from_secs(4) {
-            return Err(format!("{service} exceeded shutdown bound").into());
-        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{service} exceeded 10-second shutdown hang guard"
+        );
         std::thread::sleep(Duration::from_millis(10));
     };
     Ok((status, started.elapsed()))
