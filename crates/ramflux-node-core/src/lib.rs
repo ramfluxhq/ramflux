@@ -81,6 +81,7 @@ pub use push_registration::*;
 mod forwarded_delivery;
 mod notify;
 mod notify_wal;
+pub mod pairing_relay;
 mod perf_metrics;
 mod redb_store;
 mod relay;

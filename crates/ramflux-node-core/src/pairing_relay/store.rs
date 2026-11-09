@@ -1,0 +1,870 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Boot-scoped in-memory pairing relay allocator. Dormant: no HTTP or native route.
+use super::limits::{
+    AllocatorStats, CLAIM_GRACE_MS, HOUR_MS, INVITATION_LIFETIME_SECS, ISSUED_RESERVE,
+    LIVE_RESERVE, MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_FRAME_BYTES,
+    MAX_FRAMES_PER_DIRECTION, MAX_ISSUES_PER_HOUR, MAX_POLLS_PER_SEC, MAX_SLOTS,
+    MAX_SLOTS_PER_ACCOUNT, PairingClock, PairingRelayError, SLACK_BYTES, claim_source_prefixes,
+    wire,
+};
+use crate::{InFlightGuard, begin_service_request};
+use ramflux_crypto::{
+    public_key_base64url_from_seed, random_32, sign_canonical_bytes_with_seed,
+    verify_canonical_signature,
+};
+use ramflux_protocol::custody::pairing::PairingWire;
+use ramflux_protocol::custody::pairing::native::{
+    Create, CreateSlot, CreateSpec, CreateTicket, Created, Invitation, Issued,
+    invitation_signing_bytes, ticket_signing_bytes,
+};
+use ramflux_protocol::custody::pairing::relay::{
+    Claim, Claimed, Close, Closed, Poll, Polled, QueuedFrame, RelayFrame, Send, Sent,
+};
+use ramflux_protocol::custody::{DeviceRef, Envelope};
+use ramflux_protocol::{decode_base64url, encode_base64url};
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
+use std::sync::Arc;
+use zeroize::Zeroizing;
+
+/// Injected clock, node identity seed and pinned HTTPS origin.
+pub struct PairingRelayConfig {
+    pub clock: Arc<dyn PairingClock>,
+    pub node_seed: [u8; 32],
+    pub public_origin: String,
+}
+
+#[derive(Clone, Copy)]
+struct Now {
+    wall: u64,
+    mono: u64,
+}
+
+struct Direction {
+    frames: Vec<(u64, RelayFrame)>,
+    next_send_seq: u64,
+    last_send: Option<(u64, String)>,
+    poll_times: VecDeque<u64>,
+}
+
+struct IssuedSlot {
+    ticket: Envelope<CreateTicket>,
+    spec_hash: String,
+    primary_ref: DeviceRef,
+}
+
+enum SlotBody {
+    Issued(Box<IssuedSlot>),
+    Live(Box<LiveSlot>),
+}
+
+struct LiveSlot {
+    ticket: Envelope<CreateTicket>,
+    descriptor: Envelope<Invitation>,
+    primary_token: Zeroizing<[u8; 32]>,
+    recipient_token: Zeroizing<[u8; 32]>,
+    claim_nonce: Option<[u8; 32]>,
+    initiator: Direction,
+    responder: Direction,
+    closed_reason: Option<String>,
+    last_activity_ms: u64,
+}
+
+struct Slot {
+    account: [u8; 32],
+    expires_at: u64,
+    monotonic_deadline: u64,
+    reserved: usize,
+    body: SlotBody,
+}
+
+struct ClaimEntry {
+    prefixes: Vec<String>,
+    expires_ms: u64,
+}
+
+/// Process-local issued+live pairing relay. Restored from nothing on restart.
+pub struct PairingRelayStore {
+    clock: Arc<dyn PairingClock>,
+    seed: Zeroizing<[u8; 32]>,
+    node_key: String,
+    boot_id_b64: String,
+    public_origin: String,
+    issuer_seq: u64,
+    slots: HashMap<[u8; 32], Slot>,
+    invitations: HashMap<[u8; 32], [u8; 32]>,
+    hour: HashMap<[u8; 32], VecDeque<u64>>,
+    claims: HashMap<[u8; 32], ClaimEntry>,
+    slack: Vec<u8>,
+    backing: usize,
+    high_water: usize,
+}
+
+impl PairingRelayStore {
+    /// Draw a fresh `boot_id`. Restores no slots.
+    ///
+    /// # Errors
+    /// Refuses CSPRNG failure or a non-HTTPS origin.
+    pub fn new(config: PairingRelayConfig) -> Result<Self, PairingRelayError> {
+        let boot_id = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
+        let origin = config.public_origin;
+        if !origin.starts_with("https://") || origin.len() > 256 {
+            return Err(PairingRelayError::invalid("public_origin"));
+        }
+        Ok(Self {
+            clock: config.clock,
+            node_key: public_key_base64url_from_seed(config.node_seed),
+            seed: Zeroizing::new(config.node_seed),
+            boot_id_b64: encode_base64url(boot_id),
+            public_origin: origin,
+            issuer_seq: 0,
+            slots: HashMap::with_capacity(MAX_SLOTS),
+            invitations: HashMap::with_capacity(MAX_SLOTS),
+            hour: HashMap::with_capacity(MAX_SLOTS),
+            claims: HashMap::with_capacity(MAX_CLAIMS),
+            slack: vec![0_u8; SLACK_BYTES],
+            backing: SLACK_BYTES,
+            high_water: SLACK_BYTES,
+        })
+    }
+
+    #[must_use]
+    pub fn boot_id(&self) -> &str {
+        &self.boot_id_b64
+    }
+    #[must_use]
+    pub fn node_key(&self) -> &str {
+        &self.node_key
+    }
+    #[must_use]
+    pub fn stats(&self) -> AllocatorStats {
+        let (issued, live, queued_bytes, queued_frames) = slot_counts(&self.slots);
+        AllocatorStats {
+            slots: self.slots.len(),
+            issued,
+            live,
+            backing: self.backing,
+            high_water: self.high_water,
+            queued_bytes,
+            queued_frames,
+            sockets: self.claims.len(),
+            claims: self.claims.len(),
+        }
+    }
+    #[must_use]
+    pub fn slack_len(&self) -> usize {
+        self.slack.len()
+    }
+
+    /// Account-scoped slot class. A foreign account never observes another owner's slot.
+    ///
+    /// # Errors
+    /// `WrongContext` when the id exists under a different account; `Retired` when missing.
+    pub fn lookup_create(
+        &self,
+        account_anchor: &str,
+        create_id: &str,
+    ) -> Result<CreateSlot, PairingRelayError> {
+        let account = parse_id(account_anchor, "account_anchor")?;
+        let id = parse_id(create_id, "create_id")?;
+        let Some(slot) = self.slots.get(&id) else {
+            return Err(PairingRelayError::Retired);
+        };
+        if slot.account != account {
+            return Err(PairingRelayError::WrongContext);
+        }
+        Ok(match slot.body {
+            SlotBody::Issued(_) => CreateSlot::Issued,
+            SlotBody::Live(_) => CreateSlot::Live,
+        })
+    }
+
+    /// # Errors
+    /// Quota Busy, entropy, clock, or a malformed specification.
+    pub fn issue(&mut self, spec: CreateSpec) -> Result<Issued, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let mut spec = spec;
+        spec.normalize();
+        spec.validate().map_err(|e| wire(&e))?;
+        let account = parse_id(&spec.account_anchor, "account_anchor")?;
+        self.check_issue_quotas(account)?;
+        let now = self.now()?;
+        let create_id = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
+        self.issuer_seq =
+            self.issuer_seq.checked_add(1).ok_or(PairingRelayError::invalid("issuer_seq"))?;
+        let ticket = self.build_ticket(&spec, create_id, self.issuer_seq, now.wall)?;
+        let envelope = sign_ticket(&self.seed, ticket)?;
+        self.insert_issued(account, create_id, envelope.clone(), spec, now)?;
+        Ok(Issued { schema: "ramflux.pairing.Issued.v2".into(), version: 2, ticket: envelope })
+    }
+
+    /// Consume an issued ticket, retry a live Create, or retire a missing/old id.
+    ///
+    /// # Errors
+    /// Retired/Expired/Replay/WrongContext as specified; never allocates a missing slot.
+    pub fn create(&mut self, create: Create) -> Result<Created, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        create.validate().map_err(|e| wire(&e))?;
+        self.verify_ticket(&create)?;
+        let now = self.now()?;
+        if create.ticket.body.boot_id != self.boot_id_b64 {
+            return Err(PairingRelayError::Retired);
+        }
+        let id = parse_id(&create.ticket.body.create_id, "create_id")?;
+        let kind = match self.slots.get(&id) {
+            None => return Err(PairingRelayError::Retired),
+            Some(slot) if slot_expired(slot, &now) => {
+                self.release_slot(id);
+                return Err(PairingRelayError::Retired);
+            }
+            Some(slot) => match &slot.body {
+                SlotBody::Live(live) => return replay_created(live.as_ref(), &create),
+                SlotBody::Issued(issued) => {
+                    if issued.primary_ref != create.spec.primary_ref {
+                        return Err(PairingRelayError::WrongContext);
+                    }
+                    if issued.ticket.signature != create.ticket.signature
+                        || issued.ticket.body.create_id != create.ticket.body.create_id
+                    {
+                        return Err(PairingRelayError::Replay);
+                    }
+                    issued.spec_hash.clone()
+                }
+            },
+        };
+        if kind != create.spec.spec_hash().map_err(|e| wire(&e))? {
+            return Err(PairingRelayError::Replay);
+        }
+        self.promote_live(id, create, now)
+    }
+
+    /// # Errors
+    /// Token, claim-budget Busy, Replay of a different nonce, or a missing invitation.
+    pub fn claim(&mut self, source: IpAddr, claim: &Claim) -> Result<Claimed, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let now = self.now()?;
+        claim.validate().map_err(|e| wire(&e))?;
+        let invitation = parse_id(&claim.invitation_id, "invitation_id")?;
+        let expires_at = self.check_token(
+            invitation,
+            claim.issuer_seq,
+            "responder",
+            &claim.recipient_token,
+            now.wall,
+        )?;
+        let nonce = parse_id(&claim.claim_nonce, "claim_nonce")?;
+        match self.live(invitation)?.claim_nonce {
+            Some(existing) if existing == nonce => {
+                self.live_mut(invitation)?.last_activity_ms = now.mono;
+                return Ok(claimed_reply(claim, expires_at));
+            }
+            Some(_) => return Err(PairingRelayError::Replay),
+            None => {}
+        }
+        self.admit_claim_budget(source, invitation, now.mono)?;
+        let live = self.live_mut(invitation)?;
+        live.claim_nonce = Some(nonce);
+        live.last_activity_ms = now.mono;
+        Ok(claimed_reply(claim, expires_at))
+    }
+
+    /// # Errors
+    /// Token, Replay of a different digest, Busy at two queued frames, or Expired.
+    pub fn send(&mut self, send: &Send) -> Result<Sent, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let now = self.now()?;
+        send.validate().map_err(|e| wire(&e))?;
+        let invitation = parse_id(&send.invitation_id, "invitation_id")?;
+        let _ = self.check_token(invitation, send.issuer_seq, &send.role, &send.token, now.wall)?;
+        let digest = send.frame_digest().map_err(|e| wire(&e))?;
+        let live = self.live_mut(invitation)?;
+        live.last_activity_ms = now.mono;
+        let out = direction_mut(live, &send.role)?;
+        enqueue(out, send.seq, send.frame.clone(), digest)?;
+        Ok(Sent {
+            schema: "ramflux.pairing.Sent.v2".into(),
+            version: 2,
+            invitation_id: send.invitation_id.clone(),
+            role: send.role.clone(),
+            seq: send.seq,
+        })
+    }
+
+    /// # Errors
+    /// Token, poll-rate Busy, or a missing invitation.
+    pub fn poll(&mut self, poll: &Poll) -> Result<Polled, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let now = self.now()?;
+        poll.validate().map_err(|e| wire(&e))?;
+        let invitation = parse_id(&poll.invitation_id, "invitation_id")?;
+        let _ = self.check_token(invitation, poll.issuer_seq, &poll.role, &poll.token, now.wall)?;
+        let live = self.live_mut(invitation)?;
+        live.last_activity_ms = now.mono;
+        let closed = live.closed_reason.is_some();
+        {
+            let incoming = peer_mut(live, &poll.role)?;
+            record_poll(incoming, now.mono)?;
+            if let Some(ack) = poll.after_seq {
+                incoming.frames.retain(|(seq, _)| *seq > ack);
+            }
+        }
+        let incoming = peer_mut(self.live_mut(invitation)?, &poll.role)?;
+        let frames = take_polled_frames(incoming)?;
+        Ok(Polled {
+            schema: "ramflux.pairing.Polled.v2".into(),
+            version: 2,
+            invitation_id: poll.invitation_id.clone(),
+            frames,
+            closed,
+        })
+    }
+
+    /// Releases the slot. Idempotent for the same invitation.
+    ///
+    /// # Errors
+    /// Token or a missing invitation (Retired).
+    pub fn close(&mut self, close: &Close) -> Result<Closed, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let now = self.now()?;
+        close.validate().map_err(|e| wire(&e))?;
+        let invitation = parse_id(&close.invitation_id, "invitation_id")?;
+        let _ =
+            self.check_token(invitation, close.issuer_seq, &close.role, &close.token, now.wall)?;
+        let Some(create_id) = self.invitations.get(&invitation).copied() else {
+            return Err(PairingRelayError::Retired);
+        };
+        self.release_slot(create_id);
+        Ok(Closed {
+            schema: "ramflux.pairing.Closed.v2".into(),
+            version: 2,
+            invitation_id: close.invitation_id.clone(),
+            reason: close.reason.clone(),
+        })
+    }
+
+    /// Zeroize tokens and drop every slot. A later `new` draws a different `boot_id`.
+    pub fn shutdown(&mut self) {
+        let ids: Vec<[u8; 32]> = self.slots.keys().copied().collect();
+        for id in ids {
+            self.release_slot(id);
+        }
+        self.claims.clear();
+        self.hour.clear();
+        self.issuer_seq = 0;
+    }
+
+    /// Count issued+live slots whose `account_anchor` matches.
+    #[must_use]
+    pub fn account_slots(&self, account_anchor: &str) -> usize {
+        parse_id(account_anchor, "account_anchor")
+            .ok()
+            .map_or(0, |account| self.slots.values().filter(|slot| slot.account == account).count())
+    }
+}
+
+impl Drop for PairingRelayStore {
+    fn drop(&mut self) {
+        self.shutdown();
+        self.seed.fill(0);
+    }
+}
+
+fn admit() -> Result<InFlightGuard, PairingRelayError> {
+    begin_service_request().ok_or_else(|| PairingRelayError::busy(0))
+}
+
+impl PairingRelayStore {
+    fn now(&self) -> Result<Now, PairingRelayError> {
+        Ok(Now { wall: self.clock.wall_unix_secs()?, mono: self.clock.monotonic_ms() })
+    }
+
+    fn check_issue_quotas(&self, account: [u8; 32]) -> Result<(), PairingRelayError> {
+        if self.slots.len() >= MAX_SLOTS
+            || self.backing.saturating_add(ISSUED_RESERVE) > MAX_BACKING
+        {
+            return Err(self.busy());
+        }
+        let owned = self.slots.values().filter(|slot| slot.account == account).count();
+        if owned >= MAX_SLOTS_PER_ACCOUNT {
+            return Err(self.busy());
+        }
+        let recent = self.hour.get(&account).map_or(0, VecDeque::len);
+        if recent >= MAX_ISSUES_PER_HOUR {
+            return Err(self.busy());
+        }
+        Ok(())
+    }
+
+    fn busy(&self) -> PairingRelayError {
+        PairingRelayError::busy(self.clock.monotonic_ms())
+    }
+
+    fn build_ticket(
+        &self,
+        spec: &CreateSpec,
+        create_id: [u8; 32],
+        issuer_seq: u64,
+        wall: u64,
+    ) -> Result<CreateTicket, PairingRelayError> {
+        let ticket = CreateTicket {
+            schema: "ramflux.pairing.CreateTicket.v2".into(),
+            version: 2,
+            node_key: self.node_key.clone(),
+            boot_id: self.boot_id_b64.clone(),
+            create_id: encode_base64url(create_id),
+            issuer_seq,
+            account_anchor: spec.account_anchor.clone(),
+            primary_ref: spec.primary_ref.clone(),
+            spec_hash: spec.spec_hash().map_err(|e| wire(&e))?,
+            issued_at: wall,
+            expires_at: wall
+                .checked_add(INVITATION_LIFETIME_SECS)
+                .ok_or(PairingRelayError::invalid("expires_at"))?,
+        };
+        ticket.validate().map_err(|e| wire(&e))?;
+        Ok(ticket)
+    }
+
+    fn insert_issued(
+        &mut self,
+        account: [u8; 32],
+        create_id: [u8; 32],
+        ticket: Envelope<CreateTicket>,
+        spec: CreateSpec,
+        now: Now,
+    ) -> Result<(), PairingRelayError> {
+        self.charge(ISSUED_RESERVE)?;
+        self.slots.insert(
+            create_id,
+            Slot {
+                account,
+                expires_at: ticket.body.expires_at,
+                monotonic_deadline: now
+                    .mono
+                    .saturating_add(INVITATION_LIFETIME_SECS.saturating_mul(1_000)),
+                reserved: ISSUED_RESERVE,
+                body: SlotBody::Issued(Box::new(IssuedSlot {
+                    spec_hash: spec.spec_hash().map_err(|e| wire(&e))?,
+                    primary_ref: spec.primary_ref,
+                    ticket,
+                })),
+            },
+        );
+        self.hour.entry(account).or_default().push_back(now.mono);
+        Ok(())
+    }
+
+    fn verify_ticket(&self, create: &Create) -> Result<(), PairingRelayError> {
+        let body = &create.ticket.body;
+        if body.node_key != self.node_key {
+            return Err(PairingRelayError::WrongContext);
+        }
+        let bytes = ticket_signing_bytes(body).map_err(|e| wire(&e))?;
+        verify_canonical_signature(&bytes, &create.ticket.signature, &self.node_key)
+            .map_err(|_| PairingRelayError::WrongContext)
+    }
+
+    fn promote_live(
+        &mut self,
+        id: [u8; 32],
+        create: Create,
+        now: Now,
+    ) -> Result<Created, PairingRelayError> {
+        self.charge(LIVE_RESERVE.saturating_sub(ISSUED_RESERVE))?;
+        let invitation_id = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
+        let transfer_id = if create.spec.purpose == "primary_transfer" {
+            Some(random_32().map_err(|_| PairingRelayError::invalid("entropy"))?)
+        } else {
+            None
+        };
+        let primary = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
+        let mut recipient = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
+        if recipient == primary {
+            recipient[0] ^= 1;
+        }
+        let descriptor = self.build_invitation(&create, invitation_id, transfer_id)?;
+        let created = created_reply(&descriptor, primary, recipient)?;
+        let ticket = create.ticket;
+        if let Some(slot) = self.slots.get_mut(&id) {
+            slot.reserved = LIVE_RESERVE;
+            slot.body = SlotBody::Live(Box::new(LiveSlot {
+                ticket,
+                descriptor,
+                primary_token: Zeroizing::new(primary),
+                recipient_token: Zeroizing::new(recipient),
+                claim_nonce: None,
+                initiator: Direction::default(),
+                responder: Direction::default(),
+                closed_reason: None,
+                last_activity_ms: now.mono,
+            }));
+        }
+        self.invitations.insert(invitation_id, id);
+        Ok(created)
+    }
+
+    fn build_invitation(
+        &self,
+        create: &Create,
+        invitation_id: [u8; 32],
+        transfer_id: Option<[u8; 32]>,
+    ) -> Result<Envelope<Invitation>, PairingRelayError> {
+        let ticket = &create.ticket.body;
+        let spec = &create.spec;
+        let mut invitation = Invitation {
+            schema: "ramflux.pairing.Invitation.v2".into(),
+            version: 2,
+            invitation_id: encode_base64url(invitation_id),
+            issuer_seq: ticket.issuer_seq,
+            request_id: ticket.create_id.clone(),
+            node_key: self.node_key.clone(),
+            public_origin: self.public_origin.clone(),
+            account_anchor: spec.account_anchor.clone(),
+            primary_ref: spec.primary_ref.clone(),
+            base_record_hash: spec.base_record_hash.clone(),
+            base_epoch: spec.base_epoch,
+            purpose: spec.purpose.clone(),
+            recipient_mode: spec.recipient_mode.clone(),
+            destination_ref: spec.destination_ref.clone(),
+            capabilities: spec.capabilities.clone(),
+            lease_not_before: spec.lease_not_before,
+            lease_expires_at: spec.lease_expires_at,
+            data_selection: spec.data_selection.clone(),
+            transfer_id: transfer_id.map(encode_base64url),
+            created_at: ticket.issued_at,
+            expires_at: ticket.expires_at,
+        };
+        invitation.normalize();
+        let bytes = invitation_signing_bytes(&invitation).map_err(|e| wire(&e))?;
+        Ok(Envelope {
+            body: invitation,
+            signature: sign_canonical_bytes_with_seed(&bytes, *self.seed),
+        })
+    }
+
+    fn check_token(
+        &self,
+        invitation: [u8; 32],
+        issuer_seq: u64,
+        role: &str,
+        token: &str,
+        wall: u64,
+    ) -> Result<u64, PairingRelayError> {
+        let create_id = self.invitations.get(&invitation).ok_or(PairingRelayError::Retired)?;
+        let slot = self.slots.get(create_id).ok_or(PairingRelayError::Retired)?;
+        let now = Now { wall, mono: self.clock.monotonic_ms() };
+        if slot_expired(slot, &now) {
+            return Err(PairingRelayError::Expired);
+        }
+        let SlotBody::Live(live) = &slot.body else {
+            return Err(PairingRelayError::Retired);
+        };
+        if live.descriptor.body.invitation_id != encode_base64url(invitation)
+            || live.descriptor.body.issuer_seq != issuer_seq
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        let expected = match role {
+            "initiator" => encode_base64url(*live.primary_token),
+            "responder" => encode_base64url(*live.recipient_token),
+            _ => return Err(PairingRelayError::WrongRole),
+        };
+        if expected != token {
+            return Err(PairingRelayError::WrongContext);
+        }
+        Ok(live.descriptor.body.expires_at)
+    }
+
+    fn live(&self, invitation: [u8; 32]) -> Result<&LiveSlot, PairingRelayError> {
+        let create_id = self.invitations.get(&invitation).ok_or(PairingRelayError::Retired)?;
+        match &self.slots.get(create_id).ok_or(PairingRelayError::Retired)?.body {
+            SlotBody::Live(live) => Ok(live.as_ref()),
+            SlotBody::Issued(_) => Err(PairingRelayError::Retired),
+        }
+    }
+
+    fn live_mut(&mut self, invitation: [u8; 32]) -> Result<&mut LiveSlot, PairingRelayError> {
+        let create_id = *self.invitations.get(&invitation).ok_or(PairingRelayError::Retired)?;
+        match &mut self.slots.get_mut(&create_id).ok_or(PairingRelayError::Retired)?.body {
+            SlotBody::Live(live) => Ok(live.as_mut()),
+            SlotBody::Issued(_) => Err(PairingRelayError::Retired),
+        }
+    }
+
+    fn admit_claim_budget(
+        &mut self,
+        source: IpAddr,
+        invitation: [u8; 32],
+        mono: u64,
+    ) -> Result<(), PairingRelayError> {
+        if self.claims.contains_key(&invitation) {
+            return Ok(());
+        }
+        let prefixes = claim_source_prefixes(source);
+        if prefixes.is_empty() {
+            return Err(PairingRelayError::invalid("source"));
+        }
+        if self.claims.len() >= MAX_CLAIMS {
+            return Err(self.busy());
+        }
+        for prefix in &prefixes {
+            let used = self.claims.values().filter(|entry| entry.prefixes.contains(prefix)).count();
+            if used >= MAX_CLAIMS_PER_PREFIX {
+                return Err(self.busy());
+            }
+        }
+        self.claims.insert(
+            invitation,
+            ClaimEntry { prefixes, expires_ms: mono.saturating_add(CLAIM_GRACE_MS) },
+        );
+        Ok(())
+    }
+
+    fn prune(&mut self) -> Result<(), PairingRelayError> {
+        let now = self.now()?;
+        let expired: Vec<[u8; 32]> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot_expired(slot, &now))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.release_slot(id);
+        }
+        self.claims.retain(|_, entry| entry.expires_ms > now.mono);
+        let stale: Vec<[u8; 32]> = self
+            .slots
+            .iter()
+            .filter_map(|(id, slot)| match &slot.body {
+                SlotBody::Live(live)
+                    if now.mono.saturating_sub(live.last_activity_ms) >= CLAIM_GRACE_MS =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in stale {
+            if let Some(Slot { body: SlotBody::Live(live), .. }) = self.slots.get_mut(&id) {
+                live.initiator.frames.clear();
+                live.responder.frames.clear();
+            }
+        }
+        let cutoff = now.mono.saturating_sub(HOUR_MS);
+        for times in self.hour.values_mut() {
+            while times.front().is_some_and(|t| *t < cutoff) {
+                times.pop_front();
+            }
+        }
+        self.hour.retain(|_, times| !times.is_empty());
+        Ok(())
+    }
+
+    fn charge(&mut self, extra: usize) -> Result<(), PairingRelayError> {
+        let next = self.backing.checked_add(extra).ok_or(PairingRelayError::invalid("backing"))?;
+        if next > MAX_BACKING {
+            return Err(self.busy());
+        }
+        self.backing = next;
+        self.high_water = self.high_water.max(next);
+        Ok(())
+    }
+
+    fn release_slot(&mut self, id: [u8; 32]) {
+        if let Some(slot) = self.slots.remove(&id) {
+            self.backing = self.backing.saturating_sub(slot.reserved);
+            if let SlotBody::Live(mut live) = slot.body {
+                live.primary_token.fill(0);
+                live.recipient_token.fill(0);
+                let invitation =
+                    parse_id(&live.descriptor.body.invitation_id, "invitation_id").ok();
+                if let Some(invitation) = invitation {
+                    self.invitations.remove(&invitation);
+                    self.claims.remove(&invitation);
+                }
+            }
+        }
+    }
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Self {
+            frames: Vec::with_capacity(MAX_FRAMES_PER_DIRECTION),
+            next_send_seq: 0,
+            last_send: None,
+            poll_times: VecDeque::with_capacity(MAX_POLLS_PER_SEC),
+        }
+    }
+}
+
+fn sign_ticket(
+    seed: &Zeroizing<[u8; 32]>,
+    ticket: CreateTicket,
+) -> Result<Envelope<CreateTicket>, PairingRelayError> {
+    let bytes = ticket_signing_bytes(&ticket).map_err(|e| wire(&e))?;
+    Ok(Envelope { body: ticket, signature: sign_canonical_bytes_with_seed(&bytes, **seed) })
+}
+
+fn replay_created(live: &LiveSlot, create: &Create) -> Result<Created, PairingRelayError> {
+    if live.ticket.body.create_id != create.ticket.body.create_id {
+        return Err(PairingRelayError::Replay);
+    }
+    let expected = create.spec.spec_hash().map_err(|e| wire(&e))?;
+    if live.ticket.body.spec_hash != expected {
+        return Err(PairingRelayError::Replay);
+    }
+    created_reply(&live.descriptor, *live.primary_token, *live.recipient_token)
+}
+
+fn created_reply(
+    descriptor: &Envelope<Invitation>,
+    primary: [u8; 32],
+    recipient: [u8; 32],
+) -> Result<Created, PairingRelayError> {
+    let created = Created {
+        schema: "ramflux.pairing.Created.v2".into(),
+        version: 2,
+        request_id: descriptor.body.request_id.clone(),
+        invitation: descriptor.clone(),
+        primary_token: encode_base64url(primary),
+        recipient_token: encode_base64url(recipient),
+    };
+    created.validate().map_err(|e| wire(&e))?;
+    Ok(created)
+}
+
+fn parse_id(value: &str, field: &'static str) -> Result<[u8; 32], PairingRelayError> {
+    let bytes = decode_base64url(value).map_err(|_| PairingRelayError::invalid(field))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| PairingRelayError::invalid(field))
+}
+
+fn slot_expired(slot: &Slot, now: &Now) -> bool {
+    now.wall >= slot.expires_at || now.mono >= slot.monotonic_deadline
+}
+
+fn slot_counts(slots: &HashMap<[u8; 32], Slot>) -> (usize, usize, usize, usize) {
+    let mut issued = 0;
+    let mut live = 0;
+    let mut queued_bytes = 0;
+    let mut queued_frames = 0;
+    for slot in slots.values() {
+        match &slot.body {
+            SlotBody::Issued(_) => issued += 1,
+            SlotBody::Live(body) => {
+                live += 1;
+                for direction in [&body.initiator, &body.responder] {
+                    queued_frames += direction.frames.len();
+                    queued_bytes += direction.frames.len() * MAX_FRAME_BYTES;
+                }
+            }
+        }
+    }
+    (issued, live, queued_bytes, queued_frames)
+}
+
+fn direction_mut<'a>(
+    live: &'a mut LiveSlot,
+    role: &str,
+) -> Result<&'a mut Direction, PairingRelayError> {
+    match role {
+        "initiator" => Ok(&mut live.initiator),
+        "responder" => Ok(&mut live.responder),
+        _ => Err(PairingRelayError::WrongRole),
+    }
+}
+
+fn peer_mut<'a>(
+    live: &'a mut LiveSlot,
+    role: &str,
+) -> Result<&'a mut Direction, PairingRelayError> {
+    match role {
+        "initiator" => Ok(&mut live.responder),
+        "responder" => Ok(&mut live.initiator),
+        _ => Err(PairingRelayError::WrongRole),
+    }
+}
+
+fn enqueue(
+    out: &mut Direction,
+    seq: u64,
+    frame: RelayFrame,
+    digest: String,
+) -> Result<(), PairingRelayError> {
+    if let Some((last_seq, last_digest)) = &out.last_send
+        && seq == *last_seq
+    {
+        return if digest == *last_digest { Ok(()) } else { Err(PairingRelayError::Replay) };
+    }
+    if seq != out.next_send_seq {
+        return Err(PairingRelayError::Replay);
+    }
+    if out.frames.len() >= MAX_FRAMES_PER_DIRECTION {
+        return Err(PairingRelayError::busy(seq));
+    }
+    frame.validate().map_err(|e| wire(&e))?;
+    out.frames.push((seq, frame));
+    out.last_send = Some((seq, digest));
+    out.next_send_seq = out.next_send_seq.saturating_add(1);
+    Ok(())
+}
+
+fn record_poll(direction: &mut Direction, mono: u64) -> Result<(), PairingRelayError> {
+    let window = mono.saturating_sub(1_000);
+    while direction.poll_times.front().is_some_and(|t| *t < window) {
+        direction.poll_times.pop_front();
+    }
+    if direction.poll_times.len() >= MAX_POLLS_PER_SEC {
+        return Err(PairingRelayError::busy(mono));
+    }
+    direction.poll_times.push_back(mono);
+    Ok(())
+}
+
+fn take_polled_frames(direction: &Direction) -> Result<Vec<QueuedFrame>, PairingRelayError> {
+    let mut frames = Vec::new();
+    for (seq, frame) in &direction.frames {
+        let candidate = QueuedFrame { seq: *seq, frame: frame.clone() };
+        let mut trial = frames.clone();
+        trial.push(candidate.clone());
+        let polled = Polled {
+            schema: "ramflux.pairing.Polled.v2".into(),
+            version: 2,
+            invitation_id: encode_base64url([0; 32]),
+            frames: trial,
+            closed: false,
+        };
+        if ramflux_protocol::canonical_json_bytes(&polled)
+            .map_err(|_| PairingRelayError::invalid("json"))?
+            .len()
+            > MAX_FRAME_BYTES
+        {
+            break;
+        }
+        frames.push(candidate);
+        if frames.len() == MAX_FRAMES_PER_DIRECTION {
+            break;
+        }
+    }
+    Ok(frames)
+}
+
+fn claimed_reply(claim: &Claim, expires_at: u64) -> Claimed {
+    Claimed {
+        schema: "ramflux.pairing.Claimed.v2".into(),
+        version: 2,
+        invitation_id: claim.invitation_id.clone(),
+        issuer_seq: claim.issuer_seq,
+        claim_nonce: claim.claim_nonce.clone(),
+        role: "responder".into(),
+        expires_at,
+    }
+}
