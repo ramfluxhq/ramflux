@@ -143,6 +143,8 @@ pub enum SdkError {
     PairRecoveryRequired,
     #[error("inbound envelope rejected: {0}")]
     InboundRejected(String),
+    #[error("payload too large")]
+    PayloadTooLarge,
     #[error("authenticated envelope replay payload mismatch")]
     ReplayMismatch,
     #[error("inbound state not ready: {0}")]

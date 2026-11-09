@@ -10,7 +10,7 @@ use super::{
 use crate::client::identity_authority::HeadUse;
 use crate::prekey::sdk_fetch_prekey_bundle;
 
-fn persisted_pair_snapshot(
+pub(super) fn persisted_pair_snapshot(
     client: &RamfluxClient,
     local: &ramflux_crypto::RootQualifiedDeviceRef,
     remote: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -80,26 +80,6 @@ impl RamfluxClient {
             }
             Ok(())
         })
-    }
-
-    pub(crate) fn persist_pair_after_size_preflight(
-        &self,
-        sizes: ramflux_protocol::message::outer::IngressSizes,
-        local: &ramflux_crypto::RootQualifiedDeviceRef,
-        remote: &ramflux_crypto::RootQualifiedDeviceRef,
-        bundle: &[u8; 32],
-        session: &ramflux_crypto::DmSession,
-    ) -> Result<(), SdkError> {
-        let before = persisted_pair_snapshot(self, local, remote)?;
-        let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::wrap_session(before);
-        let advanced = serde_json::to_vec(&session.snapshot())?;
-        ramflux_protocol::message::outer::accept_after_size_preflight(
-            sizes,
-            &mut ratchet,
-            advanced,
-        )
-        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
-        self.persist_pair(local, remote, bundle, session)
     }
 
     #[cfg(test)]

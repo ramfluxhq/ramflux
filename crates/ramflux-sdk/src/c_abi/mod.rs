@@ -927,6 +927,7 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::LocalBus(_)
         | SdkError::LocalBusRefused { .. }
         | SdkError::InboundRejected(_)
+        | SdkError::PayloadTooLarge
         | SdkError::ReplayMismatch
         | SdkError::InvalidOfflineRetention(_)
         | SdkError::InboundPending(_)

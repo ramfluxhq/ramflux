@@ -222,34 +222,102 @@ fn first_unknown_conversation_decrypts_and_outer_frame_has_no_route() -> Result<
     Ok(())
 }
 
+const MAX_LEGITIMATE_BODY: usize = 392_000;
+
+fn inner_len(message: &GatewayDirectMessage, body: &[u8]) -> Result<usize, SdkError> {
+    Ok(serde_json::to_vec(&Plaintext {
+        routing: routing(message, Route::direct()),
+        body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
+    })?
+    .len())
+}
+
+fn smallest_body_over_inner(message: &GatewayDirectMessage) -> Result<Vec<u8>, SdkError> {
+    let mut lo = MAX_LEGITIMATE_BODY;
+    let mut hi = MAX_LEGITIMATE_BODY + 8_192;
+    if inner_len(message, &vec![0x5a; hi])? <= ramflux_protocol::message::outer::MAX_INNER_BYTES {
+        return Err(invalid("over-inner probe must exceed the Inner cap"));
+    }
+    while lo + 1 < hi {
+        let mid = usize::midpoint(lo, hi);
+        if inner_len(message, &vec![0x5a; mid])? > ramflux_protocol::message::outer::MAX_INNER_BYTES
+        {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Ok(vec![0x5a; hi])
+}
+
+fn assert_payload_too_large(result: Result<GatewayInboxEntry, SdkError>) -> Result<(), SdkError> {
+    match result {
+        Err(SdkError::PayloadTooLarge) => Ok(()),
+        other => Err(invalid(&format!("exact PayloadTooLarge, got {other:?}"))),
+    }
+}
+
+#[test]
+fn real_wire_size_preflight_accepts_392kb_body() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let a = Fixture::new("alice", 71)?;
+    let b = Fixture::new("bob", 72)?;
+    let body = vec![0x5a; MAX_LEGITIMATE_BODY];
+    let msg = message("max-inner", "c");
+    let inner = inner_len(&msg, &body)?;
+    assert!(inner <= ramflux_protocol::message::outer::MAX_INNER_BYTES);
+    assert!(inner >= 522_000);
+    let entry = seal(&a, &b, msg, &body)?;
+    let opened = b.client.open_routed(&entry, "bob")?;
+    assert_eq!(opened.body.as_slice(), body.as_slice());
+    assert_eq!(opened.decrypted.plaintext.len(), inner);
+    let sizes =
+        ramflux_protocol::message::outer::IngressSizes::measure_live(&entry.envelope, &[], &[])
+            .map_err(|error| invalid(&error.to_string()))?;
+    ramflux_protocol::message::outer::check_ingress_caps(sizes)
+        .map_err(|error| invalid(&error.to_string()))?;
+    assert!(sizes.bootstrap_capsule_bytes > 0);
+    let wrapper = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+        .map_err(|_| invalid("payload"))?;
+    assert!(sizes.ciphertext_bytes < wrapper.len());
+    assert!(sizes.ciphertext_bytes <= ramflux_protocol::message::outer::MAX_CIPHERTEXT_BYTES);
+    assert!(
+        sizes.complete_frame_bytes <= ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
+    );
+    assert_eq!(
+        sizes.identifier_bytes,
+        entry.envelope.source_device_id.len().max(
+            entry
+                .envelope
+                .envelope_id
+                .len()
+                .max(entry.envelope.source_principal_id.len())
+                .max(entry.envelope.target_delivery_id.len()),
+        )
+    );
+    assert_ne!(entry.envelope.source_device_id, "");
+    assert_ne!(entry.envelope.source_device_id, "local");
+    Ok(())
+}
+
 #[test]
 fn over_cap_seal_leaves_pair_session_byte_identical() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let a = Fixture::new("alice", 81)?;
     let b = Fixture::new("bob", 91)?;
-    let _entry = seal(&a, &b, message("pair", "c"), b"hello")?;
+    let established = message("pair", "c");
+    let _entry = seal(&a, &b, established, &vec![0x5a; MAX_LEGITIMATE_BODY])?;
     let local = a.client.local_device_identity("alice")?;
     let remote = a.client.device_identity(&fixture_peer_reference(&a.client, "bob")?)?;
     let before = a.client.persisted_pair_snapshot(&local, &remote)?;
-    let Some((mut session, bundle)) = a.client.active_pair(&local, &remote)? else {
-        return Err(invalid("pair session"));
-    };
-    session.encrypt(b"advance", b"aad").map_err(|error| invalid(&error.to_string()))?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_sealed_send(
-        &ramflux_protocol::message::outer::SealedSendSizes {
-            inner_bytes: ramflux_protocol::message::outer::MAX_INNER_BYTES + 1,
-            ciphertext: &[0_u8; 1],
-            encrypted_header: &[],
-            bootstrap_capsule: &[],
-            identifiers: ["e", "p", "d", "t"],
-            metadata: None,
-            complete_frame_bytes: 1,
-        },
-    )
-    .map_err(|error| invalid(&error.to_string()))?;
-    match a.client.persist_pair_after_size_preflight(sizes, &local, &remote, &bundle, &session) {
-        Err(SdkError::InboundRejected(message)) if message == "payload too large" => {}
-        other => return Err(invalid(&format!("exact PayloadTooLarge, got {other:?}"))),
-    }
+    let over_msg = message("over-inner", "c");
+    let over = smallest_body_over_inner(&over_msg)?;
+    assert!(
+        inner_len(&over_msg, &over[0..over.len() - 1])?
+            <= ramflux_protocol::message::outer::MAX_INNER_BYTES
+    );
+    assert!(inner_len(&over_msg, &over)? > ramflux_protocol::message::outer::MAX_INNER_BYTES);
+    assert_payload_too_large(seal(&a, &b, over_msg, &over))?;
     assert_eq!(before, a.client.persisted_pair_snapshot(&local, &remote)?);
     Ok(())
 }

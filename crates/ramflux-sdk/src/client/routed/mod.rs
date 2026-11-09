@@ -150,6 +150,7 @@ struct SealedPairPersist<'a> {
     bundle: &'a [u8; 32],
     session: &'a ramflux_crypto::DmSession,
     message: &'a GatewayDirectMessage,
+    header: Option<&'a SdkDmX3dhHeader>,
 }
 
 fn persist_sealed_pair(
@@ -159,33 +160,113 @@ fn persist_sealed_pair(
     let local_ref = client.local_device_identity(persist.local)?;
     let remote_id = client.device_identity(persist.remote)?;
     if !crate::client::target_selection::schema_v1_selected() {
+        mark_local_pair_origin(client, persist)?;
         return client.persist_pair(&local_ref, &remote_id, persist.bundle, persist.session);
     }
-    let frame = serde_json::to_vec(persist.sealed)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_sealed_send(
+    let sizes = measure_wire_sealed_send(client, persist)?;
+    let before = session::persisted_pair_snapshot(client, &local_ref, &remote_id)?;
+    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::wrap_session(before);
+    let advanced = serde_json::to_vec(&persist.session.snapshot())?;
+    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet, advanced)
+        .map_err(map_size_preflight)?;
+    mark_local_pair_origin(client, persist)?;
+    client.persist_pair(&local_ref, &remote_id, persist.bundle, persist.session)
+}
+
+fn mark_local_pair_origin(
+    client: &RamfluxClient,
+    persist: &SealedPairPersist<'_>,
+) -> Result<(), SdkError> {
+    if persist.header.is_none() {
+        return Ok(());
+    }
+    client
+        .account_db()?
+        .persist_actor_state(&format!("dm-pair/local/{}", persist.session.session_id), &true)?;
+    Ok(())
+}
+
+fn map_size_preflight(error: ramflux_protocol::message::outer::OuterProfileError) -> SdkError {
+    match error {
+        ramflux_protocol::message::outer::OuterProfileError::PayloadTooLarge => {
+            SdkError::PayloadTooLarge
+        }
+        other => SdkError::InboundRejected(other.to_string()),
+    }
+}
+
+fn measure_wire_sealed_send(
+    client: &RamfluxClient,
+    persist: &SealedPairPersist<'_>,
+) -> Result<ramflux_protocol::message::outer::IngressSizes, SdkError> {
+    let wire_local = crate::client::identity_authority::device_namespace::wire_device_id(
+        &client.local_device_reference(persist.local)?,
+    )?;
+    let bootstrap = match persist.header {
+        Some(header) => serde_json::to_vec(header)?,
+        None => Vec::new(),
+    };
+    let envelope = cryptobox_sender_envelope(client, persist, &wire_local);
+    let metadata = if envelope.ext.ext.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(&envelope.ext.ext)?)
+    };
+    ramflux_protocol::message::outer::IngressSizes::measure_sealed_send(
         &ramflux_protocol::message::outer::SealedSendSizes {
             inner_bytes: persist.inner_len,
             ciphertext: &persist.sealed.ciphertext,
             encrypted_header: &persist.sealed.canonical_header_bytes,
-            bootstrap_capsule: &[],
+            bootstrap_capsule: &bootstrap,
             identifiers: [
-                persist.message.envelope_id.as_str(),
-                persist.message.source_principal_id.as_str(),
-                persist.local,
-                persist.message.target_delivery_id.as_str(),
+                envelope.envelope_id.as_str(),
+                envelope.source_principal_id.as_str(),
+                envelope.source_device_id.as_str(),
+                envelope.target_delivery_id.as_str(),
             ],
-            metadata: None,
-            complete_frame_bytes: frame.len(),
+            metadata: metadata.as_ref(),
+            complete_frame_bytes: ramflux_protocol::canonical_json_bytes(&envelope)?.len(),
         },
     )
-    .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
-    client.persist_pair_after_size_preflight(
-        sizes,
-        &local_ref,
-        &remote_id,
-        persist.bundle,
-        persist.session,
-    )
+    .map_err(map_size_preflight)
+}
+
+fn cryptobox_sender_envelope(
+    client: &RamfluxClient,
+    persist: &SealedPairPersist<'_>,
+    wire_device_id: &str,
+) -> ramflux_protocol::Envelope {
+    let encrypted_payload = ramflux_protocol::encode_base64url(&persist.sealed.ciphertext);
+    let payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        encrypted_payload.as_bytes(),
+    );
+    let source_principal_id = client.device_branch.as_ref().map_or_else(
+        || persist.message.source_principal_id.clone(),
+        |branch| branch.principal_id.clone(),
+    );
+    let mut envelope = ramflux_protocol::Envelope {
+        schema: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        version: 1,
+        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        ext: ramflux_protocol::Ext::default(),
+        signed: sdk_signed_fields(""),
+        envelope_id: persist.message.envelope_id.clone(),
+        source_principal_id,
+        source_device_id: wire_device_id.to_owned(),
+        target_delivery_id: persist.message.target_delivery_id.clone(),
+        routing_set_id: None,
+        delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
+        priority: ramflux_protocol::Priority::Normal,
+        ttl: persist.message.ttl,
+        created_at: persist.message.created_at,
+        encrypted_payload,
+        payload_hash,
+    };
+    if let Ok(anchor) = client.own_account_anchor() {
+        envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
+    }
+    envelope
 }
 
 impl RamfluxClient {
@@ -286,11 +367,6 @@ impl RamfluxClient {
         })?);
         let aad = associated_data(&message.envelope_id, local, &wire_remote, &bundle)?;
         let ciphertext = session.encrypt(&plaintext, &aad)?;
-        // Never reuse a send key after transport cancellation or a process crash.
-        if header.is_some() {
-            self.account_db()?
-                .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
-        }
         persist_sealed_pair(
             self,
             &SealedPairPersist {
@@ -301,6 +377,7 @@ impl RamfluxClient {
                 bundle: &bundle,
                 session,
                 message,
+                header: header.as_ref(),
             },
         )?;
         self.finish_pair_retirement()?;

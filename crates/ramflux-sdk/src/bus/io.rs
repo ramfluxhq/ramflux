@@ -250,6 +250,7 @@ pub(crate) fn local_bus_error_code(error: &SdkError) -> &'static str {
         SdkError::Storage(error) => storage_error_code(error),
         SdkError::TaskDeliveryTooLarge { .. } => "TaskDeliveryTooLarge",
         SdkError::SurfaceDeliveryTooLarge { .. } => "too_large",
+        SdkError::PayloadTooLarge => "payload too large",
         SdkError::SurfaceRefused { reason, .. } => reason.as_str(),
         SdkError::CapabilityDenied(_) | SdkError::Sync(SyncError::CapabilityDenied) => {
             "CapabilityDenied"

@@ -395,3 +395,33 @@ fn candidate_outer_round_trip_and_sender_excludes_receipt() -> Result<(), Box<dy
     assert_eq!(CRYPTOBOX_OVERHEAD_BYTES, 581);
     Ok(())
 }
+
+#[test]
+fn measure_live_uses_nested_cryptobox_not_json_wrapper() -> Result<(), Box<dyn std::error::Error>> {
+    let cryptobox = vec![7_u8; 32];
+    let nested = json!({
+        "schema": "ramflux.sdk.dm_x3dh_envelope.v2",
+        "version": 2,
+        "x3dh": {"session_id": "s", "initiator_identity_public": vec![1_u8; 32]},
+        "ciphertext": {
+            "session_id": "s",
+            "counter": 1,
+            "nonce": vec![0_u8; 12],
+            "ciphertext": cryptobox,
+            "canonical_header_bytes": [9, 8, 7],
+        }
+    });
+    let wrapper = serde_json::to_vec(&nested)?;
+    let mut envelope = live_envelope(None);
+    envelope.encrypted_payload = encode_base64url(&wrapper);
+    envelope.source_device_id = "wire-device".to_owned();
+    let sizes = IngressSizes::measure_live(&envelope, &[], &[])?;
+    assert_eq!(sizes.ciphertext_bytes, 32);
+    assert!(sizes.ciphertext_bytes < wrapper.len());
+    assert_eq!(sizes.encrypted_header_bytes, 3);
+    assert!(sizes.bootstrap_capsule_bytes > 0);
+    assert!(sizes.complete_frame_bytes <= MAX_COMPLETE_FRAME_BYTES);
+    assert_eq!(sizes.identifier_bytes, "wire-device".len());
+    super::check_ingress_caps(sizes)?;
+    Ok(())
+}

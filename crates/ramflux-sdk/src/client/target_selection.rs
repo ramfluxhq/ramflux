@@ -12,7 +12,7 @@ use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::SignedLayerDeclaration;
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
-use ramflux_protocol::schema_profile::{ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION};
+use ramflux_protocol::schema_profile::schema_v1_live;
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -164,8 +164,8 @@ pub(crate) struct SelectionPlan {
 
 /// True only after PR24 flips the live generation to message schema v1.
 #[must_use]
-pub(crate) const fn schema_v1_selected() -> bool {
-    ACTIVE_STORAGE_GENERATION == MESSAGE_SCHEMA_V1_GENERATION
+pub(crate) fn schema_v1_selected() -> bool {
+    schema_v1_live()
 }
 
 /// Map a kind onto an admitted layer. Never substitutes text for a control.

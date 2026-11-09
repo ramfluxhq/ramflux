@@ -213,8 +213,12 @@ impl IngressSizes {
         })
     }
 
-    /// Measure a live envelope the node actually receives: decoded ciphertext,
-    /// real identifiers, real ext metadata, real canonical frame.
+    /// Measure a live envelope the node actually receives.
+    ///
+    /// `encrypted_payload` is `SdkDmEncryptedEnvelope` JSON. `CryptoBox` size is
+    /// the nested `ciphertext.ciphertext` length (AEAD bytes), not the JSON
+    /// wrapper. Complete-frame size uses the `CryptoBox` wire encoding
+    /// (base64url of those bytes) in the envelope payload field.
     ///
     /// # Errors
     /// Returns [`OuterProfileError::Malformed`] when the payload is not base64url
@@ -224,15 +228,16 @@ impl IngressSizes {
         encrypted_header: &[u8],
         bootstrap_capsule: &[u8],
     ) -> Result<Self, OuterProfileError> {
-        let ciphertext = crate::decode_base64url(&envelope.encrypted_payload)
+        let decoded = crate::decode_base64url(&envelope.encrypted_payload)
             .map_err(|_| OuterProfileError::Malformed)?;
+        let nested = live_cryptobox(&decoded, encrypted_header, bootstrap_capsule)?;
         Ok(Self {
             inner_bytes: 0,
-            ciphertext_bytes: ciphertext.len(),
+            ciphertext_bytes: nested.ciphertext.len(),
             unpadded_plaintext_bytes: 0,
             padded_plaintext_bytes: 0,
-            encrypted_header_bytes: encrypted_header.len(),
-            bootstrap_capsule_bytes: bootstrap_capsule.len(),
+            encrypted_header_bytes: nested.header.len(),
+            bootstrap_capsule_bytes: nested.bootstrap.len(),
             outer_metadata_bytes: if envelope.ext.ext.is_empty() {
                 0
             } else {
@@ -246,9 +251,7 @@ impl IngressSizes {
                 envelope.source_device_id.as_str(),
                 envelope.target_delivery_id.as_str(),
             ]),
-            complete_frame_bytes: crate::canonical_json_bytes(envelope)
-                .map_err(|_| OuterProfileError::Malformed)?
-                .len(),
+            complete_frame_bytes: complete_frame_with_cryptobox(envelope, &nested.ciphertext)?,
         })
     }
 
@@ -491,6 +494,88 @@ fn metadata_len(value: Option<&Value>) -> Result<usize, OuterProfileError> {
         return Ok(0);
     }
     Ok(crate::canonical_json_bytes(value).map_err(|_| OuterProfileError::Malformed)?.len())
+}
+
+#[derive(Deserialize)]
+struct NestedSdkEnvelope {
+    #[serde(default)]
+    x3dh: Option<Value>,
+    ciphertext: NestedCiphertext,
+}
+
+#[derive(Deserialize)]
+struct NestedCiphertext {
+    ciphertext: Vec<u8>,
+    #[serde(default)]
+    canonical_header_bytes: Vec<u8>,
+}
+
+struct LiveCryptobox {
+    ciphertext: Vec<u8>,
+    header: Vec<u8>,
+    bootstrap: Vec<u8>,
+}
+
+fn live_cryptobox(
+    decoded: &[u8],
+    encrypted_header: &[u8],
+    bootstrap_capsule: &[u8],
+) -> Result<LiveCryptobox, OuterProfileError> {
+    if let Ok(nested) = crate::parse_i_json::<NestedSdkEnvelope>(decoded) {
+        let bootstrap = if bootstrap_capsule.is_empty() {
+            match nested.x3dh {
+                Some(header) => crate::canonical_json_bytes(&header)
+                    .map_err(|_| OuterProfileError::Malformed)?,
+                None => Vec::new(),
+            }
+        } else {
+            bootstrap_capsule.to_vec()
+        };
+        let header = if encrypted_header.is_empty() {
+            nested.ciphertext.canonical_header_bytes
+        } else {
+            encrypted_header.to_vec()
+        };
+        return Ok(LiveCryptobox { ciphertext: nested.ciphertext.ciphertext, header, bootstrap });
+    }
+    Ok(LiveCryptobox {
+        ciphertext: decoded.to_vec(),
+        header: encrypted_header.to_vec(),
+        bootstrap: bootstrap_capsule.to_vec(),
+    })
+}
+
+fn complete_frame_with_cryptobox(
+    envelope: &crate::Envelope,
+    cryptobox: &[u8],
+) -> Result<usize, OuterProfileError> {
+    let payload = crate::encode_base64url(cryptobox);
+    if envelope.encrypted_payload == payload {
+        return crate::canonical_json_bytes(envelope)
+            .map(|bytes| bytes.len())
+            .map_err(|_| OuterProfileError::Malformed);
+    }
+    let compact = crate::Envelope {
+        schema: envelope.schema.clone(),
+        version: envelope.version,
+        domain: envelope.domain.clone(),
+        ext: envelope.ext.clone(),
+        signed: envelope.signed.clone(),
+        envelope_id: envelope.envelope_id.clone(),
+        source_principal_id: envelope.source_principal_id.clone(),
+        source_device_id: envelope.source_device_id.clone(),
+        target_delivery_id: envelope.target_delivery_id.clone(),
+        routing_set_id: envelope.routing_set_id.clone(),
+        delivery_class: envelope.delivery_class.clone(),
+        priority: envelope.priority.clone(),
+        ttl: envelope.ttl,
+        created_at: envelope.created_at,
+        encrypted_payload: payload,
+        payload_hash: envelope.payload_hash.clone(),
+    };
+    crate::canonical_json_bytes(&compact)
+        .map(|bytes| bytes.len())
+        .map_err(|_| OuterProfileError::Malformed)
 }
 
 #[cfg(test)]

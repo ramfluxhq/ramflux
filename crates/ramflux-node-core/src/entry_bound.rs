@@ -59,7 +59,7 @@ pub fn single_entry_frame_size(
 /// Returns typed `payload_too_large` or a serialization error, before allocation/replay.
 pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
     if ramflux_protocol::schema_profile::schema_v1_live() {
-        check_candidate_entry_bound(envelope)?;
+        return check_candidate_entry_bound(envelope);
     }
     if single_entry_frame_size(envelope)? > ENTRY_FRAME_BYTE_CAP {
         return Err(NodeCoreError::PayloadTooLarge);
