@@ -448,8 +448,10 @@ async fn stall(
 #[allow(clippy::too_many_lines)]
 async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_attempts_zero() -> Case
 {
+    // cfg(test) mutex serializes the process-wide manifest worker cap. The 20s hang
+    // guard covers the stall body only; waiting here must not count against it.
+    let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
     real_time_watchdog(LocalSet::new().run_until(Box::pin(async {
-        let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
         let fixture = Box::pin(Fixture::new("courier-independent-items-r6")).await?;
         let healthy = carrier(&fixture.source, "healthy", "healthy-task")?;
         let slow = carrier(&fixture.source, "stalled", "slow-task")?;
