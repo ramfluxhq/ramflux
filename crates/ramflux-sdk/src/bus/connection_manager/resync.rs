@@ -32,6 +32,16 @@ pub(crate) type ReceiveProfile =
 
 #[cfg(test)]
 impl super::ConnectionHandle {
+    pub(crate) async fn test_wait_receive(&self, trigger: super::ReceiveTrigger) {
+        loop {
+            let completed = self.shared.receive_completed.notified();
+            if self.test_receive_trace().contains(&(trigger, true)) {
+                return;
+            }
+            completed.await;
+        }
+    }
+
     pub(crate) async fn test_observe_sql(
         &self,
     ) -> Result<ramflux_storage::SqlWorkProbe, crate::SdkError> {

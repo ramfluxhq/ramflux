@@ -153,16 +153,29 @@ async fn prepare_case(
     fixture.source.install_test_session(engine);
     let started = Box::pin(start(fixture)).await?;
     let handle = started.actor.connection_for_test().ok_or("connection handle")?;
-    let initial = io.output.recv().await.ok_or("Connected Resume")?;
+    let initial = wait_for(io.output.recv(), "initial Connected Resume frame")
+        .await?
+        .ok_or("session output closed before initial Connected Resume frame")?;
     assert!(
         matches!(initial, GatewayClientFrame::Resume { resume } if resume.after_inbox_seq == 0)
     );
     send(&io, &GatewayServerFrame::Resume { entries: Vec::new() })?;
-    wait_until(|| handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true))).await?;
+    wait_for(
+        handle.test_wait_receive(ReceiveTrigger::Connected),
+        "Connected receive completion event",
+    )
+    .await?;
     let mut slow = subscribers.then(|| handle.subscribe([FrameKind::Deliver]));
+    let (drained_tx, mut drained_rx) = tokio::sync::mpsc::unbounded_channel();
     let draining = subscribers.then(|| {
         let mut subscription = handle.subscribe([FrameKind::Deliver]);
-        tokio::spawn(async move { while subscription.recv().await.is_some() {} })
+        tokio::spawn(async move {
+            while let Some(event) = subscription.recv().await {
+                if drained_tx.send(event).is_err() {
+                    break;
+                }
+            }
+        })
     });
     let held = {
         let handle = handle.clone();
@@ -175,9 +188,24 @@ async fn prepare_case(
                 .await
         })
     };
-    assert!(matches!(io.output.recv().await, Some(GatewayClientFrame::Cursor { .. })));
+    let cursor_request = wait_for(io.output.recv(), "held Cursor RPC request")
+        .await?
+        .ok_or("session output closed before held Cursor RPC request")?;
+    assert!(matches!(cursor_request, GatewayClientFrame::Cursor { .. }));
+    let mut second_subscriber_lagged = false;
     for entry in &entries {
         send(&io, &GatewayServerFrame::Deliver { entry: entry.clone() })?;
+        if subscribers && !second_subscriber_lagged {
+            match wait_for(drained_rx.recv(), "second subscriber delivery or overflow event")
+                .await?
+                .ok_or("second subscriber closed before its delivery or overflow event")?
+            {
+                SessionEvent::Frame { frame, .. }
+                    if matches!(frame.as_ref(), GatewayServerFrame::Deliver { .. }) => {}
+                SessionEvent::Lagged { .. } => second_subscriber_lagged = true,
+                _ => return Err("second subscriber received an unexpected event".into()),
+            }
+        }
     }
     wait_until(|| {
         let stats = handle.test_buffer_stats();
@@ -187,7 +215,10 @@ async fn prepare_case(
     assert_buffer_limits(&handle, frame_bytes.is_some());
     eprintln!("overflow barrier reached: {count} frames");
     if let Some(slow) = &mut slow {
-        assert!(matches!(slow.recv().await, Some(SessionEvent::Lagged { .. })));
+        let event = wait_for(slow.recv(), "slow subscriber Lagged event")
+            .await?
+            .ok_or("slow subscriber closed before its Lagged event")?;
+        assert!(matches!(event, SessionEvent::Lagged { .. }));
     }
     assert!(io.output.try_recv().is_err(), "no Resume or ACK may pass the held RPC");
     assert_eq!(
@@ -196,7 +227,7 @@ async fn prepare_case(
     );
     let released = WallClock::now();
     send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
-    held.await??;
+    wait_for(held, "held Cursor RPC completion").await???;
     let first = tokio::time::timeout(Duration::from_secs(1), io.output.recv())
         .await?
         .ok_or("Resync Resume")?;
@@ -302,8 +333,12 @@ async fn recover(
     probe: Option<&ramflux_storage::SqlWorkProbe>,
 ) -> Case<BTreeSet<String>> {
     let mut acked = BTreeSet::new();
-    let mut logged = WallClock::now();
     respond_page(io, entries, 0, 64)?;
+    let completion = tokio::time::timeout(
+        Duration::from_secs(45),
+        handle.test_wait_receive(ReceiveTrigger::Resync),
+    );
+    tokio::pin!(completion);
     loop {
         tokio::select! {
             frame = io.output.recv() => {
@@ -336,25 +371,31 @@ async fn recover(
                     other => return Err(format!("unexpected recovery frame {}", serde_json::to_value(other)?["frame_type"]).into()),
                 }
             }
-            () = tokio::time::sleep(Duration::from_millis(1)) => {
-                if logged.elapsed() >= Duration::from_secs(5) {
-                    eprintln!("recovery waiting at {} ACKs: {:?}", acked.len(), handle.test_receive_profile());
-                    logged = WallClock::now();
-                }
-                if handle.test_receive_trace().contains(&(ReceiveTrigger::Resync, true)) { break; }
+            result = &mut completion => {
+                assert!(result.is_ok(), "timed out awaiting Resync receive completion event");
+                break;
             }
         }
     }
     Ok(acked)
 }
 async fn wait_until(mut predicate: impl FnMut() -> bool) -> Case {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         while !predicate() {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
-    .await?;
+    .await;
+    assert!(result.is_ok(), "timed out awaiting receive buffer overflow barrier");
     Ok(())
+}
+async fn wait_for<T>(future: impl std::future::Future<Output = T>, event: &'static str) -> Case<T> {
+    let result = tokio::time::timeout(Duration::from_secs(10), future).await;
+    assert!(result.is_ok(), "timed out awaiting {event}");
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => Err(Box::new(error)),
+    }
 }
 fn send(io: &crate::bus::connection_manager::tests::SessionIo, frame: &GatewayServerFrame) -> Case {
     io.input.send(serde_json::to_vec(frame)?)?;
