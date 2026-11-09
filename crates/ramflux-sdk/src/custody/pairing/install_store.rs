@@ -10,7 +10,7 @@ use ramflux_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -300,9 +300,13 @@ pub fn list_pending(root: &Path, account_id: &str) -> Result<Vec<Install>, SdkEr
         if name == "installed.json" || !name.ends_with(".json") || name.starts_with('.') {
             continue;
         }
-        if let Some(row) = read_install(&entry.path())? {
-            rows.push(row);
-        }
+        let stem = name.strip_suffix(".json").ok_or(field("operation_id"))?;
+        b32(stem, "operation_id")?;
+        require(rows.len() < PENDING_CAP, "pending_cap")?;
+        let row = read_install(&entry.path())?.ok_or(field("operation_id"))?;
+        require(row.operation_id == stem, "operation_id")?;
+        require(row.account_id == account_id, "account_id")?;
+        rows.push(row);
     }
     Ok(rows)
 }
@@ -346,11 +350,16 @@ pub fn strip_backup_installs(root: &Path, account_id: &str) -> Result<(), SdkErr
 }
 
 fn read_install(path: &Path) -> Result<Option<Install>, SdkError> {
-    match fs::read(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-        Ok(bytes) => decode(&bytes).map(Some),
-    }
+    let file = match File::open(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(file) => file,
+    };
+    let mut bytes = Vec::new();
+    let cap = u64::try_from(LIMIT.saturating_add(1)).unwrap_or(u64::MAX);
+    file.take(cap).read_to_end(&mut bytes)?;
+    require(bytes.len() <= LIMIT, "size")?;
+    decode(&bytes).map(Some)
 }
 
 fn ensure_dir(dir: &Path) -> Result<(), SdkError> {

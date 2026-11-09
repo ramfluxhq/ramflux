@@ -12,8 +12,12 @@ use rusqlite::params;
 pub const MISSING_CRASH_WRITERS: &[(&str, &str)] = &[
     ("J0 AccountIndex/directory reservation", "P08"),
     ("J1 vault branch/data/primary commits", "P08"),
+    ("J3 same-transaction head+live prepared", "P05"),
+    ("J4 same-transaction head+live submitted", "P05"),
     ("J5 node authority persistence / Published", "P09"),
+    ("J6 same-transaction head+live acknowledged", "P05"),
     ("J7b authority.json temp/fsync/rename/dir-fsync", "P10"),
+    ("J7c same-transaction adoption+locally_installed", "P10"),
     ("J8 vault old-management provider deletion", "P14"),
     ("J7c/J8 production load/register/own-sync gates", "P10"),
 ];
@@ -47,6 +51,10 @@ fn field(name: &'static str) -> StorageError {
     StorageError::PairingField(name)
 }
 
+fn require(ok: bool, name: &'static str) -> Result<(), StorageError> {
+    if ok { Ok(()) } else { Err(field(name)) }
+}
+
 impl RecoveredPairing {
     fn from_rows(
         floor: Option<FloorRow>,
@@ -76,16 +84,19 @@ impl AccountDb {
         MISSING_CRASH_WRITERS
     }
 
-    /// Reopen recovery: cancel live handshakes with no durable head; fence an existing candidate.
+    /// Reopen recovery: cancel pre-candidate live with no matching head; fence a durable candidate.
     ///
     /// # Errors
-    /// Returns the exact invalid field or SQLite errors.
+    /// Returns `PairingField("phase")` for a post-candidate live row with no matching head,
+    /// or SQLite / field errors.
     pub fn recover_pairing(&self) -> Result<RecoveredPairing, StorageError> {
         let head = self.pairing_head()?;
         for live in self.pairing_live_rows()? {
-            if live_handshake_open(head.as_ref(), &live) {
-                self.cancel_unsubmitted_live(&live)?;
+            if !live_handshake_open(head.as_ref(), &live) {
+                continue;
             }
+            let outcome = unsubmitted_live_outcome(&live.phase)?;
+            self.retire_unsubmitted_live(&live, outcome)?;
         }
         Ok(RecoveredPairing::from_rows(
             self.pairing_floor()?,
@@ -137,19 +148,18 @@ impl AccountDb {
 
     /// J8 DB cleanup: terminal row plus live/head delete in one transaction.
     ///
+    /// A prepared (unsubmitted) head is cleared by `cancelled`/`expired`/`rejected` with no
+    /// `record_hash`. An acknowledged head requires `completed`, `record_hash == candidate_hash`,
+    /// and a matching `pairing_adoption` row. A submitted head stays fenced.
+    ///
     /// # Errors
-    /// Returns `PairingField("state")` for an unresolved submitted head, or SQLite errors.
+    /// Returns `PairingField("state")` for a submitted head, `PairingField("outcome")` when an
+    /// acknowledged head would be rewritten as cancelled, `PairingField("record_hash")` when the
+    /// terminal or adoption hash disagrees, or SQLite errors.
     pub fn commit_pairing_terminal_cleanup(&self, row: &TerminalRow) -> Result<(), StorageError> {
         row.validate()?;
         self.require_local(&row.account_id)?;
-        if let Some(head) = self.pairing_head()? {
-            if head.operation_id != row.operation_id {
-                return Err(field("operation_id"));
-            }
-            if head.state != "acknowledged" {
-                return Err(field("state"));
-            }
-        }
+        self.require_terminal_cleanup(row)?;
         let transaction = self.connection.immediate_transaction()?;
         self.delete_live(&row.account_id, &row.operation_id)?;
         self.delete_head(&row.account_id, &row.operation_id)?;
@@ -158,7 +168,32 @@ impl AccountDb {
         Ok(())
     }
 
-    fn cancel_unsubmitted_live(&self, live: &LiveRow) -> Result<(), StorageError> {
+    fn require_terminal_cleanup(&self, row: &TerminalRow) -> Result<(), StorageError> {
+        match self.pairing_head()? {
+            Some(head) if head.operation_id != row.operation_id => Err(field("operation_id")),
+            Some(head) => match head.state.as_str() {
+                "prepared" => require_prepared_cleanup(row),
+                "acknowledged" => self.require_acknowledged_cleanup(&head, row),
+                _ => Err(field("state")),
+            },
+            None => Ok(()),
+        }
+    }
+
+    fn require_acknowledged_cleanup(
+        &self,
+        head: &HeadRow,
+        row: &TerminalRow,
+    ) -> Result<(), StorageError> {
+        require(row.outcome == "completed", "outcome")?;
+        let hash = row.record_hash.as_deref().ok_or(field("record_hash"))?;
+        require(hash == head.candidate_hash, "record_hash")?;
+        let adoption = self.pairing_adoption()?.ok_or(field("record_hash"))?;
+        require(adoption.operation_id == head.operation_id, "operation_id")?;
+        require(adoption.record_hash == head.candidate_hash, "record_hash")
+    }
+
+    fn retire_unsubmitted_live(&self, live: &LiveRow, outcome: &str) -> Result<(), StorageError> {
         let terminal = TerminalRow {
             account_id: live.account_id.clone(),
             operation_id: live.operation_id.clone(),
@@ -166,7 +201,7 @@ impl AccountDb {
             issuer_seq: live.issuer_seq,
             local_seq: live.local_seq,
             generation: live.generation,
-            outcome: "cancelled".into(),
+            outcome: outcome.into(),
             record_hash: None,
             finished_at: self.now_unix().cast_unsigned(),
             cleanup: "none".into(),
@@ -201,6 +236,21 @@ impl AccountDb {
 
 fn live_handshake_open(head: Option<&HeadRow>, live: &LiveRow) -> bool {
     head.is_none_or(|head| head.operation_id != live.operation_id)
+}
+
+fn unsubmitted_live_outcome(phase: &str) -> Result<&'static str, StorageError> {
+    match phase {
+        "invited" | "commitments" | "revealed" | "sas_pending" | "mutually_confirmed"
+        | "proposal_pending" | "cancelled" => Ok("cancelled"),
+        "expired" => Ok("expired"),
+        "rejected" => Ok("rejected"),
+        _ => Err(field("phase")),
+    }
+}
+
+fn require_prepared_cleanup(row: &TerminalRow) -> Result<(), StorageError> {
+    require(matches!(row.outcome.as_str(), "cancelled" | "expired" | "rejected"), "outcome")?;
+    require(row.record_hash.is_none(), "record_hash")
 }
 
 fn map_live(row: &crate::database::Row) -> rusqlite::Result<LiveRow> {

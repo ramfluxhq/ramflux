@@ -144,6 +144,10 @@ fn j7c_file_cuts() -> Result<(), SdkError> {
     let mismatch = reopen(&root, "acct", Some(&h(9)), false)?;
     assert!(!mismatch.files_and_db_agree);
     assert_eq!(mismatch.admission, Admission::Closed);
+    let open = reopen(&root, "acct", Some(&h(4)), true)?;
+    assert!(open.files_and_db_agree);
+    assert_eq!(open.admission, Admission::Open);
+    assert!(open.admits_ordinary_networking());
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }

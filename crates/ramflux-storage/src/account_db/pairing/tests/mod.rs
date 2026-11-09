@@ -13,11 +13,15 @@ fn pairing_journal_crash_fences_and_backup_exclusion() -> Result<(), Box<dyn std
     crash::missing_writers_named();
     crash::j1_before_and_after_floor_live()?;
     crash::j2_live_phase_cancels_without_head()?;
+    crash::post_candidate_live_without_head_fails_closed()?;
+    crash::expired_live_without_head_keeps_expired_outcome()?;
     crash::j3_prepared_head_fences_same_hash()?;
     crash::j4_submitted_never_cancelled()?;
     crash::j6_acknowledged_same_hash()?;
     crash::j7c_adoption_stays_fenced()?;
     crash::j8_terminal_cleanup_deletes_head()?;
+    crash::j8_refuses_cancelled_and_hash_mismatch()?;
+    crash::prepared_head_clears_on_cancel()?;
     crash::backup_mid_ceremony_strips_live_keeps_floor()?;
     crash::recover_does_not_change_candidate()?;
     Ok(())

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use super::{Install, LIMIT, decode, encode, write_pending};
+use super::{Install, LIMIT, decode, encode, list_pending, pending_path, write_pending};
 use crate::SdkError;
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::encode_base64url;
@@ -154,8 +154,42 @@ fn pending_file_cap_and_mode() -> Result<(), SdkError> {
     let mut fourth = base("enroll", "reserved");
     fourth.operation_id = h(40);
     assert!(matches!(write_pending(&root, &fourth), Err(SdkError::PairingField("pending_cap"))));
-    let path = super::pending_path(&root, "acct", &h(30));
+    let path = pending_path(&root, "acct", &h(30));
     assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(list_pending(&root, "acct")?.len(), 3);
+    let fourth_path = pending_path(&root, "acct", &h(40));
+    std::fs::copy(&path, &fourth_path)?;
+    assert!(matches!(list_pending(&root, "acct"), Err(SdkError::PairingField("pending_cap"))));
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn list_pending_binds_filename_account_and_size() -> Result<(), SdkError> {
+    let root = std::env::temp_dir().join(format!(
+        "pair01-p04-install-bind-{}-{}",
+        std::process::id(),
+        encode_base64url([4; 8])
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root)?;
+    write_pending(&root, &base("enroll", "reserved"))?;
+    let src = pending_path(&root, "acct", &h(20));
+    let mismatch = pending_path(&root, "acct", &h(50));
+    std::fs::copy(&src, &mismatch)?;
+    assert!(matches!(list_pending(&root, "acct"), Err(SdkError::PairingField("operation_id"))));
+    std::fs::remove_file(&mismatch)?;
+    let mut foreign = base("enroll", "reserved");
+    foreign.account_id = "other".into();
+    foreign.operation_id = h(60);
+    std::fs::write(pending_path(&root, "acct", &h(60)), encode(&foreign)?)?;
+    assert!(matches!(list_pending(&root, "acct"), Err(SdkError::PairingField("account_id"))));
+    std::fs::remove_file(pending_path(&root, "acct", &h(60)))?;
+    std::fs::write(pending_path(&root, "acct", &h(70)), vec![b'x'; LIMIT + 1])?;
+    assert!(matches!(
+        super::read_pending(&root, "acct", &h(70)),
+        Err(SdkError::PairingField("size"))
+    ));
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

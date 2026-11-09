@@ -3,6 +3,7 @@
 
 //! Annex F crash cuts for writers that exist on main. Drop+reopen is the process-kill.
 
+use super::super::journal::{AdoptionRow, HeadRow, TerminalRow};
 use super::super::recovery::{Admission, RecoveredOutcome};
 use super::helpers::{
     TestResult, acknowledged_head, adoption, floor, h, head, live_phase, submitted_head, terminal,
@@ -44,8 +45,12 @@ pub(super) fn missing_writers_named() {
     let missing = AccountDb::pairing_missing_crash_writers();
     assert!(missing.iter().any(|row| row.0.contains("J0 AccountIndex")));
     assert!(missing.iter().any(|row| row.0.contains("J1 vault")));
+    assert!(missing.iter().any(|row| row.0.contains("J3 same-transaction")));
+    assert!(missing.iter().any(|row| row.0.contains("J4 same-transaction")));
     assert!(missing.iter().any(|row| row.0.contains("J5 node")));
+    assert!(missing.iter().any(|row| row.0.contains("J6 same-transaction")));
     assert!(missing.iter().any(|row| row.0.contains("J7b authority.json")));
+    assert!(missing.iter().any(|row| row.0.contains("J7c same-transaction")));
     assert!(missing.iter().any(|row| row.0.contains("J8 vault")));
 }
 
@@ -198,6 +203,50 @@ pub(super) fn j7c_adoption_stays_fenced() -> TestResult {
     Ok(())
 }
 
+pub(super) fn post_candidate_live_without_head_fails_closed() -> TestResult {
+    for phase in ["prepared", "submitted", "acknowledged", "locally_installed"] {
+        let (root, db) = seed_floor_live(&format!("pair04j-m1-{phase}"), phase)?;
+        drop(db);
+        let db = reopen(&root)?;
+        let error = db.recover_pairing();
+        assert!(matches!(error, Err(StorageError::PairingField("phase"))), "{phase}: {error:?}");
+        assert_eq!(db.pairing_live_rows()?.len(), 1, "{phase} live");
+        assert!(
+            !db.pairing_terminal_rows()?.iter().any(|row| row.outcome == "cancelled"),
+            "{phase} cancelled"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+    Ok(())
+}
+
+pub(super) fn expired_live_without_head_keeps_expired_outcome() -> TestResult {
+    let (root, db) = seed_floor_live("pair04j-expired", "expired")?;
+    let (root, recovered) = recover_after(root, db)?;
+    assert_eq!(recovered.recovered.live.len(), 0);
+    assert_eq!(recovered.recovered.terminals[0].outcome, "expired");
+    assert!(!recovered.recovered.terminals.iter().any(|row| row.outcome == "cancelled"));
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+fn matching_completed(head: &HeadRow) -> TestResult<(AdoptionRow, TerminalRow)> {
+    let hash = head.candidate_hash.clone();
+    let mut adopt = adoption("secondary", None)?;
+    adopt.record_hash = hash.clone();
+    let mut done = terminal();
+    done.record_hash = Some(hash);
+    Ok((adopt, done))
+}
+
+fn cancelled_terminal() -> TerminalRow {
+    let mut row = terminal();
+    row.outcome = "cancelled".into();
+    row.record_hash = None;
+    row.cleanup = "none".into();
+    row
+}
+
 pub(super) fn j8_terminal_cleanup_deletes_head() -> TestResult {
     let (root, db) = seed_floor_live("pair04j-j8-before", "locally_installed")?;
     db.put_pairing_head(&acknowledged_head()?)?;
@@ -207,9 +256,11 @@ pub(super) fn j8_terminal_cleanup_deletes_head() -> TestResult {
     let _ = std::fs::remove_dir_all(root);
 
     let (root, db) = seed_floor_live("pair04j-j8-after", "locally_installed")?;
-    db.put_pairing_head(&acknowledged_head()?)?;
-    db.put_pairing_adoption(&adoption("secondary", None)?)?;
-    db.commit_pairing_terminal_cleanup(&terminal())?;
+    let acked = acknowledged_head()?;
+    let (adopt, done) = matching_completed(&acked)?;
+    db.put_pairing_head(&acked)?;
+    db.put_pairing_adoption(&adopt)?;
+    db.commit_pairing_terminal_cleanup(&done)?;
     let (root, recovered) = recover_after(root, db)?;
     assert!(recovered.recovered.head.is_none());
     assert_eq!(recovered.recovered.live.len(), 0);
@@ -220,6 +271,37 @@ pub(super) fn j8_terminal_cleanup_deletes_head() -> TestResult {
     db.put_pairing_head(&submitted_head()?)?;
     let error = db.commit_pairing_terminal_cleanup(&terminal());
     assert!(matches!(error, Err(StorageError::PairingField("state"))), "submitted head: {error:?}");
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+pub(super) fn j8_refuses_cancelled_and_hash_mismatch() -> TestResult {
+    let (root, db) = seed_floor_live("pair04j-j8-cancel", "locally_installed")?;
+    db.put_pairing_head(&acknowledged_head()?)?;
+    let error = db.commit_pairing_terminal_cleanup(&cancelled_terminal());
+    assert!(matches!(error, Err(StorageError::PairingField("outcome"))), "cancelled: {error:?}");
+    assert!(db.pairing_head()?.is_some());
+    let _ = std::fs::remove_dir_all(root);
+
+    let (root, db) = seed_floor_live("pair04j-j8-hash", "locally_installed")?;
+    let acked = acknowledged_head()?;
+    let (adopt, _) = matching_completed(&acked)?;
+    db.put_pairing_head(&acked)?;
+    db.put_pairing_adoption(&adopt)?;
+    let error = db.commit_pairing_terminal_cleanup(&terminal());
+    assert!(matches!(error, Err(StorageError::PairingField("record_hash"))), "hash: {error:?}");
+    assert!(db.pairing_head()?.is_some());
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+pub(super) fn prepared_head_clears_on_cancel() -> TestResult {
+    let (root, db) = seed_floor_live("pair04j-prepared-clear", "prepared")?;
+    db.put_pairing_head(&head()?)?;
+    db.commit_pairing_terminal_cleanup(&cancelled_terminal())?;
+    assert!(db.pairing_head()?.is_none());
+    assert_eq!(db.pairing_live_rows()?.len(), 0);
+    assert_eq!(db.pairing_terminal_rows()?[0].outcome, "cancelled");
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
@@ -253,9 +335,13 @@ pub(super) fn backup_mid_ceremony_strips_live_keeps_floor() -> TestResult {
     let target_snap = fresh.write_backup_snapshot(&target_path)?;
     let mut restored = BackupDatabase::open(&target_path, &target_snap.key)?;
     restored.merge_backup(&archive, &snapshot.key, || Ok(()))?;
-    let live: i64 =
-        restored.db.query_row("SELECT count(*) FROM pairing_live", [], |row| row.get(0))?;
-    assert_eq!(live, 0);
+    for table in ["pairing_live", "pairing_head", "pairing_terminal", "pairing_adoption"] {
+        let n: i64 =
+            restored
+                .db
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
+        assert_eq!(n, 0, "{table} merged");
+    }
     let merged: i64 = restored.db.query_row(
         "SELECT issued_seq FROM pairing_floor WHERE account_id='acct'",
         [],
