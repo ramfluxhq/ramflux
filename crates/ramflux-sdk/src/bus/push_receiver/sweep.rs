@@ -47,6 +47,8 @@ pub(crate) struct Planner {
     last_completed_ms: Option<u64>,
     /// Failed-pass backoff: the next pass may not fire before this instant.
     retry_at_ms: Option<u64>,
+    /// Generation that currently owns `backoff_ms` / `retry_at_ms`.
+    retry_generation: Option<u64>,
     backoff_ms: u64,
     pub held_probe: bool,
     pub held_gap: bool,
@@ -83,21 +85,29 @@ impl SweepSetting {
     #[must_use]
     pub(crate) fn from_process() -> Self {
         static SETTING: OnceLock<SweepSetting> = OnceLock::new();
-        SETTING
+        static WARNED: OnceLock<()> = OnceLock::new();
+        let parsed = SETTING
             .get_or_init(|| {
-                let parsed = Self::parse(
+                Self::parse(
                     std::env::var("RAMFLUX_SESSION_SAFETY_SWEEP_SECS").ok().as_deref(),
                     std::env::var("RAMFLUX_SYNC_MIN_MS").ok().as_deref(),
                     std::env::var("RAMFLUX_SYNC_MAX_MS").ok().as_deref(),
-                );
-                if parsed.deprecated_ignored {
-                    tracing::warn!(
-                        "RAMFLUX_SYNC_MIN_MS/RAMFLUX_SYNC_MAX_MS have no effect; use RAMFLUX_SESSION_SAFETY_SWEEP_SECS"
-                    );
-                }
-                parsed
+                )
             })
-            .clone()
+            .clone();
+        parsed.emit_deprecated_warning(&WARNED);
+        parsed
+    }
+
+    /// Emits the deprecated-env warning at most once per `once` cell.
+    pub(crate) fn emit_deprecated_warning(&self, once: &OnceLock<()>) {
+        if self.deprecated_ignored {
+            once.get_or_init(|| {
+                tracing::warn!(
+                    "RAMFLUX_SYNC_MIN_MS/RAMFLUX_SYNC_MAX_MS have no effect; use RAMFLUX_SESSION_SAFETY_SWEEP_SECS"
+                );
+            });
+        }
     }
 
     #[must_use]
@@ -122,6 +132,7 @@ impl Planner {
             seen_generation: None,
             last_completed_ms: None,
             retry_at_ms: None,
+            retry_generation: None,
             backoff_ms: 0,
             held_probe: false,
             held_gap: false,
@@ -132,10 +143,18 @@ impl Planner {
     /// Connected catch-up is immediate (the 100 ms bound is the test frame).
     #[must_use]
     pub(crate) fn decide(&self, now_ms: u64, view: View) -> Option<ResumeKind> {
-        if !view.live || self.retry_at_ms.is_some_and(|at| now_ms < at) {
+        if !view.live {
             return None;
         }
-        if self.connected_catch_up(view) {
+        let new_generation = self.connected_catch_up(view);
+        let generation_untried = self.retry_generation != Some(view.generation);
+        if new_generation && generation_untried {
+            return Some(ResumeKind::Connected);
+        }
+        if self.retry_at_ms.is_some_and(|at| now_ms < at) {
+            return None;
+        }
+        if new_generation {
             return Some(ResumeKind::Connected);
         }
         if view.resync {
@@ -155,12 +174,25 @@ impl Planner {
         self.seen_generation != Some(view.generation)
     }
 
-    /// Records one pass outcome. Only success marks the generation handled and anchors the
-    /// idle sweep (`started_ms`). Failure schedules a retry `backoff` after `finished_ms`.
-    pub(crate) fn finish(&mut self, started_ms: u64, finished_ms: u64, generation: u64, ok: bool) {
+    /// Records one pass outcome. Success marks the generation handled and anchors the idle
+    /// sweep at `finished_ms` unless `paused`. Failure schedules a retry after `finished_ms`.
+    /// A new generation resets backoff before the outcome is applied.
+    pub(crate) fn finish(
+        &mut self,
+        _started_ms: u64,
+        finished_ms: u64,
+        generation: u64,
+        ok: bool,
+        paused: bool,
+    ) {
+        if self.retry_generation != Some(generation) {
+            self.backoff_ms = 0;
+            self.retry_at_ms = None;
+            self.retry_generation = Some(generation);
+        }
         if ok {
             self.seen_generation = Some(generation);
-            self.note_completed(started_ms, false);
+            self.note_completed(finished_ms, paused);
             self.backoff_ms = 0;
             self.retry_at_ms = None;
         } else {

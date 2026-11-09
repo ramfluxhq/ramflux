@@ -3,6 +3,9 @@
 
 //! Account receive scheduling uses only ticks, connection establishment, and explicit resync.
 
+#[path = "receive_ledger.rs"]
+mod receive_ledger;
+
 use super::{
     AccountWork, AckFlushReply, AckFlushResults, ConnectionHandle, NetworkingState, ReceiveTurn,
     RuntimeTimeouts,
@@ -10,7 +13,7 @@ use super::{
 use crate::SdkError;
 use crate::gateway::push_point::BatchReply;
 use crate::gateway::session_push::{AckOutcome, AckResult};
-use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveAckOutcome, ReceiveAckResult};
+use ramflux_storage::{ReceiveAckOutcome, ReceiveAckResult};
 use tokio::{
     sync::{mpsc, oneshot},
     time::{Instant, timeout},
@@ -140,9 +143,8 @@ pub(super) async fn run(
 }
 
 /// Candidate P23 loop: Connected catch-up within 100 ms, then an anchored sweep.
-/// Live [`run`] keeps the 250 ms–5 s tick until P24 activation.
-#[allow(dead_code, reason = "P24 activation replaces live receive::run with this loop")]
-pub(super) async fn run_anchored(
+/// Activated sessions (`session_push_advertise`) run this in place of [`run`].
+pub(crate) async fn run_anchored(
     handle: ConnectionHandle,
     work: mpsc::Sender<AccountWork>,
     limits: RuntimeTimeouts,
@@ -181,7 +183,10 @@ pub(super) async fn run_anchored(
                 pass_anchored(&handle, &work, snapshot.generation, trigger, limits.call),
             );
             let result = tokio::select! {biased;_=stop.changed()=>break,result=pass=>result};
-            let ok = matches!(result, Ok(Ok(_)));
+            let (ok, paused) = match &result {
+                Ok(Ok((_, paused))) => (true, *paused),
+                _ => (false, false),
+            };
             match result {
                 Ok(Ok(_)) => {
                     handle.resync_applied(snapshot.generation, epoch);
@@ -199,7 +204,7 @@ pub(super) async fn run_anchored(
                 Err(_) => tracing::debug!("receive pass deadline expired"),
             }
             let finished_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-            planner.finish(now_ms, finished_ms, snapshot.generation, ok);
+            planner.finish(now_ms, finished_ms, snapshot.generation, ok, paused);
             continue;
         }
         // Not live: decide() cannot fire, so wait for wake instead of a past deadline spin.
@@ -230,21 +235,22 @@ async fn pass(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<bool, SdkError> {
-    let (active, backpressure) = catch_up(handle, work, generation, trigger, call_timeout).await?;
+    let (active, _, backpressure) =
+        catch_up(handle, work, generation, trigger, call_timeout).await?;
     let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
     Ok(active || more)
 }
 
 /// Candidate catch-up: same Resume pages as live, without the contact-floor rescan.
-#[allow(dead_code, reason = "P24 activation uses this in place of pass+rescan")]
 async fn pass_anchored(
     handle: &ConnectionHandle,
     work: &mpsc::Sender<AccountWork>,
     generation: u64,
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
-) -> Result<bool, SdkError> {
-    Ok(catch_up(handle, work, generation, trigger, call_timeout).await?.0)
+) -> Result<(bool, bool), SdkError> {
+    let (active, paused, _) = catch_up(handle, work, generation, trigger, call_timeout).await?;
+    Ok((active, paused))
 }
 
 async fn catch_up(
@@ -253,7 +259,7 @@ async fn catch_up(
     generation: u64,
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
-) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+) -> Result<(bool, bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::PrepareReceive { generation, trigger, reply })
         .await
@@ -262,16 +268,26 @@ async fn catch_up(
     let mut cursor = plan.cursor;
     let mut backpressure = plan.backpressure;
     let turn = plan.turn;
-    if turn.is_some() {
-        flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
-            .await?;
+    if let Some(turn) = turn.clone() {
+        let done = receive_ledger::catch_up_ledger(receive_ledger::CatchUp {
+            handle,
+            work,
+            generation,
+            trigger,
+            call_timeout,
+            turn,
+            cursor,
+            backpressure,
+            limit: plan.limit.min(RECEIVE_PAGE_LIMIT),
+        })
+        .await?;
+        return Ok((done.active, done.paused, done.backpressure));
     }
     let mut retries: std::collections::BTreeMap<_, _> =
         plan.retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
     let mut active = false;
     let limit = plan.limit.min(RECEIVE_PAGE_LIMIT);
     let mut pages = 0_u32;
-    let mut applied = 0_usize;
     loop {
         let entries = handle
             .call(
@@ -295,15 +311,10 @@ async fn catch_up(
             .await?;
             active |= accepted;
             backpressure = next;
-            if turn.is_some() {
-                applied = applied.saturating_add(1);
-                if applied.is_multiple_of(ACK_FLUSH_COUNT) {
-                    flush_acks(handle, work, generation, false, call_timeout).await?;
-                }
-            }
         }
         pages = pages.saturating_add(1);
         if catch_up_yields(pages) {
+            handle.note_catch_up_yield();
             tokio::task::yield_now().await;
             pages = 0;
         }
@@ -323,11 +334,7 @@ async fn catch_up(
         active |= accepted;
         backpressure = next;
     }
-    if turn.is_some() {
-        flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
-            .await?;
-    }
-    Ok((active, backpressure))
+    Ok((active, false, backpressure))
 }
 
 /// Test entry to `catch_up` with an explicit trigger (Tick does not force the 16/1s gate).
@@ -339,7 +346,21 @@ pub(crate) async fn test_catch_up(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
-    catch_up(handle, work, generation, trigger, call_timeout).await
+    let (active, _, backpressure) =
+        catch_up(handle, work, generation, trigger, call_timeout).await?;
+    Ok((active, backpressure))
+}
+
+/// Test entry to the full `pass` (catch-up + rescan).
+#[cfg(test)]
+pub(crate) async fn test_pass(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    call_timeout: std::time::Duration,
+) -> Result<bool, SdkError> {
+    pass(handle, work, generation, trigger, call_timeout).await
 }
 
 /// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one

@@ -241,12 +241,14 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
         Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
-    match crate::bus::sync_driver::receive(&mut account, &mut engine, 1).await {
-        Ok(_) => panic!("legacy bus receive succeeded on an activated ledger"),
-        Err(error) => assert_activated(&error),
-    }
+    crate::bus::sync_driver::receive(&mut account, &mut engine, 1).await?;
+    assert_eq!(
+        crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
+        Some(crate::bus::push_receiver::executor::ExecutorOwner::Standalone),
+        "standalone receive binds the exclusive standalone executor"
+    );
 
-    assert_eq!(engine.resumes, 0, "activated pull sent a resume");
+    assert!(engine.resumes >= 1, "activated standalone catch-up sent a resume_page");
     assert_eq!(engine.acks, 0, "activated ACK path sent a wire ACK");
     assert_eq!(account.client.gateway_cursor(&target)?, 9);
     Ok(())
@@ -320,14 +322,14 @@ async fn activation_revert_preserves_ledger() -> TestResult {
     let cursor = fixture.client.persist_gateway_receive_cursor(&target, 2);
     assert_activated(cursor.as_ref().expect_err("legacy C write"));
 
-    let account = LocalBusAccountState::disconnected(
+    let mut account = LocalBusAccountState::disconnected(
         fixture.client,
         fixture.config.clone(),
         fixture.manifest.principal_commitment.clone(),
     );
     let advertised = account.connection_config()?;
     assert_session_push_scope(&advertised, true);
-    let engine = connect_scripted(&account.client, advertised, push_established()).await?;
+    let engine = connect_scripted(&account.client, advertised.clone(), push_established()).await?;
     assert_eq!(
         engine.mode,
         SessionMode::Push { incarnation: IncarnationId::try_from(INCARNATION.to_owned())? }
@@ -343,5 +345,12 @@ async fn activation_revert_preserves_ledger() -> TestResult {
         Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
+    let mut counting = crate::gateway::access::CountingGateway::new(advertised);
+    crate::bus::sync_driver::receive(&mut account, &mut counting, 1).await?;
+    assert_eq!(
+        crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
+        Some(crate::bus::push_receiver::executor::ExecutorOwner::Standalone)
+    );
+    assert!(counting.resumes >= 1, "standalone row issues resume_page");
     Ok(())
 }

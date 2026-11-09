@@ -14,7 +14,7 @@ use super::fixture::{Case, Fixture};
 use super::lifecycle_fence::{
     PUSH_E, account_of, acked, open_account, pump_quiet, push_engine, runtime_for,
 };
-use crate::bus::connection_manager::{ReceiveTrigger, receive::test_catch_up};
+use crate::bus::connection_manager::{ReceiveTrigger, receive::test_catch_up, receive::test_pass};
 use crate::bus::dispatch::task_transport::{Target, seal};
 use crate::prelude::*;
 use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
@@ -35,6 +35,36 @@ fn activate(account: &LocalBusAccountState) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn sweep_hold() -> Duration {
+    Duration::from_hours(24)
+}
+
+fn sweep_timeouts() -> crate::bus::runtime_limits::RuntimeTimeouts {
+    let hold = sweep_hold();
+    crate::bus::runtime_limits::RuntimeTimeouts {
+        network_wait: hold,
+        attempt: hold,
+        call: hold,
+        receipt: hold,
+        task_approval: hold,
+        task_submit: hold,
+        http: hold,
+        command: hold,
+        post_claim: hold,
+        frame: hold,
+        transport_open: hold,
+        retry_budget: hold,
+        receive_min: hold,
+        receive_max: hold,
+        sync: hold,
+        fetch: hold,
+        keepalive_idle: hold,
+        keepalive_call: hold,
+        #[cfg(feature = "itest-local-mint")]
+        relay_http: hold,
+    }
+}
+
 async fn start_runtime(
     fixture: &mut Fixture,
 ) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
@@ -44,10 +74,42 @@ async fn start_runtime(
     let account = open_account(&fixture.root, &config, &commitment)?;
     activate(&account)?;
     let mut runtime = runtime_for(account, &fixture.root);
+    let hold = sweep_hold();
+    runtime.timeouts = sweep_timeouts();
+    if let Some(account) = runtime.state.accounts.get_mut("sender") {
+        account.gateway_config.timeout = hold;
+        account.gateway_config.quic_fallback_timeout = hold;
+        account.timeouts = runtime.timeouts.clone();
+    }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
     pump_quiet(&mut runtime, Duration::from_millis(150)).await?;
     Ok(runtime)
+}
+
+async fn drive_full_pass(
+    runtime: &mut super::super::AccountRuntime,
+    trigger: ReceiveTrigger,
+) -> Case {
+    let handle = account_of(runtime)?.connection.clone().ok_or("handle")?;
+    let generation = handle.generation();
+    let work = runtime.connection_sender.clone();
+    let mut pass = tokio::task::spawn_local(async move {
+        test_pass(&handle, &work, generation, trigger, Duration::from_secs(8)).await
+    });
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut pass => {
+                result??;
+                break;
+            }
+            work = runtime.connection_work.recv() => {
+                runtime.apply_connection_work(work.ok_or("closed")?).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn drive_pass(runtime: &mut super::super::AccountRuntime, trigger: ReceiveTrigger) -> Case {
@@ -258,6 +320,161 @@ async fn ack_lost_case() -> Case {
     assert_eq!(snap(&runtime)?.intents, vec![1, 2], "abort after apply rolls back");
     drive_flush(&mut runtime, true).await?;
     assert_eq!(snap(&runtime)?.intents, vec![1, 2], "Uncertain after WR retains");
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_yields_real_pass() -> Case {
+    watch(40, catch_up_yields_real_pass_case()).await
+}
+
+async fn catch_up_yields_real_pass_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2c-yield")).await?;
+    fixture.gateway.lock().map_err(|_| "gateway")?.resume_page_size = Some(1);
+    let mut runtime = start_runtime(&mut fixture).await?;
+    fill_sealed(&mut fixture, 1, 17).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    drive_full_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    assert!(
+        handle.test_catch_up_yields() >= 1,
+        "17 one-entry resume pages must yield after 16: {}",
+        handle.test_catch_up_yields()
+    );
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn connected_and_sweep() -> Case {
+    // Real-time watchdog only: a tokio timeout would fire when the paused clock
+    // advances through the 900 s sweep.
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            connected_and_sweep_real(),
+        ))))
+        .await
+}
+
+async fn drain_ready(runtime: &mut super::super::AccountRuntime) -> Case {
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+        let mut any = false;
+        while let Ok(work) = runtime.connection_work.try_recv() {
+            any = true;
+            runtime.apply_connection_work(work).await?;
+        }
+        if !any {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// `LocalSet` starves `tokio::spawn` (`run_anchored`). Waiting on a spawned oneshot
+/// forces the current-thread scheduler to poll that queue. Do not `sleep` after
+/// `pause()`: auto-advance is off, so a sleep never completes.
+async fn poll_spawned() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let _ = tx.send(());
+    });
+    let _ = rx.await;
+}
+
+async fn pump_anchored(
+    runtime: &mut super::super::AccountRuntime,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+) -> Case {
+    handle.notify_receive_wake();
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+        drain_ready(runtime).await?;
+        // Poll the session worker only after a call is queued. Polling it first
+        // lets idle_read observe the 900s virtual jump and retire the session.
+        if handle.queued_calls() > 0 {
+            poll_spawned().await;
+        }
+    }
+    Ok(())
+}
+
+async fn stop_peer_session(fixture: &mut Fixture) {
+    if let Some(handle) = fixture.peer.connection.take() {
+        handle.stop().await;
+    }
+}
+
+async fn connected_and_sweep_real() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2c-sweep")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    fill_sealed(&mut fixture, 1, 1).await?;
+    stop_peer_session(&mut fixture).await;
+    let mut runtime = start_runtime(&mut fixture).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    let in_100 = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100}");
+    assert_eq!(
+        handle.test_context().keepalive_idle(),
+        sweep_hold(),
+        "keepalive must outlive the 900s sweep"
+    );
+    tokio::time::pause();
+    pump_anchored(&mut runtime, &handle).await?;
+    tokio::time::advance(Duration::from_secs(899)).await;
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+        1,
+        "no Resume until 900s snap={:?}",
+        handle.snapshot()
+    );
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    pump_anchored(&mut runtime, &handle).await?;
+    let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    assert!(
+        resumes >= 2,
+        "Sweep Resume at 900s: resumes={resumes} trace={:?} snap={:?}",
+        handle.test_receive_trace(),
+        handle.snapshot()
+    );
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_page_suffix_progress() -> Case {
+    watch(40, stale_page_suffix_progress_case()).await
+}
+
+async fn stale_page_suffix_progress_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2c-stale")).await?;
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.resume_losses = vec![(1, 10, "expired")];
+        gateway.resume_issued = Some(10);
+    }
+    let mut runtime = start_runtime(&mut fixture).await?;
+    assert_eq!(snap(&runtime)?.cursor, 10, "prefix losses cover through 10");
+    fill_sealed(&mut fixture, 12, 1).await?;
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.resume_losses = vec![(11, 11, "expired"), (13, 20, "nacked")];
+        gateway.resume_issued = Some(20);
+    }
+    drive_full_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    let after = snap(&runtime)?;
+    assert_eq!(after.cursor, 20, "stale suffix covers through 20: {after:?}");
+    assert!(
+        after.losses.iter().any(|loss| loss.0 == 13 && loss.1 == 20),
+        "nacked suffix is recorded: {after:?}"
+    );
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;

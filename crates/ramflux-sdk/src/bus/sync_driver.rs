@@ -6,6 +6,7 @@ use crate::prelude::*;
 use serde_json::json;
 
 pub(crate) mod source;
+mod standalone;
 use super::couriers::head_refresh::inbound as head_inbound;
 
 type PendingEntryId = (String, u64, String);
@@ -236,6 +237,12 @@ pub(crate) async fn receive(
     engine: &mut impl GatewaySessionAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
+    if crate::bus::push_receiver::apply_w1::is_active(
+        account.client.account_db()?,
+        &account.target_delivery_id,
+    )? {
+        return standalone::receive(account, engine, now).await;
+    }
     account.client.account_db()?.refuse_legacy_receive()?;
     account.client.prune_surface_resync_state()?;
     expire_receive_holds(

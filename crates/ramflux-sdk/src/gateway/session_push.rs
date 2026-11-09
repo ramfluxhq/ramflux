@@ -108,6 +108,19 @@ pub(crate) enum PageReason {
     Aborted,
 }
 
+impl PageReason {
+    /// Wire `snake_case` spelling W2 cover accepts.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::AckWindowOverflow => "ack_window_overflow",
+            Self::Nacked => "nacked",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
 /// `Unknown` is valid only for a point read of a vanished entry.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +130,20 @@ pub(crate) enum EntryGoneReason {
     Nacked,
     Aborted,
     Unknown,
+}
+
+impl EntryGoneReason {
+    /// Wire `snake_case` spelling W2 cover accepts.
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Expired => "expired",
+            Self::AckWindowOverflow => "ack_window_overflow",
+            Self::Nacked => "nacked",
+            Self::Aborted => "aborted",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

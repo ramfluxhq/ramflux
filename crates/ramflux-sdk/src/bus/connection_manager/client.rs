@@ -84,6 +84,7 @@ impl crate::gateway::access::ClassifiedSubmit for SessionClient {
     }
 }
 
+#[allow(private_interfaces)]
 impl GatewaySessionAccess for SessionClient {
     fn config(&self) -> &GatewaySessionConfig {
         &self.config
@@ -151,6 +152,27 @@ impl GatewaySessionAccess for SessionClient {
                     async move { engine.resume_authoritative_after(after_inbox_seq, limit).await },
                 )
             },
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.resume_page(after_inbox_seq, limit).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn fetch_entry(
+        &mut self,
+        seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.fetch_entry(seq).await }),
             self.deadline,
             self.generation,
         ))

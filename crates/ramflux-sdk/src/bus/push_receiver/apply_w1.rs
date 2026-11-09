@@ -4,7 +4,7 @@
 //! Dormant `ApplyPage` → W1 adapters. Inactive accounts stay on the live path.
 #![allow(dead_code)]
 
-use super::apply::{self, ApplyOutcome, cover_held_in, cover_terminal_in};
+use super::apply::{self, ApplyOutcome, ApplyPoint, cover_held_in, cover_terminal_in};
 use crate::bus::account_runtime::lifecycle_fence;
 use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
@@ -26,7 +26,6 @@ use ramflux_storage::{
 const BINDING_ATTEMPTS: u32 = 3;
 const BINDING_GIVE_UP: &str = "legacy binding changed after 3 attempts";
 const COVERED_BELOW: &str = "receive page covered below sequence";
-const NOT_YET_WIRED: &str = "NotYetWired";
 
 /// True when the P24b1 discriminator is Activated. Activated without an epoch is Integrity.
 pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> {
@@ -104,7 +103,7 @@ async fn apply_once(
     cross_await().await;
     let entry = &prepared.entry;
     let sequence = entry.inbox_seq;
-    if !admit_open(account, turn, handle_generation(), prepared)? {
+    if !admit_open(account, turn, handle_generation(), prepared).await? {
         return Ok(());
     }
     let local_device = account.gateway_config.device_id.clone();
@@ -440,49 +439,136 @@ fn failure_of(
 /// Reconcile the single-entry page. `NeedStage` writes W0 using the cursor returned
 /// after any gap-prefix cover. `Covered`/`AlreadyCovered` with C >= seq skip W1.
 /// A cover that leaves C behind seq is a plan bug.
-fn admit_open(
-    account: &LocalBusAccountState,
+async fn admit_open(
+    account: &mut LocalBusAccountState,
     turn: &mut ReceiveTurn,
     generation: u64,
     prepared: &ReceiveEntry,
 ) -> Result<bool, SdkError> {
     let sequence = prepared.entry.inbox_seq;
-    match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
-        ApplyOutcome::NeedStage { sequence: need, cursor } if need == sequence => {
-            turn.cursor = cursor;
-            stage_open(account, turn, generation, prepared)
+    loop {
+        match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
+            ApplyOutcome::NeedStage { sequence: need, cursor } if need == sequence => {
+                turn.cursor = cursor;
+                return stage_open(account, turn, generation, prepared);
+            }
+            ApplyOutcome::NeedStage { .. } => {
+                return Err(SdkError::InboundRejected("receive page need-stage mismatch".into()));
+            }
+            ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
+                map_page_outcome(
+                    if cursor < sequence {
+                        ApplyOutcome::Covered { cursor }
+                    } else {
+                        ApplyOutcome::AlreadyCovered { cursor }
+                    },
+                    sequence,
+                )?;
+                return Ok(false);
+            }
+            ApplyOutcome::NeedPoint { seq, cursor } => {
+                turn.cursor = cursor;
+                fetch_and_cover_point(account, turn, generation, seq).await?;
+            }
+            ApplyOutcome::NeedFetch { after } => {
+                turn.cursor = after;
+                fetch_and_cover_point(account, turn, generation, after.saturating_add(1)).await?;
+            }
+            ApplyOutcome::Paused { .. } => return Ok(false),
         }
-        ApplyOutcome::NeedStage { .. } => {
-            Err(SdkError::InboundRejected("receive page need-stage mismatch".into()))
-        }
+        refresh_cursor(account.client.account_db()?, turn)?;
+    }
+}
+
+/// Maps a durable page outcome onto one sequence. `Covered`/`AlreadyCovered` with
+/// `cursor < sequence` is Integrity `COVERED_BELOW`.
+pub(crate) fn map_page_outcome(
+    outcome: ApplyOutcome,
+    sequence: u64,
+) -> Result<ApplyOutcome, SdkError> {
+    match outcome {
         ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor }
             if cursor < sequence =>
         {
             Err(SdkError::Storage(StorageError::Integrity(COVERED_BELOW)))
         }
-        ApplyOutcome::NeedPoint { seq, cursor } => {
-            turn.cursor = cursor;
-            fetch_point(account, turn, generation, seq)?;
-            Ok(false)
-        }
-        ApplyOutcome::Covered { .. }
-        | ApplyOutcome::AlreadyCovered { .. }
-        | ApplyOutcome::NeedFetch { .. }
-        | ApplyOutcome::Paused { .. } => Ok(false),
+        other => Ok(other),
     }
 }
 
-/// A point the router could not stage needs a real `FetchEntry` reply (Entry/TooLarge/Gone).
-/// That fetch is not wired until P24b2, and `reconcile_entry` never yields `NeedPoint`
-/// while `oversize_next` is `None`, so this refuses rather than invent a loss or a
-/// `retain_until`. No W0 terminal path exists here until the fetch lands.
-fn fetch_point(
-    _account: &LocalBusAccountState,
-    _turn: &mut ReceiveTurn,
-    _generation: u64,
+async fn fetch_and_cover_point(
+    account: &mut LocalBusAccountState,
+    turn: &mut ReceiveTurn,
+    generation: u64,
     seq: u64,
 ) -> Result<(), SdkError> {
-    Err(SdkError::LocalBus(format!("{NOT_YET_WIRED}: fetch point {seq}")))
+    let reply = fetch_entry_reply(account, seq).await?;
+    let target = turn.target.clone();
+    let incarnation = turn.incarnation.clone();
+    let point = match &reply {
+        crate::gateway::push_point::PointReply::Entry(record) => ApplyPoint::Entry {
+            seq: record.entry.inbox_seq,
+            target: &target,
+            incarnation: &incarnation,
+        },
+        crate::gateway::push_point::PointReply::TooLarge { retain_until } => {
+            ApplyPoint::TooLarge { seq, retain_until: *retain_until, incarnation: &incarnation }
+        }
+        crate::gateway::push_point::PointReply::Gone { observed_issued_inbox_seq, reason } => {
+            ApplyPoint::Gone {
+                seq,
+                observed_issued: *observed_issued_inbox_seq,
+                reason: reason.as_str(),
+                incarnation: &incarnation,
+            }
+        }
+        crate::gateway::push_point::PointReply::Refused(reason) => {
+            return Err(SdkError::GatewaySessionRejected(format!(
+                "fetch_entry refused: {}",
+                reason.as_str()
+            )));
+        }
+    };
+    let db = account.client.account_db()?;
+    match apply::apply_point(db, turn.expected(), generation, seq, point) {
+        Ok(outcome) => {
+            let outcome = map_page_outcome(outcome, seq)?;
+            if let ApplyOutcome::Covered { cursor }
+            | ApplyOutcome::AlreadyCovered { cursor }
+            | ApplyOutcome::Paused { cursor }
+            | ApplyOutcome::NeedStage { cursor, .. }
+            | ApplyOutcome::NeedPoint { cursor, .. } = outcome
+            {
+                turn.cursor = cursor;
+            }
+            Ok(())
+        }
+        Err(apply::ApplyError::Protocol(text)) => Err(SdkError::InboundRejected(text.into())),
+        Err(apply::ApplyError::Storage(error)) => Err(error.into()),
+    }
+}
+
+async fn fetch_entry_reply(
+    account: &mut LocalBusAccountState,
+    seq: u64,
+) -> Result<crate::gateway::push_point::PointReply, SdkError> {
+    #[cfg(test)]
+    if let Some(reply) = take_point_reply() {
+        return Ok(reply);
+    }
+    let timeout = account.timeouts.call;
+    if let Some(handle) = account.connection.clone() {
+        return handle
+            .call(
+                move |engine| Box::pin(engine.fetch_entry(seq)),
+                tokio::time::Instant::now() + timeout,
+            )
+            .await;
+    }
+    if let Some(engine) = account.engine.as_mut() {
+        return engine.fetch_entry(seq).await;
+    }
+    Err(SdkError::NetworkingPending)
 }
 
 fn project_application(
@@ -691,7 +777,7 @@ fn cover_w1_outcome(
 
 /// Validate/reconcile the single-entry page before W1. `NeedStage` is the live sequence
 /// this adapter must process; any other outcome is already covered or not this entry.
-fn reconcile_entry(
+pub(crate) fn reconcile_entry(
     db: &AccountDb,
     turn: &ReceiveTurn,
     generation: u64,
@@ -720,7 +806,7 @@ fn reconcile_entry(
         more: false,
     };
     match apply::apply_page(db, turn.expected(), generation, page) {
-        Ok(outcome) => Ok(outcome),
+        Ok(outcome) => map_page_outcome(outcome, sequence),
         Err(apply::ApplyError::Protocol(text)) => Err(SdkError::InboundRejected(text.into())),
         Err(apply::ApplyError::Storage(error)) => Err(error.into()),
     }
@@ -743,7 +829,7 @@ pub(crate) fn refresh_cursor(db: &AccountDb, turn: &mut ReceiveTurn) -> Result<(
     Ok(())
 }
 
-fn read_cursor(db: &AccountDb, target: &str) -> Result<u64, SdkError> {
+pub(crate) fn read_cursor(db: &AccountDb, target: &str) -> Result<u64, SdkError> {
     Ok(db
         .projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?
         .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?)
@@ -757,6 +843,8 @@ thread_local! {
     static LEGACY_HOLD: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
     static FORCE_COVERED_BELOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_NEED_POINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static POINT_REPLY: std::cell::RefCell<Option<crate::gateway::push_point::PointReply>> =
+        const { std::cell::RefCell::new(None) };
     static PROJECTION_KEY: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
     static PROJECTION_ERROR: std::cell::RefCell<Option<SdkError>> =
@@ -840,6 +928,16 @@ pub(crate) fn force_covered_below() {
 #[cfg(test)]
 pub(crate) fn force_need_point() {
     FORCE_NEED_POINT.with(|cell| cell.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn queue_point_reply(reply: crate::gateway::push_point::PointReply) {
+    POINT_REPLY.with(|cell| cell.replace(Some(reply)));
+}
+
+#[cfg(test)]
+fn take_point_reply() -> Option<crate::gateway::push_point::PointReply> {
+    POINT_REPLY.with(std::cell::RefCell::take)
 }
 
 #[cfg(test)]

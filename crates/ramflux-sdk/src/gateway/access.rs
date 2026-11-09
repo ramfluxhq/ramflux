@@ -42,7 +42,7 @@ impl ClassifiedSubmit for GatewaySessionEngine {
 /// Gateway capabilities usable with a direct engine or an account's resident session host.
 // The sealed `ClassifiedSubmit` supertrait is crate-private by design: every implementor is
 // already classified, so callers that need it add no bound of their own.
-#[allow(private_bounds)]
+#[allow(private_bounds, private_interfaces)]
 pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     /// Returns the caller's immutable connection coordinates and signing context.
     fn config(&self) -> &GatewaySessionConfig;
@@ -82,6 +82,19 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
         after_inbox_seq: u64,
         limit: usize,
     ) -> GatewayCallFuture<'_, Vec<GatewayInboxEntry>>;
+    /// # Errors
+    /// Returns an error if the session exchange is refused, cancelled, or expires.
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply>;
+    /// # Errors
+    /// Returns an error if the session exchange is refused, cancelled, or expires.
+    fn fetch_entry(
+        &mut self,
+        seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply>;
     /// # Errors
     /// Returns an error if the session exchange is refused, cancelled, or expires.
     fn register_identity(
@@ -140,6 +153,7 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     fn close<'a>(&'a mut self, reason: &'a str) -> GatewayCallFuture<'a, ()>;
 }
 
+#[allow(private_interfaces)]
 impl GatewaySessionAccess for GatewaySessionEngine {
     fn config(&self) -> &GatewaySessionConfig {
         &self.config
@@ -183,6 +197,19 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         limit: usize,
     ) -> GatewayCallFuture<'_, Vec<GatewayInboxEntry>> {
         Box::pin(GatewaySessionEngine::resume_after(self, after_inbox_seq, limit))
+    }
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
+        Box::pin(GatewaySessionEngine::resume_page(self, after_inbox_seq, limit))
+    }
+    fn fetch_entry(
+        &mut self,
+        seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
+        Box::pin(GatewaySessionEngine::fetch_entry(self, seq))
     }
     fn register_identity(
         &mut self,
@@ -286,6 +313,7 @@ impl ClassifiedSubmit for CountingGateway {
 }
 
 #[cfg(test)]
+#[allow(private_interfaces)]
 impl GatewaySessionAccess for CountingGateway {
     fn config(&self) -> &GatewaySessionConfig {
         &self.config
@@ -333,6 +361,33 @@ impl GatewaySessionAccess for CountingGateway {
     ) -> GatewayCallFuture<'_, Vec<GatewayInboxEntry>> {
         self.resumes += 1;
         Box::pin(async move { Ok(Vec::new()) })
+    }
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        _limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
+        self.resumes += 1;
+        Box::pin(async move {
+            Ok(crate::gateway::push_resume::PageReply::Page(Box::new(
+                crate::gateway::push_resume::ResumePage {
+                    after_inbox_seq,
+                    covered_through_seq: after_inbox_seq,
+                    issued_inbox_seq: after_inbox_seq,
+                    settled_through_seq: 0,
+                    entries: Vec::new(),
+                    known_losses: Vec::new(),
+                    oversize_next: None,
+                    more: false,
+                },
+            )))
+        })
+    }
+    fn fetch_entry(
+        &mut self,
+        _seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
+        unused("fetch_entry")
     }
     fn register_identity(
         &mut self,

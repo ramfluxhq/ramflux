@@ -1033,25 +1033,20 @@ fn seed_cover_seq1(
 
 #[tokio::test(flavor = "current_thread")]
 async fn covered_below_from_seeded_storage_plan() -> Result<(), SdkError> {
-    let mut harness = open()?;
-    let before = harness.account.client.account_db()?.durable_rows_for_test()?;
+    let harness = open()?;
     assert_eq!(seed_cover_seq1(&harness.account)?, ApplyOutcome::Covered { cursor: 1 });
-    let entry = dummy_seq(
-        &harness.account.target_delivery_id,
-        &encode_base64url(b"legacy-a2i-dummy"),
-        &harness.account.gateway_config.principal_id,
-        &harness.account.gateway_config.device_id,
-        2,
-    );
-    let refused = drive(&mut harness.account, entry, || 1).await;
-    let error = refused.as_ref().err();
-    // reconcile_entry always puts seq in `entries`, so admit_open sees NeedStage
-    // rather than Covered{seq-1}. COVERED_BELOW stays a plan-bug arm; reaching it
-    // from this seeded cover needs a reconcile_entry seam (BLOCKED L3).
+    let db = harness.account.client.account_db()?;
+    let prepared = turn(&harness.account, 1)?;
+    let outcome = apply_w1::reconcile_entry(db, &prepared, 1, 1)?;
+    assert_eq!(outcome, ApplyOutcome::AlreadyCovered { cursor: 1 });
+    let mapped = apply_w1::map_page_outcome(outcome, 2);
+    let error = mapped.as_ref().err();
     assert!(
-        error.is_none(),
-        "seeded cover of seq-1 plus drive of seq is NeedStage today: {error:?}"
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text))) if *text == apply_w1::covered_below()
+        ),
+        "COVERED_BELOW from the real seeded plan via reconcile_entry: {error:?}"
     );
-    let _ = before;
     Ok(())
 }

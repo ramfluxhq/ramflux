@@ -111,9 +111,40 @@ pub(super) fn start(
             }));
     }
     if let Some(work) = handle.shared.account_work.clone() {
-        auxiliary.push(tokio::spawn(receive::run(handle.clone(), work, timeouts.clone())));
+        auxiliary.push(spawn_account_receive(handle, work, timeouts));
     }
     auxiliary
+}
+
+fn spawn_account_receive(
+    handle: &ConnectionHandle,
+    work: mpsc::Sender<AccountWork>,
+    timeouts: &RuntimeTimeouts,
+) -> JoinHandle<()> {
+    if handle.shared.session_push_advertise {
+        spawn_receive(receive::run_anchored(
+            handle.clone(),
+            work,
+            timeouts.clone(),
+            crate::bus::push_receiver::sweep::SweepSetting::from_process(),
+            crate::bus::push_receiver::sweep::SweepMode::Push,
+        ))
+    } else {
+        spawn_receive(receive::run(handle.clone(), work, timeouts.clone()))
+    }
+}
+
+/// Tests drive receive under `LocalSet`; `spawn_local` keeps the loop on that set so
+/// pause/advance wakes `sleep_until`. Production uses the multi-thread spawn.
+fn spawn_receive(fut: impl std::future::Future<Output = ()> + Send + 'static) -> JoinHandle<()> {
+    #[cfg(test)]
+    {
+        tokio::task::spawn_local(fut)
+    }
+    #[cfg(not(test))]
+    {
+        tokio::spawn(fut)
+    }
 }
 
 fn register_courier<F, R>(

@@ -45,6 +45,12 @@ pub(super) struct Gateway {
     /// When set, `ack_batch` fails so the actor records Uncertain.
     pub ack_fail: bool,
     pub resumes: Vec<u64>,
+    /// Caps `resume_page` entries so tests can observe page-sized catch-up (yield every 16).
+    pub resume_page_size: Option<usize>,
+    /// Optional issued seq so a loss-only page can still report a high-water mark.
+    pub resume_issued: Option<u64>,
+    /// Known-loss intervals returned on every `resume_page` until cleared.
+    pub resume_losses: Vec<(u64, u64, &'static str)>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
     pub ack_hold: Option<Arc<AckHold>>,
@@ -511,30 +517,44 @@ fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
     let limit = usize::try_from(value["resume"]["limit"].as_u64().ok_or("resume limit")?)?;
     let target = value["resume"]["target_delivery_id"].as_str().ok_or("resume target")?.to_owned();
     let retain_until = now_unix_timestamp() + 300;
-    let gateway = shared.lock().map_err(|_| "gateway")?;
+    let mut gateway = shared.lock().map_err(|_| "gateway")?;
+    gateway.resumes.push(after);
+    let take = gateway.resume_page_size.unwrap_or(limit);
+    let issued = gateway
+        .resume_issued
+        .or_else(|| gateway.inbox.last().map(|entry| entry.inbox_seq))
+        .unwrap_or(after);
     let entries: Vec<Value> = gateway
         .inbox
         .iter()
         .filter(|entry| {
             entry.inbox_seq > after && !gateway.acked.contains(&entry.envelope.envelope_id)
         })
-        .take(limit)
+        .take(take)
         .map(|entry| json!({ "entry": entry, "retain_until": retain_until }))
         .collect();
-    let covered =
-        entries.last().and_then(|entry| entry["entry"]["inbox_seq"].as_u64()).unwrap_or(after);
+    let known_losses: Vec<Value> = gateway
+        .resume_losses
+        .iter()
+        .map(|(from_seq, to_seq, reason)| {
+            json!({ "from_seq": from_seq, "to_seq": to_seq, "reason": reason })
+        })
+        .collect();
+    let loss_high = gateway.resume_losses.iter().map(|(_, to_seq, _)| *to_seq).max();
+    let entry_high = entries.last().and_then(|entry| entry["entry"]["inbox_seq"].as_u64());
+    let covered = entry_high.max(loss_high).unwrap_or(after);
     Ok(json!({
         "frame_type": "resume_page",
         "target_delivery_id": target,
         "incarnation_id": incarnation_id,
         "after_inbox_seq": after,
         "covered_through_seq": covered,
-        "issued_inbox_seq": covered,
+        "issued_inbox_seq": issued,
         "settled_through_seq": 0,
         "entries": entries,
-        "known_losses": [],
+        "known_losses": known_losses,
         "oversize_next": null,
-        "more": false,
+        "more": covered < issued,
     }))
 }
 

@@ -18,6 +18,10 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 static REGISTRY: OnceLock<Mutex<HashMap<String, ExecutorOwner>>> = OnceLock::new();
+#[cfg(test)]
+thread_local! {
+    static LAST_OWNER: std::cell::Cell<Option<ExecutorOwner>> = const { std::cell::Cell::new(None) };
+}
 
 fn registry() -> &'static Mutex<HashMap<String, ExecutorOwner>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -89,7 +93,16 @@ impl LedgerExecutor {
             return Err(SdkError::Storage(StorageError::AccountWriterBusy(account)));
         }
         held.insert(account.clone(), owner);
+        #[cfg(test)]
+        LAST_OWNER.with(|cell| cell.set(Some(owner)));
         Ok(Self { owner, account })
+    }
+
+    /// Last exclusive bind in this process. Test-only proof for the standalone row.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn last_bound_owner() -> Option<ExecutorOwner> {
+        LAST_OWNER.with(std::cell::Cell::get)
     }
 
     /// Exclusive actor bind for `account`. Released on drop.

@@ -93,6 +93,7 @@ pub(crate) struct SessionMetadata {
 
 struct Shared {
     timeouts: RuntimeTimeouts,
+    session_push_advertise: bool,
     snapshot: RwLock<NetworkingSnapshot>,
     metadata: RwLock<Option<SessionMetadata>>,
     hub: RwLock<Arc<SessionHub>>,
@@ -121,6 +122,8 @@ struct Shared {
     live_waiters: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     keepalive_running: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    catch_up_yields: std::sync::atomic::AtomicU32,
 }
 
 #[derive(Clone)]
@@ -324,6 +327,7 @@ impl ConnectionHandle {
         let (events, _) = broadcast::channel(64);
         let shared = Arc::new(Shared {
             timeouts: timeouts.clone(),
+            session_push_advertise: config.session_push_advertise,
             snapshot: RwLock::new(NetworkingSnapshot::pending(generation)),
             metadata: RwLock::new(None),
             hub: RwLock::new(Arc::new(SessionHub::new(generation))),
@@ -352,6 +356,8 @@ impl ConnectionHandle {
             live_waiters: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             keepalive_running: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            catch_up_yields: std::sync::atomic::AtomicU32::new(0),
             stop_reason: std::sync::Mutex::new(None),
             #[cfg(test)]
             removals: std::sync::Mutex::new(Vec::new()),
@@ -459,6 +465,22 @@ impl ConnectionHandle {
     }
     pub(crate) fn generation(&self) -> u64 {
         self.snapshot().generation
+    }
+    pub(crate) fn note_catch_up_yield(&self) {
+        #[cfg(not(test))]
+        let _ = self;
+        #[cfg(test)]
+        self.shared.catch_up_yields.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn test_catch_up_yields(&self) -> u32 {
+        self.shared.catch_up_yields.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Wake the receive loop without requesting resync (tests drive the paused clock).
+    #[cfg(test)]
+    pub(crate) fn notify_receive_wake(&self) {
+        self.shared.receive_wake.notify_one();
     }
     pub(crate) fn pending(&self) -> SdkError {
         let snapshot = self.snapshot();

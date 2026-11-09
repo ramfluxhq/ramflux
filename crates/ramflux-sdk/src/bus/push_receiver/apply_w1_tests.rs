@@ -4,6 +4,7 @@
 //! `ApplyPage` fence, binding retry, and routed refusal (S6b P20f / P20c r2 CARRY).
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
+use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
     self, after_w1_cut, apply_page, binding_attempts, binding_give_up, covered_below,
     force_covered_below, force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy,
@@ -24,7 +25,8 @@ use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::encode_base64url;
 use ramflux_storage::{
-    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveFailureKind, ReceiveMigrate, StorageError,
+    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveFailureKind, ReceiveMigrate, ReceiveStage,
+    ReceiveStageResult, StorageError,
 };
 use ramflux_transport::TransportError;
 use serde_json::json;
@@ -889,29 +891,119 @@ fn persist_projection_receipt_at(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn need_point_is_not_yet_wired_and_records_no_loss() -> Result<(), SdkError> {
+async fn need_point_gone_covers_and_records_loss() -> Result<(), SdkError> {
     let mut harness = open()?;
     force_need_point();
+    apply_w1::queue_point_reply(crate::gateway::push_point::PointReply::Gone {
+        observed_issued_inbox_seq: 1,
+        reason: crate::gateway::session_push::EntryGoneReason::Expired,
+    });
     let entry = live_dummy(&harness.account);
-    let before = harness
+    drive(&mut harness.account, entry, || 1).await?;
+    let snap = harness
         .account
         .client
         .account_db()?
         .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
-    let refused = drive(&mut harness.account, entry, || 1).await;
-    let error = refused.as_ref().err();
+    assert_eq!(snap.cursor, 1, "Gone point covers the requested sequence");
     assert!(
-        matches!(error, Some(SdkError::LocalBus(text)) if text.starts_with("NotYetWired")),
-        "NeedPoint without a real FetchEntry must be a typed NotYetWired: {error:?}"
+        snap.losses.iter().any(|loss| loss.3 == "expired"),
+        "FetchEntry Gone records the wire loss: {snap:?}"
     );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_sdk_page(
+    account: &crate::bus::state::LocalBusAccountState,
+    cursor: u64,
+    after: u64,
+    covered: u64,
+    issued: u64,
+    entries: &[u64],
+    losses: &[ApplyLoss<'_>],
+) -> Result<ApplyOutcome, SdkError> {
+    let db = account.client.account_db()?;
+    let mut prepared = turn(account, 1)?;
+    prepared.cursor = cursor;
+    let page = ApplyPage {
+        target: &prepared.target,
+        incarnation: &prepared.incarnation,
+        after,
+        covered,
+        issued,
+        settled: 0,
+        entries,
+        known_losses: losses,
+        oversize_next: None,
+        more: covered < issued,
+    };
+    match apply::apply_page(db, prepared.expected(), 1, page) {
+        Ok(outcome) => Ok(outcome),
+        Err(apply::ApplyError::Protocol(text)) => Err(SdkError::InboundRejected(text.into())),
+        Err(apply::ApplyError::Storage(error)) => Err(error.into()),
+    }
+}
+
+fn stage_seq(
+    account: &crate::bus::state::LocalBusAccountState,
+    cursor: u64,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let db = account.client.account_db()?;
+    let mut prepared = turn(account, 1)?;
+    prepared.cursor = cursor;
+    let entry = dummy_seq(
+        &account.target_delivery_id,
+        &encode_base64url(b"legacy-a2i-dummy"),
+        "source",
+        "device",
+        sequence,
+    );
+    let bytes = serde_json::to_vec(&entry.entry)?;
+    let result = db.receive_transaction(prepared.expected(), 1, |tx| {
+        tx.stage(ReceiveStage {
+            target: &prepared.target,
+            incarnation: &prepared.incarnation,
+            sequence,
+            entry_json: &bytes,
+            admission_key: "authenticated-key",
+            retain_until: 100,
+            first_seen: 1,
+        })
+    })?;
+    assert!(matches!(result, ReceiveStageResult::Staged), "{result:?}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn stale_page_suffix_progress() -> Result<(), SdkError> {
+    let harness = open()?;
+    let prefix = [ApplyLoss { from_seq: 1, to_seq: 10, reason: "expired" }];
     assert_eq!(
-        harness
-            .account
-            .client
-            .account_db()?
-            .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?,
-        before,
-        "no fabricated loss, cover or retain_until"
+        apply_sdk_page(&harness.account, 0, 0, 10, 20, &[], &prefix)?,
+        ApplyOutcome::Covered { cursor: 10 }
+    );
+    stage_seq(&harness.account, 10, 12)?;
+    let losses = [
+        ApplyLoss { from_seq: 6, to_seq: 11, reason: "expired" },
+        ApplyLoss { from_seq: 13, to_seq: 20, reason: "nacked" },
+    ];
+    assert_eq!(
+        apply_sdk_page(&harness.account, 10, 5, 20, 20, &[12], &losses)?,
+        ApplyOutcome::NeedStage { sequence: 12, cursor: 11 }
+    );
+    let db = harness.account.client.account_db()?;
+    db.set_receipt_disposition_for_test(12, "completed")?;
+    assert_eq!(
+        apply_sdk_page(&harness.account, 11, 5, 20, 20, &[12], &losses)?,
+        ApplyOutcome::Covered { cursor: 20 }
+    );
+    let once = db.receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    assert_eq!(once.cursor, 20);
+    assert_eq!(
+        apply_sdk_page(&harness.account, 20, 5, 20, 20, &[12], &losses)?,
+        ApplyOutcome::AlreadyCovered { cursor: 20 }
     );
     Ok(())
 }

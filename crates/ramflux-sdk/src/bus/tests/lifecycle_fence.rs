@@ -65,7 +65,7 @@ pub(super) fn runtime_for(
     let (commands, receiver) = mpsc::channel(8);
     let (stop, shutdown) = watch::channel(false);
     let (events, mut batches) = mpsc::channel::<EventBatch>(64);
-    tokio::task::spawn_local(async move {
+    tokio::spawn(async move {
         while let Some(batch) = batches.recv().await {
             let _ = batch.accepted.send(());
         }

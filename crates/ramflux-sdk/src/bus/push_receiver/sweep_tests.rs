@@ -5,6 +5,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use super::sweep::{Planner, ResumeKind, SweepMode, SweepSetting, View};
+use std::sync::OnceLock;
 
 fn live(generation: u64) -> View {
     View { live: true, generation, resync: false }
@@ -13,14 +14,14 @@ fn live(generation: u64) -> View {
 /// Decide, then report a successful pass (the live loop's `finish` call).
 fn fire(planner: &mut Planner, now_ms: u64, generation: u64) -> Option<ResumeKind> {
     let kind = planner.decide(now_ms, live(generation))?;
-    planner.finish(now_ms, now_ms, generation, true);
+    planner.finish(now_ms, now_ms, generation, true, false);
     Some(kind)
 }
 
 /// Decide, then report a failed pass that finished at `finished_ms`.
 fn fail(planner: &mut Planner, now_ms: u64, finished_ms: u64, view: View) -> Option<ResumeKind> {
     let kind = planner.decide(now_ms, view)?;
-    planner.finish(now_ms, finished_ms, view.generation, false);
+    planner.finish(now_ms, finished_ms, view.generation, false, false);
     Some(kind)
 }
 
@@ -43,6 +44,15 @@ fn sweep_setting() {
     assert!(deprecated.deprecated_ignored);
     assert_eq!(deprecated.push_secs, 900);
     assert_eq!(SweepSetting::parse(Some("120"), Some("1"), None).push_secs, 120);
+    let once = OnceLock::new();
+    let warnings = WarnLog::default();
+    tracing::subscriber::with_default(warnings.clone(), || {
+        deprecated.emit_deprecated_warning(&once);
+        deprecated.emit_deprecated_warning(&once);
+    });
+    let logs = warnings.0.lock().unwrap();
+    assert_eq!(logs.len(), 1, "deprecated env warns once: {logs:?}");
+    assert!(logs[0].contains("RAMFLUX_SESSION_SAFETY_SWEEP_SECS"), "{logs:?}");
     assert_eq!(SweepSetting::parse(Some(" 120"), None, None).push_secs, 120);
     assert_eq!(SweepSetting::parse(Some("120 "), None, None).push_secs, 120);
     assert_eq!(SweepSetting::parse(Some(" 0 "), None, None).push_secs, 60);
@@ -141,4 +151,67 @@ fn connected_and_sweep_failed_resync_backs_off() {
     assert_eq!(planner.wake_at_ms(1_000), Some(1_250));
     assert_eq!(planner.decide(1_249, resync), None);
     assert_eq!(planner.decide(1_250, resync), Some(ResumeKind::Resync));
+}
+
+/// A reconnect during backoff fires Connected immediately and starts backoff at 250 ms.
+#[test]
+fn connected_and_sweep_resets_backoff_on_generation_change() {
+    let mut planner = default_push();
+    assert_eq!(fail(&mut planner, 0, 0, live(1)), Some(ResumeKind::Connected));
+    assert_eq!(planner.decide(100, live(1)), None, "same generation honours backoff");
+    assert_eq!(
+        planner.decide(100, live(2)),
+        Some(ResumeKind::Connected),
+        "new generation ignores leftover backoff"
+    );
+    assert_eq!(fail(&mut planner, 100, 100, live(2)), Some(ResumeKind::Connected));
+    assert_eq!(
+        planner.wake_at_ms(100),
+        Some(350),
+        "first fail on the new generation starts at 250"
+    );
+    assert_eq!(planner.decide(349, live(2)), None);
+    assert_eq!(planner.decide(350, live(2)), Some(ResumeKind::Connected));
+}
+
+/// A paused success does not anchor the idle sweep.
+#[test]
+fn connected_and_sweep_paused_does_not_anchor() {
+    let mut planner = default_push();
+    assert_eq!(planner.decide(0, live(1)), Some(ResumeKind::Connected));
+    planner.finish(0, 40, 1, true, true);
+    assert_eq!(planner.decide(40, live(1)), None, "generation is handled");
+    assert_eq!(planner.decide(900_000, live(1)), None, "paused pass does not start the 900s sweep");
+}
+
+#[derive(Clone, Default)]
+struct WarnLog(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for WarnLog {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() == tracing::Level::WARN
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                use std::fmt::Write;
+                let _ = write!(self.0, "{field}={value:?} ");
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                use std::fmt::Write;
+                let _ = write!(self.0, "{field}={value} ");
+            }
+        }
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(format!("{} {}", event.metadata().name(), fields.0));
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }
