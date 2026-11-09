@@ -7,10 +7,7 @@
 //! generation-0 schema gate. Live producers stay unfed until activation.
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::custody::{
-    MAX_LAYER_DECLARATION_VALIDITY_SECONDS, MAX_MESSAGE_LAYER, MESSAGE_LAYER_FLOOR,
-    SignedLayerDeclaration,
-};
+use ramflux_protocol::custody::{DeviceRef, SignedLayerDeclaration};
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
 use ramflux_protocol::schema_profile::{ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION};
@@ -42,17 +39,10 @@ impl LayerView {
         }
     }
 
-    /// Inclusive signed validity window from P04; `now == expires_at` is still fresh.
+    /// Inclusive selection window; P04 already enforced layer bounds and the 24 h cap.
     #[must_use]
     pub(crate) fn is_fresh(self, now: u64) -> bool {
-        self.max_layer >= MESSAGE_LAYER_FLOOR
-            && self.max_layer <= MAX_MESSAGE_LAYER
-            && self.issued_at != 0
-            && self.expires_at != 0
-            && self.issued_at <= now
-            && now <= self.expires_at
-            && self.expires_at.saturating_sub(self.issued_at)
-                <= MAX_LAYER_DECLARATION_VALIDITY_SECONDS
+        self.issued_at <= now && now <= self.expires_at
     }
 }
 
@@ -243,7 +233,7 @@ fn push_representation(
     layer: u32,
     targets: BTreeSet<TargetKey>,
 ) -> Result<(), SdkError> {
-    *counter = counter.checked_add(1).ok_or_else(invalid_kind)?;
+    *counter = counter.checked_add(1).ok_or_else(counter_overflow)?;
     representations.push(Representation {
         variant_counter: *counter,
         selected_layer: layer,
@@ -282,52 +272,112 @@ fn invalid_kind() -> SdkError {
     }
 }
 
+fn counter_overflow() -> SdkError {
+    SdkError::LocalBusRefused {
+        code: "ValidationFailed".into(),
+        message: "variant counter overflow".into(),
+        body: Box::new(json!({})),
+    }
+}
+
 fn unix_now() -> Result<u64, SdkError> {
     u64::try_from(crate::time::now_unix_timestamp()).map_err(|_| SdkError::CustodySetupInvalid)
 }
 
-fn target_from_entry(
+/// Map a live send route onto the inner kind used for candidate encoding.
+#[must_use]
+pub(crate) fn kind_id_for_route(kind: &crate::client::routed::Kind) -> KindId {
+    match kind {
+        crate::client::routed::Kind::Control | crate::client::routed::Kind::GroupControl => {
+            KindId::KindControl
+        }
+        crate::client::routed::Kind::Receipt => KindId::KindReceipt,
+        crate::client::routed::Kind::Direct | crate::client::routed::Kind::GroupMessage => {
+            KindId::KindMessage
+        }
+    }
+}
+
+/// Accept a layer only from P04-verified custody evidence bound to this device.
+fn endorsed_layer(manifest: &SdkDeviceManifestResponse, device_id: &str) -> Option<LayerView> {
+    let custody = manifest.custody.as_ref()?;
+    let body = &custody.publication.record.body;
+    let device = body.devices.iter().find(|row| row.device_id == device_id)?;
+    let signed = device.message_layer.as_ref()?;
+    let certificate = device.branch_certificate.as_ref()?;
+    let bytes = ramflux_protocol::custody::signing_bytes(
+        ramflux_protocol::domain::CUSTODY_MESSAGE_LAYER_DECLARATION,
+        &signed.declaration,
+    )
+    .ok()?;
+    ramflux_crypto::verify_canonical_signature(
+        &bytes,
+        &signed.branch_signature,
+        &certificate.body.branch_signing_public_key,
+    )
+    .ok()?;
+    let expected = DeviceRef {
+        account_anchor: body.account_anchor.clone(),
+        device_id: device.device_id.clone(),
+        device_epoch: device.device_epoch,
+    };
+    if signed.declaration.device != expected {
+        return None;
+    }
+    Some(LayerView::from_signed(signed))
+}
+
+fn target_from_manifest(
     root: &str,
     device_id: &str,
-    entry: Option<&crate::prekey::SdkDeviceManifestEntry>,
+    manifest: Option<&SdkDeviceManifestResponse>,
 ) -> TargetDevice {
+    let entry =
+        manifest.and_then(|row| row.devices.iter().find(|device| device.device_id == device_id));
     TargetDevice {
         account_anchor: root.to_owned(),
         device_id: device_id.to_owned(),
         device_epoch: entry.map_or(0, |row| row.device_epoch),
-        declaration: entry.and_then(|row| row.message_layer.as_ref()).map(LayerView::from_signed),
+        declaration: manifest.and_then(|row| endorsed_layer(row, device_id)),
     }
+}
+
+/// Select, then re-read membership and recheck so a submit-time change rebuilds counters.
+fn select_with_current_membership(
+    build: impl Fn() -> Result<SelectionRequest, SdkError>,
+) -> Result<SelectionPlan, SdkError> {
+    let plan = select(&build()?)?;
+    recheck(&plan, &build()?)
 }
 
 impl RamfluxClient {
     /// Run candidate selection only when the live profile is message schema v1.
     ///
     /// The request closure is skipped while the gate is off so live send bytes
-    /// stay unchanged. When the gate is on, the plan is rechecked against the
-    /// same request before it is returned (keep counters if membership is
-    /// unchanged; rebuild from `high_water` otherwise).
+    /// stay unchanged. When the gate is on, membership is read twice: once to
+    /// select, then again so [`recheck`] sees the current roster.
     /// # Errors
     /// Propagates request construction or [`select`] failures when the gate is on.
     pub(crate) fn candidate_target_plan(
-        build: impl FnOnce() -> Result<SelectionRequest, SdkError>,
+        build: impl Fn() -> Result<SelectionRequest, SdkError>,
     ) -> Result<Option<SelectionPlan>, SdkError> {
         if !schema_v1_selected() {
             return Ok(None);
         }
-        let request = build()?;
-        let plan = select(&request)?;
-        Ok(Some(recheck(&plan, &request)?))
+        Ok(Some(select_with_current_membership(build)?))
     }
 
     pub(crate) fn dm_selection_request(
         &self,
         message: &crate::GatewayDirectMessage,
+        kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
         let local = self.owned_device_identity()?;
         let recipient = Self::qualified_recipient(message)?;
         let remote = self.device_identity(&recipient)?;
         self.pair_selection_request(
             FanoutScope::Dm,
+            kind,
             &message.message_id,
             (local.root_commitment(), local.device_id()),
             (remote.root_commitment(), remote.device_id()),
@@ -338,10 +388,11 @@ impl RamfluxClient {
         logical_event_id: &str,
         source_device_id: &str,
         manifest: &SdkDeviceManifestResponse,
+        kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
         Ok(request_from_manifest(
             FanoutScope::OwnCopy,
-            KindId::KindMessage,
+            kind,
             logical_event_id,
             unix_now()?,
             source_device_id,
@@ -353,16 +404,25 @@ impl RamfluxClient {
         &self,
         group_id: &str,
         sender_id: &str,
+        logical_event_id: &str,
+        kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
         if let Some(state) = self.account_db()?.shared_group_state(group_id)? {
-            return self.shared_group_selection_request(group_id, sender_id, &state);
+            return self.shared_group_selection_request(
+                group_id,
+                sender_id,
+                logical_event_id,
+                kind,
+                &state,
+            );
         }
-        self.legacy_group_selection_request(group_id, sender_id)
+        self.legacy_group_selection_request(group_id, sender_id, logical_event_id, kind)
     }
 
     fn pair_selection_request(
         &self,
         scope: FanoutScope,
+        kind: KindId,
         logical_event_id: &str,
         source: (&str, &str),
         target: (&str, &str),
@@ -374,7 +434,7 @@ impl RamfluxClient {
             MembershipSnapshot { epoch: 0, devices: BTreeSet::from([source.key(), target.key()]) };
         Ok(SelectionRequest {
             scope,
-            kind: KindId::KindMessage,
+            kind,
             logical_event_id: logical_event_id.to_owned(),
             now_unix: now,
             source_compiled_support: COMPILED_LAYER,
@@ -389,16 +449,15 @@ impl RamfluxClient {
         let manifest = self.account_db()?.load_actor_state::<SdkDeviceManifestResponse>(
             &format!("identity/manifest-root/{root}"),
         )?;
-        let entry = manifest
-            .as_ref()
-            .and_then(|row| row.devices.iter().find(|device| device.device_id == device_id));
-        Ok(target_from_entry(root, device_id, entry))
+        Ok(target_from_manifest(root, device_id, manifest.as_ref()))
     }
 
     fn shared_group_selection_request(
         &self,
-        group_id: &str,
+        _group_id: &str,
         sender_id: &str,
+        logical_event_id: &str,
+        kind: KindId,
         state: &ramflux_crypto::VerifiedGroupState,
     ) -> Result<SelectionRequest, SdkError> {
         let sender = self.local_device_identity(sender_id)?;
@@ -409,23 +468,22 @@ impl RamfluxClient {
                 &format!("identity/manifest-root/{root}"),
             )?;
             for device_id in devices {
-                targets.push(target_from_entry(
-                    &root,
-                    &device_id,
-                    manifest.as_ref().and_then(|row| {
-                        row.devices.iter().find(|device| device.device_id == device_id)
-                    }),
-                ));
+                if root == sender.root_commitment() && device_id == sender.device_id() {
+                    continue;
+                }
+                targets.push(target_from_manifest(&root, &device_id, manifest.as_ref()));
             }
         }
         let source = self.cached_target(sender.root_commitment(), sender.device_id())?;
-        finish_group_request(group_id, state.snapshot().epoch, source, targets)
+        finish_group_request(logical_event_id, kind, state.snapshot().epoch, source, targets)
     }
 
     fn legacy_group_selection_request(
         &self,
         group_id: &str,
         sender_id: &str,
+        logical_event_id: &str,
+        kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
         let group = self.group_state(group_id)?;
         let source = TargetDevice {
@@ -445,7 +503,7 @@ impl RamfluxClient {
                 declaration: None,
             })
             .collect();
-        finish_group_request(group_id, group.group_epoch, source, targets)
+        finish_group_request(logical_event_id, kind, group.group_epoch, source, targets)
     }
 }
 
@@ -458,16 +516,12 @@ fn request_from_manifest(
     manifest: &SdkDeviceManifestResponse,
 ) -> SelectionRequest {
     let root = manifest.principal_commitment.as_str();
-    let source = target_from_entry(
-        root,
-        source_device_id,
-        manifest.devices.iter().find(|device| device.device_id == source_device_id),
-    );
+    let source = target_from_manifest(root, source_device_id, Some(manifest));
     let targets = manifest
         .devices
         .iter()
         .filter(|device| device.device_id != source_device_id)
-        .map(|device| target_from_entry(root, &device.device_id, Some(device)))
+        .map(|device| target_from_manifest(root, &device.device_id, Some(manifest)))
         .collect::<Vec<_>>();
     let mut devices = BTreeSet::from([source.key()]);
     devices.extend(targets.iter().map(TargetDevice::key));
@@ -485,17 +539,20 @@ fn request_from_manifest(
 }
 
 fn finish_group_request(
-    group_id: &str,
+    logical_event_id: &str,
+    kind: KindId,
     epoch: u64,
     source: TargetDevice,
-    targets: Vec<TargetDevice>,
+    mut targets: Vec<TargetDevice>,
 ) -> Result<SelectionRequest, SdkError> {
-    let mut devices = BTreeSet::from([source.key()]);
+    let source_key = source.key();
+    targets.retain(|target| target.key() != source_key);
+    let mut devices = BTreeSet::from([source_key]);
     devices.extend(targets.iter().map(TargetDevice::key));
     Ok(SelectionRequest {
         scope: FanoutScope::Group,
-        kind: KindId::KindMessage,
-        logical_event_id: group_id.to_owned(),
+        kind,
+        logical_event_id: logical_event_id.to_owned(),
         now_unix: unix_now()?,
         source_compiled_support: COMPILED_LAYER,
         source,

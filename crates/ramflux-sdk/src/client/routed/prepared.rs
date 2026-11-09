@@ -67,7 +67,9 @@ impl RamfluxClient {
         if let Some((root, manifest)) = material.manifest {
             self.accept_fetched_device_manifest(manifest, &root, "background-outbox")?;
         }
-        let _ = Self::candidate_target_plan(|| self.dm_selection_request(message))?;
+        let _ = Self::candidate_target_plan(|| {
+            self.dm_selection_request(message, ramflux_protocol::message::KindId::KindMessage)
+        })?;
         let local = self.local_device_identity(&config.device_id)?;
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;

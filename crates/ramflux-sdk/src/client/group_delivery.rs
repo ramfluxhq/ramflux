@@ -12,8 +12,12 @@ impl RamfluxClient {
         &self,
         group_id: &str,
         sender_id: &str,
+        logical_event_id: &str,
+        kind: ramflux_protocol::message::KindId,
     ) -> Result<Option<crate::client::target_selection::SelectionPlan>, SdkError> {
-        Self::candidate_target_plan(|| self.group_selection_request(group_id, sender_id))
+        Self::candidate_target_plan(|| {
+            self.group_selection_request(group_id, sender_id, logical_event_id, kind)
+        })
     }
 
     pub fn append_gateway_delivery(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
@@ -457,4 +461,22 @@ fn validate_legacy_group_payload(body: &[u8], expected: &str) -> Result<(), SdkE
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::native_test_support::{Fixture, TestResult};
+
+    #[tokio::test]
+    async fn candidate_group_plan_stays_dormant_behind_schema_gate() -> TestResult {
+        let owner = Fixture::with_device("p05-gd-owner", "owner").await?;
+        let plan = owner.client.candidate_group_target_plan(
+            "g1",
+            "owner",
+            "event-1",
+            ramflux_protocol::message::KindId::KindControl,
+        )?;
+        assert!(plan.is_none(), "generation 0 must skip the candidate group plan");
+        Ok(())
+    }
 }

@@ -99,6 +99,8 @@ pub use memory_vault::MemoryPrimaryVault;
 
 mod layer_declaration;
 pub use layer_declaration::DeclarationValidity;
+#[cfg(test)]
+pub(crate) use layer_declaration::candidate as sign_layer_declaration;
 mod network;
 mod node_pins;
 pub(crate) mod retry;
