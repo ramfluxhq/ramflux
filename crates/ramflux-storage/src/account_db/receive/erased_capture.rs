@@ -198,6 +198,11 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     "runtime_message_content",
     // The footprint bindings themselves: copy ids and message ids only.
     "message_copy_binding",
+    // Writer `runtime/operations.rs` `complete_operation`: the cached response of a LOCAL
+    // mutation (upload, send, delete) kept for idempotent retries. It joined the footprint in
+    // S10a P11 so erasure clears message copies inside responses; it never stores an inbound
+    // transport envelope, so no erased-input tuple can be formed.
+    "runtime_operation",
     // Transient stages written and consumed by one trigger statement (`message_footprint/
     // schema.rs` `staged_actor_copy` and `journal_copy`): they carry ids and bindings, or the
     // journal body whose durable home is `runtime_journal` (a Source). Always empty at rest.
