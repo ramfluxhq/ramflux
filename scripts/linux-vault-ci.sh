@@ -21,6 +21,17 @@ run_bounded() {
   fi
   if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
     echo "::error::Timed out after ${seconds}s waiting for ${label}: ${command% }" >&2
+    local -a user_dump
+    user_dump=(env PATH="/usr/bin:/bin")
+    if [ -n "${fixture_user:-}" ] && [ -n "${fixture:-}" ]; then
+      user_dump=(runuser -u "$fixture_user" -- env PATH="/usr/bin:/bin"
+        XDG_RUNTIME_DIR="$fixture/runtime"
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$fixture/runtime/bus")
+    fi
+    echo '--- systemctl --user status ---' >&2
+    timeout 10s "${user_dump[@]}" systemctl --user status --no-pager >&2 || true
+    echo '--- busctl --user list ---' >&2
+    timeout 10s "${user_dump[@]}" busctl --user list >&2 || true
     echo '--- recent system journal ---' >&2
     timeout 10s journalctl -n 100 --no-pager >&2 || true
     echo '--- systemd fixture unit ---' >&2
@@ -41,7 +52,7 @@ else
   archive="$(realpath "${1:-rest.tar.zst}")"
   nextest="$(command -v cargo-nextest)"
 fi
-for tool in systemd-creds systemd-run systemctl dbus-run-session dbus-send useradd runuser timeout; do
+for tool in systemd-creds systemd-run systemctl busctl dbus-run-session dbus-send useradd runuser timeout; do
   command -v "$tool" >/dev/null
 done
 run_bounded 30 'systemd manager readiness query' systemctl show --property=Version --value >/dev/null

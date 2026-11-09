@@ -326,7 +326,8 @@ jobs:
     name: Linux vault platform fixture
     needs: [build-rest, build-sdk]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Budget for one archive-download retry plus the 15-minute D-Bus step bound.
+    timeout-minutes: 40
     steps:
       - name: Checkout
         timeout-minutes: 3
@@ -344,13 +345,29 @@ jobs:
         with:
           tool: nextest@0.9.150
       - name: Download default-feature rest archive
+        id: download-rest
+        continue-on-error: true
+        timeout-minutes: 10
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        timeout-minutes: 5
+        with:
+          name: archive-rest
+      - name: Retry download default-feature rest archive
+        if: steps.download-rest.outcome != 'success'
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: archive-rest
       - name: Download default-feature SDK archive
+        id: download-sdk
+        continue-on-error: true
+        timeout-minutes: 10
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        timeout-minutes: 5
+        with:
+          name: archive-sdk
+      - name: Retry download default-feature SDK archive
+        if: steps.download-sdk.outcome != 'success'
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: archive-sdk
       - name: Verify pinned independent libsodium C oracle
@@ -428,6 +445,15 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Download archive
+        id: download-archive
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-sdk
+      - name: Retry download archive
+        if: steps.download-archive.outcome != 'success'
+        timeout-minutes: 10
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: archive-sdk
@@ -495,6 +521,15 @@ jobs:
           tool: nextest@0.9.150
 
       - name: Download archive
+        id: download-archive
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: archive-rest
+      - name: Retry download archive
+        if: steps.download-archive.outcome != 'success'
+        timeout-minutes: 10
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: archive-rest
