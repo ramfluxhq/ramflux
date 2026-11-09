@@ -495,3 +495,31 @@ fn ephemeral_deadline() -> TestResult {
     std::fs::remove_file(path)?;
     Ok(())
 }
+
+#[test]
+fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
+    let (live_router, live_path) = fresh("clock-live")?;
+    let (expired_router, expired_path) = fresh("clock-expired")?;
+    establish_capable(&live_router, TARGET)?;
+    establish_capable(&expired_router, TARGET)?;
+    let live_env = signed_ephemeral("clock-live", TARGET)?;
+    let expired_env = signed_ephemeral("clock-expired", TARGET)?;
+    let live_expires = computed_expires(&live_env, now_ms())?;
+    let expired_expires = computed_expires(&expired_env, now_ms())?;
+    let _live_now = NowMsGuard(live_router.clone());
+    let _expired_now = NowMsGuard(expired_router.clone());
+    live_router.set_ephemeral_now_ms(Some(live_expires.saturating_sub(1)));
+    expired_router.set_ephemeral_now_ms(Some(expired_expires));
+    let live = post_route(&live_router, &request_body(&live_env, live_expires)?)?;
+    assert_eq!(
+        live,
+        EphemeralRouteResponse::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
+    );
+    let expired = post_route(&expired_router, &request_body(&expired_env, expired_expires)?)?;
+    assert_eq!(expired, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Expired });
+    drop(live_router);
+    drop(expired_router);
+    std::fs::remove_file(live_path)?;
+    std::fs::remove_file(expired_path)?;
+    Ok(())
+}

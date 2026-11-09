@@ -9,7 +9,7 @@ use super::{
     EphemeralSendError, EphemeralSendOutcome, EphemeralWire, decode_ephemeral_result,
     encode_ephemeral_submit, send_ephemeral,
 };
-use crate::RamfluxClient;
+use crate::{GatewayServerFrame, RamfluxClient};
 use ramflux_protocol::ephemeral::{
     DELIVERY_MODE_EXTENSION, EphemeralDropReason, EphemeralModeError, GATEWAY_EPHEMERAL_CAPABILITY,
 };
@@ -180,6 +180,23 @@ fn row_result_envelope_mismatch(envelope: &Envelope) {
     assert_eq!(wire.sent.len(), 1);
 }
 
+fn row_result_empty_envelope_id_is_decode(envelope: &Envelope) {
+    let reply = RecordingWire::with_result_for("", "accepted", None).replies[0].clone();
+    match ramflux_protocol::parse_i_json::<GatewayServerFrame>(&reply) {
+        Ok(GatewayServerFrame::EphemeralResult { envelope_id, .. }) => {
+            assert_eq!(envelope_id, "", "empty result id must parse as EphemeralResult");
+        }
+        other => panic!("empty result id must parse as EphemeralResult, got {other:?}"),
+    }
+    assert_eq!(
+        decode_ephemeral_result(&reply, &envelope.envelope_id),
+        Err(EphemeralSendError::Decode)
+    );
+    let mut wire = RecordingWire::with_result_for("", "accepted", None);
+    assert_eq!(send(envelope, &both_caps(), &mut wire), Err(EphemeralSendError::Decode));
+    assert_eq!(wire.sent.len(), 1);
+}
+
 fn row_missing_capability_sends_nothing(envelope: &Envelope) -> TestResult {
     let cases =
         [Vec::new(), vec![push()], vec![ephemeral_cap()], vec!["gateway.other.v1".to_owned()]];
@@ -301,6 +318,7 @@ fn ephemeral_sdk_send_and_local_unsupported() -> TestResult {
     row_invalid_mode_priority_ttl_sends_nothing()?;
     row_remote_results_map(&envelope)?;
     row_result_envelope_mismatch(&envelope);
+    row_result_empty_envelope_id_is_decode(&envelope);
     row_no_persistence(&envelope)?;
     assert_eq!(
         send_ephemeral(&signed_request(), &envelope, &both_caps(), NOW_MS, &mut FailingWire),
