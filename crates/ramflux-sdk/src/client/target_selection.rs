@@ -24,15 +24,17 @@ pub(crate) enum FanoutScope {
 }
 
 /// Verified declaration fields used for above-floor selection.
+///
+/// Fields stay private so a fresh view cannot be built from unverified bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LayerView {
-    pub max_layer: u32,
-    pub issued_at: u64,
-    pub expires_at: u64,
+    max_layer: u32,
+    issued_at: u64,
+    expires_at: u64,
 }
 
 impl LayerView {
-    fn from_signed(signed: &SignedLayerDeclaration) -> Self {
+    fn from_verified(signed: &SignedLayerDeclaration) -> Self {
         Self {
             max_layer: signed.declaration.max_layer,
             issued_at: signed.declaration.issued_at,
@@ -42,27 +44,64 @@ impl LayerView {
 
     /// Inclusive selection window; P04 already enforced layer bounds and the 24 h cap.
     #[must_use]
-    pub(crate) fn is_fresh(self, now: u64) -> bool {
+    fn is_fresh(self, now: u64) -> bool {
         self.issued_at <= now && now <= self.expires_at
     }
 }
 
 /// One recipient device plus an optional current verified declaration.
+///
+/// A declaration is present only when the constructor received a [`VerifiedLayerRoster`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TargetDevice {
-    pub account_anchor: String,
-    pub device_id: String,
-    pub device_epoch: u64,
-    pub declaration: Option<LayerView>,
+    account_anchor: String,
+    device_id: String,
+    device_epoch: u64,
+    declaration: Option<LayerView>,
 }
 
 impl TargetDevice {
+    /// Device without a verified declaration (legacy, missing, or refused authority).
+    fn without_declaration(account_anchor: String, device_id: String, device_epoch: u64) -> Self {
+        Self { account_anchor, device_id, device_epoch, declaration: None }
+    }
+
+    /// Layer and epoch come only from a P04-verified roster. Unverified bytes never enter.
+    fn from_verified_roster(
+        root: &str,
+        device_id: &str,
+        roster: Option<&VerifiedLayerRoster>,
+    ) -> Self {
+        let Some(roster) = roster else {
+            return Self::without_declaration(root.to_owned(), device_id.to_owned(), 0);
+        };
+        let device = roster.device(device_id);
+        Self {
+            account_anchor: root.to_owned(),
+            device_id: device_id.to_owned(),
+            device_epoch: device.map_or(0, |row| row.device_epoch),
+            declaration: device
+                .and_then(|row| row.message_layer.as_ref())
+                .map(LayerView::from_verified),
+        }
+    }
+
     fn key(&self) -> TargetKey {
         TargetKey {
             account_anchor: self.account_anchor.clone(),
-            device_id: self.device_id.clone(),
-            device_epoch: self.device_epoch,
+            device_id: self.device_id().to_owned(),
+            device_epoch: self.device_epoch(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    #[must_use]
+    pub(crate) fn device_epoch(&self) -> u64 {
+        self.device_epoch
     }
 }
 
@@ -299,21 +338,6 @@ pub(crate) fn kind_id_for_route(kind: &crate::client::routed::Kind) -> KindId {
     }
 }
 
-/// Read layer and epoch only from a P04-verified roster. Unverified bytes never enter.
-fn target_from_roster(
-    root: &str,
-    device_id: &str,
-    roster: Option<&VerifiedLayerRoster>,
-) -> TargetDevice {
-    let device = roster.and_then(|row| row.device(device_id));
-    TargetDevice {
-        account_anchor: root.to_owned(),
-        device_id: device_id.to_owned(),
-        device_epoch: device.map_or(0, |row| row.device_epoch),
-        declaration: device.and_then(|row| row.message_layer.as_ref()).map(LayerView::from_signed),
-    }
-}
-
 /// Select, then re-read membership and recheck so a submit-time change rebuilds counters.
 fn select_with_current_membership(
     build: impl Fn() -> Result<SelectionRequest, SdkError>,
@@ -346,13 +370,16 @@ impl RamfluxClient {
     ) -> Result<SelectionRequest, SdkError> {
         let local = self.owned_device_identity()?;
         let recipient = Self::qualified_recipient(message)?;
-        let remote = self.device_identity(&recipient)?;
+        let (root, device) =
+            ramflux_protocol::parse_qualified_device_id(&recipient)?.ok_or_else(|| {
+                crate::client::identity_authority::invalid("recipient device required")
+            })?;
         self.pair_selection_request(
             FanoutScope::Dm,
             kind,
             &message.message_id,
             (local.root_commitment(), local.device_id()),
-            (remote.root_commitment(), remote.device_id()),
+            (&root, &device),
         )
     }
 
@@ -365,12 +392,14 @@ impl RamfluxClient {
         let now = unix_now()?;
         let roster = VerifiedLayerRoster::verify(manifest, now).ok();
         let root = manifest.principal_commitment.as_str();
-        let source = target_from_roster(root, source_device_id, roster.as_ref());
+        let source = TargetDevice::from_verified_roster(root, source_device_id, roster.as_ref());
         let targets = manifest
             .devices
             .iter()
             .filter(|device| device.device_id != source_device_id)
-            .map(|device| target_from_roster(root, &device.device_id, roster.as_ref()))
+            .map(|device| {
+                TargetDevice::from_verified_roster(root, &device.device_id, roster.as_ref())
+            })
             .collect::<Vec<_>>();
         let mut devices = BTreeSet::from([source.key()]);
         devices.extend(targets.iter().map(TargetDevice::key));
@@ -433,10 +462,16 @@ impl RamfluxClient {
     }
 
     fn cached_target(&self, root: &str, device_id: &str) -> Result<TargetDevice, SdkError> {
-        let now = unix_now()?;
-        let roster =
-            self.current_custody_authority(root, now)?.map(VerifiedLayerRoster::from_verified);
-        Ok(target_from_roster(root, device_id, roster.as_ref()))
+        Ok(TargetDevice::from_verified_roster(root, device_id, self.cached_roster(root)?.as_ref()))
+    }
+
+    /// One member's refused cache is stale for that member; it does not fail the send.
+    fn cached_roster(&self, root: &str) -> Result<Option<VerifiedLayerRoster>, SdkError> {
+        Ok(self
+            .current_custody_authority(root, unix_now()?)
+            .ok()
+            .flatten()
+            .map(VerifiedLayerRoster::from_verified))
     }
 
     fn shared_group_selection_request(
@@ -449,16 +484,18 @@ impl RamfluxClient {
     ) -> Result<SelectionRequest, SdkError> {
         let sender = self.local_device_identity(sender_id)?;
         let selected = self.shared_group_selected_devices(state)?;
-        let now = unix_now()?;
         let mut targets = Vec::new();
         for (root, devices) in selected {
-            let roster =
-                self.current_custody_authority(&root, now)?.map(VerifiedLayerRoster::from_verified);
+            let roster = self.cached_roster(&root)?;
             for device_id in devices {
                 if root == sender.root_commitment() && device_id == sender.device_id() {
                     continue;
                 }
-                targets.push(target_from_roster(&root, &device_id, roster.as_ref()));
+                targets.push(TargetDevice::from_verified_roster(
+                    &root,
+                    &device_id,
+                    roster.as_ref(),
+                ));
             }
         }
         let source = self.cached_target(sender.root_commitment(), sender.device_id())?;
@@ -473,22 +510,12 @@ impl RamfluxClient {
         kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
         let group = self.group_state(group_id)?;
-        let source = TargetDevice {
-            account_anchor: String::new(),
-            device_id: sender_id.to_owned(),
-            device_epoch: 0,
-            declaration: None,
-        };
+        let source = TargetDevice::without_declaration(String::new(), sender_id.to_owned(), 0);
         let targets = group
             .members
             .into_iter()
             .filter(|member| member != sender_id)
-            .map(|member| TargetDevice {
-                account_anchor: String::new(),
-                device_id: member,
-                device_epoch: 0,
-                declaration: None,
-            })
+            .map(|member| TargetDevice::without_declaration(String::new(), member, 0))
             .collect();
         finish_group_request(logical_event_id, kind, group.group_epoch, source, targets)
     }

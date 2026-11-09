@@ -224,6 +224,32 @@ fn project_layers(native: &mut CustodyManifest) {
     }
 }
 
+/// Re-sign the mutated body without P04 `record_structure`, so only the attacked rule fails.
+fn resign_publication_raw(fixture: &Fixture, native: &mut CustodyManifest) -> TestResult {
+    let primary = primary_key(fixture)?;
+    let mut body = native.publication.record.body.clone();
+    body.section_hashes = ramflux_protocol::custody::section_hashes(&body)?;
+    let bytes = ramflux_protocol::custody::signing_bytes(
+        ramflux_protocol::domain::SIGNED_DEVICE_SET_V3,
+        &body,
+    )?;
+    native.publication.record.body = body;
+    native.publication.record.signature =
+        ramflux_crypto::sign_canonical_bytes_with_seed(&bytes, *primary.vault_seed());
+    Ok(())
+}
+
+fn attack_manifest(
+    fixture: &Fixture,
+    mut native: CustodyManifest,
+    mutate: impl FnOnce(&mut CustodyManifest) -> TestResult,
+) -> TestResult<SdkDeviceManifestResponse> {
+    mutate(&mut native)?;
+    project_layers(&mut native);
+    resign_publication_raw(fixture, &mut native)?;
+    Ok(SdkDeviceManifestResponse::from_native(native)?)
+}
+
 fn own_roster(
     fixture: &Fixture,
     extras: &[(&str, u64, u64)],
@@ -355,6 +381,21 @@ async fn own_and_dm_fresh_minimum() -> TestResult {
     assert_eq!(dm_plan.logical_event_id, "dm-1");
     assert_eq!(own_plan.fresh_cohort_layer, Some(PROFILE_FLOOR));
     assert_eq!(dm_plan.fresh_cohort_layer, Some(PROFILE_FLOOR));
+    let roster = VerifiedLayerRoster::verify(&own_m, issued + 20)?;
+    let laptop_epoch = roster.device("laptop").ok_or("laptop")?.device_epoch;
+    assert_ne!(laptop_epoch, 0);
+    let own_request = RamfluxClient::own_copy_selection_request(
+        "own-1",
+        &own.config.device_id,
+        &own_m,
+        KindId::KindMessage,
+    )?;
+    let laptop = own_request
+        .targets
+        .iter()
+        .find(|target| target.device_id() == "laptop")
+        .ok_or("laptop target")?;
+    assert_eq!(laptop.device_epoch(), laptop_epoch);
     let own_fresh = representation(&own_plan, "watch")?;
     let own_floor = representation(&own_plan, "laptop")?;
     assert_eq!(own_fresh.variant_counter, 1);
@@ -591,8 +632,12 @@ fn classify_unverified_stale(
     source: &str,
     now: u64,
     device_id: &str,
+    reason: &str,
 ) -> TestResult {
-    assert!(VerifiedLayerRoster::verify(manifest, now).is_err(), "P04 must refuse this directory");
+    match VerifiedLayerRoster::verify(manifest, now) {
+        Err(SdkError::Crypto(actual)) if actual.to_string() == reason => {}
+        other => return Err(format!("expected {reason}, got {other:?}").into()),
+    }
     assert_target_stale(&classify_own(manifest, source, now)?, device_id)
 }
 
@@ -600,20 +645,27 @@ fn classify_unverified_stale(
 async fn forged_declaration_is_classified_stale() -> TestResult {
     let own = Fixture::new("p05-forged").await?;
     let issued = wall_now()? + 1;
-    let mut native = native_of(&own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?)?;
-    let device = native
-        .publication
-        .record
-        .body
-        .devices
-        .iter_mut()
-        .find(|row| row.device_id == "laptop")
-        .ok_or("laptop")?;
-    let signed = device.message_layer.as_mut().ok_or("layer")?;
-    signed.branch_signature = ramflux_protocol::encode_base64url([7_u8; 64]);
-    project_layers(&mut native);
-    let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+    let native = native_of(&own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?)?;
+    let manifest = attack_manifest(&own, native, |native| {
+        let device = native
+            .publication
+            .record
+            .body
+            .devices
+            .iter_mut()
+            .find(|row| row.device_id == "laptop")
+            .ok_or("laptop")?;
+        let signed = device.message_layer.as_mut().ok_or("layer")?;
+        signed.branch_signature = ramflux_protocol::encode_base64url([7_u8; 64]);
+        Ok(())
+    })?;
+    classify_unverified_stale(
+        &manifest,
+        &own.config.device_id,
+        issued + 1,
+        "laptop",
+        "identity authority rejected: message-layer branch signature verification failed",
+    )
 }
 
 #[tokio::test]
@@ -635,18 +687,25 @@ async fn foreign_device_declaration_is_classified_stale() -> TestResult {
         issued,
         issued + 3_600,
     )?;
-    let device = native
-        .publication
-        .record
-        .body
-        .devices
-        .iter_mut()
-        .find(|row| row.device_id == "laptop")
-        .ok_or("laptop")?;
-    device.message_layer = Some(foreign);
-    project_layers(&mut native);
-    let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+    let manifest = attack_manifest(&own, native, |native| {
+        let device = native
+            .publication
+            .record
+            .body
+            .devices
+            .iter_mut()
+            .find(|row| row.device_id == "laptop")
+            .ok_or("laptop")?;
+        device.message_layer = Some(foreign);
+        Ok(())
+    })?;
+    classify_unverified_stale(
+        &manifest,
+        &own.config.device_id,
+        issued + 1,
+        "laptop",
+        "identity authority rejected: message-layer declaration device binding mismatch",
+    )
 }
 
 #[tokio::test]
@@ -667,18 +726,25 @@ async fn wrong_epoch_declaration_is_classified_stale() -> TestResult {
         issued,
         issued + 3_600,
     )?;
-    let device = native
-        .publication
-        .record
-        .body
-        .devices
-        .iter_mut()
-        .find(|row| row.device_id == "laptop")
-        .ok_or("laptop")?;
-    device.message_layer = Some(wrong);
-    project_layers(&mut native);
-    let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+    let manifest = attack_manifest(&own, native, |native| {
+        let device = native
+            .publication
+            .record
+            .body
+            .devices
+            .iter_mut()
+            .find(|row| row.device_id == "laptop")
+            .ok_or("laptop")?;
+        device.message_layer = Some(wrong);
+        Ok(())
+    })?;
+    classify_unverified_stale(
+        &manifest,
+        &own.config.device_id,
+        issued + 1,
+        "laptop",
+        "identity authority rejected: message-layer declaration device binding mismatch",
+    )
 }
 
 #[tokio::test]
@@ -687,45 +753,57 @@ async fn legacy_unsigned_layer_field_is_classified_stale() -> TestResult {
     let issued = wall_now()? + 1;
     let mut manifest = own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?;
     manifest.custody = None;
-    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+    match VerifiedLayerRoster::verify(&manifest, issued + 1) {
+        Err(SdkError::InboundRejected(message))
+            if message == "identity authority: legacy unsigned directory" => {}
+        other => return Err(format!("expected legacy unsigned refusal, got {other:?}").into()),
+    }
+    assert_target_stale(&classify_own(&manifest, &own.config.device_id, issued + 1)?, "laptop")
 }
 
 #[tokio::test]
 async fn attacker_branch_key_swapped_in_is_classified_stale() -> TestResult {
     let own = Fixture::new("p05-attacker-branch").await?;
     let issued = wall_now()? + 1;
-    let mut native = native_of(&own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?)?;
+    let native = native_of(&own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?)?;
     let attacker = ramflux_crypto::create_device_branch(
         &own.manifest.principal_id,
         "attacker",
         1,
         ramflux_crypto::random_32()?,
     );
-    let device = native
-        .publication
-        .record
-        .body
-        .devices
-        .iter_mut()
-        .find(|row| row.device_id == "laptop")
-        .ok_or("laptop")?;
-    let certificate = device.branch_certificate.as_mut().ok_or("cert")?;
-    certificate.body.branch_signing_public_key =
-        ramflux_protocol::encode_base64url(attacker.signing_key.verifying_key().as_bytes());
-    let epoch = device.device_epoch;
-    device.message_layer = Some(sign_layer_raw(
-        &attacker,
-        DeviceRef {
-            account_anchor: own.manifest.principal_commitment.clone(),
-            device_id: "laptop".into(),
-            device_epoch: epoch,
-        },
-        issued,
-        issued + 3_600,
-    )?);
-    project_layers(&mut native);
-    let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+    let manifest = attack_manifest(&own, native, |native| {
+        let device = native
+            .publication
+            .record
+            .body
+            .devices
+            .iter_mut()
+            .find(|row| row.device_id == "laptop")
+            .ok_or("laptop")?;
+        let certificate = device.branch_certificate.as_mut().ok_or("cert")?;
+        certificate.body.branch_signing_public_key =
+            ramflux_protocol::encode_base64url(attacker.signing_key.verifying_key().as_bytes());
+        let epoch = device.device_epoch;
+        device.message_layer = Some(sign_layer_raw(
+            &attacker,
+            DeviceRef {
+                account_anchor: own.manifest.principal_commitment.clone(),
+                device_id: "laptop".into(),
+                device_epoch: epoch,
+            },
+            issued,
+            issued + 3_600,
+        )?);
+        Ok(())
+    })?;
+    classify_unverified_stale(
+        &manifest,
+        &own.config.device_id,
+        issued + 1,
+        "laptop",
+        "ed25519 verification failed",
+    )
 }
 
 #[tokio::test]
@@ -736,27 +814,82 @@ async fn thirty_day_declaration_observed_on_day_10_is_classified_stale() -> Test
     let laptop = enroll_sibling(&own, &mut native, "laptop", issued)?;
     let thirty_days = 30 * MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
     let day_10 = issued + 10 * MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
-    let device = native
-        .publication
-        .record
-        .body
-        .devices
-        .iter_mut()
-        .find(|row| row.device_id == "laptop")
-        .ok_or("laptop")?;
-    device.message_layer = Some(sign_layer_raw(
-        &laptop,
-        DeviceRef {
-            account_anchor: own.manifest.principal_commitment.clone(),
-            device_id: "laptop".into(),
-            device_epoch: device.device_epoch,
-        },
-        issued,
-        issued + thirty_days,
-    )?);
-    project_layers(&mut native);
-    let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    classify_unverified_stale(&manifest, &own.config.device_id, day_10, "laptop")
+    let manifest = attack_manifest(&own, native, |native| {
+        let device = native
+            .publication
+            .record
+            .body
+            .devices
+            .iter_mut()
+            .find(|row| row.device_id == "laptop")
+            .ok_or("laptop")?;
+        device.message_layer = Some(sign_layer_raw(
+            &laptop,
+            DeviceRef {
+                account_anchor: own.manifest.principal_commitment.clone(),
+                device_id: "laptop".into(),
+                device_epoch: device.device_epoch,
+            },
+            issued,
+            issued + thirty_days,
+        )?);
+        Ok(())
+    })?;
+    classify_unverified_stale(
+        &manifest,
+        &own.config.device_id,
+        day_10,
+        "laptop",
+        "identity authority rejected: message-layer declaration validity exceeds 24 hours",
+    )
+}
+
+#[tokio::test]
+async fn one_hour_declaration_on_the_same_record_is_fresh() -> TestResult {
+    let own = Fixture::new("p05-one-hour").await?;
+    let issued = wall_now()? + 1;
+    let manifest = own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?;
+    VerifiedLayerRoster::verify(&manifest, issued + 1)?;
+    let plan = classify_own(&manifest, &own.config.device_id, issued + 1)?;
+    let fresh = representation(&plan, "laptop")?;
+    assert_eq!(plan.fresh_cohort_layer, Some(PROFILE_FLOOR));
+    assert_eq!(fresh.variant_counter, 1);
+    assert_eq!(fresh.selected_layer, PROFILE_FLOOR);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bad_cached_authority_isolates_that_member_as_stale() -> TestResult {
+    let owner = Fixture::with_device("p05-iso-owner", "owner").await?;
+    let alice = Fixture::with_device("p05-iso-alice", "alice").await?;
+    let bob = Fixture::with_device("p05-iso-bob", "bob").await?;
+    let issued = wall_now()? + 1;
+    let owner_m = publish_primary(&owner, issued, issued + 3_600)?;
+    let alice_m = publish_primary(&alice, issued, issued + 3_600)?;
+    let bob_m = publish_primary(&bob, issued, issued + 3_600)?;
+    persist_declared(&owner, &owner_m)?;
+    shared_group(&owner, &owner_m, &[(&alice, &alice_m), (&bob, &bob_m)], "g-iso")?;
+    owner.client.retire_custody_directory_payload(&bob.manifest.principal_commitment)?;
+    let _clock = FixedClock::set(i64::try_from(issued)?);
+    let group = plan_of(&owner.client.group_selection_request(
+        "g-iso",
+        "owner",
+        "event-1",
+        KindId::KindMessage,
+    )?)?;
+    let dm = plan_of(
+        &owner
+            .client
+            .dm_selection_request(&dm_message(&owner, &bob, "dm-iso"), KindId::KindMessage)?,
+    )?;
+    let alice_row = representation(&group, "alice")?;
+    let bob_row = representation(&group, "bob")?;
+    assert_eq!(alice_row.variant_counter, 1);
+    assert_eq!(bob_row.variant_counter, 2);
+    assert_eq!(bob_row.selected_layer, PROFILE_FLOOR);
+    assert!(!alice_row.targets.iter().any(|target| target.device_id == "bob"));
+    assert_target_stale(&dm, bob.config.device_id.as_str())?;
+    Ok(())
 }
 
 #[test]
