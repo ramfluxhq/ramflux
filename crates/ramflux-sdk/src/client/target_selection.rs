@@ -5,9 +5,10 @@
 //!
 //! Adapters call [`RamfluxClient::candidate_target_plan`] behind the existing
 //! generation-0 schema gate. Live producers stay unfed until activation.
+use crate::client::identity_authority::VerifiedLayerRoster;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
-use ramflux_protocol::custody::{DeviceRef, SignedLayerDeclaration};
+use ramflux_protocol::custody::SignedLayerDeclaration;
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
 use ramflux_protocol::schema_profile::{ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION};
@@ -298,47 +299,18 @@ pub(crate) fn kind_id_for_route(kind: &crate::client::routed::Kind) -> KindId {
     }
 }
 
-/// Accept a layer only from P04-verified custody evidence bound to this device.
-fn endorsed_layer(manifest: &SdkDeviceManifestResponse, device_id: &str) -> Option<LayerView> {
-    let custody = manifest.custody.as_ref()?;
-    let body = &custody.publication.record.body;
-    let device = body.devices.iter().find(|row| row.device_id == device_id)?;
-    let signed = device.message_layer.as_ref()?;
-    let certificate = device.branch_certificate.as_ref()?;
-    let bytes = ramflux_protocol::custody::signing_bytes(
-        ramflux_protocol::domain::CUSTODY_MESSAGE_LAYER_DECLARATION,
-        &signed.declaration,
-    )
-    .ok()?;
-    ramflux_crypto::verify_canonical_signature(
-        &bytes,
-        &signed.branch_signature,
-        &certificate.body.branch_signing_public_key,
-    )
-    .ok()?;
-    let expected = DeviceRef {
-        account_anchor: body.account_anchor.clone(),
-        device_id: device.device_id.clone(),
-        device_epoch: device.device_epoch,
-    };
-    if signed.declaration.device != expected {
-        return None;
-    }
-    Some(LayerView::from_signed(signed))
-}
-
-fn target_from_manifest(
+/// Read layer and epoch only from a P04-verified roster. Unverified bytes never enter.
+fn target_from_roster(
     root: &str,
     device_id: &str,
-    manifest: Option<&SdkDeviceManifestResponse>,
+    roster: Option<&VerifiedLayerRoster>,
 ) -> TargetDevice {
-    let entry =
-        manifest.and_then(|row| row.devices.iter().find(|device| device.device_id == device_id));
+    let device = roster.and_then(|row| row.device(device_id));
     TargetDevice {
         account_anchor: root.to_owned(),
         device_id: device_id.to_owned(),
-        device_epoch: entry.map_or(0, |row| row.device_epoch),
-        declaration: manifest.and_then(|row| endorsed_layer(row, device_id)),
+        device_epoch: device.map_or(0, |row| row.device_epoch),
+        declaration: device.and_then(|row| row.message_layer.as_ref()).map(LayerView::from_signed),
     }
 }
 
@@ -390,14 +362,29 @@ impl RamfluxClient {
         manifest: &SdkDeviceManifestResponse,
         kind: KindId,
     ) -> Result<SelectionRequest, SdkError> {
-        Ok(request_from_manifest(
-            FanoutScope::OwnCopy,
+        let now = unix_now()?;
+        let roster = VerifiedLayerRoster::verify(manifest, now).ok();
+        let root = manifest.principal_commitment.as_str();
+        let source = target_from_roster(root, source_device_id, roster.as_ref());
+        let targets = manifest
+            .devices
+            .iter()
+            .filter(|device| device.device_id != source_device_id)
+            .map(|device| target_from_roster(root, &device.device_id, roster.as_ref()))
+            .collect::<Vec<_>>();
+        let mut devices = BTreeSet::from([source.key()]);
+        devices.extend(targets.iter().map(TargetDevice::key));
+        Ok(SelectionRequest {
+            scope: FanoutScope::OwnCopy,
             kind,
-            logical_event_id,
-            unix_now()?,
-            source_device_id,
-            manifest,
-        ))
+            logical_event_id: logical_event_id.to_owned(),
+            now_unix: now,
+            source_compiled_support: COMPILED_LAYER,
+            source,
+            targets,
+            membership: MembershipSnapshot { epoch: 0, devices },
+            variant_counter_high_water: 0,
+        })
     }
 
     pub(crate) fn group_selection_request(
@@ -446,10 +433,10 @@ impl RamfluxClient {
     }
 
     fn cached_target(&self, root: &str, device_id: &str) -> Result<TargetDevice, SdkError> {
-        let manifest = self.account_db()?.load_actor_state::<SdkDeviceManifestResponse>(
-            &format!("identity/manifest-root/{root}"),
-        )?;
-        Ok(target_from_manifest(root, device_id, manifest.as_ref()))
+        let now = unix_now()?;
+        let roster =
+            self.current_custody_authority(root, now)?.map(VerifiedLayerRoster::from_verified);
+        Ok(target_from_roster(root, device_id, roster.as_ref()))
     }
 
     fn shared_group_selection_request(
@@ -462,16 +449,16 @@ impl RamfluxClient {
     ) -> Result<SelectionRequest, SdkError> {
         let sender = self.local_device_identity(sender_id)?;
         let selected = self.shared_group_selected_devices(state)?;
+        let now = unix_now()?;
         let mut targets = Vec::new();
         for (root, devices) in selected {
-            let manifest = self.account_db()?.load_actor_state::<SdkDeviceManifestResponse>(
-                &format!("identity/manifest-root/{root}"),
-            )?;
+            let roster =
+                self.current_custody_authority(&root, now)?.map(VerifiedLayerRoster::from_verified);
             for device_id in devices {
                 if root == sender.root_commitment() && device_id == sender.device_id() {
                     continue;
                 }
-                targets.push(target_from_manifest(&root, &device_id, manifest.as_ref()));
+                targets.push(target_from_roster(&root, &device_id, roster.as_ref()));
             }
         }
         let source = self.cached_target(sender.root_commitment(), sender.device_id())?;
@@ -504,37 +491,6 @@ impl RamfluxClient {
             })
             .collect();
         finish_group_request(logical_event_id, kind, group.group_epoch, source, targets)
-    }
-}
-
-fn request_from_manifest(
-    scope: FanoutScope,
-    kind: KindId,
-    logical_event_id: &str,
-    now_unix: u64,
-    source_device_id: &str,
-    manifest: &SdkDeviceManifestResponse,
-) -> SelectionRequest {
-    let root = manifest.principal_commitment.as_str();
-    let source = target_from_manifest(root, source_device_id, Some(manifest));
-    let targets = manifest
-        .devices
-        .iter()
-        .filter(|device| device.device_id != source_device_id)
-        .map(|device| target_from_manifest(root, &device.device_id, Some(manifest)))
-        .collect::<Vec<_>>();
-    let mut devices = BTreeSet::from([source.key()]);
-    devices.extend(targets.iter().map(TargetDevice::key));
-    SelectionRequest {
-        scope,
-        kind,
-        logical_event_id: logical_event_id.to_owned(),
-        now_unix,
-        source_compiled_support: COMPILED_LAYER,
-        source,
-        targets,
-        membership: MembershipSnapshot { epoch: 0, devices },
-        variant_counter_high_water: 0,
     }
 }
 

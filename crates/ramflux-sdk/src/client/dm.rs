@@ -156,7 +156,7 @@ impl RamfluxClient {
                         &content,
                     )?;
                     if copy_plain {
-                        own_copy = self.queue_own_sent_dm(&message, &content);
+                        own_copy = self.queue_own_sent_dm(&message, &content, kind);
                     }
                     Ok::<_, SdkError>(())
                 })?;

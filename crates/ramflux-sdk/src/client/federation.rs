@@ -122,7 +122,11 @@ impl RamfluxClient {
                 &content,
             )?;
             if copy_plain {
-                own_copy = self.queue_own_sent_dm(message, &content);
+                own_copy = self.queue_own_sent_dm(
+                    message,
+                    &content,
+                    crate::client::target_selection::kind_id_for_route(&options.route.kind),
+                );
             }
             Ok::<_, SdkError>(())
         })?;

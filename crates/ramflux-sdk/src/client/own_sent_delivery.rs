@@ -157,11 +157,10 @@ impl RamfluxClient {
         &self,
         message: &GatewayDirectMessage,
         content: &[u8],
+        kind: ramflux_protocol::message::KindId,
     ) -> Option<String> {
         self.queue_own_sent_copy(&message.message_id, || {
-            let _ = Self::candidate_target_plan(|| {
-                self.dm_selection_request(message, ramflux_protocol::message::KindId::KindMessage)
-            })?;
+            let _ = Self::candidate_target_plan(|| self.dm_selection_request(message, kind))?;
             let peer = self.own_sent_peer(message)?;
             let recipients = self.own_original_recipient(message)?;
             self.stage_own_sent_message(super::own_sent_message::OwnSentInput {

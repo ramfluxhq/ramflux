@@ -44,7 +44,12 @@ impl RamfluxClient {
         request: PairObjectSlotRequest<'_>,
         material: super::SendMaterial,
     ) -> Result<SdkObjectKeySlot, SdkError> {
-        let pair = self.prepared_send_pair(request.config, request.message, material)?;
+        let pair = self.prepared_send_pair(
+            request.config,
+            request.message,
+            material,
+            ramflux_protocol::message::KindId::KindMessage,
+        )?;
         self.seal_pair_object_slot(request, pair)
     }
 

@@ -63,13 +63,12 @@ impl RamfluxClient {
         config: &GatewaySessionConfig,
         message: &GatewayDirectMessage,
         material: SendMaterial,
+        kind: ramflux_protocol::message::KindId,
     ) -> Result<super::send_candidate::SendPair, SdkError> {
         if let Some((root, manifest)) = material.manifest {
             self.accept_fetched_device_manifest(manifest, &root, "background-outbox")?;
         }
-        let _ = Self::candidate_target_plan(|| {
-            self.dm_selection_request(message, ramflux_protocol::message::KindId::KindMessage)
-        })?;
+        let _ = Self::candidate_target_plan(|| self.dm_selection_request(message, kind))?;
         let local = self.local_device_identity(&config.device_id)?;
         self.require_pair_device_active(&local)?;
         let recipient = Self::qualified_recipient(message)?;
@@ -93,7 +92,12 @@ impl RamfluxClient {
         route: Route,
         material: SendMaterial,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
-        let (mut session, header, bundle) = self.prepared_send_pair(config, message, material)?;
+        let (mut session, header, bundle) = self.prepared_send_pair(
+            config,
+            message,
+            material,
+            crate::client::target_selection::kind_id_for_route(&route.kind),
+        )?;
         let local = self.local_device_identity(&config.device_id)?;
         let recipient = Self::qualified_recipient(message)?;
         self.bind_outgoing_delivery(&local, message, &route.kind)?;

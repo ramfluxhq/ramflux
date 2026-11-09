@@ -401,7 +401,7 @@ fn retained_routes(
         .unwrap_or_default()
 }
 
-pub(super) fn verify_native_authority(
+pub(crate) fn verify_native_authority(
     manifest: &CustodyManifest,
     expected: &str,
     now: u64,

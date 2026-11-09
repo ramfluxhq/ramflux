@@ -2,14 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
+use crate::client::identity_authority::VerifiedLayerRoster;
 use crate::client::native_test_support::{Fixture, TestResult};
 use crate::custody::{DeclarationValidity, load_account, sign_layer_declaration};
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::time::FixedClock;
 use crate::{GatewayDirectMessage, RamfluxClient, SdkError};
 use ramflux_protocol::custody::{
-    CustodyManifest, CustodyManifestDevice, DeviceRef, MAX_LAYER_DECLARATION_VALIDITY_SECONDS,
-    MESSAGE_LAYER_FLOOR,
+    CustodyManifest, CustodyManifestDevice, DeviceRef, LayerDeclaration,
+    MAX_LAYER_DECLARATION_VALIDITY_SECONDS, MESSAGE_LAYER_FLOOR, SignedLayerDeclaration,
 };
 use ramflux_protocol::group_state::{GroupStateChange, SharedGroupRole};
 use ramflux_protocol::message::KindId;
@@ -185,6 +186,42 @@ fn sign_layers(
     }
     native.publication.record = primary.sign_record(body)?;
     Ok(())
+}
+
+fn sign_layer_raw(
+    branch: &ramflux_crypto::DeviceBranch,
+    device: DeviceRef,
+    issued_at: u64,
+    expires_at: u64,
+) -> TestResult<SignedLayerDeclaration> {
+    let declaration = LayerDeclaration {
+        device,
+        max_layer: MESSAGE_LAYER_FLOOR,
+        declaration_sequence: 1,
+        issued_at,
+        expires_at,
+    };
+    let bytes = ramflux_protocol::custody::signing_bytes(
+        ramflux_protocol::domain::CUSTODY_MESSAGE_LAYER_DECLARATION,
+        &declaration,
+    )?;
+    Ok(SignedLayerDeclaration {
+        branch_signature: ramflux_crypto::sign_canonical_bytes_with_device_branch(&bytes, branch),
+        declaration,
+    })
+}
+
+fn project_layers(native: &mut CustodyManifest) {
+    for device in &mut native.devices {
+        device.message_layer = native
+            .publication
+            .record
+            .body
+            .devices
+            .iter()
+            .find(|row| row.device_id == device.device_ref.device_id)
+            .and_then(|row| row.message_layer.clone());
+    }
 }
 
 fn own_roster(
@@ -549,12 +586,21 @@ fn assert_target_stale(plan: &SelectionPlan, device_id: &str) -> TestResult {
     Ok(())
 }
 
+fn classify_unverified_stale(
+    manifest: &SdkDeviceManifestResponse,
+    source: &str,
+    now: u64,
+    device_id: &str,
+) -> TestResult {
+    assert!(VerifiedLayerRoster::verify(manifest, now).is_err(), "P04 must refuse this directory");
+    assert_target_stale(&classify_own(manifest, source, now)?, device_id)
+}
+
 #[tokio::test]
 async fn forged_declaration_is_classified_stale() -> TestResult {
     let own = Fixture::new("p05-forged").await?;
     let issued = wall_now()? + 1;
-    let mut manifest = own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?;
-    let native = manifest.custody.as_mut().ok_or("native")?;
+    let mut native = native_of(&own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?)?;
     let device = native
         .publication
         .record
@@ -565,11 +611,9 @@ async fn forged_declaration_is_classified_stale() -> TestResult {
         .ok_or("laptop")?;
     let signed = device.message_layer.as_mut().ok_or("layer")?;
     signed.branch_signature = ramflux_protocol::encode_base64url([7_u8; 64]);
-    let projected =
-        native.devices.iter_mut().find(|row| row.device_ref.device_id == "laptop").ok_or("proj")?;
-    projected.message_layer = device.message_layer.clone();
-    let plan = classify_own(&manifest, &own.config.device_id, issued + 1)?;
-    assert_target_stale(&plan, "laptop")
+    project_layers(&mut native);
+    let manifest = SdkDeviceManifestResponse::from_native(native)?;
+    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
 }
 
 #[tokio::test]
@@ -599,16 +643,10 @@ async fn foreign_device_declaration_is_classified_stale() -> TestResult {
         .iter_mut()
         .find(|row| row.device_id == "laptop")
         .ok_or("laptop")?;
-    device.message_layer = Some(foreign.clone());
-    native
-        .devices
-        .iter_mut()
-        .find(|row| row.device_ref.device_id == "laptop")
-        .ok_or("proj")?
-        .message_layer = Some(foreign);
+    device.message_layer = Some(foreign);
+    project_layers(&mut native);
     let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    let plan = classify_own(&manifest, &own.config.device_id, issued + 1)?;
-    assert_target_stale(&plan, "laptop")
+    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
 }
 
 #[tokio::test]
@@ -637,16 +675,10 @@ async fn wrong_epoch_declaration_is_classified_stale() -> TestResult {
         .iter_mut()
         .find(|row| row.device_id == "laptop")
         .ok_or("laptop")?;
-    device.message_layer = Some(wrong.clone());
-    native
-        .devices
-        .iter_mut()
-        .find(|row| row.device_ref.device_id == "laptop")
-        .ok_or("proj")?
-        .message_layer = Some(wrong);
+    device.message_layer = Some(wrong);
+    project_layers(&mut native);
     let manifest = SdkDeviceManifestResponse::from_native(native)?;
-    let plan = classify_own(&manifest, &own.config.device_id, issued + 1)?;
-    assert_target_stale(&plan, "laptop")
+    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
 }
 
 #[tokio::test]
@@ -655,8 +687,76 @@ async fn legacy_unsigned_layer_field_is_classified_stale() -> TestResult {
     let issued = wall_now()? + 1;
     let mut manifest = own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?;
     manifest.custody = None;
-    let plan = classify_own(&manifest, &own.config.device_id, issued + 1)?;
-    assert_target_stale(&plan, "laptop")
+    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+}
+
+#[tokio::test]
+async fn attacker_branch_key_swapped_in_is_classified_stale() -> TestResult {
+    let own = Fixture::new("p05-attacker-branch").await?;
+    let issued = wall_now()? + 1;
+    let mut native = native_of(&own_roster(&own, &[("laptop", issued, issued + 3_600)], issued)?)?;
+    let attacker = ramflux_crypto::create_device_branch(
+        &own.manifest.principal_id,
+        "attacker",
+        1,
+        ramflux_crypto::random_32()?,
+    );
+    let device = native
+        .publication
+        .record
+        .body
+        .devices
+        .iter_mut()
+        .find(|row| row.device_id == "laptop")
+        .ok_or("laptop")?;
+    let certificate = device.branch_certificate.as_mut().ok_or("cert")?;
+    certificate.body.branch_signing_public_key =
+        ramflux_protocol::encode_base64url(attacker.signing_key.verifying_key().as_bytes());
+    let epoch = device.device_epoch;
+    device.message_layer = Some(sign_layer_raw(
+        &attacker,
+        DeviceRef {
+            account_anchor: own.manifest.principal_commitment.clone(),
+            device_id: "laptop".into(),
+            device_epoch: epoch,
+        },
+        issued,
+        issued + 3_600,
+    )?);
+    project_layers(&mut native);
+    let manifest = SdkDeviceManifestResponse::from_native(native)?;
+    classify_unverified_stale(&manifest, &own.config.device_id, issued + 1, "laptop")
+}
+
+#[tokio::test]
+async fn thirty_day_declaration_observed_on_day_10_is_classified_stale() -> TestResult {
+    let own = Fixture::new("p05-thirty-day").await?;
+    let issued = wall_now()? + 1;
+    let mut native = native_of(&own.manifest)?;
+    let laptop = enroll_sibling(&own, &mut native, "laptop", issued)?;
+    let thirty_days = 30 * MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
+    let day_10 = issued + 10 * MAX_LAYER_DECLARATION_VALIDITY_SECONDS;
+    let device = native
+        .publication
+        .record
+        .body
+        .devices
+        .iter_mut()
+        .find(|row| row.device_id == "laptop")
+        .ok_or("laptop")?;
+    device.message_layer = Some(sign_layer_raw(
+        &laptop,
+        DeviceRef {
+            account_anchor: own.manifest.principal_commitment.clone(),
+            device_id: "laptop".into(),
+            device_epoch: device.device_epoch,
+        },
+        issued,
+        issued + thirty_days,
+    )?);
+    project_layers(&mut native);
+    let manifest = SdkDeviceManifestResponse::from_native(native)?;
+    classify_unverified_stale(&manifest, &own.config.device_id, day_10, "laptop")
 }
 
 #[test]
