@@ -2,14 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    CANDIDATE_ENVELOPE_SCHEMA, CRYPTOBOX_OVERHEAD_BYTES, CandidateDeliveryClass,
-    CandidateOuterEnvelope, FRAME_PREFIX_BYTES, IngressSizes, MAX_BOOTSTRAP_CAPSULE_BYTES,
-    MAX_CIPHERTEXT_B64_CHARS, MAX_CIPHERTEXT_BYTES, MAX_COMPLETE_FRAME_BYTES,
-    MAX_ENCRYPTED_HEADER_BYTES, MAX_IDENTIFIER_BYTES, MAX_INNER_BYTES, MAX_OUTER_METADATA_BYTES,
-    MAX_UNPADDED_PLAINTEXT_BYTES, MESSAGE_SCHEMA_V1_PROFILE, NamedDeliveryMode, OuterProfileError,
-    REPORT_OPENING_BYTES, SealedSendSizes, TemporaryRatchet, accept_after_size_preflight,
-    advertised_client_protocol_versions, decode_candidate_outer_ijson,
-    discover_verified_message_schema, validate_candidate_delivery_mode,
+    CANDIDATE_ENVELOPE_SCHEMA, COMPACT_CRYPTOBOX_MAGIC, CRYPTOBOX_OVERHEAD_BYTES,
+    CandidateDeliveryClass, CandidateOuterEnvelope, FRAME_PREFIX_BYTES, IngressSizes,
+    MAX_BOOTSTRAP_CAPSULE_BYTES, MAX_CIPHERTEXT_B64_CHARS, MAX_CIPHERTEXT_BYTES,
+    MAX_COMPLETE_FRAME_BYTES, MAX_ENCRYPTED_HEADER_BYTES, MAX_IDENTIFIER_BYTES, MAX_INNER_BYTES,
+    MAX_OUTER_METADATA_BYTES, MAX_UNPADDED_PLAINTEXT_BYTES, MESSAGE_SCHEMA_V1_PROFILE,
+    NamedDeliveryMode, OuterProfileError, REPORT_OPENING_BYTES, SealedSendSizes, TemporaryRatchet,
+    accept_after_size_preflight, advertised_client_protocol_versions, compact_cryptobox_bytes,
+    decode_candidate_outer_ijson, decode_compact_cryptobox, discover_verified_message_schema,
+    validate_candidate_delivery_mode, wire_encrypted_payload,
 };
 use crate::schema_profile::{
     ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
@@ -415,13 +416,68 @@ fn measure_live_uses_nested_cryptobox_not_json_wrapper() -> Result<(), Box<dyn s
     let mut envelope = live_envelope(None);
     envelope.encrypted_payload = encode_base64url(&wrapper);
     envelope.source_device_id = "wire-device".to_owned();
-    let sizes = IngressSizes::measure_live(&envelope, &[], &[])?;
+    let sizes = IngressSizes::measure_wire(&envelope, 0, &[], &[])?;
     assert_eq!(sizes.ciphertext_bytes, 32);
     assert!(sizes.ciphertext_bytes < wrapper.len());
     assert_eq!(sizes.encrypted_header_bytes, 3);
     assert!(sizes.bootstrap_capsule_bytes > 0);
+    assert_eq!(sizes.complete_frame_bytes, canonical_json_bytes(&envelope)?.len());
     assert!(sizes.complete_frame_bytes <= MAX_COMPLETE_FRAME_BYTES);
     assert_eq!(sizes.identifier_bytes, "wire-device".len());
     super::check_ingress_caps(sizes)?;
+    Ok(())
+}
+
+fn nested_sdk_value(cryptobox: &[u8]) -> Value {
+    json!({
+        "schema": "ramflux.sdk.dm_x3dh_envelope.v2",
+        "version": 2,
+        "x3dh": {"session_id": "s"},
+        "ciphertext": {
+            "ciphertext": cryptobox,
+            "canonical_header_bytes": [1, 2, 3],
+        }
+    })
+}
+
+#[test]
+fn legacy_encrypted_payload_is_byte_identical_with_gate_off()
+-> Result<(), Box<dyn std::error::Error>> {
+    assert!(!schema_v1_live());
+    let body = serde_json::to_vec(&nested_sdk_value(&[7_u8; 32]))?;
+    assert_eq!(wire_encrypted_payload(&body)?, encode_base64url(&body));
+    Ok(())
+}
+
+#[test]
+fn candidate_wire_payload_is_compact_cryptobox() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
+    let cryptobox = vec![7_u8; 64];
+    let body = serde_json::to_vec(&nested_sdk_value(&cryptobox))?;
+    let payload = wire_encrypted_payload(&body)?;
+    let decoded = crate::decode_base64url(&payload)?;
+    assert!(decoded.starts_with(&COMPACT_CRYPTOBOX_MAGIC));
+    let compact = decode_compact_cryptobox(&decoded)?;
+    assert_eq!(compact.ciphertext, cryptobox.as_slice());
+    assert!(!body.windows(4).any(|window| window == COMPACT_CRYPTOBOX_MAGIC));
+    Ok(())
+}
+
+#[test]
+fn compact_cryptobox_round_trip_and_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(&nested_sdk_value(&[9_u8; 8]))?;
+    let compact = compact_cryptobox_bytes(&body)?;
+    let decoded = decode_compact_cryptobox(&compact)?;
+    assert_eq!(decoded.ciphertext, &[9_u8; 8]);
+    let mut padded = nested_sdk_value(&[9_u8; 8]);
+    padded["pad"] = json!("x");
+    assert_eq!(
+        compact_cryptobox_bytes(&serde_json::to_vec(&padded)?),
+        Err(OuterProfileError::UnknownField)
+    );
+    assert_eq!(
+        OuterProfileError::UnknownField.to_string(),
+        "candidate outer envelope has unknown fields"
+    );
     Ok(())
 }

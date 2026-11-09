@@ -355,6 +355,8 @@ crates/ramflux-protocol/src/i_json.rs | validate_i_json_bytes | 1 | E | excluded
 crates/ramflux-protocol/src/identity_keys.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/identity_profile_v2.rs | decode_profile_document | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/identity_profile_v2.rs | decode_profile_document | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/message/outer/compact.rs | compact_cryptobox_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/message/outer/mod.rs | cryptobox_from_sidecar | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 1 | E | excluded=dormant candidate outer; becomes class A at P24 activation
 crates/ramflux-protocol/src/message/outer/mod.rs | decode_candidate_outer_ijson | 2 | E | excluded=dormant candidate outer; becomes class A at P24 activation
 crates/ramflux-protocol/src/message/outer/mod.rs | live_cryptobox | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -642,6 +644,7 @@ crates/ramflux-sdk/src/client/routed/group_directory.rs | legacy_group_directory
 crates/ramflux-sdk/src/client/routed/group_directory.rs | prepare_legacy_group_with_directory | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/legacy.rs | legacy_routing_binding | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/routed/mod.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/mod.rs | open_routed | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/own_history.rs | routed_own_history_envelope | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/own_history.rs | routed_own_history_envelope | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

@@ -202,31 +202,12 @@ fn measure_wire_sealed_send(
     let wire_local = crate::client::identity_authority::device_namespace::wire_device_id(
         &client.local_device_reference(persist.local)?,
     )?;
-    let bootstrap = match persist.header {
-        Some(header) => serde_json::to_vec(header)?,
-        None => Vec::new(),
-    };
-    let envelope = cryptobox_sender_envelope(client, persist, &wire_local);
-    let metadata = if envelope.ext.ext.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_value(&envelope.ext.ext)?)
-    };
-    ramflux_protocol::message::outer::IngressSizes::measure_sealed_send(
-        &ramflux_protocol::message::outer::SealedSendSizes {
-            inner_bytes: persist.inner_len,
-            ciphertext: &persist.sealed.ciphertext,
-            encrypted_header: &persist.sealed.canonical_header_bytes,
-            bootstrap_capsule: &bootstrap,
-            identifiers: [
-                envelope.envelope_id.as_str(),
-                envelope.source_principal_id.as_str(),
-                envelope.source_device_id.as_str(),
-                envelope.target_delivery_id.as_str(),
-            ],
-            metadata: metadata.as_ref(),
-            complete_frame_bytes: ramflux_protocol::canonical_json_bytes(&envelope)?.len(),
-        },
+    let envelope = cryptobox_sender_envelope(client, persist, &wire_local)?;
+    ramflux_protocol::message::outer::IngressSizes::measure_wire(
+        &envelope,
+        persist.inner_len,
+        &persist.sealed.canonical_header_bytes,
+        &[],
     )
     .map_err(map_size_preflight)
 }
@@ -235,8 +216,17 @@ fn cryptobox_sender_envelope(
     client: &RamfluxClient,
     persist: &SealedPairPersist<'_>,
     wire_device_id: &str,
-) -> ramflux_protocol::Envelope {
-    let encrypted_payload = ramflux_protocol::encode_base64url(&persist.sealed.ciphertext);
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let nested = SdkDmEncryptedEnvelope {
+        source_principal_commitment: Some(client.own_account_anchor()?),
+        schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
+        version: 2,
+        x3dh: persist.header.cloned(),
+        ciphertext: persist.sealed.clone(),
+    };
+    let encrypted_payload =
+        ramflux_protocol::message::outer::wire_encrypted_payload(&serde_json::to_vec(&nested)?)
+            .map_err(map_size_preflight)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         encrypted_payload.as_bytes(),
@@ -266,7 +256,7 @@ fn cryptobox_sender_envelope(
     if let Ok(anchor) = client.own_account_anchor() {
         envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
     }
-    envelope
+    Ok(envelope)
 }
 
 impl RamfluxClient {
@@ -464,7 +454,14 @@ pub(crate) fn decode(
 ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
     let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)
         .map_err(|_| invalid("invalid encrypted payload"))?;
-    let decoded: SdkDmEncryptedEnvelope = serde_json::from_slice(&bytes)?;
+    let decoded =
+        if let Ok(compact) = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes) {
+            let mut decoded: SdkDmEncryptedEnvelope = serde_json::from_slice(compact.sidecar)?;
+            decoded.ciphertext.ciphertext = compact.ciphertext.to_vec();
+            decoded
+        } else {
+            serde_json::from_slice(&bytes)?
+        };
     if decoded.version != 2
         || !matches!(
             decoded.schema.as_str(),

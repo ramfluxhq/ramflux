@@ -16,7 +16,7 @@ fn candidate_size_preflight(envelope: &ramflux_protocol::Envelope) -> Result<(),
         return Ok(());
     }
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_live(envelope, &[], &[])
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_wire(envelope, 0, &[], &[])
         .map_err(map_outer_profile)?;
     ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)
 }

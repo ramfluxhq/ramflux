@@ -440,12 +440,23 @@ pub(crate) fn gateway_ack(
     ack
 }
 
+fn wire_payload(encrypted_body: &[u8]) -> Result<String, SdkError> {
+    ramflux_protocol::message::outer::wire_encrypted_payload(encrypted_body).map_err(|error| {
+        match error {
+            ramflux_protocol::message::outer::OuterProfileError::PayloadTooLarge => {
+                SdkError::PayloadTooLarge
+            }
+            other => SdkError::InboundRejected(other.to_string()),
+        }
+    })
+}
+
 pub(crate) fn gateway_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
-    let encrypted_payload = ramflux_protocol::encode_base64url(&message.encrypted_body);
+    let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         encrypted_payload.as_bytes(),
@@ -502,7 +513,7 @@ pub(crate) fn candidate_direct_message_envelope(
     collapse_tag: [u8; 32],
     mode: ramflux_protocol::message::outer::NamedDeliveryMode,
 ) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
-    let encrypted_payload = ramflux_protocol::encode_base64url(&message.encrypted_body);
+    let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         encrypted_payload.as_bytes(),

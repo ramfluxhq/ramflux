@@ -3,7 +3,9 @@
 
 #![allow(clippy::expect_used, reason = "independent wire assertions")]
 use super::*;
-use crate::router_store::publication::tests::entry;
+use crate::InboxEntryResponse;
+use crate::router_store::incarnation::test_store;
+use crate::router_store::publication::tests::{entry, fixture};
 fn independent_size(envelope: &ramflux_protocol::Envelope) -> usize {
     let row = serde_json::json!({"inbox_seq":u64::MAX,"target_delivery_id":envelope.target_delivery_id,"envelope":envelope});
     [serde_json::json!({"frame_type":"deliver","entry":row}),
@@ -44,10 +46,8 @@ fn single_entry_bound_serializes_envelope_once() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-fn nested_sdk_envelope(
-    cryptobox: &[u8],
-) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
-    let nested = serde_json::json!({
+fn nested_sdk_json(cryptobox: &[u8], pad: Option<String>) -> serde_json::Value {
+    let mut nested = serde_json::json!({
         "schema": "ramflux.sdk.dm_x3dh_envelope.v2",
         "version": 2,
         "x3dh": {"session_id": "s"},
@@ -56,20 +56,54 @@ fn nested_sdk_envelope(
             "canonical_header_bytes": [1, 2, 3],
         }
     });
+    if let Some(pad) = pad {
+        nested["pad"] = serde_json::Value::String(pad);
+    }
+    nested
+}
+
+fn nested_sdk_envelope(
+    cryptobox: &[u8],
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
     let mut envelope = entry(1).envelope;
     envelope.source_device_id = "wire-device".to_owned();
-    envelope.encrypted_payload = ramflux_protocol::encode_base64url(serde_json::to_vec(&nested)?);
+    envelope.encrypted_payload =
+        ramflux_protocol::encode_base64url(serde_json::to_vec(&nested_sdk_json(cryptobox, None))?);
     Ok(envelope)
+}
+
+fn compact_sdk_envelope(
+    cryptobox: &[u8],
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let compact = ramflux_protocol::message::outer::compact_cryptobox_bytes(&serde_json::to_vec(
+        &nested_sdk_json(cryptobox, None),
+    )?)?;
+    let mut envelope = entry(1).envelope;
+    envelope.source_device_id = "wire-device".to_owned();
+    envelope.encrypted_payload = ramflux_protocol::encode_base64url(&compact);
+    Ok(envelope)
+}
+
+fn payload_too_large(result: Result<(), NodeCoreError>) -> Result<(), Box<dyn std::error::Error>> {
+    match result {
+        Err(NodeCoreError::PayloadTooLarge) => Ok(()),
+        other => Err(format!("exact PayloadTooLarge, got {other:?}").into()),
+    }
 }
 
 #[test]
 fn candidate_entry_bound_measures_nested_cryptobox_when_gate_on()
 -> Result<(), Box<dyn std::error::Error>> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let envelope = nested_sdk_envelope(&[7_u8; 32])?;
+    let envelope = compact_sdk_envelope(&[7_u8; 32])?;
     check_entry_bound(&envelope)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_live(&envelope, &[], &[])?;
+    let sizes =
+        ramflux_protocol::message::outer::IngressSizes::measure_wire(&envelope, 0, &[], &[])?;
     assert_eq!(sizes.ciphertext_bytes, 32);
+    assert_eq!(
+        sizes.complete_frame_bytes,
+        ramflux_protocol::canonical_json_bytes(&envelope)?.len()
+    );
     ramflux_protocol::message::outer::check_ingress_caps(sizes)?;
     Ok(())
 }
@@ -79,12 +113,18 @@ fn candidate_entry_bound_accepts_392kb_nested_cryptobox() -> Result<(), Box<dyn 
 {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let cryptobox = vec![7_u8; 522_808];
-    let envelope = nested_sdk_envelope(&cryptobox)?;
+    let envelope = compact_sdk_envelope(&cryptobox)?;
     let wrapper = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
+    assert!(wrapper.starts_with(&ramflux_protocol::message::outer::COMPACT_CRYPTOBOX_MAGIC));
     check_entry_bound(&envelope)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_live(&envelope, &[], &[])?;
+    let sizes =
+        ramflux_protocol::message::outer::IngressSizes::measure_wire(&envelope, 0, &[], &[])?;
     assert_eq!(sizes.ciphertext_bytes, 522_808);
     assert!(sizes.ciphertext_bytes < wrapper.len());
+    assert!(
+        sizes.complete_frame_bytes <= ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
+    );
+    assert!(single_entry_frame_size(&envelope)? <= ENTRY_FRAME_BYTE_CAP);
     assert!(sizes.bootstrap_capsule_bytes > 0);
     assert_ne!(envelope.source_device_id, "local");
     ramflux_protocol::message::outer::check_ingress_caps(sizes)?;
@@ -95,9 +135,66 @@ fn candidate_entry_bound_accepts_392kb_nested_cryptobox() -> Result<(), Box<dyn 
 fn candidate_entry_bound_refuses_one_over_cryptobox() -> Result<(), Box<dyn std::error::Error>> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let over = vec![7_u8; ramflux_protocol::message::outer::MAX_CIPHERTEXT_BYTES + 1];
-    let envelope = nested_sdk_envelope(&over)?;
+    payload_too_large(check_entry_bound(&compact_sdk_envelope(&over)?))
+}
+
+fn padded_nested_envelope() -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let nested = nested_sdk_json(&[7_u8; 32], Some("p".repeat(8 * 1024 * 1024)));
+    let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
+    envelope.encrypted_payload = ramflux_protocol::encode_base64url(serde_json::to_vec(&nested)?);
+    Ok(envelope)
+}
+
+#[test]
+fn padded_nested_field_is_payload_too_large_with_gate_on_and_off()
+-> Result<(), Box<dyn std::error::Error>> {
+    let envelope = padded_nested_envelope()?;
+    payload_too_large(check_entry_bound(&envelope))?;
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    payload_too_large(check_entry_bound(&envelope))
+}
+
+#[test]
+fn candidate_decode_refuses_unknown_nested_field() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let nested = nested_sdk_json(&[7_u8; 32], Some("x".into()));
+    let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
+    envelope.encrypted_payload = ramflux_protocol::encode_base64url(serde_json::to_vec(&nested)?);
     match check_entry_bound(&envelope) {
-        Err(NodeCoreError::PayloadTooLarge) => Ok(()),
-        other => Err(format!("exact PayloadTooLarge, got {other:?}").into()),
+        Err(NodeCoreError::InvalidConfiguration(message))
+            if message == "candidate outer envelope has unknown fields" =>
+        {
+            Ok(())
+        }
+        other => Err(format!("exact unknown-field error, got {other:?}").into()),
     }
+}
+
+#[test]
+fn admitted_candidate_envelope_is_fetchable() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let envelope = compact_sdk_envelope(&vec![7_u8; 522_808])?;
+    check_entry_bound(&envelope)?;
+    let root = fixture("p06-r4-fetch");
+    let store = test_store(&root, 0, 2 * 1024 * 1024)?;
+    let now = i64::try_from(crate::now_unix_seconds())?;
+    let mut row = entry(1);
+    row.envelope = envelope;
+    row.envelope.created_at = now;
+    row.envelope.target_delivery_id = "target".to_owned();
+    store.record_submission_increment("p06-r4", now + 3600, Some(&row))?;
+    let router = store.load_router()?.ok_or("router")?;
+    match router.fetch_entry("target", 1, now)? {
+        InboxEntryResponse::Entry { .. } => {}
+        InboxEntryResponse::EntryTooLarge { .. } => {
+            return Err("admitted envelope must stay fetchable".into());
+        }
+        other @ InboxEntryResponse::EntryGone { .. } => {
+            return Err(format!("expected entry, got {other:?}").into());
+        }
+    }
+    drop(router);
+    drop(store);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }

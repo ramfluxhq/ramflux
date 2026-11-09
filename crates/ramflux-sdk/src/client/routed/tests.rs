@@ -257,6 +257,31 @@ fn assert_payload_too_large(result: Result<GatewayInboxEntry, SdkError>) -> Resu
     }
 }
 
+fn assert_compact_frame_admitted(entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+    let decoded = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+        .map_err(|_| invalid("payload"))?;
+    assert!(decoded.starts_with(&ramflux_protocol::message::outer::COMPACT_CRYPTOBOX_MAGIC));
+    let frame = ramflux_node_core::single_entry_frame_size(&entry.envelope)
+        .map_err(|error| invalid(&error.to_string()))?;
+    assert!(frame <= ramflux_node_core::ENTRY_FRAME_BYTE_CAP);
+    ramflux_node_core::check_entry_bound(&entry.envelope)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let sizes =
+        ramflux_protocol::message::outer::IngressSizes::measure_wire(&entry.envelope, 0, &[], &[])
+            .map_err(|error| invalid(&error.to_string()))?;
+    ramflux_protocol::message::outer::check_ingress_caps(sizes)
+        .map_err(|error| invalid(&error.to_string()))?;
+    assert!(sizes.ciphertext_bytes < decoded.len());
+    assert!(sizes.ciphertext_bytes <= ramflux_protocol::message::outer::MAX_CIPHERTEXT_BYTES);
+    assert!(
+        sizes.complete_frame_bytes <= ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
+    );
+    assert!(sizes.bootstrap_capsule_bytes > 0);
+    assert_ne!(entry.envelope.source_device_id, "");
+    assert_ne!(entry.envelope.source_device_id, "local");
+    Ok(())
+}
+
 #[test]
 fn real_wire_size_preflight_accepts_392kb_body() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
@@ -271,33 +296,7 @@ fn real_wire_size_preflight_accepts_392kb_body() -> Result<(), SdkError> {
     let opened = b.client.open_routed(&entry, "bob")?;
     assert_eq!(opened.body.as_slice(), body.as_slice());
     assert_eq!(opened.decrypted.plaintext.len(), inner);
-    let sizes =
-        ramflux_protocol::message::outer::IngressSizes::measure_live(&entry.envelope, &[], &[])
-            .map_err(|error| invalid(&error.to_string()))?;
-    ramflux_protocol::message::outer::check_ingress_caps(sizes)
-        .map_err(|error| invalid(&error.to_string()))?;
-    assert!(sizes.bootstrap_capsule_bytes > 0);
-    let wrapper = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
-        .map_err(|_| invalid("payload"))?;
-    assert!(sizes.ciphertext_bytes < wrapper.len());
-    assert!(sizes.ciphertext_bytes <= ramflux_protocol::message::outer::MAX_CIPHERTEXT_BYTES);
-    assert!(
-        sizes.complete_frame_bytes <= ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
-    );
-    assert_eq!(
-        sizes.identifier_bytes,
-        entry.envelope.source_device_id.len().max(
-            entry
-                .envelope
-                .envelope_id
-                .len()
-                .max(entry.envelope.source_principal_id.len())
-                .max(entry.envelope.target_delivery_id.len()),
-        )
-    );
-    assert_ne!(entry.envelope.source_device_id, "");
-    assert_ne!(entry.envelope.source_device_id, "local");
-    Ok(())
+    assert_compact_frame_admitted(&entry)
 }
 
 #[test]

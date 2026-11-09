@@ -58,18 +58,18 @@ pub fn single_entry_frame_size(
 /// # Errors
 /// Returns typed `payload_too_large` or a serialization error, before allocation/replay.
 pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
-    if ramflux_protocol::schema_profile::schema_v1_live() {
-        return check_candidate_entry_bound(envelope);
-    }
     if single_entry_frame_size(envelope)? > ENTRY_FRAME_BYTE_CAP {
         return Err(NodeCoreError::PayloadTooLarge);
+    }
+    if ramflux_protocol::schema_profile::schema_v1_live() {
+        check_candidate_entry_bound(envelope)?;
     }
     Ok(())
 }
 
 fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_live(envelope, &[], &[])
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_wire(envelope, 0, &[], &[])
         .map_err(map_outer_profile)?;
     ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)
 }
