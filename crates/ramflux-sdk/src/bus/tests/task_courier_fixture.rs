@@ -38,6 +38,8 @@ pub(super) struct Gateway {
     pub stall_submit: bool,
     pub inbox: Vec<GatewayInboxEntry>,
     pub acked: BTreeSet<String>,
+    /// Last seen inbox target, kept after the router row is cleared so `ack_batch` can reply.
+    pub ack_target: String,
     pub resumes: Vec<u64>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
@@ -265,6 +267,7 @@ impl Fixture {
         .await?;
         self.peer.install_test_session(engine);
         let mut gateway = self.gateway.lock().map_err(|_| "gateway")?;
+        gateway.ack_target = self.source.target_delivery_id.clone();
         for (index, delivery) in [dm, call].into_iter().enumerate() {
             gateway.inbox.push(GatewayInboxEntry {
                 forwarded: false,
@@ -292,6 +295,12 @@ async fn serve(
         let value: Value = serde_json::from_slice(&bytes)?;
         let response = if let Some(path) = value["path"].as_str() {
             public_lookup(path, shared).await?
+        } else if value["frame_type"].as_str() == Some("ack_batch") {
+            ack_batch_response(shared, &value)?
+        } else if value["frame_type"].as_str() == Some("resume")
+            && value.get("incarnation_id").is_some()
+        {
+            resume_page_response(shared, &value)?
         } else {
             let frame: GatewayClientFrame = serde_json::from_value(value)?;
             let response = match frame {
@@ -304,15 +313,16 @@ async fn serve(
                         .or_default() += 1;
                     continue;
                 }
-                GatewayClientFrame::Auth { .. } => GatewayServerFrame::SessionEstablished {
-                    session: crate::gateway::GatewaySessionEstablishedFrame {
-                        session_id: "courier-session".into(),
-                        gateway_id: "test-gateway".into(),
-                        accepted_cursor: None,
-                        resume_token: "courier-resume".into(),
-                        resume_window_seconds: 60,
-                    },
-                },
+                GatewayClientFrame::Auth { auth } => {
+                    let advertised = auth.device_proof.capability_scope.iter().any(|capability| {
+                        capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
+                    });
+                    let bytes = serde_json::to_vec(&established_session(advertised))?;
+                    stream.write_u32(u32::try_from(bytes.len())?).await?;
+                    stream.write_all(&bytes).await?;
+                    stream.flush().await?;
+                    continue;
+                }
                 GatewayClientFrame::Heartbeat { now } => GatewayServerFrame::Heartbeat { now },
                 GatewayClientFrame::Resume { resume } => {
                     let hold = shared.lock().map_err(|_| "gateway")?.resume_hold.take();
@@ -489,6 +499,102 @@ pub(super) fn own_copy_response(
                 .collect(),
         },
     })
+}
+
+fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value> {
+    let incarnation_id = value["incarnation_id"].as_str().ok_or("resume incarnation")?.to_owned();
+    let after = value["resume"]["after_inbox_seq"].as_u64().ok_or("resume after")?;
+    let limit = usize::try_from(value["resume"]["limit"].as_u64().ok_or("resume limit")?)?;
+    let target = value["resume"]["target_delivery_id"].as_str().ok_or("resume target")?.to_owned();
+    let retain_until = now_unix_timestamp() + 300;
+    let gateway = shared.lock().map_err(|_| "gateway")?;
+    let entries: Vec<Value> = gateway
+        .inbox
+        .iter()
+        .filter(|entry| {
+            entry.inbox_seq > after && !gateway.acked.contains(&entry.envelope.envelope_id)
+        })
+        .take(limit)
+        .map(|entry| json!({ "entry": entry, "retain_until": retain_until }))
+        .collect();
+    let covered =
+        entries.last().and_then(|entry| entry["entry"]["inbox_seq"].as_u64()).unwrap_or(after);
+    Ok(json!({
+        "frame_type": "resume_page",
+        "target_delivery_id": target,
+        "incarnation_id": incarnation_id,
+        "after_inbox_seq": after,
+        "covered_through_seq": covered,
+        "issued_inbox_seq": covered,
+        "settled_through_seq": 0,
+        "entries": entries,
+        "known_losses": [],
+        "oversize_next": null,
+        "more": false,
+    }))
+}
+
+fn ack_batch_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value> {
+    let incarnation_id =
+        value["incarnation_id"].as_str().ok_or("ack_batch incarnation")?.to_owned();
+    let seqs: Vec<u64> = value["inbox_seqs"]
+        .as_array()
+        .ok_or("ack_batch inbox_seqs")?
+        .iter()
+        .map(|seq| seq.as_u64().ok_or("ack_batch seq"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut gateway = shared.lock().map_err(|_| "gateway")?;
+    if gateway.ack_target.is_empty() {
+        gateway.ack_target = gateway
+            .inbox
+            .first()
+            .map_or_else(|| "sender".into(), |entry| entry.target_delivery_id.clone());
+    }
+    let mut acked_ids = Vec::new();
+    let mut last_seq = 0_u64;
+    for seq in &seqs {
+        last_seq = *seq;
+        let id = gateway
+            .inbox
+            .iter()
+            .find(|entry| entry.inbox_seq == *seq)
+            .map_or_else(|| format!("seq:{seq}"), |entry| entry.envelope.envelope_id.clone());
+        gateway.acked.insert(id.clone());
+        acked_ids.push(id);
+    }
+    let cursor = GatewayCursor {
+        target_delivery_id: gateway.ack_target.clone(),
+        inbox_seq: last_seq,
+        last_envelope_id: acked_ids.last().cloned(),
+        acked_envelope_ids: acked_ids,
+        nacked_envelope_ids: BTreeMap::new(),
+    };
+    let results: Vec<Value> = seqs
+        .iter()
+        .map(|seq| json!({"inbox_seq": seq, "outcome": "acked", "reason": null}))
+        .collect();
+    Ok(json!({
+        "frame_type": "ack_batch",
+        "incarnation_id": incarnation_id,
+        "cursor": cursor,
+        "results": results,
+    }))
+}
+
+/// Echo session-push on `session_established` only when Auth advertised the capability.
+fn established_session(advertised: bool) -> Value {
+    let mut session = json!({
+        "session_id": "courier-session",
+        "gateway_id": "test-gateway",
+        "accepted_cursor": null,
+        "resume_token": "courier-resume",
+        "resume_window_seconds": 60,
+    });
+    if advertised {
+        session["capabilities"] = json!([ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY]);
+        session["inbox_incarnation_id"] = json!("0123456789abcdef0123456789abcdef");
+    }
+    json!({ "frame_type": "session_established", "session": session })
 }
 
 fn acknowledged_cursor(

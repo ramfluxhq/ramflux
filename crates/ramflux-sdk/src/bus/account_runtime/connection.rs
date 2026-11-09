@@ -177,7 +177,9 @@ impl AccountRuntime {
             | AccountWork::ReceiveObservation { .. } => {
                 return self.apply_receive_turn(&handle, work).await;
             }
-            AccountWork::AckPermit { .. } | AccountWork::AckResults { .. } => {
+            AccountWork::AckPermit { .. }
+            | AccountWork::AckResults { .. }
+            | AccountWork::AckFlush { .. } => {
                 return Ok(self.apply_ack_work(&handle, work));
             }
             AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
@@ -244,6 +246,13 @@ impl AccountRuntime {
                     &mut backpressure,
                 );
                 let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
+            }
+            AccountWork::AckFlush { generation, force, now, results, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return false;
+                }
+                let _ =
+                    reply.send(apply_ack_flush(account, handle.generation(), force, now, results));
             }
             _ => {}
         }
@@ -483,6 +492,43 @@ async fn short_step<T>(
     future: impl std::future::Future<Output = Result<T, SdkError>>,
 ) -> Result<T, SdkError> {
     tokio::time::timeout(limit, future).await.map_err(|_| attempt_timeout())?
+}
+
+fn apply_ack_flush(
+    account: &LocalBusAccountState,
+    generation: u64,
+    force: bool,
+    now: i64,
+    results: Option<crate::bus::connection_manager::AckFlushResults>,
+) -> Result<crate::bus::connection_manager::AckFlushReply, SdkError> {
+    use crate::bus::connection_manager::AckFlushReply;
+    use crate::bus::push_receiver::ack_batch::SourceWa;
+    use ramflux_storage::ReceiveAckApply;
+    let db = account.client.account_db()?;
+    let target = account.target_delivery_id.as_str();
+    if !super::super::push_receiver::apply_w1::is_active(db, target)? {
+        return Ok(AckFlushReply::Inactive);
+    }
+    let turn = super::super::push_receiver::apply_w1::capture_turn(db, generation, target)?;
+    match results {
+        None => {
+            let sequences =
+                SourceWa { expected: turn.expected(), generation }.select(db, now, force)?;
+            Ok(AckFlushReply::Selected { incarnation: turn.incarnation, sequences })
+        }
+        Some(rows) => {
+            let applied = SourceWa { expected: turn.expected(), generation }.apply(
+                db,
+                ReceiveAckApply {
+                    incarnation: &rows.incarnation,
+                    sequences: &rows.sequences,
+                    results: &rows.results,
+                    now,
+                },
+            )?;
+            Ok(AckFlushReply::Applied(applied))
+        }
+    }
 }
 
 fn apply_ack_permit(

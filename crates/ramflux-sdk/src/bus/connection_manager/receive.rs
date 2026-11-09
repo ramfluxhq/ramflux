@@ -3,8 +3,14 @@
 
 //! Account receive scheduling uses only ticks, connection establishment, and explicit resync.
 
-use super::{AccountWork, ConnectionHandle, NetworkingState, ReceiveTurn, RuntimeTimeouts};
+use super::{
+    AccountWork, AckFlushReply, AckFlushResults, ConnectionHandle, NetworkingState, ReceiveTurn,
+    RuntimeTimeouts,
+};
 use crate::SdkError;
+use crate::gateway::push_point::BatchReply;
+use crate::gateway::session_push::{AckOutcome, AckResult};
+use ramflux_storage::{ReceiveAckOutcome, ReceiveAckResult};
 use tokio::{
     sync::{mpsc, oneshot},
     time::{Instant, timeout},
@@ -256,6 +262,10 @@ async fn catch_up(
     let mut cursor = plan.cursor;
     let mut backpressure = plan.backpressure;
     let turn = plan.turn;
+    if turn.is_some() {
+        flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
+            .await?;
+    }
     let mut retries: std::collections::BTreeMap<_, _> =
         plan.retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
     let mut active = false;
@@ -305,6 +315,10 @@ async fn catch_up(
             apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
         active |= accepted;
         backpressure = next;
+    }
+    if turn.is_some() {
+        flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
+            .await?;
     }
     Ok((active, backpressure))
 }
@@ -427,6 +441,77 @@ async fn apply_entry(
     .await
 }
 
+/// Select a due WA batch (16 / 1s / `force`), send `ack_batch` on a Push session, apply.
+async fn flush_acks(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    force: bool,
+    call_timeout: std::time::Duration,
+) -> Result<(), SdkError> {
+    let now = crate::time::now_unix_timestamp();
+    let (reply, response) = oneshot::channel();
+    work.send(AccountWork::AckFlush { generation, force, now, results: None, reply })
+        .await
+        .map_err(|_| handle.pending())?;
+    let selected = response.await.map_err(|_| handle.pending())??;
+    let AckFlushReply::Selected { incarnation, sequences } = selected else {
+        return Ok(());
+    };
+    if sequences.is_empty() {
+        return Ok(());
+    }
+    let sent = sequences.clone();
+    let batch = handle
+        .call(move |engine| Box::pin(engine.ack_batch(sent)), Instant::now() + call_timeout)
+        .await;
+    let results = map_batch_results(&sequences, batch);
+    let (reply, response) = oneshot::channel();
+    work.send(AccountWork::AckFlush {
+        generation,
+        force: false,
+        now: crate::time::now_unix_timestamp(),
+        results: Some(AckFlushResults { incarnation, sequences, results }),
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
+    match response.await.map_err(|_| handle.pending())?? {
+        AckFlushReply::Applied(_) | AckFlushReply::Inactive | AckFlushReply::Selected { .. } => {
+            Ok(())
+        }
+    }
+}
+
+fn map_batch_results(
+    sequences: &[u64],
+    batch: Result<BatchReply, SdkError>,
+) -> Vec<ReceiveAckResult> {
+    match batch {
+        Ok(BatchReply::Done { results, .. }) => results.iter().map(map_ack_result).collect(),
+        Ok(BatchReply::Refused(_)) | Err(_) => sequences
+            .iter()
+            .map(|sequence| ReceiveAckResult {
+                sequence: *sequence,
+                outcome: ReceiveAckOutcome::Uncertain,
+            })
+            .collect(),
+    }
+}
+
+fn map_ack_result(result: &AckResult) -> ReceiveAckResult {
+    let outcome = match (&result.outcome, result.reason.as_deref()) {
+        (AckOutcome::Acked, _) => ReceiveAckOutcome::Acked,
+        (AckOutcome::AlreadySettled, _) => ReceiveAckOutcome::AlreadySettled,
+        (AckOutcome::NotFound, _) => ReceiveAckOutcome::NotFound,
+        (AckOutcome::InvalidSeq, _) | (AckOutcome::Rejected, Some("invalid_seq")) => {
+            ReceiveAckOutcome::InvalidSeq
+        }
+        (AckOutcome::Rejected, _) => ReceiveAckOutcome::Transient,
+    };
+    ReceiveAckResult { sequence: result.inbox_seq, outcome }
+}
+
 /// Transmit one ACK and record the outcome. For `turn: Some` the actor decides first
 /// (intent, `seq <= C`, fence); a refused sequence produces no ACK on the wire.
 /// `turn: None` is the live path and stays unchanged.
@@ -542,6 +627,17 @@ pub(crate) async fn test_redrive(
                         &mut backpressure,
                     );
                     let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
+                }
+                AccountWork::AckFlush { results, reply, .. } => {
+                    let _ = reply.send(Ok(match results {
+                        None => AckFlushReply::Inactive,
+                        Some(_) => AckFlushReply::Applied(
+                            ramflux_storage::ReceiveAckApplyResult::Applied {
+                                settled: 0,
+                                revalidate: false,
+                            },
+                        ),
+                    }));
                 }
                 _ => return Err(SdkError::NetworkingPending),
             }

@@ -5,8 +5,29 @@
 
 use super::SessionMetadata;
 use crate::{GatewaySessionConfig, SdkError};
-use ramflux_storage::ReceiveExpectation;
+use ramflux_storage::{ReceiveAckApplyResult, ReceiveAckResult, ReceiveExpectation};
 use tokio::{sync::oneshot, time::Instant};
+
+/// Exact WA result set the actor applies after `push_point::ack_batch`.
+#[derive(Clone, Debug)]
+pub(crate) struct AckFlushResults {
+    pub incarnation: String,
+    pub sequences: Vec<u64>,
+    pub results: Vec<ReceiveAckResult>,
+}
+
+/// Actor answer to one [`AccountWork::AckFlush`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AckFlushReply {
+    /// Inactive discriminator: the caller must not send a batch.
+    Inactive,
+    /// Due sequences for this incarnation, possibly empty.
+    Selected {
+        incarnation: String,
+        sequences: Vec<u64>,
+    },
+    Applied(ReceiveAckApplyResult),
+}
 
 /// Owned actor/durable coordinates carried on a receive turn. The commit fence
 /// borrows this as `ReceiveExpectation`.
@@ -86,6 +107,15 @@ pub(crate) enum AccountWork {
         cursor: Box<Result<crate::GatewayCursor, SdkError>>,
         backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
         reply: oneshot::Sender<Result<super::receive::ReceiveAcked, SdkError>>,
+    },
+    /// Activated-ledger WA flush: `results` is `None` to select a due batch, `Some` to
+    /// apply the exact router result set. Inactive accounts never emit this arm.
+    AckFlush {
+        generation: u64,
+        force: bool,
+        now: i64,
+        results: Option<AckFlushResults>,
+        reply: oneshot::Sender<Result<AckFlushReply, SdkError>>,
     },
     ReceiveObservation {
         generation: u64,

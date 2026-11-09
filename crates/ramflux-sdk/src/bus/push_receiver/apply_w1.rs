@@ -4,7 +4,7 @@
 //! Dormant `ApplyPage` → W1 adapters. Inactive accounts stay on the live path.
 #![allow(dead_code)]
 
-use super::apply::{self, ApplyOutcome, cover_held_in};
+use super::apply::{self, ApplyOutcome, cover_held_in, cover_terminal_in};
 use crate::bus::account_runtime::lifecycle_fence;
 use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
@@ -25,7 +25,6 @@ use ramflux_storage::{
 /// Bounded redrive of `LegacyBindingChanged` before a typed give-up.
 const BINDING_ATTEMPTS: u32 = 3;
 const BINDING_GIVE_UP: &str = "legacy binding changed after 3 attempts";
-const ROUTED_REFUSED: &str = "receive ledger refuses live routed apply";
 const COVERED_BELOW: &str = "receive page covered below sequence";
 const NOT_YET_WIRED: &str = "NotYetWired";
 
@@ -58,7 +57,9 @@ pub(crate) fn capture_turn(
     })
 }
 
-/// W1 + held W2 for one `ApplyPage` entry. No ACK intent (WA is P21).
+/// W1 + W2 for one `ApplyPage` entry. A non-held W1 writes the terminal cover in the
+/// same fenced transaction (receipt bind, ACK intent, C). Held W1 keeps the held cover.
+/// ACK emission is the actor `AckFlush` arm (`SourceWa`).
 ///
 /// `turn` is the prepare-time expectation. `handle_generation` is read at each commit
 /// (after any await) from S2/handle state.
@@ -77,14 +78,8 @@ pub(crate) async fn apply_page(
     #[cfg(test)]
     BINDING_TRIES.with(|cell| cell.set(0));
     loop {
-        match Box::pin(apply_once(
-            account,
-            &mut turn,
-            handle_generation,
-            &prepared,
-            source.as_mut(),
-        ))
-        .await
+        match Box::pin(apply_once(account, &mut turn, handle_generation, &prepared, &mut source))
+            .await
         {
             Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
             Err(SdkError::PairRecoveryRequired) => {
@@ -103,7 +98,7 @@ async fn apply_once(
     turn: &mut ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
     prepared: &ReceiveEntry,
-    source: Option<&mut crate::client::routed::PreparedInbound>,
+    source: &mut Option<crate::client::routed::PreparedInbound>,
 ) -> Result<(), SdkError> {
     #[cfg(test)]
     cross_await().await;
@@ -113,7 +108,8 @@ async fn apply_once(
         return Ok(());
     }
     let local_device = account.gateway_config.device_id.clone();
-    let kind = match classify(account, entry, source).await {
+    let own_copy = source.as_mut().and_then(|prepared| prepared.own_copy_manifest.take());
+    let kind = match classify(account, entry, own_copy).await {
         Ok(kind) => kind,
         Err(error) => match failure_of(&error, entry)? {
             Some((kind, code)) => Kind::PolicyFailure(kind, code),
@@ -123,7 +119,9 @@ async fn apply_once(
     #[cfg(test)]
     after_classify(account.client.account_db()?);
     match kind {
-        Kind::Routed => Err(SdkError::InboundRejected(ROUTED_REFUSED.into())),
+        Kind::Routed => {
+            apply_routed_w1(account, turn, handle_generation, prepared, source.take()).await
+        }
         Kind::OwnCopy(manifest) => {
             let message = entry.envelope.envelope_id.clone();
             let client = &account.client;
@@ -132,6 +130,7 @@ async fn apply_once(
                 client.apply_own_copy_w1_in(tx, entry, &manifest, expected, sequence, &message)?;
                 project_if_committed(tx, client, entry, sequence, expected)?;
                 ReplyOutbox::prune_marker_in(tx, &key)?;
+                cover_w1_outcome(tx, sequence, false, &[])?;
                 Ok(false)
             })?;
             Ok(())
@@ -150,6 +149,7 @@ async fn apply_once(
                 )?;
                 project_if_committed(tx, client, entry, sequence, expected)?;
                 ReplyOutbox::prune_marker_in(tx, &key)?;
+                cover_w1_outcome(tx, sequence, false, &[])?;
                 Ok(false)
             })?;
             Ok(())
@@ -165,7 +165,7 @@ async fn apply_once(
                     expected,
                     handle_generation(),
                 )?;
-                cover_if_held(tx, sequence, held, &[])?;
+                cover_w1_outcome(tx, sequence, held, &[])?;
                 if !held {
                     ReplyOutbox::prune_marker_in(tx, &key)?;
                 }
@@ -182,6 +182,39 @@ async fn apply_once(
             settle_reply_terminal(account, turn, handle_generation, entry, sequence)
         }
     }
+}
+
+/// Open/decrypt outside the fence; persist + terminal (or held) cover in the same fenced tx.
+async fn apply_routed_w1(
+    account: &mut LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    prepared: &ReceiveEntry,
+    source: Option<crate::client::routed::PreparedInbound>,
+) -> Result<(), SdkError> {
+    let mut engine = account.live_session_client()?;
+    let pool = account.relay_quic_pool()?;
+    let sequence = prepared.entry.inbox_seq;
+    let generation = handle_generation();
+    account
+        .client
+        .apply_routed_entry_joining(
+            &mut engine,
+            &pool,
+            &prepared.entry,
+            source.map(Ok),
+            |client, ctx| {
+                let held = ctx.contact_held;
+                run_fenced(client.account_db()?, generation, turn, |tx, _| {
+                    let projected = client.commit_routed_w1_in(tx, sequence, ctx)?;
+                    cover_w1_outcome(tx, sequence, held, &[])?;
+                    Ok(projected)
+                })
+            },
+        )
+        .await?;
+    account.apply_session_metadata(engine);
+    Ok(())
 }
 
 fn admit_failure(
@@ -262,9 +295,9 @@ enum Kind {
 async fn classify(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
-    source: Option<&mut crate::client::routed::PreparedInbound>,
+    own_copy: Option<crate::SdkDeviceManifestResponse>,
 ) -> Result<Kind, SdkError> {
-    if let Some(manifest) = source.and_then(|prepared| prepared.own_copy_manifest.take()) {
+    if let Some(manifest) = own_copy {
         return Ok(Kind::OwnCopy(Box::new(manifest)));
     }
     if let Some(root) = account.client.own_device_receive_manifest_request(entry)? {
@@ -449,6 +482,7 @@ fn project_application(
     let key = projection_key(client, entry)?;
     run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
         project_with_key(tx, client, entry, sequence, expected, &key)?;
+        cover_w1_outcome(tx, sequence, false, &[])?;
         Ok(false)
     })?;
     Ok(())
@@ -573,22 +607,23 @@ fn recover_own_copy(
             entry.inbox_seq,
             now_unix_timestamp(),
         )?;
+        cover_w1_outcome(tx, entry.inbox_seq, false, &[])?;
         Ok(false)
     })?;
     Ok(())
 }
 
-fn run_fenced(
+fn run_fenced<T>(
     db: &AccountDb,
     handle_generation: u64,
     turn: &ReceiveTurn,
-    write: impl FnOnce(&ReceiveTransaction<'_>, ReceiveExpectation<'_>) -> Result<bool, SdkError>,
-) -> Result<bool, SdkError> {
+    write: impl FnOnce(&ReceiveTransaction<'_>, ReceiveExpectation<'_>) -> Result<T, SdkError>,
+) -> Result<T, SdkError> {
     let expected = turn.expected();
     let mut outcome = None;
     let fenced =
         lifecycle_fence::commit(db, handle_generation, expected, |tx| match write(tx, expected) {
-            Ok(held) => {
+            Ok(value) => {
                 #[cfg(test)]
                 if let Some(hook) = BEFORE_COMMIT_HOOK.with(std::cell::Cell::take) {
                     hook(tx.account());
@@ -598,7 +633,7 @@ fn run_fenced(
                     outcome = Some(Err(SdkError::Storage(StorageError::Integrity(text))));
                     return Err(StorageError::Integrity(text));
                 }
-                outcome = Some(Ok(held));
+                outcome = Some(Ok(value));
                 Ok(())
             }
             Err(error) => {
@@ -609,22 +644,32 @@ fn run_fenced(
     match (fenced, outcome) {
         (_, Some(Err(error))) => Err(error),
         (Err(error), _) => Err(error.into()),
-        (Ok(()), Some(Ok(held))) => Ok(held),
+        (Ok(()), Some(Ok(value))) => Ok(value),
         (Ok(()), None) => Err(SdkError::LocalBus("apply page w1 did not run".into())),
     }
 }
 
-fn cover_if_held(
+fn cover_w1_outcome(
     tx: &ReceiveTransaction<'_>,
     sequence: u64,
     held: bool,
     gaps: &[ReceiveGap<'_>],
 ) -> Result<(), SdkError> {
-    if !held {
-        return Ok(());
+    #[cfg(test)]
+    if let Some(text) = AFTER_W1_CUT.with(std::cell::Cell::take) {
+        return Err(SdkError::Storage(StorageError::Integrity(text)));
     }
-    match cover_held_in(tx, sequence, gaps)? {
-        ReceiveCoverResult::Covered | ReceiveCoverResult::Paused => Ok(()),
+    let covered = if held {
+        cover_held_in(tx, sequence, gaps)?
+    } else {
+        cover_terminal_in(tx, sequence, gaps)?
+    };
+    match covered {
+        ReceiveCoverResult::Covered => Ok(()),
+        ReceiveCoverResult::Paused if held => Ok(()),
+        ReceiveCoverResult::Paused => {
+            Err(SdkError::InboundRejected("receive terminal cover paused".into()))
+        }
     }
 }
 
@@ -711,6 +756,7 @@ thread_local! {
     static BEFORE_COMMIT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     static BEFORE_COMMIT_HOOK: std::cell::Cell<Option<fn(&AccountDb)>> =
         const { std::cell::Cell::new(None) };
+    static AFTER_W1_CUT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -763,11 +809,6 @@ pub(crate) fn set_after_classify(hook: fn(&AccountDb)) {
 #[cfg(test)]
 pub(crate) const fn binding_give_up() -> &'static str {
     BINDING_GIVE_UP
-}
-
-#[cfg(test)]
-pub(crate) const fn routed_refused() -> &'static str {
-    ROUTED_REFUSED
 }
 
 #[cfg(test)]
@@ -898,6 +939,16 @@ pub(crate) fn set_before_commit(text: &'static str) {
 #[cfg(test)]
 pub(crate) fn set_before_commit_hook(hook: fn(&AccountDb)) {
     BEFORE_COMMIT_HOOK.with(|cell| cell.set(Some(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_w1_cut(text: &'static str) {
+    AFTER_W1_CUT.with(|cell| cell.set(Some(text)));
+}
+
+#[cfg(test)]
+pub(crate) const fn after_w1_cut() -> &'static str {
+    "receive w1-cover cut"
 }
 
 #[cfg(test)]

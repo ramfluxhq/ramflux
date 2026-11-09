@@ -489,14 +489,9 @@ fn ledger(account: &crate::bus::state::LocalBusAccountState) -> Result<Ledger, S
 
 fn expected_ledger(sweep: Sweep) -> Ledger {
     match sweep {
-        Sweep::OwnCopy | Sweep::LegacyDm | Sweep::Projection => Ledger {
-            state: (Some("staged".into()), 1),
-            cursor: 0,
-            journals: 0,
-            holds: 0,
-            work: 1,
-            intents: Vec::new(),
-        },
+        Sweep::OwnCopy | Sweep::LegacyDm | Sweep::Projection | Sweep::Failure => {
+            Ledger { state: (None, 0), cursor: 1, journals: 0, holds: 0, work: 0, intents: vec![1] }
+        }
         Sweep::LegacyHold => Ledger {
             state: (Some("held".into()), 1),
             cursor: 1,
@@ -513,9 +508,6 @@ fn expected_ledger(sweep: Sweep) -> Ledger {
             work: 1,
             intents: Vec::new(),
         },
-        Sweep::Failure => {
-            Ledger { state: (None, 0), cursor: 1, journals: 0, holds: 0, work: 0, intents: vec![1] }
-        }
     }
 }
 
@@ -713,8 +705,18 @@ async fn erase_while_w1_pending_reopen_no_resurrection() -> Result<(), SdkError>
     let _ = drive_disk(&mut harness.account, 1, || 1).await?;
     assert_eq!(
         harness.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("erased".into()), 0),
-        "erased-only receipt settlement"
+        (None, 0),
+        "terminal cover binds the erased receipt"
+    );
+    assert_eq!(cursor(&harness.account)?, 1);
+    assert_eq!(
+        harness
+            .account
+            .client
+            .account_db()?
+            .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?
+            .intents,
+        vec![1]
     );
     let content = content_rows(harness.account.client.account_db()?)?;
     assert!(

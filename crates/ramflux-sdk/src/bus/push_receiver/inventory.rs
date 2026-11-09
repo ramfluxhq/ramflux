@@ -141,6 +141,14 @@ pub(crate) const SITES: &[WriterSite] = &[
         count: 1,
     },
     WriterSite {
+        file: "src/bus/connection_manager/receive.rs",
+        symbol: "engine.ack_batch(",
+        class: WriterClass::ExecutorOwned,
+        executor: "SourceWa::apply (WA token)",
+        hook: "outgoing ACK batch",
+        count: 1,
+    },
+    WriterSite {
         file: "src/bus/connection_manager/client.rs",
         symbol: "engine.ack(",
         class: WriterClass::ProductionLegacy,
@@ -381,6 +389,7 @@ pub(crate) const SCAN_SYMBOLS: &[&str] = &[
     "ack_gateway_delivery",
     "remove_unrouted",
     "engine.ack(",
+    "engine.ack_batch(",
     "set_projection_checkpoint",
     "message.ack",
     "persist_receive_cursor",

@@ -45,7 +45,12 @@ struct PreparedGroupControls {
     shared: Option<crate::client::shared_group::PreparedSharedGroup>,
 }
 
-struct Commit<'a> {
+struct ApplyOpts {
+    attachments: bool,
+    prepared: Option<Result<super::PreparedInbound, SdkError>>,
+}
+
+pub(crate) struct Commit<'a> {
     opened: &'a Opened,
     entry: &'a GatewayInboxEntry,
     body: &'a [u8],
@@ -60,6 +65,8 @@ struct Commit<'a> {
     )>,
     receipt: &'a str,
     consume_erased: bool,
+    /// Pending-contact hold: the ledger cover is Held, not Terminal.
+    pub contact_held: bool,
 }
 
 impl RamfluxClient {
@@ -212,7 +219,14 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         attachments: bool,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true>(engine, pool, entry, attachments, None).await
+        self.apply_routed_entry_with_source::<true>(
+            engine,
+            pool,
+            entry,
+            ApplyOpts { attachments, prepared: None },
+            Self::commit_routed_projection,
+        )
+        .await
     }
 
     pub(crate) async fn apply_routed_prepared_entry(
@@ -222,8 +236,33 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         prepared: Result<super::PreparedInbound, SdkError>,
     ) -> Result<Delivery, SdkError> {
-        self.apply_routed_entry_with_source::<true>(engine, pool, entry, false, Some(prepared))
-            .await
+        self.apply_routed_entry_with_source::<true>(
+            engine,
+            pool,
+            entry,
+            ApplyOpts { attachments: false, prepared: Some(prepared) },
+            Self::commit_routed_projection,
+        )
+        .await
+    }
+
+    /// Same prepare/open as live apply; persist joins the caller's receive transaction.
+    pub(crate) async fn apply_routed_entry_joining(
+        &mut self,
+        engine: &mut impl GatewaySessionAccess,
+        pool: &ramflux_transport::RelayQuicPool,
+        entry: &GatewayInboxEntry,
+        prepared: Option<Result<super::PreparedInbound, SdkError>>,
+        persist: impl FnOnce(&Self, Commit<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
+    ) -> Result<Delivery, SdkError> {
+        self.apply_routed_entry_with_source::<true>(
+            engine,
+            pool,
+            entry,
+            ApplyOpts { attachments: false, prepared },
+            persist,
+        )
+        .await
     }
 
     async fn apply_routed_entry_with_source<const CONSUME_ERASED: bool>(
@@ -231,10 +270,11 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         pool: &ramflux_transport::RelayQuicPool,
         entry: &GatewayInboxEntry,
-        attachments: bool,
-        prepared: Option<Result<super::PreparedInbound, SdkError>>,
+        opts: ApplyOpts,
+        persist: impl FnOnce(&Self, Commit<'_>) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError>,
     ) -> Result<Delivery, SdkError> {
         let consume_erased = CONSUME_ERASED;
+        let ApplyOpts { attachments, prepared } = opts;
         if let Some(delivery) = self.routed_duplicate_delivery(entry)? {
             return Ok(delivery);
         }
@@ -283,8 +323,6 @@ impl RamfluxClient {
             self.import_routed_own_history(engine, pool, entry, &opened, &body).await?;
         }
         let metadata = routed_message_metadata(&opened, entry, &envelope, &aad)?;
-        let mut consumed_slots = Vec::new();
-        let mut references = Vec::new();
         let accepted = self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_none();
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let held = opened.routing.kind == Kind::Direct
@@ -293,6 +331,55 @@ impl RamfluxClient {
                 source.root_commitment(),
                 &entry.envelope.source_principal_id,
             )?;
+        let (consumed_slots, references) =
+            self.routed_attachment_refs(&mut opened, &refs, accepted);
+        let groups = self
+            .prepare_routed_group_controls(engine, &opened, entry, &body, directory.as_ref())
+            .await?;
+        let (plaintext, admitted) = persist(
+            self,
+            Commit {
+                opened: &opened,
+                entry,
+                body: &body,
+                metadata: metadata.as_ref(),
+                membership: groups.legacy.as_ref(),
+                shared_group: groups.shared.as_ref(),
+                local_target: Some(&engine.config().target_delivery_id),
+                slots: &consumed_slots,
+                references,
+                receipt: &commit,
+                consume_erased,
+                contact_held: held,
+            },
+        )?;
+        self.finish_pair_retirement()?;
+        let refs = if consume_erased { admitted_refs(&refs, admitted) } else { refs };
+        let import = attachments && opened.routing.kind == Kind::Direct && accepted && !held;
+        let background = native_prepared;
+        self.finish_routed_receive(
+            engine,
+            pool,
+            entry,
+            Finish { opened, body, plaintext, refs, import, background, consume_erased },
+        )
+        .await
+    }
+
+    fn routed_attachment_refs<'a>(
+        &self,
+        opened: &mut Opened,
+        refs: &'a [crate::dm::SdkDmAttachmentRef],
+        accepted: bool,
+    ) -> (
+        Vec<crate::SdkObjectKeySlot>,
+        Vec<(
+            &'a crate::dm::SdkDmAttachmentRef,
+            Option<crate::client::object::DeferredObjectKeySlot>,
+        )>,
+    ) {
+        let mut consumed_slots = Vec::new();
+        let mut references = Vec::new();
         for attachment in refs.iter().filter(|_| accepted) {
             let prepared = if attachment.key_slot.version == 2 {
                 self.decrypt_pair_object_slot(&attachment.key_slot, Some(&mut opened.session)).ok()
@@ -304,32 +391,7 @@ impl RamfluxClient {
             }
             references.push((attachment, prepared));
         }
-        let groups = self
-            .prepare_routed_group_controls(engine, &opened, entry, &body, directory.as_ref())
-            .await?;
-        let (plaintext, admitted) = self.commit_routed_projection(Commit {
-            opened: &opened,
-            entry,
-            body: &body,
-            metadata: metadata.as_ref(),
-            membership: groups.legacy.as_ref(),
-            shared_group: groups.shared.as_ref(),
-            local_target: Some(&engine.config().target_delivery_id),
-            slots: &consumed_slots,
-            references,
-            receipt: &commit,
-            consume_erased,
-        })?;
-        let refs = if consume_erased { admitted_refs(&refs, admitted) } else { refs };
-        let import = attachments && opened.routing.kind == Kind::Direct && accepted && !held;
-        let background = native_prepared;
-        self.finish_routed_receive(
-            engine,
-            pool,
-            entry,
-            Finish { opened, body, plaintext, refs, import, background, consume_erased },
-        )
-        .await
+        (consumed_slots, references)
     }
 
     async fn finish_routed_receive(
@@ -644,6 +706,7 @@ impl RamfluxClient {
                 references: Vec::new(),
                 receipt: &receipt,
                 consume_erased: false,
+                contact_held: false,
             })?;
             // Fault after the marker and every effect, so the rollback must undo both.
             #[cfg(test)]
@@ -697,15 +760,11 @@ impl RamfluxClient {
         &self,
         context: Commit<'_>,
     ) -> Result<(Option<Vec<u8>>, Vec<usize>), SdkError> {
-        let result =
-            self.account_db()?.write_transaction(|| self.persist_routed_projection(context))?;
-        self.finish_pair_retirement()?;
-        Ok(result)
+        self.account_db()?.write_transaction(|| self.persist_routed_projection(context))
     }
 
     /// Joins an open receive transaction. Live [`Self::commit_routed_projection`] stays on its writer.
-    #[allow(dead_code, reason = "P20c join point; actor uses live apply until P20f projection W1")]
-    fn commit_routed_w1_in(
+    pub(crate) fn commit_routed_w1_in(
         &self,
         tx: &ramflux_storage::ReceiveTransaction<'_>,
         sequence: u64,
@@ -731,6 +790,7 @@ impl RamfluxClient {
             receipt,
             references,
             consume_erased,
+            contact_held: _,
         } = context;
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage)
             && self.account_db()?.message_is_deleted(&opened.routing.message_id)?

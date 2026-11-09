@@ -4,11 +4,12 @@
 //! `ApplyPage` fence, binding retry, and routed refusal (S6b P20f / P20c r2 CARRY).
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
 
+use super::ack_batch::SourceWa;
 use super::apply_w1::{
-    self, apply_page, binding_attempts, binding_give_up, covered_below, force_covered_below,
-    force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy, queue_policy_kind,
-    queue_projection, queue_terminal_reply, routed_refused, set_after_classify, set_before_commit,
-    set_cross_await, set_manifest_await, set_projection_key,
+    self, after_w1_cut, apply_page, binding_attempts, binding_give_up, covered_below,
+    force_covered_below, force_need_point, queue_legacy_hold, queue_manifest_wait, queue_own_copy,
+    queue_policy_kind, queue_projection, queue_terminal_reply, set_after_classify,
+    set_after_w1_cut, set_before_commit, set_cross_await, set_manifest_await, set_projection_key,
 };
 use super::erase_support::erase_through_retention;
 use crate::bus::connection_manager::receive::bind_retry_turns;
@@ -24,7 +25,8 @@ use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::encode_base64url;
 use ramflux_storage::{
-    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveFailureKind, ReceiveMigrate, StorageError,
+    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveAckApply, ReceiveAckApplyResult,
+    ReceiveAckOutcome, ReceiveAckResult, ReceiveFailureKind, ReceiveMigrate, StorageError,
 };
 use ramflux_transport::TransportError;
 use serde_json::json;
@@ -313,14 +315,14 @@ async fn legacy_binding_changed_gives_up_after_three() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn active_routed_refuses_live_apply() -> Result<(), SdkError> {
+async fn active_routed_requires_live_session() -> Result<(), SdkError> {
     let mut harness = open()?;
     let target = harness.account.target_delivery_id.clone();
     let refused = drive(&mut harness.account, prepared(&target, &routed_payload()), || 1).await;
     let error = refused.as_ref().err();
     assert!(
-        matches!(error, Some(SdkError::InboundRejected(text)) if text == routed_refused()),
-        "active routed must refuse through apply_page: {error:?}"
+        matches!(error, Some(SdkError::GatewaySessionNotEstablished)),
+        "routed W1 needs a live session: {error:?}"
     );
     Ok(())
 }
@@ -928,11 +930,14 @@ async fn projection_w1_admits_outbox() -> Result<(), SdkError> {
     let stored: Option<ApplicationEvent> =
         harness.account.client.account_db()?.load_actor_state(&format!("{OUTBOX}{key}"))?;
     assert!(stored.is_some(), "projection W1 writes the application outbox");
-    assert_eq!(cursor(&harness.account)?, 0, "projection admits without covering C");
-    assert_eq!(
-        harness.account.client.account_db()?.receive_state_for_test(1)?,
-        (Some("staged".into()), 1)
-    );
+    assert_eq!(cursor(&harness.account)?, 1, "projection W1 terminal cover advances C");
+    let snap = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    assert_eq!(snap.intents, vec![1], "terminal cover writes the ACK intent");
+    assert!(snap.receipts.is_empty(), "terminal cover binds and cleans the receipt");
     Ok(())
 }
 
@@ -1022,6 +1027,13 @@ async fn own_copy_success_without_authenticated_identity_commits_w1() -> Result<
             &crate::client::own_device_copy::w1::locator_key(&entry.entry.envelope.envelope_id),
         )?;
     assert!(locator.is_some(), "own-copy W1 commits; missing identity is nothing owed");
+    assert_eq!(cursor(&harness.account)?, 1, "own-copy terminal cover advances C");
+    let snap = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    assert_eq!(snap.intents, vec![1]);
     Ok(())
 }
 
@@ -1149,5 +1161,179 @@ fn activated_without_epoch_is_integrity() -> Result<(), SdkError> {
         Err(SdkError::Storage(StorageError::Integrity(MISSING_EPOCH))) => {}
         other => panic!("Activated without epoch must be MISSING_EPOCH, got {other:?}"),
     }
+    Ok(())
+}
+
+fn snap(
+    account: &crate::bus::state::LocalBusAccountState,
+) -> Result<ramflux_storage::ReceiveLedgerSnap, SdkError> {
+    Ok(account.client.account_db()?.receive_ledger_snap_for_test(&account.target_delivery_id)?)
+}
+
+fn select_due(
+    account: &crate::bus::state::LocalBusAccountState,
+    now: i64,
+    force: bool,
+) -> Result<Vec<u64>, SdkError> {
+    let db = account.client.account_db()?;
+    let prepared = turn(account, 1)?;
+    SourceWa { expected: prepared.expected(), generation: 1 }.select(db, now, force)
+}
+
+fn apply_wa(
+    account: &crate::bus::state::LocalBusAccountState,
+    rows: &[ReceiveAckResult],
+    now: i64,
+) -> Result<ReceiveAckApplyResult, SdkError> {
+    let db = account.client.account_db()?;
+    let prepared = turn(account, 1)?;
+    let sequences: Vec<u64> = rows.iter().map(|row| row.sequence).collect();
+    SourceWa { expected: prepared.expected(), generation: 1 }.apply(
+        db,
+        ReceiveAckApply {
+            incarnation: &prepared.incarnation,
+            sequences: &sequences,
+            results: rows,
+            now,
+        },
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_cover_cut_rolls_w1_with_receipt() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    queue_own_copy();
+    set_after_w1_cut(after_w1_cut());
+    let cut = drive(&mut harness.account, entry.clone(), || 1).await;
+    let error = cut.as_ref().err();
+    assert!(
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text))) if *text == after_w1_cut()
+        ),
+        "W1/cover cut: {error:?}"
+    );
+    let locator: Option<serde_json::Value> =
+        harness.account.client.account_db()?.load_actor_state(
+            &crate::client::own_device_copy::w1::locator_key(&entry.entry.envelope.envelope_id),
+        )?;
+    assert!(locator.is_none(), "W1 rolls back with the cover");
+    assert_eq!(cursor(&harness.account)?, 0);
+    assert_eq!(snap(&harness.account)?.intents, Vec::<u64>::new());
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (Some("staged".into()), 1)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn second_connected_no_redelivery() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let entry = live_dummy(&harness.account);
+    queue_own_copy();
+    drive(&mut harness.account, entry.clone(), || 1).await?;
+    assert_eq!(cursor(&harness.account)?, 1);
+    assert_eq!(snap(&harness.account)?.intents, vec![1]);
+    queue_own_copy();
+    drive(&mut harness.account, entry, || 1).await?;
+    assert_eq!(cursor(&harness.account)?, 1, "second apply does not move C");
+    assert_eq!(snap(&harness.account)?.intents, vec![1], "second apply writes no new intent");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn never_ack_above_c() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_legacy_hold(std::iter::repeat_n(true, 8));
+    let held_entry = own_dummy(&harness.account);
+    drive(&mut harness.account, held_entry, || 1).await?;
+    assert_eq!(cursor(&harness.account)?, 1);
+    let now = now_unix_timestamp();
+    assert_eq!(select_due(&harness.account, now, true)?, Vec::<u64>::new(), "held never selected");
+    let above = apply_wa(
+        &harness.account,
+        &[ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::Acked }],
+        now,
+    )
+    .expect_err("seq>C");
+    assert!(
+        matches!(
+            above,
+            SdkError::Storage(StorageError::Integrity("receive ack sequence exceeds cursor"))
+        ),
+        "{above:?}"
+    );
+    queue_own_copy();
+    let next = own_dummy_at(&harness.account, 2);
+    drive(&mut harness.account, next, || 1).await?;
+    assert_eq!(select_due(&harness.account, now_unix_timestamp(), true)?, vec![2]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ack_batch_timing() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    for sequence in 1..=16 {
+        queue_own_copy();
+        let entry = own_dummy_at(&harness.account, sequence);
+        drive(&mut harness.account, entry, || 1).await?;
+    }
+    harness.account.client.account_db()?.set_ack_intent_clock_for_test(100, 100)?;
+    assert_eq!(select_due(&harness.account, 100, false)?, (1..=16).collect::<Vec<_>>());
+    let mut three = open()?;
+    for sequence in 1..=3 {
+        queue_own_copy();
+        let entry = own_dummy_at(&three.account, sequence);
+        drive(&mut three.account, entry, || 1).await?;
+    }
+    three.account.client.account_db()?.set_ack_intent_clock_for_test(100, 100)?;
+    assert_eq!(select_due(&three.account, 100, false)?, Vec::<u64>::new());
+    assert_eq!(select_due(&three.account, 101, false)?, vec![1, 2, 3]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ack_lost_before_and_after_commit() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    for sequence in 1..=2 {
+        queue_own_copy();
+        let entry = own_dummy_at(&harness.account, sequence);
+        drive(&mut harness.account, entry, || 1).await?;
+    }
+    let rows = [
+        ReceiveAckResult { sequence: 1, outcome: ReceiveAckOutcome::Uncertain },
+        ReceiveAckResult { sequence: 2, outcome: ReceiveAckOutcome::Uncertain },
+    ];
+    let now = now_unix_timestamp();
+    assert_eq!(select_due(&harness.account, now, true)?, vec![1, 2], "select does not delete");
+    let lost = super::ack_batch::run(|| apply_wa(&harness.account, &rows, now));
+    assert!(
+        matches!(
+            &lost,
+            Err(SdkError::Storage(StorageError::Integrity("wa settlement before-commit")))
+        ),
+        "{lost:?}"
+    );
+    assert_eq!(snap(&harness.account)?.intents, vec![1, 2], "abort after apply rolls back");
+    assert_eq!(
+        apply_wa(&harness.account, &rows, now)?,
+        ReceiveAckApplyResult::Applied { settled: 0, revalidate: false }
+    );
+    assert_eq!(snap(&harness.account)?.intents, vec![1, 2], "lost reply after WR retains");
+    Ok(())
+}
+
+#[test]
+fn inactive_account_skips_w2_and_ack_flush() -> Result<(), SdkError> {
+    let root = tempfile::tempdir().expect("tmp");
+    let account =
+        runtime_tests::account(root.path(), "acct", None, Arc::new(AtomicBool::new(false)))?;
+    let target = account.target_delivery_id.clone();
+    let db = account.client.account_db()?;
+    assert!(!apply_w1::is_active(db, &target)?, "inactive discriminator skips the ledger route");
+    assert!(db.receive_epoch(&target)?.is_none());
+    assert!(db.projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?.is_none());
     Ok(())
 }

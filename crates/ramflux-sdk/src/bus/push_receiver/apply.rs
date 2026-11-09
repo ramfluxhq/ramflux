@@ -314,6 +314,16 @@ pub(crate) fn cover_held_in(
     tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps, retain_until: 0 })
 }
 
+/// Terminal W2 on an already-open receive transaction: bind the receipt, write the ACK
+/// intent and advance C. `gaps` follow the same `(C, sequence]` rule as [`cover_held_in`].
+pub(crate) fn cover_terminal_in(
+    tx: &ReceiveTransaction<'_>,
+    sequence: u64,
+    gaps: &[ramflux_storage::ReceiveGap<'_>],
+) -> Result<ReceiveCoverResult, StorageError> {
+    tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Terminal, gaps, retain_until: 0 })
+}
+
 struct Trimmed<'a> {
     entries: &'a [u64],
     known_losses: Vec<ApplyLoss<'a>>,

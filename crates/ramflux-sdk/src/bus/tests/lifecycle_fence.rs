@@ -8,9 +8,10 @@
 //! held result is then released into the actor at generation 1 after a new connection owns
 //! generation 2: it must write nothing, apply nothing and ACK nothing. After the reopen, the
 //! Connected `PrepareReceive` recovers the staged copy from disk (the router no longer has
-//! it) into the plan, and the activated `ApplyPage` turn returns the P20c refusal with 0
-//! messages applied and 0 ACKs. Negatives: dropping the actor generation check makes the
-//! stale release write the message; dropping the recovery feed leaves the plan without the row.
+//! it) into the plan, and the activated `ApplyPage` applies exactly once with exactly one ACK.
+//! A second Connected after that apply+ACK delivers 0 new messages and 0 new ACKs. Negatives:
+//! dropping the actor generation check makes the stale release write the message; dropping
+//! the recovery feed leaves the plan without the row.
 use super::fixture::{Case, Fixture};
 use super::receive_ack::command;
 use crate::bus::connection_manager::AccountWork;
@@ -178,6 +179,31 @@ async fn pump(
     .expect("lifecycle connection-work hang guard expired")
 }
 
+/// Drives connection work until no new work arrives for `quiet`.
+async fn pump_quiet(
+    runtime: &mut super::super::AccountRuntime,
+    quiet: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last = Instant::now();
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
+        {
+            Ok(Some(work)) => {
+                runtime.apply_connection_work(work).await?;
+                last = Instant::now();
+            }
+            Ok(None) => return Err("connection work channel closed".into()),
+            Err(_) => {
+                if last.elapsed() >= quiet {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err("pump quiet deadline".into())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn lifecycle_fence() -> Case {
     tokio::time::timeout(
@@ -287,41 +313,48 @@ async fn held() -> Case {
         entry.inbox_seq
     );
 
-    // (b) The recovered row reaches the activated ApplyPage turn, which returns the P20c
-    // refusal: 0 messages applied, 0 ACKs sent.
+    // (b) Unlock-recovery applies the staged routed DM exactly once; the child then flushes WA.
     let Some(AccountWork::ApplyPage {
         generation: g_page,
         entry: page,
         source,
         backpressure,
         turn,
-        ..
+        reply,
     }) = pump(&mut runtime, true, |_| false).await?
     else {
         return Err("recovery must reach an ApplyPage at the new generation".into());
     };
     assert!(g_page >= g2, "the recovered page belongs to the new generation");
-    assert_eq!(g_page, generation_of(&runtime)?, "the page is at the live generation");
-    let (refused_reply, refused_response) = oneshot::channel();
     runtime
         .apply_connection_work(AccountWork::ApplyPage {
             generation: g_page,
             entry: page,
             source,
             backpressure,
-            reply: refused_reply,
+            reply,
             turn,
         })
         .await?;
-    let refusal = refused_response.await?.err();
-    assert!(
-        matches!(&refusal, Some(SdkError::InboundRejected(text))
-            if text == crate::bus::push_receiver::apply_w1::routed_refused()),
-        "activated ApplyPage must return the P20c refusal: {refusal:?}"
-    );
-    assert_eq!(messages(&runtime)?, 0, "the refusal applies 0 messages");
-    // apply-once + ACK leg: S6b P24b2a/b (controller ruling 2026-11-09)
-    assert_eq!(acked(&gateway)?, 0, "the refusal sends 0 ACKs");
+    assert_eq!(messages(&runtime)?, 1, "unlock-recovery applies exactly once");
+    pump(&mut runtime, false, |_| acked(&gateway).ok() == Some(1)).await?;
+    assert_eq!(acked(&gateway)?, 1, "exactly one ACK on the wire");
+
+    // (c) second Connected after apply+ACK: 0 new messages, 0 new ACKs.
+    let carrier = runtime
+        .state
+        .accounts
+        .get_mut("sender")
+        .and_then(|account| account.engine.take())
+        .ok_or("carrier")?;
+    runtime.stop_connection().await;
+    runtime.start_connection()?;
+    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
+    let g3 = generation_of(&runtime)?;
+    assert_ne!(g2, g3, "second Connected must issue a new connection generation");
+    pump_quiet(&mut runtime, Duration::from_millis(200)).await?;
+    assert_eq!(messages(&runtime)?, 1, "second Connected applies 0 new messages");
+    assert_eq!(acked(&gateway)?, 1, "second Connected sends 0 new ACKs");
     runtime.stop_connection().await;
     drop(runtime);
     drop((peer, sibling));

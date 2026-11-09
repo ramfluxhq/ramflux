@@ -10,12 +10,12 @@ pub(crate) use receive::{ReceiveApplied, ReceiveEntry, ReceivePlan, ReceiveTrigg
 mod account_work;
 mod background_children;
 mod metadata_child;
-pub(crate) use account_work::AccountWork;
 #[cfg_attr(
     not(test),
     allow(unused_imports, reason = "W0 on main and bus tests import this path")
 )]
 pub(crate) use account_work::ReceiveTurn;
+pub(crate) use account_work::{AccountWork, AckFlushReply, AckFlushResults};
 mod client;
 pub(crate) use client::SessionClient;
 pub(crate) mod session_host;
