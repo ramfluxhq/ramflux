@@ -38,11 +38,11 @@ async fn retirement_before_sink_authority_refuses_dequeued_frame() -> anyhow::Re
     let writing = tokio::spawn(async move {
         writer.write(&sink, &frame.bytes, frame.incarnation.as_deref(), None).await
     });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    super::guard_10s("writer entering the sink before retirement", entered.notified()).await;
     q.retire_with_sink(&send).await;
     assert!(q.is_closed());
     release.add_permits(1);
-    let wrote = tokio::time::timeout(Duration::from_secs(10), writing).await??;
+    let wrote = super::guard_10s("retired writer task", writing).await?;
     let wire = frames.lock().map_err(|_| anyhow::anyhow!("frames poisoned"))?;
     assert!(wire.is_empty(), "retired incarnation reached the wire: {wire:?}");
     assert!(!wrote);
@@ -86,7 +86,7 @@ async fn admitted_write_finishes_once_before_retirement() -> anyhow::Result<()> 
     let writer = q.clone();
     let sink = send.clone();
     let task = tokio::spawn(async move { writer.write(&sink, b"frame", Some(ID), None).await });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    super::guard_10s("held sink write entering before retirement", entered.notified()).await;
     let retirement = q.retire_with_sink(&send);
     tokio::pin!(retirement);
     std::future::poll_fn(|cx| {
@@ -96,7 +96,7 @@ async fn admitted_write_finishes_once_before_retirement() -> anyhow::Result<()> 
     .await;
     assert!(!q.is_closed());
     release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(10), retirement).await?;
+    super::guard_10s("retirement completing after releasing the held sink", retirement).await;
     assert!(task.await?);
     assert!(q.is_closed());
     assert!(!q.write(&send, b"later", Some(ID), None).await);
@@ -130,11 +130,11 @@ async fn direct_control_sink_write_has_the_same_deadline() -> anyhow::Result<()>
     })));
     q.install(&send, Some(ID.into())).await?;
     let task = tokio::spawn(async move { send.lock().await.send_frame(b"control").await });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    super::guard_10s("direct control write entering the held sink", entered.notified()).await;
     tokio::time::advance(Duration::from_secs(15)).await;
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(10), task)
-            .await??
+        super::guard_10s("direct control writer task", task)
+            .await?
             .err()
             .map(|e| e.to_string())
             .as_deref(),
@@ -175,7 +175,7 @@ async fn release_barrier_timeout_panics_instead_of_hiding_retirement_failure() -
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     q.park_next_write(entered.clone(), release);
     let task = tokio::spawn(async move { q.write(&send, b"held", Some(ID), None).await });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    super::guard_10s("writer entering the release-barrier row", entered.notified()).await;
     tokio::time::advance(Duration::from_secs(10)).await;
     let failure = task
         .await

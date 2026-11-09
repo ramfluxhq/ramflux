@@ -37,6 +37,14 @@ const INVALID: &str = "invalid";
 type TestResult = anyhow::Result<()>;
 type Fallible<T> = anyhow::Result<T>;
 
+#[allow(clippy::panic, reason = "test hang guard must fail with the awaited event")]
+async fn guard_10s<F: std::future::Future>(event: &str, future: F) -> F::Output {
+    match tokio::time::timeout(Duration::from_secs(10), future).await {
+        Ok(output) => output,
+        Err(elapsed) => panic!("timed out waiting for {event} after 10s: {elapsed}"),
+    }
+}
+
 fn ephemeral_ext() -> Ext {
     let mut ext = BTreeMap::new();
     ext.insert(DELIVERY_MODE_EXTENSION.to_owned(), Value::String("ephemeral".to_owned()));
@@ -203,6 +211,7 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
     listener.hub.set_ephemeral_clock_ms(NOW_LIVE_MS);
     listener.hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
     let wake_before = listener.notify.wake_count();
+    let hub_wake_before = listener.hub.wake_count();
     let request = ramflux_transport::GatewayQuicRequest {
         method: "POST".into(),
         path: PATH.into(),
@@ -213,6 +222,7 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
     assert_eq!(listener.hub.ephemeral_queued(TARGET).await, 1);
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);
     assert_eq!(listener.notify.wake_count(), wake_before);
+    assert_eq!(listener.hub.wake_count(), hub_wake_before, "ephemeral hub path must not wake");
     Ok(())
 }
 
@@ -238,7 +248,7 @@ async fn row_sixty_fifth_frame_queue_full() -> TestResult {
     let (entered, release) = park_hub_write(&hub, TARGET).await?;
     let first = handle_at(&hub, request(TARGET, TARGET, "env-f0"), NOW_LIVE_MS).await?;
     assert!(first.delivered);
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("writer entering the sink for the frame-cap row", entered.notified()).await;
     for n in 1..TRANSIENT_FRAME_CAP {
         let reply =
             handle_at(&hub, request(TARGET, TARGET, &format!("env-f{n}")), NOW_LIVE_MS).await?;
@@ -264,7 +274,7 @@ async fn row_byte_cap_ninth_max_frame_queue_full() -> TestResult {
     )
     .await?;
     assert!(first.delivered);
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("writer entering the sink for the byte-cap row", entered.notified()).await;
     for n in 1..8 {
         let reply = handle_at(
             &hub,
@@ -376,7 +386,7 @@ async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-open"), NOW_LIVE_MS).await
     });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("hub enqueue hold for the router-move row", entered.notified()).await;
     seed_live(&router, TARGET, SESSION_B, GATEWAY_B)?;
     router.bind_ephemeral_capability(TARGET, GATEWAY_B, SESSION_B);
     assert_eq!(
@@ -384,7 +394,7 @@ async fn row_held_forward_enqueues_on_a_after_router_move() -> TestResult {
         EphemeralRouteGate::Online { gateway_id: GATEWAY_B.into(), session_id: SESSION_B.into() }
     );
     release.add_permits(1);
-    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let reply = guard_10s("router-move ephemeral forward task", task).await??;
     assert!(reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Queued));
     hub_a.flushed(TARGET).await?;
@@ -415,7 +425,7 @@ async fn row_held_forward_drops_when_a_closed() -> TestResult {
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-closed"), NOW_LIVE_MS).await
     });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("hub enqueue hold for the closed-registration row", entered.notified()).await;
     seed_live(&router, TARGET, SESSION_B, GATEWAY_B)?;
     router.bind_ephemeral_capability(TARGET, GATEWAY_B, SESSION_B);
     assert_eq!(
@@ -426,7 +436,7 @@ async fn row_held_forward_drops_when_a_closed() -> TestResult {
     let token = snapshot.get(TARGET).ok_or_else(|| anyhow::anyhow!("hub a token"))?.token;
     hub_a.unregister(TARGET, token).await;
     release.add_permits(1);
-    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let reply = guard_10s("closed-registration ephemeral forward task", task).await??;
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::NoSession));
     hub_a.flushed(TARGET).await?;
@@ -461,10 +471,10 @@ async fn row_held_forward_refused_when_clock_reaches_d() -> TestResult {
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-at-d"), NOW_LIVE_MS).await
     });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("hub enqueue hold for the deadline row", entered.notified()).await;
     hub.set_queue_clock(TARGET, EXPIRES_AT_MS).await;
     release.add_permits(1);
-    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let reply = guard_10s("deadline ephemeral forward task", task).await??;
     assert!(!reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Expired));
     assert_eq!(EphemeralEnqueueOutcome::Expired.to_string(), EXPIRED);
@@ -481,9 +491,9 @@ async fn row_held_forward_queued_before_d() -> TestResult {
     let task = tokio::spawn(async move {
         handle_at(&held, request(TARGET, TARGET, "env-held-before-d"), NOW_LIVE_MS).await
     });
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("hub enqueue hold for the pre-deadline row", entered.notified()).await;
     release.add_permits(1);
-    let reply = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let reply = guard_10s("pre-deadline ephemeral forward task", task).await??;
     assert!(reply.delivered);
     assert_eq!(reply.outcome, Some(SessionPushForwardOutcome::Queued));
     hub.flushed(TARGET).await?;
@@ -526,7 +536,7 @@ async fn row_frame_32768_accepted_32769_invalid() -> TestResult {
     .await?;
     assert!(accepted.delivered);
     assert_eq!(accepted.outcome, Some(SessionPushForwardOutcome::Queued));
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("writer entering the sink for the maximum-frame row", entered.notified()).await;
     release.add_permits(1);
     hub.flushed(TARGET).await?;
     let over = handle_at(

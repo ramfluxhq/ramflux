@@ -17,6 +17,14 @@ const SESSION_PUSH: &str = ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY;
 
 type TestResult = anyhow::Result<()>;
 
+#[allow(clippy::panic, reason = "test hang guard must fail with the awaited event")]
+async fn guard_10s<F: std::future::Future>(event: &str, future: F) -> F::Output {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), future).await {
+        Ok(output) => output,
+        Err(elapsed) => panic!("timed out waiting for {event} after 10s: {elapsed}"),
+    }
+}
+
 fn session_push_auth() -> anyhow::Result<ramflux_node_core::GatewayAuthFrame> {
     super::negotiation::auth(true)
 }
@@ -117,7 +125,7 @@ async fn establish(
     let cursor = fixture.next().await?;
     anyhow::ensure!(cursor.path == format!("/mvp0/cursor/{TARGET}"), "{}", cursor.path);
     cursor.respond.send((200, Value::Null)).map_err(|_| Retired)?;
-    let runtime = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let runtime = guard_10s("ephemeral session establishment task", task).await??;
     let rows = frames.lock().map_err(|_| Retired)?.clone();
     Ok((runtime, rows, path))
 }
@@ -166,7 +174,7 @@ async fn negotiate_on(
         body.clone()
     };
     req.respond.send((200, reply)).map_err(|_| Retired)?;
-    let binding = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let binding = guard_10s("ephemeral negotiation task", task).await??;
     Ok((binding, path, body))
 }
 
@@ -305,7 +313,7 @@ async fn establish_legacy(
     req.respond.send((200, req.body.clone())).map_err(|_| Retired)?;
     let cursor = fixture.next().await?;
     cursor.respond.send((200, Value::Null)).map_err(|_| Retired)?;
-    tokio::time::timeout(Duration::from_secs(10), task).await??
+    guard_10s("legacy session establishment task", task).await?
 }
 
 async fn row_resume_grants_capability() -> TestResult {
@@ -355,7 +363,7 @@ async fn row_resume_without_echo_sends_false() -> TestResult {
     req.respond.send((200, capable_reply(&req.body))).map_err(|_| Retired)?;
     let cursor = fixture.next().await?;
     cursor.respond.send((200, Value::Null)).map_err(|_| Retired)?;
-    let resumed = tokio::time::timeout(Duration::from_secs(10), task).await???;
+    let resumed = guard_10s("resumed session establishment task", task).await??;
     assert!(!resumed.ephemeral);
     assert_unsupported(&router);
     Ok(())
@@ -447,7 +455,8 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     .await?;
     assert!(accepted.delivered);
     assert_eq!(accepted.outcome, Some(ramflux_node_core::SessionPushForwardOutcome::Queued));
-    tokio::time::timeout(Duration::from_secs(10), entered.notified()).await?;
+    guard_10s("ephemeral writer entering the sink after router reassertion", entered.notified())
+        .await;
     assert_eq!(fixture.context.hub.ephemeral_queued(TARGET).await, 1);
     assert_eq!(fixture.context.notify.wake_count(), wake_before);
     release.add_permits(1);

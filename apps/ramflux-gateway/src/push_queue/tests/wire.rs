@@ -31,10 +31,13 @@ impl GatewaySessionFrameSink for StepSink {
         })
     }
 }
-async fn next(events: &mut tokio::sync::mpsc::Receiver<Value>) -> anyhow::Result<Value> {
-    tokio::time::timeout(Duration::from_secs(2), events.recv())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("writer ended"))
+async fn next(
+    events: &mut tokio::sync::mpsc::Receiver<Value>,
+    event: &str,
+) -> anyhow::Result<Value> {
+    super::super::guard_10s(event, events.recv())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("writer ended before {event}"))
 }
 #[tokio::test]
 async fn queued_incarnation_and_detached_resync() -> anyhow::Result<()> {
@@ -59,7 +62,7 @@ async fn queued_incarnation_and_detached_resync() -> anyhow::Result<()> {
         }
     };
     assert!(hub.send_delivery("target", &frame(1), Some((ID, 12345))).await);
-    let first = next(&mut events).await?;
+    let first = next(&mut events, "first incarnation-tagged delivery").await?;
     assert_eq!(first["incarnation_id"], ID);
     assert_eq!(first["retain_until"], 12345);
     for seq in 2..=20 {
@@ -67,23 +70,23 @@ async fn queued_incarnation_and_detached_resync() -> anyhow::Result<()> {
     }
     for seq in 2..=8 {
         release.add_permits(1);
-        let wire = next(&mut events).await?;
+        let wire = next(&mut events, "queued durable delivery").await?;
         assert_eq!(wire["frame_type"], "deliver");
         assert_eq!(wire["entry"]["inbox_seq"], seq);
     }
     release.add_permits(1);
-    let hint = next(&mut events).await?;
+    let hint = next(&mut events, "resync hint after durable overflow").await?;
     assert_eq!(hint["frame_type"], "resync");
     assert_eq!(hint["after_inbox_seq"], 16);
     assert_eq!(hint["incarnation_id"], ID);
     assert!(hub.send_delivery("target", &frame(25), Some((ID, 12345))).await);
     release.add_permits(1);
-    let fresh = next(&mut events).await?;
+    let fresh = next(&mut events, "fresh resync after the overflow hint").await?;
     assert_eq!(fresh["frame_type"], "resync");
     assert_eq!(fresh["after_inbox_seq"], 24);
     release.add_permits(1);
     for seq in 9..=16 {
-        let wire = next(&mut events).await?;
+        let wire = next(&mut events, "remaining queued durable delivery").await?;
         assert_eq!(wire["entry"]["inbox_seq"], seq);
         assert_eq!(wire["incarnation_id"], ID);
         assert_eq!(wire["retain_until"], 12345);
@@ -103,7 +106,7 @@ async fn frame_atomic_sink_yields_between_deliveries() -> anyhow::Result<()> {
     hub.register("target".into(), "session".into(), sender.clone()).await?;
     let frame = ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 };
     assert!(hub.send_to("target", &frame).await);
-    assert_eq!(next(&mut received).await?["now"], 1);
+    assert_eq!(next(&mut received, "first heartbeat").await?["now"], 1);
     assert!(hub.send_to("target", &frame).await);
     let control = tokio::spawn(async move {
         crate::session::write_gateway_handle(
@@ -115,10 +118,10 @@ async fn frame_atomic_sink_yields_between_deliveries() -> anyhow::Result<()> {
     tokio::task::yield_now().await;
     assert!(received.try_recv().is_err());
     release.add_permits(1);
-    assert_eq!(next(&mut received).await?["now"], 7);
+    assert_eq!(next(&mut received, "direct control heartbeat").await?["now"], 7);
     release.add_permits(1);
     control.await??;
-    assert_eq!(next(&mut received).await?["now"], 1);
+    assert_eq!(next(&mut received, "queued heartbeat after control write").await?["now"], 1);
     release.add_permits(1);
     hub.flushed("target").await?;
     Ok(())
@@ -139,7 +142,7 @@ async fn queue_wait_does_not_consume_write_deadline() -> anyhow::Result<()> {
         )
         .await
     });
-    assert_eq!(next(&mut received).await?["now"], 7);
+    assert_eq!(next(&mut received, "direct heartbeat before queue wait").await?["now"], 7);
     assert!(
         hub.send_to("target", &ramflux_node_core::GatewayServerFrame::Heartbeat { now: 1 }).await
     );
@@ -147,11 +150,15 @@ async fn queue_wait_does_not_consume_write_deadline() -> anyhow::Result<()> {
     tokio::time::advance(Duration::from_secs(14)).await;
     release.add_permits(1);
     control.await??;
-    assert_eq!(next(&mut received).await?["now"], 1);
+    assert_eq!(next(&mut received, "queued heartbeat after queue wait").await?["now"], 1);
     tokio::time::advance(Duration::from_secs(14)).await;
     assert!(!*registration.closed.borrow());
     tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::time::timeout(Duration::from_secs(1), registration.closed.changed()).await??;
+    super::super::guard_10s(
+        "registration closing after the sink write deadline",
+        registration.closed.changed(),
+    )
+    .await?;
     assert!(*registration.closed.borrow());
     Ok(())
 }

@@ -7,23 +7,12 @@ use crate::session_push::tests::support::{ID, sink};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 const NOW_MS: u64 = 1_000_000;
 const LIVE_MS: u64 = NOW_MS + 1;
 const MAX_FRAME: usize = 32_768;
 
 type TestResult<T = ()> = anyhow::Result<T>;
-
-/// Hang guard: fails the test (assertion panic) if `future` does not finish within 10 s.
-async fn guard_10s<F: std::future::Future>(what: &str, future: F) -> F::Output {
-    let finished = tokio::time::timeout(Duration::from_secs(10), future).await;
-    assert!(finished.is_ok(), "{what} did not finish within 10s");
-    match finished {
-        Ok(output) => output,
-        Err(_) => unreachable!("guarded by the assert above"),
-    }
-}
 
 fn queue() -> PushQueue {
     let (closed, _) = tokio::sync::watch::channel(false);
@@ -169,14 +158,14 @@ async fn row_inflight_sink_write_still_occupies() -> TestResult {
         writer.complete_transient(&frame);
         Ok(wrote)
     });
-    guard_10s("writer sink barrier", entered.notified()).await;
+    super::guard_10s("writer entering the sink for transient occupancy", entered.notified()).await;
     assert_eq!(occupancy(&queue).0, TRANSIENT_FRAME_CAP);
     assert_eq!(
         queue.try_push_transient(transient_bytes(99)?, LIVE_MS),
         TransientAdmission::QueueFull
     );
     release.add_permits(1);
-    let wrote = guard_10s("writer task", task).await??;
+    let wrote = super::guard_10s("transient writer task", task).await??;
     assert!(wrote);
     Ok(())
 }
@@ -205,7 +194,8 @@ async fn row_inflight_max_write_seven_queued_ninth_queue_full() -> TestResult {
         writer.complete_transient(&frame);
         Ok(wrote)
     });
-    guard_10s("in-flight sink barrier", entered.notified()).await;
+    super::guard_10s("writer entering the sink for maximum-frame occupancy", entered.notified())
+        .await;
     assert_eq!(occupancy(&queue), (8, TRANSIENT_BYTE_CAP));
     assert_eq!(
         queue.try_push_transient(max_frame_bytes()?, LIVE_MS),
@@ -213,7 +203,7 @@ async fn row_inflight_max_write_seven_queued_ninth_queue_full() -> TestResult {
     );
     assert_eq!(occupancy(&queue), (8, TRANSIENT_BYTE_CAP));
     release.add_permits(1);
-    let wrote = guard_10s("in-flight writer task", task).await??;
+    let wrote = super::guard_10s("maximum-frame writer task", task).await??;
     assert!(wrote);
     assert_eq!(frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.len(), 1);
     assert_eq!(occupancy(&queue), (7, 7 * MAX_FRAME));
@@ -239,7 +229,7 @@ async fn row_expired_while_waiting_for_sink_not_written() -> TestResult {
     });
     queue.set_clock_ms(deadline);
     drop(held);
-    let wrote = guard_10s("expired writer task", task).await?;
+    let wrote = super::guard_10s("expired transient writer task", task).await?;
     assert!(wrote, "expiry is a silent drop, not a sink failure");
     assert!(frames.lock().map_err(|_| anyhow::anyhow!("frames"))?.is_empty());
     assert_eq!(occupancy(&queue), (0, 0));

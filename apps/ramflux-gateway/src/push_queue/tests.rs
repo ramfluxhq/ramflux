@@ -70,13 +70,13 @@ fn contended_admission_waits_and_queues() -> anyhow::Result<()> {
         let _ = result.send(producer.try_push(vec![0], 1));
     });
     // This gate fires only after the real mutex reported contention.
-    ready.recv_timeout(Duration::from_secs(10))?;
+    super::recv_timeout_10s(&ready, "state mutex contention");
     assert!(
         matches!(received.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
         "admission returned while the state mutex is held"
     );
     drop(guard);
-    let admitted = received.recv_timeout(Duration::from_secs(10))?;
+    let admitted = super::recv_timeout_10s(&received, "queue admission after mutex release");
     worker.join().map_err(|_| anyhow::anyhow!("admission worker panicked"))?;
     assert_eq!(admitted, Admission::Queued);
     assert!(matches!(queue.next(), Next::Frame(_)));

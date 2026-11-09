@@ -683,6 +683,24 @@ impl Drop for CancelledWrite {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, reason = "test hang guard must fail with the awaited event")]
+async fn guard_10s<F: std::future::Future>(event: &str, future: F) -> F::Output {
+    match tokio::time::timeout(Duration::from_secs(10), future).await {
+        Ok(output) => output,
+        Err(elapsed) => panic!("timed out waiting for {event} after 10s: {elapsed}"),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, reason = "test hang guard must fail with the awaited event")]
+fn recv_timeout_10s<T>(receiver: &std::sync::mpsc::Receiver<T>, event: &str) -> T {
+    match receiver.recv_timeout(Duration::from_secs(10)) {
+        Ok(value) => value,
+        Err(error) => panic!("timed out waiting for {event} after 10s: {error}"),
+    }
+}
+
+#[cfg(test)]
 mod retirement_tests;
 #[cfg(test)]
 mod tests;
