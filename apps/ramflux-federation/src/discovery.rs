@@ -109,7 +109,9 @@ impl FederationDiscoverySurface {
                 "RAMFLUX_CLIENT_SIGNALING_TURN_ADDR",
                 format!("{}:3478", self.node_id),
             ),
-            protocol_versions: self.protocol_versions.clone(),
+            protocol_versions: ramflux_protocol::advertised_client_protocol_versions(
+                &self.protocol_versions,
+            ),
             client_capabilities: vec![
                 "opaque_delivery".to_owned(),
                 "prekey".to_owned(),

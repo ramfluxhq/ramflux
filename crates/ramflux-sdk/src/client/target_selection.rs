@@ -8,6 +8,7 @@
 use crate::client::identity_authority::VerifiedLayerRoster;
 use crate::prekey::SdkDeviceManifestResponse;
 use crate::{RamfluxClient, SdkError};
+use ramflux_crypto::custody::VerifiedRecord;
 use ramflux_protocol::custody::SignedLayerDeclaration;
 use ramflux_protocol::message::KindId;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
@@ -467,11 +468,7 @@ impl RamfluxClient {
 
     /// One member's refused cache is stale for that member; it does not fail the send.
     fn cached_roster(&self, root: &str) -> Result<Option<VerifiedLayerRoster>, SdkError> {
-        Ok(self
-            .current_custody_authority(root, unix_now()?)
-            .ok()
-            .flatten()
-            .map(VerifiedLayerRoster::from_verified))
+        roster_from_authority_result(self.current_custody_authority(root, unix_now()?))
     }
 
     fn shared_group_selection_request(
@@ -543,6 +540,30 @@ fn finish_group_request(
         membership: MembershipSnapshot { epoch, devices },
         variant_counter_high_water: 0,
     })
+}
+
+fn is_storage_or_io(error: &SdkError) -> bool {
+    matches!(
+        error,
+        SdkError::Storage(_)
+            | SdkError::Io(_)
+            | SdkError::AccountDbNotUnlocked
+            | SdkError::AccountNotOpen(_)
+            | SdkError::AccountIndexNotOpen
+            | SdkError::AccountManifestUnreadable
+    )
+}
+
+pub(crate) fn roster_from_authority_result(
+    result: Result<Option<VerifiedRecord>, SdkError>,
+) -> Result<Option<VerifiedLayerRoster>, SdkError> {
+    match result {
+        Ok(record) => Ok(record.map(VerifiedLayerRoster::from_verified)),
+        Err(error) if is_storage_or_io(&error) || matches!(error, SdkError::CustodyForkFenced) => {
+            Err(error)
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 #[cfg(test)]

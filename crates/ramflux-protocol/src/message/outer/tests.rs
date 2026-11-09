@@ -4,19 +4,22 @@
 use super::{
     CANDIDATE_ENVELOPE_SCHEMA, CRYPTOBOX_OVERHEAD_BYTES, CandidateDeliveryClass,
     CandidateOuterEnvelope, FRAME_PREFIX_BYTES, IngressSizes, MAX_BOOTSTRAP_CAPSULE_BYTES,
-    MAX_COMPLETE_FRAME_BYTES, MAX_ENCRYPTED_HEADER_BYTES, MAX_IDENTIFIER_BYTES, MAX_INNER_BYTES,
-    MAX_OUTER_METADATA_BYTES, MAX_PADDED_PLAINTEXT_BYTES, MAX_UNPADDED_PLAINTEXT_BYTES,
-    MESSAGE_SCHEMA_V1_PROFILE, NamedDeliveryMode, OuterProfileError, REPORT_OPENING_BYTES,
-    TemporaryRatchet, accept_after_size_preflight, decode_candidate_outer_ijson,
-    discover_candidate_message_schema, validate_candidate_delivery_mode,
+    MAX_CIPHERTEXT_B64_CHARS, MAX_CIPHERTEXT_BYTES, MAX_COMPLETE_FRAME_BYTES,
+    MAX_ENCRYPTED_HEADER_BYTES, MAX_IDENTIFIER_BYTES, MAX_INNER_BYTES, MAX_OUTER_METADATA_BYTES,
+    MAX_UNPADDED_PLAINTEXT_BYTES, MESSAGE_SCHEMA_V1_PROFILE, NamedDeliveryMode, OuterProfileError,
+    REPORT_OPENING_BYTES, SealedSendSizes, TemporaryRatchet, accept_after_size_preflight,
+    advertised_client_protocol_versions, decode_candidate_outer_ijson,
+    discover_verified_message_schema, validate_candidate_delivery_mode,
 };
 use crate::schema_profile::{
     ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
 };
 use crate::{
-    DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields, WellKnownClientRecord,
-    canonical_json_bytes, ephemeral,
+    DeliveryClass, Envelope, Ext, Priority, ProtocolError, SignatureAlg, SignedFields,
+    WELL_KNOWN_CLIENT_SCHEMA, WellKnownClientRecord, canonical_json_bytes,
+    client_discovery_signing_bytes, encode_base64url, ephemeral,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -78,12 +81,59 @@ fn candidate_value(mode: &str) -> Value {
     })
 }
 
-fn sizes_ok() -> Result<IngressSizes, OuterProfileError> {
-    IngressSizes::from_inner(1)
+const PAIR_BEFORE: &[u8] = b"pair-session-before";
+const PAIR_AFTER: &[u8] = b"pair-session-after-commit";
+const LIVE_ENVELOPE_GOLDEN: &[u8] = br#"{"created_at":1000,"delivery_class":"opaque_event","domain":"ramflux.envelope.v1","encrypted_payload":"payload","envelope_id":"envelope","ext":{"delivery_mode":"ephemeral"},"payload_hash":"hash","priority":"normal","schema":"ramflux.envelope.v1","signature":"signature","signature_alg":"ed25519","signing_key_id":"key","source_device_id":"device","source_principal_id":"principal","target_delivery_id":"target","ttl":300,"version":1}"#;
+
+fn candidate_outer(mode: NamedDeliveryMode) -> CandidateOuterEnvelope {
+    CandidateOuterEnvelope {
+        schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
+        version: 2,
+        domain: crate::domain::ENVELOPE.to_owned(),
+        envelope_id: "envelope".to_owned(),
+        source_principal_id: "principal".to_owned(),
+        source_device_id: "device".to_owned(),
+        target_delivery_id: "target".to_owned(),
+        delivery_class: CandidateDeliveryClass::Message,
+        priority: Priority::Normal,
+        ttl_seconds: 300,
+        created_at: 1_762_128_000,
+        encrypted_payload: "payload".to_owned(),
+        payload_hash: "hash".to_owned(),
+        collapse_tag: collapse_tag(),
+        delivery_mode: mode,
+        node_report_receipt: None,
+        signed: SignedFields {
+            signing_key_id: "key".to_owned(),
+            signature_alg: SignatureAlg::Ed25519,
+            signature: "signature".to_owned(),
+        },
+    }
 }
 
-fn bound_inner() -> Result<IngressSizes, OuterProfileError> {
-    IngressSizes::from_inner(MAX_INNER_BYTES)
+fn max_ciphertext_outer() -> CandidateOuterEnvelope {
+    let mut outer = candidate_outer(NamedDeliveryMode::Durable);
+    outer.encrypted_payload = encode_base64url(vec![0_u8; MAX_CIPHERTEXT_BYTES]);
+    outer
+}
+
+fn protocol_err_display(
+    result: Result<(), ProtocolError>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match result {
+        Err(error) => Ok(error.to_string()),
+        Ok(()) => Err("expected protocol refusal".into()),
+    }
+}
+
+fn refuse_over_cap(sizes: IngressSizes) {
+    let mut ratchet = TemporaryRatchet::wrap_session(PAIR_BEFORE.to_vec());
+    assert_eq!(
+        accept_after_size_preflight(sizes, &mut ratchet, PAIR_AFTER.to_vec()),
+        Err(OuterProfileError::PayloadTooLarge)
+    );
+    assert_eq!(ratchet.snapshot(), PAIR_BEFORE);
+    assert_eq!(OuterProfileError::PayloadTooLarge.to_string(), "payload too large");
 }
 
 #[test]
@@ -149,60 +199,79 @@ fn named_delivery_mode_replaces_signed_ext_bridge_at_reset()
 
 #[test]
 fn inner_and_complete_frame_caps_precede_state_commit() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ratchet = TemporaryRatchet::new();
-    accept_after_size_preflight(bound_inner()?, &mut ratchet)?;
-    assert!(ratchet.is_committed());
-    assert_eq!(bound_inner()?.unpadded_plaintext_bytes, MAX_UNPADDED_PLAINTEXT_BYTES);
+    let outer = max_ciphertext_outer();
+    assert_eq!(outer.encrypted_payload.len(), MAX_CIPHERTEXT_B64_CHARS);
+    let sizes = IngressSizes::measure_candidate(&outer, &[], &[])?;
+    assert_eq!(sizes.ciphertext_bytes, MAX_CIPHERTEXT_BYTES);
+    let mut ratchet = TemporaryRatchet::wrap_session(PAIR_BEFORE.to_vec());
+    accept_after_size_preflight(sizes, &mut ratchet, PAIR_AFTER.to_vec())?;
+    assert_eq!(ratchet.snapshot(), PAIR_AFTER);
     assert_eq!(
         MAX_INNER_BYTES + FRAME_PREFIX_BYTES + REPORT_OPENING_BYTES,
         MAX_UNPADDED_PLAINTEXT_BYTES
     );
 
-    let mut ok = TemporaryRatchet::new();
-    accept_after_size_preflight(sizes_ok()?, &mut ok)?;
-    assert!(ok.is_committed());
+    let ciphertext = vec![0_u8; MAX_CIPHERTEXT_BYTES];
+    let header = vec![0_u8; MAX_ENCRYPTED_HEADER_BYTES];
+    let bootstrap = vec![0_u8; MAX_BOOTSTRAP_CAPSULE_BYTES];
+    let send = IngressSizes::measure_sealed_send(&SealedSendSizes {
+        inner_bytes: MAX_INNER_BYTES,
+        ciphertext: &ciphertext,
+        encrypted_header: &header,
+        bootstrap_capsule: &bootstrap,
+        identifiers: ["e", "p", "d", "t"],
+        metadata: None,
+        complete_frame_bytes: MAX_COMPLETE_FRAME_BYTES,
+    })?;
+    let mut ok = TemporaryRatchet::wrap_session(PAIR_BEFORE.to_vec());
+    accept_after_size_preflight(send, &mut ok, PAIR_AFTER.to_vec())?;
+    assert_eq!(ok.snapshot(), PAIR_AFTER);
 
-    for (name, over) in cap_overflows()? {
-        let mut ratchet = TemporaryRatchet::new();
-        assert_eq!(
-            accept_after_size_preflight(over, &mut ratchet),
-            Err(OuterProfileError::PayloadTooLarge),
-            "{name}"
-        );
-        assert!(!ratchet.is_committed(), "{name} must not expose ratchet state");
-        assert_eq!(OuterProfileError::PayloadTooLarge.to_string(), "payload too large");
-    }
+    one_byte_over_each_real_cap()?;
     Ok(())
 }
 
-fn cap_overflows() -> Result<Vec<(&'static str, IngressSizes)>, OuterProfileError> {
-    let mut inner = bound_inner()?;
-    inner.inner_bytes = MAX_INNER_BYTES + 1;
-    inner.unpadded_plaintext_bytes = inner.inner_bytes + FRAME_PREFIX_BYTES + REPORT_OPENING_BYTES;
-    let mut unpadded = sizes_ok()?;
-    unpadded.unpadded_plaintext_bytes = MAX_UNPADDED_PLAINTEXT_BYTES + 1;
-    let mut padded = sizes_ok()?;
-    padded.padded_plaintext_bytes = MAX_PADDED_PLAINTEXT_BYTES + 1;
-    let mut header = sizes_ok()?;
-    header.encrypted_header_bytes = MAX_ENCRYPTED_HEADER_BYTES + 1;
-    let mut bootstrap = sizes_ok()?;
-    bootstrap.bootstrap_capsule_bytes = MAX_BOOTSTRAP_CAPSULE_BYTES + 1;
-    let mut metadata = sizes_ok()?;
-    metadata.outer_metadata_bytes = MAX_OUTER_METADATA_BYTES + 1;
-    let mut identifier = sizes_ok()?;
-    identifier.identifier_bytes = MAX_IDENTIFIER_BYTES + 1;
-    let mut frame = sizes_ok()?;
-    frame.complete_frame_bytes = MAX_COMPLETE_FRAME_BYTES + 1;
-    Ok(vec![
-        ("inner", inner),
-        ("unpadded", unpadded),
-        ("padded", padded),
-        ("header", header),
-        ("bootstrap", bootstrap),
-        ("metadata", metadata),
-        ("identifier", identifier),
-        ("complete_frame", frame),
-    ])
+fn one_byte_over_each_real_cap() -> Result<(), Box<dyn std::error::Error>> {
+    let mut over_ct = max_ciphertext_outer();
+    over_ct.encrypted_payload = encode_base64url(vec![0_u8; MAX_CIPHERTEXT_BYTES + 1]);
+    refuse_over_cap(IngressSizes::measure_candidate(&over_ct, &[], &[])?);
+
+    let mut over_id = max_ciphertext_outer();
+    over_id.envelope_id = "i".repeat(MAX_IDENTIFIER_BYTES + 1);
+    refuse_over_cap(IngressSizes::measure_candidate(&over_id, &[], &[])?);
+
+    let mut over_meta = max_ciphertext_outer();
+    over_meta.node_report_receipt = Some(Value::String("m".repeat(MAX_OUTER_METADATA_BYTES)));
+    refuse_over_cap(IngressSizes::measure_candidate(&over_meta, &[], &[])?);
+
+    let over_header = vec![0_u8; MAX_ENCRYPTED_HEADER_BYTES + 1];
+    refuse_over_cap(IngressSizes::measure_candidate(&max_ciphertext_outer(), &over_header, &[])?);
+    let over_bootstrap = vec![0_u8; MAX_BOOTSTRAP_CAPSULE_BYTES + 1];
+    refuse_over_cap(IngressSizes::measure_candidate(
+        &max_ciphertext_outer(),
+        &[],
+        &over_bootstrap,
+    )?);
+
+    refuse_over_cap(IngressSizes::measure_sealed_send(&SealedSendSizes {
+        inner_bytes: MAX_INNER_BYTES + 1,
+        ciphertext: &[0_u8; 1],
+        encrypted_header: &[],
+        bootstrap_capsule: &[],
+        identifiers: ["e", "p", "d", "t"],
+        metadata: None,
+        complete_frame_bytes: 1,
+    })?);
+    refuse_over_cap(IngressSizes::measure_sealed_send(&SealedSendSizes {
+        inner_bytes: 1,
+        ciphertext: &[0_u8; 1],
+        encrypted_header: &[],
+        bootstrap_capsule: &[],
+        identifiers: ["e", "p", "d", "t"],
+        metadata: None,
+        complete_frame_bytes: MAX_COMPLETE_FRAME_BYTES + 1,
+    })?);
+    Ok(())
 }
 
 #[test]
@@ -213,21 +282,21 @@ fn live_envelope_wire_bytes_unchanged_with_schema_gate_off()
     assert!(!schema_v1_live());
     let envelope = live_envelope(Some("ephemeral"));
     let first = canonical_json_bytes(&envelope)?;
+    assert_eq!(first, LIVE_ENVELOPE_GOLDEN);
     let decoded: Envelope = serde_json::from_slice(&first)?;
     let second = canonical_json_bytes(&decoded)?;
     assert_eq!(first, second);
     assert_eq!(envelope.schema, crate::domain::ENVELOPE);
     assert_ne!(envelope.schema, CANDIDATE_ENVELOPE_SCHEMA);
-    assert!(envelope.delivery_mode_bridge().is_some());
+    assert_eq!(envelope.delivery_mode_bridge(), Some(&Value::String("ephemeral".to_owned())));
     Ok(())
 }
 
-#[test]
-fn candidate_profile_discovery_rejects_old_node() -> Result<(), Box<dyn std::error::Error>> {
-    let mut record = WellKnownClientRecord {
-        schema: crate::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
+fn unsigned_discovery_record() -> WellKnownClientRecord {
+    WellKnownClientRecord {
+        schema: WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
         node_id: "node.example.com".to_owned(),
-        node_public_key: "key".to_owned(),
+        node_public_key: String::new(),
         node_ca_cert_pem: "ca".to_owned(),
         gateway_quic_addr: "node.example.com:443".to_owned(),
         gateway_tcp_addr: "node.example.com:443".to_owned(),
@@ -236,16 +305,77 @@ fn candidate_profile_discovery_rejects_old_node() -> Result<(), Box<dyn std::err
         relay_server_name: "ramflux-relay".to_owned(),
         prekey_http_url: "https://node.example.com".to_owned(),
         signaling_turn_addr: "node.example.com:3478".to_owned(),
-        protocol_versions: vec!["v1".to_owned()],
+        protocol_versions: vec!["v1".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()],
         client_capabilities: vec!["prekey".to_owned()],
         updated_at: 1000,
         expires_at: 2000,
         signature: String::new(),
-    };
-    assert!(discover_candidate_message_schema(&record).is_err());
-    super::admit_discovered_profile(&record)?;
-    record.protocol_versions.push(MESSAGE_SCHEMA_V1_PROFILE.to_owned());
-    discover_candidate_message_schema(&record)?;
+    }
+}
+
+fn sign_discovery(record: &mut WellKnownClientRecord, seed: u8) -> Result<(), ProtocolError> {
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    record.node_public_key = encode_base64url(key.verifying_key().to_bytes());
+    record.signature =
+        encode_base64url(key.sign(&client_discovery_signing_bytes(record)?).to_bytes());
+    Ok(())
+}
+
+#[test]
+fn candidate_profile_discovery_requires_verified_canonical_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let unsigned = unsigned_discovery_record();
+    assert_eq!(
+        protocol_err_display(discover_verified_message_schema(&unsigned, 1500))?,
+        ProtocolError::InvalidSignatureLength(0).to_string()
+    );
+
+    let mut wrong = unsigned_discovery_record();
+    sign_discovery(&mut wrong, 1)?;
+    let foreign = SigningKey::from_bytes(&[2; 32]);
+    wrong.signature =
+        encode_base64url(foreign.sign(&client_discovery_signing_bytes(&wrong)?).to_bytes());
+    assert_eq!(
+        protocol_err_display(discover_verified_message_schema(&wrong, 1500))?,
+        ProtocolError::SignatureVerificationFailed.to_string()
+    );
+
+    let mut alternate = unsigned_discovery_record();
+    alternate.protocol_versions = vec!["v1".to_owned()];
+    alternate.client_capabilities = vec!["prekey".to_owned(), MESSAGE_SCHEMA_V1_PROFILE.to_owned()];
+    sign_discovery(&mut alternate, 3)?;
+    assert_eq!(
+        protocol_err_display(discover_verified_message_schema(&alternate, 1500))?,
+        ProtocolError::InvalidDomain {
+            expected: MESSAGE_SCHEMA_V1_PROFILE,
+            actual: "v1".to_owned(),
+        }
+        .to_string()
+    );
+
+    let mut old = unsigned_discovery_record();
+    old.protocol_versions = vec!["v1".to_owned()];
+    sign_discovery(&mut old, 4)?;
+    assert_eq!(
+        protocol_err_display(discover_verified_message_schema(&old, 1500))?,
+        ProtocolError::InvalidDomain {
+            expected: MESSAGE_SCHEMA_V1_PROFILE,
+            actual: "v1".to_owned(),
+        }
+        .to_string()
+    );
+    let verified = crate::VerifiedWellKnownClientRecord::verify(&old, 1500)?;
+    super::admit_discovered_profile(&verified)?;
+
+    let mut live = unsigned_discovery_record();
+    sign_discovery(&mut live, 5)?;
+    discover_verified_message_schema(&live, 1500)?;
+    assert_eq!(advertised_client_protocol_versions(&["v1".to_owned()]), vec!["v1".to_owned()]);
+    assert!(
+        !advertised_client_protocol_versions(&["v1".to_owned()])
+            .iter()
+            .any(|version| version == MESSAGE_SCHEMA_V1_PROFILE)
+    );
     Ok(())
 }
 

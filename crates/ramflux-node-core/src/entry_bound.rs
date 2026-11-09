@@ -68,15 +68,22 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
 }
 
 fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
-    ramflux_protocol::message::outer::refuse_live_bridge(envelope)
-        .map_err(|_| NodeCoreError::PayloadTooLarge)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::from_inner(
-        envelope.encrypted_payload.len(),
-    )
-    .map_err(|_| NodeCoreError::PayloadTooLarge)?;
-    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::new();
-    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet)
-        .map_err(|_| NodeCoreError::PayloadTooLarge)
+    ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_live(envelope, &[], &[])
+        .map_err(map_outer_profile)?;
+    ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)
+}
+
+fn map_outer_profile(error: ramflux_protocol::message::outer::OuterProfileError) -> NodeCoreError {
+    use ramflux_protocol::message::outer::OuterProfileError;
+    match error {
+        OuterProfileError::PayloadTooLarge => NodeCoreError::PayloadTooLarge,
+        OuterProfileError::Bridge
+        | OuterProfileError::DualField
+        | OuterProfileError::UnknownMode
+        | OuterProfileError::MissingMode => NodeCoreError::DeliveryModeRefused,
+        _ => NodeCoreError::InvalidConfiguration(error.to_string()),
+    }
 }
 
 #[cfg(test)]

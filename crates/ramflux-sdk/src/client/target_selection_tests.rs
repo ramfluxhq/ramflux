@@ -893,6 +893,20 @@ async fn bad_cached_authority_isolates_that_member_as_stale() -> TestResult {
 }
 
 #[test]
+fn storage_errors_in_cached_roster_are_not_classified_stale() -> TestResult {
+    match roster_from_authority_result(Err(SdkError::AccountDbNotUnlocked)) {
+        Err(SdkError::AccountDbNotUnlocked) => {}
+        other => return Err(format!("storage must propagate, got {other:?}").into()),
+    }
+    match roster_from_authority_result(Err(SdkError::InboundRejected("authority refused".into()))) {
+        Ok(None) => {}
+        other => return Err(format!("authority refusal must be stale, got {other:?}").into()),
+    }
+    assert!(roster_from_authority_result(Ok(None))?.is_none());
+    Ok(())
+}
+
+#[test]
 fn control_route_selects_control_kind() {
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Control), KindId::KindControl);
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::GroupControl), KindId::KindControl);

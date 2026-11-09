@@ -13,12 +13,10 @@ use crate::{
 
 const GATEWAY_QUIC_RUNTIME_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RUNTIME";
 
-/// Candidate profile discovery. Live listeners stay on the existing well-known record.
+/// Advertiser-only helper. The SDK consumer verifies and reads the token.
 #[cfg_attr(not(test), expect(dead_code, reason = "S10a P06 dormant until P24"))]
-fn admit_discovered_profile(
-    record: &ramflux_protocol::WellKnownClientRecord,
-) -> Result<(), ramflux_protocol::ProtocolError> {
-    ramflux_protocol::message::outer::admit_discovered_profile(record)
+fn advertised_client_protocol_versions(base: &[String]) -> Vec<String> {
+    ramflux_protocol::advertised_client_protocol_versions(base)
 }
 const GATEWAY_QUIC_WORKER_THREADS_ENV: &str = "RAMFLUX_GATEWAY_QUIC_WORKER_THREADS";
 
@@ -582,29 +580,13 @@ mod tests {
     use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
 
     #[test]
-    fn candidate_profile_discovery_is_skipped_while_gate_off()
-    -> Result<(), ramflux_protocol::ProtocolError> {
+    fn candidate_profile_token_is_not_advertised_while_gate_off() {
         assert!(!ramflux_protocol::schema_profile::schema_v1_live());
-        let record = ramflux_protocol::WellKnownClientRecord {
-            schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
-            node_id: "node.example.com".to_owned(),
-            node_public_key: "key".to_owned(),
-            node_ca_cert_pem: "ca".to_owned(),
-            gateway_quic_addr: "node.example.com:443".to_owned(),
-            gateway_tcp_addr: "node.example.com:443".to_owned(),
-            gateway_server_name: "ramflux-gateway".to_owned(),
-            relay_quic_addr: "node.example.com:17447".to_owned(),
-            relay_server_name: "ramflux-relay".to_owned(),
-            prekey_http_url: "https://node.example.com".to_owned(),
-            signaling_turn_addr: "node.example.com:3478".to_owned(),
-            protocol_versions: vec!["v1".to_owned()],
-            client_capabilities: vec!["prekey".to_owned()],
-            updated_at: 1000,
-            expires_at: 2000,
-            signature: String::new(),
-        };
-        super::admit_discovered_profile(&record)?;
-        Ok(())
+        let versions = super::advertised_client_protocol_versions(&["v1".to_owned()]);
+        assert_eq!(versions, vec!["v1".to_owned()]);
+        assert!(!versions.iter().any(|version| {
+            version == ramflux_protocol::message::outer::MESSAGE_SCHEMA_V1_PROFILE
+        }));
     }
 
     #[test]

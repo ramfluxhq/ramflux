@@ -10,6 +10,26 @@ use super::{
 use crate::client::identity_authority::HeadUse;
 use crate::prekey::sdk_fetch_prekey_bundle;
 
+fn persisted_pair_snapshot(
+    client: &RamfluxClient,
+    local: &ramflux_crypto::RootQualifiedDeviceRef,
+    remote: &ramflux_crypto::RootQualifiedDeviceRef,
+) -> Result<Vec<u8>, SdkError> {
+    let Some(id) = client
+        .account_db()?
+        .load_actor_state::<String>(&RamfluxClient::pair_key(local, remote)?)?
+    else {
+        return Ok(Vec::new());
+    };
+    match client
+        .account_db()?
+        .load_actor_state::<serde_json::Value>(&format!("dm-pair/session/{id}"))?
+    {
+        Some(value) => Ok(serde_json::to_vec(&value)?),
+        None => Ok(Vec::new()),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Pair {
     #[serde(default)]
@@ -60,6 +80,35 @@ impl RamfluxClient {
             }
             Ok(())
         })
+    }
+
+    pub(crate) fn persist_pair_after_size_preflight(
+        &self,
+        sizes: ramflux_protocol::message::outer::IngressSizes,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+        bundle: &[u8; 32],
+        session: &ramflux_crypto::DmSession,
+    ) -> Result<(), SdkError> {
+        let before = persisted_pair_snapshot(self, local, remote)?;
+        let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::wrap_session(before);
+        let advanced = serde_json::to_vec(&session.snapshot())?;
+        ramflux_protocol::message::outer::accept_after_size_preflight(
+            sizes,
+            &mut ratchet,
+            advanced,
+        )
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+        self.persist_pair(local, remote, bundle, session)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persisted_pair_snapshot(
+        &self,
+        local: &ramflux_crypto::RootQualifiedDeviceRef,
+        remote: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<Vec<u8>, SdkError> {
+        persisted_pair_snapshot(self, local, remote)
     }
     pub(super) fn confirm_pair(
         &self,

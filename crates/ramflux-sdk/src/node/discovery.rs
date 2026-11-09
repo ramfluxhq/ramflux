@@ -2,10 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Bounded HTTP(S) client-record retrieval.
-use super::{
-    Duration, SdkError, WellKnownClientRecord, node_error, now_unix_timestamp,
-    verify_client_discovery_record,
-};
+use super::{Duration, SdkError, WellKnownClientRecord, node_error, now_unix_timestamp};
 pub(crate) fn discovery_origin(input: &str) -> Result<String, SdkError> {
     let origin = if input.contains("://") { input.to_owned() } else { format!("https://{input}") };
     let url = reqwest::Url::parse(&origin).map_err(|_| node_error("invalid node URL"))?;
@@ -44,11 +41,13 @@ pub(crate) async fn fetch_client_record(input: &str) -> Result<WellKnownClientRe
         bytes.extend_from_slice(&chunk);
     }
     let record: WellKnownClientRecord = serde_json::from_slice(&bytes)?;
-    verify_client_discovery_record(&record, now_unix_timestamp().unsigned_abs())?;
-    if !input.contains("://") && record.node_id != input {
+    let now = now_unix_timestamp().unsigned_abs();
+    let verified = ramflux_protocol::VerifiedWellKnownClientRecord::verify(&record, now)?;
+    if !input.contains("://") && verified.record().node_id != input {
         return Err(node_error("discovery node_id mismatch"));
     }
-    Ok(record)
+    ramflux_protocol::message::outer::admit_discovered_profile(&verified)?;
+    Ok(verified.record().clone())
 }
 
 fn discovery_error(error: reqwest::Error) -> SdkError {

@@ -35,14 +35,55 @@ pub struct WellKnownClientRecord {
 /// Candidate message-schema v1 profile token advertised during discovery.
 pub const MESSAGE_SCHEMA_V1_PROFILE: &str = crate::message::outer::MESSAGE_SCHEMA_V1_PROFILE;
 
+/// A [`WellKnownClientRecord`] whose signature verified against the advertising
+/// node's `node_public_key`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedWellKnownClientRecord<'a> {
+    record: &'a WellKnownClientRecord,
+}
+
+impl<'a> VerifiedWellKnownClientRecord<'a> {
+    /// Verify schema, CA, freshness, and the node-bound Ed25519 signature.
+    ///
+    /// # Errors
+    /// Returns the underlying verifier error when the record is unsigned,
+    /// wrongly signed, stale, or schema-invalid.
+    pub fn verify(record: &'a WellKnownClientRecord, now: u64) -> Result<Self, ProtocolError> {
+        verify_client_discovery_record(record, now)?;
+        Ok(Self { record })
+    }
+
+    #[must_use]
+    pub const fn record(&self) -> &WellKnownClientRecord {
+        self.record
+    }
+}
+
 /// Reject an old node that does not advertise the candidate message-schema profile.
 ///
 /// # Errors
 /// Returns [`ProtocolError::InvalidDomain`] when the v1 profile is absent.
 pub fn discover_candidate_message_schema(
-    record: &WellKnownClientRecord,
+    record: &VerifiedWellKnownClientRecord<'_>,
 ) -> Result<(), ProtocolError> {
     crate::message::outer::discover_candidate_message_schema(record)
+}
+
+/// Verify the record, then require the canonical `protocol_versions` token.
+///
+/// # Errors
+/// Signature, freshness, identity, or missing-token refusals.
+pub fn discover_verified_message_schema(
+    record: &WellKnownClientRecord,
+    now: u64,
+) -> Result<(), ProtocolError> {
+    crate::message::outer::discover_verified_message_schema(record, now)
+}
+
+/// Protocol versions an advertiser publishes. The v1 token is absent while the gate is off.
+#[must_use]
+pub fn advertised_client_protocol_versions(base: &[String]) -> Vec<String> {
+    crate::message::outer::advertised_client_protocol_versions(base)
 }
 
 /// Applies the shared server/client discovery freshness window.

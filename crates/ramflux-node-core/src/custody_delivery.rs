@@ -15,15 +15,18 @@ fn candidate_size_preflight(envelope: &ramflux_protocol::Envelope) -> Result<(),
     if !ramflux_protocol::schema_profile::schema_v1_live() {
         return Ok(());
     }
-    ramflux_protocol::message::outer::refuse_live_bridge(envelope)
-        .map_err(|_| CustodyRefusal::InvalidInput)?;
-    let sizes = ramflux_protocol::message::outer::IngressSizes::from_inner(
-        envelope.encrypted_payload.len(),
-    )
-    .map_err(|_| CustodyRefusal::PayloadTooLarge)?;
-    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::new();
-    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet)
-        .map_err(|_| CustodyRefusal::PayloadTooLarge)
+    ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_live(envelope, &[], &[])
+        .map_err(map_outer_profile)?;
+    ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)
+}
+
+fn map_outer_profile(error: ramflux_protocol::message::outer::OuterProfileError) -> CustodyRefusal {
+    use ramflux_protocol::message::outer::OuterProfileError;
+    match error {
+        OuterProfileError::PayloadTooLarge => CustodyRefusal::PayloadTooLarge,
+        _ => CustodyRefusal::InvalidInput,
+    }
 }
 #[derive(Clone, Copy)]
 pub(crate) struct DeliveryAuthority<'a> {

@@ -33,6 +33,8 @@ pub enum TransportError {
     InvalidDnsName(String),
     #[error("frame too large: {len} bytes")]
     FrameTooLarge { len: usize },
+    #[error("frame too short: {len} bytes")]
+    FrameTooShort { len: usize },
     #[error("transport backend is not production-grade: backend={backend}, reason={reason}")]
     NonProductionBackend { backend: &'static str, reason: &'static str },
     #[error("backpressure rejected request: capacity={capacity}, in_flight={in_flight}")]

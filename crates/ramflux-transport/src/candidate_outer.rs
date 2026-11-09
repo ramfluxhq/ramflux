@@ -41,7 +41,7 @@ pub fn decode_candidate_outer_frame(
     frame: &[u8],
 ) -> Result<CandidateOuterEnvelope, TransportError> {
     if frame.len() < 4 {
-        return Err(TransportError::FrameTooLarge { len: frame.len() });
+        return Err(TransportError::FrameTooShort { len: frame.len() });
     }
     let len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
     if len > crate::MAX_GATEWAY_FRAME_BYTES || 4 + len != frame.len() {
@@ -134,5 +134,17 @@ mod tests {
         );
         assert_eq!(live, canonical_json_bytes(&serde_json::from_slice::<Envelope>(&live)?)?);
         Ok(())
+    }
+
+    #[test]
+    fn short_candidate_frame_is_truncated_not_too_large() -> Result<(), Box<dyn std::error::Error>>
+    {
+        match decode_candidate_outer_frame(&[0, 1, 2]) {
+            Err(error) => {
+                assert_eq!(error.to_string(), "frame too short: 3 bytes");
+                Ok(())
+            }
+            Ok(_) => Err("short frame must be refused".into()),
+        }
     }
 }

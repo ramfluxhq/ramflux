@@ -173,6 +173,9 @@ fn quic_request_phase_from_transport(error: TransportError) -> QuicRequestPhase 
         TransportError::FrameTooLarge { len } => {
             QuicRequestPhase::Protocol(format!("response frame too large: {len} bytes"))
         }
+        TransportError::FrameTooShort { len } => {
+            QuicRequestPhase::Protocol(format!("response frame too short: {len} bytes"))
+        }
         other => QuicRequestPhase::ConnectionLost(other.to_string()),
     }
 }

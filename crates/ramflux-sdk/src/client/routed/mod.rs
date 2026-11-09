@@ -142,16 +142,50 @@ struct SealPair<'a> {
     bundle: [u8; 32],
 }
 
-fn candidate_seal_preflight(inner_len: usize) -> Result<(), SdkError> {
+struct SealedPairPersist<'a> {
+    inner_len: usize,
+    sealed: &'a ramflux_crypto::DmCiphertext,
+    local: &'a str,
+    remote: &'a str,
+    bundle: &'a [u8; 32],
+    session: &'a ramflux_crypto::DmSession,
+    message: &'a GatewayDirectMessage,
+}
+
+fn persist_sealed_pair(
+    client: &RamfluxClient,
+    persist: &SealedPairPersist<'_>,
+) -> Result<(), SdkError> {
+    let local_ref = client.local_device_identity(persist.local)?;
+    let remote_id = client.device_identity(persist.remote)?;
     if !crate::client::target_selection::schema_v1_selected() {
-        return Ok(());
+        return client.persist_pair(&local_ref, &remote_id, persist.bundle, persist.session);
     }
-    let sizes = ramflux_protocol::message::outer::IngressSizes::from_inner(inner_len)
-        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
-    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::new();
-    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet)
-        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
-    Ok(())
+    let frame = serde_json::to_vec(persist.sealed)?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_sealed_send(
+        &ramflux_protocol::message::outer::SealedSendSizes {
+            inner_bytes: persist.inner_len,
+            ciphertext: &persist.sealed.ciphertext,
+            encrypted_header: &persist.sealed.canonical_header_bytes,
+            bootstrap_capsule: &[],
+            identifiers: [
+                persist.message.envelope_id.as_str(),
+                persist.message.source_principal_id.as_str(),
+                persist.local,
+                persist.message.target_delivery_id.as_str(),
+            ],
+            metadata: None,
+            complete_frame_bytes: frame.len(),
+        },
+    )
+    .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+    client.persist_pair_after_size_preflight(
+        sizes,
+        &local_ref,
+        &remote_id,
+        persist.bundle,
+        persist.session,
+    )
 }
 
 impl RamfluxClient {
@@ -227,7 +261,6 @@ impl RamfluxClient {
         pair: SealPair<'_>,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         self.require_backup_outbound_ready()?;
-        candidate_seal_preflight(body.len())?;
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
         let wire_remote =
@@ -258,11 +291,17 @@ impl RamfluxClient {
             self.account_db()?
                 .persist_actor_state(&format!("dm-pair/local/{}", session.session_id), &true)?;
         }
-        self.persist_pair(
-            &self.local_device_identity(local)?,
-            &self.device_identity(&remote)?,
-            &bundle,
-            session,
+        persist_sealed_pair(
+            self,
+            &SealedPairPersist {
+                inner_len: plaintext.len(),
+                sealed: &ciphertext,
+                local,
+                remote: &remote,
+                bundle: &bundle,
+                session,
+                message,
+            },
         )?;
         self.finish_pair_retirement()?;
 

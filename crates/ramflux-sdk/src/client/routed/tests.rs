@@ -223,6 +223,38 @@ fn first_unknown_conversation_decrypts_and_outer_frame_has_no_route() -> Result<
 }
 
 #[test]
+fn over_cap_seal_leaves_pair_session_byte_identical() -> Result<(), SdkError> {
+    let a = Fixture::new("alice", 81)?;
+    let b = Fixture::new("bob", 91)?;
+    let _entry = seal(&a, &b, message("pair", "c"), b"hello")?;
+    let local = a.client.local_device_identity("alice")?;
+    let remote = a.client.device_identity(&fixture_peer_reference(&a.client, "bob")?)?;
+    let before = a.client.persisted_pair_snapshot(&local, &remote)?;
+    let Some((mut session, bundle)) = a.client.active_pair(&local, &remote)? else {
+        return Err(invalid("pair session"));
+    };
+    session.encrypt(b"advance", b"aad").map_err(|error| invalid(&error.to_string()))?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::measure_sealed_send(
+        &ramflux_protocol::message::outer::SealedSendSizes {
+            inner_bytes: ramflux_protocol::message::outer::MAX_INNER_BYTES + 1,
+            ciphertext: &[0_u8; 1],
+            encrypted_header: &[],
+            bootstrap_capsule: &[],
+            identifiers: ["e", "p", "d", "t"],
+            metadata: None,
+            complete_frame_bytes: 1,
+        },
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    match a.client.persist_pair_after_size_preflight(sizes, &local, &remote, &bundle, &session) {
+        Err(SdkError::InboundRejected(message)) if message == "payload too large" => {}
+        other => return Err(invalid(&format!("exact PayloadTooLarge, got {other:?}"))),
+    }
+    assert_eq!(before, a.client.persisted_pair_snapshot(&local, &remote)?);
+    Ok(())
+}
+
+#[test]
 fn device_pair_session_spans_conversations_and_rejects_replay_and_tampering() -> Result<(), SdkError>
 {
     let a = Fixture::new("alice", 41)?;
