@@ -8,9 +8,9 @@
 //! held result is then released into the actor at generation 1 after a new connection owns
 //! generation 2: it must write nothing, apply nothing and ACK nothing. After the reopen, the
 //! Connected `PrepareReceive` recovers the staged copy from disk (the router no longer has
-//! it) and the real receive child applies it exactly once and ACKs on the gateway. Negatives:
-//! dropping the actor generation check makes the stale release write the message; dropping
-//! the recovery feed leaves the message unapplied.
+//! it) into the plan, and the activated `ApplyPage` turn returns the P20c refusal with 0
+//! messages applied and 0 ACKs. Negatives: dropping the actor generation check makes the
+//! stale release write the message; dropping the recovery feed leaves the plan without the row.
 use super::fixture::{Case, Fixture};
 use super::receive_ack::command;
 use crate::bus::connection_manager::AccountWork;
@@ -272,14 +272,54 @@ async fn held() -> Case {
     assert_eq!(messages(&runtime)?, 0, "old generation applies nothing");
     assert_eq!(acked(&gateway)?, 0, "old generation must not ACK");
 
-    // Recovery from disk through the actor: the Connected PrepareReceive feeds the staged
-    // row to the real receive child, which applies it exactly once.
-    pump(&mut runtime, false, |runtime| messages(runtime).is_ok_and(|count| count > 0)).await?;
-    let settle = Instant::now() + Duration::from_millis(500);
-    pump(&mut runtime, false, |_| Instant::now() >= settle).await?;
-    assert_eq!(messages(&runtime)?, 1, "recovered work applies exactly once");
-    // ACK leg: S6b P24b2 (controller ruling 2026-11-09)
-    assert_eq!(acked(&gateway)?, 0, "the activated path sends no ACK until P24b2");
+    // (a) Recovery from disk: the Connected PrepareReceive feeds the staged row into the plan.
+    let plan = crate::bus::sync_driver::source::w0::prepare_receive_turn(
+        account_of(&runtime)?,
+        g2,
+        g2,
+        crate::bus::connection_manager::ReceiveTrigger::Connected,
+    )?;
+    assert!(
+        plan.retries.iter().any(|prepared| prepared.entry.inbox_seq == entry.inbox_seq),
+        "Connected recovery must put the staged sequence {} into the plan",
+        entry.inbox_seq
+    );
+
+    // (b) The recovered row reaches the activated ApplyPage turn, which returns the P20c
+    // refusal: 0 messages applied, 0 ACKs sent.
+    let Some(AccountWork::ApplyPage {
+        generation: g_page,
+        entry: page,
+        source,
+        backpressure,
+        turn,
+        ..
+    }) = pump(&mut runtime, true, |_| false).await?
+    else {
+        return Err("recovery must reach an ApplyPage at the new generation".into());
+    };
+    assert!(g_page >= g2, "the recovered page belongs to the new generation");
+    assert_eq!(g_page, generation_of(&runtime)?, "the page is at the live generation");
+    let (refused_reply, refused_response) = oneshot::channel();
+    runtime
+        .apply_connection_work(AccountWork::ApplyPage {
+            generation: g_page,
+            entry: page,
+            source,
+            backpressure,
+            reply: refused_reply,
+            turn,
+        })
+        .await?;
+    let refusal = refused_response.await?.err();
+    assert!(
+        matches!(&refusal, Some(SdkError::InboundRejected(text))
+            if text == crate::bus::push_receiver::apply_w1::routed_refused()),
+        "activated ApplyPage must return the P20c refusal: {refusal:?}"
+    );
+    assert_eq!(messages(&runtime)?, 0, "the refusal applies 0 messages");
+    // apply-once + ACK leg: S6b P24b2a/b (controller ruling 2026-11-09)
+    assert_eq!(acked(&gateway)?, 0, "the refusal sends 0 ACKs");
     runtime.stop_connection().await;
     drop(runtime);
     drop((peer, sibling));

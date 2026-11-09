@@ -129,7 +129,8 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
         fixture.config.clone(),
         fixture.manifest.principal_commitment.clone(),
     );
-    match prepare_receive_turn(&account, 1) {
+    match prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
+    {
         Ok(_) => panic!("legacy PrepareReceive succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
@@ -168,7 +169,7 @@ async fn activated_ledger_prepare_receive_and_apply_page_are_not_refused() -> Te
     account.install_test_session(push_engine(fixture.config.clone()));
     refuse_legacy_receive_unless_ledger_turn(&account, 1)
         .expect("ledger ApplyPage (turn: Some) must not be refused");
-    prepare_receive_turn(&account, 1)
+    prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
         .expect("ledger PrepareReceive (turn: Some) must not be refused");
     Ok(())
 }
