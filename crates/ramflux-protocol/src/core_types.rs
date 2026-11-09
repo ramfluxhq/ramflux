@@ -57,6 +57,12 @@ pub struct Envelope {
     pub created_at: i64,
     pub encrypted_payload: String,
     pub payload_hash: String,
+    /// Candidate named delivery mode. Omitted on the generation-0 wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<String>,
+    /// Candidate collapse tag (base64url of 32 bytes). Omitted on the generation-0 wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collapse_tag: Option<String>,
 }
 
 impl Envelope {

@@ -49,6 +49,7 @@ mod pairing_routes;
 
 mod sender_fanout;
 
+mod candidate_binding;
 mod durable_ingress_registry;
 mod fanout_entry_bound;
 

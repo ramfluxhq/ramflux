@@ -122,6 +122,8 @@ pub(crate) mod tests {
             created_at: 1000,
             encrypted_payload: "encrypted".into(),
             payload_hash: "hash".into(),
+            delivery_mode: None,
+            collapse_tag: None,
         };
         envelope.ext.ext.insert(
             "source_root_commitment".into(),

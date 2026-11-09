@@ -393,6 +393,26 @@ pub(crate) fn dm_attachment_slot_conversation_id(
 pub(crate) fn dm_device_id_hash(device_id: &str) -> [u8; 32] {
     ramflux_crypto::blake3_256(ramflux_protocol::domain::DEVICE_PROOF, device_id.as_bytes())
 }
+
+const CANDIDATE_COLLAPSE_TAG_DOMAIN: &str = "ramflux.sdk.candidate.collapse_tag.v1";
+const CANDIDATE_DELIVERY_MODE_DURABLE: &str = "durable";
+
+#[must_use]
+pub(crate) fn derived_candidate_binding(envelope_id: &str) -> ([u8; 32], &'static str) {
+    (
+        ramflux_crypto::blake3_256(CANDIDATE_COLLAPSE_TAG_DOMAIN, envelope_id.as_bytes()),
+        CANDIDATE_DELIVERY_MODE_DURABLE,
+    )
+}
+
+pub(crate) fn apply_candidate_named_fields(envelope: &mut ramflux_protocol::Envelope) {
+    if !ramflux_protocol::schema_profile::schema_v1_live() {
+        return;
+    }
+    let (collapse_tag, delivery_mode) = derived_candidate_binding(&envelope.envelope_id);
+    envelope.delivery_mode = Some(delivery_mode.to_owned());
+    envelope.collapse_tag = Some(ramflux_protocol::encode_base64url(collapse_tag));
+}
 pub(crate) fn x3dh_private_checkpoint_name(
     device: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> String {
@@ -482,7 +502,10 @@ pub(crate) fn gateway_direct_message_envelope(
         created_at: message.created_at,
         encrypted_payload,
         payload_hash,
+        delivery_mode: None,
+        collapse_tag: None,
     };
+    apply_candidate_named_fields(&mut envelope);
     if let Some(source) = &config.source_identity {
         if source.device_id() != envelope.source_device_id {
             return Err(SdkError::GatewaySessionRejected(

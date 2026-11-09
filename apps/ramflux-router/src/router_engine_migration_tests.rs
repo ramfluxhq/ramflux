@@ -80,6 +80,8 @@ pub(super) fn envelope(
         created_at: i64::try_from(ramflux_node_core::now_unix_seconds())?,
         encrypted_payload: "opaque".into(),
         payload_hash: ramflux_protocol::encode_base64url([43; 32]),
+        delivery_mode: None,
+        collapse_tag: None,
     };
     envelope
         .ext

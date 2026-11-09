@@ -1493,6 +1493,8 @@ pub(crate) mod tests {
             created_at: 1_760_000_000,
             encrypted_payload: "ciphertext".to_owned(),
             payload_hash: "payload_hash".to_owned(),
+            delivery_mode: None,
+            collapse_tag: None,
         }
     }
 

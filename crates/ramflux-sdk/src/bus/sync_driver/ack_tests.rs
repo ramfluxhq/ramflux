@@ -41,6 +41,8 @@ fn entry(target: &str) -> GatewayInboxEntry {
             created_at: 1,
             encrypted_payload: "cipher".into(),
             payload_hash: "hash".into(),
+            delivery_mode: None,
+            collapse_tag: None,
         },
     }
 }

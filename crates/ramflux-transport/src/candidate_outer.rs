@@ -125,6 +125,8 @@ mod tests {
             created_at: 1_000,
             encrypted_payload: "payload".to_owned(),
             payload_hash: "hash".to_owned(),
+            delivery_mode: None,
+            collapse_tag: None,
         };
         let live = canonical_json_bytes(&envelope)?;
         assert!(

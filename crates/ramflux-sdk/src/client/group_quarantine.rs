@@ -184,6 +184,8 @@ mod tests {
                 created_at: 1,
                 encrypted_payload: "cipher".into(),
                 payload_hash: "hash".into(),
+                delivery_mode: None,
+                collapse_tag: None,
             },
         };
         let first = legacy_key(&entry)?;

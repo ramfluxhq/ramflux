@@ -108,6 +108,8 @@ fn signed_ephemeral(id: &str, target: &str) -> anyhow::Result<Envelope> {
         created_at,
         encrypted_payload: "ciphertext".into(),
         payload_hash: "payload_hash".into(),
+        delivery_mode: None,
+        collapse_tag: None,
     };
     envelope.ext.ext.insert(proto::DELIVERY_MODE_EXTENSION.into(), json!("ephemeral"));
     let root = ramflux_crypto::create_identity_root(

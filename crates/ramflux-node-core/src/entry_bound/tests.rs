@@ -69,6 +69,7 @@ fn nested_sdk_envelope(
     envelope.source_device_id = "wire-device".to_owned();
     envelope.encrypted_payload =
         ramflux_protocol::encode_base64url(serde_json::to_vec(&nested_sdk_json(cryptobox, None))?);
+    bind_payload_hash(&mut envelope);
     Ok(envelope)
 }
 
@@ -80,7 +81,15 @@ fn compact_sdk_envelope(
     let mut envelope = entry(1).envelope;
     envelope.source_device_id = "wire-device".to_owned();
     envelope.encrypted_payload = ramflux_protocol::encode_base64url(&compact);
+    bind_payload_hash(&mut envelope);
     Ok(envelope)
+}
+
+fn bind_payload_hash(envelope: &mut ramflux_protocol::Envelope) {
+    envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        envelope.encrypted_payload.as_bytes(),
+    );
 }
 
 fn payload_too_large(result: Result<(), NodeCoreError>) -> Result<(), Box<dyn std::error::Error>> {
@@ -159,6 +168,7 @@ fn candidate_decode_refuses_unknown_nested_field() -> Result<(), Box<dyn std::er
     let nested = nested_sdk_json(&[7_u8; 32], Some("x".into()));
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.encrypted_payload = ramflux_protocol::encode_base64url(serde_json::to_vec(&nested)?);
+    bind_payload_hash(&mut envelope);
     match check_entry_bound(&envelope) {
         Err(NodeCoreError::InvalidConfiguration(message))
             if message == "candidate outer envelope has unknown fields" =>
@@ -217,6 +227,7 @@ fn inject_compact_pad(
     )?;
     let mut out = envelope.clone();
     out.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    bind_payload_hash(&mut out);
     Ok(out)
 }
 
@@ -266,6 +277,7 @@ fn candidate_source_principal_commitment_cap() -> Result<(), Box<dyn std::error:
         &serde_json::to_vec(&sidecar)?,
     )?;
     allowed.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    bind_payload_hash(&mut allowed);
     check_entry_bound(&allowed)?;
     sidecar["source_principal_commitment"] = serde_json::json!("c".repeat(cap + 1));
     let over = ramflux_protocol::message::outer::encode_compact_cryptobox(
@@ -273,6 +285,7 @@ fn candidate_source_principal_commitment_cap() -> Result<(), Box<dyn std::error:
         &serde_json::to_vec(&sidecar)?,
     )?;
     allowed.encrypted_payload = ramflux_protocol::encode_base64url(&over);
+    bind_payload_hash(&mut allowed);
     match check_entry_bound(&allowed) {
         Err(NodeCoreError::InvalidConfiguration(message))
             if message == "identifier exceeds 256 bytes" =>
@@ -332,4 +345,47 @@ fn candidate_250kb_top_level_pad_is_unknown_field() -> Result<(), Box<dyn std::e
         sidecar["pad"] = serde_json::json!("p".repeat(100 * 1024));
     })?;
     unknown_nested_field(check_entry_bound(&padded))
+}
+
+const MISSING_COMPACT_CIPHERTEXT: &str = "compact candidate sidecar ciphertext field is required";
+const PAYLOAD_HASH_MISMATCH: &str = "envelope payload hash mismatch";
+
+#[test]
+fn candidate_compact_ciphertext_field_is_required() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let missing = set_sidecar_field(&compact_250kb_envelope()?, |sidecar| {
+        let object = sidecar["ciphertext"].as_object_mut().expect("ciphertext object");
+        object.remove("ciphertext");
+    })?;
+    match check_entry_bound(&missing) {
+        Err(NodeCoreError::InvalidConfiguration(message))
+            if message == MISSING_COMPACT_CIPHERTEXT =>
+        {
+            Ok(())
+        }
+        other => Err(format!("exact missing ciphertext error, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn candidate_entry_refuses_payload_hash_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let mut envelope = compact_250kb_envelope()?;
+    check_entry_bound(&envelope)?;
+    envelope.payload_hash = "tampered-payload-hash".into();
+    match check_entry_bound(&envelope) {
+        Err(NodeCoreError::InvalidConfiguration(message)) if message == PAYLOAD_HASH_MISMATCH => {
+            Ok(())
+        }
+        other => Err(format!("exact payload hash error, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn legacy_entry_accepts_payload_hash_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
+    envelope.payload_hash = "legacy-mismatch".into();
+    check_entry_bound(&envelope)?;
+    Ok(())
 }

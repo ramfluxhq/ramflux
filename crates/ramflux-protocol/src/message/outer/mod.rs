@@ -120,6 +120,8 @@ pub enum OuterProfileError {
     UnknownField,
     #[error("compact candidate sidecar ciphertext field must be empty")]
     CompactCiphertextField,
+    #[error("compact candidate sidecar ciphertext field is required")]
+    MissingCompactCiphertext,
 }
 
 /// Measured sizes checked before any ratchet or outbox commit.

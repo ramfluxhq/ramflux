@@ -257,6 +257,8 @@ impl RamfluxClient {
                             .saturating_sub(i64::from(self.content_ttl()?)),
                         encrypted_payload: String::new(),
                         payload_hash: String::new(),
+                        delivery_mode: None,
+                        collapse_tag: None,
                     },
                 };
                 self.receive_surface_control_from(

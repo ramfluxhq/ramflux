@@ -52,6 +52,8 @@ fn live_envelope(mode: Option<&str>) -> Envelope {
         created_at: 1_000,
         encrypted_payload: "payload".to_owned(),
         payload_hash: "hash".to_owned(),
+        delivery_mode: None,
+        collapse_tag: None,
     }
 }
 
@@ -582,4 +584,35 @@ fn compact_sidecar_refuses_non_empty_legacy_ciphertext_field() {
         Err(OuterProfileError::CompactCiphertextField)
     );
     assert_eq!(decode_candidate_sidecar(&full), Ok(()));
+}
+
+#[test]
+fn compact_sidecar_requires_ciphertext_field() {
+    let absent = serde_json::to_vec(&json!({"ciphertext": {}})).unwrap_or_default();
+    assert_eq!(
+        decode_compact_candidate_sidecar(&absent),
+        Err(OuterProfileError::MissingCompactCiphertext)
+    );
+    assert_eq!(
+        OuterProfileError::MissingCompactCiphertext.to_string(),
+        "compact candidate sidecar ciphertext field is required"
+    );
+}
+
+#[test]
+fn sender_signed_bytes_cover_named_delivery_mode_and_collapse_tag()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut envelope = live_envelope(None);
+    envelope.delivery_mode = Some("durable".to_owned());
+    envelope.collapse_tag = Some(collapse_tag());
+    let signed = crate::envelope_sender_signed_bytes(&envelope)?;
+    let text = String::from_utf8(signed.clone())?;
+    assert!(text.contains("\"delivery_mode\":\"durable\""));
+    assert!(text.contains("\"collapse_tag\":"));
+    envelope.delivery_mode = Some("ephemeral".to_owned());
+    assert_ne!(signed, crate::envelope_sender_signed_bytes(&envelope)?);
+    envelope.delivery_mode = Some("durable".to_owned());
+    envelope.collapse_tag = Some(crate::encode_base64url([0x00_u8; 32]));
+    assert_ne!(signed, crate::envelope_sender_signed_bytes(&envelope)?);
+    Ok(())
 }

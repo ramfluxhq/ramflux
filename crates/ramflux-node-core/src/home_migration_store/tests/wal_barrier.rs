@@ -30,6 +30,8 @@ pub(super) fn entry(target: &str) -> crate::InboxEntry {
             created_at: 1_700_000_100,
             encrypted_payload: "opaque".into(),
             payload_hash: hash(43),
+            delivery_mode: None,
+            collapse_tag: None,
         },
     }
 }

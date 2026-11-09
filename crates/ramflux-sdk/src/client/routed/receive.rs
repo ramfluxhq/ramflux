@@ -6,7 +6,7 @@ use super::committed::Committed;
 use super::{
     GatewayInboxEntry, GatewayPlaintextDelivery, GatewaySessionAccess, Kind, MessageMetadata,
     Opened, RamfluxClient, Routing, SdkError, SdkGroupSenderKeyDistribution,
-    SdkGroupSenderKeyDistributionEnvelope, associated_data, decode, invalid,
+    SdkGroupSenderKeyDistributionEnvelope, associated_data_from_outer, decode, invalid,
 };
 use crate::client::dm::{decode_dm_attachment_body, franking_report_metadata_for_delivery};
 use crate::client::identity_authority::HeadUse;
@@ -405,8 +405,8 @@ impl RamfluxClient {
         };
         self.prepare_routed_surface_projection(&mut opened, entry, &body)?;
         let envelope = decode(&entry.envelope)?;
-        let aad = associated_data(
-            &entry.envelope.envelope_id,
+        let aad = associated_data_from_outer(
+            &entry.envelope,
             &entry.envelope.source_device_id,
             opened.local_device.device_id(),
             &opened.bundle_hash,

@@ -70,6 +70,8 @@ fn entry(seq: u64) -> InboxEntry {
         created_at: i64::try_from(crate::now_unix_seconds()).expect("server time"),
         encrypted_payload: "ciphertext".into(),
         payload_hash: "hash".into(),
+        delivery_mode: None,
+        collapse_tag: None,
     };
     let mut entry = inbox.append(envelope);
     entry.inbox_seq = seq;

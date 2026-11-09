@@ -123,6 +123,10 @@ struct StoredRouterWalEnvelope {
     created_at: i64,
     encrypted_payload: String,
     payload_hash: String,
+    #[serde(default)]
+    delivery_mode: Option<String>,
+    #[serde(default)]
+    collapse_tag: Option<String>,
 }
 
 impl StoredRouterWalPayload {
@@ -288,6 +292,8 @@ impl TryFrom<&ramflux_protocol::Envelope> for StoredRouterWalEnvelope {
             created_at: envelope.created_at,
             encrypted_payload: envelope.encrypted_payload.clone(),
             payload_hash: envelope.payload_hash.clone(),
+            delivery_mode: envelope.delivery_mode.clone(),
+            collapse_tag: envelope.collapse_tag.clone(),
         })
     }
 }
@@ -318,6 +324,8 @@ impl TryFrom<StoredRouterWalEnvelope> for ramflux_protocol::Envelope {
             created_at: envelope.created_at,
             encrypted_payload: envelope.encrypted_payload,
             payload_hash: envelope.payload_hash,
+            delivery_mode: envelope.delivery_mode,
+            collapse_tag: envelope.collapse_tag,
         })
     }
 }
@@ -2613,6 +2621,8 @@ mod tests {
             created_at: 1_760_000_000,
             encrypted_payload: "ciphertext".to_owned(),
             payload_hash: "payload_hash".to_owned(),
+            delivery_mode: None,
+            collapse_tag: None,
         }
     }
 

@@ -79,19 +79,97 @@ pub(crate) struct Opened {
     pub remote_device: ramflux_crypto::RootQualifiedDeviceRef,
 }
 
+const AAD_V2_DOMAIN: &str = "ramflux.sdk.envelope.aad.v2";
+const AAD_V3_DOMAIN: &str = "ramflux.sdk.envelope.aad.v3";
+
+#[derive(Clone, Copy)]
+struct CandidateAadBinding<'a> {
+    delivery_mode: &'a str,
+    collapse_tag: [u8; 32],
+}
+
+fn parse_received_collapse_tag(tag: Option<&str>) -> Result<[u8; 32], SdkError> {
+    let raw =
+        ramflux_protocol::decode_base64url(tag.ok_or_else(|| invalid("collapse_tag is required"))?)
+            .map_err(|_| invalid("collapse_tag must be 32 bytes"))?;
+    raw.as_slice().try_into().map_err(|_| invalid("collapse_tag must be 32 bytes"))
+}
+
 pub(crate) fn associated_data(
     envelope_id: &str,
     sender: &str,
     recipient: &str,
     bundle: &[u8; 32],
 ) -> Result<Vec<u8>, SdkError> {
+    if crate::client::target_selection::schema_v1_selected() {
+        let (collapse_tag, delivery_mode) = crate::dm::derived_candidate_binding(envelope_id);
+        return associated_data_bound(
+            envelope_id,
+            sender,
+            recipient,
+            bundle,
+            CandidateAadBinding { delivery_mode, collapse_tag },
+        );
+    }
+    associated_data_v2(envelope_id, sender, recipient, bundle)
+}
+
+pub(crate) fn associated_data_from_outer(
+    envelope: &ramflux_protocol::Envelope,
+    sender: &str,
+    recipient: &str,
+    bundle: &[u8; 32],
+) -> Result<Vec<u8>, SdkError> {
+    if !crate::client::target_selection::schema_v1_selected() {
+        return associated_data_v2(&envelope.envelope_id, sender, recipient, bundle);
+    }
+    let delivery_mode =
+        envelope.delivery_mode.as_deref().ok_or_else(|| invalid("delivery_mode is required"))?;
+    associated_data_bound(
+        &envelope.envelope_id,
+        sender,
+        recipient,
+        bundle,
+        CandidateAadBinding {
+            delivery_mode,
+            collapse_tag: parse_received_collapse_tag(envelope.collapse_tag.as_deref())?,
+        },
+    )
+}
+
+fn associated_data_v2(
+    envelope_id: &str,
+    sender: &str,
+    recipient: &str,
+    bundle: &[u8; 32],
+) -> Result<Vec<u8>, SdkError> {
     Ok(ramflux_protocol::canonical_json_bytes(&(
-        "ramflux.sdk.envelope.aad.v2",
+        AAD_V2_DOMAIN,
         envelope_id,
         dm_device_id_hash(sender),
         dm_device_id_hash(recipient),
         bundle,
         2_u32,
+    ))?)
+}
+
+fn associated_data_bound(
+    envelope_id: &str,
+    sender: &str,
+    recipient: &str,
+    bundle: &[u8; 32],
+    binding: CandidateAadBinding<'_>,
+) -> Result<Vec<u8>, SdkError> {
+    Ok(ramflux_protocol::canonical_json_bytes(&(
+        AAD_V3_DOMAIN,
+        envelope_id,
+        dm_device_id_hash(sender),
+        dm_device_id_hash(recipient),
+        bundle,
+        2_u32,
+        ramflux_protocol::schema_profile::MESSAGE_SCHEMA_V1_GENERATION,
+        binding.delivery_mode,
+        binding.collapse_tag,
     ))?)
 }
 
@@ -252,7 +330,10 @@ fn cryptobox_sender_envelope(
         created_at: persist.message.created_at,
         encrypted_payload,
         payload_hash,
+        delivery_mode: None,
+        collapse_tag: None,
     };
+    crate::dm::apply_candidate_named_fields(&mut envelope);
     if let Ok(anchor) = client.own_account_anchor() {
         envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
     }
@@ -398,8 +479,8 @@ impl RamfluxClient {
             &entry.envelope.envelope_id,
             &envelope,
         )?;
-        let aad = associated_data(
-            &entry.envelope.envelope_id,
+        let aad = associated_data_from_outer(
+            &entry.envelope,
             &entry.envelope.source_device_id,
             local,
             &bundle,

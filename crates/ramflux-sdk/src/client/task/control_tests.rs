@@ -25,6 +25,8 @@ fn entry(principal: &str, device: &str) -> crate::GatewayInboxEntry {
             created_at: crate::time::now_unix_timestamp(),
             encrypted_payload: String::new(),
             payload_hash: String::new(),
+            delivery_mode: None,
+            collapse_tag: None,
         },
     }
 }

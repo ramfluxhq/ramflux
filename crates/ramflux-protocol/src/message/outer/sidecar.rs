@@ -36,7 +36,6 @@ struct CandidateCiphertext {
     counter: u64,
     #[serde(default)]
     nonce: Option<[u8; 12]>,
-    #[serde(default)]
     ciphertext: Vec<u8>,
     #[serde(default)]
     ratchet_public_key: Option<[u8; 32]>,
@@ -120,8 +119,8 @@ pub fn decode_compact_candidate_sidecar(bytes: &[u8]) -> Result<(), OuterProfile
 }
 
 pub(super) fn decode_sidecar_value(value: &Value, compact: bool) -> Result<(), OuterProfileError> {
-    let sidecar: CandidateSidecar =
-        serde_json::from_value(value.clone()).map_err(|error| map_strict_decode(&error))?;
+    let sidecar: CandidateSidecar = serde_json::from_value(value.clone())
+        .map_err(|error| map_strict_decode(&error, compact))?;
     sidecar.check_caps()?;
     if compact
         && sidecar.ciphertext.as_ref().is_some_and(|ciphertext| !ciphertext.ciphertext.is_empty())
@@ -131,9 +130,12 @@ pub(super) fn decode_sidecar_value(value: &Value, compact: bool) -> Result<(), O
     Ok(())
 }
 
-fn map_strict_decode(error: &serde_json::Error) -> OuterProfileError {
-    if error.to_string().starts_with("unknown field") {
+fn map_strict_decode(error: &serde_json::Error, compact: bool) -> OuterProfileError {
+    let message = error.to_string();
+    if message.starts_with("unknown field") {
         OuterProfileError::UnknownField
+    } else if compact && message.contains("missing field `ciphertext`") {
+        OuterProfileError::MissingCompactCiphertext
     } else {
         OuterProfileError::Malformed
     }

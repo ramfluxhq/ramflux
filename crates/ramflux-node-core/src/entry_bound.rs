@@ -69,6 +69,13 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
 
 fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
+    let payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        envelope.encrypted_payload.as_bytes(),
+    );
+    if envelope.payload_hash != payload_hash {
+        return Err(NodeCoreError::InvalidConfiguration("envelope payload hash mismatch".into()));
+    }
     let sizes = ramflux_protocol::message::outer::IngressSizes::measure_wire(envelope, 0, &[], &[])
         .map_err(map_outer_profile)?;
     ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)

@@ -352,6 +352,8 @@ mod tests {
             created_at: 0,
             encrypted_payload: "MARKER".into(),
             payload_hash: "hash".into(),
+            delivery_mode: None,
+            collapse_tag: None,
         }
     }
 

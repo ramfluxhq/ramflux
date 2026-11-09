@@ -46,6 +46,8 @@ pub(crate) fn entry(seq: u64) -> InboxEntry {
         created_at: i64::try_from(crate::now_unix_seconds()).expect("time"),
         encrypted_payload: "ciphertext-must-not-enter-aborted-record".into(),
         payload_hash: "hash".into(),
+        delivery_mode: None,
+        collapse_tag: None,
     };
     let mut entry = OpaqueDeviceInbox::new().append(envelope);
     entry.inbox_seq = seq;

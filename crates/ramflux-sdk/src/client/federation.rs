@@ -456,6 +456,8 @@ mod tests {
             created_at: now_unix_timestamp(),
             encrypted_payload: "payload".to_owned(),
             payload_hash: "hash".to_owned(),
+            delivery_mode: None,
+            collapse_tag: None,
         }
     }
 
