@@ -102,7 +102,11 @@ pub(crate) async fn handle(
     hub: &GatewaySessionHub,
     request: GatewayForwardEphemeralRequest,
 ) -> anyhow::Result<SessionPushForwardResponse> {
-    handle_at(hub, request, wall_clock_ms()).await
+    #[cfg(test)]
+    let now_ms = hub.ephemeral_now_ms().unwrap_or_else(wall_clock_ms);
+    #[cfg(not(test))]
+    let now_ms = wall_clock_ms();
+    handle_at(hub, request, now_ms).await
 }
 
 /// Admit a same-node ephemeral forward at `now_ms`.

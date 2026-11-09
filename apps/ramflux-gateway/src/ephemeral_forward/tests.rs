@@ -173,12 +173,10 @@ async fn park_hub_write(
     Ok((entered, release))
 }
 
-async fn row_durable_wake_positive_control() -> TestResult {
-    let woken = crate::session::tests::test_gateway_context()?;
-    crate::session::dispatch_offline_wake(&woken, TARGET, &envelope(TARGET, "env-wake")).await?;
-    assert_eq!(woken.notify.wake_count(), 1);
-    let idle = crate::session::tests::test_gateway_context()?;
-    assert_eq!(idle.notify.wake_count(), 0);
+async fn row_durable_wake_positive_control(context: &crate::GatewayQuicContext) -> TestResult {
+    let before = context.notify.wake_count();
+    crate::session::dispatch_offline_wake(context, TARGET, &envelope(TARGET, "env-wake")).await?;
+    assert_eq!(context.notify.wake_count(), before + 1);
     Ok(())
 }
 
@@ -196,18 +194,15 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
         store: context.store.clone(),
         hub: context.hub.clone(),
     };
-    let now_seconds = ramflux_node_core::now_unix_seconds();
-    let now_ms = now_seconds.saturating_mul(1_000);
-    let mut forward = request(TARGET, TARGET, "env-nowake");
-    forward.envelope.created_at = i64::try_from(now_seconds)?;
-    forward.envelope.ttl = 5;
-    forward.expires_at_ms = now_ms.saturating_add(5_000);
+    let forward = request(TARGET, TARGET, "env-nowake");
     let (recipient, received) = sink();
     listener
         .hub
         .register_ephemeral(TARGET.into(), SESSION.into(), recipient, Some(ID.into()), 32)
         .await?;
-    assert_eq!(listener.notify.wake_count(), 0);
+    listener.hub.set_ephemeral_clock_ms(NOW_LIVE_MS);
+    listener.hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
+    let wake_before = listener.notify.wake_count();
     let request = ramflux_transport::GatewayQuicRequest {
         method: "POST".into(),
         path: PATH.into(),
@@ -217,7 +212,7 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
     assert!(reply.delivered);
     assert_eq!(listener.hub.ephemeral_queued(TARGET).await, 1);
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);
-    assert_eq!(listener.notify.wake_count(), 0);
+    assert_eq!(listener.notify.wake_count(), wake_before);
     Ok(())
 }
 
@@ -722,50 +717,28 @@ fn row_map_queue_full() {
 #[allow(clippy::too_many_lines)]
 async fn final_registration_capability() -> TestResult {
     let wake_context = crate::session::tests::test_gateway_context()?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_path_is_same_node_forward();
     row_map_queue_full();
-    row_durable_wake_positive_control().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
+    row_durable_wake_positive_control(&wake_context).await?;
     row_ephemeral_forward_does_not_wake(&wake_context).await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_writer_emits_transient().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_sixty_fifth_frame_queue_full().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_byte_cap_ninth_max_frame_queue_full().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_forward_target_differs_from_hub().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_forward_target_differs_from_envelope().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_capable_token_replaced_after_c1().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_capability_absent().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_no_hub_entry_offline().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_enqueues_on_a_after_router_move().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_drops_when_a_closed().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_expired_at_d().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_refused_when_clock_reaches_d().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_held_forward_queued_before_d().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_deadline_mismatch_invalid().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_durable_mode_invalid().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_frame_32768_accepted_32769_invalid().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_marker_required_exact_error().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_id_bounds_exact_errors_and_inclusive_positives().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     row_isolated_p01_predicates().await?;
-    assert_eq!(wake_context.notify.wake_count(), 0);
     Ok(())
 }

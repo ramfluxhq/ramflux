@@ -43,6 +43,9 @@ pub(crate) struct GatewaySessionHub {
     pub(crate) probe_requests: crate::issued_probe::Requests,
     pub(crate) readiness: Arc<crate::session_push::Readiness>,
     pub(crate) ephemeral_rates: crate::ephemeral::EphemeralRateRegistry,
+    /// Per-hub C4 clock override; production builds always use wall clock.
+    #[cfg(test)]
+    ephemeral_clock_ms: std::sync::atomic::AtomicU64,
     /// Per-hub enqueue barrier; tests park one forward without a process-global hold.
     #[cfg(test)]
     enqueue_hold: std::sync::Mutex<
@@ -496,6 +499,17 @@ impl GatewaySessionHub {
         if let Some(entry) = self.snapshot().await.get(target) {
             entry.queue.set_clock_ms(now_ms);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ephemeral_now_ms(&self) -> Option<u64> {
+        let now_ms = self.ephemeral_clock_ms.load(std::sync::atomic::Ordering::Acquire);
+        (now_ms != 0).then_some(now_ms)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ephemeral_clock_ms(&self, now_ms: u64) {
+        self.ephemeral_clock_ms.store(now_ms, std::sync::atomic::Ordering::Release);
     }
 }
 
