@@ -330,19 +330,16 @@ async fn classify(
 /// An authenticated entry that an earlier routed commit already settled. A transferred
 /// reply marker ranks above a pending projection: W0 then only needs its terminal cover
 /// (the projection already transferred with the reply). A committed receipt without a
-/// marker means only the application projection is still owed. Unauthenticated entries
-/// and key-derivation failures other than storage never match; storage errors propagate.
+/// marker means only the application projection is still owed. Missing identity is
+/// nothing owed; every other key-derivation error (including storage) propagates.
 fn settled_routed_kind(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
 ) -> Result<Option<Kind>, SdkError> {
-    let auth_key = match account.client.authenticated_committed_key(
-        crate::client::identity_authority::HeadUse::NewAuthorization,
-        entry,
-    ) {
+    let auth_key = match projection_key(&account.client, entry) {
         Ok(key) => key,
-        Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
-        Err(_) => return Ok(None),
+        Err(error) if identity_absence(&error) => return Ok(None),
+        Err(error) => return Err(error),
     };
     let db = account.client.account_db()?;
     if db.actor_state_exists(&format!("{MARKER}{auth_key}"))? {
@@ -457,12 +454,12 @@ pub(super) fn project_if_committed(
     expected: ReceiveExpectation<'_>,
 ) -> Result<(), SdkError> {
     // Own-copy and legacy-DM success: a missing authenticated identity means
-    // nothing is owed. Storage errors still propagate. `project_application`
-    // (the Kind::Projection arm) keeps failing on the same derivation error.
+    // nothing is owed. Every other derivation error (including storage) still
+    // propagates. `project_application` keeps failing on the same derivation error.
     let auth_key = match projection_key(client, entry) {
         Ok(key) => key,
-        Err(SdkError::Storage(error)) => return Err(SdkError::Storage(error)),
-        Err(_) => return Ok(()),
+        Err(error) if identity_absence(&error) => return Ok(()),
+        Err(error) => return Err(error),
     };
     if tx.account().load_actor_state::<crate::client::routed::Committed>(&auth_key)?.is_none() {
         return Ok(());
@@ -473,6 +470,10 @@ pub(super) fn project_if_committed(
 /// The authenticated admission key; derivation failure is an error, never a fallback key.
 fn projection_key(client: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<String, SdkError> {
     #[cfg(test)]
+    if let Some(error) = PROJECTION_ERROR.with(std::cell::RefCell::take) {
+        return Err(error);
+    }
+    #[cfg(test)]
     if let Some(key) = PROJECTION_KEY.with(std::cell::RefCell::take) {
         return Ok(key);
     }
@@ -480,6 +481,13 @@ fn projection_key(client: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<S
         crate::client::identity_authority::HeadUse::NewAuthorization,
         entry,
     )
+}
+
+/// Identity-absence is nothing owed on own-copy / legacy-DM success and on the
+/// settled-routed probe. Local and directory failures must not be swallowed.
+fn identity_absence(error: &SdkError) -> bool {
+    matches!(error, SdkError::IdentityRootMissing)
+        || matches!(error, SdkError::InboundRejected(reason) if reason.starts_with("identity authority:"))
 }
 
 fn project_with_key(
@@ -678,6 +686,8 @@ thread_local! {
     static FORCE_NEED_POINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PROJECTION_KEY: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    static PROJECTION_ERROR: std::cell::RefCell<Option<SdkError>> =
+        const { std::cell::RefCell::new(None) };
     static CLASSIFY_ERROR: std::cell::RefCell<Option<SdkError>> =
         const { std::cell::RefCell::new(None) };
     static PROJECTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -824,6 +834,12 @@ fn dummy_own_copy_manifest() -> crate::SdkDeviceManifestResponse {
 #[cfg(test)]
 pub(crate) fn set_projection_key(key: &str) {
     PROJECTION_KEY.with(|cell| cell.replace(Some(key.to_owned())));
+}
+
+/// Injects a key-derivation error into both nothing-owed arms.
+#[cfg(test)]
+pub(crate) fn set_projection_error(error: SdkError) {
+    PROJECTION_ERROR.with(|cell| cell.replace(Some(error)));
 }
 
 #[cfg(test)]
