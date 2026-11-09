@@ -3385,6 +3385,7 @@ dependencies = [
  "rcgen",
  "redb",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "tokio",

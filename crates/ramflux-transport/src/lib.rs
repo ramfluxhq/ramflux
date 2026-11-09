@@ -92,6 +92,8 @@ pub use policy::{
     ShutdownDrain, ShutdownDrainPermit, TransportBackpressure, TransportBackpressurePermit,
     TransportRetryPolicy, retry_with_policy,
 };
+#[cfg(feature = "test-support")]
+pub use quic_gateway::encode_gateway_session_frame_for_test;
 pub use quic_gateway::{
     GatewaySessionFrameFuture, GatewaySessionFrameSink, GatewaySessionFrameSource,
     GatewaySessionTransport, GatewayTcpTlsStream, QuicConnectPhase, QuicGatewayBidiStream,

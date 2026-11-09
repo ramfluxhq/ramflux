@@ -10,6 +10,9 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type RegistrationSeed = fn(&Path) -> Result<(), Box<dyn std::error::Error>>;
+type ShutdownProbe = std::thread::JoinHandle<Result<(), std::io::Error>>;
+pub type GatewayTlsProbe =
+    fn(&str, &Path, Arc<AtomicBool>, Arc<AtomicBool>) -> Result<ShutdownProbe, std::io::Error>;
 
 #[allow(dead_code)] // Shared by several integration-test binaries.
 pub fn configured_shutdown_is_clean(
@@ -25,8 +28,27 @@ pub fn configured_shutdown_with_registration(
     service: &str,
     registration_seed: Option<RegistrationSeed>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    configured_shutdown_with_probes(binary, service, registration_seed, None)
+}
+
+#[allow(dead_code)]
+pub fn configured_gateway_shutdown_is_clean(
+    binary: &str,
+    service: &str,
+    gateway_tls_probe: GatewayTlsProbe,
+) -> Result<(), Box<dyn std::error::Error>> {
+    configured_shutdown_with_probes(binary, service, None, Some(gateway_tls_probe))
+}
+
+fn configured_shutdown_with_probes(
+    binary: &str,
+    service: &str,
+    registration_seed: Option<RegistrationSeed>,
+    gateway_tls_probe: Option<GatewayTlsProbe>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut fixture = Fixture::new(service)?;
     fixture.registration_seed = registration_seed;
+    fixture.gateway_tls_probe = gateway_tls_probe;
     if let Ok(mode) = std::env::var("RAMFLUX_SHUTDOWN_TEST_ONLY") {
         run_case(binary, service, &fixture, &mode)?;
         #[cfg(feature = "itest-http")]
@@ -98,6 +120,7 @@ pub fn configured_notify_runtime_shutdown_is_clean(
 
 struct Fixture {
     registration_seed: Option<RegistrationSeed>,
+    gateway_tls_probe: Option<GatewayTlsProbe>,
     root: PathBuf,
     config: PathBuf,
     database: PathBuf,
@@ -187,6 +210,7 @@ turn_tcp_addr = "127.0.0.1:0"
         Ok(Self {
             notify_runtime: None,
             registration_seed: None,
+            gateway_tls_probe: None,
             root,
             config,
             database,
@@ -222,22 +246,16 @@ impl Drop for ChildGuard {
 
 struct ShutdownLogReader {
     receiver: mpsc::Receiver<String>,
-    shutdown_complete: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<String>,
 }
 
 fn spawn_shutdown_log_reader(stdout: std::process::ChildStdout) -> ShutdownLogReader {
     let (sender, receiver) = mpsc::channel();
-    let shutdown_complete = Arc::new(AtomicBool::new(false));
-    let drain_signal = Arc::clone(&shutdown_complete);
     let thread = std::thread::spawn(move || {
         let mut logs = String::new();
         for line in std::io::BufReader::new(stdout).lines() {
             match line {
                 Ok(line) => {
-                    if line.contains("graceful shutdown complete") {
-                        drain_signal.store(true, Ordering::SeqCst);
-                    }
                     logs.push_str(&line);
                     logs.push('\n');
                     let _ = sender.send(line);
@@ -247,7 +265,7 @@ fn spawn_shutdown_log_reader(stdout: std::process::ChildStdout) -> ShutdownLogRe
         }
         logs
     });
-    ShutdownLogReader { receiver, shutdown_complete, thread }
+    ShutdownLogReader { receiver, thread }
 }
 
 #[cfg(feature = "itest-http")]
@@ -297,16 +315,9 @@ fn run_case(
     if let Some(stage) = mode.strip_prefix("failure-") {
         std::fs::write(fixture.root.join("connection-failures").join(stage), b"fail once")?;
     }
-    let probe = if mode == "probe" {
-        Some(start_request_probe(
-            &fixture.probe_addr,
-            fixture.probe_udp,
-            service == "ramflux-gateway",
-            Arc::clone(&log_reader.shutdown_complete),
-        )?)
-    } else {
-        None
-    };
+    let shutdown_started = Arc::new(AtomicBool::new(false));
+    let probe_closed = Arc::new(AtomicBool::new(false));
+    let probe = start_configured_probe(service, mode, fixture, &shutdown_started, &probe_closed)?;
     let mut peer = if matches!(
         mode,
         "pooled" | "handshake" | "raw" | "request" | "churn" | "descriptors" | "second"
@@ -325,11 +336,17 @@ fn run_case(
     if matches!(mode, "request" | "second") || mode.ends_with("-request") {
         wait_for_file(&fixture.root.join("admitted"))?;
     }
-    let (status, elapsed) = signal_and_wait(&mut child.0, service, mode)?;
+    let (status, elapsed) = signal_and_wait(
+        &mut child.0,
+        service,
+        mode,
+        shutdown_bound(service)?,
+        (service == "ramflux-gateway" && mode == "probe").then_some(&shutdown_started),
+    )?;
+    let gateway_connection_closed_at_exit = (service == "ramflux-gateway" && mode == "probe")
+        .then(|| probe_closed.load(Ordering::SeqCst));
     wait_for_request_peer(peer.as_mut(), mode)?;
-    if let Some(probe) = probe {
-        probe.join().map_err(|_| "request probe panicked")??;
-    }
+    finish_shutdown_probe(probe, gateway_connection_closed_at_exit)?;
     let mut logs = log_reader.thread.join().map_err(|_| "stdout reader panicked")?;
     if let Some(mut stderr) = child.0.stderr.take() {
         stderr.read_to_string(&mut logs)?;
@@ -357,6 +374,48 @@ fn run_case(
     }
     if logs.matches("graceful shutdown complete").count() != 1 {
         return Err(format!("missing unique shutdown completion for {service}: {logs}").into());
+    }
+    Ok(())
+}
+
+fn start_configured_probe(
+    service: &str,
+    mode: &str,
+    fixture: &Fixture,
+    shutdown_started: &Arc<AtomicBool>,
+    probe_closed: &Arc<AtomicBool>,
+) -> Result<Option<ShutdownProbe>, Box<dyn std::error::Error>> {
+    if mode != "probe" {
+        return Ok(None);
+    }
+    if service == "ramflux-gateway" {
+        let start_probe = fixture.gateway_tls_probe.ok_or("gateway TLS probe not configured")?;
+        Ok(Some(start_probe(
+            &fixture.probe_addr,
+            &fixture.root.join("ca.pem"),
+            Arc::clone(shutdown_started),
+            Arc::clone(probe_closed),
+        )?))
+    } else {
+        Ok(Some(start_request_probe(
+            &fixture.probe_addr,
+            fixture.probe_udp,
+            false,
+            Arc::clone(shutdown_started),
+        )?))
+    }
+}
+
+fn finish_shutdown_probe(
+    probe: Option<ShutdownProbe>,
+    gateway_connection_closed_at_exit: Option<bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let probe_result = probe.map(|probe| probe.join().map_err(|_| "request probe panicked"));
+    if gateway_connection_closed_at_exit == Some(false) {
+        return Err("gateway TLS connection remained open when the process exited".into());
+    }
+    if let Some(result) = probe_result {
+        result??;
     }
     Ok(())
 }
@@ -464,7 +523,8 @@ fn start_request_probe(
             }
 
             let close_deadline = Instant::now() + Duration::from_secs(10);
-            let mut response = [0; 1024];
+            let mut chunk = [0; 1024];
+            let mut response = Vec::new();
             loop {
                 let remaining = close_deadline.saturating_duration_since(Instant::now());
                 assert!(
@@ -472,7 +532,7 @@ fn start_request_probe(
                     "gateway socket did not close within the 10-second hang guard"
                 );
                 stream.set_read_timeout(Some(remaining))?;
-                match stream.read(&mut response) {
+                match stream.read(&mut chunk) {
                     Ok(0) => break,
                     Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                     Err(error)
@@ -486,13 +546,89 @@ fn start_request_probe(
                             "gateway socket did not close within the 10-second hang guard"
                         );
                     }
-                    Ok(_) => {}
+                    Ok(read) => response.extend_from_slice(&chunk[..read]),
                     Err(error) => return Err(error),
                 }
+            }
+            if !response.is_empty() && !is_well_formed_http_error_response(&response) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "probe received neither EOF/reset nor a well-formed HTTP error response: {response:?}"
+                    ),
+                ));
             }
         }
         Ok(())
     }))
+}
+
+pub fn is_well_formed_http_error_response(response: &[u8]) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let mut lines = response[..header_end].split(|byte| *byte == b'\n');
+    let Some(status_line) = lines.next().and_then(|line| line.strip_suffix(b"\r")) else {
+        return false;
+    };
+    let Ok(status_line) = std::str::from_utf8(status_line) else {
+        return false;
+    };
+    let mut status_parts = status_line.splitn(3, ' ');
+    let (Some(version), Some(status), Some(reason)) =
+        (status_parts.next(), status_parts.next(), status_parts.next())
+    else {
+        return false;
+    };
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || status.len() != 3
+        || !status.bytes().all(|byte| byte.is_ascii_digit())
+        || !status.parse::<u16>().is_ok_and(|code| (400..=599).contains(&code))
+        || reason.bytes().any(|byte| byte < b' ' || byte == 0x7f)
+    {
+        return false;
+    }
+    lines.all(|line| {
+        let Some(line) = line.strip_suffix(b"\r") else {
+            return false;
+        };
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            return false;
+        };
+        let name = &line[..colon];
+        let value = &line[colon + 1..];
+        !name.is_empty()
+            && name.iter().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            })
+            && value.iter().all(|byte| *byte == b'\t' || (*byte >= b' ' && *byte != 0x7f))
+    })
+}
+
+fn shutdown_bound(service: &str) -> Result<Duration, Box<dyn std::error::Error>> {
+    match service {
+        "ramflux-gateway" => Ok(Duration::from_secs(10)),
+        "ramflux-router" | "ramflux-notify" | "ramflux-federation" | "ramflux-relay"
+        | "ramflux-signaling" | "ramflux-retention" => Ok(Duration::from_secs(4)),
+        _ => Err(format!("unknown shutdown-test service {service}").into()),
+    }
 }
 
 fn assert_clean_reopen(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -797,11 +933,16 @@ fn signal_and_wait(
     child: &mut Child,
     service: &str,
     mode: &str,
+    shutdown_bound: Duration,
+    shutdown_started: Option<&AtomicBool>,
 ) -> Result<(std::process::ExitStatus, Duration), Box<dyn std::error::Error>> {
     let started = Instant::now();
     let sent = Command::new("kill").args(["-TERM", &child.id().to_string()]).status()?;
     if !sent.success() {
         return Err(format!("kill failed for {service}: {sent}").into());
+    }
+    if let Some(shutdown_started) = shutdown_started {
+        shutdown_started.store(true, Ordering::SeqCst);
     }
     if mode == "second" {
         std::thread::sleep(Duration::from_millis(30));
@@ -813,8 +954,8 @@ fn signal_and_wait(
             break status;
         }
         assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "{service} exceeded 10-second shutdown hang guard"
+            started.elapsed() < shutdown_bound,
+            "{service} exceeded {shutdown_bound:?} shutdown hang guard"
         );
         std::thread::sleep(Duration::from_millis(10));
     };

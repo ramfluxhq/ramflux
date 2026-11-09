@@ -897,11 +897,38 @@ async fn write_tcp_raw_frame<W>(send: &mut W, frame: &[u8]) -> Result<(), Transp
 where
     W: AsyncWrite + Unpin + ?Sized,
 {
-    let len = u32::try_from(frame.len())
-        .map_err(|_error| TransportError::FrameTooLarge { len: frame.len() })?;
-    send.write_all(&len.to_be_bytes()).await.map_err(TransportError::Io)?;
+    let header = encode_tcp_raw_frame_header(frame)?;
+    send.write_all(&header).await.map_err(TransportError::Io)?;
     send.write_all(frame).await.map_err(TransportError::Io)?;
     send.flush().await.map_err(TransportError::Io)
+}
+
+#[cfg(feature = "test-support")]
+/// Encode a gateway session frame using the TCP-TLS four-byte length prefix.
+///
+/// # Errors
+/// Returns an error when the frame length cannot fit in the wire header.
+pub fn encode_gateway_session_frame_for_test(frame: &[u8]) -> Result<Vec<u8>, TransportError> {
+    encode_tcp_raw_frame(frame)
+}
+
+#[cfg(feature = "test-support")]
+fn encode_tcp_raw_frame(frame: &[u8]) -> Result<Vec<u8>, TransportError> {
+    let header = encode_tcp_raw_frame_header(frame)?;
+    let capacity = frame
+        .len()
+        .checked_add(header.len())
+        .ok_or(TransportError::FrameTooLarge { len: frame.len() })?;
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(&header);
+    encoded.extend_from_slice(frame);
+    Ok(encoded)
+}
+
+fn encode_tcp_raw_frame_header(frame: &[u8]) -> Result<[u8; 4], TransportError> {
+    let len = u32::try_from(frame.len())
+        .map_err(|_error| TransportError::FrameTooLarge { len: frame.len() })?;
+    Ok(len.to_be_bytes())
 }
 
 async fn read_tcp_raw_frame<R>(recv: &mut R) -> Result<Vec<u8>, TransportError>

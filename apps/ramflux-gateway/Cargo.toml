@@ -47,3 +47,5 @@ ramflux-node-core = { workspace = true, features = ["durability-test-hooks", "te
 ramflux-sdk = { workspace = true }
 rcgen = { workspace = true }
 redb = { workspace = true }
+ramflux-transport = { workspace = true, features = ["test-support"] }
+rustls-pemfile = { workspace = true }
