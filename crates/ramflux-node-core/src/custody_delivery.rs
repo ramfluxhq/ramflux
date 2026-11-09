@@ -10,6 +10,21 @@ use ramflux_protocol::custody::{CustodyRefusal, CustodyServerFrame, CustodySessi
 fn invalid(_: impl std::fmt::Display) -> CustodyRefusal {
     CustodyRefusal::InvalidInput
 }
+
+fn candidate_size_preflight(envelope: &ramflux_protocol::Envelope) -> Result<(), CustodyRefusal> {
+    if !ramflux_protocol::schema_profile::schema_v1_live() {
+        return Ok(());
+    }
+    ramflux_protocol::message::outer::refuse_live_bridge(envelope)
+        .map_err(|_| CustodyRefusal::InvalidInput)?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::from_inner(
+        envelope.encrypted_payload.len(),
+    )
+    .map_err(|_| CustodyRefusal::PayloadTooLarge)?;
+    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::new();
+    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet)
+        .map_err(|_| CustodyRefusal::PayloadTooLarge)
+}
 #[derive(Clone, Copy)]
 pub(crate) struct DeliveryAuthority<'a> {
     pub authority: &'a VerifiedRecord,
@@ -23,6 +38,7 @@ pub(crate) fn submit(
     envelope: ramflux_protocol::Envelope,
     now: u64,
 ) -> Result<CustodyServerFrame, CustodyRefusal> {
+    candidate_size_preflight(&envelope)?;
     ramflux_protocol::ephemeral::require_durable(&envelope)
         .map_err(|_| CustodyRefusal::InvalidInput)?;
     let DeliveryAuthority { source, .. } = credentials;

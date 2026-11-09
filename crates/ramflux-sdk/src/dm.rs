@@ -494,6 +494,54 @@ pub(crate) fn gateway_direct_message_envelope(
     Ok(envelope)
 }
 
+/// Candidate v1 outer envelope. Live [`gateway_direct_message_envelope`] is unchanged.
+#[expect(dead_code, reason = "S10a P06 dormant until P24")]
+pub(crate) fn candidate_direct_message_envelope(
+    config: &GatewaySessionConfig,
+    message: &GatewayDirectMessage,
+    collapse_tag: [u8; 32],
+    mode: ramflux_protocol::message::outer::NamedDeliveryMode,
+) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
+    let encrypted_payload = ramflux_protocol::encode_base64url(&message.encrypted_body);
+    let payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        encrypted_payload.as_bytes(),
+    );
+    let source_principal_id = config
+        .device_branch
+        .as_ref()
+        .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
+    let outer = ramflux_protocol::message::outer::CandidateOuterEnvelope {
+        schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
+        version: 2,
+        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        envelope_id: message.envelope_id.clone(),
+        source_principal_id,
+        source_device_id: config.device_id.clone(),
+        target_delivery_id: message.target_delivery_id.clone(),
+        delivery_class: ramflux_protocol::message::outer::CandidateDeliveryClass::Message,
+        priority: match mode {
+            ramflux_protocol::message::outer::NamedDeliveryMode::Durable => {
+                ramflux_protocol::Priority::Normal
+            }
+            ramflux_protocol::message::outer::NamedDeliveryMode::Ephemeral => {
+                ramflux_protocol::Priority::Low
+            }
+        },
+        ttl_seconds: message.ttl,
+        created_at: message.created_at,
+        encrypted_payload,
+        payload_hash,
+        collapse_tag: ramflux_protocol::encode_base64url(collapse_tag),
+        delivery_mode: mode,
+        node_report_receipt: None,
+        signed: sdk_signed_fields(""),
+    };
+    ramflux_protocol::message::outer::validate_candidate_outer(&outer)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+    Ok(outer)
+}
+
 pub(crate) fn dedup_gateway_entries(entries: Vec<GatewayInboxEntry>) -> Vec<GatewayInboxEntry> {
     let mut seen = BTreeSet::new();
     let mut deduped = Vec::new();

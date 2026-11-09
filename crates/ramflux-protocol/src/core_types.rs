@@ -59,6 +59,14 @@ pub struct Envelope {
     pub payload_hash: String,
 }
 
+impl Envelope {
+    /// Live S6 `ext.delivery_mode` bridge. The v1 profile rejects this key.
+    #[must_use]
+    pub fn delivery_mode_bridge(&self) -> Option<&Value> {
+        self.ext.ext.get(crate::ephemeral::DELIVERY_MODE_EXTENSION)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryClass {

@@ -142,6 +142,18 @@ struct SealPair<'a> {
     bundle: [u8; 32],
 }
 
+fn candidate_seal_preflight(inner_len: usize) -> Result<(), SdkError> {
+    if !crate::client::target_selection::schema_v1_selected() {
+        return Ok(());
+    }
+    let sizes = ramflux_protocol::message::outer::IngressSizes::from_inner(inner_len)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::new();
+    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+    Ok(())
+}
+
 impl RamfluxClient {
     pub(crate) async fn seal_routed_as(
         &self,
@@ -215,6 +227,7 @@ impl RamfluxClient {
         pair: SealPair<'_>,
     ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
         self.require_backup_outbound_ready()?;
+        candidate_seal_preflight(body.len())?;
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
         let wire_remote =

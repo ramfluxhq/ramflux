@@ -23,3 +23,13 @@ pub fn envelope_sender_signed_bytes(envelope: &Envelope) -> Result<Vec<u8>, Prot
     }
     crate::signed_bytes(&sender)
 }
+
+/// Sender-signed candidate outer bytes. Node receipt is excluded.
+///
+/// # Errors
+/// Returns canonical JSON errors.
+pub fn candidate_outer_sender_signed_bytes(
+    outer: &crate::message::outer::CandidateOuterEnvelope,
+) -> Result<Vec<u8>, ProtocolError> {
+    crate::message::outer::candidate_outer_sender_signed_bytes(outer)
+}

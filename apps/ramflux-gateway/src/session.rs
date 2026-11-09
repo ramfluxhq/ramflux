@@ -16,6 +16,8 @@ use crate::{
 pub(crate) const GATEWAY_FIRST_FRAME_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 
+const _: () = assert!(ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES == 1_048_576);
+
 const DEFAULT_GATEWAY_RESUME_WINDOW_SECONDS: u64 = 300;
 const GATEWAY_V3_ISSUER_SEED_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_SEED";
 const GATEWAY_V3_ISSUER_CERT_FILE_ENV: &str = "RAMFLUX_GATEWAY_V3_ISSUER_CERT_FILE";

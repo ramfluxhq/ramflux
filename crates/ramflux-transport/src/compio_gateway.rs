@@ -10,6 +10,9 @@ use crate::tls_config::compio_quic_gateway_server_config;
 use crate::{MeshTlsConfig, TransportError};
 
 const COMP_IO_GATEWAY_FRAME_MAX_BYTES: usize = crate::MAX_GATEWAY_FRAME_BYTES;
+const _: () = assert!(
+    COMP_IO_GATEWAY_FRAME_MAX_BYTES == ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
+);
 
 pub struct CompioGatewayQuicServer {
     endpoint: compio_quic::Endpoint,

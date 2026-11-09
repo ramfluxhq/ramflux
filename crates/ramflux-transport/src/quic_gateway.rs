@@ -15,6 +15,8 @@ use tokio::net::{TcpSocket, TcpStream};
 use tokio_rustls::TlsConnector;
 
 const MAX_QUIC_FRAME_BYTES: usize = crate::MAX_GATEWAY_FRAME_BYTES;
+const _: () =
+    assert!(MAX_QUIC_FRAME_BYTES == ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES);
 
 pub type GatewaySessionFrameFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TransportError>> + Send + 'a>>;

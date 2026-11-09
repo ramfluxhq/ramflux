@@ -32,6 +32,19 @@ pub struct WellKnownClientRecord {
     pub signature: String,
 }
 
+/// Candidate message-schema v1 profile token advertised during discovery.
+pub const MESSAGE_SCHEMA_V1_PROFILE: &str = crate::message::outer::MESSAGE_SCHEMA_V1_PROFILE;
+
+/// Reject an old node that does not advertise the candidate message-schema profile.
+///
+/// # Errors
+/// Returns [`ProtocolError::InvalidDomain`] when the v1 profile is absent.
+pub fn discover_candidate_message_schema(
+    record: &WellKnownClientRecord,
+) -> Result<(), ProtocolError> {
+    crate::message::outer::discover_candidate_message_schema(record)
+}
+
 /// Applies the shared server/client discovery freshness window.
 ///
 /// # Errors

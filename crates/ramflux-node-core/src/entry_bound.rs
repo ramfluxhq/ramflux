@@ -7,6 +7,8 @@ use serde::Serialize;
 use std::io;
 
 pub const ENTRY_FRAME_BYTE_CAP: usize = 1_048_576;
+const _: () =
+    assert!(ENTRY_FRAME_BYTE_CAP == ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES);
 // Exact fixed JSON bytes around the WireEntry slot. Empty slots below contribute
 // no entry bytes; the independent wire oracle checks all three complete shapes.
 const LEGACY_OVERHEAD: usize = r#"{"frame_type":"deliver","entry":}"#.len();
@@ -56,10 +58,25 @@ pub fn single_entry_frame_size(
 /// # Errors
 /// Returns typed `payload_too_large` or a serialization error, before allocation/replay.
 pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
+    if ramflux_protocol::schema_profile::schema_v1_live() {
+        check_candidate_entry_bound(envelope)?;
+    }
     if single_entry_frame_size(envelope)? > ENTRY_FRAME_BYTE_CAP {
         return Err(NodeCoreError::PayloadTooLarge);
     }
     Ok(())
+}
+
+fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
+    ramflux_protocol::message::outer::refuse_live_bridge(envelope)
+        .map_err(|_| NodeCoreError::PayloadTooLarge)?;
+    let sizes = ramflux_protocol::message::outer::IngressSizes::from_inner(
+        envelope.encrypted_payload.len(),
+    )
+    .map_err(|_| NodeCoreError::PayloadTooLarge)?;
+    let mut ratchet = ramflux_protocol::message::outer::TemporaryRatchet::new();
+    ramflux_protocol::message::outer::accept_after_size_preflight(sizes, &mut ratchet)
+        .map_err(|_| NodeCoreError::PayloadTooLarge)
 }
 
 #[cfg(test)]

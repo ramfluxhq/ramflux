@@ -7,6 +7,21 @@ use crate::prelude::*;
 
 const GATEWAY_SESSION_AUTH_TTL_SECONDS: i64 = 300;
 
+/// Admit a candidate outer frame only after activation; live frames stay on the existing codecs.
+///
+/// # Errors
+/// Profile or frame-cap refusals when the v1 generation is live.
+#[expect(dead_code, reason = "S10a P06 dormant until P24")]
+pub(crate) fn admit_candidate_outer_frame(
+    frame: &[u8],
+) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
+    if !ramflux_protocol::schema_profile::schema_v1_live() {
+        return Err(SdkError::InboundRejected("candidate outer is dormant".into()));
+    }
+    ramflux_transport::decode_candidate_outer_frame(frame)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))
+}
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct GatewayQuicEndpointConfig {
     pub bind_addr: SocketAddr,

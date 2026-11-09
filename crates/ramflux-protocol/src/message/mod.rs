@@ -12,6 +12,7 @@
 mod generated;
 pub use generated::*;
 mod canonical;
+pub mod outer;
 mod protojson;
 pub mod registry;
 mod scanner;

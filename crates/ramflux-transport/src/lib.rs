@@ -7,6 +7,7 @@ mod backend;
 mod bounded_http;
 mod bounded_http_dns;
 mod bounded_mesh_request;
+mod candidate_outer;
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 mod compio_gateway;
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
@@ -39,6 +40,7 @@ pub use bounded_http::{BoundedHttpPost, BoundedHttpTls, bounded_http_post};
 pub use bounded_mesh_request::{
     read_bounded_mesh_http_request, read_bounded_mesh_http_request_by_path,
 };
+pub use candidate_outer::{decode_candidate_outer_frame, encode_candidate_outer_frame};
 #[cfg(all(target_os = "linux", feature = "compio-gateway"))]
 pub use compio_gateway::{
     CompioGatewayBidiStream, CompioGatewayQuicConnection, CompioGatewayQuicServer,
@@ -121,6 +123,9 @@ pub const fn crate_name() -> &'static str {
 
 /// Maximum serialized gateway frame length, shared by sender admission and wire codecs.
 pub const MAX_GATEWAY_FRAME_BYTES: usize = 1024 * 1024;
+
+const _: () =
+    assert!(MAX_GATEWAY_FRAME_BYTES == ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES);
 
 #[cfg(test)]
 mod tests {

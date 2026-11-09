@@ -6,6 +6,10 @@
 use crate::TransportError;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+const _: () = assert!(
+    crate::MAX_GATEWAY_FRAME_BYTES == ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES
+);
+
 #[derive(Default)]
 pub(crate) struct GatewayFrameReader {
     prefix: [u8; 4],

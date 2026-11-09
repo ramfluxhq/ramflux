@@ -16,6 +16,10 @@ pub(crate) fn bind_source(
     }
     let mut envelope = envelope.clone();
     envelope.ext.ext.remove("source_device_authority");
+    if ramflux_protocol::schema_profile::schema_v1_live() {
+        ramflux_protocol::message::outer::refuse_live_bridge(&envelope)
+            .map_err(|error| anyhow::anyhow!(error))?;
+    }
     ramflux_crypto::verify_canonical_signature(
         &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
         &envelope.signed.signature,

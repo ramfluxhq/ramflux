@@ -12,6 +12,14 @@ use crate::{
 };
 
 const GATEWAY_QUIC_RUNTIME_ENV: &str = "RAMFLUX_GATEWAY_QUIC_RUNTIME";
+
+/// Candidate profile discovery. Live listeners stay on the existing well-known record.
+#[cfg_attr(not(test), expect(dead_code, reason = "S10a P06 dormant until P24"))]
+fn admit_discovered_profile(
+    record: &ramflux_protocol::WellKnownClientRecord,
+) -> Result<(), ramflux_protocol::ProtocolError> {
+    ramflux_protocol::message::outer::admit_discovered_profile(record)
+}
 const GATEWAY_QUIC_WORKER_THREADS_ENV: &str = "RAMFLUX_GATEWAY_QUIC_WORKER_THREADS";
 
 #[derive(Clone)]
@@ -572,6 +580,32 @@ mod tests {
         GatewaySessionHub, gateway_quic_worker_threads_from_value, handle_gateway_forward_deliver,
     };
     use crate::{GatewayForwardDeliverRequest, GatewaySendHandle};
+
+    #[test]
+    fn candidate_profile_discovery_is_skipped_while_gate_off()
+    -> Result<(), ramflux_protocol::ProtocolError> {
+        assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+        let record = ramflux_protocol::WellKnownClientRecord {
+            schema: ramflux_protocol::WELL_KNOWN_CLIENT_SCHEMA.to_owned(),
+            node_id: "node.example.com".to_owned(),
+            node_public_key: "key".to_owned(),
+            node_ca_cert_pem: "ca".to_owned(),
+            gateway_quic_addr: "node.example.com:443".to_owned(),
+            gateway_tcp_addr: "node.example.com:443".to_owned(),
+            gateway_server_name: "ramflux-gateway".to_owned(),
+            relay_quic_addr: "node.example.com:17447".to_owned(),
+            relay_server_name: "ramflux-relay".to_owned(),
+            prekey_http_url: "https://node.example.com".to_owned(),
+            signaling_turn_addr: "node.example.com:3478".to_owned(),
+            protocol_versions: vec!["v1".to_owned()],
+            client_capabilities: vec!["prekey".to_owned()],
+            updated_at: 1000,
+            expires_at: 2000,
+            signature: String::new(),
+        };
+        super::admit_discovered_profile(&record)?;
+        Ok(())
+    }
 
     #[test]
     fn gateway_quic_worker_threads_parse_positive_env_value() {

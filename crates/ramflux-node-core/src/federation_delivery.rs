@@ -140,6 +140,9 @@ impl FederationTrustState {
 fn required_capability_for_federated_envelope(
     delivery_class: &DeliveryClass,
 ) -> Result<&'static str, NodeCoreError> {
+    if ramflux_protocol::schema_profile::schema_v1_live() {
+        return candidate_federation_capability(delivery_class);
+    }
     match delivery_class {
         DeliveryClass::OpaqueEvent => Ok(FEDERATION_OPAQUE_DELIVERY_CAPABILITY),
         DeliveryClass::SelfDeviceControl
@@ -148,6 +151,22 @@ fn required_capability_for_federated_envelope(
         | DeliveryClass::ObjectChunk
         | DeliveryClass::FederationControl => Err(NodeCoreError::ItestHttp(
             "federated envelope inner delivery_class must be opaque_event".to_owned(),
+        )),
+    }
+}
+
+fn candidate_federation_capability(
+    delivery_class: &DeliveryClass,
+) -> Result<&'static str, NodeCoreError> {
+    match delivery_class {
+        DeliveryClass::OpaqueEvent | DeliveryClass::NotificationWake => {
+            Ok(FEDERATION_OPAQUE_DELIVERY_CAPABILITY)
+        }
+        DeliveryClass::SelfDeviceControl
+        | DeliveryClass::ObjectManifest
+        | DeliveryClass::ObjectChunk
+        | DeliveryClass::FederationControl => Err(NodeCoreError::ItestHttp(
+            "federated envelope inner delivery_class must be message or call_wake".to_owned(),
         )),
     }
 }

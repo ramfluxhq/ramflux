@@ -8,6 +8,8 @@ use super::frame_dispatch::{ExpectedReply, FrameClass, FrameKind};
 use super::session_push::{CapableEvent, CapableServerFrame, PushMeta, SessionMode};
 use super::{GatewayClientFrame, GatewayInboxEntry, GatewayServerFrame, GatewaySessionEngine};
 use crate::SdkError;
+
+const _: () = assert!(ramflux_protocol::message::outer::MAX_COMPLETE_FRAME_BYTES == 1_048_576);
 use crate::bus::connection_manager::{DisconnectReason, SessionHub};
 use crate::bus::runtime_limits::{SESSION_BUFFER, SESSION_BUFFER_BYTES};
 use std::sync::{
