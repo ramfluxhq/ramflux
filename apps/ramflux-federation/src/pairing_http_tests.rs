@@ -5,8 +5,8 @@
 use super::*;
 use crate::public_http::{FederationPublicHttpContext, handle_public_connection_with_limits};
 use ramflux_node_core::pairing_relay::{
-    PAIRING_CLAIM_PATH, PAIRING_CLOSE_PATH, PAIRING_POLL_PATH, PAIRING_SEND_PATH,
-    PairingMeshForward, PairingRelayStore, handle_pairing_mesh,
+    PAIRING_CLAIM_PATH, PAIRING_CLOSE_PATH, PAIRING_POLL_PATH, PAIRING_SEND_PATH, PairingClock,
+    PairingMeshForward, PairingRelayConfig, PairingRelayStore, handle_pairing_mesh,
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::PairingWire;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-struct PairingEnv {
+pub(crate) struct PairingEnv {
     _guard: MutexGuard<'static, ()>,
     previous: Option<String>,
     previous_plain: Option<String>,
@@ -34,7 +34,7 @@ fn pairing_env_lock() -> &'static Mutex<()> {
 }
 
 #[allow(unsafe_code)]
-fn enable_pairing() -> PairingEnv {
+pub(crate) fn enable_pairing() -> PairingEnv {
     let guard = pairing_env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").ok();
     let previous_plain = std::env::var("RAMFLUX_FEDERATION_PUBLIC_PLAIN_HTTP").ok();
@@ -69,10 +69,10 @@ fn set_plain_http() {
     }
 }
 
-struct NodeMesh {
-    endpoint: String,
-    store: Arc<Mutex<PairingRelayStore>>,
-    client_tls: ramflux_transport::MeshTlsConfig,
+pub(crate) struct NodeMesh {
+    pub(crate) endpoint: String,
+    pub(crate) store: Arc<Mutex<PairingRelayStore>>,
+    pub(crate) client_tls: ramflux_transport::MeshTlsConfig,
     _root: crate::test_directories::TestDirectory,
 }
 
@@ -104,6 +104,13 @@ fn node_record() -> TestResult<ramflux_crypto::custody::VerifiedNodeRecord> {
 }
 
 fn spawn_node_mesh() -> TestResult<NodeMesh> {
+    spawn_node_mesh_at("https://relay.example:443".into(), None)
+}
+
+pub(crate) fn spawn_node_mesh_at(
+    public_origin: String,
+    clock: Option<Arc<dyn PairingClock>>,
+) -> TestResult<NodeMesh> {
     let root = crate::test_certificates::temp_cert_root("pairing-node-mesh")?;
     let ca = crate::test_certificates::issue_test_ca(&root)?;
     let federation =
@@ -115,8 +122,18 @@ fn spawn_node_mesh() -> TestResult<NodeMesh> {
     let router_core = ramflux_node_core::RouterCore::new();
     store.bootstrap_router(&router_core)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let service = ramflux_node_core::CustodyService::new(node_record()?, false, &store, now)?
-        .with_pairing_relay_if_enabled([7; 32], "https://relay.example:443".into())?;
+    let service = ramflux_node_core::CustodyService::new(node_record()?, false, &store, now)?;
+    let service = match clock {
+        Some(clock) => {
+            let relay_store = PairingRelayStore::new(PairingRelayConfig {
+                clock,
+                node_seed: [7; 32],
+                public_origin,
+            })?;
+            service.with_pairing_relay(Arc::new(Mutex::new(relay_store)))
+        }
+        None => service.with_pairing_relay_if_enabled([7; 32], public_origin)?,
+    };
     let relay = service.pairing_relay().cloned().ok_or("pairing store missing")?;
     let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &router.tls)?;
     let endpoint = server.local_addr()?.to_string();

@@ -35,7 +35,10 @@ tracing-subscriber = { workspace = true }
 socket2 = { workspace = true }
 redb = { workspace = true }
 ramflux-node-core = { workspace = true, features = ["test-support"] }
+ramflux-sdk = { workspace = true }
 ramflux-transport = { workspace = true, features = ["test-support"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 
 [lints]

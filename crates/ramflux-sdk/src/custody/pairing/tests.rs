@@ -1,29 +1,31 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Coordinator talks to production P06 `handle_pairing_http` over a real TCP listener.
+//! Coordinator unit tests. Config is injected; no process environment.
 use super::{
-    HttpRelay, PairingActor, PairingIdentity, PairingNative, pairing_enabled, validate_head_advance,
+    PairingActor, PairingConfig, PairingIdentity, PairingNative, PairingTransport, pairing_enabled,
+    validate_head_advance,
 };
 use crate::SdkError;
 use ramflux_node_core::pairing_relay::{
     PairingClock, PairingRelayConfig, PairingRelayError, PairingRelayStore, TestPairingClock,
-    handle_pairing_http,
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::local_dto::{
     Approve, Begin, BeginResult, Confirm, Join, LocalResult, Outcome, StatusRequest, Update,
 };
 use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, Created, Issued};
+use ramflux_protocol::custody::pairing::relay::{
+    Claim, Claimed, Close, Closed, Poll, Polled, RelayFrame, Send, Sent,
+};
 use ramflux_protocol::encode_base64url;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::thread::JoinHandle;
-use std::time::Duration;
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type BoxFut<T> = Pin<Box<dyn Future<Output = T> + std::marker::Send>>;
 const WALL: u64 = 1_760_000_000;
 const ORIGIN: &str = "https://relay.example:443";
 
@@ -40,22 +42,28 @@ impl PairingNative for StoreNative {
     }
 }
 
-struct PairingHttp {
-    origin: String,
-    addr: std::net::SocketAddr,
-    stop: Arc<AtomicBool>,
-    join: Option<JoinHandle<()>>,
+struct MemoryRelay {
+    store: Arc<Mutex<PairingRelayStore>>,
 }
 
-impl Drop for PairingHttp {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Ok(stream) = TcpStream::connect(self.addr) {
-            drop(stream);
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+impl PairingTransport for MemoryRelay {
+    fn claim(&self, _origin: String, claim: Claim) -> BoxFut<Result<Claimed, SdkError>> {
+        let store = Arc::clone(&self.store);
+        Box::pin(async move {
+            held(&store).claim(IpAddr::V4(Ipv4Addr::LOCALHOST), &claim).map_err(relay_err)
+        })
+    }
+    fn send(&self, _origin: String, send: Send) -> BoxFut<Result<Sent, SdkError>> {
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { held(&store).send(&send).map_err(relay_err) })
+    }
+    fn poll(&self, _origin: String, poll: Poll) -> BoxFut<Result<Polled, SdkError>> {
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { held(&store).poll(&poll).map_err(relay_err) })
+    }
+    fn close(&self, _origin: String, close: Close) -> BoxFut<Result<Closed, SdkError>> {
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { held(&store).close(&close).map_err(relay_err) })
     }
 }
 
@@ -63,52 +71,45 @@ struct Fixture {
     primary: PairingActor,
     recipient: PairingActor,
     clock: Arc<TestPairingClock>,
-    _http: PairingHttp,
-    _env: PairingEnv,
+    store: Arc<Mutex<PairingRelayStore>>,
     _fixed: crate::time::FixedClock,
 }
 
-struct PairingEnv {
-    _guard: MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
-
-#[test]
-fn pairing_two_local_confirmations_precede_approval() -> TestResult {
+#[tokio::test]
+async fn pairing_coordinator_requires_two_local_confirmations() -> TestResult {
     let mut fx = Fixture::open()?;
-    let begun = begin_result(fx.primary.begin(begin_body())?)?;
+    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
     let secret = begun.invite_token.recipient_token.clone();
     let op = begun.operation_id.clone();
     let generation = begun.generation;
-    assert_no_token(&fx.primary.status(&status_req(&op, generation))?, &secret)?;
-    fx.recipient.join(Join {
-        schema: "ramflux.pairing.Join.v2".into(),
-        version: 2,
-        token: begun.invite_token,
-        display_name: "Recipient".into(),
-    })?;
-    drive_sas(&mut fx, &op, generation)?;
-    assert!(fx.primary.frames_seen() > 0 && fx.recipient.frames_seen() > 0);
-    assert_eq!(fx.primary.unsolicited_prompts(), 0);
-    assert_eq!(fx.recipient.unsolicited_prompts(), 0);
-    fx.recipient.confirm(&confirm_ok(&fx.recipient, &op)?)?;
-    drive_once(&mut fx)?;
+    assert_no_token(&fx.primary.status(&status_req(&op, generation)).await?, &secret)?;
+    fx.recipient
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Recipient".into(),
+        })
+        .await?;
+    drive_sas(&mut fx, &op, generation).await?;
+    fx.recipient.confirm(&confirm_ok(&fx.recipient, &op)?).await?;
+    drive_once(&mut fx).await?;
     fx.primary.note_peer_confirmed_flag(true);
-    assert_approve_refused(&mut fx.primary, &op)?;
-    fx.primary.confirm(&confirm_ok(&fx.primary, &op)?)?;
-    drive_once(&mut fx)?;
-    let approved = update(fx.primary.approve(&approve_ok(&fx.primary, &op)?)?)?;
+    assert_approve_refused(&mut fx.primary, &op).await?;
+    fx.primary.confirm(&confirm_ok(&fx.primary, &op)?).await?;
+    drive_once(&mut fx).await?;
+    let approved = update(fx.primary.approve(&approve_ok(&fx.primary, &op)?).await?)?;
     assert_eq!(approved.phase, "proposal_pending");
     Ok(())
 }
 
-#[test]
-fn pairing_mismatch_rejects_sas() -> TestResult {
+#[tokio::test]
+async fn pairing_mismatch_rejects_sas() -> TestResult {
     let mut fx = Fixture::open()?;
-    let (op, _) = joined(&mut fx)?;
+    let (op, _) = joined(&mut fx).await?;
     let mut bad = confirm_ok(&fx.primary, &op)?;
     bad.r#match = false;
-    let mismatch = update(fx.primary.confirm(&bad)?)?;
+    let mismatch = update(fx.primary.confirm(&bad).await?)?;
     assert_eq!(
         (mismatch.phase.as_str(), mismatch.result.as_deref()),
         ("rejected", Some("SasMismatch"))
@@ -116,22 +117,22 @@ fn pairing_mismatch_rejects_sas() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn pairing_lock_background_and_head_change() -> TestResult {
+#[tokio::test]
+async fn pairing_lock_background_and_head_change() -> TestResult {
     let mut fx = Fixture::open()?;
-    let begun = begin_result(fx.primary.begin(begin_body())?)?;
-    let locked = update(fx.primary.lock()?)?;
+    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let locked = update(fx.primary.lock().await?)?;
     assert_eq!((locked.phase.as_str(), locked.result.as_deref()), ("cancelled", Some("Retired")));
     assert!(fx.primary.frontend_generation() > begun.generation);
     drop(fx);
     let mut fx = Fixture::open()?;
-    let _ = begin_result(fx.primary.begin(begin_body())?)?;
-    let expired = update(fx.primary.background()?)?;
+    let _ = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let expired = update(fx.primary.background().await?)?;
     assert_eq!((expired.phase.as_str(), expired.result.as_deref()), ("expired", Some("Expired")));
     drop(fx);
     let mut fx = Fixture::open()?;
-    let _ = begin_result(fx.primary.begin(begin_body())?)?;
-    let changed = update(fx.primary.note_head_change()?)?;
+    let _ = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let changed = update(fx.primary.note_head_change().await?)?;
     assert_eq!(
         (changed.phase.as_str(), changed.result.as_deref()),
         ("rejected", Some("HeadChanged"))
@@ -155,44 +156,130 @@ fn pairing_head_advance_enforces_publisher_ref() -> TestResult {
     Ok(())
 }
 
-#[test]
-#[allow(unsafe_code)]
-fn pairing_disabled_without_opt_in() {
-    let _guard = pairing_env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous = std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").ok();
-    unsafe {
-        std::env::remove_var("RAMFLUX_DEVICE_PAIRING_ENABLED");
+#[tokio::test]
+async fn pairing_disabled_without_opt_in() -> TestResult {
+    assert!(!pairing_enabled());
+    let mut fx = Fixture::disabled()?;
+    match fx.primary.begin(begin_body()).await {
+        Err(SdkError::PairingCode("NotFound")) => Ok(()),
+        other => Err(format!("disabled begin: {other:?}").into()),
     }
-    let disabled = !pairing_enabled();
-    unsafe {
-        match previous {
-            Some(value) => std::env::set_var("RAMFLUX_DEVICE_PAIRING_ENABLED", value),
-            None => std::env::remove_var("RAMFLUX_DEVICE_PAIRING_ENABLED"),
-        }
-    }
-    assert!(disabled);
 }
 
-fn joined(fx: &mut Fixture) -> TestResult<(String, u64)> {
-    let begun = begin_result(fx.primary.begin(begin_body())?)?;
+#[tokio::test]
+async fn pairing_stale_generation_is_refused() -> TestResult {
+    let mut fx = Fixture::open()?;
+    let (op, generation) = joined(&mut fx).await?;
+    let mut stale = confirm_ok(&fx.primary, &op)?;
+    stale.generation = generation.saturating_add(1);
+    match fx.primary.confirm(&stale).await {
+        Err(SdkError::PairingCode("WrongContext")) => {}
+        Ok(result) => return Err(format!("stale confirm {}", update(result)?.phase).into()),
+        Err(error) => return Err(format!("stale confirm {error}").into()),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_forged_invitation_is_refused() -> TestResult {
+    let mut fx = Fixture::open()?;
+    let mut begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let mut raw = ramflux_protocol::decode_base64url(&begun.invite_token.invitation.signature)?;
+    raw[0] ^= 1;
+    begun.invite_token.invitation.signature = encode_base64url(raw);
+    match fx
+        .recipient
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Recipient".into(),
+        })
+        .await
+    {
+        Err(SdkError::PairingCode("InvalidInput")) => Ok(()),
+        other => Err(format!("forged invitation: {other:?}").into()),
+    }
+}
+
+#[tokio::test]
+async fn pairing_bad_mac_is_terminal() -> TestResult {
+    let mut fx = Fixture::open()?;
+    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let recipient_token = begun.invite_token.recipient_token.clone();
+    let invitation_id = begun.invite_token.invitation.body.invitation_id.clone();
+    let issuer_seq = begun.invite_token.invitation.body.issuer_seq;
     let op = begun.operation_id.clone();
     let generation = begun.generation;
-    fx.recipient.join(Join {
-        schema: "ramflux.pairing.Join.v2".into(),
+    fx.recipient
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Recipient".into(),
+        })
+        .await?;
+    drive_sas(&mut fx, &op, generation).await?;
+    let th = fx.primary.displayed_transcript()?;
+    held(&fx.store).send(&Send {
+        schema: "ramflux.pairing.Send.v2".into(),
         version: 2,
-        token: begun.invite_token,
-        display_name: "Recipient".into(),
+        invitation_id,
+        issuer_seq,
+        role: "responder".into(),
+        token: recipient_token,
+        seq: 2,
+        frame: RelayFrame::Confirm {
+            role: "responder".into(),
+            transcript_hash: th,
+            mac: encode_base64url([9u8; 32]),
+        },
     })?;
-    drive_sas(fx, &op, generation)?;
+    fx.clock.advance_ms(1_001);
+    let rejected = update(fx.primary.sync_relay().await?)?;
+    assert_eq!(
+        (rejected.phase.as_str(), rejected.result.as_deref(), rejected.emoji_indices.is_none()),
+        ("rejected", Some("SasMismatch"), true)
+    );
+    fx.clock.advance_ms(1_001);
+    match fx.recipient.sync_relay().await {
+        Ok(result) => {
+            let polled = update(result)?;
+            assert!(
+                polled.phase == "cancelled"
+                    || polled.phase == "rejected"
+                    || polled.result.as_deref() == Some("Retired"),
+                "{polled:?}"
+            );
+        }
+        Err(SdkError::PairingCode("Retired")) => {}
+        Err(error) => return Err(format!("close observe {error}").into()),
+    }
+    Ok(())
+}
+
+async fn joined(fx: &mut Fixture) -> TestResult<(String, u64)> {
+    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let op = begun.operation_id.clone();
+    let generation = begun.generation;
+    fx.recipient
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Recipient".into(),
+        })
+        .await?;
+    drive_sas(fx, &op, generation).await?;
     Ok((op, generation))
 }
 
-fn drive_sas(fx: &mut Fixture, op: &str, generation: u64) -> TestResult {
+async fn drive_sas(fx: &mut Fixture, op: &str, generation: u64) -> TestResult {
     let mut last = String::new();
     for _ in 0..24 {
-        drive_once(fx)?;
-        let primary = phase(&mut fx.primary, op, generation)?;
-        let recipient = phase(&mut fx.recipient, op, generation)?;
+        drive_once(fx).await?;
+        let primary = phase(&mut fx.primary, op, generation).await?;
+        let recipient = phase(&mut fx.recipient, op, generation).await?;
         last = format!(
             "primary={primary} recipient={recipient} frames={}/{}",
             fx.primary.frames_seen(),
@@ -201,24 +288,27 @@ fn drive_sas(fx: &mut Fixture, op: &str, generation: u64) -> TestResult {
         if primary == "sas_pending" && recipient == "sas_pending" {
             return Ok(());
         }
+        if terminal_phase(&primary) || terminal_phase(&recipient) {
+            return Err(last.into());
+        }
     }
     Err(last.into())
 }
 
-fn drive_once(fx: &mut Fixture) -> TestResult {
+async fn drive_once(fx: &mut Fixture) -> TestResult {
     fx.clock.advance_ms(1_001);
-    let _ = fx.primary.sync_relay()?;
+    let _ = fx.primary.sync_relay().await?;
     fx.clock.advance_ms(1_001);
-    let _ = fx.recipient.sync_relay()?;
+    let _ = fx.recipient.sync_relay().await?;
     Ok(())
 }
 
-fn phase(actor: &mut PairingActor, op: &str, generation: u64) -> TestResult<String> {
-    Ok(update(actor.status(&status_req(op, generation))?)?.phase)
+async fn phase(actor: &mut PairingActor, op: &str, generation: u64) -> TestResult<String> {
+    Ok(update(actor.status(&status_req(op, generation)).await?)?.phase)
 }
 
-fn assert_approve_refused(actor: &mut PairingActor, op: &str) -> TestResult {
-    match actor.approve(&approve_ok(actor, op)?) {
+async fn assert_approve_refused(actor: &mut PairingActor, op: &str) -> TestResult {
+    match actor.approve(&approve_ok(actor, op)?).await {
         Err(SdkError::PairingCode("WrongContext")) => Ok(()),
         Ok(result) => Err(format!("premature approval {}", update(result)?.phase).into()),
         Err(error) => Err(format!("approve {error}").into()),
@@ -292,9 +382,20 @@ fn update(result: LocalResult) -> TestResult<Update> {
     }
 }
 
+fn terminal_phase(phase: &str) -> bool {
+    matches!(phase, "cancelled" | "expired" | "rejected" | "completed")
+}
+
 impl Fixture {
     fn open() -> TestResult<Self> {
-        let env = enable_pairing();
+        Self::with_config(PairingConfig { enabled: true, extra_root_ca_pem: None })
+    }
+
+    fn disabled() -> TestResult<Self> {
+        Self::with_config(PairingConfig { enabled: false, extra_root_ca_pem: None })
+    }
+
+    fn with_config(config: PairingConfig) -> TestResult<Self> {
         let fixed = crate::time::FixedClock::set(i64::try_from(WALL)?);
         let clock = TestPairingClock::new(WALL);
         let store = Arc::new(Mutex::new(PairingRelayStore::new(PairingRelayConfig {
@@ -302,25 +403,24 @@ impl Fixture {
             node_seed: [7; 32],
             public_origin: ORIGIN.into(),
         })?));
-        let http = spawn_http(Arc::clone(&store))?;
-        let native = Arc::new(StoreNative { store });
-        let relay = HttpRelay::new(http.origin.clone());
+        let native = Arc::new(StoreNative { store: Arc::clone(&store) });
+        let relay = Arc::new(MemoryRelay { store: Arc::clone(&store) });
         Ok(Self {
             primary: PairingActor::new(
-                identity("primary", true),
-                Arc::clone(&native) as _,
-                relay.clone(),
+                identity("primary", true, true),
+                Some(Arc::clone(&native) as _),
+                Arc::clone(&relay) as _,
+                config.clone(),
             ),
-            recipient: PairingActor::new(identity("recipient", false), native, relay),
+            recipient: PairingActor::new(identity("recipient", false, false), None, relay, config),
             clock,
-            _http: http,
-            _env: env,
+            store,
             _fixed: fixed,
         })
     }
 }
 
-fn identity(device: &str, primary: bool) -> PairingIdentity {
+fn identity(device: &str, primary: bool, with_master: bool) -> PairingIdentity {
     PairingIdentity {
         account_id: device.into(),
         local_ref: DeviceRef {
@@ -328,95 +428,11 @@ fn identity(device: &str, primary: bool) -> PairingIdentity {
             device_id: device.into(),
             device_epoch: 1,
         },
-        master_public_key: encode_base64url([3u8; 32]),
+        master_public_key: with_master.then(|| encode_base64url([3u8; 32])),
         base_record_hash: encode_base64url([2u8; 32]),
         base_epoch: 1,
         is_primary: primary,
     }
-}
-
-fn spawn_http(store: Arc<Mutex<PairingRelayStore>>) -> TestResult<PairingHttp> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let addr = listener.local_addr()?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&stop);
-    let join = std::thread::spawn(move || {
-        let _ = listener.set_nonblocking(true);
-        while !flag.load(Ordering::SeqCst) {
-            match listener.accept() {
-                Ok((stream, peer)) => {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        serve_one(&store, stream, peer.ip());
-                    }));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(_) if flag.load(Ordering::SeqCst) => break,
-                Err(_) => std::thread::sleep(Duration::from_millis(1)),
-            }
-        }
-    });
-    Ok(PairingHttp { origin: format!("http://{addr}"), addr, stop, join: Some(join) })
-}
-
-fn serve_one(store: &Mutex<PairingRelayStore>, mut stream: TcpStream, source: std::net::IpAddr) {
-    let Ok((method, path, body)) = read_http(&mut stream) else {
-        return;
-    };
-    let reply = handle_pairing_http(store, source, &method, &path, &body);
-    let header = format!(
-        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        reply.status,
-        reply.body.len()
-    );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(&reply.body);
-    let _ = stream.flush();
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-}
-
-fn read_http(stream: &mut TcpStream) -> TestResult<(String, String, Vec<u8>)> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 1024];
-    loop {
-        let n = stream.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-            let head = std::str::from_utf8(&raw[..split])?.to_owned();
-            let length = content_length(&head);
-            let start = split + 4;
-            while raw.len() < start.saturating_add(length) {
-                let n = stream.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-            }
-            let mut parts = head.lines().next().unwrap_or_default().split(' ');
-            let method = parts.next().unwrap_or_default().to_owned();
-            let path = parts.next().unwrap_or_default().to_owned();
-            let body = raw.get(start..start.saturating_add(length)).unwrap_or(&[]).to_vec();
-            return Ok((method, path, body));
-        }
-        if raw.len() > 16 * 1024 {
-            break;
-        }
-    }
-    Err("http request".into())
-}
-
-fn content_length(head: &str) -> usize {
-    head.lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok()).flatten()
-        })
-        .unwrap_or(0)
 }
 
 fn held(store: &Mutex<PairingRelayStore>) -> MutexGuard<'_, PairingRelayStore> {
@@ -425,33 +441,4 @@ fn held(store: &Mutex<PairingRelayStore>) -> MutexGuard<'_, PairingRelayStore> {
 
 fn relay_err(error: PairingRelayError) -> SdkError {
     SdkError::PairingCode(error.code())
-}
-
-fn pairing_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[allow(unsafe_code)]
-fn enable_pairing() -> PairingEnv {
-    let guard = pairing_env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous = std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").ok();
-    // SAFETY: `guard` is held for the whole set/restore window.
-    unsafe {
-        std::env::set_var("RAMFLUX_DEVICE_PAIRING_ENABLED", "1");
-    }
-    PairingEnv { _guard: guard, previous }
-}
-
-#[allow(unsafe_code)]
-impl Drop for PairingEnv {
-    fn drop(&mut self) {
-        // SAFETY: `self._guard` is held until this drop returns.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var("RAMFLUX_DEVICE_PAIRING_ENABLED", value),
-                None => std::env::remove_var("RAMFLUX_DEVICE_PAIRING_ENABLED"),
-            }
-        }
-    }
 }

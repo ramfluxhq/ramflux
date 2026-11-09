@@ -12,7 +12,9 @@ pub use coordinator::{
 };
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};
-pub use transport::{HttpRelay, PairingNative, PreparedCreate, PreparedIssue};
+pub use transport::{
+    HttpRelay, PairingConfig, PairingNative, PairingTransport, PreparedCreate, PreparedIssue,
+};
 
 #[cfg(test)]
 mod tests;

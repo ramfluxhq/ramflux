@@ -170,18 +170,9 @@ fn serve_public_surface(
         public_http::FederationPublicHttpContext {
             router: Arc::clone(router),
             discovery: discovery.clone(),
-            pairing: open_pairing_surface(router)?,
+            pairing: pairing_http::PairingHttpSurface::open_if_enabled(Arc::clone(router))?,
         },
     )
-}
-
-fn open_pairing_surface(
-    router: &Arc<RouterMeshClient>,
-) -> Result<Option<Arc<pairing_http::PairingHttpSurface>>, ramflux_node_core::NodeCoreError> {
-    if !ramflux_node_core::device_pairing_enabled()? {
-        return Ok(None);
-    }
-    Ok(Some(Arc::new(pairing_http::PairingHttpSurface::open(Arc::clone(router))?)))
 }
 
 fn finish_shutdown(

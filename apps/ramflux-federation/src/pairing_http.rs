@@ -28,6 +28,18 @@ impl PairingHttpSurface {
         Ok(Self { router, trusted_proxies: trusted_proxies_from_env()? })
     }
 
+    /// Production assembly: capability gate then the node-forwarding surface.
+    /// # Errors
+    /// Rejects a malformed trusted-proxy allowlist or pairing opt-in.
+    pub(crate) fn open_if_enabled(
+        router: Arc<RouterMeshClient>,
+    ) -> Result<Option<Arc<Self>>, ramflux_node_core::NodeCoreError> {
+        if !ramflux_node_core::device_pairing_enabled()? {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(Self::open(router)?)))
+    }
+
     #[cfg(test)]
     pub(crate) fn with_proxies(
         router: Arc<RouterMeshClient>,
@@ -91,6 +103,9 @@ fn to_http(reply: PairingHttpResponse) -> HttpResponse {
     }
 }
 
+#[cfg(test)]
+#[path = "pairing_continuity_tests.rs"]
+mod continuity_tests;
 #[cfg(test)]
 #[path = "pairing_http_tests.rs"]
 mod tests;

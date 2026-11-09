@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! S2 Prepare→Apply native issuance and one temporary pairing HTTP client.
+//! S2 Prepare→Apply native issuance and the pairing HTTPS client.
 //! Dormant: talks only to pairing routes; grants no account session.
 use crate::SdkError;
 use ramflux_protocol::custody::pairing::PairingWire;
@@ -10,12 +10,36 @@ use ramflux_protocol::custody::pairing::relay::{
     Claim, Claimed, Close, Closed, Poll, Polled, RelayFrame, Send, Sent,
 };
 use ramflux_protocol::encode_base64url;
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 const POLL_SECS: u64 = 2;
 const CHUNK: usize = 8192;
+/// P06 relay body cap (`PAIRING_MAX_BODY_BYTES`).
+const MAX_BODY: usize = 16 * 1024;
+/// P06 relay request timeout (`PAIRING_REQUEST_TIMEOUT`).
+const REQUEST_DEADLINE: Duration = Duration::from_secs(5);
+
+type BoxFut<T> = Pin<Box<dyn Future<Output = T> + std::marker::Send>>;
+
+/// Injected pairing capability and HTTPS trust. Built once at SDK startup.
+#[derive(Clone, Debug, Default)]
+pub struct PairingConfig {
+    pub enabled: bool,
+    pub extra_root_ca_pem: Option<String>,
+}
+
+impl PairingConfig {
+    /// Production reader: env once at process start. Tests construct this directly.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            enabled: matches!(std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").as_deref(), Ok("1")),
+            extra_root_ca_pem: None,
+        }
+    }
+}
 
 /// Native Issue/Create apply target. Primary uses the existing S2 proof worker.
 pub trait PairingNative: std::marker::Send + std::marker::Sync {
@@ -25,6 +49,14 @@ pub trait PairingNative: std::marker::Send + std::marker::Sync {
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
     fn create(&self, create: Create) -> Result<Created, SdkError>;
+}
+
+/// HTTPS (or in-process) pairing relay. Production is [`HttpRelay`].
+pub trait PairingTransport: std::marker::Send + Sync {
+    fn claim(&self, origin: String, claim: Claim) -> BoxFut<Result<Claimed, SdkError>>;
+    fn send(&self, origin: String, send: Send) -> BoxFut<Result<Sent, SdkError>>;
+    fn poll(&self, origin: String, poll: Poll) -> BoxFut<Result<Polled, SdkError>>;
+    fn close(&self, origin: String, close: Close) -> BoxFut<Result<Closed, SdkError>>;
 }
 
 /// Prepared Issue body, applied once over the native worker.
@@ -81,59 +113,52 @@ impl PreparedCreate {
     pub fn apply(&self, native: &dyn PairingNative) -> Result<Created, SdkError> {
         native.create(self.create.clone())
     }
+
+    #[must_use]
+    pub fn create(&self) -> &Create {
+        &self.create
+    }
 }
 
-/// Temporary pairing HTTP client. One job; no resident account session.
+/// Temporary pairing HTTPS client. One job; no resident account session.
 #[derive(Clone)]
 pub struct HttpRelay {
-    origin: String,
+    client: reqwest::Client,
 }
 
 impl HttpRelay {
-    #[must_use]
-    pub fn new(origin: String) -> Self {
-        Self { origin }
-    }
-
-    #[must_use]
-    pub fn origin(&self) -> &str {
-        &self.origin
-    }
-
-    /// POST a Claim.
+    /// Build a rustls HTTPS client. `extra_root_ca_pem` is test-only fixture trust.
     /// # Errors
-    /// Transport, Busy, or a pairing Failure.
-    pub fn claim(&self, claim: &Claim) -> Result<Claimed, SdkError> {
-        self.round("claim", claim)
+    /// Rejects a malformed extra root CA or a client that cannot be built.
+    pub fn from_config(config: &PairingConfig) -> Result<Self, SdkError> {
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(REQUEST_DEADLINE)
+            .pool_max_idle_per_host(0);
+        if let Some(pem) = &config.extra_root_ca_pem {
+            let cert = reqwest::Certificate::from_pem(pem.as_bytes())
+                .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+            builder = builder.add_root_certificate(cert);
+        }
+        let client =
+            builder.build().map_err(|error| SdkError::LocalBus(error.without_url().to_string()))?;
+        Ok(Self { client })
     }
 
-    /// POST a Send frame.
-    /// # Errors
-    /// Transport, Busy, Replay, or a pairing Failure.
-    pub fn send(&self, send: &Send) -> Result<Sent, SdkError> {
-        self.round("send", send)
-    }
-
-    /// POST a Poll. Bounded to two seconds.
-    /// # Errors
-    /// Transport, Busy, or a pairing Failure.
-    pub fn poll(&self, poll: &Poll) -> Result<Polled, SdkError> {
-        self.round("poll", poll)
-    }
-
-    /// POST a Close.
-    /// # Errors
-    /// Transport or a pairing Failure.
-    pub fn close(&self, close: &Close) -> Result<Closed, SdkError> {
-        self.round("close", close)
-    }
-
-    fn round<T: PairingWire, R: PairingWire>(&self, route: &str, value: &T) -> Result<R, SdkError> {
+    async fn round<T: PairingWire, R: PairingWire>(
+        &self,
+        origin: &str,
+        route: &str,
+        value: &T,
+    ) -> Result<R, SdkError> {
+        require_https_origin(origin)?;
         let body = value.to_wire_bytes().map_err(|e| wire(&e))?;
         let path = format!("/client/pairing/v1/{route}");
-        let (status, reply) = post(&self.origin, &path, &body)?;
-        if status != "200 OK" {
-            return Err(status_error(&status, &reply));
+        let (status, reply) = post(&self.client, origin, &path, &body).await?;
+        if status != reqwest::StatusCode::OK {
+            return Err(status_error(status, &reply));
         }
         match R::from_wire_bytes(&reply) {
             Ok(parsed) => Ok(parsed),
@@ -145,11 +170,37 @@ impl HttpRelay {
     }
 }
 
+impl PairingTransport for HttpRelay {
+    fn claim(&self, origin: String, claim: Claim) -> BoxFut<Result<Claimed, SdkError>> {
+        let this = self.clone();
+        Box::pin(async move { this.round(&origin, "claim", &claim).await })
+    }
+    fn send(&self, origin: String, send: Send) -> BoxFut<Result<Sent, SdkError>> {
+        let this = self.clone();
+        Box::pin(async move { this.round(&origin, "send", &send).await })
+    }
+    fn poll(&self, origin: String, poll: Poll) -> BoxFut<Result<Polled, SdkError>> {
+        let this = self.clone();
+        Box::pin(async move { this.round(&origin, "poll", &poll).await })
+    }
+    fn close(&self, origin: String, close: Close) -> BoxFut<Result<Closed, SdkError>> {
+        let this = self.clone();
+        Box::pin(async move { this.round(&origin, "close", &close).await })
+    }
+}
+
 /// Split a reveal object into ≤8KiB relay chunks.
 /// # Errors
 /// Rejects an empty body or more than three chunks.
 pub fn reveal_chunks(object_id: [u8; 32], bytes: &[u8]) -> Result<Vec<RelayFrame>, SdkError> {
     offer_or_reveal_chunks(object_id, bytes, true)
+}
+
+/// Split a context-offer object into ≤8KiB relay chunks.
+/// # Errors
+/// Rejects an empty body or more than three chunks.
+pub fn offer_chunks(object_id: [u8; 32], bytes: &[u8]) -> Result<Vec<RelayFrame>, SdkError> {
+    offer_or_reveal_chunks(object_id, bytes, false)
 }
 
 fn offer_or_reveal_chunks(
@@ -260,67 +311,72 @@ fn failure_error(failure: &Failure) -> SdkError {
     }
 }
 
-fn status_error(status: &str, body: &[u8]) -> SdkError {
+fn status_error(status: reqwest::StatusCode, body: &[u8]) -> SdkError {
     let text = std::str::from_utf8(body).unwrap_or("request rejected");
     SdkError::LocalBus(format!("{status}: {text}"))
 }
 
-fn post(origin: &str, path: &str, body: &[u8]) -> Result<(String, Vec<u8>), SdkError> {
-    let (host, addr) = dial_addr(origin)?;
-    let addr = addr
-        .to_socket_addrs()
-        .map_err(|_| SdkError::PairingCode("InvalidInput"))?
-        .next()
-        .ok_or(SdkError::PairingCode("InvalidInput"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(POLL_SECS))?;
-    stream.set_read_timeout(Some(Duration::from_secs(POLL_SECS)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(POLL_SECS)))?;
-    stream.set_nodelay(true)?;
-    let header = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(header.as_bytes())?;
-    stream.write_all(body)?;
-    stream.flush()?;
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw)?;
-    split_http(&raw)
-}
-
-fn dial_addr(origin: &str) -> Result<(String, String), SdkError> {
-    let rest = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .unwrap_or(origin);
-    let host = rest.split('/').next().ok_or(SdkError::PairingCode("InvalidInput"))?;
-    if host.is_empty() {
+fn require_https_origin(origin: &str) -> Result<(), SdkError> {
+    let url = reqwest::Url::parse(origin).map_err(|_| SdkError::PairingCode("InvalidInput"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return Err(SdkError::PairingCode("InvalidInput"));
     }
-    Ok((host.to_owned(), host.to_owned()))
+    Ok(())
 }
 
-fn split_http(raw: &[u8]) -> Result<(String, Vec<u8>), SdkError> {
-    let text = std::str::from_utf8(raw).map_err(|_| SdkError::PairingCode("InvalidInput"))?;
-    let (head, body) = text.split_once("\r\n\r\n").ok_or(SdkError::PairingCode("InvalidInput"))?;
-    let status = head.lines().next().and_then(|line| {
-        let mut parts = line.splitn(3, ' ');
-        let _ = parts.next()?;
-        let code = parts.next()?;
-        let reason = parts.next().unwrap_or("");
-        Some(format!("{code} {reason}"))
-    });
-    let status = status.ok_or(SdkError::PairingCode("InvalidInput"))?;
-    let length = head.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        (name.eq_ignore_ascii_case("content-length"))
-            .then(|| value.trim().parse::<usize>().ok())
-            .flatten()
-    });
-    let bytes = body.as_bytes();
-    let body = match length {
-        Some(n) => bytes.get(..n).unwrap_or(bytes).to_vec(),
-        None => bytes.to_vec(),
-    };
-    Ok((status, body))
+async fn post(
+    client: &reqwest::Client,
+    origin: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(reqwest::StatusCode, Vec<u8>), SdkError> {
+    let url = format!("{origin}{path}");
+    let request = client
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::CONNECTION, "close")
+        .body(body.to_vec());
+    let response = tokio::time::timeout(REQUEST_DEADLINE, request.send())
+        .await
+        .map_err(|_| {
+            SdkError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "pairing HTTPS deadline expired",
+            ))
+        })?
+        .map_err(http_error)?;
+    let status = response.status();
+    if let Some(length) = response.content_length()
+        && length > MAX_BODY as u64
+    {
+        return Err(SdkError::PairingCode("InvalidInput"));
+    }
+    let mut bytes = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = tokio::time::timeout(REQUEST_DEADLINE, response.chunk())
+        .await
+        .map_err(|_| {
+            SdkError::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "pairing HTTPS deadline expired",
+            ))
+        })?
+        .map_err(http_error)?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_BODY {
+            return Err(SdkError::PairingCode("InvalidInput"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((status, bytes))
 }
+
+fn http_error(error: reqwest::Error) -> SdkError {
+    SdkError::LocalBus(error.without_url().to_string())
+}
+
+const _: () = assert!(POLL_SECS >= 1);
