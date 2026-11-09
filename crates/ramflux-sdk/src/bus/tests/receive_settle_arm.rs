@@ -11,8 +11,8 @@ use crate::bus::connection_manager::{
 };
 use crate::client::native_test_support::{Fixture, TestResult};
 use ramflux_storage::{
-    ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveExpectation, ReceiveLedgerSnap,
-    ReceiveStage, ReceiveStageResult,
+    ProjectionStore, ReceiveCover, ReceiveCoverKind, ReceiveCoverResult, ReceiveExpectation,
+    ReceiveLedgerSnap, ReceiveMigrate, ReceiveStage, ReceiveStageResult, StorageError,
 };
 use tokio::sync::oneshot;
 
@@ -188,5 +188,50 @@ async fn case() -> TestResult {
     );
 
     runtime.state.accounts.clear();
+    Ok(())
+}
+
+#[test]
+fn settle_retained_paused_is_integrity() -> Result<(), SdkError> {
+    let root = crate::bus::runtime_tests::root("settle-paused");
+    let mut account = crate::bus::runtime_tests::account(
+        &root,
+        "acct",
+        None,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let (before, turn) = {
+        let db = account.client.account_db()?;
+        let _ = db.activate_receive_ledger(ReceiveMigrate { target: "t", incarnation: "e" })?;
+        db.set_projection_checkpoint("gateway_receive_cursor:t", "1024")?;
+        stage(db, 1024, 1025)?;
+        db.insert_ack_intents_for_test("t", "e", 1024)?;
+        let before = db.receive_ledger_snap_for_test("t")?;
+        assert_eq!(before.cursor, 1024);
+        assert_eq!(before.work, 1, "seq 1025 stays staged");
+        let turn = ReceiveTurn {
+            target: "t".into(),
+            incarnation: "e".into(),
+            cursor: 1024,
+            generation: 1,
+            erasure_generation: db.privacy_erasure_generation()?,
+        };
+        (before, turn)
+    };
+    let refused = crate::bus::account_runtime::settle_retained(&mut account, 1, &turn, 1025);
+    assert!(
+        matches!(
+            refused.as_ref().err(),
+            Some(SdkError::Storage(StorageError::Integrity("settle retained paused")))
+        ),
+        "paused cover must be Integrity(settle retained paused): {refused:?}"
+    );
+    assert_eq!(
+        account.client.account_db()?.receive_ledger_snap_for_test("t")?,
+        before,
+        "paused settle writes nothing"
+    );
+    drop(account);
+    let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

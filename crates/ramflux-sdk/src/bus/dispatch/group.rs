@@ -1396,6 +1396,7 @@ pub(crate) async fn dispatch_group_receive_request(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
+    account.client.account_db()?.refuse_legacy_receive()?;
     let mut body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
     if !crate::bus::account_runtime::head_refresh::take_receive_preparation() {
         super::super::sync_driver::run(account).await?;

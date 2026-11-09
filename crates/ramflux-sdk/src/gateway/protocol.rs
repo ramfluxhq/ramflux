@@ -104,8 +104,9 @@ pub struct GatewaySessionConfig {
     pub push_route_retry: super::PushRouteRetry,
     /// Last push route control sequence (milliseconds, strictly increasing).
     pub push_route_last_seq: u64,
-    /// Advertise the session-push capability in the signed scope. Off until activation (P24);
-    /// only test constructors turn it on.
+    /// Advertise the session-push capability in the signed scope. Production sets this
+    /// from the receive-activation discriminator (Activated iff advertised). Test
+    /// constructors may set it directly for negotiation unit tests without a DB.
     pub(crate) session_push_advertise: bool,
 }
 

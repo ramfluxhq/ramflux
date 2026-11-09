@@ -118,53 +118,47 @@ impl SourceW0<'_> {
 
 /// Refuse the legacy receive path on an activated ledger.
 ///
-/// `actor_turn` is `Some` only for a Push session: that is the ledger actor path
+/// `turn` is `Some` only for a Push session: that is the ledger actor path
 /// an activated account must use, so it is not refused here. `None` is the
 /// legacy PrepareReceive/ApplyPage branch and is refused first.
 pub(crate) fn refuse_legacy_receive_unless_ledger_turn(
     account: &LocalBusAccountState,
-    generation: u64,
+    turn: Option<&ReceiveTurn>,
 ) -> Result<(), SdkError> {
-    if actor_turn(account, generation)?.is_some() {
+    if turn.is_some() {
         return Ok(());
     }
     Ok(account.client.account_db()?.refuse_legacy_receive()?)
 }
 
-/// Actor `PrepareReceive` entry. The live cursor plan is computed first so extra dormant
-/// reads cannot fail live receive. When the ledger is activated and this is the Connected
-/// pass, [`SourceW0::from_actor`] builds the fence (`turn.generation` vs S2 `handle_generation`)
-/// and the open W0/W1 rows read from disk inside that fence feed `plan.retries`, so the
-/// receive child redrives staged-but-unapplied work through the normal apply path. Fence
-/// refusals and read errors are logged, never silently dropped, and never fail the live plan.
+/// Actor `PrepareReceive` entry. The legacy guard and its activation/epoch/cursor/erase
+/// reads run before the live cursor plan, so their errors fail `PrepareReceive`. `actor_turn`
+/// is computed once and reused for the guard and Connected recovery. When the ledger is
+/// activated and this is the Connected pass, [`SourceW0::from_actor`] builds the fence
+/// (`turn.generation` vs S2 `handle_generation`) and the open W0/W1 rows read from disk
+/// inside that fence feed `plan.retries`. An activated fence refusal or epoch read error
+/// is a typed `PrepareReceive` failure. Inactive accounts skip recovery and keep the live plan.
 pub(crate) fn prepare_receive_turn(
     account: &LocalBusAccountState,
     turn_generation: u64,
     handle_generation: u64,
     trigger: crate::bus::connection_manager::ReceiveTrigger,
 ) -> Result<ReceivePlan, SdkError> {
-    refuse_legacy_receive_unless_ledger_turn(account, turn_generation)?;
+    let turn = actor_turn(account, turn_generation)?;
+    refuse_legacy_receive_unless_ledger_turn(account, turn.as_ref())?;
     let mut plan = crate::bus::sync_driver::prepare_receive(account, turn_generation)?;
     // Only the Connected pass recovers: Tick/Resync never pay the writer lock for a read.
     if trigger != crate::bus::connection_manager::ReceiveTrigger::Connected {
         return Ok(plan);
     }
-    let turn = match actor_turn(account, turn_generation) {
-        Ok(Some(turn)) => turn,
-        Ok(None) => return Ok(plan),
-        Err(error) => {
-            tracing::warn!(%error, "receive ledger coordinates unreadable; disk recovery skipped");
-            return Ok(plan);
-        }
+    let Some(turn) = turn else {
+        return Ok(plan);
     };
     let recovered = account
         .client
         .account_db()
-        .and_then(|db| SourceW0::from_actor(&turn, handle_generation).recover_from_disk(db));
-    match recovered {
-        Ok(inputs) => merge_recovered(&mut plan, &inputs),
-        Err(error) => tracing::warn!(%error, "receive disk recovery refused; live plan unchanged"),
-    }
+        .and_then(|db| SourceW0::from_actor(&turn, handle_generation).recover_from_disk(db))?;
+    merge_recovered(&mut plan, &recovered);
     Ok(plan)
 }
 
@@ -195,15 +189,24 @@ fn merge_recovered(plan: &mut ReceivePlan, inputs: &[ramflux_storage::RecoveryIn
 }
 
 /// Push-session coordinates from S2's engine plus disk cursor/erase. `None` when the
-/// ledger is unactivated or the session is not Push. Extra DB reads stay behind that
-/// dormant switch so live `PrepareReceive` cannot fail on them.
+/// ledger is Inactive or the session is not Push. Activated without an epoch is
+/// [`ramflux_storage::MISSING_EPOCH`]. Extra DB reads stay behind the discriminator
+/// so live `PrepareReceive` cannot fail on them for inactive accounts.
 pub(crate) fn actor_turn(
     account: &LocalBusAccountState,
     generation: u64,
 ) -> Result<Option<ReceiveTurn>, SdkError> {
     let db = account.client.account_db()?;
-    if db.receive_epoch(&account.target_delivery_id)?.is_none() {
-        return Ok(None);
+    match db.receive_activation()? {
+        ramflux_storage::ReceiveActivation::Inactive => return Ok(None),
+        ramflux_storage::ReceiveActivation::Activated => {
+            if db.receive_epoch(&account.target_delivery_id)?.is_none() {
+                return Err(ramflux_storage::StorageError::Integrity(
+                    ramflux_storage::MISSING_EPOCH,
+                )
+                .into());
+            }
+        }
     }
     let Some(engine) = account.engine.as_ref() else {
         return Ok(None);

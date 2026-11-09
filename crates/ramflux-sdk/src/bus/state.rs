@@ -128,8 +128,8 @@ pub(crate) struct LocalBusAccountState {
     pub(crate) object_put_spools: BTreeMap<String, ObjectPutSpoolSession>,
     /// T25-A4 (OBJ-IPC-01): in-flight bounded DOWNLOAD spools, keyed by `operation_id`.
     pub(crate) object_get_spools: BTreeMap<String, ObjectGetSpoolSession>,
-    /// Cached receive-epoch presence for `(connection generation, target)`.
-    /// P24 activation must clear this cache or bump the connection generation.
+    /// Cached receive-activation discriminator for `(connection generation, target)`.
+    /// [`Self::invalidate_receive_active_cache`] must run after activation in the same generation.
     pub(crate) receive_active_cache: Option<(u64, String, bool)>,
 }
 
@@ -385,6 +385,10 @@ impl LocalBusAccountState {
         Ok(())
     }
 
+    pub(crate) fn invalidate_receive_active_cache(&mut self) {
+        self.receive_active_cache = None;
+    }
+
     pub(crate) fn connection_config(&self) -> Result<GatewaySessionConfig, SdkError> {
         let mut config = self.gateway_config.clone();
         let target = self.target_delivery_id.clone();
@@ -394,11 +398,16 @@ impl LocalBusAccountState {
         if config.device_branch.is_none() {
             config.device_branch = self.client.device_branch.clone().map(std::sync::Arc::new);
         }
+        crate::gateway::apply_session_push_advertise(
+            &mut config,
+            self.client.account_db()?.receive_activation()?,
+        );
         Ok(config)
     }
 
     pub(crate) fn start_connection(&mut self) -> Result<(), SdkError> {
         if self.connection.is_none() {
+            self.invalidate_receive_active_cache();
             let config = self.connection_config()?;
             let connector: std::sync::Arc<dyn super::connection_manager::SessionConnector> =
                 std::sync::Arc::new(super::connection_manager::GatewayConnector {

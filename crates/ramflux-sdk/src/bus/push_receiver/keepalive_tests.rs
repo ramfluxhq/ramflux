@@ -51,6 +51,18 @@ async fn keepalive_all_reads() -> Case {
         let mut limits = RuntimeTimeouts::held_for_test();
         limits.keepalive_idle = KEEPALIVE_IDLE;
         limits.keepalive_call = KEEPALIVE_CALL;
+        let (handle, mut sessions) = reconnecting_fixture(limits.clone())?;
+        let _io = sessions.recv().await.ok_or("connector did not enter")?;
+        handle.require_live(Duration::from_secs(600)).await?;
+        wait_keepalive_running(&handle, true).await;
+        handle.request_stop(DisconnectReason::Lock);
+        wait_keepalive_running(&handle, false).await;
+        assert!(
+            !handle.test_keepalive_running(),
+            "lock must abort the keepalive task, not only the output stream"
+        );
+        handle.stop().await;
+
         let (handle, mut sessions) = reconnecting_fixture(limits)?;
         let mut io = sessions.recv().await.ok_or("connector did not enter")?;
         handle.require_live(Duration::from_secs(600)).await?;
@@ -134,6 +146,16 @@ async fn keepalive_all_reads() -> Case {
         Ok(())
     })
     .await
+}
+
+async fn wait_keepalive_running(handle: &ConnectionHandle, running: bool) {
+    for _ in 0..10_000 {
+        if handle.test_keepalive_running() == running {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("keepalive running={running} was not observed");
 }
 
 fn keepalive_limits() -> RuntimeTimeouts {
@@ -344,8 +366,10 @@ async fn keepalive_stops_on_lock_and_restarts_without_duplicate_connected() -> C
 
         handle.request_stop(DisconnectReason::Lock);
         wait_disconnected(&mut events, generation, DisconnectReason::Lock).await;
+        wait_keepalive_running(&handle, false).await;
         tokio::time::advance(KEEPALIVE_IDLE + KEEPALIVE_CALL).await;
         assert!(io.output.recv().await.is_none(), "lock must close the stream");
+        assert!(!handle.test_keepalive_running(), "lock must abort the keepalive task");
         handle.stop_with_reason(DisconnectReason::Lock).await;
 
         let (handle, mut sessions) = reconnecting_fixture(keepalive_limits())?;
@@ -362,7 +386,9 @@ async fn keepalive_stops_on_lock_and_restarts_without_duplicate_connected() -> C
             &GatewayServerFrame::Drain { session_id: "fixture".into(), reason: "rotation".into() },
         )?;
         wait_disconnected(&mut events, generation, DisconnectReason::Drain).await;
+        wait_keepalive_running(&handle, false).await;
         assert!(io.output.recv().await.is_none(), "disconnect must abort keepalive");
+        assert!(!handle.test_keepalive_running(), "drain must abort the keepalive task");
 
         let mut fresh = next_session(&handle, &mut sessions, generation).await?;
         let next = handle.generation();

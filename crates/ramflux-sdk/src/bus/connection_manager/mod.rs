@@ -119,6 +119,8 @@ struct Shared {
     read_clock: Arc<crate::gateway::host_frames::ReadClock>,
     #[cfg(test)]
     live_waiters: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    keepalive_running: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -231,6 +233,11 @@ impl SessionContext {
         self.connection.last_read_at()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_keepalive_running(&self, running: bool) {
+        self.connection.set_keepalive_running(running);
+    }
+
     #[must_use]
     pub(crate) fn connection_generation(&self) -> u64 {
         self.connection.generation()
@@ -294,6 +301,17 @@ impl ConnectionHandle {
         self.shared.read_clock.read_count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_keepalive_running(&self, running: bool) {
+        self.shared.keepalive_running.store(running, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn test_keepalive_running(&self) -> bool {
+        self.shared.keepalive_running.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn start_with(
         config: GatewaySessionConfig,
         engine: Option<GatewaySessionEngine>,
@@ -332,6 +350,8 @@ impl ConnectionHandle {
             call_changed: Arc::new(Notify::new()),
             #[cfg(test)]
             live_waiters: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            keepalive_running: std::sync::atomic::AtomicBool::new(false),
             stop_reason: std::sync::Mutex::new(None),
             #[cfg(test)]
             removals: std::sync::Mutex::new(Vec::new()),

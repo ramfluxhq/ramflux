@@ -16,6 +16,18 @@ fn stop_on_error(context: &SessionContext, error: &SdkError) -> bool {
 }
 
 pub(crate) async fn run(context: SessionContext) {
+    #[cfg(test)]
+    struct Running(SessionContext);
+    #[cfg(test)]
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.0.set_keepalive_running(false);
+        }
+    }
+    #[cfg(test)]
+    context.set_keepalive_running(true);
+    #[cfg(test)]
+    let _running = Running(context.clone());
     let mut cancel = context.cancel.clone();
     if *cancel.borrow() {
         return;

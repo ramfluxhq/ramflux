@@ -1197,6 +1197,10 @@ async fn own_authorization_refresh_failure_has_a_distinct_error_code() -> Result
 mod contact_state;
 mod group_legacy;
 
+pub(crate) async fn assert_activated_group_unrouted_replay_refused() -> Result<(), SdkError> {
+    Box::pin(group_legacy::activated_group_unrouted_replay_refused()).await
+}
+
 mod status_snapshot;
 
 mod group_actor;

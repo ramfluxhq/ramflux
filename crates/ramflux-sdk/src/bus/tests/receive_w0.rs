@@ -21,7 +21,7 @@ use crate::client::identity_authority::test_support::public_manifest;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
 use ramflux_storage::{
-    ReceiveBind, ReceiveExpectation, ReceiveStage, ReceiveStageResult, StorageError,
+    ReceiveBind, ReceiveExpectation, ReceiveMigrate, ReceiveStage, ReceiveStageResult, StorageError,
 };
 use serde_json::json;
 use std::cell::Cell;
@@ -625,8 +625,7 @@ const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
 fn activate_push(account: &mut LocalBusAccountState) -> Case {
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test(&target, PUSH_E)?;
+    let _ = db.activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: PUSH_E })?;
     let engine = account.engine.as_mut().ok_or("fixture engine")?;
     engine.mode = SessionMode::Push {
         incarnation: IncarnationId::try_from(PUSH_E.to_owned()).map_err(std::io::Error::other)?,
@@ -720,9 +719,11 @@ async fn mismatch_reachable() -> Case {
     let mut fixture = Box::pin(Fixture::new("w0-from-actor-mismatch")).await?;
     activate_push(&mut fixture.source)?;
     stage_on_target(&fixture.source, 7, 1)?;
-    let plan = prepare_receive_turn(&fixture.source, 1, 2, ReceiveTrigger::Connected)?;
-    assert_eq!(plan.limit, 64, "live plan must survive from_actor mismatch");
-    assert!(plan.retries.is_empty(), "a refused fence recovers nothing");
+    match prepare_receive_turn(&fixture.source, 1, 2, ReceiveTrigger::Connected) {
+        Err(SdkError::Storage(StorageError::AuthorizationRejected)) => {}
+        Err(error) => panic!("activated fence refusal must fail PrepareReceive: {error}"),
+        Ok(_) => panic!("activated fence refusal must fail PrepareReceive, got a plan"),
+    }
     let turn = actor_turn(&fixture.source, 1)?.ok_or("activated Push turn")?;
     let refused =
         SourceW0::from_actor(&turn, 2).recover_from_disk(fixture.source.client.account_db()?);

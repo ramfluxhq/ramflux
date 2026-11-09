@@ -23,7 +23,9 @@ use crate::client::reply_outbox::MARKER;
 use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::{AccountDb, ReceiveFailureKind, StorageError};
+use ramflux_storage::{
+    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveFailureKind, ReceiveMigrate, StorageError,
+};
 use ramflux_transport::TransportError;
 use serde_json::json;
 use std::cell::Cell;
@@ -41,8 +43,7 @@ fn open() -> Result<Harness, SdkError> {
         runtime_tests::account(root.path(), "acct", None, Arc::new(AtomicBool::new(false)))?;
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test(&target, "e")?;
+    let _ = db.activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?;
     Ok(Harness { _root: root, account })
 }
 
@@ -1117,5 +1118,36 @@ async fn non_ledger_expiry_still_runs_on_activated_accounts() -> Result<(), SdkE
         0,
         "activated prepare_receive still trims expired unrouted rows"
     );
+    Ok(())
+}
+
+#[test]
+fn epoch_only_is_not_active() -> Result<(), SdkError> {
+    let root = tempfile::tempdir().expect("tmp");
+    let account =
+        runtime_tests::account(root.path(), "acct", None, Arc::new(AtomicBool::new(false)))?;
+    let target = account.target_delivery_id.clone();
+    let db = account.client.account_db()?;
+    db.install_receive_ledger_schema()?;
+    db.seed_receive_epoch_for_test(&target, "e")?;
+    assert!(
+        !apply_w1::is_active(db, &target)?,
+        "epoch-only seed is not the activation discriminator"
+    );
+    Ok(())
+}
+
+#[test]
+fn activated_without_epoch_is_integrity() -> Result<(), SdkError> {
+    let root = tempfile::tempdir().expect("tmp");
+    let account =
+        runtime_tests::account(root.path(), "acct", None, Arc::new(AtomicBool::new(false)))?;
+    let target = account.target_delivery_id.clone();
+    let db = account.client.account_db()?;
+    db.set_projection_checkpoint("gateway_receive_activation", "activated")?;
+    match apply_w1::is_active(db, &target) {
+        Err(SdkError::Storage(StorageError::Integrity(MISSING_EPOCH))) => {}
+        other => panic!("Activated without epoch must be MISSING_EPOCH, got {other:?}"),
+    }
     Ok(())
 }

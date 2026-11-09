@@ -21,6 +21,12 @@ pub(crate) fn take_receive_preparation() -> bool {
     RECEIVE_PREPARED.try_with(|prepared| prepared.replace(false)).unwrap_or(false)
 }
 
+/// Test fixture: the account actor sets this after a successful `group.receive` prepare.
+#[cfg(test)]
+pub(crate) async fn with_receive_prepared<T>(fut: impl std::future::Future<Output = T>) -> T {
+    RECEIVE_PREPARED.scope(std::cell::Cell::new(true), fut).await
+}
+
 pub(crate) fn is_freshness_refusal(error: &SdkError) -> bool {
     matches!(error, SdkError::FreshHeadRequired { .. })
 }

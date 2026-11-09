@@ -18,7 +18,7 @@ use crate::bus::events::EventBatch;
 use crate::bus::runtime_limits::RuntimeTimeouts;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
 use crate::prelude::*;
-use ramflux_storage::{ReceiveExpectation, ReceiveStage};
+use ramflux_storage::{ReceiveExpectation, ReceiveMigrate, ReceiveStage};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -112,8 +112,7 @@ fn acked(gateway: &std::sync::Mutex<super::fixture::Gateway>) -> Result<usize, S
 fn stage(account: &LocalBusAccountState, entry: &GatewayInboxEntry) -> Case {
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test(&target, PUSH_E)?;
+    let _ = db.activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: PUSH_E })?;
     let bytes = serde_json::to_vec(entry)?;
     let expected = ReceiveExpectation {
         target: &target,

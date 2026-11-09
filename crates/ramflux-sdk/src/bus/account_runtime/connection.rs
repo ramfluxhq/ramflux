@@ -345,9 +345,17 @@ impl AccountRuntime {
     ) -> Result<(), SdkError> {
         let account =
             self.state.accounts.get_mut(&self.id).ok_or(SdkError::AccountDbNotUnlocked)?;
+        let turn = match super::super::sync_driver::source::w0::actor_turn(account, generation) {
+            Ok(turn) => turn,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return Ok(());
+            }
+        };
         if let Err(error) =
             super::super::sync_driver::source::w0::refuse_legacy_receive_unless_ledger_turn(
-                account, generation,
+                account,
+                turn.as_ref(),
             )
         {
             let _ = reply.send(Err(error));

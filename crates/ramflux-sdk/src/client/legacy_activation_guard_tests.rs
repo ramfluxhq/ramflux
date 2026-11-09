@@ -8,7 +8,7 @@
 use super::native_test_support::{Fixture, TestResult};
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::w0::{
-    prepare_receive_turn, refuse_legacy_receive_unless_ledger_turn,
+    actor_turn, prepare_receive_turn, refuse_legacy_receive_unless_ledger_turn,
 };
 use crate::gateway::access::CountingGateway;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
@@ -134,7 +134,8 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
         Ok(_) => panic!("legacy PrepareReceive succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
-    match refuse_legacy_receive_unless_ledger_turn(&account, 1) {
+    let turn = actor_turn(&account, 1)?;
+    match refuse_legacy_receive_unless_ledger_turn(&account, turn.as_ref()) {
         Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
@@ -167,9 +168,64 @@ async fn activated_ledger_prepare_receive_and_apply_page_are_not_refused() -> Te
         fixture.manifest.principal_commitment.clone(),
     );
     account.install_test_session(push_engine(fixture.config.clone()));
-    refuse_legacy_receive_unless_ledger_turn(&account, 1)
+    let turn = actor_turn(&account, 1)?;
+    assert!(turn.is_some(), "activated Push session must yield a ledger turn");
+    refuse_legacy_receive_unless_ledger_turn(&account, turn.as_ref())
         .expect("ledger ApplyPage (turn: Some) must not be refused");
     prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
         .expect("ledger PrepareReceive (turn: Some) must not be refused");
+    Ok(())
+}
+
+/// Activated DB advertises session-push and never reaches a legacy receive writer.
+#[tokio::test]
+async fn activation_revert_preserves_ledger() -> TestResult {
+    let fixture = Fixture::new("p24b2a-advertise").await?;
+    let target = fixture.config.target_delivery_id.clone();
+    assert_eq!(
+        fixture
+            .client
+            .account_db()?
+            .activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?,
+        ReceiveMigrateResult::Migrated
+    );
+    let mut config = fixture.config.clone();
+    crate::gateway::apply_session_push_advertise(
+        &mut config,
+        fixture.client.account_db()?.receive_activation()?,
+    );
+    assert!(config.session_push_advertise, "Activated must advertise session-push");
+    let scope = crate::gateway::signed_capability_scope(&config);
+    assert!(
+        scope
+            .iter()
+            .any(|capability| capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY),
+        "signed scope must carry session-push: {scope:?}"
+    );
+
+    let cursor = fixture.client.persist_gateway_receive_cursor(&target, 2);
+    assert_activated(cursor.as_ref().expect_err("legacy C write"));
+
+    let account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    let advertised = account.connection_config()?;
+    assert!(
+        advertised.session_push_advertise,
+        "connection_config must advertise from discriminator"
+    );
+    match prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
+    {
+        Ok(_) => panic!("legacy PrepareReceive succeeded on an activated ledger"),
+        Err(error) => assert_activated(&error),
+    }
+    let turn = actor_turn(&account, 1)?;
+    assert!(turn.is_none(), "activated without a Push engine is not a ledger turn");
+    match refuse_legacy_receive_unless_ledger_turn(&account, turn.as_ref()) {
+        Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
+        Err(error) => assert_activated(&error),
+    }
     Ok(())
 }

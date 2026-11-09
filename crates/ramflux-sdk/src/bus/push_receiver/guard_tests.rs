@@ -43,8 +43,10 @@ fn open() -> Result<Harness, StorageError> {
     index.create_account("acct", "principal")?;
     let db =
         AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test("t", "e")?;
+    let _ = db.activate_receive_ledger(ramflux_storage::ReceiveMigrate {
+        target: "t",
+        incarnation: "e",
+    })?;
     Ok(Harness { _root: root, db })
 }
 
@@ -101,6 +103,21 @@ fn stage(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), StorageError>
     Ok(())
 }
 
+fn count_symbol(src: &str, symbol: &str) -> usize {
+    let mut count = 0;
+    let mut rest = src;
+    while let Some(at) = rest.find(symbol) {
+        let after = &rest[at + symbol.len()..];
+        if symbol == "persist_receive_cursor" && after.starts_with("_if_inactive") {
+            rest = after;
+            continue;
+        }
+        count += 1;
+        rest = after;
+    }
+    count
+}
+
 fn skip_scan(rel: &str) -> bool {
     rel.contains("/tests/")
         || rel.contains("_tests/")
@@ -151,7 +168,7 @@ fn scan_tree(
         }
         let src = fs::read_to_string(&path).expect("read rust");
         for symbol in SCAN_SYMBOLS {
-            let actual = src.matches(symbol).count();
+            let actual = count_symbol(&src, symbol);
             let want = expected.get(&format!("{rel}::{symbol}")).copied().unwrap_or(0);
             if want != actual {
                 missing.push(format!("{rel} {symbol} actual={actual} expected={want}"));
@@ -196,11 +213,17 @@ fn assert_inventory_scan() {
             && site.symbol == "set_projection_checkpoint")
     );
     assert!(SITES.iter().any(|site| site.file == "src/client/account.rs"
-        && site.symbol == "persist_receive_cursor"
+        && site.symbol == "persist_gateway_receive_cursor"
         && site.class == WriterClass::ProductionLegacy
-        && site.executor.contains("persist_receive_cursor_if_inactive")
-        && site.executor.contains("refuses when activation row present")
+        && site.executor.contains("persist_receive_checkpoint_in")
         && site.count == 1));
+    assert!(
+        !SITES
+            .iter()
+            .any(|site| site.file == "src/client/account.rs"
+                && site.symbol == "persist_receive_cursor"),
+        "account.rs persist_receive_cursor substring is not a separate site"
+    );
     assert!(SITES.iter().any(|site| site.class == WriterClass::FixtureOnly));
 }
 
@@ -728,8 +751,8 @@ async fn managed_message_ack_refuses_at_dispatch_with_schema_15() -> Result<(), 
     outcome.map_err(SdkError::LocalBus)
 }
 
-#[test]
-fn all_receive_writers_guard() -> Result<(), SdkError> {
+#[tokio::test(flavor = "current_thread")]
+async fn all_receive_writers_guard() -> Result<(), SdkError> {
     assert_inventory_scan();
     assert_constructor_grep();
     assert_exclusive_and_managed_ack()?;
@@ -741,7 +764,8 @@ fn all_receive_writers_guard() -> Result<(), SdkError> {
     assert_hooks(&exec, &harness.db)?;
     assert_held_never_acked_and_authorized_delete(&exec, &harness.db)?;
     assert_token_binding(&exec, &harness.db)?;
-    assert_settle_outcomes(&exec, &harness.db)
+    assert_settle_outcomes(&exec, &harness.db)?;
+    Box::pin(crate::bus::runtime_tests::assert_activated_group_unrouted_replay_refused()).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

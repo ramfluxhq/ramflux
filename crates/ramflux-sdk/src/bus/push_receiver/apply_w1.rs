@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Dormant `ApplyPage` → W1 adapters. Unactivated accounts (no epoch row) stay on the live path.
+//! Dormant `ApplyPage` → W1 adapters. Inactive accounts stay on the live path.
 #![allow(dead_code)]
 
 use super::apply::{self, ApplyOutcome, cover_held_in};
@@ -17,9 +17,9 @@ use crate::client::legacy_w1::LegacyW1;
 use crate::client::reply_outbox::{MARKER, ReplyOutbox};
 use crate::prelude::*;
 use ramflux_storage::{
-    AccountDb, ProjectionStore, ReceiveCoverResult, ReceiveExpectation, ReceiveFailure,
-    ReceiveFailureKind, ReceiveGap, ReceiveStage, ReceiveStageResult, ReceiveTransaction,
-    StorageError,
+    AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveActivation, ReceiveCoverResult,
+    ReceiveExpectation, ReceiveFailure, ReceiveFailureKind, ReceiveGap, ReceiveStage,
+    ReceiveStageResult, ReceiveTransaction, StorageError,
 };
 
 /// Bounded redrive of `LegacyBindingChanged` before a typed give-up.
@@ -29,9 +29,17 @@ const ROUTED_REFUSED: &str = "receive ledger refuses live routed apply";
 const COVERED_BELOW: &str = "receive page covered below sequence";
 const NOT_YET_WIRED: &str = "NotYetWired";
 
-/// True when `target` has a receive-epoch row. Missing table or row is the live unactivated path.
+/// True when the P24b1 discriminator is Activated. Activated without an epoch is Integrity.
 pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> {
-    Ok(db.receive_epoch(target)?.is_some())
+    match db.receive_activation()? {
+        ReceiveActivation::Inactive => Ok(false),
+        ReceiveActivation::Activated => {
+            if db.receive_epoch(target)?.is_none() {
+                return Err(StorageError::Integrity(MISSING_EPOCH).into());
+            }
+            Ok(true)
+        }
+    }
 }
 
 /// Prepare-time coordinates for one `ApplyPage`: message generation plus DB cursor/E/erase.
@@ -40,7 +48,7 @@ pub(crate) fn capture_turn(
     generation: u64,
     target: &str,
 ) -> Result<ReceiveTurn, SdkError> {
-    let incarnation = db.receive_epoch(target)?.unwrap_or_default();
+    let incarnation = db.receive_epoch(target)?.ok_or(StorageError::Integrity(MISSING_EPOCH))?;
     Ok(ReceiveTurn {
         target: target.to_owned(),
         incarnation,

@@ -673,3 +673,88 @@ fn prepare_legacy_group_membership(
 
     Ok(())
 }
+
+/// Routed envelope that `decode` accepts so the unrouted loop would call `apply_routed_entry`.
+fn routed_unrouted_entry(mut entry: GatewayInboxEntry) -> Result<GatewayInboxEntry, SdkError> {
+    let wrapper = crate::dm::SdkDmEncryptedEnvelope {
+        schema: "ramflux.sdk.dm_x3dh_envelope.v2".into(),
+        version: 2,
+        source_principal_commitment: None,
+        x3dh: None,
+        ciphertext: ramflux_crypto::DmCiphertext {
+            session_id: "s".into(),
+            counter: 0,
+            nonce: [0; 12],
+            ciphertext: b"valid".to_vec(),
+            ratchet_public_key: None,
+            previous_chain_length: 0,
+            sender_device_id_hash: [0; 32],
+            recipient_device_id_hash: [0; 32],
+            device_epoch: 0,
+            message_event_id: String::new(),
+            canonical_header_bytes: Vec::new(),
+            header_hash: String::new(),
+            key_commitment: String::new(),
+            franking_commitment: String::new(),
+            commitment: String::new(),
+            ciphertext_hash: String::new(),
+        },
+    };
+    entry.envelope.encrypted_payload =
+        ramflux_protocol::encode_base64url(&serde_json::to_vec(&wrapper)?);
+    Ok(entry)
+}
+
+/// Activated `group.receive` refuses unrouted replay at entry: no routed effect, row stays.
+pub(super) async fn activated_group_unrouted_replay_refused() -> Result<(), SdkError> {
+    let (root, sender, mut receiver, good) = legacy_group_fixture()?;
+    let target = receiver.target_delivery_id.clone();
+    let _ =
+        receiver.client.account_db()?.activate_receive_ledger(ramflux_storage::ReceiveMigrate {
+            target: &target,
+            incarnation: "e",
+        })?;
+    let routed = routed_unrouted_entry(good)?;
+    crate::client::routed::decode(&routed.envelope)?;
+    receiver.client.account_db()?.hold_unrouted(
+        &receiver.client.inbox_admission_key(&routed)?,
+        routed.inbox_seq,
+        &serde_json::to_vec(&routed)?,
+        now_unix_timestamp(),
+    )?;
+    let request = LocalBusFrame::request(
+        "group.receive",
+        Some("bob".into()),
+        "group",
+        "group.receive",
+        serde_json::json!({"group_id":"g","conversation_id":"thread","limit":32}),
+    );
+    let refused =
+        Box::pin(crate::bus::account_runtime::head_refresh::with_receive_prepared(async {
+            crate::bus::dispatch::group::dispatch_group_receive_request(&request, &mut receiver)
+                .await
+        }))
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(SdkError::Storage(StorageError::Integrity(
+                ramflux_storage::LEGACY_RECEIVE_ACTIVATED,
+            )))
+        ),
+        "activated unrouted replay must refuse at entry"
+    );
+    assert!(
+        receiver.client.direct_message_by_id("valid")?.is_none(),
+        "no routed effect before the refusal"
+    );
+    assert_eq!(
+        receiver.client.account_db()?.unrouted_count()?,
+        1,
+        "unrouted row must remain after the entry refusal"
+    );
+    drop(sender);
+    drop(receiver);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
