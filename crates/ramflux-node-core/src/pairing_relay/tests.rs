@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_FRAMES_PER_DIRECTION, MAX_ISSUES_PER_HOUR,
-    MAX_SLOTS, MAX_SLOTS_PER_ACCOUNT, PairingClock, PairingRelayConfig, PairingRelayError,
-    PairingRelayStore, SLACK_BYTES, TestPairingClock,
+    MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_FRAME_BYTES, MAX_FRAMES_PER_DIRECTION,
+    MAX_HOUR_ENTRIES, MAX_ISSUES_PER_HOUR, MAX_SLOTS, MAX_SLOTS_PER_ACCOUNT, PairingClock,
+    PairingRelayConfig, PairingRelayError, PairingRelayStore, SLACK_BYTES, TestPairingClock,
 };
 use ramflux_crypto::sign_canonical_bytes_with_seed;
 use ramflux_protocol::custody::pairing::native::{
@@ -13,7 +13,7 @@ use ramflux_protocol::custody::pairing::native::{
 use ramflux_protocol::custody::pairing::relay::{Claim, Close, Poll, RelayFrame, Send};
 use ramflux_protocol::custody::{DeviceRef, Envelope};
 use ramflux_protocol::encode_base64url;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 type TestResult<T = ()> = Result<T, PairingRelayError>;
@@ -44,6 +44,30 @@ fn id_usize(n: usize) -> String {
     encode_base64url(bytes)
 }
 
+fn spec_n(n: usize, wall: u64) -> CreateSpec {
+    let account_anchor = id_usize(n);
+    CreateSpec {
+        schema: "ramflux.pairing.CreateSpec.v2".into(),
+        version: 2,
+        account_anchor: account_anchor.clone(),
+        primary_ref: DeviceRef {
+            account_anchor,
+            device_id: format!("device-{n}"),
+            device_epoch: 1,
+        },
+        base_record_hash: id(2),
+        base_epoch: 1,
+        purpose: "enroll".into(),
+        recipient_mode: "new".into(),
+        destination_ref: None,
+        capabilities: vec!["message".into()],
+        lease_not_before: wall,
+        lease_expires_at: wall + 86_400,
+        data_selection: vec![],
+        ttl_seconds: 300,
+    }
+}
+
 fn spec(account: u8, wall: u64) -> CreateSpec {
     let account_anchor = id(account);
     CreateSpec {
@@ -65,6 +89,39 @@ fn spec(account: u8, wall: u64) -> CreateSpec {
         lease_expires_at: wall + 86_400,
         data_selection: vec![],
         ttl_seconds: 300,
+    }
+}
+
+fn create_from_n(issued: &Issued, n: usize, wall: u64) -> Create {
+    Create {
+        schema: "ramflux.pairing.Create.v2".into(),
+        version: 2,
+        ticket: issued.ticket.clone(),
+        spec: spec_n(n, wall),
+    }
+}
+
+fn close_live(store: &mut PairingRelayStore, created: &Created) -> TestResult {
+    store.close(&Close {
+        schema: "ramflux.pairing.Close.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "initiator".into(),
+        token: created.primary_token.clone(),
+        reason: "done".into(),
+    })?;
+    Ok(())
+}
+
+fn claim_of(created: &Created, nonce: usize) -> Claim {
+    Claim {
+        schema: "ramflux.pairing.Claim.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        recipient_token: created.recipient_token.clone(),
+        claim_nonce: id_usize(nonce),
     }
 }
 
@@ -201,6 +258,9 @@ fn prune_reuse_and_restart() -> TestResult {
         Err(err) => exact(err, "Retired")?,
         Ok(_) => return Err(PairingRelayError::invalid("restart")),
     }
+    if restarted.stats().slots != 0 || restarted.stats().backing != SLACK_BYTES {
+        return Err(PairingRelayError::invalid("restart_alloc"));
+    }
     restarted.issue(spec(3, clock.wall_unix_secs()?))?;
     let _ = old;
     Ok(())
@@ -222,49 +282,40 @@ fn lost_replies(store: &mut PairingRelayStore) -> TestResult {
     Ok(())
 }
 
+fn fill_role_queue(
+    store: &mut PairingRelayStore,
+    created: &Created,
+    role: &str,
+    token: &str,
+) -> TestResult {
+    for seq in 0..MAX_FRAMES_PER_DIRECTION as u64 {
+        store.send(&send_body(created, role, token, seq))?;
+    }
+    match store.send(&send_body(created, role, token, 2)) {
+        Err(err) => exact(err, "Busy"),
+        Ok(_) => Err(PairingRelayError::invalid("queue")),
+    }
+}
+
 fn independent_counts(store: &mut PairingRelayStore) -> TestResult {
     store.shutdown();
     let live = fill_live(store, MAX_SLOTS)?;
-    for created in &live {
-        for role_token in [
-            ("initiator", created.primary_token.clone()),
-            ("responder", created.recipient_token.clone()),
-        ] {
-            for seq in 0..MAX_FRAMES_PER_DIRECTION as u64 {
-                store.send(&send_body(created, role_token.0, &role_token.1, seq))?;
-            }
-            match store.send(&send_body(created, role_token.0, &role_token.1, 2)) {
-                Err(err) => exact(err, "Busy")?,
-                Ok(_) => return Err(PairingRelayError::invalid("queue")),
-            }
-        }
-    }
-    let stats = store.stats();
-    if stats.queued_frames != MAX_SLOTS * 4 || stats.claims != 0 {
-        return Err(PairingRelayError::invalid("queued"));
-    }
     for (i, created) in live.iter().enumerate() {
+        fill_role_queue(store, created, "initiator", &created.primary_token)?;
         let octet = u8::try_from(i / MAX_CLAIMS_PER_PREFIX)
             .map_err(|_| PairingRelayError::invalid("prefix"))?;
-        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, octet, 1));
-        store.claim(
-            ip,
-            &Claim {
-                schema: "ramflux.pairing.Claim.v2".into(),
-                version: 2,
-                invitation_id: created.invitation.body.invitation_id.clone(),
-                issuer_seq: created.invitation.body.issuer_seq,
-                recipient_token: created.recipient_token.clone(),
-                claim_nonce: id_usize(i),
-            },
-        )?;
+        store.claim(IpAddr::V4(Ipv4Addr::new(198, 51, octet, 1)), &claim_of(created, i))?;
+        fill_role_queue(store, created, "responder", &created.recipient_token)?;
     }
     let stats = store.stats();
-    if stats.claims != MAX_CLAIMS
-        || stats.queued_frames != MAX_SLOTS * 4
+    if stats.queued_frames != MAX_SLOTS * 4
+        || stats.claims != MAX_CLAIMS
         || stats.sockets != MAX_CLAIMS
     {
         return Err(PairingRelayError::invalid("sockets"));
+    }
+    if stats.queued_bytes == 0 || stats.queued_bytes == stats.queued_frames * MAX_FRAME_BYTES {
+        return Err(PairingRelayError::invalid("queued_bytes"));
     }
     Ok(())
 }
@@ -274,7 +325,7 @@ fn sparse_and_isolation(store: &mut PairingRelayStore) -> TestResult {
     let issued = store.issue(spec(7, WALL))?;
     let create_id = issued.ticket.body.create_id.clone();
     match store.lookup_create(&id(8), &create_id) {
-        Err(err) => exact(err, "WrongContext")?,
+        Err(err) => exact(err, "Retired")?,
         Ok(_) => return Err(PairingRelayError::invalid("isolation")),
     }
     if store.lookup_create(&id(7), &create_id)? != CreateSlot::Issued {
@@ -309,8 +360,13 @@ fn lost_holder(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestR
     if store.stats().claims != 1 {
         return Err(PairingRelayError::invalid("claim"));
     }
-    clock.advance_ms(10_000);
+    clock.advance_ms(9_999);
     store.issue(spec(10, clock.wall_unix_secs()?))?;
+    if store.stats().claims != 1 {
+        return Err(PairingRelayError::invalid("grace_in"));
+    }
+    clock.advance_ms(1);
+    store.issue(spec(16, clock.wall_unix_secs()?))?;
     if store.stats().claims != 0 {
         return Err(PairingRelayError::invalid("lost_holder"));
     }
@@ -386,6 +442,7 @@ fn poll_rate_and_retry(store: &mut PairingRelayStore) -> TestResult {
     let send = send_body(&created, "initiator", &created.primary_token, 0);
     store.send(&send)?;
     store.send(&send)?;
+    store.claim(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 13)), &claim_of(&created, 13))?;
     let poll = Poll {
         schema: "ramflux.pairing.Poll.v2".into(),
         version: 2,
@@ -418,6 +475,205 @@ fn wall_rollback(store: &mut PairingRelayStore, clock: &TestPairingClock) -> Tes
     Ok(())
 }
 
+fn hour_map_cap(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestResult {
+    store.shutdown();
+    clock.set_wall(WALL);
+    clock.set_mono(0);
+    for n in 0..MAX_HOUR_ENTRIES {
+        let issued = store.issue(spec_n(n, WALL))?;
+        let created = store.create(create_from_n(&issued, n, WALL))?;
+        close_live(store, &created)?;
+    }
+    match store.issue(spec_n(MAX_HOUR_ENTRIES, WALL)) {
+        Err(err) => exact(err, "Busy")?,
+        Ok(_) => return Err(PairingRelayError::invalid("hour_map")),
+    }
+    store.issue(spec_n(0, WALL))?;
+    Ok(())
+}
+
+fn claim_four_then_busy(
+    store: &mut PairingRelayStore,
+    live: &[Created],
+    ip_at: impl Fn(usize) -> IpAddr,
+    nonce_base: usize,
+) -> TestResult {
+    if live.len() < 5 {
+        return Err(PairingRelayError::invalid("prefix_slots"));
+    }
+    for (i, created) in live.iter().enumerate().take(4) {
+        store.claim(ip_at(i), &claim_of(created, nonce_base + i))?;
+    }
+    let fifth = live.get(4).ok_or(PairingRelayError::invalid("prefix_slots"))?;
+    match store.claim(ip_at(4), &claim_of(fifth, nonce_base + 4)) {
+        Err(err) => exact(err, "Busy"),
+        Ok(_) => Err(PairingRelayError::invalid("prefix")),
+    }
+}
+
+fn prefix_caps(store: &mut PairingRelayStore) -> TestResult {
+    store.shutdown();
+    let live = fill_live(store, 5)?;
+    claim_four_then_busy(
+        store,
+        &live,
+        |i| IpAddr::V4(Ipv4Addr::new(198, 51, 100, u8::try_from(i + 1).unwrap_or(1))),
+        200,
+    )?;
+    store.shutdown();
+    let live = fill_live(store, 5)?;
+    claim_four_then_busy(
+        store,
+        &live,
+        |i| {
+            IpAddr::V6(Ipv6Addr::new(
+                0x2001,
+                0xdb8,
+                2,
+                1,
+                0,
+                0,
+                0,
+                u16::try_from(i + 1).unwrap_or(1),
+            ))
+        },
+        210,
+    )?;
+    store.shutdown();
+    let live = fill_live(store, 5)?;
+    claim_four_then_busy(
+        store,
+        &live,
+        |i| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, u16::try_from(i).unwrap_or(0), 0, 0, 0, 1)),
+        220,
+    )?;
+    store.shutdown();
+    let live = fill_live(store, 5)?;
+    claim_four_then_busy(
+        store,
+        &live,
+        |i| {
+            IpAddr::V6(
+                Ipv4Addr::new(203, 0, 113, u8::try_from(i + 1).unwrap_or(1)).to_ipv6_mapped(),
+            )
+        },
+        230,
+    )
+}
+
+fn close_idempotent(store: &mut PairingRelayStore) -> TestResult {
+    store.shutdown();
+    let issued = store.issue(spec(22, WALL))?;
+    let created = store.create(create_from(&issued, 22, WALL))?;
+    let close = Close {
+        schema: "ramflux.pairing.Close.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "initiator".into(),
+        token: created.primary_token.clone(),
+        reason: "done".into(),
+    };
+    let first = store.close(&close)?;
+    let second = store.close(&close)?;
+    if first != second {
+        return Err(PairingRelayError::invalid("close_retry"));
+    }
+    let polled = store.poll(&Poll {
+        schema: "ramflux.pairing.Poll.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "initiator".into(),
+        token: created.primary_token.clone(),
+        after_seq: None,
+    })?;
+    if !polled.closed {
+        return Err(PairingRelayError::invalid("polled_closed"));
+    }
+    Ok(())
+}
+
+fn responder_needs_claim(store: &mut PairingRelayStore) -> TestResult {
+    store.shutdown();
+    let issued = store.issue(spec(23, WALL))?;
+    let created = store.create(create_from(&issued, 23, WALL))?;
+    match store.send(&send_body(&created, "responder", &created.recipient_token, 0)) {
+        Err(err) => exact(err, "WrongContext")?,
+        Ok(_) => return Err(PairingRelayError::invalid("unclaimed")),
+    }
+    store.claim(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 23)), &claim_of(&created, 23))?;
+    store.send(&send_body(&created, "responder", &created.recipient_token, 0))?;
+    Ok(())
+}
+
+fn stale_requeue(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestResult {
+    store.shutdown();
+    clock.set_wall(WALL);
+    clock.set_mono(0);
+    let issued = store.issue(spec(24, WALL))?;
+    let created = store.create(create_from(&issued, 24, WALL))?;
+    let send = send_body(&created, "initiator", &created.primary_token, 0);
+    store.send(&send)?;
+    clock.advance_ms(10_000);
+    store.issue(spec(25, clock.wall_unix_secs()?))?;
+    store.send(&send)?;
+    store.claim(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 24)), &claim_of(&created, 24))?;
+    let polled = store.poll(&Poll {
+        schema: "ramflux.pairing.Poll.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "responder".into(),
+        token: created.recipient_token.clone(),
+        after_seq: None,
+    })?;
+    if polled.frames.len() != 1 || polled.frames[0].seq != 0 {
+        return Err(PairingRelayError::invalid("requeue"));
+    }
+    Ok(())
+}
+
+fn send_cipher(created: &Created, token: &str, seq: u64, nbytes: usize) -> Send {
+    Send {
+        schema: "ramflux.pairing.Send.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "initiator".into(),
+        token: token.into(),
+        seq,
+        frame: RelayFrame::Channel { counter: 0, ciphertext: encode_base64url(vec![0_u8; nbytes]) },
+    }
+}
+
+fn encoded_send_len(send: &Send) -> usize {
+    ramflux_protocol::canonical_json_bytes(send).map_or(0, |bytes| bytes.len())
+}
+
+fn frame_max_plus_minus(store: &mut PairingRelayStore) -> TestResult {
+    store.shutdown();
+    let issued = store.issue(spec(26, WALL))?;
+    let created = store.create(create_from(&issued, 26, WALL))?;
+    let token = created.primary_token.clone();
+    let mut lo = 16_usize;
+    let mut hi = 11_716_usize;
+    while lo < hi {
+        let mid = lo.saturating_add(hi).saturating_add(1) / 2;
+        if encoded_send_len(&send_cipher(&created, &token, 0, mid)) <= MAX_FRAME_BYTES {
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+    store.send(&send_cipher(&created, &token, 0, lo))?;
+    match store.send(&send_cipher(&created, &token, 1, lo.saturating_add(1))) {
+        Err(err) => exact(err, "InvalidInput")?,
+        Ok(_) => return Err(PairingRelayError::invalid("frame_over")),
+    }
+    Ok(())
+}
+
 #[test]
 fn pairing_relay_caps_expiry_and_account_isolation() -> TestResult {
     let (mut store, clock) = open()?;
@@ -429,9 +685,15 @@ fn pairing_relay_caps_expiry_and_account_isolation() -> TestResult {
     sparse_and_isolation(&mut store)?;
     lost_holder(&mut store, &clock)?;
     hour_and_account_caps(&mut store, &clock)?;
+    hour_map_cap(&mut store, &clock)?;
     missing_slot_stays_retired(&mut store)?;
     poll_rate_and_retry(&mut store)?;
     wall_rollback(&mut store, &clock)?;
+    prefix_caps(&mut store)?;
+    close_idempotent(&mut store)?;
+    responder_needs_claim(&mut store)?;
+    stale_requeue(&mut store, &clock)?;
+    frame_max_plus_minus(&mut store)?;
     prune_reuse_and_restart()?;
     Ok(())
 }

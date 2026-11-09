@@ -14,6 +14,8 @@ pub const MAX_SLOTS: usize = 64;
 pub const MAX_SLOTS_PER_ACCOUNT: usize = 3;
 /// Native Issue admissions per account per monotonic hour.
 pub const MAX_ISSUES_PER_HOUR: usize = 10;
+/// Per-account hour-counter map size. Full Busy, no eviction.
+pub const MAX_HOUR_ENTRIES: usize = 1_024;
 /// Root-free outstanding claims per node.
 pub const MAX_CLAIMS: usize = 64;
 /// Outstanding claims per IPv4 /24 or IPv6 /64 and /48.
@@ -38,7 +40,8 @@ pub const MAX_SLOT_METADATA: usize = 21_504;
 pub const ISSUED_RESERVE: usize = 2_048 + 3_456;
 /// Live slot reserves metadata and both queues before tokens exist.
 pub const LIVE_RESERVE: usize = MAX_SLOT_METADATA + MAX_QUEUE_BYTES;
-/// Preallocated boot/index/hour/source/allocator slack.
+/// Preallocated registry budget: boot id, issuer sequence, indexes, hour and source maps (annex F).
+/// Held as a live allocation so the 5832704 ceiling includes this registry, not a counter.
 pub const SLACK_BYTES: usize = 262_144;
 /// Total retained relay backing, including slack.
 pub const MAX_BACKING: usize = MAX_SLOTS * LIVE_RESERVE + SLACK_BYTES;
@@ -158,6 +161,13 @@ impl PairingRelayError {
             Self::PublicationPending => "PublicationPending",
         }
     }
+}
+
+pub(super) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter().zip(right.iter()).fold(0_u8, |acc, (left, right)| acc | (left ^ right)) == 0
 }
 
 pub(super) fn wire(error: &WireError) -> PairingRelayError {

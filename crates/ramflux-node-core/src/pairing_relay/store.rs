@@ -5,9 +5,9 @@
 use super::limits::{
     AllocatorStats, CLAIM_GRACE_MS, HOUR_MS, INVITATION_LIFETIME_SECS, ISSUED_RESERVE,
     LIVE_RESERVE, MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_FRAME_BYTES,
-    MAX_FRAMES_PER_DIRECTION, MAX_ISSUES_PER_HOUR, MAX_POLLS_PER_SEC, MAX_SLOTS,
+    MAX_FRAMES_PER_DIRECTION, MAX_HOUR_ENTRIES, MAX_ISSUES_PER_HOUR, MAX_POLLS_PER_SEC, MAX_SLOTS,
     MAX_SLOTS_PER_ACCOUNT, PairingClock, PairingRelayError, SLACK_BYTES, claim_source_prefixes,
-    wire,
+    constant_time_eq, wire,
 };
 use crate::{InFlightGuard, begin_service_request};
 use ramflux_crypto::{
@@ -77,7 +77,17 @@ struct Slot {
     expires_at: u64,
     monotonic_deadline: u64,
     reserved: usize,
+    backing: Vec<u8>,
     body: SlotBody,
+}
+
+struct ClosedSlot {
+    reason: String,
+    issuer_seq: u64,
+    primary_token: Zeroizing<[u8; 32]>,
+    recipient_token: Zeroizing<[u8; 32]>,
+    expires_at: u64,
+    monotonic_deadline: u64,
 }
 
 struct ClaimEntry {
@@ -97,8 +107,9 @@ pub struct PairingRelayStore {
     invitations: HashMap<[u8; 32], [u8; 32]>,
     hour: HashMap<[u8; 32], VecDeque<u64>>,
     claims: HashMap<[u8; 32], ClaimEntry>,
+    closed: HashMap<[u8; 32], ClosedSlot>,
     slack: Vec<u8>,
-    backing: usize,
+    reserved_total: usize,
     high_water: usize,
 }
 
@@ -122,10 +133,11 @@ impl PairingRelayStore {
             issuer_seq: 0,
             slots: HashMap::with_capacity(MAX_SLOTS),
             invitations: HashMap::with_capacity(MAX_SLOTS),
-            hour: HashMap::with_capacity(MAX_SLOTS),
+            hour: HashMap::with_capacity(MAX_HOUR_ENTRIES),
             claims: HashMap::with_capacity(MAX_CLAIMS),
+            closed: HashMap::with_capacity(MAX_SLOTS),
             slack: vec![0_u8; SLACK_BYTES],
-            backing: SLACK_BYTES,
+            reserved_total: SLACK_BYTES,
             high_water: SLACK_BYTES,
         })
     }
@@ -141,12 +153,13 @@ impl PairingRelayStore {
     #[must_use]
     pub fn stats(&self) -> AllocatorStats {
         let (issued, live, queued_bytes, queued_frames) = slot_counts(&self.slots);
+        let backing = self.measured_retained();
         AllocatorStats {
             slots: self.slots.len(),
             issued,
             live,
-            backing: self.backing,
-            high_water: self.high_water,
+            backing,
+            high_water: self.high_water.max(backing),
             queued_bytes,
             queued_frames,
             sockets: self.claims.len(),
@@ -158,10 +171,10 @@ impl PairingRelayStore {
         self.slack.len()
     }
 
-    /// Account-scoped slot class. A foreign account never observes another owner's slot.
+    /// Account-scoped slot class. Unknown and foreign ids share one Retired result.
     ///
     /// # Errors
-    /// `WrongContext` when the id exists under a different account; `Retired` when missing.
+    /// `Retired` when the id is missing or belongs to a different account.
     pub fn lookup_create(
         &self,
         account_anchor: &str,
@@ -169,16 +182,13 @@ impl PairingRelayStore {
     ) -> Result<CreateSlot, PairingRelayError> {
         let account = parse_id(account_anchor, "account_anchor")?;
         let id = parse_id(create_id, "create_id")?;
-        let Some(slot) = self.slots.get(&id) else {
-            return Err(PairingRelayError::Retired);
-        };
-        if slot.account != account {
-            return Err(PairingRelayError::WrongContext);
+        match self.slots.get(&id) {
+            Some(slot) if slot.account == account => Ok(match slot.body {
+                SlotBody::Issued(_) => CreateSlot::Issued,
+                SlotBody::Live(_) => CreateSlot::Live,
+            }),
+            _ => Err(PairingRelayError::Retired),
         }
-        Ok(match slot.body {
-            SlotBody::Issued(_) => CreateSlot::Issued,
-            SlotBody::Live(_) => CreateSlot::Live,
-        })
     }
 
     /// # Errors
@@ -282,6 +292,7 @@ impl PairingRelayStore {
         send.validate().map_err(|e| wire(&e))?;
         let invitation = parse_id(&send.invitation_id, "invitation_id")?;
         let _ = self.check_token(invitation, send.issuer_seq, &send.role, &send.token, now.wall)?;
+        self.require_responder_claim(invitation, &send.role)?;
         let digest = send.frame_digest().map_err(|e| wire(&e))?;
         let live = self.live_mut(invitation)?;
         live.last_activity_ms = now.mono;
@@ -305,6 +316,16 @@ impl PairingRelayStore {
         poll.validate().map_err(|e| wire(&e))?;
         let invitation = parse_id(&poll.invitation_id, "invitation_id")?;
         let _ = self.check_token(invitation, poll.issuer_seq, &poll.role, &poll.token, now.wall)?;
+        if self.closed.contains_key(&invitation) {
+            return Ok(Polled {
+                schema: "ramflux.pairing.Polled.v2".into(),
+                version: 2,
+                invitation_id: poll.invitation_id.clone(),
+                frames: Vec::new(),
+                closed: true,
+            });
+        }
+        self.require_responder_claim(invitation, &poll.role)?;
         let live = self.live_mut(invitation)?;
         live.last_activity_ms = now.mono;
         let closed = live.closed_reason.is_some();
@@ -338,16 +359,16 @@ impl PairingRelayStore {
         let invitation = parse_id(&close.invitation_id, "invitation_id")?;
         let _ =
             self.check_token(invitation, close.issuer_seq, &close.role, &close.token, now.wall)?;
+        if let Some(closed) = self.closed.get(&invitation) {
+            return Ok(closed_reply(&close.invitation_id, &closed.reason));
+        }
+        self.require_responder_claim(invitation, &close.role)?;
         let Some(create_id) = self.invitations.get(&invitation).copied() else {
             return Err(PairingRelayError::Retired);
         };
+        self.remember_closed(create_id, invitation, close.reason.clone())?;
         self.release_slot(create_id);
-        Ok(Closed {
-            schema: "ramflux.pairing.Closed.v2".into(),
-            version: 2,
-            invitation_id: close.invitation_id.clone(),
-            reason: close.reason.clone(),
-        })
+        Ok(closed_reply(&close.invitation_id, &close.reason))
     }
 
     /// Zeroize tokens and drop every slot. A later `new` draws a different `boot_id`.
@@ -358,7 +379,13 @@ impl PairingRelayStore {
         }
         self.claims.clear();
         self.hour.clear();
+        for closed in self.closed.values_mut() {
+            closed.primary_token.fill(0);
+            closed.recipient_token.fill(0);
+        }
+        self.closed.clear();
         self.issuer_seq = 0;
+        self.refresh_measured();
     }
 
     /// Count issued+live slots whose `account_anchor` matches.
@@ -388,7 +415,7 @@ impl PairingRelayStore {
 
     fn check_issue_quotas(&self, account: [u8; 32]) -> Result<(), PairingRelayError> {
         if self.slots.len() >= MAX_SLOTS
-            || self.backing.saturating_add(ISSUED_RESERVE) > MAX_BACKING
+            || self.reserved_total.saturating_add(ISSUED_RESERVE) > MAX_BACKING
         {
             return Err(self.busy());
         }
@@ -398,6 +425,9 @@ impl PairingRelayStore {
         }
         let recent = self.hour.get(&account).map_or(0, VecDeque::len);
         if recent >= MAX_ISSUES_PER_HOUR {
+            return Err(self.busy());
+        }
+        if !self.hour.contains_key(&account) && self.hour.len() >= MAX_HOUR_ENTRIES {
             return Err(self.busy());
         }
         Ok(())
@@ -441,6 +471,9 @@ impl PairingRelayStore {
         spec: CreateSpec,
         now: Now,
     ) -> Result<(), PairingRelayError> {
+        if !self.hour.contains_key(&account) && self.hour.len() >= MAX_HOUR_ENTRIES {
+            return Err(self.busy());
+        }
         self.charge(ISSUED_RESERVE)?;
         self.slots.insert(
             create_id,
@@ -451,6 +484,7 @@ impl PairingRelayStore {
                     .mono
                     .saturating_add(INVITATION_LIFETIME_SECS.saturating_mul(1_000)),
                 reserved: ISSUED_RESERVE,
+                backing: vec![0_u8; ISSUED_RESERVE],
                 body: SlotBody::Issued(Box::new(IssuedSlot {
                     spec_hash: spec.spec_hash().map_err(|e| wire(&e))?,
                     primary_ref: spec.primary_ref,
@@ -459,6 +493,7 @@ impl PairingRelayStore {
             },
         );
         self.hour.entry(account).or_default().push_back(now.mono);
+        self.refresh_measured();
         Ok(())
     }
 
@@ -478,7 +513,6 @@ impl PairingRelayStore {
         create: Create,
         now: Now,
     ) -> Result<Created, PairingRelayError> {
-        self.charge(LIVE_RESERVE.saturating_sub(ISSUED_RESERVE))?;
         let invitation_id = random_32().map_err(|_| PairingRelayError::invalid("entropy"))?;
         let transfer_id = if create.spec.purpose == "primary_transfer" {
             Some(random_32().map_err(|_| PairingRelayError::invalid("entropy"))?)
@@ -492,22 +526,28 @@ impl PairingRelayStore {
         }
         let descriptor = self.build_invitation(&create, invitation_id, transfer_id)?;
         let created = created_reply(&descriptor, primary, recipient)?;
+        let extra = LIVE_RESERVE.saturating_sub(ISSUED_RESERVE);
+        self.charge(extra)?;
         let ticket = create.ticket;
-        if let Some(slot) = self.slots.get_mut(&id) {
-            slot.reserved = LIVE_RESERVE;
-            slot.body = SlotBody::Live(Box::new(LiveSlot {
-                ticket,
-                descriptor,
-                primary_token: Zeroizing::new(primary),
-                recipient_token: Zeroizing::new(recipient),
-                claim_nonce: None,
-                initiator: Direction::default(),
-                responder: Direction::default(),
-                closed_reason: None,
-                last_activity_ms: now.mono,
-            }));
-        }
+        let Some(slot) = self.slots.get_mut(&id) else {
+            self.refund(extra);
+            return Err(PairingRelayError::Retired);
+        };
+        slot.reserved = LIVE_RESERVE;
+        slot.backing = vec![0_u8; LIVE_RESERVE];
+        slot.body = SlotBody::Live(Box::new(LiveSlot {
+            ticket,
+            descriptor,
+            primary_token: Zeroizing::new(primary),
+            recipient_token: Zeroizing::new(recipient),
+            claim_nonce: None,
+            initiator: Direction::default(),
+            responder: Direction::default(),
+            closed_reason: None,
+            last_activity_ms: now.mono,
+        }));
         self.invitations.insert(invitation_id, id);
+        self.refresh_measured();
         Ok(created)
     }
 
@@ -550,7 +590,7 @@ impl PairingRelayStore {
         })
     }
 
-    fn check_token(
+    fn check_live_token(
         &self,
         invitation: [u8; 32],
         issuer_seq: u64,
@@ -572,15 +612,72 @@ impl PairingRelayStore {
         {
             return Err(PairingRelayError::WrongContext);
         }
-        let expected = match role {
-            "initiator" => encode_base64url(*live.primary_token),
-            "responder" => encode_base64url(*live.recipient_token),
-            _ => return Err(PairingRelayError::WrongRole),
+        role_token_ok(role, token, &live.primary_token, &live.recipient_token)?;
+        Ok(live.descriptor.body.expires_at)
+    }
+
+    fn check_token(
+        &self,
+        invitation: [u8; 32],
+        issuer_seq: u64,
+        role: &str,
+        token: &str,
+        wall: u64,
+    ) -> Result<u64, PairingRelayError> {
+        if self.invitations.contains_key(&invitation) {
+            return self.check_live_token(invitation, issuer_seq, role, token, wall);
+        }
+        let Some(closed) = self.closed.get(&invitation) else {
+            return Err(PairingRelayError::Retired);
         };
-        if expected != token {
+        let now = Now { wall, mono: self.clock.monotonic_ms() };
+        if now.wall >= closed.expires_at || now.mono >= closed.monotonic_deadline {
+            return Err(PairingRelayError::Expired);
+        }
+        if closed.issuer_seq != issuer_seq {
             return Err(PairingRelayError::WrongContext);
         }
-        Ok(live.descriptor.body.expires_at)
+        role_token_ok(role, token, &closed.primary_token, &closed.recipient_token)?;
+        Ok(closed.expires_at)
+    }
+
+    fn require_responder_claim(
+        &self,
+        invitation: [u8; 32],
+        role: &str,
+    ) -> Result<(), PairingRelayError> {
+        if role != "responder" {
+            return Ok(());
+        }
+        match self.live(invitation) {
+            Ok(live) if live.claim_nonce.is_some() => Ok(()),
+            Ok(_) => Err(PairingRelayError::WrongContext),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn remember_closed(
+        &mut self,
+        create_id: [u8; 32],
+        invitation: [u8; 32],
+        reason: String,
+    ) -> Result<(), PairingRelayError> {
+        let slot = self.slots.get(&create_id).ok_or(PairingRelayError::Retired)?;
+        let SlotBody::Live(live) = &slot.body else {
+            return Err(PairingRelayError::Retired);
+        };
+        self.closed.insert(
+            invitation,
+            ClosedSlot {
+                reason,
+                issuer_seq: live.descriptor.body.issuer_seq,
+                primary_token: Zeroizing::new(*live.primary_token),
+                recipient_token: Zeroizing::new(*live.recipient_token),
+                expires_at: slot.expires_at,
+                monotonic_deadline: slot.monotonic_deadline,
+            },
+        );
+        Ok(())
     }
 
     fn live(&self, invitation: [u8; 32]) -> Result<&LiveSlot, PairingRelayError> {
@@ -640,6 +737,9 @@ impl PairingRelayStore {
             self.release_slot(id);
         }
         self.claims.retain(|_, entry| entry.expires_ms > now.mono);
+        self.closed.retain(|_, closed| {
+            now.wall < closed.expires_at && now.mono < closed.monotonic_deadline
+        });
         let stale: Vec<[u8; 32]> = self
             .slots
             .iter()
@@ -669,18 +769,34 @@ impl PairingRelayStore {
     }
 
     fn charge(&mut self, extra: usize) -> Result<(), PairingRelayError> {
-        let next = self.backing.checked_add(extra).ok_or(PairingRelayError::invalid("backing"))?;
+        let next =
+            self.reserved_total.checked_add(extra).ok_or(PairingRelayError::invalid("backing"))?;
         if next > MAX_BACKING {
             return Err(self.busy());
         }
-        self.backing = next;
-        self.high_water = self.high_water.max(next);
+        self.reserved_total = next;
         Ok(())
+    }
+
+    fn refund(&mut self, extra: usize) {
+        self.reserved_total = self.reserved_total.saturating_sub(extra);
+    }
+
+    fn measured_retained(&self) -> usize {
+        self.slack
+            .capacity()
+            .saturating_add(self.slots.values().map(|slot| slot.backing.capacity()).sum())
+    }
+
+    fn refresh_measured(&mut self) {
+        let now = self.measured_retained();
+        self.high_water = self.high_water.max(now);
     }
 
     fn release_slot(&mut self, id: [u8; 32]) {
         if let Some(slot) = self.slots.remove(&id) {
-            self.backing = self.backing.saturating_sub(slot.reserved);
+            self.reserved_total = self.reserved_total.saturating_sub(slot.reserved);
+            self.refresh_measured();
             if let SlotBody::Live(mut live) = slot.body {
                 live.primary_token.fill(0);
                 live.recipient_token.fill(0);
@@ -763,7 +879,11 @@ fn slot_counts(slots: &HashMap<[u8; 32], Slot>) -> (usize, usize, usize, usize) 
                 live += 1;
                 for direction in [&body.initiator, &body.responder] {
                     queued_frames += direction.frames.len();
-                    queued_bytes += direction.frames.len() * MAX_FRAME_BYTES;
+                    queued_bytes += direction
+                        .frames
+                        .iter()
+                        .map(|(_, frame)| frame_held_bytes(frame))
+                        .sum::<usize>();
                 }
             }
         }
@@ -802,7 +922,17 @@ fn enqueue(
     if let Some((last_seq, last_digest)) = &out.last_send
         && seq == *last_seq
     {
-        return if digest == *last_digest { Ok(()) } else { Err(PairingRelayError::Replay) };
+        if digest != *last_digest {
+            return Err(PairingRelayError::Replay);
+        }
+        if !out.frames.iter().any(|(held, _)| *held == seq) {
+            if out.frames.len() >= MAX_FRAMES_PER_DIRECTION {
+                return Err(PairingRelayError::busy(seq));
+            }
+            frame.validate().map_err(|e| wire(&e))?;
+            out.frames.push((seq, frame));
+        }
+        return Ok(());
     }
     if seq != out.next_send_seq {
         return Err(PairingRelayError::Replay);
@@ -855,6 +985,48 @@ fn take_polled_frames(direction: &Direction) -> Result<Vec<QueuedFrame>, Pairing
         }
     }
     Ok(frames)
+}
+
+fn closed_reply(invitation_id: &str, reason: &str) -> Closed {
+    Closed {
+        schema: "ramflux.pairing.Closed.v2".into(),
+        version: 2,
+        invitation_id: invitation_id.into(),
+        reason: reason.into(),
+    }
+}
+
+fn role_token_ok(
+    role: &str,
+    presented: &str,
+    primary: &[u8; 32],
+    recipient: &[u8; 32],
+) -> Result<(), PairingRelayError> {
+    let init_ok = token_eq(primary, presented);
+    let resp_ok = token_eq(recipient, presented);
+    match role {
+        "initiator" if init_ok => Ok(()),
+        "responder" if resp_ok => Ok(()),
+        "initiator" | "responder" => Err(PairingRelayError::WrongContext),
+        _ => Err(PairingRelayError::WrongRole),
+    }
+}
+
+fn token_eq(expected: &[u8; 32], presented: &str) -> bool {
+    let decoded = decode_base64url(presented).ok();
+    let mut buf = [0_u8; 32];
+    let valid = match decoded {
+        Some(bytes) if bytes.len() == 32 => {
+            buf.copy_from_slice(&bytes);
+            true
+        }
+        _ => false,
+    };
+    constant_time_eq(&buf, expected) && valid
+}
+
+fn frame_held_bytes(frame: &RelayFrame) -> usize {
+    ramflux_protocol::canonical_json_bytes(frame).map_or(MAX_FRAME_BYTES, |bytes| bytes.len())
 }
 
 fn claimed_reply(claim: &Claim, expires_at: u64) -> Claimed {
