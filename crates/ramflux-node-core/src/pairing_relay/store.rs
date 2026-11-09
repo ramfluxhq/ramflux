@@ -47,9 +47,9 @@ struct Now {
 
 pub(super) struct Direction {
     pub(super) frames: Vec<(u64, RelayFrame)>,
-    next_send_seq: u64,
+    pub(super) next_send_seq: u64,
     pub(super) last_send: Option<(u64, String)>,
-    acked_seq: Option<u64>,
+    pub(super) acked_seq: Option<u64>,
     pub(super) poll_times: VecDeque<u64>,
 }
 
@@ -67,34 +67,34 @@ pub(super) enum SlotBody {
 pub(super) struct LiveSlot {
     pub(super) ticket: Envelope<CreateTicket>,
     pub(super) descriptor: Envelope<Invitation>,
-    primary_token: Zeroizing<[u8; 32]>,
-    recipient_token: Zeroizing<[u8; 32]>,
-    claim_nonce: Option<[u8; 32]>,
+    pub(super) primary_token: Zeroizing<[u8; 32]>,
+    pub(super) recipient_token: Zeroizing<[u8; 32]>,
+    pub(super) claim_nonce: Option<[u8; 32]>,
     pub(super) initiator: Direction,
     pub(super) responder: Direction,
     pub(super) closed_reason: Option<String>,
-    last_activity_ms: u64,
+    pub(super) last_activity_ms: u64,
 }
 
 pub(super) struct Slot {
-    account: [u8; 32],
-    expires_at: u64,
-    monotonic_deadline: u64,
+    pub(super) account: [u8; 32],
+    pub(super) expires_at: u64,
+    pub(super) monotonic_deadline: u64,
     pub(super) body: SlotBody,
 }
 
 pub(super) struct ClosedSlot {
     pub(super) reason: String,
-    issuer_seq: u64,
-    primary_hash: [u8; 32],
-    recipient_hash: [u8; 32],
-    expires_at: u64,
-    monotonic_deadline: u64,
+    pub(super) issuer_seq: u64,
+    pub(super) primary_hash: [u8; 32],
+    pub(super) recipient_hash: [u8; 32],
+    pub(super) expires_at: u64,
+    pub(super) monotonic_deadline: u64,
 }
 
 pub(super) struct ClaimEntry {
     pub(super) prefixes: Vec<String>,
-    expires_ms: u64,
+    pub(super) expires_ms: u64,
 }
 
 /// Process-local issued+live pairing relay. Restored from nothing on restart.
@@ -310,16 +310,26 @@ impl PairingRelayStore {
         self.require_responder_claim(invitation, &send.role)?;
         let digest = send.frame_digest().map_err(|e| wire(&e))?;
         send.frame.validate().map_err(|e| wire(&e))?;
-        let extra = {
+        let (extra, snapshot) = {
             let live = self.live_mut(invitation)?;
             live.last_activity_ms = now.mono;
             let out = direction_mut(live, &send.role)?;
             enqueue_cost(out, send.seq, &digest)?;
             let before = direction_payload(out);
+            let snapshot = (out.last_send.clone(), out.next_send_seq, out.frames.len());
             apply_enqueue(out, send.seq, send.frame.clone(), digest);
-            direction_payload(out).saturating_sub(before)
+            (direction_payload(out).saturating_sub(before), snapshot)
         };
-        self.charge(extra)?;
+        if let Err(err) = self.charge(extra) {
+            if let Ok(live) = self.live_mut(invitation)
+                && let Ok(out) = direction_mut(live, &send.role)
+            {
+                out.frames.truncate(snapshot.2);
+                out.last_send = snapshot.0;
+                out.next_send_seq = snapshot.1;
+            }
+            return Err(err);
+        }
         Ok(Sent {
             schema: "ramflux.pairing.Sent.v2".into(),
             version: 2,

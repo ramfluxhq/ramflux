@@ -44,11 +44,17 @@ pub const LIVE_RESERVE: usize = MAX_SLOT_METADATA + MAX_QUEUE_BYTES;
 /// Annex F registry ceiling (boot id, indexes, hour/source/closed maps). Charged as real
 /// `HashMap::capacity() × ENTRY_OVERHEAD` at construction; no dummy 256 KiB allocation.
 pub const SLACK_BYTES: usize = 262_144;
-/// Per-entry overhead charged once for every map bucket and held record.
+/// Floor charged once for every map bucket and held record. Per-table charges use
+/// `size_of::<Entry>().max(ENTRY_OVERHEAD)` so the overhead is never below the real entry.
 pub const ENTRY_OVERHEAD: usize = 64;
 /// Closed-invitation tombstones. Live slot cap × issues-per-hour (retention-window factor 10):
 /// closed hashes persist for the original 300 s invitation lifetime, and a frozen clock admits
 /// at most 10 Issue→Create→Close cycles per account. 64 × 10 = 640. Busy, no eviction.
+///
+/// Policy, not a derived per-account bound: 64 accounts can fill all 640 closed entries
+/// within 300 s. Further Close then returns Busy for every account until a tombstone
+/// expires with its original invitation lifetime. Live slots still expire and prune
+/// independently. This is accepted allocator policy.
 pub const MAX_CLOSED: usize = MAX_SLOTS * MAX_ISSUES_PER_HOUR;
 /// Total retained relay backing. Cap uses the accountant; 5832704 is the annex F plan total.
 pub const MAX_BACKING: usize = MAX_SLOTS * LIVE_RESERVE + SLACK_BYTES;

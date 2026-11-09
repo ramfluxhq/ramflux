@@ -8,6 +8,7 @@ use super::{
     TestPairingClock,
 };
 use ramflux_crypto::sign_canonical_bytes_with_seed;
+use ramflux_protocol::custody::pairing::DataSelection;
 use ramflux_protocol::custody::pairing::native::{
     Create, CreateSlot, CreateSpec, CreateTicket, Created, Issued, ticket_signing_bytes,
 };
@@ -189,14 +190,117 @@ fn books_match(store: &PairingRelayStore) -> TestResult {
     Ok(())
 }
 
+fn max_spec(n: usize, wall: u64) -> CreateSpec {
+    let account_anchor = id_usize(n);
+    let device = format!("d{n:0126}");
+    let mut data_selection = Vec::with_capacity(32);
+    for i in 0..32 {
+        data_selection.push(DataSelection {
+            key_id: format!("s{n:04}-{i:0121}"),
+            purpose: if i % 2 == 0 { "history".into() } else { "attachment".into() },
+        });
+    }
+    CreateSpec {
+        schema: "ramflux.pairing.CreateSpec.v2".into(),
+        version: 2,
+        account_anchor: account_anchor.clone(),
+        primary_ref: DeviceRef { account_anchor, device_id: device, device_epoch: 1 },
+        base_record_hash: id(2),
+        base_epoch: 1,
+        purpose: "primary_transfer".into(),
+        recipient_mode: "new".into(),
+        destination_ref: None,
+        capabilities: vec![
+            "call".into(),
+            "group".into(),
+            "message".into(),
+            "register".into(),
+            "sync".into(),
+        ],
+        lease_not_before: wall,
+        lease_expires_at: wall + 86_400,
+        data_selection,
+        ttl_seconds: 300,
+    }
+}
+
+fn create_from_max(issued: &Issued, n: usize, wall: u64) -> Create {
+    Create {
+        schema: "ramflux.pairing.Create.v2".into(),
+        version: 2,
+        ticket: issued.ticket.clone(),
+        spec: max_spec(n, wall),
+    }
+}
+
+fn max_cipher_len(created: &Created, token: &str) -> usize {
+    let mut lo = 16_usize;
+    let mut hi = 11_716_usize;
+    while lo < hi {
+        let mid = lo.saturating_add(hi).saturating_add(1) / 2;
+        if encoded_send_len(&send_cipher(created, token, 0, mid)) <= MAX_FRAME_BYTES {
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+    lo
+}
+
+fn fill_max_live(store: &mut PairingRelayStore, count: usize) -> TestResult<Vec<Created>> {
+    let mut live = Vec::new();
+    for i in 0..count {
+        let n = i / MAX_SLOTS_PER_ACCOUNT;
+        let issued = store.issue(max_spec(n, WALL))?;
+        live.push(store.create(create_from_max(&issued, n, WALL))?);
+    }
+    Ok(live)
+}
+
+fn fill_max_queues(store: &mut PairingRelayStore, live: &[Created]) -> TestResult {
+    let Some(first) = live.first() else {
+        return Ok(());
+    };
+    let nbytes = max_cipher_len(first, &first.primary_token);
+    for (i, created) in live.iter().enumerate() {
+        let octet = u8::try_from(i / MAX_CLAIMS_PER_PREFIX)
+            .map_err(|_| PairingRelayError::invalid("prefix"))?;
+        store.claim(IpAddr::V4(Ipv4Addr::new(198, 51, octet, 1)), &claim_of(created, i))?;
+        for seq in 0..MAX_FRAMES_PER_DIRECTION as u64 {
+            store.send(&send_cipher(created, &created.primary_token, seq, nbytes))?;
+            store.send(&Send {
+                schema: "ramflux.pairing.Send.v2".into(),
+                version: 2,
+                invitation_id: created.invitation.body.invitation_id.clone(),
+                issuer_seq: created.invitation.body.issuer_seq,
+                role: "responder".into(),
+                token: created.recipient_token.clone(),
+                seq,
+                frame: RelayFrame::Channel {
+                    counter: seq,
+                    ciphertext: encode_base64url(vec![0_u8; nbytes]),
+                },
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn high_water_at_cap(store: &mut PairingRelayStore) -> TestResult {
-    let live = fill_live(store, MAX_SLOTS)?;
+    let live = fill_max_live(store, MAX_SLOTS)?;
     if live.len() != MAX_SLOTS {
         return Err(PairingRelayError::invalid("slots"));
     }
+    if store.accounted_bytes() != store.measured_bytes() {
+        return Err(PairingRelayError::invalid("max_live"));
+    }
+    fill_max_queues(store, &live)?;
     let stats = store.stats();
     if stats.live != MAX_SLOTS {
         return Err(PairingRelayError::invalid("high_water"));
+    }
+    if stats.queued_frames != MAX_SLOTS * 4 {
+        return Err(PairingRelayError::invalid("max_frames"));
     }
     books_match(store)
 }
