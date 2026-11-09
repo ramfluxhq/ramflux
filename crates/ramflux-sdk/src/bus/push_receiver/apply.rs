@@ -311,7 +311,10 @@ pub(crate) fn cover_held_in(
     sequence: u64,
     gaps: &[ramflux_storage::ReceiveGap<'_>],
 ) -> Result<ReceiveCoverResult, StorageError> {
-    tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps, retain_until: 0 })
+    tx.cover_at(
+        ReceiveCover { sequence, kind: ReceiveCoverKind::Held, gaps, retain_until: 0 },
+        crate::time::now_unix_timestamp(),
+    )
 }
 
 /// Terminal W2 on an already-open receive transaction: bind the receipt, write the ACK
@@ -321,7 +324,10 @@ pub(crate) fn cover_terminal_in(
     sequence: u64,
     gaps: &[ramflux_storage::ReceiveGap<'_>],
 ) -> Result<ReceiveCoverResult, StorageError> {
-    tx.cover(ReceiveCover { sequence, kind: ReceiveCoverKind::Terminal, gaps, retain_until: 0 })
+    tx.cover_at(
+        ReceiveCover { sequence, kind: ReceiveCoverKind::Terminal, gaps, retain_until: 0 },
+        crate::time::now_unix_timestamp(),
+    )
 }
 
 struct Trimmed<'a> {

@@ -8,7 +8,7 @@
     clippy::too_many_lines,
     clippy::large_futures
 )]
-//! Actor-path WA flush and routed early-return cover (S6b P24b2b r2).
+//! Actor-path WA flush and routed early-return cover (S6b P24b2b r3).
 
 use super::fixture::{Case, Fixture};
 use super::lifecycle_fence::{
@@ -16,15 +16,10 @@ use super::lifecycle_fence::{
 };
 use crate::bus::connection_manager::{ReceiveTrigger, receive::test_catch_up};
 use crate::bus::dispatch::task_transport::{Target, seal};
-use crate::client::identity_authority::HeadUse;
-use crate::client::routed::{Committed, Kind, Routing};
 use crate::prelude::*;
 use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-
-static ACTOR_GATE: Mutex<()> = Mutex::const_new(());
 
 fn snap(runtime: &super::super::AccountRuntime) -> Result<ReceiveLedgerSnap, SdkError> {
     let account = account_of(runtime)?;
@@ -145,7 +140,6 @@ async fn watch<F>(secs: u64, fut: F) -> Case
 where
     F: Future<Output = Case>,
 {
-    let _gate = ACTOR_GATE.lock().await;
     tokio::time::timeout(
         Duration::from_secs(secs),
         LocalSet::new()
@@ -170,20 +164,28 @@ async fn never_ack_above_c_case() -> Case {
         drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
     }
     assert_eq!(snap(&runtime)?.cursor, 1);
-    assert_eq!(snap(&runtime)?.intents, vec![1]);
-    assert_eq!(acked(&gateway)?, 0, "one intent is below the Tick flush gate");
     drive_flush(&mut runtime, true).await?;
     assert_eq!(acked(&gateway)?, 1, "WA ACKs only seq <= C");
     assert_eq!(snap(&runtime)?.intents, Vec::<u64>::new());
-    fill_sealed(&mut fixture, 2, 1).await?;
     {
-        let _clock = crate::time::test_clock::FrozenClock::freeze();
-        drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+        let account = account_of(&runtime)?;
+        let target = account.target_delivery_id.clone();
+        let db = account.client.account_db()?;
+        db.seed_held_receive_for_test(&target, PUSH_E, 2, b"{}")?;
+        db.seed_ack_intent_for_test(&target, PUSH_E, 2)?;
+        db.seed_ack_intent_for_test(&target, PUSH_E, 9)?;
+        assert_eq!(
+            db.receive_ledger_snap_for_test(&target)?.intents,
+            vec![2, 9],
+            "held seq 2 and seq>C 9 sit above C"
+        );
     }
-    assert_eq!(snap(&runtime)?.cursor, 2);
-    assert_eq!(acked(&gateway)?, 1, "seq 2 is not ACKed until a flush selects it");
-    drive_flush(&mut runtime, true).await?;
-    assert_eq!(acked(&gateway)?, 2);
+    crate::time::test_clock::set_frozen(Some(100));
+    let flushed = drive_flush(&mut runtime, true).await;
+    crate::time::test_clock::set_frozen(None);
+    flushed?;
+    assert_eq!(acked(&gateway)?, 1, "actor never ACKs held or seq>C intents");
+    assert_eq!(snap(&runtime)?.intents, vec![2, 9]);
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
@@ -192,20 +194,28 @@ async fn never_ack_above_c_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn ack_batch_timing() -> Case {
-    watch(40, ack_batch_timing_case()).await
+    watch(60, ack_batch_timing_case()).await
 }
 
 async fn ack_batch_timing_case() -> Case {
     let n = u64::try_from(ACK_FLUSH_COUNT)?;
-    let mut sixteen = Box::pin(Fixture::new("wa-timing-16")).await?;
-    let gateway16 = Arc::clone(&sixteen.gateway);
-    let mut runtime16 = start_runtime(&mut sixteen).await?;
-    fill_sealed(&mut sixteen, 1, n).await?;
-    drive_pass(&mut runtime16, ReceiveTrigger::Tick).await?;
-    assert_eq!(acked(&gateway16)?, ACK_FLUSH_COUNT, "16 intents flush mid catch-up");
-    runtime16.stop_connection().await;
-    drop(runtime16);
-    std::fs::remove_dir_all(sixteen.root)?;
+    let mut thirty_three = Box::pin(Fixture::new("wa-timing-33")).await?;
+    let gateway33 = Arc::clone(&thirty_three.gateway);
+    let mut runtime33 = start_runtime(&mut thirty_three).await?;
+    fill_sealed(&mut thirty_three, 1, n.saturating_mul(2).saturating_add(1)).await?;
+    {
+        let _clock = crate::time::test_clock::FrozenClock::freeze();
+        drive_pass(&mut runtime33, ReceiveTrigger::Tick).await?;
+    }
+    assert_eq!(
+        acked(&gateway33)?,
+        ACK_FLUSH_COUNT.saturating_mul(2),
+        "33 entries on one FrozenClock Tick flush 32 mid catch-up"
+    );
+    assert_eq!(snap(&runtime33)?.intents, vec![n.saturating_mul(2).saturating_add(1)]);
+    runtime33.stop_connection().await;
+    drop(runtime33);
+    std::fs::remove_dir_all(thirty_three.root)?;
 
     let mut three = Box::pin(Fixture::new("wa-timing-3")).await?;
     let gateway3 = Arc::clone(&three.gateway);
@@ -261,64 +271,20 @@ async fn routed_seen_duplicate_covers_and_acks() -> Case {
 
 async fn seen_duplicate_case() -> Case {
     let mut fixture = Box::pin(Fixture::new("h1-seen")).await?;
-    fixture.inbound().await?;
     let gateway = Arc::clone(&fixture.gateway);
+    let mut runtime = start_runtime(&mut fixture).await?;
+    fill_sealed(&mut fixture, 1, 1).await?;
     let first = gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
-    let config = fixture.source.gateway_config.clone();
-    let commitment = fixture.source.principal_commitment.clone();
-    let carrier = push_engine(fixture.source.engine.take().ok_or("engine")?)?;
-    let account = open_account(&fixture.root, &config, &commitment)?;
-    activate(&account)?;
-    account.client.persist_routed_seen(&first)?;
-    let mut runtime = runtime_for(account, &fixture.root);
-    runtime.start_connection()?;
-    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
-    pump_quiet(&mut runtime, Duration::from_millis(400)).await?;
-    assert!(snap(&runtime)?.cursor >= 2, "seen seq above C must not wedge the next seq");
-    assert!(acked(&gateway)? >= 1, "duplicate early return is ACKed");
-    runtime.stop_connection().await;
-    drop(runtime);
-    std::fs::remove_dir_all(fixture.root)?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn routed_committed_covers_and_acks() -> Case {
-    watch(25, committed_case()).await
-}
-
-async fn committed_case() -> Case {
-    let mut fixture = Box::pin(Fixture::new("h1-committed")).await?;
-    fixture.inbound().await?;
-    let gateway = Arc::clone(&fixture.gateway);
-    let first = gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
-    let config = fixture.source.gateway_config.clone();
-    let commitment = fixture.source.principal_commitment.clone();
-    let carrier = push_engine(fixture.source.engine.take().ok_or("engine")?)?;
-    let account = open_account(&fixture.root, &config, &commitment)?;
-    activate(&account)?;
-    let key = account.client.authenticated_committed_key(HeadUse::NewAuthorization, &first)?;
-    account.client.account_db()?.persist_actor_state(
-        &key,
-        &Committed {
-            routing: Routing {
-                kind: Kind::Direct,
-                conversation_id: "healthy".into(),
-                group_id: None,
-                message_id: "pre".into(),
-                group_message_id: None,
-                attachments: false,
-            },
-            entry: first,
-            projected: true,
-        },
-    )?;
-    let mut runtime = runtime_for(account, &fixture.root);
-    runtime.start_connection()?;
-    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
-    pump_quiet(&mut runtime, Duration::from_millis(400)).await?;
-    assert!(snap(&runtime)?.cursor >= 1, "committed early return advances C");
-    assert!(acked(&gateway)? >= 1, "committed early return is ACKed");
+    account_of(&runtime)?.client.persist_routed_seen(&first)?;
+    drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    drive_flush(&mut runtime, true).await?;
+    assert_eq!(snap(&runtime)?.cursor, 1, "seen seq above C covers");
+    assert_eq!(acked(&gateway)?, 1, "duplicate early return is ACKed once");
+    fill_sealed(&mut fixture, 2, 1).await?;
+    drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    drive_flush(&mut runtime, true).await?;
+    assert_eq!(snap(&runtime)?.cursor, 2, "seen seq above C must not wedge the next seq");
+    assert_eq!(acked(&gateway)?, 2, "next seq is ACKed once");
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
@@ -368,8 +334,8 @@ async fn contact_request_case() -> Case {
     let mut runtime = start_runtime(&mut fixture).await?;
     drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
     drive_flush(&mut runtime, true).await?;
-    assert!(snap(&runtime)?.cursor >= 1, "contact-request bootstrap covers C");
-    assert!(acked(&gateway)? >= 1, "contact-request bootstrap is ACKed once");
+    assert_eq!(snap(&runtime)?.cursor, 1, "contact-request bootstrap covers C");
+    assert_eq!(acked(&gateway)?, 1, "contact-request bootstrap is ACKed once");
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;

@@ -452,7 +452,9 @@ impl RamfluxClient {
                 contact_held: held,
             }),
         )?;
-        self.finish_pair_retirement()?;
+        if JOINING {
+            self.finish_pair_retirement()?;
+        }
         let refs = if consume_erased { admitted_refs(&refs, admitted) } else { refs };
         let import = attachments && opened.routing.kind == Kind::Direct && accepted && !held;
         let background = native_prepared;
