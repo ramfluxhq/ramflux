@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! P20f r5A: `failure_policy_stage_crash` (M5) and `held_local_expiry_and_eviction_crash` (M6).
-#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+//! P20f r5A r2: `failure_policy_stage_crash` (M5) and `held_local_expiry_and_eviction_crash` (M6).
+#![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used, clippy::too_many_lines)]
 
 use super::apply_w1::{
     self, apply_page, queue_legacy_hold, queue_policy_kind, set_after_classify, set_before_commit,
@@ -14,20 +14,22 @@ use crate::bus::sync_driver::source::failure::{self as source_failure, SourceFai
 use crate::bus::sync_driver::source::hold::SourceHold;
 use crate::client::inbox_failure::verified_failure_policy;
 use crate::prelude::*;
-use ramflux_protocol::encode_base64url;
+use ramflux_node_core::{InboxEntry, RouterCore, RouterRedbStore};
+use ramflux_protocol::{Ack, Ext, SignatureAlg, SignedFields, encode_base64url};
 use ramflux_storage::{
     AccountDb, ReceiveFailure, ReceiveFailureKind, ReceiveFailureResult, StorageError,
 };
 use serde_json::json;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const START: i64 = 1_700_000_000;
 const HOLD_MAX: i64 = 604_800;
 const OPEN_INPUT: &str = "source effect requires staged receive work";
 const FAILURE_CUT: &str = "source failure before-commit";
 const W1_CUT: &str = "apply page w1 before-commit";
-const EXHAUSTED: &str = "retry_exhausted";
+const UNTRUSTED_RETRY_LIMIT: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
@@ -40,9 +42,116 @@ const MODES: [Mode; 2] = [Mode::Wal, Mode::RedbOnly];
 struct Harness {
     _root: tempfile::TempDir,
     account: crate::bus::state::LocalBusAccountState,
+    router_path: PathBuf,
+    mode: Mode,
 }
 
-fn open() -> Result<Harness, SdkError> {
+fn router_wal_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[allow(unsafe_code)]
+fn write_router_wal_env(enabled: bool) {
+    // SAFETY: callers hold `router_wal_lock` for the whole set/open/restore window.
+    unsafe {
+        std::env::set_var("RAMFLUX_ROUTER_WAL", if enabled { "1" } else { "0" });
+    }
+}
+
+#[allow(unsafe_code)]
+fn restore_router_wal_env(previous: Option<String>) {
+    // SAFETY: callers hold `router_wal_lock` for the whole set/open/restore window.
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("RAMFLUX_ROUTER_WAL", value),
+            None => std::env::remove_var("RAMFLUX_ROUTER_WAL"),
+        }
+    }
+}
+
+fn open_router(path: &Path, mode: Mode) -> Result<RouterRedbStore, SdkError> {
+    let _guard = router_wal_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var("RAMFLUX_ROUTER_WAL").ok();
+    write_router_wal_env(mode == Mode::Wal);
+    let opened = RouterRedbStore::open(path);
+    restore_router_wal_env(previous);
+    opened.map_err(|error| SdkError::LocalBus(error.to_string()))
+}
+
+fn wal_dir(path: &Path) -> PathBuf {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("router.redb");
+    path.with_file_name(format!("{name}.wal"))
+}
+
+fn assert_router_mode(path: &Path, mode: Mode) {
+    let wal = wal_dir(path);
+    match mode {
+        Mode::Wal => assert!(wal.exists(), "WAL mode must create {wal:?}"),
+        Mode::RedbOnly => assert!(!wal.exists(), "redb-only must not create {wal:?}"),
+    }
+}
+
+fn router_inbox(entry: &crate::GatewayInboxEntry) -> InboxEntry {
+    InboxEntry {
+        inbox_seq: entry.inbox_seq,
+        target_delivery_id: entry.target_delivery_id.clone(),
+        envelope: entry.envelope.clone(),
+    }
+}
+
+fn router_ack(envelope_id: &str) -> Ack {
+    Ack {
+        schema: "ramflux.ack.v1".into(),
+        version: 1,
+        domain: "ramflux.ack.v1".into(),
+        ext: Ext::default(),
+        signed: SignedFields {
+            signing_key_id: "key".into(),
+            signature_alg: SignatureAlg::Ed25519,
+            signature: "sig".into(),
+        },
+        ack_id: format!("ack-{envelope_id}"),
+        envelope_id: envelope_id.to_owned(),
+        receiver_device_id: "device".into(),
+        received_at: 1,
+        cursor_after: None,
+    }
+}
+
+fn plant_router_row(
+    store: &RouterRedbStore,
+    entry: &crate::GatewayInboxEntry,
+) -> Result<(), SdkError> {
+    store
+        .record_inbox_entry(&router_inbox(entry))
+        .map_err(|error| SdkError::LocalBus(error.to_string()))
+}
+
+fn pending_for(store: &RouterRedbStore, target: &str) -> Result<Vec<InboxEntry>, SdkError> {
+    let Some(router) =
+        store.load_router().map_err(|error| SdkError::LocalBus(error.to_string()))?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(router.resume(target, 0, 32))
+}
+
+fn ack_router_row(
+    store: &RouterRedbStore,
+    entry: &crate::GatewayInboxEntry,
+) -> Result<(), SdkError> {
+    let router = store
+        .load_router()
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?
+        .ok_or_else(|| SdkError::LocalBus("router row missing before ACK".into()))?;
+    let id = entry.envelope.envelope_id.as_str();
+    let cursor =
+        router.apply_ack(&router_ack(id)).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    store.record_ack_increment(&cursor, id).map_err(|error| SdkError::LocalBus(error.to_string()))
+}
+
+fn open(mode: Mode) -> Result<Harness, SdkError> {
     let root = tempfile::tempdir().expect("tmp");
     let account =
         runtime_tests::account(root.path(), "acct", None, Arc::new(AtomicBool::new(false)))?;
@@ -50,7 +159,23 @@ fn open() -> Result<Harness, SdkError> {
     let db = account.client.account_db()?;
     db.install_receive_ledger_schema()?;
     db.seed_receive_epoch_for_test(&target, "e")?;
-    Ok(Harness { _root: root, account })
+    let router_path = root.path().join("router.redb");
+    {
+        let store = open_router(&router_path, mode)?;
+        store
+            .bootstrap_router(&RouterCore::new())
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        let plant =
+            dummy_seq(&target, &encode_base64url(b"router-mode-plant"), "router", "dev", 99);
+        plant_router_row(&store, &plant.entry)?;
+        assert_router_mode(&router_path, mode);
+        assert_eq!(
+            pending_for(&store, &target)?.len(),
+            1,
+            "mode plant must be a real router inbox row"
+        );
+    }
+    Ok(Harness { _root: root, account, router_path, mode })
 }
 
 fn turn(
@@ -140,14 +265,11 @@ fn reopen(account: &mut crate::bus::state::LocalBusAccountState) -> Result<(), S
     Ok(())
 }
 
-fn recover(
-    account: &mut crate::bus::state::LocalBusAccountState,
-    mode: Mode,
-) -> Result<(), SdkError> {
-    if mode == Mode::RedbOnly {
-        account.client.account_db()?.checkpoint_retired_secrets()?;
-    }
-    reopen(account)
+fn recover(harness: &mut Harness) -> Result<(), SdkError> {
+    reopen(&mut harness.account)?;
+    let _store = open_router(&harness.router_path, harness.mode)?;
+    assert_router_mode(&harness.router_path, harness.mode);
+    Ok(())
 }
 
 fn from_disk(
@@ -214,7 +336,7 @@ fn assert_integrity(error: Option<&SdkError>, text: &str, label: &str) {
     );
 }
 
-fn admit_exhausted(
+fn admit_retryable(
     account: &crate::bus::state::LocalBusAccountState,
     entry: &crate::GatewayInboxEntry,
     json: &[u8],
@@ -231,8 +353,8 @@ fn admit_exhausted(
             sequence: entry.inbox_seq,
             admission_key: &key,
             entry: json,
-            kind: ReceiveFailureKind::Exhausted,
-            error_code: EXHAUSTED,
+            kind: ReceiveFailureKind::Retryable,
+            error_code: "inbound_pending",
             at,
             policy: built.policy(),
         },
@@ -256,31 +378,67 @@ async fn stage_w0(
     Ok(entry)
 }
 
+fn assert_held_retry(
+    account: &crate::bus::state::LocalBusAccountState,
+    key: &str,
+    attempt: u32,
+) -> Result<(), SdkError> {
+    let db = db_of(account)?;
+    assert_eq!(
+        db.receive_state_for_test(1)?,
+        (Some("held".into()), 1),
+        "attempt {attempt} still retries"
+    );
+    assert_eq!(retry_count(db, key)?, 1, "attempt {attempt} keeps the retry row");
+    assert_eq!(failure_events(db, "policy_rejected")?, 0, "attempt {attempt} is not terminal");
+    assert_eq!(dead_letters(db)?, 0, "Retryable exhaustion never writes message.undeliverable");
+    Ok(())
+}
+
 fn assert_exhausted_committed(
     account: &crate::bus::state::LocalBusAccountState,
     key: &str,
 ) -> Result<(), SdkError> {
     let db = db_of(account)?;
-    assert_eq!(db.receive_state_for_test(1)?, (None, 0), "exhausted settles W0");
+    assert_eq!(db.receive_state_for_test(1)?, (None, 0), "limit settles W0");
     assert_eq!(cursor(account)?, 1);
     assert_eq!(snap(account)?.intents, vec![1]);
     assert_eq!(failure_events(db, "policy_rejected")?, 1);
     assert_eq!(retry_count(db, key)?, 0);
-    assert_eq!(dead_letters(db)?, 1);
+    assert_eq!(dead_letters(db)?, 0, "Retryable reject does not insert_inbox_dead_letter");
     Ok(())
 }
 
+fn drive_untrusted_limit(
+    account: &crate::bus::state::LocalBusAccountState,
+    entry: &crate::GatewayInboxEntry,
+    json: &[u8],
+    key: &str,
+) -> Result<(), SdkError> {
+    for attempt in 1..=UNTRUSTED_RETRY_LIMIT {
+        assert_eq!(
+            admit_retryable(account, entry, json)?,
+            ReceiveFailureResult::Held,
+            "attempt {attempt} of {UNTRUSTED_RETRY_LIMIT} still retries"
+        );
+        assert_held_retry(account, key, attempt)?;
+    }
+    assert_eq!(
+        admit_retryable(account, entry, json)?,
+        ReceiveFailureResult::Rejected,
+        "attempt {} dead-letters",
+        UNTRUSTED_RETRY_LIMIT + 1
+    );
+    assert_exhausted_committed(account, key)
+}
+
 async fn exhausted_retry_after_commit(mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open(mode)?;
     let entry = stage_w0(&mut harness.account).await?;
     let key = harness.account.client.inbox_admission_key(&entry.entry)?;
     let json = db_of(&harness.account)?.staged_entry_json_for_test(1)?;
-    assert_eq!(
-        admit_exhausted(&harness.account, &entry.entry, &json)?,
-        ReceiveFailureResult::Rejected
-    );
-    assert_exhausted_committed(&harness.account, &key)?;
-    recover(&mut harness.account, mode)?;
+    drive_untrusted_limit(&harness.account, &entry.entry, &json, &key)?;
+    recover(&mut harness)?;
     assert_exhausted_committed(&harness.account, &key)?;
     let again = drive(&mut harness.account, entry, || 1).await?;
     assert!(again.0.is_none());
@@ -289,22 +447,33 @@ async fn exhausted_retry_after_commit(mode: Mode) -> Result<(), SdkError> {
 }
 
 async fn exhausted_split_write(mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open(mode)?;
     let entry = stage_w0(&mut harness.account).await?;
     let key = harness.account.client.inbox_admission_key(&entry.entry)?;
     let json = db_of(&harness.account)?.staged_entry_json_for_test(1)?;
+    for attempt in 1..=UNTRUSTED_RETRY_LIMIT {
+        assert_eq!(
+            admit_retryable(&harness.account, &entry.entry, &json)?,
+            ReceiveFailureResult::Held
+        );
+        assert_held_retry(&harness.account, &key, attempt)?;
+    }
     source_failure::set_fault(source_failure::Fault::BeforeCommit);
-    let cut = admit_exhausted(&harness.account, &entry.entry, &json);
+    let cut = admit_retryable(&harness.account, &entry.entry, &json);
     source_failure::set_fault(source_failure::Fault::None);
     assert_integrity(cut.as_ref().err(), FAILURE_CUT, "exhausted split-write");
-    assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?, (Some("staged".into()), 1));
-    assert_eq!(failure_events(db_of(&harness.account)?, "policy_rejected")?, 0);
-    assert_eq!(retry_count(db_of(&harness.account)?, &key)?, 0);
-    assert_eq!(dead_letters(db_of(&harness.account)?)?, 0);
-    recover(&mut harness.account, mode)?;
     assert_eq!(
         db_of(&harness.account)?.receive_state_for_test(1)?,
-        (Some("staged".into()), 1),
+        (Some("held".into()), 1),
+        "limit-1 hold survives the rejected split-write"
+    );
+    assert_eq!(failure_events(db_of(&harness.account)?, "policy_rejected")?, 0);
+    assert_eq!(retry_count(db_of(&harness.account)?, &key)?, 1);
+    assert_eq!(dead_letters(db_of(&harness.account)?)?, 0);
+    recover(&mut harness)?;
+    assert_eq!(
+        db_of(&harness.account)?.receive_state_for_test(1)?,
+        (Some("held".into()), 1),
         "split-write reopen shows neither journal nor dead-letter"
     );
     assert_eq!(failure_events(db_of(&harness.account)?, "policy_rejected")?, 0);
@@ -313,19 +482,33 @@ async fn exhausted_split_write(mode: Mode) -> Result<(), SdkError> {
 }
 
 async fn exhausted_router_row_removed(mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open(mode)?;
     let entry = stage_w0(&mut harness.account).await?;
     let key = harness.account.client.inbox_admission_key(&entry.entry)?;
-    recover(&mut harness.account, mode)?;
+    let target = harness.account.target_delivery_id.clone();
+    {
+        let store = open_router(&harness.router_path, mode)?;
+        plant_router_row(&store, &entry.entry)?;
+        assert!(
+            pending_for(&store, &target)?
+                .iter()
+                .any(|row| row.envelope.envelope_id == entry.entry.envelope.envelope_id),
+            "staged envelope must be a live router row"
+        );
+        ack_router_row(&store, &entry.entry)?;
+        assert!(
+            pending_for(&store, &target)?
+                .iter()
+                .all(|row| row.envelope.envelope_id != entry.entry.envelope.envelope_id),
+            "ACK must remove the real router row"
+        );
+    }
+    recover(&mut harness)?;
     let recovered = from_disk(&harness.account, 1)?;
     assert_eq!(recovered.entry.envelope.envelope_id, entry.entry.envelope.envelope_id);
     let json = db_of(&harness.account)?.staged_entry_json_for_test(1)?;
-    assert_eq!(
-        admit_exhausted(&harness.account, &recovered.entry, &json)?,
-        ReceiveFailureResult::Rejected
-    );
-    assert_exhausted_committed(&harness.account, &key)?;
-    recover(&mut harness.account, mode)?;
+    drive_untrusted_limit(&harness.account, &recovered.entry, &json, &key)?;
+    recover(&mut harness)?;
     assert_exhausted_committed(&harness.account, &key)?;
     Ok(())
 }
@@ -343,62 +526,106 @@ async fn failure_policy_stage_crash() -> Result<(), SdkError> {
 async fn hold_seq(
     account: &mut crate::bus::state::LocalBusAccountState,
     seq: u64,
+    source: Option<&str>,
 ) -> Result<(), SdkError> {
     queue_legacy_hold(std::iter::repeat_n(true, 4));
     let entry = own_dummy_at(account, seq);
+    if let Some(source) = source {
+        let key = account.client.inbox_admission_key(&entry.entry)?;
+        db_of(account)?.seed_inbox_policy_for_test(&key, source)?;
+    }
     drive(account, entry, || 1).await?;
+    Ok(())
+}
+
+fn refuse_open_input(
+    account: &crate::bus::state::LocalBusAccountState,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let prepared = turn(account, 1)?;
+    let refused = db_of(account)?
+        .receive_transaction(prepared.expected(), 1, |tx| tx.require_open_input(sequence));
+    let error = refused.as_ref().expect_err("fenced purge must refuse a later source effect");
+    assert!(
+        matches!(error, StorageError::Integrity(text) if *text == OPEN_INPUT),
+        "exact StorageError: {error:?}"
+    );
+    Ok(())
+}
+
+fn probe_unrouted(
+    account: &crate::bus::state::LocalBusAccountState,
+    id: &str,
+    seq: u64,
+    at: i64,
+) -> Result<(), SdkError> {
+    let body = serde_json::to_vec(&json!({"probe": id, "inbox_seq": seq}))?;
+    db_of(account)?.hold_unrouted(id, seq, &body, at)?;
     Ok(())
 }
 
 async fn quarantine_purge(mode: Mode) -> Result<(), SdkError> {
     let _clock = crate::time::FixedClock::set(START);
-    let mut harness = open()?;
-    hold_seq(&mut harness.account, 1).await?;
+    let mut harness = open(mode)?;
+    hold_seq(&mut harness.account, 1, None).await?;
     assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?, (Some("held".into()), 1));
     assert_eq!(db_of(&harness.account)?.unrouted_count()?, 1);
-    let pre = snap(&harness.account)?;
-    crate::time::FixedClock::advance_to(START + HOLD_MAX);
-    let prepared = turn(&harness.account, 1)?;
-    source_failure::set_fault(source_failure::Fault::BeforeCommit);
-    let cut = SourceFailure { expected: prepared.expected(), generation: 1 }
-        .expire_holds(db_of(&harness.account)?, START + HOLD_MAX);
-    source_failure::set_fault(source_failure::Fault::None);
-    assert_integrity(cut.as_ref().err(), FAILURE_CUT, "quarantine purge cut");
-    assert_eq!(snap(&harness.account)?, pre, "purge cut writes nothing");
-    recover(&mut harness.account, mode)?;
-    assert_eq!(snap(&harness.account)?, pre);
-    let prepared = turn(&harness.account, 1)?;
-    let settled = SourceFailure { expected: prepared.expected(), generation: 1 }
-        .expire_holds(db_of(&harness.account)?, START + HOLD_MAX)?;
-    assert_eq!(settled, vec![1]);
+    crate::time::FixedClock::advance_to(START + HOLD_MAX + 1);
+    probe_unrouted(&harness.account, "probe-expired", 99, START + HOLD_MAX + 1)?;
     assert_eq!(failure_events(db_of(&harness.account)?, "held_expired")?, 1);
-    assert_eq!(db_of(&harness.account)?.unrouted_count()?, 0, "quarantine row is gone");
+    assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?, (None, 0));
     assert_eq!(snap(&harness.account)?.work, 0);
-    recover(&mut harness.account, mode)?;
+    refuse_open_input(&harness.account, 1)?;
+    recover(&mut harness)?;
     assert_eq!(failure_events(db_of(&harness.account)?, "held_expired")?, 1);
-    assert_eq!(db_of(&harness.account)?.unrouted_count()?, 0);
+    assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?, (None, 0));
+    refuse_open_input(&harness.account, 1)?;
     Ok(())
 }
 
-async fn fill_holds(
-    account: &mut crate::bus::state::LocalBusAccountState,
-    through: u64,
-) -> Result<(), SdkError> {
-    for seq in 1..=through {
-        hold_seq(account, seq).await?;
+async fn quarantine_overflow(mode: Mode) -> Result<(), SdkError> {
+    let mut harness = open(mode)?;
+    for seq in 1..=64 {
+        hold_seq(&mut harness.account, seq, None).await?;
     }
+    assert_eq!(snap(&harness.account)?.work, 64);
+    assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 0);
+    probe_unrouted(&harness.account, "probe-overflow", 99, now_unix_timestamp())?;
+    assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 1);
+    assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?.0, None);
+    refuse_open_input(&harness.account, 1)?;
+    recover(&mut harness)?;
+    assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 1);
+    refuse_open_input(&harness.account, 1)?;
     Ok(())
+}
+
+fn held_receipts(done: &ramflux_storage::ReceiveLedgerSnap) -> Vec<u64> {
+    done.receipts
+        .iter()
+        .filter(|(_, disposition)| disposition == "held")
+        .map(|(seq, _)| *seq)
+        .collect()
 }
 
 async fn cap_64_bound(mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
-    fill_holds(&mut harness.account, 64).await?;
-    assert_eq!(snap(&harness.account)?.work, 64, "64 unrouted holds stay");
+    let mut harness = open(mode)?;
+    for seq in 1..=32 {
+        hold_seq(&mut harness.account, seq, Some("src-a")).await?;
+    }
+    for seq in 33..=64 {
+        hold_seq(&mut harness.account, seq, Some("src-b")).await?;
+    }
+    let filled = snap(&harness.account)?;
+    assert_eq!(filled.work, 64, "64 unrouted holds stay");
     assert_eq!(cursor(&harness.account)?, 64);
     assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 0);
+    assert_eq!(held_receipts(&filled), (1..=64).collect::<Vec<_>>());
     queue_legacy_hold(std::iter::repeat_n(true, 4));
     set_after_classify(arm_w1_cut);
     let extra = own_dummy_at(&harness.account, 65);
+    let extra_key = harness.account.client.inbox_admission_key(&extra.entry)?;
+    db_of(&harness.account)?.seed_inbox_policy_for_test(&extra_key, "src-c")?;
     let cut = drive(&mut harness.account, extra, || 1).await;
     assert_integrity(cut.as_ref().err(), W1_CUT, "65th eviction cut");
     assert_eq!(
@@ -407,22 +634,26 @@ async fn cap_64_bound(mode: Mode) -> Result<(), SdkError> {
         "W1 cut leaves the 65th staged and the 64 holds"
     );
     assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 0);
-    recover(&mut harness.account, mode)?;
-    hold_seq(&mut harness.account, 65).await?;
+    recover(&mut harness)?;
+    hold_seq(&mut harness.account, 65, None).await?;
     let done = snap(&harness.account)?;
     assert_eq!(done.cursor, 65);
     assert_eq!(done.work, 64, "65 evicts exactly one");
     assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 1);
-    assert!(!done.receipts.iter().any(|(seq, disp)| *seq == 1 && disp == "held"));
+    assert_eq!(
+        held_receipts(&done),
+        (2..=65).collect::<Vec<_>>(),
+        "seqs 2..=64 survive; 65 is held"
+    );
     assert!(done.intents.contains(&1));
-    recover(&mut harness.account, mode)?;
+    recover(&mut harness)?;
     assert_eq!(snap(&harness.account)?, done);
     assert_eq!(failure_events(db_of(&harness.account)?, "held_evicted")?, 1);
     Ok(())
 }
 
 async fn dead_letter_row(mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
+    let mut harness = open(mode)?;
     let entry = stage_w0(&mut harness.account).await?;
     let key = harness.account.client.inbox_admission_key(&entry.entry)?;
     let json = db_of(&harness.account)?.staged_entry_json_for_test(1)?;
@@ -436,7 +667,7 @@ async fn dead_letter_row(mode: Mode) -> Result<(), SdkError> {
     assert_eq!(dead_letters(db_of(&harness.account)?)?, 1);
     assert_eq!(snap(&harness.account)?.work, 0);
     assert_eq!(snap(&harness.account)?.intents, vec![1]);
-    recover(&mut harness.account, mode)?;
+    recover(&mut harness)?;
     assert_eq!(failure_events(db_of(&harness.account)?, "policy_rejected")?, 1);
     assert_eq!(dead_letters(db_of(&harness.account)?)?, 1);
     assert_eq!(snap(&harness.account)?.work, 0);
@@ -459,7 +690,7 @@ fn contact_hold(account: &crate::bus::state::LocalBusAccountState) -> Result<(),
 
 async fn contact_expiry_cut(mode: Mode) -> Result<(), SdkError> {
     let _clock = crate::time::FixedClock::set(START);
-    let mut harness = open()?;
+    let mut harness = open(mode)?;
     queue_legacy_hold(std::iter::repeat_n(true, 4));
     set_after_classify(arm_w1_cut);
     let entry = own_dummy_at(&harness.account, 1);
@@ -476,38 +707,15 @@ async fn contact_expiry_cut(mode: Mode) -> Result<(), SdkError> {
     source_failure::set_fault(source_failure::Fault::None);
     assert_integrity(cut.as_ref().err(), FAILURE_CUT, "contact expiry cut");
     assert_eq!(snap(&harness.account)?, pre);
-    recover(&mut harness.account, mode)?;
+    recover(&mut harness)?;
     let prepared = turn(&harness.account, 1)?;
     let settled = SourceFailure { expected: prepared.expected(), generation: 1 }
         .expire_holds(db_of(&harness.account)?, START + HOLD_MAX)?;
     assert_eq!(settled, vec![1]);
     assert_eq!(failure_events(db_of(&harness.account)?, "held_expired")?, 1);
-    recover(&mut harness.account, mode)?;
+    recover(&mut harness)?;
     assert_eq!(failure_events(db_of(&harness.account)?, "held_expired")?, 1);
     assert_eq!(snap(&harness.account)?.work, 0);
-    Ok(())
-}
-
-async fn raw_delete_refused(mode: Mode) -> Result<(), SdkError> {
-    let mut harness = open()?;
-    hold_seq(&mut harness.account, 1).await?;
-    assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?, (Some("held".into()), 1));
-    db_of(&harness.account)?.erase_receive_work_for_test(1)?;
-    let prepared = turn(&harness.account, 1)?;
-    let refused = db_of(&harness.account)?
-        .receive_transaction(prepared.expected(), 1, |tx| tx.require_open_input(1));
-    let error = refused.as_ref().expect_err("raw DELETE must be refused");
-    assert!(
-        matches!(error, StorageError::Integrity(text) if *text == OPEN_INPUT),
-        "exact StorageError: {error:?}"
-    );
-    assert_eq!(
-        db_of(&harness.account)?.receive_state_for_test(1)?,
-        (Some("held".into()), 0),
-        "receipt stays held after an unfenced work DELETE"
-    );
-    recover(&mut harness.account, mode)?;
-    assert_eq!(db_of(&harness.account)?.receive_state_for_test(1)?, (Some("held".into()), 0));
     Ok(())
 }
 
@@ -515,10 +723,10 @@ async fn raw_delete_refused(mode: Mode) -> Result<(), SdkError> {
 async fn held_local_expiry_and_eviction_crash() -> Result<(), SdkError> {
     for mode in MODES {
         quarantine_purge(mode).await?;
+        quarantine_overflow(mode).await?;
         cap_64_bound(mode).await?;
         dead_letter_row(mode).await?;
         contact_expiry_cut(mode).await?;
-        raw_delete_refused(mode).await?;
     }
     Ok(())
 }
