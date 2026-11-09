@@ -273,25 +273,7 @@ impl AccountRuntime {
                 if generation != handle.generation() || reply.is_closed() {
                     return Ok(false);
                 }
-                let db = account.client.account_db()?;
-                let expected = turn.expected();
-                let result =
-                    super::lifecycle_fence::commit(db, handle.generation(), expected, |tx| {
-                        match crate::bus::sync_driver::source::ws::SourceWs::settle_in(
-                            tx,
-                            ramflux_storage::ReceiveSettle {
-                                sequence,
-                                kind: ramflux_storage::ReceiveSettleKind::Terminal,
-                            },
-                        )? {
-                            ramflux_storage::ReceiveSettleResult::Settled
-                            | ramflux_storage::ReceiveSettleResult::Held => Ok(()),
-                            ramflux_storage::ReceiveSettleResult::Paused => Err(
-                                ramflux_storage::StorageError::Integrity("settle retained paused"),
-                            ),
-                        }
-                    })
-                    .map_err(SdkError::from);
+                let result = settle_retained(account, handle.generation(), &turn, sequence);
                 let _ = reply.send(result);
             }
             AccountWork::AckResults { generation, state, cursor, mut backpressure, reply } => {
@@ -535,4 +517,32 @@ fn apply_metadata(
         account.persist_push_route_seq();
         account.forget_confirmed_push_clear();
     }
+}
+
+/// WS settlement of a retained terminal entry inside the lifecycle fence (moved out of
+/// `apply_receive_turn` unchanged to keep it under the line limit).
+fn settle_retained(
+    account: &mut LocalBusAccountState,
+    generation: u64,
+    turn: &super::super::connection_manager::ReceiveTurn,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let db = account.client.account_db()?;
+    let expected = turn.expected();
+    super::lifecycle_fence::commit(db, generation, expected, |tx| {
+        match crate::bus::sync_driver::source::ws::SourceWs::settle_in(
+            tx,
+            ramflux_storage::ReceiveSettle {
+                sequence,
+                kind: ramflux_storage::ReceiveSettleKind::Terminal,
+            },
+        )? {
+            ramflux_storage::ReceiveSettleResult::Settled
+            | ramflux_storage::ReceiveSettleResult::Held => Ok(()),
+            ramflux_storage::ReceiveSettleResult::Paused => {
+                Err(ramflux_storage::StorageError::Integrity("settle retained paused"))
+            }
+        }
+    })
+    .map_err(SdkError::from)
 }
