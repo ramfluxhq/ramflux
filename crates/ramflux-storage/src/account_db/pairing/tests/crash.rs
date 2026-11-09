@@ -275,6 +275,56 @@ pub(super) fn j8_terminal_cleanup_deletes_head() -> TestResult {
     Ok(())
 }
 
+pub(super) fn j8_headless_cleanup_keeps_published_terminal() -> TestResult {
+    let (root, db) = seed_floor_live("pair04j-r3-immut", "locally_installed")?;
+    let acked = acknowledged_head()?;
+    let (adopt, done) = matching_completed(&acked)?;
+    db.put_pairing_head(&acked)?;
+    db.put_pairing_adoption(&adopt)?;
+    db.commit_pairing_terminal_cleanup(&done)?;
+    assert_eq!(db.pairing_terminal_rows()?[0].outcome, "completed");
+    let error = db.commit_pairing_terminal_cleanup(&cancelled_terminal());
+    assert!(matches!(error, Err(StorageError::PairingField("outcome"))), "rewrite: {error:?}");
+    assert_eq!(db.pairing_terminal_rows()?[0].outcome, "completed");
+    assert_eq!(db.pairing_terminal_rows()?[0].record_hash, done.record_hash);
+    let put = db.put_pairing_terminal(&cancelled_terminal());
+    assert!(matches!(put, Err(StorageError::PairingField("operation_id"))), "put: {put:?}");
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+pub(super) fn j8_headless_post_candidate_live_refuses_cancel() -> TestResult {
+    let (root, db) = seed_floor_live("pair04j-r4-submitted", "submitted")?;
+    let error = db.commit_pairing_terminal_cleanup(&cancelled_terminal());
+    assert!(matches!(error, Err(StorageError::PairingField("phase"))), "submitted: {error:?}");
+    assert_eq!(db.pairing_live_rows()?.len(), 1);
+    assert_eq!(db.pairing_terminal_rows()?.len(), 0);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+pub(super) fn j8_headless_completed_without_adoption_is_refused() -> TestResult {
+    let (root, db) = crate::tests::test_db("pair04j-r5-completed")?;
+    let error = db.commit_pairing_terminal_cleanup(&terminal());
+    assert!(matches!(error, Err(StorageError::PairingField("outcome"))), "completed: {error:?}");
+    assert_eq!(db.pairing_terminal_rows()?.len(), 0);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
+pub(super) fn j8_matching_hash_without_adoption_is_refused() -> TestResult {
+    let (root, db) = seed_floor_live("pair04j-l1-adopt", "locally_installed")?;
+    let acked = acknowledged_head()?;
+    let mut done = terminal();
+    done.record_hash = Some(acked.candidate_hash.clone());
+    db.put_pairing_head(&acked)?;
+    let error = db.commit_pairing_terminal_cleanup(&done);
+    assert!(matches!(error, Err(StorageError::PairingField("record_hash"))), "adopt: {error:?}");
+    assert!(db.pairing_head()?.is_some());
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
 pub(super) fn j8_refuses_cancelled_and_hash_mismatch() -> TestResult {
     let (root, db) = seed_floor_live("pair04j-j8-cancel", "locally_installed")?;
     db.put_pairing_head(&acknowledged_head()?)?;

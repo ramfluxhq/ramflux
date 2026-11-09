@@ -158,7 +158,7 @@ fn pending_file_cap_and_mode() -> Result<(), SdkError> {
     assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
     assert_eq!(list_pending(&root, "acct")?.len(), 3);
     let fourth_path = pending_path(&root, "acct", &h(40));
-    std::fs::copy(&path, &fourth_path)?;
+    std::fs::write(&fourth_path, encode(&fourth)?)?;
     assert!(matches!(list_pending(&root, "acct"), Err(SdkError::PairingField("pending_cap"))));
     let _ = std::fs::remove_dir_all(&root);
     Ok(())

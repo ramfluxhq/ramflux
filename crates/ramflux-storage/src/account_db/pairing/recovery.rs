@@ -150,12 +150,15 @@ impl AccountDb {
     ///
     /// A prepared (unsubmitted) head is cleared by `cancelled`/`expired`/`rejected` with no
     /// `record_hash`. An acknowledged head requires `completed`, `record_hash == candidate_hash`,
-    /// and a matching `pairing_adoption` row. A submitted head stays fenced.
+    /// and a matching `pairing_adoption` row. A submitted head stays fenced. With no head, an
+    /// existing terminal is immutable, a post-candidate live row is refused, and `completed` is
+    /// refused.
     ///
     /// # Errors
     /// Returns `PairingField("state")` for a submitted head, `PairingField("outcome")` when an
-    /// acknowledged head would be rewritten as cancelled, `PairingField("record_hash")` when the
-    /// terminal or adoption hash disagrees, or SQLite errors.
+    /// acknowledged head would be rewritten as cancelled or when `completed` has no head,
+    /// `PairingField("phase")` for a post-candidate live row with no head, `PairingField("record_hash")`
+    /// when the terminal or adoption hash disagrees, or SQLite errors.
     pub fn commit_pairing_terminal_cleanup(&self, row: &TerminalRow) -> Result<(), StorageError> {
         row.validate()?;
         self.require_local(&row.account_id)?;
@@ -176,7 +179,24 @@ impl AccountDb {
                 "acknowledged" => self.require_acknowledged_cleanup(&head, row),
                 _ => Err(field("state")),
             },
-            None => Ok(()),
+            None => {
+                if let Some(existing) = self
+                    .pairing_terminal_rows()?
+                    .into_iter()
+                    .find(|stored| stored.operation_id == row.operation_id)
+                {
+                    require(existing.outcome == row.outcome, "outcome")?;
+                    require(existing.record_hash == row.record_hash, "record_hash")?;
+                }
+                if let Some(live) = self
+                    .pairing_live_rows()?
+                    .into_iter()
+                    .find(|stored| stored.operation_id == row.operation_id)
+                {
+                    unsubmitted_live_outcome(&live.phase)?;
+                }
+                require_prepared_cleanup(row)
+            }
         }
     }
 

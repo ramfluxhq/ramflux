@@ -736,10 +736,11 @@ impl AccountDb {
         Ok(())
     }
 
-    /// Persist a validated terminal row.
+    /// Persist a validated terminal row. Existing terminals are immutable.
     ///
     /// # Errors
-    /// Returns the exact invalid field, terminal cap, or SQLite errors.
+    /// Returns the exact invalid field, terminal cap, `operation_id` when a terminal for the
+    /// same operation already exists, or SQLite errors.
     pub fn put_pairing_terminal(&self, row: &TerminalRow) -> Result<(), StorageError> {
         decode_terminal(row)?;
         self.require_account(&row.account_id)?;
@@ -750,15 +751,17 @@ impl AccountDb {
             |r| r.get(0),
         )?;
         require(count < TERMINAL_CAP, "terminal_cap")?;
+        let exists: i64 = self.connection.query_row(
+            "SELECT count(*) FROM pairing_terminal WHERE account_id=?1 AND operation_id=?2",
+            params![row.account_id, row.operation_id],
+            |r| r.get(0),
+        )?;
+        require(exists == 0, "operation_id")?;
         self.connection.execute(
             "INSERT INTO pairing_terminal(
               account_id,operation_id,invitation_id,issuer_seq,local_seq,generation,outcome,
               record_hash,finished_at,cleanup)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-             ON CONFLICT(account_id,operation_id) DO UPDATE SET
-              invitation_id=excluded.invitation_id,issuer_seq=excluded.issuer_seq,
-              local_seq=excluded.local_seq,generation=excluded.generation,outcome=excluded.outcome,
-              record_hash=excluded.record_hash,finished_at=excluded.finished_at,cleanup=excluded.cleanup",
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 row.account_id,
                 row.operation_id,

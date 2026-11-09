@@ -21,6 +21,10 @@ fn pairing_journal_crash_fences_and_backup_exclusion() -> Result<(), Box<dyn std
     crash::j7c_adoption_stays_fenced()?;
     crash::j8_terminal_cleanup_deletes_head()?;
     crash::j8_refuses_cancelled_and_hash_mismatch()?;
+    crash::j8_headless_cleanup_keeps_published_terminal()?;
+    crash::j8_headless_post_candidate_live_refuses_cancel()?;
+    crash::j8_headless_completed_without_adoption_is_refused()?;
+    crash::j8_matching_hash_without_adoption_is_refused()?;
     crash::prepared_head_clears_on_cancel()?;
     crash::backup_mid_ceremony_strips_live_keeps_floor()?;
     crash::recover_does_not_change_candidate()?;
