@@ -9,8 +9,9 @@ use super::{
     MAX_OUTER_METADATA_BYTES, MAX_UNPADDED_PLAINTEXT_BYTES, MESSAGE_SCHEMA_V1_PROFILE,
     NamedDeliveryMode, OuterProfileError, REPORT_OPENING_BYTES, SealedSendSizes, TemporaryRatchet,
     accept_after_size_preflight, advertised_client_protocol_versions, compact_cryptobox_bytes,
-    decode_candidate_outer_ijson, decode_compact_cryptobox, discover_verified_message_schema,
-    validate_candidate_delivery_mode, wire_encrypted_payload,
+    decode_candidate_outer_ijson, decode_candidate_sidecar, decode_compact_cryptobox,
+    discover_verified_message_schema, encode_compact_cryptobox, validate_candidate_delivery_mode,
+    wire_encrypted_payload,
 };
 use crate::schema_profile::{
     ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
@@ -478,6 +479,95 @@ fn compact_cryptobox_round_trip_and_unknown_field() -> Result<(), Box<dyn std::e
     assert_eq!(
         OuterProfileError::UnknownField.to_string(),
         "candidate outer envelope has unknown fields"
+    );
+    Ok(())
+}
+
+const REAL_250KB: usize = 250 * 1024;
+const NESTED_PAD: usize = 100 * 1024;
+
+fn compact_250kb() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let sidecar = serde_json::to_vec(&nested_sdk_value(&[]))?;
+    Ok(encode_compact_cryptobox(&vec![7_u8; REAL_250KB], &sidecar)?)
+}
+
+fn inject_nested_pad(
+    compact: &[u8],
+    object: &str,
+    pad: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let decoded = decode_compact_cryptobox(compact)?;
+    let mut sidecar: Value = serde_json::from_slice(decoded.sidecar)?;
+    sidecar[object]["pad"] = pad;
+    Ok(encode_compact_cryptobox(decoded.ciphertext, &serde_json::to_vec(&sidecar)?)?)
+}
+
+fn envelope_with_payload(payload: &[u8]) -> Envelope {
+    let mut envelope = live_envelope(None);
+    envelope.encrypted_payload = encode_base64url(payload);
+    envelope
+}
+
+fn unknown_field<T: std::fmt::Debug>(
+    result: Result<T, OuterProfileError>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match result {
+        Err(OuterProfileError::UnknownField) => {
+            assert_eq!(
+                OuterProfileError::UnknownField.to_string(),
+                "candidate outer envelope has unknown fields"
+            );
+            Ok(())
+        }
+        other => Err(format!("exact unknown-field error, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn nested_ciphertext_pad_is_unknown_field_on_250kb_envelope()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
+    let padded = inject_nested_pad(&compact_250kb()?, "ciphertext", json!("p".repeat(NESTED_PAD)))?;
+    assert!(padded.len() > REAL_250KB);
+    assert!(padded.len() < MAX_COMPLETE_FRAME_BYTES);
+    unknown_field(decode_candidate_sidecar(decode_compact_cryptobox(&padded)?.sidecar))?;
+    unknown_field(IngressSizes::measure_wire(&envelope_with_payload(&padded), 0, &[], &[]))
+}
+
+#[test]
+fn nested_x3dh_pad_is_unknown_field_not_bootstrap_cap() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
+    let padded = inject_nested_pad(&compact_250kb()?, "x3dh", json!("x"))?;
+    unknown_field(decode_candidate_sidecar(decode_compact_cryptobox(&padded)?.sidecar))?;
+    unknown_field(IngressSizes::measure_wire(&envelope_with_payload(&padded), 0, &[], &[]))
+}
+
+#[test]
+fn source_principal_commitment_is_refused_at_identifier_cap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut nested = nested_sdk_value(&[7_u8; 8]);
+    nested["source_principal_commitment"] = json!("c".repeat(MAX_IDENTIFIER_BYTES));
+    decode_candidate_sidecar(&serde_json::to_vec(&nested)?)?;
+    nested["source_principal_commitment"] = json!("c".repeat(MAX_IDENTIFIER_BYTES + 1));
+    assert_eq!(
+        decode_candidate_sidecar(&serde_json::to_vec(&nested)?),
+        Err(OuterProfileError::Identifier)
+    );
+    assert_eq!(OuterProfileError::Identifier.to_string(), "identifier exceeds 256 bytes");
+    Ok(())
+}
+
+#[test]
+fn canonical_header_bytes_are_refused_at_encrypted_header_cap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut nested = nested_sdk_value(&[]);
+    nested["ciphertext"]["canonical_header_bytes"] = json!(vec![1_u8; MAX_ENCRYPTED_HEADER_BYTES]);
+    decode_candidate_sidecar(&serde_json::to_vec(&nested)?)?;
+    nested["ciphertext"]["canonical_header_bytes"] =
+        json!(vec![1_u8; MAX_ENCRYPTED_HEADER_BYTES + 1]);
+    assert_eq!(
+        decode_candidate_sidecar(&serde_json::to_vec(&nested)?),
+        Err(OuterProfileError::PayloadTooLarge)
     );
     Ok(())
 }

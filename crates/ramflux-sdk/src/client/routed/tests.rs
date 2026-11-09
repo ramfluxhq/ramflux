@@ -978,6 +978,9 @@ async fn r5_outsider_controls_are_rejected_before_directory_io() -> Result<(), S
     Ok(())
 }
 
+#[path = "candidate_nested_decode_tests.rs"]
+mod candidate_nested_decode;
+
 #[path = "native_group_conversation_tests.rs"]
 mod native_group_conversation;
 

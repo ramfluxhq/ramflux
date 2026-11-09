@@ -13,10 +13,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod compact;
+mod sidecar;
 pub use compact::{
     COMPACT_CRYPTOBOX_MAGIC, CompactCryptobox, compact_cryptobox_bytes, decode_compact_cryptobox,
     encode_compact_cryptobox, wire_encrypted_payload,
 };
+pub use sidecar::decode_candidate_sidecar;
 
 /// Candidate envelope schema installed at the profile reset.
 pub const CANDIDATE_ENVELOPE_SCHEMA: &str = "ramflux.envelope.v2";
@@ -549,7 +551,7 @@ fn live_cryptobox(
         );
     }
     if let Ok(value) = crate::parse_i_json::<Value>(decoded) {
-        compact::refuse_unknown_nested_fields(&value)?;
+        sidecar::decode_sidecar_value(&value)?;
         let ciphertext = compact::nested_byte_field(&value, "ciphertext", "ciphertext")?;
         return cryptobox_from_value(&value, ciphertext, encrypted_header, bootstrap_capsule);
     }
@@ -574,7 +576,7 @@ fn cryptobox_from_sidecar(
         });
     }
     let value: Value = crate::parse_i_json(sidecar).map_err(|_| OuterProfileError::Malformed)?;
-    compact::refuse_unknown_nested_fields(&value)?;
+    sidecar::decode_sidecar_value(&value)?;
     cryptobox_from_value(&value, ciphertext.to_vec(), encrypted_header, bootstrap_capsule)
 }
 

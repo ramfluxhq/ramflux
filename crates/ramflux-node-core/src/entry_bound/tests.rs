@@ -75,9 +75,8 @@ fn nested_sdk_envelope(
 fn compact_sdk_envelope(
     cryptobox: &[u8],
 ) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
-    let compact = ramflux_protocol::message::outer::compact_cryptobox_bytes(&serde_json::to_vec(
-        &nested_sdk_json(cryptobox, None),
-    )?)?;
+    let sidecar = serde_json::to_vec(&nested_sdk_json(&[], None))?;
+    let compact = ramflux_protocol::message::outer::encode_compact_cryptobox(cryptobox, &sidecar)?;
     let mut envelope = entry(1).envelope;
     envelope.source_device_id = "wire-device".to_owned();
     envelope.encrypted_payload = ramflux_protocol::encode_base64url(&compact);
@@ -197,4 +196,89 @@ fn admitted_candidate_envelope_is_fetchable() -> Result<(), Box<dyn std::error::
     drop(store);
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+fn compact_250kb_envelope() -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    compact_sdk_envelope(&vec![7_u8; 250 * 1024])
+}
+
+fn inject_compact_pad(
+    envelope: &ramflux_protocol::Envelope,
+    object: &str,
+    pad: serde_json::Value,
+) -> Result<ramflux_protocol::Envelope, Box<dyn std::error::Error>> {
+    let bytes = ramflux_protocol::decode_base64url(&envelope.encrypted_payload)?;
+    let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes)?;
+    let mut sidecar: serde_json::Value = serde_json::from_slice(compact.sidecar)?;
+    sidecar[object]["pad"] = pad;
+    let rebuilt = ramflux_protocol::message::outer::encode_compact_cryptobox(
+        compact.ciphertext,
+        &serde_json::to_vec(&sidecar)?,
+    )?;
+    let mut out = envelope.clone();
+    out.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    Ok(out)
+}
+
+fn unknown_nested_field(
+    result: Result<(), NodeCoreError>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match result {
+        Err(NodeCoreError::InvalidConfiguration(message))
+            if message == "candidate outer envelope has unknown fields" =>
+        {
+            Ok(())
+        }
+        other => Err(format!("exact unknown-field error, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn candidate_250kb_ciphertext_pad_is_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let envelope = inject_compact_pad(
+        &compact_250kb_envelope()?,
+        "ciphertext",
+        serde_json::json!("p".repeat(100 * 1024)),
+    )?;
+    assert!(single_entry_frame_size(&envelope)? <= ENTRY_FRAME_BYTE_CAP);
+    unknown_nested_field(check_entry_bound(&envelope))
+}
+
+#[test]
+fn candidate_250kb_x3dh_pad_is_unknown_field() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let envelope = inject_compact_pad(&compact_250kb_envelope()?, "x3dh", serde_json::json!("x"))?;
+    unknown_nested_field(check_entry_bound(&envelope))
+}
+
+#[test]
+fn candidate_source_principal_commitment_cap() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let cap = ramflux_protocol::message::outer::MAX_IDENTIFIER_BYTES;
+    let mut allowed = compact_250kb_envelope()?;
+    let bytes = ramflux_protocol::decode_base64url(&allowed.encrypted_payload)?;
+    let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes)?;
+    let mut sidecar: serde_json::Value = serde_json::from_slice(compact.sidecar)?;
+    sidecar["source_principal_commitment"] = serde_json::json!("c".repeat(cap));
+    let rebuilt = ramflux_protocol::message::outer::encode_compact_cryptobox(
+        compact.ciphertext,
+        &serde_json::to_vec(&sidecar)?,
+    )?;
+    allowed.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    check_entry_bound(&allowed)?;
+    sidecar["source_principal_commitment"] = serde_json::json!("c".repeat(cap + 1));
+    let over = ramflux_protocol::message::outer::encode_compact_cryptobox(
+        compact.ciphertext,
+        &serde_json::to_vec(&sidecar)?,
+    )?;
+    allowed.encrypted_payload = ramflux_protocol::encode_base64url(&over);
+    match check_entry_bound(&allowed) {
+        Err(NodeCoreError::InvalidConfiguration(message))
+            if message == "identifier exceeds 256 bytes" =>
+        {
+            Ok(())
+        }
+        other => Err(format!("exact identifier error, got {other:?}").into()),
+    }
 }

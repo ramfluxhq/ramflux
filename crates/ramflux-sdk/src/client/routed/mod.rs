@@ -256,6 +256,10 @@ fn cryptobox_sender_envelope(
     if let Ok(anchor) = client.own_account_anchor() {
         envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
     }
+    envelope.signed.signature = match client.device_branch.as_ref() {
+        Some(branch) => ramflux_crypto::sign_protocol_object_with_device_branch(branch, &envelope)?,
+        None => ramflux_crypto::sign_protocol_object(&envelope)?,
+    };
     Ok(envelope)
 }
 
@@ -456,6 +460,10 @@ pub(crate) fn decode(
         .map_err(|_| invalid("invalid encrypted payload"))?;
     let decoded =
         if let Ok(compact) = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes) {
+            if !compact.sidecar.is_empty() {
+                ramflux_protocol::message::outer::decode_candidate_sidecar(compact.sidecar)
+                    .map_err(|error| invalid(&error.to_string()))?;
+            }
             let mut decoded: SdkDmEncryptedEnvelope = serde_json::from_slice(compact.sidecar)?;
             decoded.ciphertext.ciphertext = compact.ciphertext.to_vec();
             decoded

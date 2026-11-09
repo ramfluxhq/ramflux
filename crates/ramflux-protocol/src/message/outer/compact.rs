@@ -4,14 +4,13 @@
 //! Compact candidate `CryptoBox`: raw AEAD bytes once, then a small JSON sidecar.
 
 use super::OuterProfileError;
+use super::sidecar::decode_sidecar_value;
 use crate::schema_profile::schema_v1_live;
 use serde_json::Value;
 
 /// Magic prefix of a candidate compact `CryptoBox` (`RF1C`).
 pub const COMPACT_CRYPTOBOX_MAGIC: [u8; 4] = *b"RF1C";
 const COMPACT_VERSION: u8 = 1;
-const NESTED_SDK_FIELDS: [&str; 5] =
-    ["schema", "version", "source_principal_commitment", "x3dh", "ciphertext"];
 
 /// Compact on-wire `CryptoBox`: AEAD ciphertext plus the remaining nested JSON.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,21 +91,11 @@ pub fn compact_cryptobox_bytes(encrypted_body: &[u8]) -> Result<Vec<u8>, OuterPr
     if !value.is_object() || value.get("ciphertext").and_then(|c| c.get("ciphertext")).is_none() {
         return Ok(encrypted_body.to_vec());
     }
+    decode_sidecar_value(&value)?;
     compact_from_nested_value(&value)
 }
 
-pub(super) fn refuse_unknown_nested_fields(value: &Value) -> Result<(), OuterProfileError> {
-    let Some(object) = value.as_object() else {
-        return Err(OuterProfileError::Malformed);
-    };
-    if object.keys().any(|key| !NESTED_SDK_FIELDS.contains(&key.as_str())) {
-        return Err(OuterProfileError::UnknownField);
-    }
-    Ok(())
-}
-
 pub(super) fn compact_from_nested_value(value: &Value) -> Result<Vec<u8>, OuterProfileError> {
-    refuse_unknown_nested_fields(value)?;
     let ciphertext = nested_byte_field(value, "ciphertext", "ciphertext")?;
     let mut sidecar = value.clone();
     if let Some(object) = sidecar.get_mut("ciphertext").and_then(Value::as_object_mut) {
