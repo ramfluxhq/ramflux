@@ -232,6 +232,24 @@ impl crate::AccountDb {
         Ok(())
     }
 
+    /// Test support: seeds an ACK intent row without moving C, so a test can place one
+    /// above the durable cursor.
+    ///
+    /// # Errors
+    /// Returns storage errors.
+    pub fn seed_ack_intent_for_test(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO gateway_ack_intent VALUES(?1,?2,?3,1,0,1,604801)",
+            params![target, incarnation, sequence.to_be_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// Test support: leftover terminal work+receipt the P18 executor keeps until WA/reset.
     ///
     /// # Errors

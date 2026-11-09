@@ -10,6 +10,9 @@
 
 use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveTransaction, StorageError};
 
+use crate::SdkError;
+use crate::bus::connection_manager::ReceiveTurn;
+
 /// Actor commit. `handle_generation` is S2's current generation; `expected.generation`
 /// is the generation captured when the turn was prepared. A mismatch, wrong E, stale
 /// cursor, or erasure generation refuses before `write`.
@@ -22,17 +25,49 @@ pub(crate) fn commit<T>(
     db.receive_transaction(expected, handle_generation, write)
 }
 
-/// Outcome of one `AckResults` record. Never writes C.
+/// Outcome of one ACK decision or record. Never writes C.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AckRecord {
     /// Terminal W2/WS intent at or below C; cursor succeeded.
     Recorded,
+    /// Pre-send decision: the intent exists, `seq <= C` and the fence holds.
+    Permitted,
     /// No intent (held / quarantined). Never acknowledged.
     Held,
     /// Sequence is above the captured cursor.
     AboveCursor,
     /// Cursor failed; C stays at the captured value.
     CursorFailed,
+}
+
+/// Intent exists and `seq <= C`, evaluated inside the commit fence.
+fn decide(
+    tx: &ReceiveTransaction<'_>,
+    turn: &ReceiveTurn,
+    sequence: u64,
+) -> Result<Option<AckRecord>, StorageError> {
+    tx.require_writer()?;
+    if sequence > turn.cursor {
+        return Ok(Some(AckRecord::AboveCursor));
+    }
+    if !tx.has_ack_intent(sequence)? {
+        return Ok(Some(AckRecord::Held));
+    }
+    Ok(None)
+}
+
+/// Decide before the gateway ACK is transmitted. Only `Permitted` may be sent; a
+/// stale generation, E, or erase is refused with a storage error. C is unchanged.
+pub(crate) fn ack_permit(
+    db: &AccountDb,
+    handle_generation: u64,
+    turn: &ReceiveTurn,
+    sequence: u64,
+) -> Result<AckRecord, SdkError> {
+    commit(db, handle_generation, turn.expected(), |tx| {
+        Ok(decide(tx, turn, sequence)?.unwrap_or(AckRecord::Permitted))
+    })
+    .map_err(SdkError::from)
 }
 
 /// Record one ACK outcome under the commit fence. C is unchanged.
@@ -44,12 +79,8 @@ pub(crate) fn ack_results(
     cursor_ok: bool,
 ) -> Result<AckRecord, SdkError> {
     commit(db, handle_generation, turn.expected(), |tx| {
-        tx.require_writer()?;
-        if sequence > turn.cursor {
-            return Ok(AckRecord::AboveCursor);
-        }
-        if !tx.has_ack_intent(sequence)? {
-            return Ok(AckRecord::Held);
+        if let Some(refused) = decide(tx, turn, sequence)? {
+            return Ok(refused);
         }
         if cursor_ok { Ok(AckRecord::Recorded) } else { Ok(AckRecord::CursorFailed) }
     })

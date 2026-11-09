@@ -66,6 +66,16 @@ pub(crate) enum AccountWork {
         sequence: u64,
         reply: oneshot::Sender<Result<(), SdkError>>,
     },
+    /// Pre-send ACK decision for an activated turn. No ACK leaves the process
+    /// unless the actor answers `Permitted`.
+    AckPermit {
+        generation: u64,
+        turn: Box<ReceiveTurn>,
+        sequence: u64,
+        reply: oneshot::Sender<
+            Result<crate::bus::account_runtime::lifecycle_fence::AckRecord, SdkError>,
+        >,
+    },
     AckResults {
         generation: u64,
         /// Ledger coordinates captured with the turn. `None` keeps today's live

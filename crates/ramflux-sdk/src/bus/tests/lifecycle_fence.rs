@@ -60,7 +60,10 @@ fn reopen(account: &mut LocalBusAccountState) -> Case {
 #[tokio::test(flavor = "current_thread")]
 async fn lifecycle_fence() -> Case {
     LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(held()))))
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
+            held().await?;
+            Box::pin(super::receive_ack::ack_fence()).await
+        }))))
         .await
 }
 

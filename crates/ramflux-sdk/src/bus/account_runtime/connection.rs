@@ -174,9 +174,11 @@ impl AccountRuntime {
             AccountWork::PrepareReceive { .. }
             | AccountWork::ApplyPage { .. }
             | AccountWork::SettleRetained { .. }
-            | AccountWork::AckResults { .. }
             | AccountWork::ReceiveObservation { .. } => {
                 return self.apply_receive_turn(&handle, work).await;
+            }
+            AccountWork::AckPermit { .. } | AccountWork::AckResults { .. } => {
+                return Ok(self.apply_ack_work(&handle, work));
             }
             AccountWork::Metadata { metadata } => apply_metadata(account, &handle, *metadata),
             AccountWork::Observation { event } => {
@@ -213,6 +215,47 @@ impl AccountRuntime {
             }
         }
         Ok(publish_networking)
+    }
+
+    fn apply_ack_work(
+        &mut self,
+        handle: &crate::bus::connection_manager::ConnectionHandle,
+        work: AccountWork,
+    ) -> bool {
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return false;
+        };
+        match work {
+            AccountWork::AckPermit { generation, turn, sequence, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return false;
+                }
+                let _ = reply.send(apply_ack_permit(account, handle.generation(), &turn, sequence));
+            }
+            AccountWork::AckResults {
+                generation,
+                turn,
+                state,
+                cursor,
+                mut backpressure,
+                reply,
+            } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return false;
+                }
+                let result = apply_ack_results(
+                    account,
+                    handle.generation(),
+                    turn.as_deref(),
+                    &state,
+                    *cursor,
+                    &mut backpressure,
+                );
+                let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
+            }
+            _ => {}
+        }
+        false
     }
 
     async fn apply_receive_turn(
@@ -275,27 +318,6 @@ impl AccountRuntime {
                 }
                 let result = settle_retained(account, handle.generation(), &turn, sequence);
                 let _ = reply.send(result);
-            }
-            AccountWork::AckResults {
-                generation,
-                turn,
-                state,
-                cursor,
-                mut backpressure,
-                reply,
-            } => {
-                if generation != handle.generation() || reply.is_closed() {
-                    return Ok(false);
-                }
-                let result = apply_ack_results(
-                    account,
-                    handle.generation(),
-                    turn.as_deref(),
-                    &state,
-                    *cursor,
-                    &mut backpressure,
-                );
-                let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
             }
             AccountWork::ReceiveObservation { generation, event } => {
                 if generation != handle.generation() {
@@ -447,6 +469,19 @@ async fn short_step<T>(
 ) -> Result<T, SdkError> {
     tokio::time::timeout(limit, future).await.map_err(|_| attempt_timeout())?
 }
+
+fn apply_ack_permit(
+    account: &crate::bus::state::LocalBusAccountState,
+    generation: u64,
+    turn: &crate::bus::connection_manager::ReceiveTurn,
+    sequence: u64,
+) -> Result<super::lifecycle_fence::AckRecord, SdkError> {
+    account
+        .client
+        .account_db()
+        .and_then(|db| super::lifecycle_fence::ack_permit(db, generation, turn, sequence))
+}
+
 fn apply_ack_results(
     account: &crate::bus::state::LocalBusAccountState,
     handle_generation: u64,
@@ -474,7 +509,7 @@ fn apply_ack_results(
         cursor_ok,
     )?;
     cursor?;
-    Ok(matches!(record, super::lifecycle_fence::AckRecord::Recorded))
+    Ok(matches!(record, super::lifecycle_fence::AckRecord::Recorded) && state.accepted)
 }
 
 fn attempt_timeout() -> SdkError {

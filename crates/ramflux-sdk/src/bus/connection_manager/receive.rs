@@ -389,11 +389,53 @@ async fn apply_entry(
             tracing::debug!(%error, "encrypted reset acknowledgement awaits a later reset");
         }
     }
+    ack_prepared(
+        handle,
+        work,
+        generation,
+        None,
+        prepared.ack,
+        prepared.state,
+        backpressure,
+        call_timeout,
+    )
+    .await
+}
+
+/// Transmit one ACK and record the outcome. For `turn: Some` the actor decides first
+/// (intent, `seq <= C`, fence); a refused sequence produces no ACK on the wire.
+/// `turn: None` is the live path and stays unchanged.
+#[allow(clippy::too_many_arguments, reason = "mirrors the live apply_entry tail")]
+pub(crate) async fn ack_prepared(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    turn: Option<ReceiveTurn>,
+    ack: ramflux_protocol::Ack,
+    state: crate::bus::sync_driver::AckState,
+    backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+    call_timeout: std::time::Duration,
+) -> Result<ReceiveAcked, SdkError> {
+    if let Some(turn) = &turn {
+        let (reply, response) = oneshot::channel();
+        work.send(AccountWork::AckPermit {
+            generation,
+            turn: Box::new(turn.clone()),
+            sequence: state.entry.inbox_seq,
+            reply,
+        })
+        .await
+        .map_err(|_| handle.pending())?;
+        let record = response.await.map_err(|_| handle.pending())??;
+        if record != crate::bus::account_runtime::lifecycle_fence::AckRecord::Permitted {
+            return Ok((false, backpressure));
+        }
+    }
     #[cfg(test)]
     let started = std::time::Instant::now();
     let cursor = handle
         .call(
-            move |engine| Box::pin(async move { engine.ack(prepared.ack).await }),
+            move |engine| Box::pin(async move { engine.ack(ack).await }),
             Instant::now() + call_timeout,
         )
         .await;
@@ -402,8 +444,8 @@ async fn apply_entry(
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::AckResults {
         generation,
-        turn: None,
-        state: Box::new(prepared.state),
+        turn: turn.map(Box::new),
+        state: Box::new(state),
         cursor: Box::new(cursor),
         backpressure,
         reply,

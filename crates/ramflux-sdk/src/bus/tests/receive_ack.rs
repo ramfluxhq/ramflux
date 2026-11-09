@@ -224,16 +224,15 @@ fn cover(
     target: &str,
     sequence: u64,
     generation: u64,
+    cursor: u64,
     kind: ramflux_storage::ReceiveCoverKind,
 ) -> Case {
     let db = account.client.account_db()?;
-    db.install_receive_ledger_schema()?;
-    db.seed_receive_epoch_for_test(target, "e")?;
     let entry = wire(target, sequence)?;
     let expected = ramflux_storage::ReceiveExpectation {
         target,
         incarnation: "e",
-        cursor: 0,
+        cursor,
         generation,
         erasure_generation: db.privacy_erasure_generation()?,
     };
@@ -270,7 +269,7 @@ fn turn(
 fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRuntime, u64, String) {
     let handle = crate::bus::connection_manager::ConnectionHandle::start_with(
         account.gateway_config.clone(),
-        None,
+        account.engine.take(),
         limits(),
         Arc::new(PendingConnect),
         None,
@@ -396,115 +395,87 @@ async fn cursor_error_case() -> Case {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn lifecycle_fence_ack() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(fence_ack()))))
-        .await
-}
-
-async fn fence_ack() -> Case {
-    let fixture = Box::pin(Fixture::new("ack-fence")).await?;
-    let (mut runtime, generation, target) = ack_runtime(fixture.source);
-    let coords = {
-        let account = runtime.state.accounts.get("sender").ok_or("account")?;
-        cover(account, &target, 1, generation, ramflux_storage::ReceiveCoverKind::Terminal)?;
-        let snap = account.client.account_db()?.receive_ledger_snap_for_test(&target)?;
-        assert_eq!(snap.cursor, 1);
-        assert_eq!(snap.intents, vec![1]);
-        turn(account, &target, 1, generation)?
-    };
-    let probe = runtime
+fn db_of(runtime: &super::super::AccountRuntime) -> Result<&AccountDb, SdkError> {
+    runtime
         .state
         .accounts
         .get("sender")
-        .ok_or("account")?
+        .ok_or(SdkError::LocalBus("account".into()))?
         .client
-        .account_db()?
-        .observe_sql_work();
-    let recorded = send_ack(
-        &mut runtime,
-        generation,
-        Some(coords.clone()),
-        ack_state(&target, 1)?,
-        Ok(cursor_ok(&target, 1)),
-    )
-    .await??;
-    assert!(recorded, "terminal intent at C is recorded");
-    assert!(probe.snapshot().read_statements > 0, "AckResults observed through the actor");
-    let account = runtime.state.accounts.get("sender").ok_or("account")?;
-    assert_eq!(account.client.account_db()?.receive_ledger_snap_for_test(&target)?.cursor, 1);
-    let above = send_ack(
-        &mut runtime,
-        generation,
-        Some(coords.clone()),
-        ack_state(&target, 9)?,
-        Ok(cursor_ok(&target, 9)),
-    )
-    .await??;
-    assert!(!above, "sequence above C is never ACKed");
-    let account = runtime.state.accounts.get("sender").ok_or("account")?;
-    assert_eq!(
-        account.client.account_db()?.receive_ledger_snap_for_test(&target)?.cursor,
-        1,
-        "above-C leaves C unchanged"
-    );
-    let stale = send_ack(
-        &mut runtime,
-        generation.wrapping_add(1),
-        Some(coords),
-        ack_state(&target, 1)?,
-        Ok(cursor_ok(&target, 1)),
-    )
-    .await?;
-    assert!(
-        matches!(stale, Err(SdkError::LocalBus(ref reason)) if reason == "ack reply dropped"),
-        "stale generation must not ACK: {stale:?}"
-    );
-    let account = runtime.state.accounts.get("sender").ok_or("account")?;
-    assert_eq!(
-        account.client.account_db()?.receive_ledger_snap_for_test(&target)?.cursor,
-        1,
-        "stale generation leaves C unchanged"
-    );
-    let root = fixture.root.clone();
-    drop(runtime);
-    std::fs::remove_dir_all(root)?;
-    Ok(())
+        .account_db()
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn held_never_acked_and_cursor_error_keeps_c() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(held_ack()))))
-        .await
+fn is_storage(error: &SdkError, expected: &ramflux_storage::StorageError) -> bool {
+    match (error, expected) {
+        (SdkError::ObjectErased, ramflux_storage::StorageError::ObjectErased) => true,
+        (SdkError::Storage(found), _) => {
+            std::mem::discriminant(found) == std::mem::discriminant(expected)
+        }
+        _ => false,
+    }
 }
 
-async fn held_ack() -> Case {
-    let fixture = Box::pin(Fixture::new("ack-held")).await?;
-    let (mut runtime, generation, target) = ack_runtime(fixture.source);
-    let coords = {
+/// Pumps the account writer while the receive-side ACK step runs on the real path.
+async fn drive<T>(
+    runtime: &mut super::super::AccountRuntime,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            work = runtime.connection_work.recv() => {
+                runtime.apply_connection_work(work.ok_or("writer closed")?).await?;
+            }
+        }
+    }
+}
+
+async fn ack_step(
+    runtime: &mut super::super::AccountRuntime,
+    generation: u64,
+    turn: crate::bus::connection_manager::ReceiveTurn,
+    target: &str,
+    sequence: u64,
+) -> Result<Result<bool, SdkError>, Box<dyn std::error::Error>> {
+    let (handle, work, ack, state) = {
         let account = runtime.state.accounts.get("sender").ok_or("account")?;
-        cover(account, &target, 1, generation, ramflux_storage::ReceiveCoverKind::Held)?;
-        let snap = account.client.account_db()?.receive_ledger_snap_for_test(&target)?;
-        assert_eq!(snap.cursor, 1);
-        assert_eq!(snap.intents, Vec::<u64>::new(), "held W2 omits intent");
-        turn(account, &target, 1, generation)?
+        let receiver = account.client.owned_device_identity()?;
+        let state = ack_state(target, sequence)?;
+        let mut ack =
+            crate::dm::gateway_ack(&state.entry.envelope.envelope_id, &receiver, state.received_at);
+        ack.ext.ext.insert("inbox_seq".into(), json!(sequence));
+        (account.connection.clone().ok_or("handle")?, runtime.connection_sender.clone(), ack, state)
     };
-    let held = send_ack(
-        &mut runtime,
+    let step = crate::bus::connection_manager::receive::ack_prepared(
+        &handle,
+        &work,
         generation,
-        Some(coords.clone()),
-        ack_state(&target, 1)?,
-        Ok(cursor_ok(&target, 1)),
-    )
-    .await??;
-    assert!(!held, "held is never ACKed");
+        Some(turn),
+        ack,
+        state,
+        Box::default(),
+        Duration::from_secs(5),
+    );
+    Ok(drive(runtime, step).await?.map(|(acked, _)| acked))
+}
+
+/// Cursor failure keeps C; Recorded honours `state.accepted`.
+async fn ack_outcomes(
+    runtime: &mut super::super::AccountRuntime,
+    generation: u64,
+    target: &str,
+) -> Case {
+    // A cursor failure keeps C and still surfaces the error.
+    let at_two = {
+        let account = runtime.state.accounts.get("sender").ok_or("account")?;
+        turn(account, target, 2, generation)?
+    };
     let failed = send_ack(
-        &mut runtime,
+        runtime,
         generation,
-        Some(coords),
-        ack_state(&target, 1)?,
+        Some(at_two.clone()),
+        ack_state(target, 1)?,
         Err(SdkError::InboundRejected("cursor failed".into())),
     )
     .await?;
@@ -512,10 +483,113 @@ async fn held_ack() -> Case {
         matches!(&failed, Err(SdkError::InboundRejected(reason)) if reason == "cursor failed"),
         "{failed:?}"
     );
-    let account = runtime.state.accounts.get("sender").ok_or("account")?;
-    let snap = account.client.account_db()?.receive_ledger_snap_for_test(&target)?;
-    assert_eq!(snap.cursor, 1, "AckResults never writes C");
-    assert_eq!(snap.intents, Vec::<u64>::new());
+    assert_eq!(db_of(runtime)?.receive_ledger_snap_for_test(target)?.cursor, 2);
+    // A Recorded outcome honours state.accepted like the live finish().
+    let mut declined = ack_state(target, 1)?;
+    declined.accepted = false;
+    let kept =
+        send_ack(runtime, generation, Some(at_two), declined, Ok(cursor_ok(target, 1))).await??;
+    assert!(!kept, "Recorded honours state.accepted");
+    Ok(())
+}
+
+/// `lifecycle_fence` ACK leg: the actor decides before any ACK is transmitted.
+pub(super) async fn ack_fence() -> Case {
+    use crate::bus::account_runtime::lifecycle_fence::{AckRecord, ack_permit, ack_results};
+    use ramflux_storage::{ReceiveCoverKind, StorageError};
+    let fixture = Box::pin(Fixture::new("ack-fence")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    let sent = || -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(gateway.lock().map_err(|_| "gateway")?.acked.len())
+    };
+    let (mut runtime, generation, target) = ack_runtime(fixture.source);
+    {
+        let account = runtime.state.accounts.get("sender").ok_or("account")?;
+        let db = account.client.account_db()?;
+        db.install_receive_ledger_schema()?;
+        db.seed_receive_epoch_for_test(&target, "e")?;
+        cover(account, &target, 1, generation, 0, ReceiveCoverKind::Terminal)?;
+        db.seed_ack_intent_for_test(&target, "e", 9)?;
+        let snap = db.receive_ledger_snap_for_test(&target)?;
+        assert_eq!((snap.cursor, snap.intents), (1, vec![1, 9]), "intent 9 sits above C");
+    }
+    let good = {
+        let account = runtime.state.accounts.get("sender").ok_or("account")?;
+        turn(account, &target, 1, generation)?
+    };
+    // Exact records through the fence.
+    let db = db_of(&runtime)?;
+    assert_eq!(ack_permit(db, generation, &good, 1)?, AckRecord::Permitted);
+    assert_eq!(
+        ack_permit(db, generation, &good, 9)?,
+        AckRecord::AboveCursor,
+        "bound check alone refuses 9"
+    );
+    assert_eq!(ack_results(db, generation, &good, 1, true)?, AckRecord::Recorded);
+    assert_eq!(ack_results(db, generation, &good, 1, false)?, AckRecord::CursorFailed);
+    assert_eq!(ack_results(db, generation, &good, 9, true)?, AckRecord::AboveCursor);
+    // Stale turn generation, E change and erase (L1): exact storage errors.
+    let mut stale_generation = good.clone();
+    stale_generation.generation = generation.wrapping_add(1);
+    let mut stale_epoch = good.clone();
+    stale_epoch.incarnation = "other".into();
+    let mut stale_erase = good.clone();
+    stale_erase.erasure_generation = good.erasure_generation.wrapping_add(1);
+    for (label, stale, expected) in [
+        ("generation", &stale_generation, StorageError::AuthorizationRejected),
+        ("epoch", &stale_epoch, StorageError::AuthorizationRejected),
+        ("erase", &stale_erase, StorageError::ObjectErased),
+    ] {
+        let permit = ack_permit(db, generation, stale, 1).err();
+        let record = ack_results(db, generation, stale, 1, true).err();
+        for found in [permit, record] {
+            let found = found.ok_or_else(|| format!("stale {label} must be refused"))?;
+            assert!(
+                is_storage(&found, &expected)
+                    || matches!(
+                        (&found, &expected),
+                        (SdkError::ObjectErased, StorageError::ObjectErased)
+                    ),
+                "{label}: {found:?}"
+            );
+        }
+    }
+    // Wire: zero ACKs unless intent, seq <= C and fence all hold.
+    for (label, turn, expected) in [
+        ("stale generation", stale_generation, StorageError::AuthorizationRejected),
+        ("stale epoch", stale_epoch, StorageError::AuthorizationRejected),
+        ("stale erase", stale_erase, StorageError::ObjectErased),
+    ] {
+        let refused = ack_step(&mut runtime, generation, turn, &target, 1).await?;
+        let found = refused.err().ok_or_else(|| format!("{label} must not ACK"))?;
+        assert!(is_storage(&found, &expected), "{label}: {found:?}");
+        assert_eq!(sent()?, 0, "{label}: no ACK on the wire");
+    }
+    let stale_message =
+        ack_step(&mut runtime, generation.wrapping_add(1), good.clone(), &target, 1).await?;
+    let found = stale_message.err().ok_or("stale message generation must not ACK")?;
+    assert!(
+        matches!(&found, SdkError::NetworkingPendingContext { .. }),
+        "stale message generation: {found:?}"
+    );
+    assert_eq!(sent()?, 0, "stale message generation: no ACK on the wire");
+    let above = ack_step(&mut runtime, generation, good.clone(), &target, 9).await??;
+    assert!(!above, "above C is not acknowledged");
+    assert_eq!(sent()?, 0, "above C: no ACK on the wire");
+    let held = {
+        let account = runtime.state.accounts.get("sender").ok_or("account")?;
+        cover(account, &target, 2, generation, 1, ReceiveCoverKind::Held)?;
+        turn(account, &target, 2, generation)?
+    };
+    let held_sent = ack_step(&mut runtime, generation, held.clone(), &target, 2).await??;
+    assert!(!held_sent, "held is not acknowledged");
+    assert_eq!(sent()?, 0, "held: no ACK on the wire");
+    let acked = ack_step(&mut runtime, generation, held, &target, 1).await??;
+    assert!(acked, "terminal intent at C is acknowledged");
+    assert_eq!(sent()?, 1, "good case: exactly one ACK");
+    let snap = db_of(&runtime)?.receive_ledger_snap_for_test(&target)?;
+    assert_eq!(snap.cursor, 2, "AckResults never writes C");
+    ack_outcomes(&mut runtime, generation, &target).await?;
     let root = fixture.root.clone();
     drop(runtime);
     std::fs::remove_dir_all(root)?;
