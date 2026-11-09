@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use super::super::journal::{
-    decode_adoption, decode_floor, decode_head, decode_live, decode_terminal,
+    HeadRow, decode_adoption, decode_floor, decode_head, decode_live, decode_terminal,
 };
 use super::super::schema::{
     ADOPTION_ROW_MAX, DESCRIPTOR_MAX, FLOOR_ROW_MAX, HEAD_ROW_MAX, ID_MAX, LIVE_ROW_MAX,
@@ -54,6 +54,19 @@ pub(super) fn row_field_and_size_bounds() -> TestResult {
     row = invited()?;
     row.descriptor = vec![1; DESCRIPTOR_MAX + 1];
     field_err(&decode_live(&row), "descriptor");
+    row = invited()?;
+    let live_prefix = row.account_id.len()
+        + row.operation_id.len()
+        + row.invitation_id.len()
+        + row.role.len()
+        + row.phase.len()
+        + row.base_record_hash.len();
+    row.descriptor = vec![1; LIVE_ROW_MAX - live_prefix];
+    let at_max = decode_live(&row);
+    assert!(
+        !matches!(at_max, Err(crate::StorageError::PairingField("size"))),
+        "live at-max size: {at_max:?}"
+    );
     row = invited()?;
     row.descriptor = vec![1; LIVE_ROW_MAX + 1];
     field_err(&decode_live(&row), "size");
@@ -118,6 +131,77 @@ pub(super) fn head_candidate_is_immutable() -> TestResult {
     Ok(())
 }
 
+pub(super) fn head_one_account_forward_only() -> TestResult {
+    other_operation_refused()?;
+    backward_state_refused()?;
+    forward_state_allowed()?;
+    Ok(())
+}
+
+fn head_state(state: &str) -> TestResult<HeadRow> {
+    let mut row = head()?;
+    row.state = state.into();
+    if state == "acknowledged" {
+        let (_, hash, epoch) = publication()?;
+        row.ack = Some(ack_bytes(&hash, epoch)?);
+    }
+    Ok(row)
+}
+
+fn other_operation_refused() -> TestResult {
+    for state in ["prepared", "submitted", "acknowledged"] {
+        let (root, db) = crate::tests::test_db(&format!("pair04-head-other-{state}"))?;
+        let existing = head_state(state)?;
+        db.put_pairing_head(&existing)?;
+        let mut other = head_state("prepared")?;
+        other.operation_id = h(21);
+        field_err(&db.put_pairing_head(&other), "operation_id");
+        let stored = db.pairing_head()?.ok_or("head")?;
+        assert_eq!(stored.operation_id, existing.operation_id);
+        assert_eq!(stored.state, state);
+        if state == "acknowledged" {
+            assert!(stored.ack.is_some(), "ack kept");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+    Ok(())
+}
+
+fn backward_state_refused() -> TestResult {
+    let transitions =
+        [("acknowledged", "prepared"), ("acknowledged", "submitted"), ("submitted", "prepared")];
+    for (from, to) in transitions {
+        let (root, db) = crate::tests::test_db(&format!("pair04-head-back-{from}-{to}"))?;
+        db.put_pairing_head(&head_state(from)?)?;
+        field_err(&db.put_pairing_head(&head_state(to)?), "state");
+        let stored = db.pairing_head()?.ok_or("head")?;
+        assert_eq!(stored.state, from);
+        if from == "acknowledged" {
+            assert!(stored.ack.is_some(), "ack kept");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+    Ok(())
+}
+
+fn forward_state_allowed() -> TestResult {
+    let (root, db) = crate::tests::test_db("pair04-head-forward")?;
+    db.put_pairing_head(&head_state("prepared")?)?;
+    db.put_pairing_head(&head_state("submitted")?)?;
+    assert_eq!(db.pairing_head()?.ok_or("head")?.state, "submitted");
+    db.put_pairing_head(&head_state("acknowledged")?)?;
+    let stored = db.pairing_head()?.ok_or("head")?;
+    assert_eq!(stored.state, "acknowledged");
+    assert!(stored.ack.is_some());
+    let _ = std::fs::remove_dir_all(root);
+    let (root, db) = crate::tests::test_db("pair04-head-responder-ack")?;
+    db.put_pairing_head(&head_state("prepared")?)?;
+    db.put_pairing_head(&head_state("acknowledged")?)?;
+    assert_eq!(db.pairing_head()?.ok_or("head")?.state, "acknowledged");
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
 pub(super) fn put_refuses_foreign_account_and_anchor() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-account-scope")?;
     db.put_pairing_floor(&floor())?;
@@ -145,6 +229,22 @@ pub(super) fn put_refuses_foreign_account_and_anchor() -> TestResult {
     Ok(())
 }
 
+pub(super) fn floor_decrease_exact_errors() -> TestResult {
+    let (root, db) = crate::tests::test_db("pair04-floor-decrease")?;
+    db.put_pairing_floor(&floor())?;
+    let mut issued = floor();
+    issued.issued_seq = 2;
+    field_err(&db.put_pairing_floor(&issued), "issued_seq");
+    let mut generation = floor();
+    generation.next_generation = 1;
+    field_err(&db.put_pairing_floor(&generation), "next_generation");
+    let kept = db.pairing_floor()?.ok_or("floor")?;
+    assert_eq!(kept.issued_seq, 3);
+    assert_eq!(kept.next_generation, 2);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}
+
 pub(super) fn bounds_id_u_and_row_sizes() -> TestResult {
     let mut live = invited()?;
     live.generation = MAX_SAFE_JSON_INTEGER;
@@ -160,6 +260,12 @@ pub(super) fn bounds_id_u_and_row_sizes() -> TestResult {
     fl.account_id = "x".repeat(ID_MAX);
     assert!(fl.account_id.len() + fl.account_anchor.len() + 16 <= FLOOR_ROW_MAX);
     decode_floor(&fl)?;
+    fl.account_id.push('y');
+    field_err(&decode_floor(&fl), "account_id");
+    fl = floor();
+    let floor_other = fl.account_anchor.len() + 16;
+    fl.account_id = "x".repeat(FLOOR_ROW_MAX - floor_other + 1);
+    field_err(&decode_floor(&fl), "size");
     let mut term = terminal();
     term.account_id = "x".repeat(ID_MAX);
     let term_len = term.account_id.len()
@@ -173,6 +279,15 @@ pub(super) fn bounds_id_u_and_row_sizes() -> TestResult {
     decode_terminal(&term)?;
     term.account_id.push('y');
     field_err(&decode_terminal(&term), "account_id");
+    term = terminal();
+    let term_other = term.operation_id.len()
+        + term.invitation_id.len()
+        + term.outcome.len()
+        + term.record_hash.as_ref().map_or(0, String::len)
+        + term.cleanup.len()
+        + 32;
+    term.account_id = "x".repeat(TERMINAL_ROW_MAX - term_other + 1);
+    field_err(&decode_terminal(&term), "size");
     let mut adopt = adoption("secondary", None)?;
     adopt.account_id = "x".repeat(ID_MAX);
     adopt.branch_vault_ref = "b".repeat(ID_MAX);
@@ -186,10 +301,16 @@ pub(super) fn bounds_id_u_and_row_sizes() -> TestResult {
 pub(super) fn terminal_ttl_and_cap() -> TestResult {
     let (root, mut db) = crate::tests::test_db("pair04-terminal-ttl")?;
     db.set_clock(crate::AccountClock::fixed(1_000_000));
+    let mut under = terminal();
+    under.operation_id = h(10);
+    under.invitation_id = h(11);
+    under.finished_at = 1_000_000 - 24 * 60 * 60 + 1;
+    db.put_pairing_terminal(&under)?;
+    assert_eq!(db.pairing_terminal_count()?, 1);
     let mut first = terminal();
     first.finished_at = 1_000_000;
     db.put_pairing_terminal(&first)?;
-    assert_eq!(db.pairing_terminal_count()?, 1);
+    assert_eq!(db.pairing_terminal_count()?, 2);
     db.set_clock(crate::AccountClock::fixed(1_000_000 + 24 * 60 * 60));
     assert_eq!(db.pairing_terminal_count()?, 0);
     db.set_clock(crate::AccountClock::fixed(2_000_000));

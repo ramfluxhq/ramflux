@@ -37,6 +37,15 @@ fn field(name: &'static str) -> StorageError {
     StorageError::PairingField(name)
 }
 
+fn head_state_forward(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        ("prepared", "prepared" | "submitted" | "acknowledged")
+            | ("submitted", "submitted" | "acknowledged")
+            | ("acknowledged", "acknowledged")
+    )
+}
+
 fn require(ok: bool, name: &'static str) -> Result<(), StorageError> {
     if ok { Ok(()) } else { Err(field(name)) }
 }
@@ -325,12 +334,12 @@ impl FloorRow {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), StorageError> {
+        let n = self.account_id.len() + self.account_anchor.len() + 16;
+        require(n <= FLOOR_ROW_MAX, "size")?;
         ident(&self.account_id, "account_id")?;
         b32(&self.account_anchor, "account_anchor")?;
         integer(self.issued_seq, "issued_seq")?;
-        integer(self.next_generation, "next_generation")?;
-        let n = self.account_id.len() + self.account_anchor.len() + 16;
-        require(n <= FLOOR_ROW_MAX, "size")
+        integer(self.next_generation, "next_generation")
     }
 }
 
@@ -412,6 +421,7 @@ impl TerminalRow {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), StorageError> {
+        require(self.encoded_size() <= TERMINAL_ROW_MAX, "size")?;
         ident(&self.account_id, "account_id")?;
         b32(&self.operation_id, "operation_id")?;
         b32(&self.invitation_id, "invitation_id")?;
@@ -428,14 +438,17 @@ impl TerminalRow {
         optional_b32(self.record_hash.as_deref(), "record_hash")?;
         integer(self.finished_at, "finished_at")?;
         require(matches!(self.cleanup.as_str(), "none" | "pending" | "done"), "cleanup")?;
-        let n = self.account_id.len()
+        Ok(())
+    }
+
+    fn encoded_size(&self) -> usize {
+        self.account_id.len()
             + self.operation_id.len()
             + self.invitation_id.len()
             + self.outcome.len()
             + self.record_hash.as_ref().map_or(0, String::len)
             + self.cleanup.len()
-            + 32;
-        require(n <= TERMINAL_ROW_MAX, "size")
+            + 32
     }
 }
 
@@ -655,51 +668,53 @@ impl AccountDb {
         Ok(())
     }
 
-    /// Persist a validated head row.
+    /// Persist a validated head row. One head per account; state moves only forward.
     ///
     /// # Errors
     /// Returns the exact invalid field or SQLite errors.
     pub fn put_pairing_head(&self, row: &HeadRow) -> Result<(), StorageError> {
         decode_head(row)?;
         self.require_account(&row.account_id)?;
-        let existing: Option<(String, String)> = self
+        let existing: Option<(String, String, String)> = self
             .connection
             .query_row(
-                "SELECT operation_id,candidate_hash FROM pairing_head WHERE account_id=?1",
+                "SELECT operation_id,candidate_hash,state FROM pairing_head WHERE account_id=?1",
                 params![row.account_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if let Some((operation_id, candidate_hash)) = &existing {
-            if operation_id == &row.operation_id && candidate_hash != &row.candidate_hash {
-                return Err(field("candidate_hash"));
+        match existing {
+            Some((operation_id, candidate_hash, state)) => {
+                self.update_pairing_head(row, &operation_id, &candidate_hash, &state)
             }
-            if operation_id == &row.operation_id {
-                self.connection.execute(
-                    "UPDATE pairing_head SET state=?1,ack=?2
-                     WHERE account_id=?3 AND operation_id=?4 AND candidate_hash=?5",
-                    params![
-                        row.state,
-                        row.ack,
-                        row.account_id,
-                        row.operation_id,
-                        row.candidate_hash
-                    ],
-                )?;
-                return Ok(());
-            }
+            None => self.insert_pairing_head(row),
         }
+    }
+
+    fn update_pairing_head(
+        &self,
+        row: &HeadRow,
+        operation_id: &str,
+        candidate_hash: &str,
+        state: &str,
+    ) -> Result<(), StorageError> {
+        require(operation_id == row.operation_id, "operation_id")?;
+        require(candidate_hash == row.candidate_hash, "candidate_hash")?;
+        require(head_state_forward(state, &row.state), "state")?;
+        self.connection.execute(
+            "UPDATE pairing_head SET state=?1,ack=?2
+             WHERE account_id=?3 AND operation_id=?4 AND candidate_hash=?5",
+            params![row.state, row.ack, row.account_id, row.operation_id, row.candidate_hash],
+        )?;
+        Ok(())
+    }
+
+    fn insert_pairing_head(&self, row: &HeadRow) -> Result<(), StorageError> {
         self.connection.execute(
             "INSERT INTO pairing_head(
               account_id,operation_id,invitation_id,generation,kind,base_record_hash,base_epoch,
               publisher_ref,candidate,candidate_hash,state,ack,recipient_ref,revoked_ref,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
-             ON CONFLICT(account_id) DO UPDATE SET
-              operation_id=excluded.operation_id,invitation_id=excluded.invitation_id,
-              generation=excluded.generation,kind=excluded.kind,base_record_hash=excluded.base_record_hash,
-              base_epoch=excluded.base_epoch,publisher_ref=excluded.publisher_ref,candidate=excluded.candidate,
-              candidate_hash=excluded.candidate_hash,state=excluded.state,ack=excluded.ack,
-              recipient_ref=excluded.recipient_ref,revoked_ref=excluded.revoked_ref,created_at=excluded.created_at",
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 row.account_id,
                 row.operation_id,

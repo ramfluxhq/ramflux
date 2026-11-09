@@ -113,3 +113,35 @@ pub(super) fn skip_merge_and_floor_maxima() -> TestResult {
     let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
+
+pub(super) fn floor_merge_binds_local_account() -> TestResult {
+    let (root, db) = crate::tests::test_db("pair04-floor-empty-foreign")?;
+    db.connection.call(|sql| {
+        sql.execute_batch("ATTACH ':memory:' AS incoming")?;
+        super::super::schema::install(sql)?;
+        sql.execute_batch(
+            "CREATE TABLE incoming.pairing_floor AS SELECT * FROM pairing_floor LIMIT 0",
+        )?;
+        sql.execute(
+            "INSERT INTO incoming.pairing_floor(account_id,account_anchor,issued_seq,next_generation)
+             VALUES('other',?1,9,8)",
+            rusqlite::params![h(2)],
+        )?;
+        let result = super::super::privacy::merge_floor_for(sql, Some("acct"));
+        assert!(
+            matches!(result, Err(crate::StorageError::PairingField("account_id"))),
+            "empty local foreign: {result:?}"
+        );
+        Ok(())
+    })?;
+    assert!(db.pairing_floor()?.is_none());
+    db.connection.call(|sql| {
+        sql.execute("UPDATE incoming.pairing_floor SET account_id='acct'", [])?;
+        Ok(super::super::privacy::merge_floor_for(sql, Some("acct")))
+    })??;
+    let copied = db.pairing_floor()?.ok_or("copied")?;
+    assert_eq!(copied.account_id, "acct");
+    assert_eq!(copied.issued_seq, 9);
+    let _ = std::fs::remove_dir_all(root);
+    Ok(())
+}

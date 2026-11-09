@@ -209,9 +209,6 @@ pub(crate) const NON_SOURCE_TABLES: &[&str] = &[
     // journal body whose durable home is `runtime_journal` (a Source). Always empty at rest.
     "message_footprint_actor_stage",
     "message_footprint_journal_stage",
-    // Writer `runtime/operations.rs`: operation_id, fingerprint, operation_kind and
-    // response_json. The footprint trigger is `json_copy` kind `operation`; no inbound envelope.
-    "runtime_operation",
 ];
 
 /// Why the classification guard refused. It is crate-internal on purpose: a new public

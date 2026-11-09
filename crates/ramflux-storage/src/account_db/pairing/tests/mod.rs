@@ -18,11 +18,14 @@ fn pairing_journal_schema_and_indexes_are_closed() -> Result<(), Box<dyn std::er
     codec::live_binds_descriptor_ids()?;
     codec::head_binds_candidate_hash_and_ack()?;
     codec::head_candidate_is_immutable()?;
+    codec::head_one_account_forward_only()?;
     codec::put_refuses_foreign_account_and_anchor()?;
+    codec::floor_decrease_exact_errors()?;
     codec::bounds_id_u_and_row_sizes()?;
     codec::terminal_ttl_and_cap()?;
     codec::live_cap_exact_error()?;
     backup::live_rows_are_stripped_floors_survive()?;
     backup::skip_merge_and_floor_maxima()?;
+    backup::floor_merge_binds_local_account()?;
     Ok(())
 }

@@ -33,7 +33,21 @@ pub(crate) fn sanitize_backup(db: &Connection) -> Result<(), StorageError> {
 /// # Errors
 /// Returns `PairingField("account_anchor")` or `PairingField("account_id")` on conflict.
 pub(crate) fn merge_floor(db: &Connection) -> Result<(), StorageError> {
+    merge_floor_for(db, local_pairing_account(db)?.as_deref())
+}
+
+/// Merge bound to an explicit local account id, including when the local floor is missing.
+///
+/// # Errors
+/// Returns `PairingField("account_anchor")` or `PairingField("account_id")` on conflict.
+pub(crate) fn merge_floor_for(
+    db: &Connection,
+    local_account_id: Option<&str>,
+) -> Result<(), StorageError> {
     if !incoming_floor_exists(db)? {
+        return Ok(());
+    }
+    if !table_exists(db, "pairing_floor")? {
         return Ok(());
     }
     let incoming: (String, String, i64, i64) = db.query_row(
@@ -41,6 +55,11 @@ pub(crate) fn merge_floor(db: &Connection) -> Result<(), StorageError> {
         [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
+    if let Some(local_id) = local_account_id
+        && incoming.0 != local_id
+    {
+        return Err(StorageError::PairingField("account_id"));
+    }
     let local: Option<(String, String, i64, i64)> = db
         .query_row(
             "SELECT account_id,account_anchor,issued_seq,next_generation FROM pairing_floor WHERE account_id=?1",
@@ -85,6 +104,21 @@ fn table_exists(db: &Connection, table: &str) -> rusqlite::Result<bool> {
         params![table],
         |row| row.get(0),
     )
+}
+
+fn local_pairing_account(db: &Connection) -> Result<Option<String>, StorageError> {
+    for table in TABLES {
+        if !table_exists(db, table)? {
+            continue;
+        }
+        let id: Option<String> = db
+            .query_row(&format!("SELECT account_id FROM {table} LIMIT 1"), [], |row| row.get(0))
+            .optional()?;
+        if let Some(id) = id {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 fn incoming_floor_exists(db: &Connection) -> rusqlite::Result<bool> {
