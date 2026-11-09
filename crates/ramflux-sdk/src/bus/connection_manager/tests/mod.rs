@@ -171,22 +171,41 @@ pub(crate) fn entry(id: &str, sequence: u64) -> Result<crate::GatewayInboxEntry,
     )?)
 }
 
-pub(crate) async fn watchdog(
-    future: impl std::future::Future<Output = Result<(), Box<dyn std::error::Error>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn arm_watchdog(
+    budget: Duration,
+) -> (std::sync::mpsc::Sender<()>, tokio::sync::oneshot::Receiver<()>) {
     let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
     let (expired, deadline) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        if matches!(
-            cancelled.recv_timeout(Duration::from_secs(30)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ) {
+        if matches!(cancelled.recv_timeout(budget), Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+        {
             let _ = expired.send(());
         }
     });
+    (cancel, deadline)
+}
+
+pub(crate) async fn watchdog(
+    future: impl std::future::Future<Output = Result<(), Box<dyn std::error::Error>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (cancel, deadline) = arm_watchdog(Duration::from_secs(30));
     let result = tokio::select! {
         result = future => result,
         _ = deadline => Err("30-second real-time test watchdog expired".into()),
+    };
+    drop(cancel);
+    result
+}
+
+pub(crate) async fn watchdog_for(
+    budget: Duration,
+    future: impl std::future::Future<Output = Result<(), Box<dyn std::error::Error>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (cancel, deadline) = arm_watchdog(budget);
+    let secs = budget.as_secs();
+    let result = tokio::select! {
+        result = future => result,
+        _ = deadline => Err(format!("{secs}-second real-time test watchdog expired").into()),
     };
     drop(cancel);
     result
