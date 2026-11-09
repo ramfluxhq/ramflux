@@ -934,7 +934,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::SenderManifestRequired { .. }
         | SdkError::FreshHeadRequired { .. }
         | SdkError::PairRecoveryRequired
-        | SdkError::PairingField(_) => RamfluxErrorCode::InvalidArgument,
+        | SdkError::PairingField(_)
+        | SdkError::PairingCode(_) => RamfluxErrorCode::InvalidArgument,
     }
 }
 

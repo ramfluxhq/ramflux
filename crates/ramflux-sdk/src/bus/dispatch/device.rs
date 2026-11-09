@@ -34,6 +34,12 @@ pub(crate) async fn dispatch_device_bus_request(
                 serde_json::from_value(request.body.clone())?;
             Box::pin(dispatch_device_sync_import(request, state, body)).await
         }
+        "device.pair.begin"
+        | "device.pair.join"
+        | "device.pair.confirm"
+        | "device.pair.approve"
+        | "device.pair.cancel"
+        | "device.pair.status" => dispatch_device_pair(request),
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }
@@ -113,6 +119,19 @@ async fn dispatch_push_route_set(
         "deregistered": cleared,
         "expires_at": expires_at,
     })))
+}
+
+fn dispatch_device_pair(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
+    if !crate::custody::pairing::pairing_enabled() {
+        return Err(SdkError::LocalBus(format!(
+            "unsupported local bus method: {}",
+            request.method
+        )));
+    }
+    let account_id = request_account_id(request)?;
+    let result =
+        crate::custody::pairing::handle_bus(account_id, &request.method, request.body.clone())?;
+    Ok(local_bus_ok(serde_json::to_value(result)?))
 }
 
 fn dispatch_device_list(

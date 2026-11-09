@@ -717,6 +717,7 @@ crates/ramflux-sdk/src/client/task/quota.rs | record_task_capacity_rejection | 1
 crates/ramflux-sdk/src/contact_card.rs | parse_contact_card | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/contact_card.rs | parse_contact_card | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/bus.rs | exchange | 1 | E | excluded=decode is not an ingress admission; no signed envelope is admitted here
+crates/ramflux-sdk/src/custody/pairing/coordinator.rs | bus_body | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/pairing/install_store.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/linux/init.rs | parse | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/presence.rs | approved_primary_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

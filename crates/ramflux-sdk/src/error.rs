@@ -173,6 +173,8 @@ pub enum SdkError {
     Crypto(#[from] CryptoError),
     #[error("invalid pairing field: {0}")]
     PairingField(&'static str),
+    #[error("pairing {0}")]
+    PairingCode(&'static str),
     #[error("storage error: {0}")]
     Storage(#[source] StorageError),
     #[error("sync error: {0}")]

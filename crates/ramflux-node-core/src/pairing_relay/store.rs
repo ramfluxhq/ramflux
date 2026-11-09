@@ -317,7 +317,8 @@ impl PairingRelayStore {
             let out = direction_mut(live, &send.role)?;
             enqueue_cost(out, send.seq, &digest)?;
             let before = direction_payload(out);
-            let snapshot = (out.last_send.clone(), out.next_send_seq, out.frames.len());
+            let snapshot =
+                (out.last_send.clone(), out.next_send_seq, out.frames.len(), out.frames.capacity());
             apply_enqueue(out, send.seq, send.frame.clone(), digest);
             (direction_payload(out).saturating_sub(before), snapshot)
         };
@@ -327,9 +328,10 @@ impl PairingRelayStore {
             {
                 out.frames.truncate(snapshot.2);
                 // Inverse of first-send growth from `Direction::default` (`Vec::new()`).
+                // Snapshot capacity, not length: shrink_to(len) is a no-op when len > 0.
                 // Charge-Busy on Send is unreachable at annex F caps (remaining slack
                 // after max fill exceeds one max frame); shrink_to stays as defense.
-                out.frames.shrink_to(snapshot.2);
+                out.frames.shrink_to(snapshot.3);
                 out.last_send = snapshot.0;
                 out.next_send_seq = snapshot.1;
             }
@@ -363,12 +365,18 @@ impl PairingRelayStore {
             });
         }
         self.require_responder_claim(invitation, &poll.role)?;
-        let (closed, refund, extra, frames) = {
+        let (closed, refund, extra, frames, undo) = {
             let live = self.live_mut(invitation)?;
             live.last_activity_ms = now.mono;
             let closed = live.closed_reason.is_some();
             let incoming = peer_mut(live, &poll.role)?;
             let before = direction_payload(incoming);
+            let undo = (
+                incoming.poll_times.clone(),
+                incoming.poll_times.capacity(),
+                incoming.frames.clone(),
+                incoming.frames.capacity(),
+            );
             record_poll(incoming, now.mono)?;
             if let Some(ack) = poll.after_seq {
                 let _ = ack_frames(incoming, ack);
@@ -377,10 +385,20 @@ impl PairingRelayStore {
             let frames = take_polled_frames(incoming)?;
             let refund = before.saturating_sub(after);
             let extra = after.saturating_sub(before);
-            (closed, refund, extra, frames)
+            (closed, refund, extra, frames, undo)
         };
         self.refund(refund);
-        self.charge(extra)?;
+        if let Err(err) = self.charge(extra) {
+            if let Ok(live) = self.live_mut(invitation)
+                && let Ok(incoming) = peer_mut(live, &poll.role)
+            {
+                incoming.poll_times = undo.0;
+                incoming.poll_times.shrink_to(undo.1);
+                incoming.frames = undo.2;
+                incoming.frames.shrink_to(undo.3);
+            }
+            return Err(err);
+        }
         Ok(Polled {
             schema: "ramflux.pairing.Polled.v2".into(),
             version: 2,
