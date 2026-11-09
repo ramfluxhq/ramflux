@@ -261,4 +261,95 @@ mod tests {
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
+
+    /// Exact pre-r5 `runtime_operation` DDL from `2fec5ec5d`
+    /// `crates/ramflux-storage/src/account_db/runtime/schema.rs` (before S10a P11 r5).
+    const PRE_R5_RUNTIME_OPERATION: &str = "CREATE TABLE IF NOT EXISTS runtime_operation (
+                operation_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                response_json TEXT
+             )";
+
+    fn operation_kind_columns(db: &AccountDb) -> Result<i64, StorageError> {
+        Ok(db.connection.query_row(
+            "SELECT count(*) FROM pragma_table_info('runtime_operation') WHERE name='operation_kind'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn rebuild_runtime_operation_as_pre_r5(db: &AccountDb) -> Result<(), StorageError> {
+        db.connection.execute_batch(
+            "CREATE TABLE pre_r5_runtime_operation_backup AS
+             SELECT operation_id, fingerprint, response_json FROM runtime_operation;
+             DROP TABLE runtime_operation;",
+        )?;
+        db.connection.execute_batch(PRE_R5_RUNTIME_OPERATION)?;
+        db.connection.execute_batch(
+            "INSERT INTO runtime_operation(operation_id,fingerprint,response_json)
+             SELECT operation_id,fingerprint,response_json FROM pre_r5_runtime_operation_backup;
+             DROP TABLE pre_r5_runtime_operation_backup;",
+        )?;
+        Ok(())
+    }
+
+    fn reopen_account(root: &std::path::Path) -> Result<AccountDb, StorageError> {
+        AccountDb::open(
+            &crate::AccountIndex::open(root)?,
+            "acct",
+            &crate::AccountDbKey::derive("acct", b"storage-test-secret"),
+        )
+    }
+
+    #[test]
+    fn pre_r5_runtime_operation_alter_is_idempotent_and_null_kind_delete_replays_object_erased()
+    -> Result<(), StorageError> {
+        let (root, db) = crate::tests::test_db("pre-r5-runtime-operation-alter")?;
+        db.send_direct_message("thread", "m", "peer", b"private-content")?;
+        db.reserve_operation("op-delete", "fp-op", "message.delete")?;
+        let delete_body = json!({
+            "tombstone_id": "tombstone:thread:m",
+            "conversation_id": "thread",
+            "message_id": "m",
+            "delete_scope": "local"
+        });
+        db.complete_operation("op-delete", &delete_body)?;
+        rebuild_runtime_operation_as_pre_r5(&db)?;
+        assert_eq!(operation_kind_columns(&db)?, 0, "pre-r5 table must lack operation_kind");
+        drop(db);
+
+        let db = reopen_account(&root)?;
+        assert_eq!(operation_kind_columns(&db)?, 1, "normal-open ALTER must add operation_kind");
+        let kind: Option<String> = db.connection.query_row(
+            "SELECT operation_kind FROM runtime_operation WHERE operation_id='op-delete'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(kind, None, "upgraded pre-r5 row must keep NULL kind");
+        drop(db);
+
+        let db = reopen_account(&root)?;
+        assert_eq!(
+            operation_kind_columns(&db)?,
+            1,
+            "second open must not drop or duplicate the column"
+        );
+        let kind: Option<String> = db.connection.query_row(
+            "SELECT operation_kind FROM runtime_operation WHERE operation_id='op-delete'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(kind, None);
+        db.delete_direct_message("thread", "m", "local", "delete")?;
+        assert!(
+            matches!(
+                db.reserve_operation("op-delete", "fp-op", "message.delete"),
+                Err(StorageError::ObjectErased)
+            ),
+            "NULL-kind delete-shaped receipt must replay ObjectErased"
+        );
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }

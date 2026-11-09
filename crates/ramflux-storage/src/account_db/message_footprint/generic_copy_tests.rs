@@ -13,13 +13,16 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-const SECRETS: [&str; 6] = [
+const SECRETS: [&str; 9] = [
     "actor-secret-body",
     "nested-raw-secret",
     "journal-event-secret",
     "operation-preview-secret",
     "prepared-envelope-secret",
     "history-page-secret",
+    "raw-inner-copy-secret",
+    "raw-evidence-secret",
+    "raw-opening-secret",
 ];
 
 fn secrets() -> Vec<String> {
@@ -61,6 +64,21 @@ fn seed_registered_copies(db: &AccountDb) -> Result<(), StorageError> {
             0,
             &["projection-id"],
             &json!({"body":"history-page-secret"}),
+        )?;
+        db.put_unsupported_raw_copy(super::super::raw_inner::RawInnerCopyWrite {
+            owner_id: "projection-id",
+            verified_source_anchor: "verified-root",
+            copy_id: "raw-copy-1",
+            kind: super::super::raw_inner::RawInnerCopyKind::NestedGroup,
+            bytes: b"raw-inner-copy-secret",
+            bounded_metadata: b"{}",
+        })?;
+        db.put_known_content_evidence(
+            "projection-id",
+            "thread",
+            b"private-content",
+            b"raw-evidence-secret",
+            b"raw-opening-secret",
         )?;
         Ok::<(), StorageError>(())
     })?;
@@ -113,6 +131,42 @@ fn scan_tables(
         |row| row.get(0),
     )?;
     assert_eq!(leftover, 0, "footprint rows survived for {message}");
+    census_raw_inner(raw, message)?;
+    Ok(())
+}
+
+fn census_raw_inner(raw: &rusqlite::Connection, message: &str) -> rusqlite::Result<()> {
+    let copies: i64 = raw.query_row(
+        "SELECT count(*) FROM raw_inner_copy WHERE owner_id=?1",
+        params![message],
+        |row| row.get(0),
+    )?;
+    assert_eq!(copies, 0, "raw_inner_copy still holds {message}");
+    let owners: i64 = raw.query_row(
+        "SELECT count(*) FROM raw_inner_owner WHERE owner_id=?1",
+        params![message],
+        |row| row.get(0),
+    )?;
+    assert_eq!(owners, 0, "raw_inner_owner still holds {message}");
+    let evidence: i64 = raw.query_row(
+        "SELECT count(*) FROM raw_inner_evidence WHERE message_id=?1",
+        params![message],
+        |row| row.get(0),
+    )?;
+    assert_eq!(evidence, 0, "raw_inner_evidence still holds {message}");
+    let bindings: i64 = raw.query_row(
+        "SELECT count(*) FROM message_copy_binding WHERE message_id=?1 AND copy_id GLOB 'raw:*'",
+        params![message],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bindings, 0, "raw_inner marker binding still holds {message}");
+    let footprints: i64 = raw.query_row(
+        "SELECT count(*) FROM message_footprint
+         WHERE message_id=?1 AND kind IN ('raw_inner','raw_inner_evidence')",
+        params![message],
+        |row| row.get(0),
+    )?;
+    assert_eq!(footprints, 0, "raw_inner footprint still holds {message}");
     Ok(())
 }
 
@@ -170,6 +224,9 @@ fn raw_inner_generic_absence_across_active_archive_and_restore() -> Result<(), S
     assert_generic_absence(&db, "projection-id", &forbidden)?;
     let erased = root.join("erased.db");
     let erased_snap = db.write_backup_snapshot(&erased)?;
+    let archived = BackupDatabase::open(&erased, &erased_snap.key)?;
+    census_raw_inner(&archived.db, "projection-id")?;
+    drop(archived);
     let mut merged = BackupDatabase::open(&erased, &erased_snap.key)?;
     merged.merge_backup(&content, &content_snap.key, || Ok(()))?;
     merged.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;

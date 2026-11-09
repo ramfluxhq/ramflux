@@ -186,35 +186,7 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
 }
 
 pub(crate) fn message_deleted(db: &Connection, message_id: &str) -> Result<bool, StorageError> {
-    let projection: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=1)",
-        [message_id],
-        |row| row.get(0),
-    )?;
-    if projection {
-        return Ok(true);
-    }
-    for mac in
-        super::super::mac_subkeys::all_macs(db, b"ramflux/tombstone-key/v1", message_id.as_bytes())?
-    {
-        let found: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",
-            [format!("message/deleted/{mac}")],
-            |row| row.get(0),
-        )?;
-        if found {
-            return Ok(true);
-        }
-    }
-    let legacy = format!(
-        "message/deleted/{}",
-        ramflux_crypto::blake3_256_base64url("ramflux.deleted-message.v1", message_id.as_bytes())
-    );
-    Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",
-        [legacy],
-        |row| row.get(0),
-    )?)
+    super::super::deleted_messages::message_is_deleted_on(db, message_id)
 }
 
 pub(crate) fn raw_copy_deleted(db: &Connection, copy_id: &str) -> Result<bool, StorageError> {

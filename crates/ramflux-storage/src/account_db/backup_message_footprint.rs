@@ -278,6 +278,11 @@ mod tests {
         Ok(())
     }
 
+    fn persist_mac_tombstone(db: &AccountDb, message: &str) -> Result<(), crate::StorageError> {
+        let mac = db.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())?;
+        db.persist_actor_state(&format!("message/deleted/{mac}"), &json!({"version":2}))
+    }
+
     #[test]
     fn deleted_raw_rows_are_removed_at_the_full_merge_footprint_boundary()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -288,30 +293,36 @@ mod tests {
         target_index.create_account("acct", "own-root")?;
         let source = AccountDb::open(&source_index, "acct", &AccountDbKey::generate()?)?;
         let target = AccountDb::open(&target_index, "acct", &AccountDbKey::generate()?)?;
-        for db in [&source, &target] {
-            db.send_direct_message("thread", "message-target", "peer", b"body")?;
-            db.write_transaction(|| {
-                db.put_unsupported_raw_copy(super::super::raw_inner::RawInnerCopyWrite {
-                    owner_id: "copy:authenticated-envelope",
-                    verified_source_anchor: "verified-root",
-                    copy_id: "bound-copy",
-                    kind: super::super::raw_inner::RawInnerCopyKind::NestedGroup,
-                    bytes: b"stale bound bytes",
-                    bounded_metadata: b"{}",
-                })?;
-                db.bind_raw_inner_copy("bound-copy", "message-target")
+        source.send_direct_message("thread", "message-target", "peer", b"body")?;
+        source.write_transaction(|| {
+            source.put_unsupported_raw_copy(super::super::raw_inner::RawInnerCopyWrite {
+                owner_id: "copy:authenticated-envelope",
+                verified_source_anchor: "verified-root",
+                copy_id: "bound-copy",
+                kind: super::super::raw_inner::RawInnerCopyKind::NestedGroup,
+                bytes: b"stale bound bytes",
+                bounded_metadata: b"{}",
             })?;
-            db.write_transaction(|| {
-                db.put_known_content_evidence(
-                    "message-target",
-                    "thread",
-                    b"known content",
-                    b"private provenance",
-                    b"private opening",
-                )
-            })?;
-        }
-        target.delete_direct_message("thread", "message-target", "peer", "delete")?;
+            source.bind_raw_inner_copy("bound-copy", "message-target")
+        })?;
+        source.write_transaction(|| {
+            source.put_known_content_evidence(
+                "message-target",
+                "thread",
+                b"known content",
+                b"private provenance",
+                b"private opening",
+            )
+        })?;
+        target.send_direct_message("thread", "message-target", "peer", b"body")?;
+        persist_mac_tombstone(&target, "message-target")?;
+        assert!(target.message_is_deleted("message-target")?);
+        let projection_deleted: i64 = target.connection.query_row(
+            "SELECT deleted FROM direct_message_projection WHERE message_id='message-target'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(projection_deleted, 0, "MAC tombstone must leave projection deleted=0");
 
         let source_path = root.join("incoming.db");
         let source_snapshot = source.write_backup_snapshot(&source_path)?;
@@ -319,7 +330,8 @@ mod tests {
         let target_snapshot = target.write_backup_snapshot(&target_path)?;
         let merged = BackupDatabase::open(&target_path, &target_snapshot.key)?;
         merged.attach(&source_path, &source_snapshot.key)?;
-        // Recreate the generic row-merge result to exercise this final deletion guard directly.
+        // Recreate the generic row-merge result and assert immediately after the merge
+        // deletion step, before finish_merge's final erasure pass.
         merged.db.execute_batch(
             "INSERT INTO main.raw_inner_owner SELECT * FROM incoming.raw_inner_owner;
              INSERT INTO main.raw_inner_copy SELECT * FROM incoming.raw_inner_copy;
@@ -336,7 +348,7 @@ mod tests {
                     row.get::<_, u64>(0)
                 })?,
                 0,
-                "deleted raw data survived in {table}"
+                "deleted raw data survived in {table} after the merge deletion step"
             );
         }
         assert_eq!(
@@ -347,6 +359,12 @@ mod tests {
             )?,
             0
         );
+        let still_live: i64 = merged.db.query_row(
+            "SELECT deleted FROM direct_message_projection WHERE message_id='message-target'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(still_live, 0, "merge deletion must not depend on projection deleted=1");
         drop(merged);
         drop(source);
         drop(target);

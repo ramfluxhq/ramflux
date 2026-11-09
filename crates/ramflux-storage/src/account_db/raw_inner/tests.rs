@@ -832,3 +832,71 @@ fn full_merge_does_not_restore_a_bound_raw_copy_after_target_deletion() -> TestR
     );
     Ok(())
 }
+
+fn persist_mac_tombstone(db: &AccountDb, message: &str) -> Result<(), StorageError> {
+    let mac = db.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())?;
+    db.persist_actor_state(&format!("message/deleted/{mac}"), &serde_json::json!({"version":2}))
+}
+
+#[test]
+fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> TestResult {
+    let root = crate::tests::temp_root("raw-inner-mac-tombstone-merge");
+    let source_index = AccountIndex::open(root.join("source"))?;
+    let target_index = AccountIndex::open(root.join("target"))?;
+    source_index.create_account("acct", "root")?;
+    target_index.create_account("acct", "root")?;
+    let source = AccountDb::open(&source_index, "acct", &AccountDbKey::generate()?)?;
+    let target = AccountDb::open(&target_index, "acct", &AccountDbKey::generate()?)?;
+    source.write_transaction(|| {
+        source.put_unsupported_raw_copy(RawInnerCopyWrite {
+            owner_id: "mac-only-message",
+            verified_source_anchor: "verified-root",
+            copy_id: "mac-only-copy",
+            kind: RawInnerCopyKind::NestedGroup,
+            bytes: b"stale mac-tombstone raw bytes",
+            bounded_metadata: b"{}",
+        })
+    })?;
+    target.send_direct_message("thread", "mac-only-message", "sender", b"body")?;
+    persist_mac_tombstone(&target, "mac-only-message")?;
+    assert!(
+        matches!(target.message_is_deleted("mac-only-message"), Ok(true)),
+        "MAC tombstone must make message_is_deleted return true"
+    );
+    let projection_deleted: i64 = target.connection.query_row(
+        "SELECT deleted FROM direct_message_projection WHERE message_id='mac-only-message'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(projection_deleted, 0);
+
+    let source_path = root.join("source.db");
+    let source_snapshot = source.write_backup_snapshot(&source_path)?;
+    let target_path = root.join("target.db");
+    let target_snapshot = target.write_backup_snapshot(&target_path)?;
+    let mut merged = BackupDatabase::open(&target_path, &target_snapshot.key)?;
+    merged.merge_backup(&source_path, &source_snapshot.key, || Ok(()))?;
+    assert_eq!(
+        merged
+            .db
+            .query_row("SELECT count(*) FROM raw_inner_copy", [], |row| row.get::<_, u64>(0))?,
+        0,
+        "full merge restored a raw copy whose owner was deleted only by a MAC tombstone"
+    );
+    assert_eq!(
+        merged
+            .db
+            .query_row("SELECT count(*) FROM raw_inner_owner", [], |row| row.get::<_, u64>(0))?,
+        0
+    );
+    let still_live: i64 = merged.db.query_row(
+        "SELECT deleted FROM direct_message_projection WHERE message_id='mac-only-message'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        still_live, 0,
+        "final erasure must not have set deleted=1; the merge filter has to drop the copy"
+    );
+    Ok(())
+}

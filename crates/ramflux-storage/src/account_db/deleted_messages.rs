@@ -67,20 +67,10 @@ impl AccountDb {
     /// # Errors
     /// Returns storage errors while reading deletion state.
     pub fn message_is_deleted(&self, message: &str) -> Result<bool, StorageError> {
-        if self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=1)",
-            params![message],
-            |row| row.get::<_, i64>(0),
-        )? != 0
-        {
-            return Ok(true);
-        }
-        for mac in self.account_macs(b"ramflux/tombstone-key/v1", message.as_bytes())? {
-            if self.actor_state_exists(&format!("message/deleted/{mac}"))? {
-                return Ok(true);
-            }
-        }
-        self.actor_state_exists(&legacy_deletion_marker_key(message))
+        let message = message.to_owned();
+        self.connection
+            .call(move |db| Ok(message_is_deleted_on(db, &message)))
+            .map_err(StorageError::from)?
     }
 
     pub(crate) fn envelope_refers_to_deleted_message(
@@ -222,6 +212,38 @@ fn legacy_deletion_hash(message: &str) -> String {
 
 fn legacy_deletion_marker_key(message: &str) -> String {
     format!("message/deleted/{}", legacy_deletion_hash(message))
+}
+
+/// Shared `&rusqlite::Connection` deletion check used by `AccountDb::message_is_deleted`
+/// and the raw-inner writer / full-merge footprint filter.
+pub(crate) fn message_is_deleted_on(
+    db: &rusqlite::Connection,
+    message_id: &str,
+) -> Result<bool, StorageError> {
+    let projection: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM direct_message_projection WHERE message_id=?1 AND deleted=1)",
+        [message_id],
+        |row| row.get(0),
+    )?;
+    if projection {
+        return Ok(true);
+    }
+    for mac in super::mac_subkeys::all_macs(db, b"ramflux/tombstone-key/v1", message_id.as_bytes())?
+    {
+        let found: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",
+            [format!("message/deleted/{mac}")],
+            |row| row.get(0),
+        )?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_actor_state WHERE state_kind=?1)",
+        [legacy_deletion_marker_key(message_id)],
+        |row| row.get(0),
+    )?)
 }
 
 #[cfg(test)]
