@@ -8,6 +8,14 @@ use crate::client::identity_authority::NativeOperation;
 use crate::prelude::*;
 
 impl RamfluxClient {
+    pub(crate) fn candidate_group_target_plan(
+        &self,
+        group_id: &str,
+        sender_id: &str,
+    ) -> Result<Option<crate::client::target_selection::SelectionPlan>, SdkError> {
+        Self::candidate_target_plan(|| self.group_selection_request(group_id, sender_id))
+    }
+
     pub fn append_gateway_delivery(&self, entry: &GatewayInboxEntry) -> Result<(), SdkError> {
         if self.routed_seen_marker(entry)?.is_some() {
             return Ok(());

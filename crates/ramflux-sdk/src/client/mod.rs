@@ -62,6 +62,7 @@ pub(crate) mod routed;
 pub(crate) mod shared_group;
 pub mod storage;
 pub(crate) mod surface;
+pub(crate) mod target_selection;
 pub(crate) mod task;
 
 use crate::prelude::*;

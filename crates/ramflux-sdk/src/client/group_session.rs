@@ -604,6 +604,7 @@ impl RamfluxClient {
     ) -> Result<Vec<u8>, SdkError> {
         self.require_backup_outbound_ready()?;
         self.assert_shared_group_send_capacity(group_id, sender_id)?;
+        let _ = self.candidate_group_target_plan(group_id, sender_id)?;
         let group = self.group_state(group_id)?;
         if !group.members.contains(sender_id) {
             return Err(SdkError::from(StorageError::GroupPermissionDenied));

@@ -121,6 +121,7 @@ impl RamfluxClient {
         route: crate::client::routed::Route,
     ) -> Result<GatewayInboxEntry, SdkError> {
         self.resolve_message_recipient(engine.config(), &mut message).await?;
+        let _ = Self::candidate_target_plan(|| self.dm_selection_request(&message))?;
         let copy_plain = route.kind == crate::client::routed::Kind::Direct;
         let attachments = route.attachments;
         let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)

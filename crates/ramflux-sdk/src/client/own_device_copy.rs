@@ -287,6 +287,9 @@ impl RamfluxClient {
         if !manifest.devices.iter().any(|d| d.device_id == source) {
             return Err(invalid("own-device source is not active"));
         }
+        let _ = Self::candidate_target_plan(|| {
+            Self::own_copy_selection_request(input.id, &source, &manifest)
+        })?;
         let targets =
             manifest.devices.into_iter().filter(|d| d.device_id != source).collect::<Vec<_>>();
         if targets.is_empty() {

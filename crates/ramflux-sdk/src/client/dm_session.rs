@@ -68,6 +68,7 @@ impl RamfluxClient {
         recipient_bundle: ramflux_crypto::PrekeyBundle,
         own_device_id: &str,
     ) -> Result<(ramflux_crypto::DmSession, Option<SdkDmX3dhHeader>), SdkError> {
+        let _ = Self::candidate_target_plan(|| self.dm_selection_request(message))?;
         self.create_send_dm_session_with_aad(
             message,
             recipient_device_id,
