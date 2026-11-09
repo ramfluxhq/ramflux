@@ -32,8 +32,16 @@ pub(crate) const SITES: &[WriterSite] = &[
         file: "src/client/account.rs",
         symbol: "persist_gateway_receive_cursor",
         class: WriterClass::ProductionLegacy,
-        executor: "persist_receive_checkpoint_in (W2/reset token)",
-        hook: "SQL receive-checkpoint",
+        executor: "persist_receive_cursor_if_inactive (legacy C); refuses when activation row present",
+        hook: "SQL receive-checkpoint; no write on Activated",
+        count: 4,
+    },
+    WriterSite {
+        file: "src/client/account.rs",
+        symbol: "persist_receive_cursor",
+        class: WriterClass::ProductionLegacy,
+        executor: "persist_receive_cursor_if_inactive (legacy C); refuses when activation row present",
+        hook: "SQL receive-checkpoint; no write on Activated",
         count: 1,
     },
     WriterSite {
@@ -42,7 +50,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "generic setter; receive-cursor name requires persist_receive_checkpoint_in",
         hook: "SQL receive-checkpoint when name is receive-cursor",
-        count: 6,
+        count: 4,
     },
     WriterSite {
         file: "src/client/dm.rs",

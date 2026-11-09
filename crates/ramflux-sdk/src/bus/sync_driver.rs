@@ -753,6 +753,8 @@ pub(super) async fn process(
 }
 
 mod ack;
+#[cfg(test)]
+mod ack_tests;
 pub(crate) use ack::{AckState, PreparedAck, finish as finish_prepared_ack};
 
 pub(crate) fn inbound_failure_kind(error: &SdkError) -> &'static str {

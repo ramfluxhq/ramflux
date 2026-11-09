@@ -195,6 +195,12 @@ fn assert_inventory_scan() {
         SITES.iter().any(|site| site.file == "src/client/account.rs"
             && site.symbol == "set_projection_checkpoint")
     );
+    assert!(SITES.iter().any(|site| site.file == "src/client/account.rs"
+        && site.symbol == "persist_receive_cursor"
+        && site.class == WriterClass::ProductionLegacy
+        && site.executor.contains("persist_receive_cursor_if_inactive")
+        && site.executor.contains("refuses when activation row present")
+        && site.count == 1));
     assert!(SITES.iter().any(|site| site.class == WriterClass::FixtureOnly));
 }
 
