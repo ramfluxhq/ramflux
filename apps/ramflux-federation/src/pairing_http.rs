@@ -57,7 +57,10 @@ pub(crate) fn respond(
     if !pairing_request_is_tls(listener_is_tls, peer, &surface.trusted_proxies, forwarded_proto) {
         return HttpResponse::text("400 Bad Request", "tls required");
     }
-    let source = pairing_client_addr(peer, &surface.trusted_proxies, forwarded_for);
+    let source = match pairing_client_addr(peer, &surface.trusted_proxies, forwarded_for) {
+        Ok(source) => source,
+        Err(reason) => return HttpResponse::text("400 Bad Request", reason),
+    };
     let forward = PairingMeshForward {
         body: encode_pairing_mesh_body(&request.body),
         source: source.to_string(),

@@ -118,8 +118,21 @@ pub fn read_http_request_with_route_limits(
         return Ok(None);
     };
     let (method, path) = parse_http_request_line(&raw)?;
-    let limits = if is_pairing(&method, &path) { pairing } else { ordinary };
-    finish_classified_request(stream, limits, accepted_at, raw, method, path)
+    let pairing_route = is_pairing(&method, &path);
+    let limits = if pairing_route { pairing } else { ordinary };
+    finish_classified_request(
+        stream,
+        limits,
+        accepted_at,
+        RequestLine { raw, method, path, pairing_route },
+    )
+}
+
+struct RequestLine {
+    raw: Vec<u8>,
+    method: String,
+    path: String,
+    pairing_route: bool,
 }
 
 struct ClassifiedHttp {
@@ -134,16 +147,14 @@ fn finish_classified_request(
     stream: &mut TcpStream,
     limits: HttpRequestLimits,
     accepted_at: std::time::Instant,
-    raw: Vec<u8>,
-    method: String,
-    path: String,
+    line: RequestLine,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     let deadline = accepted_at
         .checked_add(limits.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
     let Some((raw, header_end)) = read_http_headers_capped(
         stream,
-        raw,
+        line.raw,
         limits.max_header_bytes,
         limits.read_timeout,
         deadline,
@@ -158,12 +169,12 @@ fn finish_classified_request(
         std::str::from_utf8(&raw[..header_end]).map_err(|_| rejected("400 Bad Request"))?;
     let mut lines = header.lines();
     let _ = lines.next();
-    let parsed = parse_http_header_fields(lines, limits.max_body_bytes)?;
+    let parsed = parse_http_header_fields(lines, limits.max_body_bytes, line.pairing_route)?;
     finish_http_request(
         stream,
         limits,
         accepted_at,
-        ClassifiedHttp { raw, header_end, method, path, parsed },
+        ClassifiedHttp { raw, header_end, method: line.method, path: line.path, parsed },
     )
 }
 
@@ -282,6 +293,7 @@ struct ParsedHttpHeaders {
 fn parse_http_header_fields(
     lines: std::str::Lines<'_>,
     max_body_bytes: usize,
+    pairing_route: bool,
 ) -> Result<ParsedHttpHeaders, NodeCoreError> {
     let mut content_length = None;
     let mut keep_alive = false;
@@ -314,11 +326,17 @@ fn parse_http_header_fields(
         } else if name.eq_ignore_ascii_case("X-Ramflux-PreAuth-Now") {
             pre_auth_now = Some(value.parse().map_err(|_| rejected("400 Bad Request"))?);
         } else if name.eq_ignore_ascii_case("X-Forwarded-Proto") {
+            if !pairing_route {
+                continue;
+            }
             if forwarded_proto.is_some() {
                 return Err(rejected("400 Bad Request"));
             }
             forwarded_proto = Some(value.to_owned());
         } else if name.eq_ignore_ascii_case("X-Forwarded-For") {
+            if !pairing_route {
+                continue;
+            }
             if forwarded_for.is_some() {
                 return Err(rejected("400 Bad Request"));
             }
@@ -814,6 +832,50 @@ mod tests {
             read_http_request_with_limits(&mut server, limits, std::time::Instant::now())?
                 .ok_or("request missing")?;
         assert_eq!(request.body, payload);
+        Ok(())
+    }
+
+    fn classified(
+        raw: &[u8],
+        pairing: bool,
+    ) -> Result<Result<Option<NodeHttpRequest>, NodeCoreError>, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        let (mut server, _) = listener.accept()?;
+        client.write_all(raw)?;
+        let limits = HttpRequestLimits {
+            max_header_bytes: 4096,
+            max_body_bytes: 4096,
+            ..HttpRequestLimits::default()
+        };
+        Ok(read_http_request_with_route_limits(
+            &mut server,
+            limits,
+            limits,
+            |_, _| pairing,
+            std::time::Instant::now(),
+        ))
+    }
+
+    #[test]
+    fn duplicate_forwarded_headers_are_ignored_off_pairing_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let raw = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.1\r\nX-Forwarded-For: 198.51.100.1\r\n\r\n";
+        let request = classified(raw, false)??.ok_or("eof")?;
+        assert!(request.forwarded_for.is_none());
+        assert!(request.forwarded_proto.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_forwarded_headers_are_rejected_on_pairing_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let raw = b"POST /client/pairing/v1/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nX-Forwarded-For: 203.0.113.1\r\nX-Forwarded-For: 198.51.100.1\r\n\r\n{}";
+        let result = classified(raw, true)?;
+        assert!(matches!(
+            result,
+            Err(NodeCoreError::HttpRequestRejected { status: "400 Bad Request" })
+        ));
         Ok(())
     }
 

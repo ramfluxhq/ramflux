@@ -54,16 +54,19 @@ pub fn pairing_request_is_tls(
 
 /// Client address for /24 claim budgets: X-Forwarded-For from a trusted proxy
 /// (rightmost untrusted hop), otherwise the socket peer. Untrusted X-Forwarded-* is ignored.
-#[must_use]
+/// A present hop that is not a bare IP is refused; it does not fall back to the proxy.
+///
+/// # Errors
+/// Returns `"forwarded client invalid"` when a hop is empty-only or not a bare IPv4/IPv6 address.
 pub fn pairing_client_addr(
     peer: IpAddr,
     trusted_proxies: &[IpAddr],
     forwarded_for: Option<&str>,
-) -> IpAddr {
+) -> Result<IpAddr, &'static str> {
     if !trusted_peer(peer, trusted_proxies) {
-        return peer;
+        return Ok(peer);
     }
-    rightmost_untrusted_hop(forwarded_for, trusted_proxies).unwrap_or(peer)
+    Ok(rightmost_untrusted_hop(forwarded_for, trusted_proxies)?.unwrap_or(peer))
 }
 
 fn trusted_peer(peer: IpAddr, trusted_proxies: &[IpAddr]) -> bool {
@@ -73,19 +76,26 @@ fn trusted_peer(peer: IpAddr, trusted_proxies: &[IpAddr]) -> bool {
 fn rightmost_untrusted_hop(
     forwarded_for: Option<&str>,
     trusted_proxies: &[IpAddr],
-) -> Option<IpAddr> {
-    let header = forwarded_for?;
+) -> Result<Option<IpAddr>, &'static str> {
+    let Some(header) = forwarded_for else {
+        return Ok(None);
+    };
+    let mut saw_hop = false;
     for hop in header.split(',').rev() {
         let hop = hop.trim();
         if hop.is_empty() {
             continue;
         }
-        let ip = hop.parse::<IpAddr>().ok()?;
+        saw_hop = true;
+        let ip = hop.parse::<IpAddr>().map_err(|_| "forwarded client invalid")?;
         if !trusted_peer(ip, trusted_proxies) {
-            return Some(ip);
+            return Ok(Some(ip));
         }
     }
-    None
+    if !saw_hop {
+        return Err("forwarded client invalid");
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -101,7 +111,10 @@ mod tests {
         let trusted = parse_trusted_proxies("")?;
         assert_eq!(trusted, Vec::<IpAddr>::new());
         assert!(!pairing_request_is_tls(false, peer, &trusted, Some("https")));
-        assert_eq!(pairing_client_addr(peer, &trusted, Some("203.0.113.9, 198.51.100.1")), peer);
+        assert_eq!(
+            pairing_client_addr(peer, &trusted, Some("203.0.113.9, 198.51.100.1")),
+            Ok(peer)
+        );
         assert!(pairing_request_is_tls(true, peer, &trusted, None));
         Ok(())
     }
@@ -116,12 +129,12 @@ mod tests {
         assert!(!pairing_request_is_tls(false, proxy, &trusted, None));
         assert_eq!(
             pairing_client_addr(proxy, &trusted, Some("198.51.100.7, 203.0.113.10")),
-            client
+            Ok(client)
         );
         let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
         let trusted_v6 = parse_trusted_proxies("::1")?;
         let client6: IpAddr = "2001:db8::1".parse()?;
-        assert_eq!(pairing_client_addr(v6, &trusted_v6, Some("2001:db8::1")), client6);
+        assert_eq!(pairing_client_addr(v6, &trusted_v6, Some("2001:db8::1")), Ok(client6));
         Ok(())
     }
 
@@ -130,12 +143,25 @@ mod tests {
         let peer = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
         let trusted = parse_trusted_proxies("127.0.0.1")?;
         assert!(!pairing_request_is_tls(false, peer, &trusted, Some("https")));
-        assert_eq!(pairing_client_addr(peer, &trusted, Some("203.0.113.9")), peer);
+        assert_eq!(pairing_client_addr(peer, &trusted, Some("203.0.113.9")), Ok(peer));
         Ok(())
     }
 
     #[test]
     fn invalid_allowlist_entry_fails_closed() {
         assert!(parse_trusted_proxies("127.0.0.1,not-an-ip").is_err());
+    }
+
+    #[test]
+    fn unparsable_forwarded_hop_is_refused() -> TestResult {
+        let proxy = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let trusted = parse_trusted_proxies("127.0.0.1")?;
+        for hop in ["[2001:db8::1]", "192.0.2.7:4443", "", "  ,  "] {
+            assert_eq!(
+                pairing_client_addr(proxy, &trusted, Some(hop)),
+                Err("forwarded client invalid")
+            );
+        }
+        Ok(())
     }
 }

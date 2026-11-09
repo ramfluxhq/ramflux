@@ -163,7 +163,19 @@ pub fn pairing_status_line(status: &str) -> &'static str {
         "405 Method Not Allowed" => "405 Method Not Allowed",
         "408 Request Timeout" => "408 Request Timeout",
         "413 Payload Too Large" => "413 Payload Too Large",
+        "500 Internal Server Error" => "500 Internal Server Error",
         "503 Service Unavailable" => "503 Service Unavailable",
         _ => "502 Bad Gateway",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_status_line_keeps_internal_server_error() {
+        assert_eq!(pairing_status_line("500 Internal Server Error"), "500 Internal Server Error");
+        assert_eq!(pairing_status_line("501 Not Implemented"), "502 Bad Gateway");
     }
 }

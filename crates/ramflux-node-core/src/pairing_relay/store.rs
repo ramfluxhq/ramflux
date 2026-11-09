@@ -45,6 +45,7 @@ struct Now {
     mono: u64,
 }
 
+#[derive(Default)]
 pub(super) struct Direction {
     pub(super) frames: Vec<(u64, RelayFrame)>,
     pub(super) next_send_seq: u64,
@@ -325,6 +326,9 @@ impl PairingRelayStore {
                 && let Ok(out) = direction_mut(live, &send.role)
             {
                 out.frames.truncate(snapshot.2);
+                // Inverse of first-send growth from `Direction::default` (`Vec::new()`).
+                // Charge-Busy on Send is unreachable at annex F caps (remaining slack
+                // after max fill exceeds one max frame); shrink_to stays as defense.
                 out.frames.shrink_to(snapshot.2);
                 out.last_send = snapshot.0;
                 out.next_send_seq = snapshot.1;
@@ -940,18 +944,6 @@ impl PairingRelayStore {
                 }
             }
             let _ = self.sync_registry();
-        }
-    }
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Self {
-            frames: Vec::with_capacity(MAX_FRAMES_PER_DIRECTION),
-            next_send_seq: 0,
-            last_send: None,
-            acked_seq: None,
-            poll_times: VecDeque::with_capacity(MAX_POLLS_PER_SEC),
         }
     }
 }

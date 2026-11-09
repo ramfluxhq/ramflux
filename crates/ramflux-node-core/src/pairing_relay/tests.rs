@@ -860,6 +860,44 @@ fn frame_max_plus_minus(store: &mut PairingRelayStore) -> TestResult {
     Ok(())
 }
 
+fn fill_hour_entries(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestResult {
+    clock.set_wall(WALL);
+    clock.set_mono(0);
+    for n in 0..MAX_HOUR_ENTRIES {
+        if n > 0 && n % MAX_CLOSED == 0 {
+            clock.advance_secs(301);
+        }
+        let wall = clock.wall_unix_secs()?;
+        let issued = store.issue(spec_n(n, wall))?;
+        let created = store.create(create_from_n(&issued, n, wall))?;
+        close_live(store, &created)?;
+    }
+    Ok(())
+}
+
+fn fill_closed_remainder(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestResult {
+    let wall = clock.wall_unix_secs()?;
+    for n in 0..256 {
+        let issued = store.issue(spec_n(n, wall))?;
+        let created = store.create(create_from_n(&issued, n, wall))?;
+        close_live(store, &created)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn send_charge_busy_is_unreachable_at_annex_f_caps() -> TestResult {
+    let (mut store, clock) = open()?;
+    fill_hour_entries(&mut store, &clock)?;
+    fill_closed_remainder(&mut store, &clock)?;
+    high_water_at_cap(&mut store)?;
+    let remaining = MAX_BACKING.saturating_sub(store.accounted_bytes());
+    if remaining <= MAX_FRAME_BYTES {
+        return Err(PairingRelayError::invalid("slack"));
+    }
+    books_match(&store)
+}
+
 #[test]
 fn pairing_relay_caps_expiry_and_account_isolation() -> TestResult {
     let (mut store, clock) = open()?;

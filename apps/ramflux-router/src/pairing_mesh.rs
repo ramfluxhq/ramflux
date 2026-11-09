@@ -67,18 +67,5 @@ fn mesh_reply(status: &str, body: &[u8]) -> anyhow::Result<MeshResponse> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ramflux_node_core::pairing_relay::PAIRING_CLAIM_PATH;
-
-    #[test]
-    fn pairing_mesh_requires_federation_peer() -> anyhow::Result<()> {
-        let (state, store, path) = crate::router_runtime::tests::test_router("pairing-mesh-peer")?;
-        let handle = RouterHandle::tokio(state, store, None);
-        let response = route("ramflux-gateway", "POST", PAIRING_CLAIM_PATH, b"{}", &handle)?
-            .ok_or_else(|| anyhow::anyhow!("pairing mesh route"))?;
-        assert_eq!(response.status, "403 Forbidden");
-        let _ = std::fs::remove_file(path);
-        Ok(())
-    }
-}
+#[path = "pairing_mesh_tests.rs"]
+mod tests;

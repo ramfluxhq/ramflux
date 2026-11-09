@@ -10,8 +10,10 @@ use ramflux_node_core::pairing_relay::{
 };
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::PairingWire;
-use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, Created, Issued};
-use ramflux_protocol::custody::pairing::relay::{Claim, Close, Poll, RelayFrame, Send};
+use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, Created, Failure, Issued};
+use ramflux_protocol::custody::pairing::relay::{
+    Claim, Claimed, Close, Closed, Poll, Polled, RelayFrame, Send, Sent,
+};
 use ramflux_protocol::encode_base64url;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
@@ -231,6 +233,25 @@ fn post(path: &str, body: &[u8], headers: &str) -> Vec<u8> {
     raw
 }
 
+fn get(path: &str, headers: &str) -> Vec<u8> {
+    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n").into_bytes()
+}
+
+fn duplicate_forwarded() -> &'static str {
+    "X-Forwarded-For: 203.0.113.1\r\nX-Forwarded-For: 198.51.100.1\r\n"
+}
+
+fn http_body(response: &str) -> TestResult<&str> {
+    Ok(response.split_once("\r\n\r\n").ok_or("body")?.1.trim_end_matches(['\r', '\n']))
+}
+
+fn decode_http<T: PairingWire>(response: &str) -> TestResult<T> {
+    if !response.starts_with("HTTP/1.1 200") {
+        return Err(format!("status {response}").into());
+    }
+    Ok(T::from_wire_bytes(http_body(response)?.as_bytes())?)
+}
+
 fn proxy_headers(client: &str) -> String {
     format!("X-Forwarded-Proto: https\r\nX-Forwarded-For: {client}\r\n")
 }
@@ -419,6 +440,7 @@ fn pairing_healthz_keeps_ordinary_deadline_when_pairing_is_on() -> TestResult {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn pairing_http_forwards_to_node_owned_store_end_to_end() -> TestResult {
     let _env = enable_pairing();
     let node = spawn_node_mesh()?;
@@ -431,7 +453,7 @@ fn pairing_http_forwards_to_node_owned_store_end_to_end() -> TestResult {
         context.clone(),
         ordinary,
     )?;
-    assert!(claimed.starts_with("HTTP/1.1 200"), "{claimed}");
+    let _: Claimed = decode_http(&claimed)?;
     let relay_send = Send {
         schema: "ramflux.pairing.Send.v2".into(),
         version: 2,
@@ -451,7 +473,27 @@ fn pairing_http_forwards_to_node_owned_store_end_to_end() -> TestResult {
         context.clone(),
         ordinary,
     )?;
-    assert!(send_reply.starts_with("HTTP/1.1 200"), "{send_reply}");
+    let _: Sent = decode_http(&send_reply)?;
+    let wrong = Send {
+        schema: "ramflux.pairing.Send.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "initiator".into(),
+        token: id(77),
+        seq: 0,
+        frame: RelayFrame::Confirm {
+            role: "initiator".into(),
+            transcript_hash: encode_base64url([3; 32]),
+            mac: encode_base64url([4; 32]),
+        },
+    };
+    let failed = exchange(
+        &post(PAIRING_SEND_PATH, &wrong.to_wire_bytes()?, &headers),
+        context.clone(),
+        ordinary,
+    )?;
+    assert_eq!(decode_http::<Failure>(&failed)?.code, "WrongContext");
     let poll = Poll {
         schema: "ramflux.pairing.Poll.v2".into(),
         version: 2,
@@ -466,7 +508,7 @@ fn pairing_http_forwards_to_node_owned_store_end_to_end() -> TestResult {
         context.clone(),
         ordinary,
     )?;
-    assert!(polled.starts_with("HTTP/1.1 200"), "{polled}");
+    let _: Polled = decode_http(&polled)?;
     let close = Close {
         schema: "ramflux.pairing.Close.v2".into(),
         version: 2,
@@ -478,7 +520,7 @@ fn pairing_http_forwards_to_node_owned_store_end_to_end() -> TestResult {
     };
     let closed =
         exchange(&post(PAIRING_CLOSE_PATH, &close.to_wire_bytes()?, &headers), context, ordinary)?;
-    assert!(closed.starts_with("HTTP/1.1 200"), "{closed}");
+    let _: Closed = decode_http(&closed)?;
     drop(root);
     Ok(())
 }
@@ -512,6 +554,100 @@ fn pairing_trusted_proxy_https_uses_forwarded_client_for_claim_budget() -> TestR
     let allowed =
         exchange(&post(PAIRING_CLAIM_PATH, &claim_body(&created, 6)?, &other), context, ordinary)?;
     assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+    drop(root);
+    Ok(())
+}
+
+fn assert_duplicate_xff_not_rejected(
+    context: FederationPublicHttpContext,
+    path: &str,
+    success: bool,
+) -> TestResult {
+    let response =
+        exchange(&get(path, duplicate_forwarded()), context, crate::http_limits::defaults(true))?;
+    if response.starts_with("HTTP/1.1 400") {
+        return Err(format!("{path} rejected duplicate XFF: {response}").into());
+    }
+    if success && !response.starts_with("HTTP/1.1 200") {
+        return Err(format!("{path}: {response}").into());
+    }
+    Ok(())
+}
+
+fn pairing_surface()
+-> TestResult<(FederationPublicHttpContext, crate::test_directories::TestDirectory)> {
+    let root = crate::test_certificates::temp_cert_root("pairing-dup-xff")?;
+    let admin = crate::http_listener_tests::context(&root)?;
+    let pairing = Arc::new(PairingHttpSurface::with_proxies(admin.router.clone(), Vec::new()));
+    Ok((
+        FederationPublicHttpContext {
+            router: admin.router.clone(),
+            discovery: admin.discovery.clone(),
+            pairing: Some(pairing),
+        },
+        root,
+    ))
+}
+
+#[test]
+fn non_pairing_routes_accept_duplicate_forwarded_headers_when_pairing_is_off() -> TestResult {
+    let (context, root) = public_context(None)?;
+    assert_duplicate_xff_not_rejected(context.clone(), "/healthz", true)?;
+    assert_duplicate_xff_not_rejected(context.clone(), "/.well-known/ramflux/client", true)?;
+    assert_duplicate_xff_not_rejected(context, "/mvp1/prekey/root", false)?;
+    drop(root);
+    Ok(())
+}
+
+#[test]
+fn non_pairing_routes_accept_duplicate_forwarded_headers_when_pairing_is_on() -> TestResult {
+    let (context, root) = pairing_surface()?;
+    assert_duplicate_xff_not_rejected(context.clone(), "/healthz", true)?;
+    assert_duplicate_xff_not_rejected(context.clone(), "/.well-known/ramflux/client", true)?;
+    assert_duplicate_xff_not_rejected(context, "/mvp1/prekey/root", false)?;
+    drop(root);
+    Ok(())
+}
+
+#[test]
+fn pairing_path_rejects_duplicate_forwarded_headers() -> TestResult {
+    let _env = enable_pairing();
+    let (context, root) = pairing_surface()?;
+    let response = exchange(
+        &post(PAIRING_CLAIM_PATH, b"{}", duplicate_forwarded()),
+        context,
+        crate::http_limits::defaults(true),
+    )?;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(response.contains("request rejected"), "{response}");
+    drop(root);
+    Ok(())
+}
+
+#[test]
+fn pairing_unparsable_forwarded_client_is_refused() -> TestResult {
+    let _env = enable_pairing();
+    let node = spawn_node_mesh()?;
+    let (context, root) = live_context(&node, vec![localhost()])?;
+    let headers = "X-Forwarded-Proto: https\r\nX-Forwarded-For: [2001:db8::1]\r\n";
+    let response = exchange(
+        &post(PAIRING_CLAIM_PATH, b"{}", headers),
+        context.clone(),
+        crate::http_limits::defaults(true),
+    )?;
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(response.contains("forwarded client invalid"), "{response}");
+    let port = exchange(
+        &post(
+            PAIRING_CLAIM_PATH,
+            b"{}",
+            "X-Forwarded-Proto: https\r\nX-Forwarded-For: 192.0.2.7:4443\r\n",
+        ),
+        context,
+        crate::http_limits::defaults(true),
+    )?;
+    assert!(port.starts_with("HTTP/1.1 400"), "{port}");
+    assert!(port.contains("forwarded client invalid"), "{port}");
     drop(root);
     Ok(())
 }
