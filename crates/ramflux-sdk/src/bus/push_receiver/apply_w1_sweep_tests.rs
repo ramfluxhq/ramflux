@@ -529,6 +529,33 @@ fn assert_ledger(got: &Ledger, sweep: Sweep) {
     assert_eq!(got.intents, want.intents, "{sweep:?} ack intents");
 }
 
+fn assert_legacy_dm_w1_effect(
+    account: &crate::bus::state::LocalBusAccountState,
+    entry: &ReceiveEntry,
+) -> Result<(), SdkError> {
+    assert!(account.client.legacy_w1_committed(&entry.entry)?, "legacy-DM W1 committed marker");
+    let rows = content_rows(account.client.account_db()?)?;
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with("direct_message_projection|")
+                && row.contains("legacy-dm-one")),
+        "legacy-DM W1 projection row: {rows:?}"
+    );
+    Ok(())
+}
+
+fn assert_sweep(
+    account: &crate::bus::state::LocalBusAccountState,
+    sweep: Sweep,
+    entry: &ReceiveEntry,
+) -> Result<(), SdkError> {
+    assert_ledger(&ledger(account)?, sweep);
+    if matches!(sweep, Sweep::LegacyDm) {
+        assert_legacy_dm_w1_effect(account, entry)?;
+    }
+    Ok(())
+}
+
 async fn redrive_once(
     account: &mut crate::bus::state::LocalBusAccountState,
     entry: ReceiveEntry,
@@ -573,11 +600,11 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     reopen(&mut harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let _ = drive(&mut harness.account, recovered, || 1).await?;
-    assert_ledger(&ledger(&harness.account)?, sweep);
+    assert_sweep(&harness.account, sweep, &entry)?;
     reopen(&mut harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, entry.clone()).await?;
-    assert_ledger(&ledger(&harness.account)?, sweep);
+    assert_sweep(&harness.account, sweep, &entry)?;
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
@@ -598,7 +625,7 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     reopen(&mut harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, recovered).await?;
-    assert_ledger(&ledger(&harness.account)?, sweep);
+    assert_sweep(&harness.account, sweep, &entry)?;
     row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     assert_eq!(sends.load(Ordering::SeqCst), 0, "no double ACK");
     Ok(())
@@ -711,6 +738,11 @@ async fn late_w0_fence_refuses_erase_during_stage() -> Result<(), SdkError> {
     let refused = drive(&mut harness.account, entry, || 1).await;
     let error = refused.as_ref().err();
     assert!(matches!(error, Some(SdkError::ObjectErased)), "late W0 fence: {error:?}");
+    assert_eq!(
+        harness.account.client.account_db()?.receive_state_for_test(1)?,
+        (None, 0),
+        "late W0 fence rolled back the staged receipt"
+    );
     Ok(())
 }
 

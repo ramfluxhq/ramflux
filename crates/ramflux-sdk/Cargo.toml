@@ -95,7 +95,7 @@ poly1305 = { version = "=0.8.0", features = ["zeroize"] }
 [dev-dependencies]
 ramflux-storage = { workspace = true, features = ["test-instrumentation", "itest-work-budget"] }
 rusqlite = { workspace = true }
-ramflux-node-core = { workspace = true }
+ramflux-node-core = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }
 quinn = { workspace = true }
 tokio = { version = "1.42", features = ["test-util"] }

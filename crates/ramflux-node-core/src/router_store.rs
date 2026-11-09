@@ -557,6 +557,7 @@ impl RouterRedbStore {
     ///
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_with_wal(
         path: impl AsRef<Path>,
         wal_root: impl AsRef<Path>,
@@ -568,6 +569,7 @@ impl RouterRedbStore {
     ///
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn open_without_wal(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
         Self::open_with_wal_root(path, None, true)
     }
