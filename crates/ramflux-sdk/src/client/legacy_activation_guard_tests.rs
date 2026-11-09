@@ -11,13 +11,22 @@ use crate::bus::sync_driver::source::w0::{
     actor_turn, prepare_receive_turn, refuse_legacy_receive_unless_ledger_turn,
 };
 use crate::gateway::access::CountingGateway;
+use crate::gateway::engine::TEST_CONNECT_OPENER;
 use crate::gateway::session_push::{IncarnationId, SessionMode};
-use crate::{GatewayInboxEntry, GatewaySessionEngine, SdkError};
+use crate::gateway::transport_opener::{OpenFuture, TransportOpener};
+use crate::{
+    GatewayInboxEntry, GatewaySessionConfig, GatewaySessionEngine, RamfluxClient, SdkError,
+};
 use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
 use ramflux_storage::{
-    LEGACY_RECEIVE_ACTIVATED, ReceiveMigrate, ReceiveMigrateResult, StorageError,
+    LEGACY_RECEIVE_ACTIVATED, ReceiveActivation, ReceiveMigrate, ReceiveMigrateResult, StorageError,
 };
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const PUSH: &str = ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY;
+const INCARNATION: &str = "0123456789abcdef0123456789abcdef";
 
 type FrameFuture<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, TransportError>> + Send + 'a>>;
@@ -51,6 +60,96 @@ fn assert_activated(error: &SdkError) {
         matches!(error, SdkError::Storage(StorageError::Integrity(LEGACY_RECEIVE_ACTIVATED))),
         "{error:?}"
     );
+}
+
+fn assert_session_push_scope(config: &GatewaySessionConfig, advertise: bool) {
+    assert_eq!(config.session_push_advertise, advertise, "session_push_advertise={advertise}");
+    let scope = crate::gateway::signed_capability_scope(config);
+    assert_eq!(
+        scope.iter().any(|capability| capability == PUSH),
+        advertise,
+        "signed scope session-push: {scope:?}"
+    );
+}
+
+fn established_session() -> ramflux_node_core::GatewaySessionEstablishedFrame {
+    ramflux_node_core::GatewaySessionEstablishedFrame {
+        session_id: "p24b2a-session".into(),
+        gateway_id: "p24b2a-gateway".into(),
+        accepted_cursor: None,
+        resume_token: "p24b2a-token".into(),
+        resume_window_seconds: 60,
+    }
+}
+
+fn legacy_established() -> Vec<u8> {
+    serde_json::to_vec(&ramflux_node_core::GatewayServerFrame::SessionEstablished {
+        session: established_session(),
+    })
+    .expect("legacy established")
+}
+
+fn push_established() -> Vec<u8> {
+    serde_json::to_vec(&ramflux_node_core::SessionPushServerFrame::SessionEstablished {
+        session: ramflux_node_core::SessionPushEstablishedFrame {
+            session: established_session(),
+            capabilities: vec![PUSH.into()],
+            inbox_incarnation_id: INCARNATION.into(),
+        },
+    })
+    .expect("push established")
+}
+
+struct Scripted {
+    establishment: Mutex<Option<Vec<u8>>>,
+}
+
+impl TransportOpener for Scripted {
+    fn open(&self, _config: GatewaySessionConfig, _timeout: Duration) -> OpenFuture<'_> {
+        let establishment = self.establishment.lock().expect("script").take();
+        Box::pin(async move {
+            let gateway: Box<dyn ramflux_transport::GatewaySessionTransport + Send> =
+                Box::new(Established { establishment });
+            Ok((
+                crate::gateway::engine::GatewaySessionClientTransport::Injected,
+                gateway,
+                crate::GatewaySessionTransportKind::Quic,
+            ))
+        })
+    }
+}
+
+struct Established {
+    establishment: Option<Vec<u8>>,
+}
+
+impl GatewaySessionFrameSink for Established {
+    fn send_frame<'a>(&'a mut self, _: &'a [u8]) -> FrameFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn finish(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+impl GatewaySessionFrameSource for Established {
+    fn recv_frame(&mut self) -> FrameFuture<'_, Vec<u8>> {
+        let frame = self.establishment.take();
+        Box::pin(async move {
+            if let Some(frame) = frame { Ok(frame) } else { std::future::pending().await }
+        })
+    }
+}
+
+async fn connect_scripted(
+    client: &RamfluxClient,
+    mut config: GatewaySessionConfig,
+    established: Vec<u8>,
+) -> Result<GatewaySessionEngine, SdkError> {
+    config.custody = None;
+    let opener: Arc<dyn TransportOpener> =
+        Arc::new(Scripted { establishment: Mutex::new(Some(established)) });
+    TEST_CONNECT_OPENER.scope(opener, client.connect_gateway_session(config)).await
 }
 
 fn entry(target: &str) -> GatewayInboxEntry {
@@ -177,7 +276,26 @@ async fn activated_ledger_prepare_receive_and_apply_page_are_not_refused() -> Te
     Ok(())
 }
 
-/// Activated DB advertises session-push and never reaches a legacy receive writer.
+/// Inactive accounts never advertise session-push, even when the preset is true.
+#[tokio::test]
+async fn inactive_account_never_advertises_session_push() -> TestResult {
+    let fixture = Fixture::new("p24b2a-inactive-advertise").await?;
+    assert_eq!(fixture.client.account_db()?.receive_activation()?, ReceiveActivation::Inactive);
+    let mut config = fixture.config.clone().with_session_push_advertise(true);
+    config.capability_scope.push(PUSH.to_owned());
+    let account = LocalBusAccountState::disconnected(
+        fixture.client,
+        config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    assert_session_push_scope(&account.connection_config()?, false);
+    let engine = connect_scripted(&account.client, config, legacy_established()).await?;
+    assert_session_push_scope(&engine.config, false);
+    assert_eq!(engine.mode, SessionMode::Legacy);
+    Ok(())
+}
+
+/// Activated DB negotiates Push and never reaches a legacy receive writer.
 #[tokio::test]
 async fn activation_revert_preserves_ledger() -> TestResult {
     let fixture = Fixture::new("p24b2a-advertise").await?;
@@ -194,14 +312,7 @@ async fn activation_revert_preserves_ledger() -> TestResult {
         &mut config,
         fixture.client.account_db()?.receive_activation()?,
     );
-    assert!(config.session_push_advertise, "Activated must advertise session-push");
-    let scope = crate::gateway::signed_capability_scope(&config);
-    assert!(
-        scope
-            .iter()
-            .any(|capability| capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY),
-        "signed scope must carry session-push: {scope:?}"
-    );
+    assert_session_push_scope(&config, true);
 
     let cursor = fixture.client.persist_gateway_receive_cursor(&target, 2);
     assert_activated(cursor.as_ref().expect_err("legacy C write"));
@@ -212,9 +323,11 @@ async fn activation_revert_preserves_ledger() -> TestResult {
         fixture.manifest.principal_commitment.clone(),
     );
     let advertised = account.connection_config()?;
-    assert!(
-        advertised.session_push_advertise,
-        "connection_config must advertise from discriminator"
+    assert_session_push_scope(&advertised, true);
+    let engine = connect_scripted(&account.client, advertised, push_established()).await?;
+    assert_eq!(
+        engine.mode,
+        SessionMode::Push { incarnation: IncarnationId::try_from(INCARNATION.to_owned())? }
     );
     match prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
     {

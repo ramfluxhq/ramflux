@@ -191,16 +191,78 @@ async fn case() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn settle_retained_paused_is_integrity() -> Result<(), SdkError> {
+fn runtime_with_pending(
+    mut account: LocalBusAccountState,
+    id: &str,
+    root: &std::path::Path,
+) -> (AccountRuntime, u64) {
+    let handle = ConnectionHandle::start_with(
+        account.gateway_config.clone(),
+        None,
+        crate::bus::runtime_limits::RuntimeTimeouts::held_for_test(),
+        std::sync::Arc::new(Pending),
+        None,
+    );
+    let generation = handle.generation();
+    account.connection = Some(handle);
+    let (events, mut batches) = mpsc::channel::<EventBatch>(8);
+    tokio::task::spawn_local(async move {
+        while let Some(batch) = batches.recv().await {
+            let _ = batch.accepted.send(());
+        }
+    });
+    let (connection_sender, connection_work) = mpsc::channel(2);
+    let (_lifecycle_sender, lifecycle) = mpsc::channel(4);
+    let (_preempt_sender, preempt) = watch::channel(0);
+    let (_stop, shutdown) = watch::channel(false);
+    let (_commands, receiver) = mpsc::channel(1);
+    (
+        AccountRuntime {
+            timeouts: crate::bus::runtime_limits::RuntimeTimeouts::default(),
+            lifecycle,
+            preempt,
+            connection_sender,
+            connection_work,
+            transfers: super::uploads::Transfers::start(),
+            id: id.into(),
+            state: LocalBusDaemonState {
+                account_index: None,
+                config: LocalBusConfig::new(root.join("bus.sock"), root),
+                nodes: crate::node::NodeStore::default(),
+                accounts: BTreeMap::from([(id.into(), account)]),
+                active_account_id: None,
+                attended_accounts: BTreeSet::new(),
+                subscribers: BTreeMap::new(),
+            },
+            receiver,
+            readers: std::sync::Arc::new(RoutingMutex::new(None)),
+            events,
+            shutdown,
+            courier: None,
+            networking_expiry_pending: None,
+            networking_expiry_warned: false,
+            networking_observation_warned: false,
+            courier_events: None,
+            receive_gate_hook: None,
+        },
+        generation,
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settle_retained_paused_is_integrity() -> Result<(), SdkError> {
+    tokio::task::LocalSet::new().run_until(Box::pin(settle_retained_paused_case())).await
+}
+
+async fn settle_retained_paused_case() -> Result<(), SdkError> {
     let root = crate::bus::runtime_tests::root("settle-paused");
-    let mut account = crate::bus::runtime_tests::account(
+    let account = crate::bus::runtime_tests::account(
         &root,
         "acct",
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
-    let (before, turn) = {
+    let (before, mut turn) = {
         let db = account.client.account_db()?;
         let _ = db.activate_receive_ledger(ReceiveMigrate { target: "t", incarnation: "e" })?;
         db.set_projection_checkpoint("gateway_receive_cursor:t", "1024")?;
@@ -218,7 +280,12 @@ fn settle_retained_paused_is_integrity() -> Result<(), SdkError> {
         };
         (before, turn)
     };
-    let refused = crate::bus::account_runtime::settle_retained(&mut account, 1, &turn, 1025);
+    let (mut runtime, generation) = runtime_with_pending(account, "acct", &root);
+    turn.generation = generation;
+    let (reply, paused_reply) = oneshot::channel();
+    runtime.settle_retained_for_test(generation, turn, 1025, reply).await?;
+    let refused =
+        paused_reply.await.map_err(|_| SdkError::LocalBus("settle reply dropped".into()))?;
     assert!(
         matches!(
             refused.as_ref().err(),
@@ -226,12 +293,13 @@ fn settle_retained_paused_is_integrity() -> Result<(), SdkError> {
         ),
         "paused cover must be Integrity(settle retained paused): {refused:?}"
     );
+    let account = runtime.state.accounts.get("acct").ok_or(SdkError::AccountDbNotUnlocked)?;
     assert_eq!(
         account.client.account_db()?.receive_ledger_snap_for_test("t")?,
         before,
         "paused settle writes nothing"
     );
-    drop(account);
+    runtime.state.accounts.clear();
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

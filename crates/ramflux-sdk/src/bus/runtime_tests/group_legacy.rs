@@ -691,7 +691,7 @@ fn routed_unrouted_entry(mut entry: GatewayInboxEntry) -> Result<GatewayInboxEnt
             sender_device_id_hash: [0; 32],
             recipient_device_id_hash: [0; 32],
             device_epoch: 0,
-            message_event_id: String::new(),
+            message_event_id: "valid".into(),
             canonical_header_bytes: Vec::new(),
             header_hash: String::new(),
             key_commitment: String::new(),

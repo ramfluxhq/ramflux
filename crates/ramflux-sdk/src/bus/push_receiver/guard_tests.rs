@@ -103,12 +103,16 @@ fn stage(db: &AccountDb, cursor: u64, sequence: u64) -> Result<(), StorageError>
     Ok(())
 }
 
-fn count_symbol(src: &str, symbol: &str) -> usize {
+fn count_symbol(src: &str, symbol: &str, rel: &str) -> usize {
     let mut count = 0;
     let mut rest = src;
     while let Some(at) = rest.find(symbol) {
         let after = &rest[at + symbol.len()..];
-        if symbol == "persist_receive_cursor" && after.starts_with("_if_inactive") {
+        // Skip the account.rs wrapper name only when counting the shorter prefix.
+        if symbol == "persist_receive_cursor"
+            && after.starts_with("_if_inactive")
+            && rel == "src/client/account.rs"
+        {
             rest = after;
             continue;
         }
@@ -168,7 +172,7 @@ fn scan_tree(
         }
         let src = fs::read_to_string(&path).expect("read rust");
         for symbol in SCAN_SYMBOLS {
-            let actual = count_symbol(&src, symbol);
+            let actual = count_symbol(&src, symbol, &rel);
             let want = expected.get(&format!("{rel}::{symbol}")).copied().unwrap_or(0);
             if want != actual {
                 missing.push(format!("{rel} {symbol} actual={actual} expected={want}"));
@@ -195,6 +199,11 @@ fn assert_inventory_scan() {
     scan_tree(&rf_root, "apps/rf/src/", &expected, &mut missing);
     assert!(missing.is_empty(), "unclassified production receive writers: {missing:?}");
     assert!(SCAN_SYMBOLS.contains(&"persist_receive_cursor"));
+    assert!(SCAN_SYMBOLS.contains(&"persist_receive_cursor_if_inactive"));
+    assert!(SITES.iter().any(|site| site.file == "src/client/account.rs"
+        && site.symbol == "persist_receive_cursor_if_inactive"
+        && site.class == WriterClass::ProductionLegacy
+        && site.count == 1));
     assert!(SITES.iter().any(|site| site.file == "src/bus/push_receiver/executor.rs"
         && site.symbol == "persist_receive_cursor"
         && site.count == 1));

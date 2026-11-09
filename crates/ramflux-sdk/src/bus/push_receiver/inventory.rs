@@ -38,6 +38,14 @@ pub(crate) const SITES: &[WriterSite] = &[
     },
     WriterSite {
         file: "src/client/account.rs",
+        symbol: "persist_receive_cursor_if_inactive",
+        class: WriterClass::ProductionLegacy,
+        executor: "persist_receive_checkpoint_in (W2/reset token); Inactive only",
+        hook: "SQL receive-checkpoint; no write on Activated",
+        count: 1,
+    },
+    WriterSite {
+        file: "src/client/account.rs",
         symbol: "set_projection_checkpoint",
         class: WriterClass::ProductionLegacy,
         executor: "persist_receive_checkpoint_in (W2/reset token)",
@@ -376,4 +384,5 @@ pub(crate) const SCAN_SYMBOLS: &[&str] = &[
     "set_projection_checkpoint",
     "message.ack",
     "persist_receive_cursor",
+    "persist_receive_cursor_if_inactive",
 ];
