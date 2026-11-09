@@ -7,6 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 
 /// Combined issued+live slots per node process.
 pub const MAX_SLOTS: usize = 64;
@@ -36,18 +37,25 @@ pub const MAX_FRAME_BYTES: usize = 16_384;
 pub const MAX_QUEUE_BYTES: usize = 65_536;
 /// Descriptor 16000 + ticket 2048 + fixed ids/digests 3456.
 pub const MAX_SLOT_METADATA: usize = 21_504;
-/// Issued slot without a descriptor: ticket + fixed state.
+/// Issued slot without a descriptor: ticket + fixed state (annex F bound, not a dummy buffer).
 pub const ISSUED_RESERVE: usize = 2_048 + 3_456;
-/// Live slot reserves metadata and both queues before tokens exist.
+/// Live slot metadata and both queues (annex F bound, not a dummy buffer).
 pub const LIVE_RESERVE: usize = MAX_SLOT_METADATA + MAX_QUEUE_BYTES;
-/// Preallocated registry budget: boot id, issuer sequence, indexes, hour and source maps (annex F).
-/// Held as a live allocation so the 5832704 ceiling includes this registry, not a counter.
+/// Annex F registry ceiling (boot id, indexes, hour/source/closed maps). Charged as real
+/// `HashMap::capacity() × ENTRY_OVERHEAD` at construction; no dummy 256 KiB allocation.
 pub const SLACK_BYTES: usize = 262_144;
-/// Total retained relay backing, including slack.
+/// Per-entry overhead charged once for every map bucket and held record.
+pub const ENTRY_OVERHEAD: usize = 64;
+/// Closed-invitation tombstones. Live slot cap × issues-per-hour (retention-window factor 10):
+/// closed hashes persist for the original 300 s invitation lifetime, and a frozen clock admits
+/// at most 10 Issue→Create→Close cycles per account. 64 × 10 = 640. Busy, no eviction.
+pub const MAX_CLOSED: usize = MAX_SLOTS * MAX_ISSUES_PER_HOUR;
+/// Total retained relay backing. Cap uses the accountant; 5832704 is the annex F plan total.
 pub const MAX_BACKING: usize = MAX_SLOTS * LIVE_RESERVE + SLACK_BYTES;
 
 const _: () = assert!(MAX_BACKING == 5_832_704);
 const _: () = assert!(ISSUED_RESERVE < LIVE_RESERVE);
+const _: () = assert!(MAX_CLOSED == 640);
 
 /// Wall seconds plus monotonic milliseconds. Wall rollback cannot extend a deadline.
 pub trait PairingClock: Send + Sync {
@@ -164,10 +172,11 @@ impl PairingRelayError {
 }
 
 pub(super) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter().zip(right.iter()).fold(0_u8, |acc, (left, right)| acc | (left ^ right)) == 0
+    bool::from(left.ct_eq(right))
+}
+
+pub(super) fn token_hash(token: &[u8; 32]) -> [u8; 32] {
+    ramflux_crypto::blake3_256("ramflux.identity.pairing.relay_token.v1", token)
 }
 
 pub(super) fn wire(error: &WireError) -> PairingRelayError {

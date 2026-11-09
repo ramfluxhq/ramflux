@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Span Brain
 
 use super::{
-    MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_FRAME_BYTES, MAX_FRAMES_PER_DIRECTION,
-    MAX_HOUR_ENTRIES, MAX_ISSUES_PER_HOUR, MAX_SLOTS, MAX_SLOTS_PER_ACCOUNT, PairingClock,
-    PairingRelayConfig, PairingRelayError, PairingRelayStore, SLACK_BYTES, TestPairingClock,
+    MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_CLOSED, MAX_FRAME_BYTES,
+    MAX_FRAMES_PER_DIRECTION, MAX_HOUR_ENTRIES, MAX_ISSUES_PER_HOUR, MAX_SLOTS,
+    MAX_SLOTS_PER_ACCOUNT, PairingClock, PairingRelayConfig, PairingRelayError, PairingRelayStore,
+    TestPairingClock,
 };
 use ramflux_crypto::sign_canonical_bytes_with_seed;
 use ramflux_protocol::custody::pairing::native::{
@@ -174,19 +175,30 @@ fn exact(err: PairingRelayError, code: &str) -> TestResult {
     if err.code() == code { Ok(()) } else { Err(PairingRelayError::invalid("code")) }
 }
 
+fn books_match(store: &PairingRelayStore) -> TestResult {
+    if store.accounted_bytes() != store.measured_bytes() {
+        return Err(PairingRelayError::invalid("books"));
+    }
+    let stats = store.stats();
+    if stats.backing != store.accounted_bytes() {
+        return Err(PairingRelayError::invalid("backing"));
+    }
+    if stats.high_water > MAX_BACKING || stats.backing > MAX_BACKING {
+        return Err(PairingRelayError::invalid("high_water"));
+    }
+    Ok(())
+}
+
 fn high_water_at_cap(store: &mut PairingRelayStore) -> TestResult {
     let live = fill_live(store, MAX_SLOTS)?;
     if live.len() != MAX_SLOTS {
         return Err(PairingRelayError::invalid("slots"));
     }
     let stats = store.stats();
-    if stats.live != MAX_SLOTS || stats.backing != MAX_BACKING || stats.high_water != MAX_BACKING {
+    if stats.live != MAX_SLOTS {
         return Err(PairingRelayError::invalid("high_water"));
     }
-    if store.slack_len() != SLACK_BYTES {
-        return Err(PairingRelayError::invalid("slack"));
-    }
-    Ok(())
+    books_match(store)
 }
 
 fn one_over_is_busy_without_eviction(store: &mut PairingRelayStore) -> TestResult {
@@ -258,9 +270,10 @@ fn prune_reuse_and_restart() -> TestResult {
         Err(err) => exact(err, "Retired")?,
         Ok(_) => return Err(PairingRelayError::invalid("restart")),
     }
-    if restarted.stats().slots != 0 || restarted.stats().backing != SLACK_BYTES {
+    if restarted.stats().slots != 0 {
         return Err(PairingRelayError::invalid("restart_alloc"));
     }
+    books_match(&restarted)?;
     restarted.issue(spec(3, clock.wall_unix_secs()?))?;
     let _ = old;
     Ok(())
@@ -299,7 +312,9 @@ fn fill_role_queue(
 
 fn independent_counts(store: &mut PairingRelayStore) -> TestResult {
     store.shutdown();
+    books_match(store)?;
     let live = fill_live(store, MAX_SLOTS)?;
+    books_match(store)?;
     for (i, created) in live.iter().enumerate() {
         fill_role_queue(store, created, "initiator", &created.primary_token)?;
         let octet = u8::try_from(i / MAX_CLAIMS_PER_PREFIX)
@@ -317,7 +332,7 @@ fn independent_counts(store: &mut PairingRelayStore) -> TestResult {
     if stats.queued_bytes == 0 || stats.queued_bytes == stats.queued_frames * MAX_FRAME_BYTES {
         return Err(PairingRelayError::invalid("queued_bytes"));
     }
-    Ok(())
+    books_match(store)
 }
 
 fn sparse_and_isolation(store: &mut PairingRelayStore) -> TestResult {
@@ -480,16 +495,23 @@ fn hour_map_cap(store: &mut PairingRelayStore, clock: &TestPairingClock) -> Test
     clock.set_wall(WALL);
     clock.set_mono(0);
     for n in 0..MAX_HOUR_ENTRIES {
-        let issued = store.issue(spec_n(n, WALL))?;
-        let created = store.create(create_from_n(&issued, n, WALL))?;
+        if n > 0 && n % MAX_CLOSED == 0 {
+            clock.advance_secs(301);
+        }
+        let wall = clock.wall_unix_secs()?;
+        let issued = store.issue(spec_n(n, wall))?;
+        let created = store.create(create_from_n(&issued, n, wall))?;
         close_live(store, &created)?;
+        if n % 64 == 0 {
+            books_match(store)?;
+        }
     }
-    match store.issue(spec_n(MAX_HOUR_ENTRIES, WALL)) {
+    match store.issue(spec_n(MAX_HOUR_ENTRIES, clock.wall_unix_secs()?)) {
         Err(err) => exact(err, "Busy")?,
         Ok(_) => return Err(PairingRelayError::invalid("hour_map")),
     }
-    store.issue(spec_n(0, WALL))?;
-    Ok(())
+    store.issue(spec_n(0, clock.wall_unix_secs()?))?;
+    books_match(store)
 }
 
 fn claim_four_then_busy(
@@ -591,7 +613,7 @@ fn close_idempotent(store: &mut PairingRelayStore) -> TestResult {
     if !polled.closed {
         return Err(PairingRelayError::invalid("polled_closed"));
     }
-    Ok(())
+    books_match(store)
 }
 
 fn responder_needs_claim(store: &mut PairingRelayStore) -> TestResult {
@@ -631,7 +653,64 @@ fn stale_requeue(store: &mut PairingRelayStore, clock: &TestPairingClock) -> Tes
     if polled.frames.len() != 1 || polled.frames[0].seq != 0 {
         return Err(PairingRelayError::invalid("requeue"));
     }
-    Ok(())
+    books_match(store)
+}
+
+fn acked_send_not_requeued(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestResult {
+    store.shutdown();
+    clock.set_wall(WALL);
+    clock.set_mono(0);
+    let issued = store.issue(spec(27, WALL))?;
+    let created = store.create(create_from(&issued, 27, WALL))?;
+    let send = send_body(&created, "initiator", &created.primary_token, 0);
+    store.send(&send)?;
+    store.claim(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 27)), &claim_of(&created, 27))?;
+    let poll = |after_seq: Option<u64>| Poll {
+        schema: "ramflux.pairing.Poll.v2".into(),
+        version: 2,
+        invitation_id: created.invitation.body.invitation_id.clone(),
+        issuer_seq: created.invitation.body.issuer_seq,
+        role: "responder".into(),
+        token: created.recipient_token.clone(),
+        after_seq,
+    };
+    let first = store.poll(&poll(None))?;
+    if first.frames.len() != 1 || first.frames[0].seq != 0 {
+        return Err(PairingRelayError::invalid("acked_first"));
+    }
+    store.poll(&poll(Some(0)))?;
+    store.send(&send)?;
+    if store.stats().queued_frames != 0 {
+        return Err(PairingRelayError::invalid("acked_requeue"));
+    }
+    clock.advance_ms(1_001);
+    let polled = store.poll(&poll(None))?;
+    if !polled.frames.is_empty() {
+        return Err(PairingRelayError::invalid("acked_poll"));
+    }
+    books_match(store)
+}
+
+fn closed_map_cap(store: &mut PairingRelayStore, clock: &TestPairingClock) -> TestResult {
+    store.shutdown();
+    clock.set_wall(WALL);
+    clock.set_mono(0);
+    for n in 0..MAX_CLOSED {
+        let issued = store.issue(spec_n(n, WALL))?;
+        let created = store.create(create_from_n(&issued, n, WALL))?;
+        close_live(store, &created)?;
+        books_match(store)?;
+    }
+    let issued = store.issue(spec_n(MAX_CLOSED, WALL))?;
+    let created = store.create(create_from_n(&issued, MAX_CLOSED, WALL))?;
+    match close_live(store, &created) {
+        Err(err) => exact(err, "Busy")?,
+        Ok(()) => return Err(PairingRelayError::invalid("closed_map")),
+    }
+    if store.stats().live != 1 {
+        return Err(PairingRelayError::invalid("closed_evict"));
+    }
+    books_match(store)
 }
 
 fn send_cipher(created: &Created, token: &str, seq: u64, nbytes: usize) -> Send {
@@ -677,6 +756,7 @@ fn frame_max_plus_minus(store: &mut PairingRelayStore) -> TestResult {
 #[test]
 fn pairing_relay_caps_expiry_and_account_isolation() -> TestResult {
     let (mut store, clock) = open()?;
+    books_match(&store)?;
     high_water_at_cap(&mut store)?;
     one_over_is_busy_without_eviction(&mut store)?;
     retired_paths(&mut store, &clock)?;
@@ -693,6 +773,8 @@ fn pairing_relay_caps_expiry_and_account_isolation() -> TestResult {
     close_idempotent(&mut store)?;
     responder_needs_claim(&mut store)?;
     stale_requeue(&mut store, &clock)?;
+    acked_send_not_requeued(&mut store, &clock)?;
+    closed_map_cap(&mut store, &clock)?;
     frame_max_plus_minus(&mut store)?;
     prune_reuse_and_restart()?;
     Ok(())

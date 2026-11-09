@@ -2,12 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Boot-scoped in-memory pairing relay allocator. Dormant: no HTTP or native route.
+use super::bytes::{
+    claim_payload, closed_payload, direction_payload, frame_list_heap, hour_payload, slot_payload,
+    table_bytes,
+};
 use super::limits::{
-    AllocatorStats, CLAIM_GRACE_MS, HOUR_MS, INVITATION_LIFETIME_SECS, ISSUED_RESERVE,
-    LIVE_RESERVE, MAX_BACKING, MAX_CLAIMS, MAX_CLAIMS_PER_PREFIX, MAX_FRAME_BYTES,
-    MAX_FRAMES_PER_DIRECTION, MAX_HOUR_ENTRIES, MAX_ISSUES_PER_HOUR, MAX_POLLS_PER_SEC, MAX_SLOTS,
-    MAX_SLOTS_PER_ACCOUNT, PairingClock, PairingRelayError, SLACK_BYTES, claim_source_prefixes,
-    constant_time_eq, wire,
+    AllocatorStats, CLAIM_GRACE_MS, HOUR_MS, INVITATION_LIFETIME_SECS, MAX_BACKING, MAX_CLAIMS,
+    MAX_CLAIMS_PER_PREFIX, MAX_CLOSED, MAX_FRAME_BYTES, MAX_FRAMES_PER_DIRECTION, MAX_HOUR_ENTRIES,
+    MAX_ISSUES_PER_HOUR, MAX_POLLS_PER_SEC, MAX_SLOTS, MAX_SLOTS_PER_ACCOUNT, PairingClock,
+    PairingRelayError, claim_source_prefixes, constant_time_eq, token_hash, wire,
 };
 use crate::{InFlightGuard, begin_service_request};
 use ramflux_crypto::{
@@ -42,56 +45,55 @@ struct Now {
     mono: u64,
 }
 
-struct Direction {
-    frames: Vec<(u64, RelayFrame)>,
+pub(super) struct Direction {
+    pub(super) frames: Vec<(u64, RelayFrame)>,
     next_send_seq: u64,
-    last_send: Option<(u64, String)>,
-    poll_times: VecDeque<u64>,
+    pub(super) last_send: Option<(u64, String)>,
+    acked_seq: Option<u64>,
+    pub(super) poll_times: VecDeque<u64>,
 }
 
-struct IssuedSlot {
-    ticket: Envelope<CreateTicket>,
-    spec_hash: String,
-    primary_ref: DeviceRef,
+pub(super) struct IssuedSlot {
+    pub(super) ticket: Envelope<CreateTicket>,
+    pub(super) spec_hash: String,
+    pub(super) primary_ref: DeviceRef,
 }
 
-enum SlotBody {
+pub(super) enum SlotBody {
     Issued(Box<IssuedSlot>),
     Live(Box<LiveSlot>),
 }
 
-struct LiveSlot {
-    ticket: Envelope<CreateTicket>,
-    descriptor: Envelope<Invitation>,
+pub(super) struct LiveSlot {
+    pub(super) ticket: Envelope<CreateTicket>,
+    pub(super) descriptor: Envelope<Invitation>,
     primary_token: Zeroizing<[u8; 32]>,
     recipient_token: Zeroizing<[u8; 32]>,
     claim_nonce: Option<[u8; 32]>,
-    initiator: Direction,
-    responder: Direction,
-    closed_reason: Option<String>,
+    pub(super) initiator: Direction,
+    pub(super) responder: Direction,
+    pub(super) closed_reason: Option<String>,
     last_activity_ms: u64,
 }
 
-struct Slot {
+pub(super) struct Slot {
     account: [u8; 32],
     expires_at: u64,
     monotonic_deadline: u64,
-    reserved: usize,
-    backing: Vec<u8>,
-    body: SlotBody,
+    pub(super) body: SlotBody,
 }
 
-struct ClosedSlot {
-    reason: String,
+pub(super) struct ClosedSlot {
+    pub(super) reason: String,
     issuer_seq: u64,
-    primary_token: Zeroizing<[u8; 32]>,
-    recipient_token: Zeroizing<[u8; 32]>,
+    primary_hash: [u8; 32],
+    recipient_hash: [u8; 32],
     expires_at: u64,
     monotonic_deadline: u64,
 }
 
-struct ClaimEntry {
-    prefixes: Vec<String>,
+pub(super) struct ClaimEntry {
+    pub(super) prefixes: Vec<String>,
     expires_ms: u64,
 }
 
@@ -108,9 +110,9 @@ pub struct PairingRelayStore {
     hour: HashMap<[u8; 32], VecDeque<u64>>,
     claims: HashMap<[u8; 32], ClaimEntry>,
     closed: HashMap<[u8; 32], ClosedSlot>,
-    slack: Vec<u8>,
-    reserved_total: usize,
+    accounted: usize,
     high_water: usize,
+    registry_mark: usize,
 }
 
 impl PairingRelayStore {
@@ -124,7 +126,7 @@ impl PairingRelayStore {
         if !origin.starts_with("https://") || origin.len() > 256 {
             return Err(PairingRelayError::invalid("public_origin"));
         }
-        Ok(Self {
+        let mut store = Self {
             clock: config.clock,
             node_key: public_key_base64url_from_seed(config.node_seed),
             seed: Zeroizing::new(config.node_seed),
@@ -135,11 +137,15 @@ impl PairingRelayStore {
             invitations: HashMap::with_capacity(MAX_SLOTS),
             hour: HashMap::with_capacity(MAX_HOUR_ENTRIES),
             claims: HashMap::with_capacity(MAX_CLAIMS),
-            closed: HashMap::with_capacity(MAX_SLOTS),
-            slack: vec![0_u8; SLACK_BYTES],
-            reserved_total: SLACK_BYTES,
-            high_water: SLACK_BYTES,
-        })
+            closed: HashMap::with_capacity(MAX_CLOSED),
+            accounted: 0,
+            high_water: 0,
+            registry_mark: 0,
+        };
+        store.accounted = store.registry_bytes();
+        store.high_water = store.accounted;
+        store.registry_mark = store.accounted;
+        Ok(store)
     }
 
     #[must_use]
@@ -153,13 +159,12 @@ impl PairingRelayStore {
     #[must_use]
     pub fn stats(&self) -> AllocatorStats {
         let (issued, live, queued_bytes, queued_frames) = slot_counts(&self.slots);
-        let backing = self.measured_retained();
         AllocatorStats {
             slots: self.slots.len(),
             issued,
             live,
-            backing,
-            high_water: self.high_water.max(backing),
+            backing: self.accounted,
+            high_water: self.high_water,
             queued_bytes,
             queued_frames,
             sockets: self.claims.len(),
@@ -167,8 +172,18 @@ impl PairingRelayStore {
         }
     }
     #[must_use]
-    pub fn slack_len(&self) -> usize {
-        self.slack.len()
+    pub fn accounted_bytes(&self) -> usize {
+        self.accounted
+    }
+    /// Production walker: sums the same owned-buffer quantities the accountant charges.
+    /// No allocation. Independent of the running total.
+    #[must_use]
+    pub fn measured_bytes(&self) -> usize {
+        self.registry_bytes()
+            .saturating_add(self.slots.values().map(slot_payload).sum())
+            .saturating_add(self.hour.values().map(hour_payload).sum())
+            .saturating_add(self.claims.values().map(claim_payload).sum())
+            .saturating_add(self.closed.values().map(closed_payload).sum())
     }
 
     /// Account-scoped slot class. Unknown and foreign ids share one Retired result.
@@ -294,10 +309,17 @@ impl PairingRelayStore {
         let _ = self.check_token(invitation, send.issuer_seq, &send.role, &send.token, now.wall)?;
         self.require_responder_claim(invitation, &send.role)?;
         let digest = send.frame_digest().map_err(|e| wire(&e))?;
-        let live = self.live_mut(invitation)?;
-        live.last_activity_ms = now.mono;
-        let out = direction_mut(live, &send.role)?;
-        enqueue(out, send.seq, send.frame.clone(), digest)?;
+        send.frame.validate().map_err(|e| wire(&e))?;
+        let extra = {
+            let live = self.live_mut(invitation)?;
+            live.last_activity_ms = now.mono;
+            let out = direction_mut(live, &send.role)?;
+            enqueue_cost(out, send.seq, &digest)?;
+            let before = direction_payload(out);
+            apply_enqueue(out, send.seq, send.frame.clone(), digest);
+            direction_payload(out).saturating_sub(before)
+        };
+        self.charge(extra)?;
         Ok(Sent {
             schema: "ramflux.pairing.Sent.v2".into(),
             version: 2,
@@ -326,18 +348,24 @@ impl PairingRelayStore {
             });
         }
         self.require_responder_claim(invitation, &poll.role)?;
-        let live = self.live_mut(invitation)?;
-        live.last_activity_ms = now.mono;
-        let closed = live.closed_reason.is_some();
-        {
+        let (closed, refund, extra, frames) = {
+            let live = self.live_mut(invitation)?;
+            live.last_activity_ms = now.mono;
+            let closed = live.closed_reason.is_some();
             let incoming = peer_mut(live, &poll.role)?;
+            let before = direction_payload(incoming);
             record_poll(incoming, now.mono)?;
             if let Some(ack) = poll.after_seq {
-                incoming.frames.retain(|(seq, _)| *seq > ack);
+                let _ = ack_frames(incoming, ack);
             }
-        }
-        let incoming = peer_mut(self.live_mut(invitation)?, &poll.role)?;
-        let frames = take_polled_frames(incoming)?;
+            let after = direction_payload(incoming);
+            let frames = take_polled_frames(incoming)?;
+            let refund = before.saturating_sub(after);
+            let extra = after.saturating_sub(before);
+            (closed, refund, extra, frames)
+        };
+        self.refund(refund);
+        self.charge(extra)?;
         Ok(Polled {
             schema: "ramflux.pairing.Polled.v2".into(),
             version: 2,
@@ -362,6 +390,9 @@ impl PairingRelayStore {
         if let Some(closed) = self.closed.get(&invitation) {
             return Ok(closed_reply(&close.invitation_id, &closed.reason));
         }
+        if self.closed.len() >= MAX_CLOSED {
+            return Err(self.busy());
+        }
         self.require_responder_claim(invitation, &close.role)?;
         let Some(create_id) = self.invitations.get(&invitation).copied() else {
             return Err(PairingRelayError::Retired);
@@ -377,15 +408,22 @@ impl PairingRelayStore {
         for id in ids {
             self.release_slot(id);
         }
+        let claim_refund: usize = self.claims.values().map(claim_payload).sum();
         self.claims.clear();
+        self.refund(claim_refund);
+        let hour_refund: usize = self.hour.values().map(hour_payload).sum();
         self.hour.clear();
+        self.refund(hour_refund);
+        let closed_refund: usize = self.closed.values().map(closed_payload).sum();
         for closed in self.closed.values_mut() {
-            closed.primary_token.fill(0);
-            closed.recipient_token.fill(0);
+            closed.primary_hash.fill(0);
+            closed.recipient_hash.fill(0);
         }
         self.closed.clear();
+        self.refund(closed_refund);
         self.issuer_seq = 0;
-        self.refresh_measured();
+        self.accounted = self.registry_bytes();
+        self.registry_mark = self.accounted;
     }
 
     /// Count issued+live slots whose `account_anchor` matches.
@@ -414,9 +452,7 @@ impl PairingRelayStore {
     }
 
     fn check_issue_quotas(&self, account: [u8; 32]) -> Result<(), PairingRelayError> {
-        if self.slots.len() >= MAX_SLOTS
-            || self.reserved_total.saturating_add(ISSUED_RESERVE) > MAX_BACKING
-        {
+        if self.slots.len() >= MAX_SLOTS {
             return Err(self.busy());
         }
         let owned = self.slots.values().filter(|slot| slot.account == account).count();
@@ -474,27 +510,26 @@ impl PairingRelayStore {
         if !self.hour.contains_key(&account) && self.hour.len() >= MAX_HOUR_ENTRIES {
             return Err(self.busy());
         }
-        self.charge(ISSUED_RESERVE)?;
-        self.slots.insert(
-            create_id,
-            Slot {
-                account,
-                expires_at: ticket.body.expires_at,
-                monotonic_deadline: now
-                    .mono
-                    .saturating_add(INVITATION_LIFETIME_SECS.saturating_mul(1_000)),
-                reserved: ISSUED_RESERVE,
-                backing: vec![0_u8; ISSUED_RESERVE],
-                body: SlotBody::Issued(Box::new(IssuedSlot {
-                    spec_hash: spec.spec_hash().map_err(|e| wire(&e))?,
-                    primary_ref: spec.primary_ref,
-                    ticket,
-                })),
-            },
-        );
-        self.hour.entry(account).or_default().push_back(now.mono);
-        self.refresh_measured();
-        Ok(())
+        let slot = Slot {
+            account,
+            expires_at: ticket.body.expires_at,
+            monotonic_deadline: now
+                .mono
+                .saturating_add(INVITATION_LIFETIME_SECS.saturating_mul(1_000)),
+            body: SlotBody::Issued(Box::new(IssuedSlot {
+                spec_hash: spec.spec_hash().map_err(|e| wire(&e))?,
+                primary_ref: spec.primary_ref,
+                ticket,
+            })),
+        };
+        let payload = slot_payload(&slot);
+        self.charge(payload)?;
+        if let Err(err) = self.record_hour(account, now.mono) {
+            self.refund(payload);
+            return Err(err);
+        }
+        self.slots.insert(create_id, slot);
+        self.sync_registry()
     }
 
     fn verify_ticket(&self, create: &Create) -> Result<(), PairingRelayError> {
@@ -526,28 +561,35 @@ impl PairingRelayStore {
         }
         let descriptor = self.build_invitation(&create, invitation_id, transfer_id)?;
         let created = created_reply(&descriptor, primary, recipient)?;
-        let extra = LIVE_RESERVE.saturating_sub(ISSUED_RESERVE);
-        self.charge(extra)?;
-        let ticket = create.ticket;
-        let Some(slot) = self.slots.get_mut(&id) else {
-            self.refund(extra);
-            return Err(PairingRelayError::Retired);
+        let (account, expires_at, monotonic_deadline, before) = {
+            let slot = self.slots.get(&id).ok_or(PairingRelayError::Retired)?;
+            (slot.account, slot.expires_at, slot.monotonic_deadline, slot_payload(slot))
         };
-        slot.reserved = LIVE_RESERVE;
-        slot.backing = vec![0_u8; LIVE_RESERVE];
-        slot.body = SlotBody::Live(Box::new(LiveSlot {
-            ticket,
-            descriptor,
-            primary_token: Zeroizing::new(primary),
-            recipient_token: Zeroizing::new(recipient),
-            claim_nonce: None,
-            initiator: Direction::default(),
-            responder: Direction::default(),
-            closed_reason: None,
-            last_activity_ms: now.mono,
-        }));
+        let live_slot = Slot {
+            account,
+            expires_at,
+            monotonic_deadline,
+            body: SlotBody::Live(Box::new(LiveSlot {
+                ticket: create.ticket,
+                descriptor,
+                primary_token: Zeroizing::new(primary),
+                recipient_token: Zeroizing::new(recipient),
+                claim_nonce: None,
+                initiator: Direction::default(),
+                responder: Direction::default(),
+                closed_reason: None,
+                last_activity_ms: now.mono,
+            })),
+        };
+        let after = slot_payload(&live_slot);
+        if after >= before {
+            self.charge(after.saturating_sub(before))?;
+        } else {
+            self.refund(before.saturating_sub(after));
+        }
+        self.slots.insert(id, live_slot);
         self.invitations.insert(invitation_id, id);
-        self.refresh_measured();
+        self.sync_registry()?;
         Ok(created)
     }
 
@@ -637,7 +679,7 @@ impl PairingRelayStore {
         if closed.issuer_seq != issuer_seq {
             return Err(PairingRelayError::WrongContext);
         }
-        role_token_ok(role, token, &closed.primary_token, &closed.recipient_token)?;
+        role_token_hash_ok(role, token, &closed.primary_hash, &closed.recipient_hash)?;
         Ok(closed.expires_at)
     }
 
@@ -666,18 +708,17 @@ impl PairingRelayStore {
         let SlotBody::Live(live) = &slot.body else {
             return Err(PairingRelayError::Retired);
         };
-        self.closed.insert(
-            invitation,
-            ClosedSlot {
-                reason,
-                issuer_seq: live.descriptor.body.issuer_seq,
-                primary_token: Zeroizing::new(*live.primary_token),
-                recipient_token: Zeroizing::new(*live.recipient_token),
-                expires_at: slot.expires_at,
-                monotonic_deadline: slot.monotonic_deadline,
-            },
-        );
-        Ok(())
+        let closed = ClosedSlot {
+            reason,
+            issuer_seq: live.descriptor.body.issuer_seq,
+            primary_hash: token_hash(&live.primary_token),
+            recipient_hash: token_hash(&live.recipient_token),
+            expires_at: slot.expires_at,
+            monotonic_deadline: slot.monotonic_deadline,
+        };
+        self.charge(closed_payload(&closed))?;
+        self.closed.insert(invitation, closed);
+        self.sync_registry()
     }
 
     fn live(&self, invitation: [u8; 32]) -> Result<&LiveSlot, PairingRelayError> {
@@ -718,11 +759,10 @@ impl PairingRelayStore {
                 return Err(self.busy());
             }
         }
-        self.claims.insert(
-            invitation,
-            ClaimEntry { prefixes, expires_ms: mono.saturating_add(CLAIM_GRACE_MS) },
-        );
-        Ok(())
+        let entry = ClaimEntry { prefixes, expires_ms: mono.saturating_add(CLAIM_GRACE_MS) };
+        self.charge(claim_payload(&entry))?;
+        self.claims.insert(invitation, entry);
+        self.sync_registry()
     }
 
     fn prune(&mut self) -> Result<(), PairingRelayError> {
@@ -736,67 +776,146 @@ impl PairingRelayStore {
         for id in expired {
             self.release_slot(id);
         }
-        self.claims.retain(|_, entry| entry.expires_ms > now.mono);
-        self.closed.retain(|_, closed| {
-            now.wall < closed.expires_at && now.mono < closed.monotonic_deadline
+        self.prune_claims(now.mono);
+        self.prune_closed(&now);
+        self.prune_stale_frames(now.mono);
+        self.prune_hour(now.mono);
+        Ok(())
+    }
+
+    fn charge(&mut self, extra: usize) -> Result<(), PairingRelayError> {
+        if extra == 0 {
+            return Ok(());
+        }
+        let next =
+            self.accounted.checked_add(extra).ok_or(PairingRelayError::invalid("backing"))?;
+        if next > MAX_BACKING {
+            return Err(self.busy());
+        }
+        self.accounted = next;
+        self.high_water = self.high_water.max(next);
+        Ok(())
+    }
+
+    fn refund(&mut self, extra: usize) {
+        self.accounted = self.accounted.saturating_sub(extra);
+    }
+
+    fn registry_bytes(&self) -> usize {
+        table_bytes(&self.slots)
+            .saturating_add(table_bytes(&self.invitations))
+            .saturating_add(table_bytes(&self.hour))
+            .saturating_add(table_bytes(&self.claims))
+            .saturating_add(table_bytes(&self.closed))
+            .saturating_add(self.node_key.capacity())
+            .saturating_add(self.boot_id_b64.capacity())
+            .saturating_add(self.public_origin.capacity())
+            .saturating_add(32)
+    }
+
+    fn sync_registry(&mut self) -> Result<(), PairingRelayError> {
+        let now = self.registry_bytes();
+        if now > self.registry_mark {
+            self.charge(now.saturating_sub(self.registry_mark))?;
+        } else if now < self.registry_mark {
+            self.refund(self.registry_mark.saturating_sub(now));
+        }
+        self.registry_mark = now;
+        Ok(())
+    }
+
+    fn record_hour(&mut self, account: [u8; 32], mono: u64) -> Result<(), PairingRelayError> {
+        if !self.hour.contains_key(&account) {
+            let times = VecDeque::with_capacity(MAX_ISSUES_PER_HOUR);
+            self.charge(hour_payload(&times))?;
+            self.hour.insert(account, times);
+            self.sync_registry()?;
+        }
+        let extra = {
+            let times = self.hour.get_mut(&account).ok_or(PairingRelayError::invalid("hour"))?;
+            let before = hour_payload(times);
+            times.push_back(mono);
+            hour_payload(times).saturating_sub(before)
+        };
+        self.charge(extra)
+    }
+
+    fn prune_claims(&mut self, mono: u64) {
+        let mut refund = 0_usize;
+        self.claims.retain(|_, entry| {
+            if entry.expires_ms > mono {
+                true
+            } else {
+                refund = refund.saturating_add(claim_payload(entry));
+                false
+            }
         });
+        self.refund(refund);
+        let _ = self.sync_registry();
+    }
+
+    fn prune_closed(&mut self, now: &Now) {
+        let mut refund = 0_usize;
+        self.closed.retain(|_, closed| {
+            if now.wall < closed.expires_at && now.mono < closed.monotonic_deadline {
+                true
+            } else {
+                refund = refund.saturating_add(closed_payload(closed));
+                false
+            }
+        });
+        self.refund(refund);
+        let _ = self.sync_registry();
+    }
+
+    fn prune_stale_frames(&mut self, mono: u64) {
         let stale: Vec<[u8; 32]> = self
             .slots
             .iter()
             .filter_map(|(id, slot)| match &slot.body {
                 SlotBody::Live(live)
-                    if now.mono.saturating_sub(live.last_activity_ms) >= CLAIM_GRACE_MS =>
+                    if mono.saturating_sub(live.last_activity_ms) >= CLAIM_GRACE_MS =>
                 {
                     Some(*id)
                 }
                 _ => None,
             })
             .collect();
+        let mut refund = 0_usize;
         for id in stale {
             if let Some(Slot { body: SlotBody::Live(live), .. }) = self.slots.get_mut(&id) {
+                refund = refund.saturating_add(frame_list_heap(&live.initiator.frames));
+                refund = refund.saturating_add(frame_list_heap(&live.responder.frames));
                 live.initiator.frames.clear();
                 live.responder.frames.clear();
             }
         }
-        let cutoff = now.mono.saturating_sub(HOUR_MS);
+        self.refund(refund);
+    }
+
+    fn prune_hour(&mut self, mono: u64) {
+        let cutoff = mono.saturating_sub(HOUR_MS);
         for times in self.hour.values_mut() {
             while times.front().is_some_and(|t| *t < cutoff) {
                 times.pop_front();
             }
         }
-        self.hour.retain(|_, times| !times.is_empty());
-        Ok(())
-    }
-
-    fn charge(&mut self, extra: usize) -> Result<(), PairingRelayError> {
-        let next =
-            self.reserved_total.checked_add(extra).ok_or(PairingRelayError::invalid("backing"))?;
-        if next > MAX_BACKING {
-            return Err(self.busy());
-        }
-        self.reserved_total = next;
-        Ok(())
-    }
-
-    fn refund(&mut self, extra: usize) {
-        self.reserved_total = self.reserved_total.saturating_sub(extra);
-    }
-
-    fn measured_retained(&self) -> usize {
-        self.slack
-            .capacity()
-            .saturating_add(self.slots.values().map(|slot| slot.backing.capacity()).sum())
-    }
-
-    fn refresh_measured(&mut self) {
-        let now = self.measured_retained();
-        self.high_water = self.high_water.max(now);
+        let mut refund = 0_usize;
+        self.hour.retain(|_, times| {
+            if times.is_empty() {
+                refund = refund.saturating_add(hour_payload(times));
+                false
+            } else {
+                true
+            }
+        });
+        self.refund(refund);
+        let _ = self.sync_registry();
     }
 
     fn release_slot(&mut self, id: [u8; 32]) {
         if let Some(slot) = self.slots.remove(&id) {
-            self.reserved_total = self.reserved_total.saturating_sub(slot.reserved);
-            self.refresh_measured();
+            self.refund(slot_payload(&slot));
             if let SlotBody::Live(mut live) = slot.body {
                 live.primary_token.fill(0);
                 live.recipient_token.fill(0);
@@ -804,9 +923,12 @@ impl PairingRelayStore {
                     parse_id(&live.descriptor.body.invitation_id, "invitation_id").ok();
                 if let Some(invitation) = invitation {
                     self.invitations.remove(&invitation);
-                    self.claims.remove(&invitation);
+                    if let Some(claim) = self.claims.remove(&invitation) {
+                        self.refund(claim_payload(&claim));
+                    }
                 }
             }
+            let _ = self.sync_registry();
         }
     }
 }
@@ -817,6 +939,7 @@ impl Default for Direction {
             frames: Vec::with_capacity(MAX_FRAMES_PER_DIRECTION),
             next_send_seq: 0,
             last_send: None,
+            acked_seq: None,
             poll_times: VecDeque::with_capacity(MAX_POLLS_PER_SEC),
         }
     }
@@ -913,24 +1036,20 @@ fn peer_mut<'a>(
     }
 }
 
-fn enqueue(
-    out: &mut Direction,
-    seq: u64,
-    frame: RelayFrame,
-    digest: String,
-) -> Result<(), PairingRelayError> {
+fn enqueue_cost(out: &Direction, seq: u64, digest: &str) -> Result<(), PairingRelayError> {
     if let Some((last_seq, last_digest)) = &out.last_send
         && seq == *last_seq
     {
-        if digest != *last_digest {
+        if digest != last_digest {
             return Err(PairingRelayError::Replay);
         }
-        if !out.frames.iter().any(|(held, _)| *held == seq) {
-            if out.frames.len() >= MAX_FRAMES_PER_DIRECTION {
-                return Err(PairingRelayError::busy(seq));
-            }
-            frame.validate().map_err(|e| wire(&e))?;
-            out.frames.push((seq, frame));
+        if out.acked_seq.is_some_and(|ack| seq <= ack)
+            || out.frames.iter().any(|(held, _)| *held == seq)
+        {
+            return Ok(());
+        }
+        if out.frames.len() >= MAX_FRAMES_PER_DIRECTION {
+            return Err(PairingRelayError::busy(seq));
         }
         return Ok(());
     }
@@ -940,11 +1059,31 @@ fn enqueue(
     if out.frames.len() >= MAX_FRAMES_PER_DIRECTION {
         return Err(PairingRelayError::busy(seq));
     }
-    frame.validate().map_err(|e| wire(&e))?;
+    Ok(())
+}
+
+fn apply_enqueue(out: &mut Direction, seq: u64, frame: RelayFrame, digest: String) {
+    if let Some((last_seq, _)) = &out.last_send
+        && seq == *last_seq
+    {
+        if out.acked_seq.is_some_and(|ack| seq <= ack)
+            || out.frames.iter().any(|(held, _)| *held == seq)
+        {
+            return;
+        }
+        out.frames.push((seq, frame));
+        return;
+    }
     out.frames.push((seq, frame));
     out.last_send = Some((seq, digest));
     out.next_send_seq = out.next_send_seq.saturating_add(1);
-    Ok(())
+}
+
+fn ack_frames(direction: &mut Direction, ack: u64) -> usize {
+    let before = frame_list_heap(&direction.frames);
+    direction.acked_seq = Some(direction.acked_seq.map_or(ack, |prev| prev.max(ack)));
+    direction.frames.retain(|(seq, _)| *seq > ack);
+    before.saturating_sub(frame_list_heap(&direction.frames))
 }
 
 fn record_poll(direction: &mut Direction, mono: u64) -> Result<(), PairingRelayError> {
@@ -1002,8 +1141,23 @@ fn role_token_ok(
     primary: &[u8; 32],
     recipient: &[u8; 32],
 ) -> Result<(), PairingRelayError> {
-    let init_ok = token_eq(primary, presented);
-    let resp_ok = token_eq(recipient, presented);
+    role_match(role, token_eq(primary, presented), token_eq(recipient, presented))
+}
+
+fn role_token_hash_ok(
+    role: &str,
+    presented: &str,
+    primary_hash: &[u8; 32],
+    recipient_hash: &[u8; 32],
+) -> Result<(), PairingRelayError> {
+    role_match(
+        role,
+        token_hash_eq(primary_hash, presented),
+        token_hash_eq(recipient_hash, presented),
+    )
+}
+
+fn role_match(role: &str, init_ok: bool, resp_ok: bool) -> Result<(), PairingRelayError> {
     match role {
         "initiator" if init_ok => Ok(()),
         "responder" if resp_ok => Ok(()),
@@ -1012,7 +1166,7 @@ fn role_token_ok(
     }
 }
 
-fn token_eq(expected: &[u8; 32], presented: &str) -> bool {
+fn decode_token(presented: &str) -> (bool, [u8; 32]) {
     let decoded = decode_base64url(presented).ok();
     let mut buf = [0_u8; 32];
     let valid = match decoded {
@@ -1022,7 +1176,17 @@ fn token_eq(expected: &[u8; 32], presented: &str) -> bool {
         }
         _ => false,
     };
+    (valid, buf)
+}
+
+fn token_eq(expected: &[u8; 32], presented: &str) -> bool {
+    let (valid, buf) = decode_token(presented);
     constant_time_eq(&buf, expected) && valid
+}
+
+fn token_hash_eq(expected_hash: &[u8; 32], presented: &str) -> bool {
+    let (valid, buf) = decode_token(presented);
+    constant_time_eq(&token_hash(&buf), expected_hash) && valid
 }
 
 fn frame_held_bytes(frame: &RelayFrame) -> usize {
