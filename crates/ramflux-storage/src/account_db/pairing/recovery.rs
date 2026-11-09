@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Crash reopen for pairing journal writers that exist on main (P04).
+//! Vault, [`crate::AccountIndex`], `authority.json` and node persistence cuts are later parts.
+
+use super::journal::{FloorRow, HeadRow, LiveRow, TerminalRow};
+use crate::{AccountDb, StorageError};
+use rusqlite::params;
+
+/// Writers annex F names whose production owners are not on main yet.
+pub const MISSING_CRASH_WRITERS: &[(&str, &str)] = &[
+    ("J0 AccountIndex/directory reservation", "P08"),
+    ("J1 vault branch/data/primary commits", "P08"),
+    ("J5 node authority persistence / Published", "P09"),
+    ("J7b authority.json temp/fsync/rename/dir-fsync", "P10"),
+    ("J8 vault old-management provider deletion", "P14"),
+    ("J7c/J8 production load/register/own-sync gates", "P10"),
+];
+
+/// Admission stays closed until install, authority, DB and vault agree (P10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    Closed,
+}
+
+/// Recovered ceremony after reopen. Candidate hash is preserved after J3.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveredOutcome {
+    Empty,
+    HandshakeCancelled { operation_id: String },
+    CandidateFenced { operation_id: String, candidate_hash: String, head_state: String },
+}
+
+/// Durable pairing rows observed after recover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveredPairing {
+    pub floor: Option<FloorRow>,
+    pub head: Option<HeadRow>,
+    pub live: Vec<LiveRow>,
+    pub terminals: Vec<TerminalRow>,
+    pub outcome: RecoveredOutcome,
+    pub admission: Admission,
+}
+
+fn field(name: &'static str) -> StorageError {
+    StorageError::PairingField(name)
+}
+
+impl RecoveredPairing {
+    fn from_rows(
+        floor: Option<FloorRow>,
+        head: Option<HeadRow>,
+        live: Vec<LiveRow>,
+        terminals: Vec<TerminalRow>,
+    ) -> Self {
+        let outcome = if let Some(head) = &head {
+            RecoveredOutcome::CandidateFenced {
+                operation_id: head.operation_id.clone(),
+                candidate_hash: head.candidate_hash.clone(),
+                head_state: head.state.clone(),
+            }
+        } else if let Some(row) = terminals.iter().find(|row| row.outcome == "cancelled") {
+            RecoveredOutcome::HandshakeCancelled { operation_id: row.operation_id.clone() }
+        } else {
+            RecoveredOutcome::Empty
+        };
+        Self { floor, head, live, terminals, outcome, admission: Admission::Closed }
+    }
+}
+
+impl AccountDb {
+    /// Annex F writers whose production owners are later parts. P04J models existing writers only.
+    #[must_use]
+    pub const fn pairing_missing_crash_writers() -> &'static [(&'static str, &'static str)] {
+        MISSING_CRASH_WRITERS
+    }
+
+    /// Reopen recovery: cancel live handshakes with no durable head; fence an existing candidate.
+    ///
+    /// # Errors
+    /// Returns the exact invalid field or SQLite errors.
+    pub fn recover_pairing(&self) -> Result<RecoveredPairing, StorageError> {
+        let head = self.pairing_head()?;
+        for live in self.pairing_live_rows()? {
+            if live_handshake_open(head.as_ref(), &live) {
+                self.cancel_unsubmitted_live(&live)?;
+            }
+        }
+        Ok(RecoveredPairing::from_rows(
+            self.pairing_floor()?,
+            self.pairing_head()?,
+            self.pairing_live_rows()?,
+            self.pairing_terminal_rows()?,
+        ))
+    }
+
+    /// Load live rows for this account.
+    ///
+    /// # Errors
+    /// Returns SQLite errors or a malformed stored row.
+    pub fn pairing_live_rows(&self) -> Result<Vec<LiveRow>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT account_id,operation_id,invitation_id,issuer_seq,local_seq,generation,role,
+                    descriptor,phase,context,transcript_hash,proposal_hash,transfer_ciphertext_hash,
+                    candidate_id,branch_reservation,branch_vault_ref,primary_vault_ref,
+                    base_record_hash,base_epoch,expires_at,result
+             FROM pairing_live WHERE account_id=?1",
+        )?;
+        let rows: Vec<LiveRow> = statement
+            .query_map(params![self.local_account_id], map_live)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for row in &rows {
+            row.validate()?;
+        }
+        Ok(rows)
+    }
+
+    /// Load terminal rows for this account.
+    ///
+    /// # Errors
+    /// Returns SQLite errors or a malformed stored row.
+    pub fn pairing_terminal_rows(&self) -> Result<Vec<TerminalRow>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT account_id,operation_id,invitation_id,issuer_seq,local_seq,generation,outcome,
+                    record_hash,finished_at,cleanup
+             FROM pairing_terminal WHERE account_id=?1",
+        )?;
+        let rows: Vec<TerminalRow> = statement
+            .query_map(params![self.local_account_id], map_terminal)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for row in &rows {
+            row.validate()?;
+        }
+        Ok(rows)
+    }
+
+    /// J8 DB cleanup: terminal row plus live/head delete in one transaction.
+    ///
+    /// # Errors
+    /// Returns `PairingField("state")` for an unresolved submitted head, or SQLite errors.
+    pub fn commit_pairing_terminal_cleanup(&self, row: &TerminalRow) -> Result<(), StorageError> {
+        row.validate()?;
+        self.require_local(&row.account_id)?;
+        if let Some(head) = self.pairing_head()? {
+            if head.operation_id != row.operation_id {
+                return Err(field("operation_id"));
+            }
+            if head.state != "acknowledged" {
+                return Err(field("state"));
+            }
+        }
+        let transaction = self.connection.immediate_transaction()?;
+        self.delete_live(&row.account_id, &row.operation_id)?;
+        self.delete_head(&row.account_id, &row.operation_id)?;
+        self.put_pairing_terminal(row)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn cancel_unsubmitted_live(&self, live: &LiveRow) -> Result<(), StorageError> {
+        let terminal = TerminalRow {
+            account_id: live.account_id.clone(),
+            operation_id: live.operation_id.clone(),
+            invitation_id: live.invitation_id.clone(),
+            issuer_seq: live.issuer_seq,
+            local_seq: live.local_seq,
+            generation: live.generation,
+            outcome: "cancelled".into(),
+            record_hash: None,
+            finished_at: self.now_unix().cast_unsigned(),
+            cleanup: "none".into(),
+        };
+        let transaction = self.connection.immediate_transaction()?;
+        self.delete_live(&live.account_id, &live.operation_id)?;
+        self.put_pairing_terminal(&terminal)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn require_local(&self, account_id: &str) -> Result<(), StorageError> {
+        if account_id == self.local_account_id { Ok(()) } else { Err(field("account_id")) }
+    }
+
+    fn delete_live(&self, account_id: &str, operation_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM pairing_live WHERE account_id=?1 AND operation_id=?2",
+            params![account_id, operation_id],
+        )?;
+        Ok(())
+    }
+
+    fn delete_head(&self, account_id: &str, operation_id: &str) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM pairing_head WHERE account_id=?1 AND operation_id=?2",
+            params![account_id, operation_id],
+        )?;
+        Ok(())
+    }
+}
+
+fn live_handshake_open(head: Option<&HeadRow>, live: &LiveRow) -> bool {
+    head.is_none_or(|head| head.operation_id != live.operation_id)
+}
+
+fn map_live(row: &crate::database::Row) -> rusqlite::Result<LiveRow> {
+    Ok(LiveRow {
+        account_id: row.get(0)?,
+        operation_id: row.get(1)?,
+        invitation_id: row.get(2)?,
+        issuer_seq: row.get::<_, i64>(3)?.cast_unsigned(),
+        local_seq: row.get::<_, i64>(4)?.cast_unsigned(),
+        generation: row.get::<_, i64>(5)?.cast_unsigned(),
+        role: row.get(6)?,
+        descriptor: row.get(7)?,
+        phase: row.get(8)?,
+        context: row.get(9)?,
+        transcript_hash: row.get(10)?,
+        proposal_hash: row.get(11)?,
+        transfer_ciphertext_hash: row.get(12)?,
+        candidate_id: row.get(13)?,
+        branch_reservation: row.get(14)?,
+        branch_vault_ref: row.get(15)?,
+        primary_vault_ref: row.get(16)?,
+        base_record_hash: row.get(17)?,
+        base_epoch: row.get::<_, i64>(18)?.cast_unsigned(),
+        expires_at: row.get::<_, i64>(19)?.cast_unsigned(),
+        result: row.get(20)?,
+    })
+}
+
+fn map_terminal(row: &crate::database::Row) -> rusqlite::Result<TerminalRow> {
+    Ok(TerminalRow {
+        account_id: row.get(0)?,
+        operation_id: row.get(1)?,
+        invitation_id: row.get(2)?,
+        issuer_seq: row.get::<_, i64>(3)?.cast_unsigned(),
+        local_seq: row.get::<_, i64>(4)?.cast_unsigned(),
+        generation: row.get::<_, i64>(5)?.cast_unsigned(),
+        outcome: row.get(6)?,
+        record_hash: row.get(7)?,
+        finished_at: row.get::<_, i64>(8)?.cast_unsigned(),
+        cleanup: row.get(9)?,
+    })
+}

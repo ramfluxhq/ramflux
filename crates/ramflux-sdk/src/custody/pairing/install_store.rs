@@ -259,6 +259,100 @@ pub fn write_installed(root: &Path, value: &Install) -> Result<(), SdkError> {
     write_file(&installed_path(root, &value.account_id), &encode(value)?)
 }
 
+/// Read a pending Install if the file exists.
+///
+/// # Errors
+/// Returns field, size, or I/O errors.
+pub fn read_pending(
+    root: &Path,
+    account_id: &str,
+    operation_id: &str,
+) -> Result<Option<Install>, SdkError> {
+    ident(account_id, "account_id")?;
+    b32(operation_id, "operation_id")?;
+    read_install(&pending_path(root, account_id, operation_id))
+}
+
+/// Read the current installed marker if present.
+///
+/// # Errors
+/// Returns field, size, or I/O errors.
+pub fn read_installed(root: &Path, account_id: &str) -> Result<Option<Install>, SdkError> {
+    ident(account_id, "account_id")?;
+    read_install(&installed_path(root, account_id))
+}
+
+/// Pending Install files for one account, excluding `installed.json`.
+///
+/// # Errors
+/// Returns field or I/O errors.
+pub fn list_pending(root: &Path, account_id: &str) -> Result<Vec<Install>, SdkError> {
+    ident(account_id, "account_id")?;
+    let dir = root.join("custody_accounts").join(account_id).join("pairing-install");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut rows = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(SdkError::from)? {
+        let entry = entry.map_err(SdkError::from)?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "installed.json" || !name.ends_with(".json") || name.starts_with('.') {
+            continue;
+        }
+        if let Some(row) = read_install(&entry.path())? {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
+/// Remove one pending operation file and fsync the directory.
+///
+/// # Errors
+/// Returns field or I/O errors.
+pub fn remove_pending(root: &Path, account_id: &str, operation_id: &str) -> Result<(), SdkError> {
+    ident(account_id, "account_id")?;
+    b32(operation_id, "operation_id")?;
+    let path = pending_path(root, account_id, operation_id);
+    match fs::remove_file(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(()) => {}
+    }
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// True when a path is pairing install-store metadata excluded from backup.
+#[must_use]
+pub fn backup_excluded(path: &Path) -> bool {
+    path.iter().any(|component| component == "pairing-install")
+}
+
+/// Strip pairing-install files from a backup tree. Floors live in the account DB.
+///
+/// # Errors
+/// Returns field or I/O errors.
+pub fn strip_backup_installs(root: &Path, account_id: &str) -> Result<(), SdkError> {
+    ident(account_id, "account_id")?;
+    let dir = root.join("custody_accounts").join(account_id).join("pairing-install");
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(SdkError::from)?;
+    }
+    Ok(())
+}
+
+fn read_install(path: &Path) -> Result<Option<Install>, SdkError> {
+    match fs::read(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(bytes) => decode(&bytes).map(Some),
+    }
+}
+
 fn ensure_dir(dir: &Path) -> Result<(), SdkError> {
     fs::create_dir_all(dir).map_err(SdkError::from)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(SdkError::from)

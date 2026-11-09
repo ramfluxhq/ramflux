@@ -4,6 +4,7 @@
 //! Dormant pairing journal. Tables exist after normal open; no coordinator is wired.
 pub(crate) mod journal;
 pub(crate) mod privacy;
+pub(crate) mod recovery;
 pub(crate) mod schema;
 #[cfg(test)]
 mod tests;

@@ -260,6 +260,48 @@ pub(super) fn ack_bytes(record_hash: &str, device_set_epoch: u64) -> TestResult<
     Ok(canonical_json_bytes(&HeadAck { record_hash, device_set_epoch })?)
 }
 
+pub(super) fn live_phase(phase: &str) -> TestResult<LiveRow> {
+    let mut row = invited()?;
+    let early = matches!(phase, "invited" | "commitments");
+    if !early {
+        row.context = Some(context_bytes()?);
+        row.transcript_hash = Some(h(8));
+    }
+    if matches!(
+        phase,
+        "proposal_pending"
+            | "prepared"
+            | "submitted"
+            | "acknowledged"
+            | "locally_installed"
+            | "completed"
+    ) {
+        row.proposal_hash = Some(h(9));
+    }
+    if matches!(
+        phase,
+        "prepared" | "submitted" | "acknowledged" | "locally_installed" | "completed"
+    ) {
+        row.candidate_id = Some(h(20));
+    }
+    row.phase = phase.into();
+    Ok(row)
+}
+
+pub(super) fn submitted_head() -> TestResult<HeadRow> {
+    let mut row = head()?;
+    row.state = "submitted".into();
+    Ok(row)
+}
+
+pub(super) fn acknowledged_head() -> TestResult<HeadRow> {
+    let mut row = head()?;
+    row.state = "acknowledged".into();
+    let hash = row.candidate_hash.clone();
+    row.ack = Some(ack_bytes(&hash, 7)?);
+    Ok(row)
+}
+
 pub(super) fn terminal() -> TerminalRow {
     TerminalRow {
         account_id: "acct".into(),

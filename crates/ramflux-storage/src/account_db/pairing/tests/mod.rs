@@ -4,8 +4,24 @@
 //! P04 closed schema, decoder bounds, migration and backup classification.
 mod backup;
 mod codec;
+mod crash;
 mod helpers;
 mod schema;
+
+#[test]
+fn pairing_journal_crash_fences_and_backup_exclusion() -> Result<(), Box<dyn std::error::Error>> {
+    crash::missing_writers_named();
+    crash::j1_before_and_after_floor_live()?;
+    crash::j2_live_phase_cancels_without_head()?;
+    crash::j3_prepared_head_fences_same_hash()?;
+    crash::j4_submitted_never_cancelled()?;
+    crash::j6_acknowledged_same_hash()?;
+    crash::j7c_adoption_stays_fenced()?;
+    crash::j8_terminal_cleanup_deletes_head()?;
+    crash::backup_mid_ceremony_strips_live_keeps_floor()?;
+    crash::recover_does_not_change_candidate()?;
+    Ok(())
+}
 
 #[test]
 fn pairing_journal_schema_and_indexes_are_closed() -> Result<(), Box<dyn std::error::Error>> {
