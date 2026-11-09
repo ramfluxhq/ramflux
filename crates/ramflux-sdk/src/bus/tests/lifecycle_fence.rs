@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-#![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
 //! `lifecycle_fence` through the real account runtime. A real loopback gateway serves one
 //! signed message. Generation 1 pulls the page and holds its `ApplyPage` (a held result).
 //! The real `account.lock` command stops that connection (bound: under one second). The
@@ -160,34 +160,37 @@ async fn pump(
     hold: bool,
     mut done: impl FnMut(&super::super::AccountRuntime) -> bool,
 ) -> Result<Option<AccountWork>, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if done(runtime) {
-            return Ok(None);
-        }
-        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
-        {
-            Ok(Some(work)) => {
-                if hold && matches!(work, AccountWork::ApplyPage { .. }) {
-                    return Ok(Some(work));
-                }
-                runtime.apply_connection_work(work).await?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if done(runtime) {
+                return Ok(None);
             }
-            Ok(None) => return Err("connection work channel closed".into()),
-            Err(_) => {}
+            let Some(work) = runtime.connection_work.recv().await else {
+                return Err("connection work channel closed".into());
+            };
+            if hold && matches!(work, AccountWork::ApplyPage { .. }) {
+                return Ok(Some(work));
+            }
+            runtime.apply_connection_work(work).await?;
         }
-    }
-    Err("pump deadline".into())
+    })
+    .await
+    .expect("lifecycle connection-work hang guard expired")
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn lifecycle_fence() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
-            Box::pin(held()).await?;
-            Box::pin(super::receive_ack::ack_fence()).await
-        }))))
-        .await
+    tokio::time::timeout(
+        Duration::from_secs(25),
+        LocalSet::new().run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(
+            Box::pin(async {
+                Box::pin(held()).await?;
+                Box::pin(super::receive_ack::ack_fence()).await
+            }),
+        ))),
+    )
+    .await
+    .expect("lifecycle_fence hang guard expired")
 }
 
 async fn held() -> Case {

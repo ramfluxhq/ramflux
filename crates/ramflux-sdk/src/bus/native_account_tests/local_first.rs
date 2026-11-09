@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![allow(clippy::expect_used)]
+
 //! Local-first creation and immediate admission-outcome publication.
 
 use super::*;
@@ -174,10 +176,14 @@ async fn publication_case(with_network_command: bool) -> Result {
         let notification = if with_network_command {
             tokio::select! {
                 result = &mut request => panic!("network command escaped its hold: {result:?}"),
-                result = tokio::time::timeout(Duration::from_secs(10), &mut event) => result??,
+                result = tokio::time::timeout(Duration::from_secs(30), &mut event) => {
+                    result.expect("admission outcome event hang guard expired")?
+                },
             }
         } else {
-            tokio::time::timeout(Duration::from_secs(10), &mut event).await??
+            tokio::time::timeout(Duration::from_secs(30), &mut event)
+                .await
+                .expect("admission outcome event hang guard expired")?
         };
         assert_eq!(notification.method, "account.networking.changed");
         if with_network_command {

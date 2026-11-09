@@ -128,7 +128,16 @@ async fn pass(
             .map(|()| false);
     }
     writer
-        .apply(move |account| super::apply_result(account, &failure_item, result.map(|_| true)))
+        .apply(move |account| {
+            let applied = super::apply_result(account, &failure_item, result.map(|_| true));
+            #[cfg(test)]
+            if applied.is_ok()
+                && let Some(completed) = &account.test_task_deliveries_applied
+            {
+                completed.add_permits(1);
+            }
+            applied
+        })
         .await
 }
 /// How the sends of one plan ended, apart from errors.
@@ -179,6 +188,10 @@ fn prepare(
         Preparation::Deferred => return Ok(None),
         Preparation::Charged(reason) => {
             charge(account, &item, reason)?;
+            #[cfg(test)]
+            if let Some(completed) = &account.test_task_deliveries_applied {
+                completed.add_permits(1);
+            }
             return Ok(None);
         }
         Preparation::Ready { manifests, fetched_after } => (manifests, fetched_after),

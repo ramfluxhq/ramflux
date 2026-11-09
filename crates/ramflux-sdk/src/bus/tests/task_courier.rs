@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![allow(clippy::expect_used, clippy::panic)]
+
 //! Courier regressions through the real account actor and preparation signal loop.
 
 use super::*;
@@ -68,6 +70,26 @@ fn carrier(account: &LocalBusAccountState, conversation: &str, task: &str) -> Ca
         format!("{task}-start"),
         None,
     )?)
+}
+
+async fn real_time_watchdog<T>(future: impl std::future::Future<Output = Case<T>>) -> Case<T> {
+    let (cancel, cancelled) = std::sync::mpsc::channel::<()>();
+    let (expired, deadline) = oneshot::channel();
+    std::thread::spawn(move || {
+        if matches!(
+            cancelled.recv_timeout(Duration::from_secs(20)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = expired.send(());
+        }
+    });
+    tokio::select! {
+        result = future => {
+            drop(cancel);
+            result
+        }
+        _ = deadline => panic!("task courier real-time hang guard expired"),
+    }
 }
 
 fn ack(account: &LocalBusAccountState, key: &str, carrier: &Carrier) -> Case {
@@ -140,7 +162,7 @@ fn forward(account: &LocalBusAccountState, key: &str, carrier: &Carrier) -> Case
 }
 
 pub(super) fn runtime(
-    account: LocalBusAccountState,
+    mut account: LocalBusAccountState,
     root: &Path,
 ) -> (
     AccountRuntime,
@@ -148,6 +170,7 @@ pub(super) fn runtime(
     watch::Sender<bool>,
     mpsc::UnboundedReceiver<CourierEvent>,
 ) {
+    account.test_task_deliveries_applied = Some(Arc::new(tokio::sync::Semaphore::new(0)));
     let (sender, receiver) = mpsc::channel(64);
     let (stop, shutdown) = watch::channel(false);
     let (events, mut batches) = mpsc::channel::<EventBatch>(64);
@@ -212,12 +235,16 @@ async fn command(sender: &mpsc::Sender<AccountCommand>, method: &str, body: Valu
             reply: Some(reply),
         })
         .await?;
-    Ok(tokio::time::timeout(Duration::from_secs(15), received).await???.body)
+    Ok(tokio::time::timeout(Duration::from_secs(15), received)
+        .await
+        .expect("account command hang guard expired")??
+        .body)
 }
 
 async fn next(events: &mut mpsc::UnboundedReceiver<CourierEvent>) -> Case<CourierEvent> {
     Ok(tokio::time::timeout(Duration::from_secs(15), events.recv())
-        .await?
+        .await
+        .expect("courier event hang guard expired")
         .ok_or("actor stopped during courier work")?)
 }
 
@@ -418,81 +445,118 @@ async fn stall(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn r6_real_preparation_charges_only_the_stalled_item_and_keeps_healthy_attempts_zero() -> Case
 {
-    LocalSet::new()
-        .run_until(Box::pin(async {
-            let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
-            let fixture = Box::pin(Fixture::new("courier-independent-items-r6")).await?;
-            let healthy = carrier(&fixture.source, "healthy", "healthy-task")?;
-            let slow = carrier(&fixture.source, "stalled", "slow-task")?;
-            ack(&fixture.source, "task/ack/000-stalled", &slow)?;
-            ack(&fixture.source, "task/ack/100-healthy", &healthy)?;
-            forward(&fixture.source, "task/forward/healthy", &healthy)?;
-            let (stalled, mut entered) = stall(&fixture.source).await?;
-            let root = fixture.root.clone();
-            let gateway = fixture.gateway.clone();
-            let (mut actor, _sender, stop, mut events) =
-                runtime(fixture.source, &root.join("source"));
-            // Use the default five-second deadline on the real manifest-fetch path.
-            if let Some(courier) = actor.courier.take() {
-                courier.stop().await;
+    real_time_watchdog(LocalSet::new().run_until(Box::pin(async {
+        let _guard = crate::bus::dispatch::task_transport::manifest_test_lock().lock().await;
+        let fixture = Box::pin(Fixture::new("courier-independent-items-r6")).await?;
+        let healthy = carrier(&fixture.source, "healthy", "healthy-task")?;
+        let slow = carrier(&fixture.source, "stalled", "slow-task")?;
+        ack(&fixture.source, "task/ack/000-stalled", &slow)?;
+        ack(&fixture.source, "task/ack/100-healthy", &healthy)?;
+        forward(&fixture.source, "task/forward/healthy", &healthy)?;
+        let (stalled, mut entered) = stall(&fixture.source).await?;
+        let root = fixture.root.clone();
+        let gateway = fixture.gateway.clone();
+        let (mut actor, _sender, stop, mut events) = runtime(fixture.source, &root.join("source"));
+        let deliveries_applied = actor
+            .state
+            .accounts
+            .get("sender")
+            .and_then(|account| account.test_task_deliveries_applied.clone())
+            .ok_or("delivery completion barrier")?;
+        // Use the default five-second deadline on the real manifest-fetch path.
+        if let Some(courier) = actor.courier.take() {
+            courier.stop().await;
+        }
+        actor.courier = Some(TaskCourier::start());
+        let driver = async {
+            let _shutdown = Shutdown(stop.clone());
+            tokio::time::timeout(Duration::from_secs(10), entered.recv())
+                .await
+                .expect("stalled manifest request hang guard expired")
+                .ok_or("manifest never stalled")?;
+            // The request is now held in the loopback server. Advance Tokio's clock to
+            // the courier deadline instead of making this test depend on five wall seconds.
+            tokio::time::pause();
+            assert!(matches!(events.recv().await, Some(CourierEvent::Requested)));
+            let mut rows = Vec::with_capacity(3);
+            for _ in 0..2 {
+                match events.recv().await.ok_or("courier stopped before healthy items")? {
+                    CourierEvent::Item { key, attempts, charged } => {
+                        assert_ne!(key, "task/ack/000-stalled");
+                        assert_eq!(attempts, 0);
+                        assert!(!charged);
+                        rows.push((key, attempts, charged));
+                    }
+                    event => panic!("healthy item expected before deadline, got {event:?}"),
+                }
             }
-            actor.courier = Some(TaskCourier::start());
-            let driver = async {
-                let _shutdown = Shutdown(stop.clone());
-                tokio::time::timeout(Duration::from_secs(10), entered.recv())
-                    .await?
-                    .ok_or("manifest never stalled")?;
-                let rows = pass(&mut events).await?;
-                assert_eq!(rows.len(), 3, "{rows:?}");
-                assert!(rows.iter().any(|(key, attempts, charged)| key == "task/ack/000-stalled"
-                    && *attempts == 0
-                    && *charged));
-                assert!(
-                    rows.iter()
-                        .filter(|(key, _, _)| key != "task/ack/000-stalled")
-                        .all(|(_, attempts, charged)| *attempts == 0 && !charged)
-                );
-                assert!(
-                    rows.iter()
-                        .position(|(key, _, _)| key == "task/ack/000-stalled")
-                        .is_some_and(|index| index == 2),
-                    "healthy results must be returned before the stalled deadline: {rows:?}"
-                );
-                stop.send(true)?;
-                Ok::<_, Box<dyn std::error::Error>>(())
-            };
-            let (served, result) = tokio::join!(serving(&mut actor), driver);
-            stalled.abort();
-            let _ = stalled.await;
-            served?;
-            result?;
-            let account = actor.state.accounts.get("sender").ok_or("account")?;
-            let db = account.client.account_db()?;
-            let slow: AckJob = db.load_actor_state("task/ack/000-stalled")?.ok_or("stalled job")?;
-            assert_eq!(slow.attempts, 1);
-            assert!(!db.actor_state_exists("task/ack/100-healthy")?);
-            assert!(!db.actor_state_exists("task/forward/healthy")?);
-            let failures =
-                db.task_record_page::<Value>("task/courier_failure/", "task/courier_failure/", 16)?;
-            assert_eq!(
-                failures.len(),
-                1,
-                "healthy items must never receive shared failure bookkeeping"
+            tokio::time::advance(Duration::from_secs(5)).await;
+            match events.recv().await.ok_or("courier stopped before stalled item")? {
+                CourierEvent::Item { key, attempts, charged } => {
+                    rows.push((key, attempts, charged));
+                }
+                event => panic!("stalled item expected after deadline, got {event:?}"),
+            }
+            assert!(matches!(events.recv().await, Some(CourierEvent::Finished)));
+            tokio::time::resume();
+            assert_eq!(rows.len(), 3, "{rows:?}");
+            assert!(rows.iter().any(|(key, attempts, charged)| key == "task/ack/000-stalled"
+                && *attempts == 0
+                && *charged));
+            assert!(
+                rows.iter()
+                    .filter(|(key, _, _)| key != "task/ack/000-stalled")
+                    .all(|(_, attempts, charged)| *attempts == 0 && !charged)
             );
-            assert_eq!(failures[0].1["id"], "task/ack/000-stalled");
-            assert!(failures[0].1["start"].as_i64().is_some_and(|at| slow.next_at >= at + 2));
-            let sent = &gateway.lock().map_err(|_| "gateway")?.sent;
-            assert!(sent.iter().any(|e| e.target_delivery_id == "peer"));
-            assert!(sent.iter().any(|e| e.target_delivery_id == "sibling"));
-            drop(actor);
-            drop(fixture.peer);
-            drop(fixture.sibling);
-            std::fs::remove_dir_all(root)?;
-            Ok(())
-        }))
-        .await
+            assert!(
+                rows.iter()
+                    .position(|(key, _, _)| key == "task/ack/000-stalled")
+                    .is_some_and(|index| index == 2),
+                "healthy results must be returned before the stalled deadline: {rows:?}"
+            );
+            // Preparation observation precedes delivery; wait for the writer-owned commit event.
+            let _applied = tokio::time::timeout(
+                Duration::from_secs(15),
+                deliveries_applied.acquire_many_owned(3),
+            )
+            .await
+            .expect("courier delivery-commit hang guard expired")?;
+            stop.send(true)?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (served, result) = tokio::join!(serving(&mut actor), driver);
+        stalled.abort();
+        let _ = stalled.await;
+        served?;
+        result?;
+        let account = actor.state.accounts.get("sender").ok_or("account")?;
+        let db = account.client.account_db()?;
+        let slow: AckJob = db.load_actor_state("task/ack/000-stalled")?.ok_or("stalled job")?;
+        assert_eq!(slow.attempts, 1);
+        assert!(!db.actor_state_exists("task/ack/100-healthy")?);
+        assert!(!db.actor_state_exists("task/forward/healthy")?);
+        let failures =
+            db.task_record_page::<Value>("task/courier_failure/", "task/courier_failure/", 16)?;
+        assert_eq!(
+            failures.len(),
+            1,
+            "healthy items must never receive shared failure bookkeeping"
+        );
+        assert_eq!(failures[0].1["id"], "task/ack/000-stalled");
+        assert!(failures[0].1["start"].as_i64().is_some_and(|at| slow.next_at >= at + 2));
+        let sent = &gateway.lock().map_err(|_| "gateway")?.sent;
+        assert!(sent.iter().any(|e| e.target_delivery_id == "peer"));
+        assert!(sent.iter().any(|e| e.target_delivery_id == "sibling"));
+        drop(actor);
+        drop(fixture.peer);
+        drop(fixture.sibling);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    })))
+    .await
 }
 
 async fn lock_during_fresh_preparation(

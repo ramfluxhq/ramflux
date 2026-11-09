@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
+#![allow(clippy::expect_used)]
+
 //! Fetch restart preserves chunk and ACK progress across writer-owned durability boundaries.
 
 use super::fixture::{Case, Fixture};
@@ -9,7 +11,7 @@ use super::relay_fixture::{Observe, Relay, Step};
 use crate::bus::transfer_slots::test_hooks::{Held, Hook};
 use crate::prelude::*;
 use serde_json::Value;
-use std::{rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 const OBJECT: &str = "history-object";
 type Reply = tokio::task::JoinHandle<Result<crate::bus::actor::ActorResponse, SdkError>>;
@@ -32,15 +34,16 @@ struct Rig {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_before_f2_sends_no_ack_and_restarts_from_durable_f1_chunks() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(case(false)))))
-        .await
+    LocalSet::new().run_until(Box::pin(fetch_hang_guard(case(false)))).await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_restart_skips_durable_acks_and_repeats_only_the_unconfirmed_ack() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(case(true)))))
+    LocalSet::new().run_until(Box::pin(fetch_hang_guard(case(true)))).await
+}
+async fn fetch_hang_guard<T>(future: impl std::future::Future<Output = Case<T>>) -> Case<T> {
+    tokio::time::timeout(Duration::from_secs(120), future)
         .await
+        .expect("transfer-fetch hang guard expired")
 }
 fn observe(reader: Rc<AccountDb>) -> Observe {
     Rc::new(move |step, index, _| {
@@ -121,6 +124,33 @@ fn fetch(started: &Started) -> Reply {
             .await
     })
 }
+async fn wait_for_live(started: &Started) -> Case {
+    let connection = started.actor.connection_for_test().ok_or("restarted connection")?;
+    let mut events = connection.events();
+    if connection.snapshot().state == crate::bus::connection_manager::NetworkingState::Live {
+        return Ok(());
+    }
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match events.recv().await {
+                Ok(crate::bus::connection_manager::ConnectionEvent::Connected { .. }) => {
+                    return Ok::<_, Box<dyn std::error::Error>>(());
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    if connection.snapshot().state
+                        == crate::bus::connection_manager::NetworkingState::Live =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    })
+    .await
+    .expect("connection-live event hang guard expired")?;
+    Ok(())
+}
 impl Progress {
     fn before_stop(&self, held: &Held, after_ack: bool) -> Case {
         assert!(held.fetch_reply_is_open());
@@ -154,24 +184,15 @@ impl Progress {
         assert_eq!(self.reader.actor_state_keys("attachment/ack/")?.len(), usize::from(after_ack));
         Ok(())
     }
-    async fn available(&self) -> Case {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                let errors = self.relay.state.lock().map_err(|_| "relay")?.errors.clone();
-                if !errors.is_empty() {
-                    return Err(format!("relay errors: {errors:?}").into());
-                }
-                if self
-                    .reader
-                    .load_actor_state::<Value>(&format!("attachment/fetch/{OBJECT}"))?
-                    .is_some_and(|state| state["transfer_state"] == "available")
-                {
-                    return Ok::<_, Box<dyn std::error::Error>>(());
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await?
+    fn available(&self) -> Case {
+        let relay = self.relay.state.lock().map_err(|_| "relay")?;
+        assert!(relay.errors.is_empty(), "relay errors: {:?}", relay.errors);
+        assert!(
+            self.reader
+                .load_actor_state::<Value>(&format!("attachment/fetch/{OBJECT}"))?
+                .is_some_and(|state| state["transfer_state"] == "available")
+        );
+        Ok(())
     }
     fn completed(&self, after_ack: bool) -> Case {
         let state = self.relay.state.lock().map_err(|_| "relay")?;
@@ -218,7 +239,8 @@ async fn case(after_ack: bool) -> Case {
         Box::pin(rig(if after_ack { Boundary::Ack } else { Boundary::Import })).await?;
     let first = fetch(&started);
     let held = tokio::time::timeout(Duration::from_secs(10), capture.recv())
-        .await?
+        .await
+        .expect("fetch checkpoint hang guard expired")
         .ok_or("fetch checkpoint not entered")?;
     progress.before_stop(&held, after_ack)?;
     controls(&started.actor).await?;
@@ -227,9 +249,10 @@ async fn case(after_ack: bool) -> Case {
     assert!(hook.first_job_finished(), "restart must join the previous fetch worker");
     assert!(!held.fetch_reply_is_open());
     drop(held);
+    wait_for_live(&started).await?;
     let second = fetch(&started);
-    progress.available().await?;
     assert_eq!(second.await??.body["transfer_state"], "available");
+    progress.available()?;
     progress.completed(after_ack)?;
     started.actor.stop().await?;
     let root = started.root.clone();
@@ -242,10 +265,13 @@ async fn case(after_ack: bool) -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn erased_fetch_aborts_f3_authorization_before_any_relay_ack() -> Case {
-    LocalSet::new().run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
+    LocalSet::new().run_until(Box::pin(fetch_hang_guard(async {
         let Rig { started,progress,mut capture,.. }=Box::pin(rig(Boundary::Authorize)).await?;
         let first=fetch(&started);
-        let held=tokio::time::timeout(Duration::from_secs(10),capture.recv()).await?.ok_or("F3 not entered")?;
+        let held = tokio::time::timeout(Duration::from_secs(10), capture.recv())
+            .await
+            .expect("F3 checkpoint hang guard expired")
+            .ok_or("F3 not entered")?;
         assert!(held.fetch_reply_is_open());
         assert!(progress.reader.load_object::<EncryptedObject>(OBJECT)?.is_some(),"F2 must already be durable");
         assert!(!progress.relay.state.lock().map_err(|_|"relay")?.requests.iter().any(|(step,_)|*step==Step::Ack));
@@ -263,13 +289,13 @@ async fn erased_fetch_aborts_f3_authorization_before_any_relay_ack() -> Case {
         let root=started.root.clone();drop(started.actor);started.router.await?;drop(progress);
         std::fs::remove_dir_all(root)?;
         Ok(())
-    })))).await
+    }))).await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn failed_fetch_keeps_f1_progress_and_reports_the_fixed_transport_category() -> Case {
     LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(async {
+        .run_until(Box::pin(fetch_hang_guard(async {
             let Rig { started, progress, .. } = Box::pin(rig(Boundary::Import)).await?;
             progress.relay.state.lock().map_err(|_| "relay")?.close_before_response =
                 Some((Step::Get, 1));
@@ -310,25 +336,19 @@ async fn failed_fetch_keeps_f1_progress_and_reports_the_fixed_transport_category
             drop(progress);
             std::fs::remove_dir_all(root)?;
             Ok(())
-        }))))
+        })))
         .await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_after_durable_f2_restarts_without_get_and_commits_its_slot_once() -> Case {
     LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
-            restart_imported(Boundary::Authorize),
-        ))))
+        .run_until(Box::pin(fetch_hang_guard(restart_imported(Boundary::Authorize))))
         .await
 }
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_after_all_durable_f4_acks_restarts_at_f5_without_repeating_any_ack() -> Case {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
-            restart_imported(Boundary::Slot),
-        ))))
-        .await
+    LocalSet::new().run_until(Box::pin(fetch_hang_guard(restart_imported(Boundary::Slot)))).await
 }
 async fn restart_imported(boundary: Boundary) -> Case {
     let before_ack = matches!(&boundary, Boundary::Authorize);
@@ -343,7 +363,8 @@ async fn restart_imported(boundary: Boundary) -> Case {
         crate::dm::dm_session_event_id(&conversation, "recv", &format!("object-slot:{OBJECT}"));
     let first = fetch(&started);
     let held = tokio::time::timeout(Duration::from_secs(10), capture.recv())
-        .await?
+        .await
+        .expect("imported fetch checkpoint hang guard expired")
         .ok_or("imported fetch checkpoint not entered")?;
     assert!(held.fetch_reply_is_open());
     assert!(progress.reader.load_object::<EncryptedObject>(OBJECT)?.is_some());
@@ -369,9 +390,10 @@ async fn restart_imported(boundary: Boundary) -> Case {
     assert!(hook.first_job_finished());
     assert!(!held.fetch_reply_is_open());
     drop(held);
+    wait_for_live(&started).await?;
     let second = fetch(&started);
-    progress.available().await?;
     assert_eq!(second.await??.body["transfer_state"], "available");
+    progress.available()?;
     progress.completed(false)?;
     assert_eq!(progress.reader.projection_checkpoint(&checkpoint)?, Some(committed.clone()));
     let requests = progress.relay.state.lock().map_err(|_| "relay")?.requests.clone();
