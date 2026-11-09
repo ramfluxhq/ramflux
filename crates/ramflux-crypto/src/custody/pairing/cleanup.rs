@@ -6,6 +6,7 @@
 //! HKDF/HMAC/X25519/AEAD library copies, stack residues and panic=abort are not
 //! claimed erased; a stronger guarantee needs a separately audited primitive.
 
+use crate::CryptoError;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[cfg(test)]
@@ -113,10 +114,23 @@ pub struct HpkeSecrets {
 }
 
 impl HpkeSecrets {
-    /// Wrap a 32-byte X25519 seed. The adapter takes this type by move and keeps no spare copy.
+    /// Generate a 32-byte X25519 seed in place. The adapter takes this type by move.
+    ///
+    /// # Errors
+    /// Returns `RandomUnavailable` when the CSPRNG cannot fill 32 bytes.
+    pub fn new() -> Result<Self, CryptoError> {
+        let mut sk = [0_u8; 32];
+        getrandom::fill(&mut sk)
+            .map_err(|error| CryptoError::RandomUnavailable(error.to_string()))?;
+        Ok(Self { sk })
+    }
+
+    /// Copy a known seed then wipe the caller buffer. Used by KATs and cleanup proofs.
     #[must_use]
-    pub fn new(sk: [u8; 32]) -> Self {
-        Self { sk }
+    pub fn from_seed(sk: &mut [u8; 32]) -> Self {
+        let owned = *sk;
+        sk.zeroize();
+        Self { sk: owned }
     }
 
     pub(super) fn as_bytes(&self) -> &[u8; 32] {

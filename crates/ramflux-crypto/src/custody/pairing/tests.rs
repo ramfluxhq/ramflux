@@ -653,6 +653,10 @@ fn pairing_owned_secret_cleanup_all_exits() -> Result {
     hpke_epoch_setup_exit()?;
     assert_eq!(take_pairing_secret_cleanups(), 1, "hpke_epoch");
     assert_wiped_bytes();
+    let mut seed = [9_u8; 32];
+    let secrets = HpkeSecrets::from_seed(&mut seed);
+    assert_eq!(seed, [0_u8; 32]);
+    drop(secrets);
     Ok(())
 }
 
@@ -804,7 +808,8 @@ fn hpke_setup_sender(
     recipient_pk: &[u8; 32],
     aad: &TransferHpkeAad,
 ) -> Result<HpkeSender> {
-    HpkeSender::setup(HpkeSecrets::new(sk), recipient_pk, &HPKE_TH, aad)
+    let mut seed = sk;
+    HpkeSender::setup(HpkeSecrets::from_seed(&mut seed), recipient_pk, &HPKE_TH, aad)
 }
 
 fn hpke_setup_receiver(
@@ -813,7 +818,8 @@ fn hpke_setup_receiver(
     enc: &[u8; 32],
     aad: &TransferHpkeAad,
 ) -> Result<HpkeReceiver> {
-    HpkeReceiver::setup(HpkeSecrets::new(sk), sender_pk, enc, &HPKE_TH, aad)
+    let mut seed = sk;
+    HpkeReceiver::setup(HpkeSecrets::from_seed(&mut seed), sender_pk, enc, &HPKE_TH, aad)
 }
 
 fn rfc_vector_exact_suite() -> Result {
@@ -876,7 +882,9 @@ fn application_pinned_info_aad_and_independent_ciphertext() -> Result {
         TransferHpkeAad { transfer_id, current_record_hash: record_hash, device_set_epoch: epoch };
     assert_eq!(hex::encode(super::hpke::aad_bytes(&aad)?), pinned_aad);
     let mut receiver = HpkeReceiver::setup(
-        HpkeSecrets::new(hex32(json["skRm"].as_str().ok_or(CryptoError::Pairing("json"))?)?),
+        HpkeSecrets::from_seed(&mut hex32(
+            json["skRm"].as_str().ok_or(CryptoError::Pairing("json"))?,
+        )?),
         &hex32(json["pkSm"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
         &hex32(json["enc"].as_str().ok_or(CryptoError::Pairing("json"))?)?,
         &th,
@@ -939,8 +947,14 @@ fn wrong_sender_recipient_info_aad_role() -> Result {
         "hpke_open",
     )?;
     expect_pairing(
-        HpkeReceiver::setup(HpkeSecrets::new(HPKE_RECIP_SK), &sender_pk, &enc, &[30; 32], &aad)
-            .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
+        HpkeReceiver::setup(
+            HpkeSecrets::from_seed(&mut { HPKE_RECIP_SK }),
+            &sender_pk,
+            &enc,
+            &[30; 32],
+            &aad,
+        )
+        .and_then(|mut receiver| receiver.open(&ciphertext).map(|_| ())),
         "hpke_open",
     )?;
     let mut bad_aad = aad;
