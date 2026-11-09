@@ -115,6 +115,11 @@ const RAMFLUX_LOCAL_TABLES: &[&str] = &[
     "bot_manifest_cache",
     "bot_install_grant",
     "audit_log",
+    "pairing_floor",
+    "pairing_live",
+    "pairing_head",
+    "pairing_terminal",
+    "pairing_adoption",
 ];
 
 fn table_exists(
@@ -213,7 +218,7 @@ fn client_local_db_design_tables_are_present() -> Result<(), StorageError> {
         assert!(table_exists(&db.connection, table)?, "missing ramflux_local table {table}");
     }
     assert_eq!(ACCOUNT_INDEX_TABLES.len(), 4);
-    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 50);
+    assert_eq!(RAMFLUX_LOCAL_TABLES.len(), 55);
     let _ = fs::remove_dir_all(root);
     Ok(())
 }

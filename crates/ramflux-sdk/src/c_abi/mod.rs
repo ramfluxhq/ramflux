@@ -932,7 +932,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::InboundPending(_)
         | SdkError::SenderManifestRequired { .. }
         | SdkError::FreshHeadRequired { .. }
-        | SdkError::PairRecoveryRequired => RamfluxErrorCode::InvalidArgument,
+        | SdkError::PairRecoveryRequired
+        | SdkError::PairingField(_) => RamfluxErrorCode::InvalidArgument,
     }
 }
 
@@ -996,7 +997,8 @@ fn storage_error_code(error: &ramflux_storage::StorageError) -> RamfluxErrorCode
         | E::MessageIdConflict(_)
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
-        | E::InvalidRecoveryState { .. } => RamfluxErrorCode::StorageFailed,
+        | E::InvalidRecoveryState { .. }
+        | E::PairingField(_) => RamfluxErrorCode::StorageFailed,
     }
 }
 

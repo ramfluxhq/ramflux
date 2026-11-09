@@ -68,7 +68,8 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
             | "contact_request_decision"
             | "contact_link_decision"
             | "contact_message_fence_retention"
-    ) || table.starts_with("object_retention_")
+    ) || super::pairing::skip_merge(table)
+        || table.starts_with("object_retention_")
         || table.starts_with("object_erasure_")
         || table.starts_with("object_reference_")
         || table.starts_with("object_legacy_")
@@ -380,6 +381,7 @@ impl BackupDatabase {
             super::backup_selector_admission::final_deletion::verify(&self.db)?;
         }
         super::receive::erased_capture::reconcile_merge_capture(&self.db, crate::unix_now())?;
+        super::pairing::merge_floor(&self.db)?;
         super::receive::ledger_backup::sanitize_backup(&self.db)?;
         super::backup_selector_admission::drop_scratch(&self.db)?;
         #[cfg(test)]
@@ -648,6 +650,7 @@ impl BackupDatabase {
         super::message_footprint::install(&self.db)?;
         super::home_migration::strip_from_backup(&self.db)?;
         super::receive::ledger_backup::sanitize_backup(&self.db)?;
+        super::pairing::sanitize_backup(&self.db)?;
         self.db.execute_batch("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'restore',state_kind,state_json FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%'; DELETE FROM runtime_actor_state WHERE state_kind LIKE 'group-transfer/%';")?;
         super::backup_retirement::archive_outbound_state(&self.db)?;
         super::backup_retirement::strip_own_copy_locators(&self.db)?;

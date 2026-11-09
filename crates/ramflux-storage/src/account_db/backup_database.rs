@@ -259,6 +259,7 @@ impl BackupDatabase {
             params![key.fingerprint()],
         )?;
         super::receive::ledger_backup::sanitize_backup(&target)?;
+        super::pairing::sanitize_backup(&target)?;
         drop(target);
         std::fs::File::open(path)?.sync_all()?;
         Ok(())

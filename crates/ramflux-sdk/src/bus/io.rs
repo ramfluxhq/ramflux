@@ -320,7 +320,8 @@ fn storage_error_code(error: &StorageError) -> &'static str {
         | E::MessageIdConflict(_)
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
-        | E::InvalidRecoveryState { .. } => "ValidationFailed",
+        | E::InvalidRecoveryState { .. }
+        | E::PairingField(_) => "ValidationFailed",
     }
 }
 

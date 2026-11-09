@@ -64,6 +64,7 @@ pub mod messages;
 pub mod object;
 mod object_payload;
 pub mod object_retention;
+pub(crate) mod pairing;
 pub mod raw_inner;
 pub mod read_model;
 pub(crate) mod receive;

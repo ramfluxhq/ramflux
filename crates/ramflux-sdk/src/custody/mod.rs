@@ -7,6 +7,7 @@ mod ceremony;
 mod commit_gate;
 pub use bus::{ConfirmedAccount, CustodyBusClient};
 pub(crate) use commit_gate::CommitGate;
+pub mod pairing;
 mod secret_buffer;
 pub(crate) use secret_buffer::serialize_secret;
 pub(crate) mod home_authorization;

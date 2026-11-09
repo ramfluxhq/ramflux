@@ -864,6 +864,7 @@ pub(crate) fn migrate_account_db(connection: &Connection) -> Result<(), StorageE
         apply_account_migration(connection, migration)?;
     }
     connection.call(|db| crate::account_db::raw_inner::schema::install(db))?;
+    connection.call(|db| crate::account_db::pairing::install(db))?;
     ensure_legacy_columns(connection)?;
     Ok(())
 }

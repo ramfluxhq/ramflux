@@ -107,6 +107,8 @@ pub enum StorageError {
     IdentityLifecycleBlocked(String),
     #[error("pending recovery {recovery_id} is not in expected state: {expected}")]
     InvalidRecoveryState { recovery_id: String, expected: String },
+    #[error("invalid pairing field: {0}")]
+    PairingField(&'static str),
 }
 
 impl StorageError {

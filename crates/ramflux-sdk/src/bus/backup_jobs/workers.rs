@@ -84,7 +84,8 @@ pub(super) fn storage_error(error: &ramflux_storage::StorageError) -> BackupFail
         | E::OperationReconciliationRequired { .. }
         | E::EventIdConflict(_)
         | E::IdentityLifecycleBlocked(_)
-        | E::InvalidRecoveryState { .. } => failure(BackupFailureCode::Unreadable),
+        | E::InvalidRecoveryState { .. }
+        | E::PairingField(_) => failure(BackupFailureCode::Unreadable),
     }
 }
 

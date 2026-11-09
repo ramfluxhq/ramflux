@@ -169,6 +169,8 @@ pub enum SdkError {
     TaskForwardWorkerCapacity,
     #[error("crypto error: {0}")]
     Crypto(#[from] CryptoError),
+    #[error("invalid pairing field: {0}")]
+    PairingField(&'static str),
     #[error("storage error: {0}")]
     Storage(#[source] StorageError),
     #[error("sync error: {0}")]
@@ -255,6 +257,7 @@ impl From<StorageError> for SdkError {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::ObjectErased => Self::ObjectErased,
+            StorageError::PairingField(name) => Self::PairingField(name),
             other => Self::Storage(other),
         }
     }
