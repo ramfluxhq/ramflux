@@ -3,6 +3,8 @@
 
 //! W1 commit sweep, real erase, manifest wait, `COVERED_BELOW`, nothing-owed (S6b P20f r5B).
 #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+// Env toggle for `RouterRedbStore::open` WAL vs redb-only (`RAMFLUX_ROUTER_WAL`).
+#![allow(unsafe_code)]
 
 use super::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage};
 use super::apply_w1::{
@@ -22,13 +24,14 @@ use crate::dm::{SdkDmEncryptedEnvelope, dm_associated_data, dm_device_id_hash};
 use crate::gateway::GatewaySessionTransportKind;
 use crate::prelude::*;
 use ramflux_crypto::DmSession;
+use ramflux_node_core::{InboxEntry, RouterCore, RouterRedbStore};
 use ramflux_protocol::encode_base64url;
 use ramflux_storage::{AccountDb, ReceiveExpectation, ReceiveFailureKind, StorageError};
 use ramflux_sync::SyncError;
 use ramflux_transport::TransportError;
 use serde_json::json;
 use std::cell::Cell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -186,11 +189,6 @@ fn cursor(account: &crate::bus::state::LocalBusAccountState) -> Result<u64, SdkE
         .cursor)
 }
 
-fn checkpoint_main(account: &mut crate::bus::state::LocalBusAccountState) -> Result<(), SdkError> {
-    account.client.account_db()?.checkpoint_retired_secrets()?;
-    reopen(account)
-}
-
 struct CountSends {
     sends: Arc<AtomicUsize>,
 }
@@ -260,7 +258,119 @@ fn erase_pending(db: &AccountDb) {
 #[derive(Clone, Copy, Debug)]
 enum Mode {
     Wal,
-    MainFile,
+    RedbOnly,
+}
+
+struct RouterWalMode {
+    previous: Option<String>,
+}
+
+impl RouterWalMode {
+    fn apply(mode: Mode) -> Self {
+        let previous = std::env::var("RAMFLUX_ROUTER_WAL").ok();
+        let value = match mode {
+            Mode::Wal => "1",
+            Mode::RedbOnly => "0",
+        };
+        // SAFETY: named gates run `apply_w1` with `--test-threads=1`, so this
+        // process-wide toggle is not concurrent.
+        unsafe {
+            std::env::set_var("RAMFLUX_ROUTER_WAL", value);
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for RouterWalMode {
+    fn drop(&mut self) {
+        // SAFETY: same single-threaded test contract as `apply`.
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("RAMFLUX_ROUTER_WAL", value),
+                None => std::env::remove_var("RAMFLUX_ROUTER_WAL"),
+            }
+        }
+    }
+}
+
+fn router_err(error: &ramflux_node_core::NodeCoreError) -> SdkError {
+    SdkError::LocalBus(error.to_string())
+}
+
+fn router_path(root: &Path) -> PathBuf {
+    root.join("router.redb")
+}
+
+fn wal_dir(path: &Path) -> PathBuf {
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("router.redb");
+    path.with_file_name(format!("{name}.wal"))
+}
+
+fn pin_mode(path: &Path, mode: Mode) {
+    let wal = wal_dir(path);
+    match mode {
+        Mode::Wal => assert!(wal.exists(), "WAL root {wal:?}"),
+        Mode::RedbOnly => assert!(!wal.exists(), "redb-only has no WAL root {wal:?}"),
+    }
+}
+
+fn as_inbox(entry: &crate::GatewayInboxEntry) -> InboxEntry {
+    InboxEntry {
+        inbox_seq: entry.inbox_seq,
+        target_delivery_id: entry.target_delivery_id.clone(),
+        envelope: entry.envelope.clone(),
+    }
+}
+
+fn pending_rows(store: &RouterRedbStore, target: &str) -> Result<Vec<InboxEntry>, SdkError> {
+    Ok(store
+        .load_router()
+        .map_err(|error| router_err(&error))?
+        .map(|router| router.pending_entries_for_target(target))
+        .unwrap_or_default())
+}
+
+fn seed_router_row(
+    store: &RouterRedbStore,
+    entry: &crate::GatewayInboxEntry,
+) -> Result<(), SdkError> {
+    store.bootstrap_router(&RouterCore::new()).map_err(|error| router_err(&error))?;
+    store.record_inbox_entry(&as_inbox(entry)).map_err(|error| router_err(&error))
+}
+
+fn remove_router_row(store: &RouterRedbStore) -> Result<usize, SdkError> {
+    store.sweep_delivery_retention(i64::MAX, false).map_err(|error| router_err(&error))
+}
+
+fn kill_reopen(path: &Path, store: RouterRedbStore) -> Result<RouterRedbStore, SdkError> {
+    drop(store);
+    RouterRedbStore::open_existing(path).map_err(|error| router_err(&error))
+}
+
+fn durable_pending(
+    path: &Path,
+    store: RouterRedbStore,
+    target: &str,
+    mode: Mode,
+) -> Result<(RouterRedbStore, Vec<InboxEntry>), SdkError> {
+    let store = kill_reopen(path, store)?;
+    pin_mode(path, mode);
+    let rows = pending_rows(&store, target)?;
+    assert_eq!(rows.len(), 1, "inbox row survived {mode:?} kill/reopen");
+    Ok((store, rows))
+}
+
+fn row_removed(
+    path: &Path,
+    store: RouterRedbStore,
+    target: &str,
+    mode: Mode,
+) -> Result<(), SdkError> {
+    let removed = remove_router_row(&store)?;
+    assert!(removed >= 1, "real router row removed: {removed}");
+    let store = kill_reopen(path, store)?;
+    assert!(pending_rows(&store, target)?.is_empty(), "{mode:?} row gone after reopen");
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -390,6 +500,11 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     let sends = attach_counter(&mut harness.account);
     let entry = sweep_entry(sweep, &harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
+    let path = router_path(harness.root.path());
+    let _wal = RouterWalMode::apply(mode);
+    let store = RouterRedbStore::open(&path).map_err(|error| router_err(&error))?;
+    seed_router_row(&store, &entry.entry)?;
+    pin_mode(&path, mode);
     set_after_classify(arm_w1_cut);
     let cut = drive(&mut harness.account, entry.clone(), || 1).await;
     let error = cut.as_ref().err();
@@ -405,9 +520,8 @@ async fn before_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
         harness.account.client.account_db()?.receive_state_for_test(1)?,
         (Some("staged".into()), 1)
     );
-    if matches!(mode, Mode::MainFile) {
-        checkpoint_main(&mut harness.account)?;
-    }
+    let store = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?.0;
+    row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     reopen(&mut harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     let _ = drive_disk(&mut harness.account, 1, || 1).await?;
@@ -425,11 +539,15 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
     let sends = attach_counter(&mut harness.account);
     let entry = sweep_entry(sweep, &harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
+    let path = router_path(harness.root.path());
+    let _wal = RouterWalMode::apply(mode);
+    let store = RouterRedbStore::open(&path).map_err(|error| router_err(&error))?;
+    seed_router_row(&store, &entry.entry)?;
+    pin_mode(&path, mode);
     let _ = drive(&mut harness.account, entry.clone(), || 1).await?;
     let once = ledger(&harness.account)?;
-    if matches!(mode, Mode::MainFile) {
-        checkpoint_main(&mut harness.account)?;
-    }
+    let store = durable_pending(&path, store, &entry.entry.target_delivery_id, mode)?.0;
+    row_removed(&path, store, &entry.entry.target_delivery_id, mode)?;
     reopen(&mut harness.account)?;
     arm_sweep(sweep, &harness.account, &entry)?;
     redrive_once(&mut harness.account, entry).await?;
@@ -440,9 +558,9 @@ async fn after_commit_cell(sweep: Sweep, mode: Mode) -> Result<(), SdkError> {
 
 async fn sweep_kind(sweep: Sweep) -> Result<(), SdkError> {
     before_commit_cell(sweep, Mode::Wal).await?;
-    before_commit_cell(sweep, Mode::MainFile).await?;
+    before_commit_cell(sweep, Mode::RedbOnly).await?;
     after_commit_cell(sweep, Mode::Wal).await?;
-    after_commit_cell(sweep, Mode::MainFile).await?;
+    after_commit_cell(sweep, Mode::RedbOnly).await?;
     Ok(())
 }
 
