@@ -12,6 +12,7 @@ use super::{
 use crate::CryptoError;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 const VECTOR_CREATED_AT: u64 = 1_762_128_000;
 const VECTOR_TTL_SECONDS: u64 = 300;
@@ -178,6 +179,22 @@ fn a0_wire_bytes_match_independent_encoder() -> Result<(), CryptoError> {
     Ok(())
 }
 
+const PINNED_P06_A0_HEX: &str = "7b22636f6c6c617073655f746167223a2249694969496949694969496949694969496949694969496949694969496949694969496949694969496949222c22637265617465645f6174223a313736323132383030302c2264656c69766572795f636c617373223a226d657373616765222c2264656c69766572795f6d6f6465223a2264757261626c65222c22646f6d61696e223a2272616d666c75782e656e76656c6f70652e7631222c22656e76656c6f70655f6964223a22656e76656c6f7065222c227072696f72697479223a226e6f726d616c222c22736368656d61223a2272616d666c75782e656e76656c6f70652e7631222c227369676e61747572655f616c67223a2265643235353139222c227369676e696e675f6b65795f6964223a2266697874757265222c22736f757263655f617574686f72697479223a22222c22736f757263655f6465766963655f6964223a22646576696365222c22736f757263655f7072696e636970616c5f6964223a227072696e636970616c222c227461726765745f64656c69766572795f6964223a22746172676574222c2274746c5f7365636f6e6473223a3330302c2276657273696f6e223a317d";
+const PINNED_P06_C_HEX: &str = "e825decfc46d15ee4f9e7a73a3c84944ca544f0520ab5e14491898b41cc461f5";
+const PINNED_P06_INNER: &[u8] = b"s10a-p07b1-inner";
+
+#[test]
+fn pinned_p06_a0_and_commitment_hex() -> Result<(), CryptoError> {
+    let a0 = hex::decode(PINNED_P06_A0_HEX).expect("pinned a0");
+    let opening = vector_opening();
+    let actual = report_commitment(&opening, PINNED_P06_INNER, &a0)?;
+    let independent = independent_commitment(&opening, PINNED_P06_INNER, &a0);
+    assert_eq!(actual, independent);
+    assert_eq!(hex::encode(actual), PINNED_P06_C_HEX);
+    verify_report_opening(&opening, PINNED_P06_INNER, &a0, &actual)?;
+    Ok(())
+}
+
 #[test]
 fn vector_commitment_matches_independent_keyed_blake3() -> Result<(), CryptoError> {
     let collapse = vector_collapse();
@@ -261,7 +278,8 @@ fn assemble_binds_frame_a0_and_commitment() -> Result<(), CryptoError> {
     let collapse = vector_collapse();
     let envelope_id = vector_envelope_id();
     let fields = vector_fields(&envelope_id, &collapse);
-    let assembled = assemble_report_opening(VECTOR_INNER, &fields, vector_opening())?;
+    let assembled =
+        assemble_report_opening(VECTOR_INNER, &fields, Zeroizing::new(vector_opening()))?;
     assert_eq!(assembled.collapse_tag, collapse);
     let parsed = parse_report_plaintext(assembled.framed_plaintext())?;
     verify_report_opening(
@@ -278,7 +296,8 @@ fn assembled_report_debug_redacts_secret_plaintext_and_opening() -> Result<(), C
     let collapse = vector_collapse();
     let envelope_id = vector_envelope_id();
     let fields = vector_fields(&envelope_id, &collapse);
-    let assembled = assemble_report_opening(VECTOR_INNER, &fields, vector_opening())?;
+    let assembled =
+        assemble_report_opening(VECTOR_INNER, &fields, Zeroizing::new(vector_opening()))?;
     let debug = format!("{assembled:?}");
     assert_eq!(
         debug,

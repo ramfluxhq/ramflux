@@ -124,6 +124,8 @@ fn legacy_group_distribution_sender_is_bound_to_the_authenticated_device() -> Re
         source_principal_commitment: None,
         x3dh,
         ciphertext: session.encrypt(&body, dm_associated_data(&conversation))?,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let entry = packet(&mallory, encrypted, "forged-distribution")?;
     assert!(

@@ -437,6 +437,8 @@ fn legacy_dm_entry(
         source_principal_commitment: None,
         x3dh: None,
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     };
     let message = GatewayDirectMessage {
         conversation_id: "legacy-dm-sweep".into(),

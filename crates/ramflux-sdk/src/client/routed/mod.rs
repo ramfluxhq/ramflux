@@ -27,6 +27,7 @@ pub(crate) mod group_directory;
 mod legacy;
 pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
+mod report;
 pub(crate) use receive::{Delivery, JoinedW1};
 mod pair_lifecycle;
 mod prepared;
@@ -238,6 +239,8 @@ struct SealedPairPersist<'a> {
     session: &'a ramflux_crypto::DmSession,
     message: &'a GatewayDirectMessage,
     header: Option<&'a SdkDmX3dhHeader>,
+    collapse_tag: Option<String>,
+    report_commitment: Option<String>,
 }
 
 fn persist_sealed_pair(
@@ -310,6 +313,8 @@ fn cryptobox_sender_envelope(
         version: 2,
         x3dh: persist.header.cloned(),
         ciphertext: persist.sealed.clone(),
+        collapse_tag: persist.collapse_tag.clone(),
+        report_commitment: persist.report_commitment.clone(),
     };
     let encrypted_payload =
         ramflux_protocol::message::outer::wire_encrypted_payload(&serde_json::to_vec(&nested)?)
@@ -341,8 +346,13 @@ fn cryptobox_sender_envelope(
         payload_hash,
         delivery_mode: None,
         collapse_tag: None,
+        report_commitment: None,
     };
-    crate::dm::apply_candidate_named_fields(&mut envelope);
+    crate::dm::apply_candidate_named_fields_with(
+        &mut envelope,
+        persist.collapse_tag.as_deref(),
+        persist.report_commitment.as_deref(),
+    );
     if let Ok(anchor) = client.own_account_anchor() {
         envelope.ext.ext.insert("source_root_commitment".into(), serde_json::Value::String(anchor));
     }
@@ -445,16 +455,45 @@ impl RamfluxClient {
         {
             conversation.clone_into(&mut route.conversation_id);
         }
-        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
-            routing: route,
+        let inner = zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
+            routing: route.clone(),
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
         })?);
-        let aad = associated_data(&message.envelope_id, local, &wire_remote, &bundle)?;
+        let report = if route.kind == Kind::Direct
+            && crate::client::target_selection::schema_v1_selected()
+        {
+            Some(report::assemble_direct_report(self, message, session, &inner, local)?)
+        } else {
+            None
+        };
+        let plaintext = if let Some(ref report) = report {
+            zeroize::Zeroizing::new(report.framed.as_bytes().to_vec())
+        } else {
+            inner
+        };
+        let aad = if let Some(ref report) = report {
+            associated_data_bound(
+                &message.envelope_id,
+                local,
+                &wire_remote,
+                &bundle,
+                CandidateAadBinding { delivery_mode: "durable", collapse_tag: report.collapse_tag },
+            )?
+        } else {
+            associated_data(&message.envelope_id, local, &wire_remote, &bundle)?
+        };
         let ciphertext = session.encrypt(&plaintext, &aad)?;
+        let collapse_tag =
+            report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.collapse_tag));
+        let report_commitment =
+            report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.report_commitment));
         persist_sealed_pair(
             self,
             &SealedPairPersist {
-                inner_len: plaintext.len(),
+                inner_len: plaintext.len().saturating_sub(report.as_ref().map_or(0, |_| {
+                    ramflux_protocol::message::outer::FRAME_PREFIX_BYTES
+                        + ramflux_protocol::message::outer::REPORT_OPENING_BYTES
+                })),
                 sealed: &ciphertext,
                 local,
                 remote: &remote,
@@ -462,6 +501,8 @@ impl RamfluxClient {
                 session,
                 message,
                 header: header.as_ref(),
+                collapse_tag: collapse_tag.clone(),
+                report_commitment: report_commitment.clone(),
             },
         )?;
         self.finish_pair_retirement()?;
@@ -472,6 +513,8 @@ impl RamfluxClient {
             version: 2,
             x3dh: header,
             ciphertext,
+            collapse_tag,
+            report_commitment,
         })
     }
 
@@ -483,9 +526,11 @@ impl RamfluxClient {
         self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         refuse_received_outer_fields(&entry.envelope)?;
         let envelope = decode(&entry.envelope)?;
+        let local_device = self.local_device_identity(local)?;
+        let remote_device = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let (mut session, bundle) = self.recv_pair_session(
-            &self.local_device_identity(local)?,
-            &self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+            &local_device,
+            &remote_device,
             &entry.envelope.envelope_id,
             &envelope,
         )?;
@@ -498,7 +543,11 @@ impl RamfluxClient {
         let decrypted = zeroize::Zeroizing::new(
             session.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?,
         );
-        let plaintext: Plaintext = serde_json::from_slice(&decrypted.plaintext)?;
+        if entry.envelope.report_commitment.is_some() {
+            self.persist_pair(&local_device, &remote_device, &bundle, &session)?;
+        }
+        let inner = report::opened_inner_plaintext(&entry.envelope, &decrypted.plaintext)?;
+        let plaintext: Plaintext = serde_json::from_slice(&inner)?;
         if plaintext.routing.attachments && plaintext.routing.kind != Kind::Direct {
             return Err(invalid("attachment flag requires a direct route"));
         }
@@ -528,8 +577,8 @@ impl RamfluxClient {
             decrypted,
             session,
             bundle_hash: bundle,
-            local_device: self.local_device_identity(local)?,
-            remote_device: self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?,
+            local_device,
+            remote_device,
         })
     }
     #[cfg(test)]

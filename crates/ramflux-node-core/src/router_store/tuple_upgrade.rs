@@ -197,6 +197,7 @@ mod tests {
             payload_hash: "hash".into(),
             delivery_mode: None,
             collapse_tag: None,
+            report_commitment: None,
         };
         assert!(!guard.accept_envelope_once(&source, &envelope, 100)?);
         assert!(store.has_local_delivery_envelope(

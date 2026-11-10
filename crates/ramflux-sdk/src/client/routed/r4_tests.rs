@@ -357,6 +357,8 @@ async fn legacy_a2i_is_durable_before_ack_and_survives_cursor_advance() -> Resul
         x3dh: header,
         ciphertext: sending
             .encrypt(&serde_json::to_vec(&event)?, dm_associated_data(&conversation))?,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
         forwarded: false,
@@ -421,6 +423,8 @@ fn sealed_legacy_a2i(
         x3dh: header,
         ciphertext: sending
             .encrypt(&serde_json::to_vec(&event)?, dm_associated_data(&conversation))?,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     Ok((
         GatewayInboxEntry {

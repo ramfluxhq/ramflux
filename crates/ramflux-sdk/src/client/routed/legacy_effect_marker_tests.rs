@@ -171,6 +171,8 @@ fn bound(
         version: 1,
         x3dh: header.clone(),
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let receiving =
         receiver.client.load_or_create_recv_dm_session(conversation, header.as_ref())?;
@@ -220,6 +222,8 @@ fn bound_to(
         version: 1,
         x3dh: header.clone(),
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let receiving =
         receiver.client.load_or_create_recv_dm_session(conversation, header.as_ref())?;
@@ -310,6 +314,8 @@ fn a2i_sealed_to(
         version: 1,
         x3dh: header.clone(),
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     if persist_session {
         let receiving =
@@ -886,6 +892,8 @@ fn cut_erased_dm_row() -> Result<(), SdkError> {
         version: 1,
         x3dh: None,
         ciphertext: send.encrypt(&body, dm_associated_data(conversation))?,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
         forwarded: false,

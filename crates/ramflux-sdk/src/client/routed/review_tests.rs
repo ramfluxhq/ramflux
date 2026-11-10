@@ -66,6 +66,8 @@ pub(super) fn legacy(sender: &Fixture, receiver: &Fixture) -> Result<GatewayInbo
         version: 1,
         x3dh: header,
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     Ok(GatewayInboxEntry {
         forwarded: false,
@@ -522,6 +524,8 @@ fn a_lower_peer_session_id_cannot_displace_a_locally_initiated_session() -> Resu
             version: 2,
             x3dh: header,
             ciphertext,
+            collapse_tag: None,
+            report_commitment: None,
         })?;
         inbound = Some(GatewayInboxEntry {
             forwarded: false,

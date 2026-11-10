@@ -101,6 +101,8 @@ async fn malformed_gateway_success_during_bootstrap_is_held_and_the_same_distrib
         x3dh,
         ciphertext: session
             .encrypt(&serde_json::to_vec(&wrapper)?, dm_associated_data(&conversation))?,
+        collapse_tag: None,
+        report_commitment: None,
     };
     let entry = packet(&alice, serde_json::to_vec(&encrypted)?, "bootstrap-distribution")?;
     let (address, ca, calls, server) =

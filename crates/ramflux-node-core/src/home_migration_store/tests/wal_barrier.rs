@@ -32,6 +32,7 @@ pub(super) fn entry(target: &str) -> crate::InboxEntry {
             payload_hash: hash(43),
             delivery_mode: None,
             collapse_tag: None,
+            report_commitment: None,
         },
     }
 }

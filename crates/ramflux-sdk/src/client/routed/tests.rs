@@ -295,7 +295,12 @@ fn real_wire_size_preflight_accepts_392kb_body() -> Result<(), SdkError> {
     let entry = seal(&a, &b, msg, &body)?;
     let opened = b.client.open_routed(&entry, "bob")?;
     assert_eq!(opened.body.as_slice(), body.as_slice());
-    assert_eq!(opened.decrypted.plaintext.len(), inner);
+    assert_eq!(
+        opened.decrypted.plaintext.len(),
+        inner
+            + ramflux_protocol::message::outer::FRAME_PREFIX_BYTES
+            + ramflux_protocol::message::outer::REPORT_OPENING_BYTES
+    );
     assert_compact_frame_admitted(&entry)
 }
 
@@ -531,6 +536,8 @@ fn legacy_requires_exact_existing_device_pair_conversation_binding() -> Result<(
         version: 1,
         x3dh: header.clone(),
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
         forwarded: false,
@@ -983,6 +990,9 @@ mod candidate_nested_decode;
 
 #[path = "candidate_binding_tests.rs"]
 mod candidate_binding;
+
+#[path = "candidate_report_tests.rs"]
+mod candidate_report;
 
 #[path = "native_group_conversation_tests.rs"]
 mod native_group_conversation;

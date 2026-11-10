@@ -13,6 +13,10 @@ pub(crate) struct SdkDmEncryptedEnvelope {
     pub(crate) source_principal_commitment: Option<String>,
     pub(crate) x3dh: Option<SdkDmX3dhHeader>,
     pub(crate) ciphertext: ramflux_crypto::DmCiphertext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) collapse_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) report_commitment: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
@@ -225,6 +229,8 @@ mod tests {
             version: 1,
             x3dh: None,
             ciphertext: ciphertext.clone(),
+            collapse_tag: None,
+            report_commitment: None,
         })?;
         let franking = SdkDmFrankingMetadata::from_ciphertext(&ciphertext);
         let envelope = gateway_direct_message_envelope(
@@ -405,8 +411,18 @@ pub(crate) fn derived_candidate_binding(envelope_id: &str) -> ([u8; 32], &'stati
     )
 }
 
-pub(crate) fn apply_candidate_named_fields(envelope: &mut ramflux_protocol::Envelope) {
+pub(crate) fn apply_candidate_named_fields_with(
+    envelope: &mut ramflux_protocol::Envelope,
+    collapse_tag: Option<&str>,
+    report_commitment: Option<&str>,
+) {
     if !ramflux_protocol::schema_profile::schema_v1_live() {
+        return;
+    }
+    envelope.delivery_mode = Some(CANDIDATE_DELIVERY_MODE_DURABLE.to_owned());
+    if let (Some(tag), Some(commitment)) = (collapse_tag, report_commitment) {
+        envelope.collapse_tag = Some(tag.to_owned());
+        envelope.report_commitment = Some(commitment.to_owned());
         return;
     }
     let (collapse_tag, delivery_mode) = derived_candidate_binding(&envelope.envelope_id);
@@ -504,8 +520,14 @@ pub(crate) fn gateway_direct_message_envelope(
         payload_hash,
         delivery_mode: None,
         collapse_tag: None,
+        report_commitment: None,
     };
-    apply_candidate_named_fields(&mut envelope);
+    let nested = serde_json::from_slice::<SdkDmEncryptedEnvelope>(&message.encrypted_body).ok();
+    apply_candidate_named_fields_with(
+        &mut envelope,
+        nested.as_ref().and_then(|value| value.collapse_tag.as_deref()),
+        nested.as_ref().and_then(|value| value.report_commitment.as_deref()),
+    );
     if let Some(source) = &config.source_identity {
         if source.device_id() != envelope.source_device_id {
             return Err(SdkError::GatewaySessionRejected(

@@ -168,6 +168,8 @@ impl RamfluxClient {
             version: 2,
             x3dh: slot.x3dh.clone(),
             ciphertext: slot.ciphertext.clone(),
+            collapse_tag: None,
+            report_commitment: None,
         };
         let (mut session, bundle) = self.recv_pair_session(
             &self.local_device_identity(local)?,
@@ -274,6 +276,8 @@ impl RamfluxClient {
             version: 2,
             x3dh: slot.x3dh.clone(),
             ciphertext: slot.ciphertext.clone(),
+            collapse_tag: None,
+            report_commitment: None,
         };
         let (_, bundle) = self.recv_pair_session(
             &self.local_device_identity(&slot.recipient_device_id)?,

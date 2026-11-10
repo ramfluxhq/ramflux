@@ -63,6 +63,9 @@ pub struct Envelope {
     /// Candidate collapse tag (base64url of 32 bytes). Omitted on the generation-0 wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapse_tag: Option<String>,
+    /// Candidate report commitment (base64url of 32 bytes). Omitted on generation-0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_commitment: Option<String>,
 }
 
 impl Envelope {

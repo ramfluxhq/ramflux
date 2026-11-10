@@ -72,6 +72,7 @@ fn entry(seq: u64) -> InboxEntry {
         payload_hash: "hash".into(),
         delivery_mode: None,
         collapse_tag: None,
+        report_commitment: None,
     };
     let mut entry = inbox.append(envelope);
     entry.inbox_seq = seq;

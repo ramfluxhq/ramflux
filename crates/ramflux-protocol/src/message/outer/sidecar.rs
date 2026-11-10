@@ -24,6 +24,10 @@ struct CandidateSidecar {
     x3dh: Option<CandidateX3dh>,
     #[serde(default)]
     ciphertext: Option<CandidateCiphertext>,
+    #[serde(default)]
+    collapse_tag: Option<String>,
+    #[serde(default)]
+    report_commitment: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +157,12 @@ impl CandidateSidecar {
     fn check_caps(&self) -> Result<(), OuterProfileError> {
         cap_id(&self.schema)?;
         if let Some(commitment) = &self.source_principal_commitment {
+            cap_id(commitment)?;
+        }
+        if let Some(tag) = &self.collapse_tag {
+            cap_id(tag)?;
+        }
+        if let Some(commitment) = &self.report_commitment {
             cap_id(commitment)?;
         }
         if let Some(ciphertext) = &self.ciphertext {

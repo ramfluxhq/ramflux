@@ -124,6 +124,7 @@ pub(crate) mod tests {
             payload_hash: "hash".into(),
             delivery_mode: None,
             collapse_tag: None,
+            report_commitment: None,
         };
         envelope.ext.ext.insert(
             "source_root_commitment".into(),

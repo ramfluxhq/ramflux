@@ -13,10 +13,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod compact;
+mod report_a0;
 mod sidecar;
 pub use compact::{
     COMPACT_CRYPTOBOX_MAGIC, CompactCryptobox, compact_cryptobox_bytes, decode_compact_cryptobox,
     encode_compact_cryptobox, wire_encrypted_payload,
+};
+pub use report_a0::{
+    CandidateReportA0, candidate_report_a0_from_envelope, encode_candidate_report_a0,
 };
 pub use sidecar::{decode_candidate_sidecar, decode_compact_candidate_sidecar};
 

@@ -55,6 +55,7 @@ fn live_envelope(mode: Option<&str>) -> Envelope {
         payload_hash: "hash".to_owned(),
         delivery_mode: None,
         collapse_tag: None,
+        report_commitment: None,
     }
 }
 
@@ -486,6 +487,17 @@ fn compact_cryptobox_round_trip_and_unknown_field() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[test]
+fn sidecar_admits_named_report_fields_and_still_refuses_pad()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut nested = nested_sdk_value(&[9_u8; 8]);
+    nested["collapse_tag"] = json!(collapse_tag());
+    nested["report_commitment"] = json!(crate::encode_base64url([0x33_u8; 32]));
+    decode_candidate_sidecar(&serde_json::to_vec(&nested)?)?;
+    nested["pad"] = json!("x");
+    unknown_field(decode_candidate_sidecar(&serde_json::to_vec(&nested)?))
+}
+
 const REAL_250KB: usize = 250 * 1024;
 const NESTED_PAD: usize = 100 * 1024;
 
@@ -793,5 +805,11 @@ fn sender_signed_bytes_cover_named_delivery_mode_and_collapse_tag()
     envelope.delivery_mode = Some("durable".to_owned());
     envelope.collapse_tag = Some(crate::encode_base64url([0x00_u8; 32]));
     assert_ne!(signed, crate::envelope_sender_signed_bytes(&envelope)?);
+    envelope.collapse_tag = Some(collapse_tag());
+    envelope.report_commitment = Some(crate::encode_base64url([0x33_u8; 32]));
+    let with_c = crate::envelope_sender_signed_bytes(&envelope)?;
+    assert!(String::from_utf8(with_c.clone())?.contains("\"report_commitment\":"));
+    envelope.report_commitment = Some(crate::encode_base64url([0x00_u8; 32]));
+    assert_ne!(with_c, crate::envelope_sender_signed_bytes(&envelope)?);
     Ok(())
 }

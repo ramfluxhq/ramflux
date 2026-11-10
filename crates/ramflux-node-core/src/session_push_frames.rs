@@ -20,6 +20,7 @@ pub struct SessionPushEstablishedFrame {
     pub inbox_incarnation_id: String,
 }
 #[derive(Debug, Serialize)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "frame_type", rename_all = "snake_case")]
 pub enum SessionPushServerFrame {
     SessionEstablished {

@@ -87,6 +87,8 @@ impl LegacyCase {
             version: 1,
             x3dh: None,
             ciphertext: self.send.encrypt(&body, dm_associated_data("legacy-thread"))?,
+            collapse_tag: None,
+            report_commitment: None,
         })?;
         Ok(GatewayInboxEntry {
             forwarded: false,

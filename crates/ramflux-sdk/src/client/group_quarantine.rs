@@ -186,6 +186,7 @@ mod tests {
                 payload_hash: "hash".into(),
                 delivery_mode: None,
                 collapse_tag: None,
+                report_commitment: None,
             },
         };
         let first = legacy_key(&entry)?;

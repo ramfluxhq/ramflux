@@ -127,6 +127,8 @@ struct StoredRouterWalEnvelope {
     delivery_mode: Option<String>,
     #[serde(default)]
     collapse_tag: Option<String>,
+    #[serde(default)]
+    report_commitment: Option<String>,
 }
 
 impl StoredRouterWalPayload {
@@ -294,6 +296,7 @@ impl TryFrom<&ramflux_protocol::Envelope> for StoredRouterWalEnvelope {
             payload_hash: envelope.payload_hash.clone(),
             delivery_mode: envelope.delivery_mode.clone(),
             collapse_tag: envelope.collapse_tag.clone(),
+            report_commitment: envelope.report_commitment.clone(),
         })
     }
 }
@@ -326,6 +329,7 @@ impl TryFrom<StoredRouterWalEnvelope> for ramflux_protocol::Envelope {
             payload_hash: envelope.payload_hash,
             delivery_mode: envelope.delivery_mode,
             collapse_tag: envelope.collapse_tag,
+            report_commitment: envelope.report_commitment,
         })
     }
 }
@@ -2623,6 +2627,7 @@ mod tests {
             payload_hash: "payload_hash".to_owned(),
             delivery_mode: None,
             collapse_tag: None,
+            report_commitment: None,
         }
     }
 

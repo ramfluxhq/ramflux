@@ -239,7 +239,12 @@ pub fn report_commitment(
     inner: &[u8],
     a0: &[u8],
 ) -> Result<[u8; 32], CryptoError> {
-    let mut context = Zeroizing::new(Vec::new());
+    let capacity = LEN_PREFIX
+        .saturating_mul(3)
+        .saturating_add(REPORT_OPENING_DOMAIN.len())
+        .saturating_add(inner.len())
+        .saturating_add(a0.len());
+    let mut context = Zeroizing::new(Vec::with_capacity(capacity));
     write_u32_lp(&mut context, REPORT_OPENING_DOMAIN.as_bytes(), CryptoError::ReportA0TooLarge)?;
     write_u32_lp(&mut context, inner, CryptoError::ReportInnerTooLarge)?;
     write_u32_lp(&mut context, a0, CryptoError::ReportA0TooLarge)?;
@@ -311,9 +316,8 @@ pub fn cover_collapse_tag() -> Result<[u8; 32], CryptoError> {
 pub fn assemble_report_opening(
     inner: &[u8],
     fields: &ReportA0<'_>,
-    opening: [u8; 32],
+    opening: Zeroizing<[u8; 32]>,
 ) -> Result<AssembledReportOpening, CryptoError> {
-    let opening = Zeroizing::new(opening);
     let a0 = encode_report_a0(fields)?;
     let framed_plaintext = frame_report_plaintext(inner, &opening)?;
     let report_commitment = report_commitment(&opening, inner, &a0)?;

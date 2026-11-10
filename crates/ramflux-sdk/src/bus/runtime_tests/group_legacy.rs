@@ -699,6 +699,8 @@ fn routed_unrouted_entry(mut entry: GatewayInboxEntry) -> Result<GatewayInboxEnt
             commitment: String::new(),
             ciphertext_hash: String::new(),
         },
+        collapse_tag: None,
+        report_commitment: None,
     };
     entry.envelope.encrypted_payload =
         ramflux_protocol::encode_base64url(&serde_json::to_vec(&wrapper)?);

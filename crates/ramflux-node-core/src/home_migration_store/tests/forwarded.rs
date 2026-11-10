@@ -141,6 +141,7 @@ fn sender_with_seed(target: &str, seed: u8) -> TestResult<crate::ForwardedEnvelo
         payload_hash: hash(76),
         delivery_mode: None,
         collapse_tag: None,
+        report_commitment: None,
     };
     envelope.ext.ext.insert("source_root_commitment".into(), json!(record.body.account_anchor));
     envelope.signed.signature =

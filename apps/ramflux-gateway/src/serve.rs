@@ -718,6 +718,7 @@ mod tests {
             payload_hash: "payload_hash".to_owned(),
             delivery_mode: None,
             collapse_tag: None,
+            report_commitment: None,
         }
     }
 }

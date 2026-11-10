@@ -82,6 +82,7 @@ pub(super) fn envelope(
         payload_hash: ramflux_protocol::encode_base64url([43; 32]),
         delivery_mode: None,
         collapse_tag: None,
+        report_commitment: None,
     };
     envelope
         .ext

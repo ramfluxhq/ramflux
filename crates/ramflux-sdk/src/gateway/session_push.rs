@@ -223,6 +223,7 @@ pub(crate) struct SessionEstablished {
 
 /// One negotiated server frame. Unknown tags and unknown fields are refused.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "frame_type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum CapableServerFrame {
     SessionEstablished {

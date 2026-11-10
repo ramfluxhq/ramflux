@@ -278,6 +278,8 @@ async fn legacy_friend_requests_bind_participants_to_the_authenticated_sender_be
             version: 1,
             x3dh: header.clone(),
             ciphertext,
+            collapse_tag: None,
+            report_commitment: None,
         })?;
         let entry = GatewayInboxEntry {
             forwarded: false,
@@ -354,6 +356,8 @@ async fn valid_delivery_after_rejected_control(
         version: 1,
         x3dh: None,
         ciphertext: session.encrypt(b"after rejected control", dm_associated_data("history"))?,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let next = GatewayInboxEntry {
         forwarded: false,
@@ -403,6 +407,8 @@ async fn unknown_friend_removed_is_quarantined_and_the_next_legacy_message_arriv
         version: 1,
         x3dh: header.clone(),
         ciphertext,
+        collapse_tag: None,
+        report_commitment: None,
     })?;
     let entry = GatewayInboxEntry {
         forwarded: false,

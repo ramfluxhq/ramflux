@@ -45,7 +45,8 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::InvalidSignatureLength(_)
             | ramflux_crypto::CryptoError::AeadFailed
             | ramflux_crypto::CryptoError::KeyCommitmentMismatch
-            | ramflux_crypto::CryptoError::CommitmentMismatch,
+            | ramflux_crypto::CryptoError::CommitmentMismatch
+            | ramflux_crypto::CryptoError::ReportCommitmentMismatch,
         ) => Some("authentication_failed"),
         SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)) => Some("i_json_rejected"),
         SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
@@ -179,6 +180,10 @@ mod tests {
         assert_eq!(deterministic(&SdkError::ReplayMismatch), Some("replay_mismatch"));
         assert_eq!(
             deterministic(&SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed)),
+            Some("authentication_failed")
+        );
+        assert_eq!(
+            deterministic(&SdkError::Crypto(ramflux_crypto::CryptoError::ReportCommitmentMismatch)),
             Some("authentication_failed")
         );
         assert_eq!(deterministic(&SdkError::InboundRejected("x".into())), Some("routing_rejected"));

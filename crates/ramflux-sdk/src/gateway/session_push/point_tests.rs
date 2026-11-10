@@ -448,8 +448,8 @@ async fn capable_point_and_ack_exact_reply_sets() {
     let decoded: crate::gateway::GatewayClientFrame = serde_json::from_slice(&written[0]).unwrap();
     assert_eq!(serde_json::to_vec(&decoded).unwrap(), written[0]);
 
-    refusal_rows().await;
-    set_rows().await;
+    Box::pin(refusal_rows()).await;
+    Box::pin(set_rows()).await;
 }
 
 async fn refusal_rows() {
