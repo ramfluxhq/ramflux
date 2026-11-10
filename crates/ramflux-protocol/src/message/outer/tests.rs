@@ -610,6 +610,50 @@ fn compact_sidecar_requires_ciphertext_object() {
     assert_eq!(decode_candidate_sidecar(&absent), Ok(()));
 }
 
+/// Generation-0 `Envelope` fields on `origin/main` before named candidate fields.
+const GENERATION_0_ENVELOPE_FIELDS: &[&str] = &[
+    "schema",
+    "version",
+    "domain",
+    "ext",
+    "signed",
+    "envelope_id",
+    "source_principal_id",
+    "source_device_id",
+    "target_delivery_id",
+    "routing_set_id",
+    "delivery_class",
+    "priority",
+    "ttl",
+    "created_at",
+    "encrypted_payload",
+    "payload_hash",
+];
+
+fn all_envelope_field_names_from_source(src: &str) -> Vec<String> {
+    let Some(start) = src.find("pub struct Envelope {") else {
+        return Vec::new();
+    };
+    let Some((body, _)) = src[start..].split_once("\n}") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
 fn candidate_field_names_from_envelope_source(src: &str) -> Vec<String> {
     let Some(start) = src.find("pub struct Envelope {") else {
         return Vec::new();
@@ -657,6 +701,15 @@ fn candidate_only_fields_are_enumerated() {
     let names = candidate_field_names_from_envelope_source(src);
     assert_eq!(names, vec!["delivery_mode".to_owned(), "collapse_tag".to_owned()]);
     assert!(helper_covers_candidate_fields(src, &names));
+    let extra: Vec<String> = all_envelope_field_names_from_source(src)
+        .into_iter()
+        .filter(|name| !GENERATION_0_ENVELOPE_FIELDS.contains(&name.as_str()))
+        .collect();
+    assert_ne!(extra.len(), 0);
+    assert!(
+        helper_covers_candidate_fields(src, &extra),
+        "fields outside generation-0 Envelope must be in candidate_fields_present: {extra:?}"
+    );
     assert!(!schema_v1_live());
     let mut envelope = live_envelope(None);
     assert!(!envelope.candidate_fields_present());

@@ -25,6 +25,32 @@ fn reservation(
 }
 
 #[test]
+fn committed_forward_named_field_gate_off_is_terminal_rejected_security() -> anyhow::Result<()> {
+    anyhow::ensure!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let now = i64::try_from(ramflux_node_core::now_unix_seconds())?;
+    let (handle, _) = migrated_test_handle("http://127.0.0.1:1/", 1, Duration::from_secs(20), now)?;
+    let mut envelope = current_envelope("named-gate-off", "target_alice")?;
+    envelope.delivery_mode = Some("durable".into());
+    envelope.ext.ext.remove("source_device_authority");
+    envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
+        &envelope,
+        ramflux_crypto::blake3_256("ramflux.test.runtime.device.v1", b"alice/alice_phone"),
+    )?;
+    handle.state().refresh_registered_envelope_authority(&mut envelope)?;
+    let response = handle.submit_envelope_from(
+        envelope,
+        Instant::now(),
+        ramflux_node_core::RouterEnvelopeOrigin::Gateway,
+    )?;
+    anyhow::ensure!(
+        response.outcome == "rejected_security:delivery_mode_refused",
+        "exact RejectedSecurity, got {}",
+        response.outcome
+    );
+    Ok(())
+}
+
+#[test]
 fn socket_timeout_uses_production_forward_completion() -> anyhow::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let url = format!("http://{}/forward", listener.local_addr()?);

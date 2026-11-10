@@ -447,6 +447,13 @@ fn committed_preparation(
                         reason,
                     }
                 }
+                ramflux_node_core::NodeCoreError::DeliveryModeRefused
+                | ramflux_node_core::NodeCoreError::PayloadTooLarge => {
+                    ramflux_node_core::RouterSubmitOutcome::RejectedSecurity {
+                        target_delivery_id,
+                        reason: error.to_string(),
+                    }
+                }
                 _ => {
                     ramflux_node_core::RouterSubmitOutcome::ForwardInProgress { target_delivery_id }
                 }
