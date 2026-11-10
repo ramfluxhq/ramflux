@@ -220,7 +220,7 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
         path: PATH.into(),
         body: serde_json::to_value(forward)?,
     };
-    let reply = crate::serve::handle_gateway_forward_request(&request, &listener).await?;
+    let reply = crate::serve::handle_gateway_forward_request(&request, &listener.hub).await?;
     assert!(reply.delivered);
     assert_eq!(listener.hub.ephemeral_queued(TARGET).await, 1);
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);

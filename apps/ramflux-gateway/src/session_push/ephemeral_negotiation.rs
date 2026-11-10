@@ -621,3 +621,75 @@ async fn identity_403_latches_refused_boot_without_retry_loop() -> TestResult {
         }
     }
 }
+
+fn assert_identity_hook_logged(before: usize, label: &str) -> usize {
+    let after = crate::registration::identity_rejection_call_count();
+    assert!(
+        after > before,
+        "{label} must increment identity 403 call count: before={before} after={after}"
+    );
+    after
+}
+
+#[tokio::test]
+async fn identity_403_logging_hooks_cover_session_upsert_principal_and_get() -> TestResult {
+    let mut fixture = Fixture::new("identity-403-hooks")?;
+    fixture.context.hub.readiness.seed_echo_for_test(false, false);
+    let identity_403 = json!({"reason": "gateway_instance_mismatch"});
+
+    let before_get = crate::registration::identity_rejection_call_count();
+    let router = fixture.context.router.clone();
+    let get_session =
+        tokio::spawn(async move { crate::router_session_async(&router, TARGET).await });
+    let posted = fixture.next().await?;
+    assert_eq!(posted.path, format!("/s1/session/{TARGET}"));
+    posted.respond.send((403, identity_403.clone())).map_err(|_| Retired)?;
+    let Err(get_err) = get_session.await? else {
+        anyhow::bail!("GET /s1/session must surface identity 403")
+    };
+    assert!(crate::registration::gateway_instance_rejection(&get_err));
+    let after_get = assert_identity_hook_logged(before_get, "GET /s1/session");
+
+    let (send, _) = sink();
+    let context = fixture.context.clone();
+    let session_runtime = runtime()?;
+    let fetch_runtime = session_runtime.clone();
+    let principal = tokio::spawn(async move {
+        crate::principal_directory::fetch(&send, &context, &fetch_runtime, "principal".into()).await
+    });
+    let posted = fixture.next().await?;
+    assert_eq!(posted.path, "/mvp1/principal-lookup");
+    posted.respond.send((403, identity_403.clone())).map_err(|_| Retired)?;
+    assert!(principal.await?.is_err());
+    let after_fetch = assert_identity_hook_logged(after_get, "principal-lookup");
+
+    let context = fixture.context.clone();
+    let voice_runtime = session_runtime.clone();
+    let voice =
+        tokio::spawn(
+            async move { crate::voice::manifest(&context, &voice_runtime, "principal").await },
+        );
+    let posted = fixture.next().await?;
+    assert_eq!(posted.path, "/mvp1/principal-lookup");
+    posted.respond.send((403, identity_403.clone())).map_err(|_| Retired)?;
+    assert!(voice.await?.is_err());
+    let after_voice = assert_identity_hook_logged(after_fetch, "voice manifest");
+
+    let context = fixture.context.clone();
+    let auth = super::negotiation::auth(false)?;
+    let descriptor = super::negotiation::descriptor();
+    let upsert =
+        tokio::spawn(
+            async move { crate::session_push::negotiate(&context, &auth, &descriptor).await },
+        );
+    let posted = fixture.next().await?;
+    assert_eq!(posted.path, "/s1/session/upsert");
+    posted.respond.send((403, identity_403)).map_err(|_| Retired)?;
+    assert!(upsert.await?.is_err());
+    let after_upsert = assert_identity_hook_logged(after_voice, "upsert");
+    assert!(
+        after_upsert >= before_get + 4,
+        "four identity 403 hooks must each increment: before={before_get} after={after_upsert}"
+    );
+    Ok(())
+}

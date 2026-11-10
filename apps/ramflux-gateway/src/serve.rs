@@ -471,10 +471,10 @@ fn run_gateway_forward_mesh_listener(
                     continue;
                 }
             };
-            let connection_context = context.clone();
+            let connection_hub = Arc::clone(&context.hub);
             tokio::spawn(async move {
                 if let Err(error) =
-                    gateway_forward_mesh_connection_loop(connection, connection_context).await
+                    gateway_forward_mesh_connection_loop(connection, connection_hub).await
                 {
                     tracing::debug!(%error, "gateway forward mesh connection ended");
                 }
@@ -488,8 +488,9 @@ fn run_gateway_forward_mesh_listener(
 
 async fn gateway_forward_mesh_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
-    context: GatewayListenerContext,
+    hub: Arc<GatewaySessionHub>,
 ) -> anyhow::Result<()> {
+    let peer_spiffe_uri = connection.peer_spiffe_uri().map(str::to_owned);
     loop {
         let accepted = match ramflux_transport::MeshQuicServer::accept_request_on_connection(
             &connection,
@@ -502,9 +503,11 @@ async fn gateway_forward_mesh_connection_loop(
                 return Ok(());
             }
         };
-        let request_context = context.clone();
+        let request_hub = Arc::clone(&hub);
+        let request_peer = peer_spiffe_uri.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_gateway_forward_mesh_request(accepted, request_context).await
+            if let Err(error) =
+                handle_gateway_forward_mesh_request(accepted, request_hub, request_peer).await
             {
                 tracing::warn!(%error, "gateway forward mesh request failed");
             }
@@ -512,11 +515,50 @@ async fn gateway_forward_mesh_connection_loop(
     }
 }
 
+fn authorize_gateway_forward_peer(
+    peer_spiffe_uri: Option<&str>,
+    source_gateway_id: &str,
+) -> Result<(), &'static str> {
+    let Some(uri) = peer_spiffe_uri else {
+        return Err("gateway_role_required");
+    };
+    let peer =
+        ramflux_node_core::parse_mesh_spiffe_uri(uri).map_err(|_| "gateway_role_required")?;
+    if peer.service_id != "ramflux-gateway" {
+        return Err("gateway_role_required");
+    }
+    let Some(instance_id) = peer.instance_id.as_deref() else {
+        return Err("gateway_instance_missing");
+    };
+    if instance_id != source_gateway_id {
+        return Err("gateway_instance_mismatch");
+    }
+    Ok(())
+}
+
+fn forward_source_gateway_id(request: &ramflux_transport::GatewayQuicRequest) -> &str {
+    request.body.get("source_gateway_id").and_then(serde_json::Value::as_str).unwrap_or("")
+}
+
+fn is_gateway_forward_path(path: &str) -> bool {
+    path == crate::ephemeral_forward::PATH || path == GatewayPeerDirectory::forward_path()
+}
+
 async fn handle_gateway_forward_mesh_request(
     accepted: ramflux_transport::MeshQuicAcceptedRequest,
-    context: GatewayListenerContext,
+    hub: Arc<GatewaySessionHub>,
+    peer_spiffe_uri: Option<String>,
 ) -> anyhow::Result<()> {
-    match handle_gateway_forward_request(&accepted.request, &context).await {
+    if accepted.request.method == "POST" && is_gateway_forward_path(&accepted.request.path) {
+        let source_gateway_id = forward_source_gateway_id(&accepted.request);
+        if let Err(reason) =
+            authorize_gateway_forward_peer(peer_spiffe_uri.as_deref(), source_gateway_id)
+        {
+            accepted.write_json_response(403, &serde_json::json!({"reason": reason})).await?;
+            return Ok(());
+        }
+    }
+    match handle_gateway_forward_request(&accepted.request, &hub).await {
         Ok(response) => {
             accepted.write_json_response(200, &response).await?;
         }
@@ -529,7 +571,7 @@ async fn handle_gateway_forward_mesh_request(
 
 pub(crate) async fn handle_gateway_forward_request(
     request: &ramflux_transport::GatewayQuicRequest,
-    context: &GatewayListenerContext,
+    hub: &GatewaySessionHub,
 ) -> anyhow::Result<GatewayForwardDeliverResponse> {
     if request.method != "POST" {
         return Err(anyhow::anyhow!("not found"));
@@ -537,7 +579,7 @@ pub(crate) async fn handle_gateway_forward_request(
     if request.path == crate::ephemeral_forward::PATH {
         let forward: crate::ephemeral_forward::GatewayForwardEphemeralRequest =
             serde_json::from_value(request.body.clone())?;
-        return crate::ephemeral_forward::handle(&context.hub, forward).await;
+        return crate::ephemeral_forward::handle(hub, forward).await;
     }
     if request.path != GatewayPeerDirectory::forward_path() {
         return Err(anyhow::anyhow!("not found"));
@@ -546,7 +588,7 @@ pub(crate) async fn handle_gateway_forward_request(
     if !forward.forwarded {
         return Err(anyhow::anyhow!("forward marker is required"));
     }
-    handle_gateway_forward_deliver(&context.hub, forward).await
+    handle_gateway_forward_deliver(hub, forward).await
 }
 
 pub(crate) async fn handle_gateway_forward_deliver(
@@ -723,6 +765,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "forward_identity_tests.rs"]
+mod forward_identity_tests;
 #[cfg(test)]
 #[path = "ordinary_ingress_tests.rs"]
 mod ordinary_ingress_tests;

@@ -640,14 +640,19 @@ fn mesh_identity_parses_gateway_instance_without_changing_role()
     assert_eq!(peer.service_id, "ramflux-gateway");
     assert_eq!(peer.instance_id.as_deref(), Some("gw-a"));
 
-    for local_service in
-        ["ramflux-router", "ramflux-notify", "ramflux-retention", "ramflux-signaling"]
-    {
+    for local_service in [
+        "ramflux-router",
+        "ramflux-notify",
+        "ramflux-retention",
+        "ramflux-signaling",
+        "ramflux-gateway",
+    ] {
         let authorized =
             authorize_mesh_peer(local_service, &allowed, Some("spiffe://n/ramflux-gateway/gw-a"))?;
         assert_eq!(authorized.service_id, "ramflux-gateway");
         assert_eq!(authorized.instance_id.as_deref(), Some("gw-a"));
     }
+    assert!(service_matrix_allows("ramflux-gateway", "ramflux-gateway"));
 
     for service in
         ["ramflux-notify", "ramflux-retention", "ramflux-signaling", "ramflux-federation"]

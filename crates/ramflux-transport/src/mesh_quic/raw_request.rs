@@ -60,6 +60,7 @@ pub async fn mesh_quic_post_raw_with_peer_ca_pems_async<T: serde::Serialize>(
                     path: post.path.into(),
                     body: serde_json::to_value(post.value)?,
                 }),
+                expected_gateway_instance: None,
                 enqueued_at: Instant::now(),
             },
             response: MeshQuicClientResponse::Async(response),

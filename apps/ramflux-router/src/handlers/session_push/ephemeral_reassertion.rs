@@ -321,6 +321,33 @@ fn row_ephemeral_session_rejects_another_instance_before_binding() -> TestResult
     Ok(())
 }
 
+fn row_reassertion_foreign_node_is_json_node_mismatch() -> TestResult {
+    let (router, path, _) = restarted_live("p05-node-mismatch", "target-node-mismatch", GATEWAY)?;
+    let boot = boot_id(&router)?;
+    let peer = ramflux_node_core::MeshPeerIdentity {
+        node_id: "foreign-node".into(),
+        ..ramflux_node_core::MeshPeerIdentity::gateway_for_test(GATEWAY)
+    };
+    let response = super::super::handle_mesh_request_value(
+        ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/mvp0/ephemeral-registrations".into(),
+            body: serde_json::to_vec(&json!({
+                "router_boot_id": boot,
+                "items": items_for("target-node-mismatch", SESSION, GATEWAY),
+            }))?,
+        },
+        &router,
+        &peer,
+    )?;
+    assert_eq!(response.status, "403 Forbidden");
+    assert_eq!(serde_json::from_slice::<Value>(&response.body)?["reason"], "gateway_node_mismatch");
+    assert_unsupported(&router, "target-node-mismatch");
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
 fn row_principal_lookup_and_session_get_gates() -> TestResult {
     let (router, path) = fresh("p05-principal-gates")?;
     let response = super::super::handle_mesh_request_value(
@@ -589,6 +616,7 @@ fn ephemeral_router_restart_reassertion() -> TestResult {
     row_mixed_batch_gateway_mismatch_refuses_whole_request()?;
     row_empty_gateway_is_bad_request()?;
     row_ephemeral_session_rejects_another_instance_before_binding()?;
+    row_reassertion_foreign_node_is_json_node_mismatch()?;
     row_principal_lookup_and_session_get_gates()?;
     row_unparseable_registration_body_is_bad_request()?;
     row_session_get_nested_target_is_gated()?;

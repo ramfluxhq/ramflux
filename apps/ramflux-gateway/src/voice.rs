@@ -109,7 +109,7 @@ fn scope(request: &VoiceLeaseRequest) -> &ramflux_protocol::VoiceAllocationReque
         }
     }
 }
-async fn manifest(
+pub(crate) async fn manifest(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     principal: &str,

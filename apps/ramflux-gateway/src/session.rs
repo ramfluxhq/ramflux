@@ -1823,16 +1823,22 @@ async fn forward_deliver_on_local_miss(
     let tls = context.peers.tls().clone();
     let peer_ca_pems = context.peers.peer_ca_pems().to_vec();
     let forward_path = GatewayPeerDirectory::forward_path();
-    let result =
-        tokio::task::spawn_blocking(move || {
-            ramflux_transport::mesh_quic_post_json_with_peer_ca_pems::<
-                _,
-                GatewayForwardDeliverResponse,
-            >(
-                &peer.endpoint, forward_path, &tls, &peer.server_name, &peer_ca_pems, &request
-            )
-        })
-        .await;
+    let expected_instance = session.gateway_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_and_instance::<
+            _,
+            GatewayForwardDeliverResponse,
+        >(
+            &peer.endpoint,
+            forward_path,
+            &tls,
+            &peer.server_name,
+            &peer_ca_pems,
+            &expected_instance,
+            &request,
+        )
+    })
+    .await;
     match result {
         Ok(Ok(response)) => crate::mesh_delivery::handled(&response),
         Ok(Err(error)) => {

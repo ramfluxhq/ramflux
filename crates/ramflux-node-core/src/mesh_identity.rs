@@ -104,9 +104,10 @@ pub fn authorize_mesh_peer(
 #[must_use]
 pub fn service_matrix_allows(local_service_id: &str, peer_service_id: &str) -> bool {
     match local_service_id {
-        "ramflux-gateway" => {
-            matches!(peer_service_id, "ramflux-router" | "ramflux-notify" | "ramflux-retention")
-        }
+        "ramflux-gateway" => matches!(
+            peer_service_id,
+            "ramflux-router" | "ramflux-notify" | "ramflux-retention" | "ramflux-gateway"
+        ),
         "ramflux-router" => matches!(
             peer_service_id,
             "ramflux-gateway"

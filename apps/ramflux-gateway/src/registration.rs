@@ -12,6 +12,9 @@ static GATEWAY_IDENTITY_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static GATEWAY_IDENTITY_ERROR_LOG_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static GATEWAY_IDENTITY_REJECTION_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 const IDENTITY_403_REASONS: [&str; 4] = [
     "gateway_role_required",
@@ -121,6 +124,8 @@ pub(crate) fn log_gateway_identity_rejection(error: &ramflux_transport::Transpor
     else {
         return false;
     };
+    #[cfg(test)]
+    GATEWAY_IDENTITY_REJECTION_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     if !GATEWAY_IDENTITY_ERROR_LOGGED.swap(true, Ordering::AcqRel) {
         #[cfg(test)]
         GATEWAY_IDENTITY_ERROR_LOG_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -130,6 +135,11 @@ pub(crate) fn log_gateway_identity_rejection(error: &ramflux_transport::Transpor
         );
     }
     true
+}
+
+#[cfg(test)]
+pub(crate) fn identity_rejection_call_count() -> usize {
+    GATEWAY_IDENTITY_REJECTION_CALL_COUNT.load(Ordering::SeqCst)
 }
 
 pub(crate) fn note_identity_rejection<T>(
@@ -185,15 +195,20 @@ mod tests {
     use super::*;
     #[test]
     fn identity_403_logs_once_per_process() {
-        GATEWAY_IDENTITY_ERROR_LOGGED.store(false, Ordering::SeqCst);
-        GATEWAY_IDENTITY_ERROR_LOG_COUNT.store(0, Ordering::SeqCst);
         let error = ramflux_transport::TransportError::HttpStatus {
             status: 403,
             body: r#"{"reason":"gateway_node_mismatch"}"#.into(),
         };
+        let before = GATEWAY_IDENTITY_ERROR_LOG_COUNT.load(Ordering::SeqCst);
         assert!(log_gateway_identity_rejection(&error));
+        let mid = GATEWAY_IDENTITY_ERROR_LOG_COUNT.load(Ordering::SeqCst);
         assert!(log_gateway_identity_rejection(&error));
-        assert_eq!(GATEWAY_IDENTITY_ERROR_LOG_COUNT.load(Ordering::SeqCst), 1);
+        let after = GATEWAY_IDENTITY_ERROR_LOG_COUNT.load(Ordering::SeqCst);
+        assert_eq!(after, mid, "second identity 403 must not log again");
+        assert!(
+            mid == before || mid == before + 1,
+            "first identity 403 logs at most once: before={before} mid={mid}"
+        );
         assert!(gateway_instance_rejection(&error));
         let text = ramflux_transport::TransportError::HttpStatus {
             status: 403,
@@ -201,6 +216,7 @@ mod tests {
         };
         assert!(!gateway_instance_rejection(&text));
         assert!(!log_gateway_identity_rejection(&text));
+        assert_eq!(GATEWAY_IDENTITY_ERROR_LOG_COUNT.load(Ordering::SeqCst), after);
     }
 
     #[test]
