@@ -3,7 +3,7 @@
 
 //! Coordinator unit tests. Config is injected; no process environment.
 use super::{
-    PairingActor, PairingConfig, PairingIdentity, PairingNative, PairingTransport, pairing_enabled,
+    PairingActor, PairingConfig, PairingIdentity, PairingNative, PairingTransport,
     validate_head_advance,
 };
 use crate::SdkError;
@@ -158,8 +158,9 @@ fn pairing_head_advance_enforces_publisher_ref() -> TestResult {
 
 #[tokio::test]
 async fn pairing_disabled_without_opt_in() -> TestResult {
-    assert!(!pairing_enabled());
-    let mut fx = Fixture::disabled()?;
+    let config = PairingConfig { enabled: false, extra_root_ca_pem: None };
+    assert!(!config.enabled);
+    let mut fx = Fixture::with_config(config)?;
     match fx.primary.begin(begin_body()).await {
         Err(SdkError::PairingCode("NotFound")) => Ok(()),
         other => Err(format!("disabled begin: {other:?}").into()),
@@ -391,10 +392,6 @@ impl Fixture {
         Self::with_config(PairingConfig { enabled: true, extra_root_ca_pem: None })
     }
 
-    fn disabled() -> TestResult<Self> {
-        Self::with_config(PairingConfig { enabled: false, extra_root_ca_pem: None })
-    }
-
     fn with_config(config: PairingConfig) -> TestResult<Self> {
         let fixed = crate::time::FixedClock::set(i64::try_from(WALL)?);
         let clock = TestPairingClock::new(WALL);
@@ -424,7 +421,7 @@ fn identity(device: &str, primary: bool, with_master: bool) -> PairingIdentity {
     PairingIdentity {
         account_id: device.into(),
         local_ref: DeviceRef {
-            account_anchor: encode_base64url([1u8; 32]),
+            account_anchor: if primary { encode_base64url([1u8; 32]) } else { String::new() },
             device_id: device.into(),
             device_epoch: 1,
         },

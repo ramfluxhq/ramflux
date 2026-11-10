@@ -167,12 +167,9 @@ fn serve_public_surface(
         .unwrap_or_else(|_| "127.0.0.1:18082".to_owned());
     public_http::serve_public_http(
         &public_addr,
-        public_http::FederationPublicHttpContext {
-            router: Arc::clone(router),
-            discovery: discovery.clone(),
-            pairing: pairing_http::PairingHttpSurface::open_if_enabled(Arc::clone(router))?,
-        },
+        public_http::public_context(Arc::clone(router), discovery.clone())?,
     )
+    .map(|_| ())
 }
 
 fn finish_shutdown(

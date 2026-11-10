@@ -26,6 +26,7 @@ pub(crate) struct PairingEnv {
     _guard: MutexGuard<'static, ()>,
     previous: Option<String>,
     previous_plain: Option<String>,
+    previous_proxies: Option<String>,
 }
 
 fn pairing_env_lock() -> &'static Mutex<()> {
@@ -35,14 +36,28 @@ fn pairing_env_lock() -> &'static Mutex<()> {
 
 #[allow(unsafe_code)]
 pub(crate) fn enable_pairing() -> PairingEnv {
+    enable_pairing_inner(None)
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn enable_pairing_with_trusted_proxy(proxy: &str) -> PairingEnv {
+    enable_pairing_inner(Some(proxy))
+}
+
+#[allow(unsafe_code)]
+fn enable_pairing_inner(trusted_proxy: Option<&str>) -> PairingEnv {
     let guard = pairing_env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").ok();
     let previous_plain = std::env::var("RAMFLUX_FEDERATION_PUBLIC_PLAIN_HTTP").ok();
+    let previous_proxies = std::env::var("RAMFLUX_FEDERATION_TRUSTED_PROXIES").ok();
     // SAFETY: `guard` is held for the whole set/restore window.
     unsafe {
         std::env::set_var("RAMFLUX_DEVICE_PAIRING_ENABLED", "1");
+        if let Some(proxy) = trusted_proxy {
+            std::env::set_var("RAMFLUX_FEDERATION_TRUSTED_PROXIES", proxy);
+        }
     }
-    PairingEnv { _guard: guard, previous, previous_plain }
+    PairingEnv { _guard: guard, previous, previous_plain, previous_proxies }
 }
 
 #[allow(unsafe_code)]
@@ -57,6 +72,10 @@ impl Drop for PairingEnv {
             match &self.previous_plain {
                 Some(value) => std::env::set_var("RAMFLUX_FEDERATION_PUBLIC_PLAIN_HTTP", value),
                 None => std::env::remove_var("RAMFLUX_FEDERATION_PUBLIC_PLAIN_HTTP"),
+            }
+            match &self.previous_proxies {
+                Some(value) => std::env::set_var("RAMFLUX_FEDERATION_TRUSTED_PROXIES", value),
+                None => std::env::remove_var("RAMFLUX_FEDERATION_TRUSTED_PROXIES"),
             }
         }
     }
@@ -73,12 +92,19 @@ pub(crate) struct NodeMesh {
     pub(crate) endpoint: String,
     pub(crate) store: Arc<Mutex<PairingRelayStore>>,
     pub(crate) client_tls: ramflux_transport::MeshTlsConfig,
+    pub(crate) service: Arc<ramflux_node_core::CustodyService>,
+    pub(crate) router: Arc<ramflux_node_core::RouterCore>,
+    pub(crate) redb: Arc<ramflux_node_core::RouterRedbStore>,
+    pub(crate) node: ramflux_crypto::custody::VerifiedNodeRecord,
+    pub(crate) proxy_branch: ramflux_crypto::DeviceBranch,
     _root: crate::test_directories::TestDirectory,
 }
 
-fn node_record() -> TestResult<ramflux_crypto::custody::VerifiedNodeRecord> {
+fn node_record()
+-> TestResult<(ramflux_crypto::custody::VerifiedNodeRecord, ramflux_crypto::DeviceBranch)> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let key = ramflux_crypto::fixture_signing_key();
+    let proxy_branch = ramflux_crypto::create_device_branch("gateway", "proxy", 1, [9; 32]);
     let body = ramflux_protocol::custody::NodeIdentityRecord {
         schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),
         version: 1,
@@ -90,17 +116,29 @@ fn node_record() -> TestResult<ramflux_crypto::custody::VerifiedNodeRecord> {
         issued_at: now,
         receipt_keys: vec![],
         revoked_receipt_key_ids: vec![],
-        proxy_keys: vec![],
+        proxy_keys: vec![ramflux_protocol::custody::ProxyKey {
+            key_id: encode_base64url([10; 32]),
+            public_key: encode_base64url(proxy_branch.signing_key.verifying_key().to_bytes()),
+            not_before: now.saturating_sub(1),
+            sign_until: now.saturating_add(86_400),
+            overlap_until: now.saturating_add(606_000),
+            status: ramflux_protocol::custody::ReceiptKeyStatus::Active,
+            proxy_id: "gateway".into(),
+            audiences: vec!["node".into()],
+        }],
         revoked_proxy_key_ids: vec![],
-        channel_binding_modes: vec![ramflux_protocol::custody::BindingMode::DirectExporter],
+        channel_binding_modes: vec![ramflux_protocol::custody::BindingMode::HomeRelayReceipt],
     };
     let record = ramflux_crypto::custody::sign_node_identity_record(&key, body)?;
-    Ok(ramflux_crypto::custody::verify_node_identity_record(
-        &record,
-        "node",
-        &ramflux_crypto::fixture_public_key_base64url(),
-        now,
-    )?)
+    Ok((
+        ramflux_crypto::custody::verify_node_identity_record(
+            &record,
+            "node",
+            &ramflux_crypto::fixture_public_key_base64url(),
+            now,
+        )?,
+        proxy_branch,
+    ))
 }
 
 fn spawn_node_mesh() -> TestResult<NodeMesh> {
@@ -117,12 +155,12 @@ pub(crate) fn spawn_node_mesh_at(
         crate::test_certificates::issue_test_service_cert(&ca, "node-a", "ramflux-federation")?;
     let router =
         crate::test_certificates::issue_test_service_cert(&ca, "node-a", "ramflux-router")?;
-    let redb = root.join("router.redb");
-    let store = ramflux_node_core::RouterRedbStore::open(&redb)?;
-    let router_core = ramflux_node_core::RouterCore::new();
-    store.bootstrap_router(&router_core)?;
+    let redb = Arc::new(ramflux_node_core::RouterRedbStore::open(root.join("router.redb"))?);
+    let router_core = Arc::new(ramflux_node_core::RouterCore::new());
+    redb.bootstrap_router(&router_core)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let service = ramflux_node_core::CustodyService::new(node_record()?, false, &store, now)?;
+    let (node, proxy_branch) = node_record()?;
+    let service = ramflux_node_core::CustodyService::new(node.clone(), false, &redb, now)?;
     let service = match clock {
         Some(clock) => {
             let relay_store = PairingRelayStore::new(PairingRelayConfig {
@@ -135,6 +173,7 @@ pub(crate) fn spawn_node_mesh_at(
         None => service.with_pairing_relay_if_enabled([7; 32], public_origin)?,
     };
     let relay = service.pairing_relay().cloned().ok_or("pairing store missing")?;
+    let service = Arc::new(service);
     let server = ramflux_transport::MeshTlsServer::bind("127.0.0.1:0", &router.tls)?;
     let endpoint = server.local_addr()?.to_string();
     let ca_pem = federation.ca_pem.clone();
@@ -168,7 +207,17 @@ pub(crate) fn spawn_node_mesh_at(
             let _ = ramflux_transport::close_mesh_server_stream(&mut stream);
         }
     });
-    Ok(NodeMesh { endpoint, store: relay, client_tls, _root: root })
+    Ok(NodeMesh {
+        endpoint,
+        store: relay,
+        client_tls,
+        service,
+        router: router_core,
+        redb,
+        node,
+        proxy_branch,
+        _root: root,
+    })
 }
 
 fn public_context(

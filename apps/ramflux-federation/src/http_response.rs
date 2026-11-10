@@ -3,8 +3,6 @@
 
 //! Buffered federation responses with bounded writes and graceful close.
 use ramflux_node_core::{HttpRequestLimits, NodeCoreError};
-#[cfg(test)]
-use std::io::Write;
 use std::{
     net::TcpStream,
     time::{Duration, Instant},
@@ -30,18 +28,6 @@ impl HttpResponse {
     }
     pub(crate) fn text(status: &'static str, body: &str) -> Self {
         Self { status, content_type: "text/plain; charset=utf-8", body: body.as_bytes().to_vec() }
-    }
-    /// Write the HTTP/1.1 response to any `Write` sink (TLS terminator tests).
-    #[cfg(test)]
-    pub(crate) fn write_plain(&self, dest: &mut impl Write) -> std::io::Result<()> {
-        write!(
-            dest,
-            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.status,
-            self.content_type,
-            self.body.len()
-        )?;
-        dest.write_all(&self.body)
     }
     pub(crate) fn write(
         self,

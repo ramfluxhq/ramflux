@@ -5,13 +5,17 @@
 //! Dormant: talks only to pairing routes; grants no account session.
 use crate::SdkError;
 use ramflux_protocol::custody::pairing::PairingWire;
-use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, Created, Failure, Issued};
+use ramflux_protocol::custody::pairing::native::{
+    Create, CreateSpec, Created, Failure, Issue, Issued, NativeReply,
+};
 use ramflux_protocol::custody::pairing::relay::{
     Claim, Claimed, Close, Closed, Poll, Polled, RelayFrame, Send, Sent,
 };
+use ramflux_protocol::custody::{CustodyProofAction, CustodyServerFrame};
 use ramflux_protocol::encode_base64url;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 const POLL_SECS: u64 = 2;
@@ -49,6 +53,63 @@ pub trait PairingNative: std::marker::Send + std::marker::Sync {
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
     fn create(&self, create: Create) -> Result<Created, SdkError>;
+}
+
+/// Production Issue/Create: authenticated custody `pairing_issue` / `pairing_create`.
+pub struct ProofPairingNative {
+    prove: Arc<
+        dyn Fn(CustodyProofAction) -> Result<CustodyServerFrame, SdkError>
+            + std::marker::Send
+            + Sync,
+    >,
+}
+
+impl ProofPairingNative {
+    /// Wrap the existing custody proof worker (challenge → prove → Pairing reply).
+    #[must_use]
+    pub fn new(
+        prove: Arc<
+            dyn Fn(CustodyProofAction) -> Result<CustodyServerFrame, SdkError>
+                + std::marker::Send
+                + Sync,
+        >,
+    ) -> Self {
+        Self { prove }
+    }
+
+    fn apply(&self, action: CustodyProofAction) -> Result<NativeReply, SdkError> {
+        match (self.prove)(action)? {
+            CustodyServerFrame::Pairing { reply } => Ok(reply.reply),
+            CustodyServerFrame::Refused { code, .. } => Err(code.into()),
+            _ => Err(SdkError::PairingCode("InvalidInput")),
+        }
+    }
+}
+
+impl PairingNative for ProofPairingNative {
+    fn issue(&self, spec: CreateSpec) -> Result<Issued, SdkError> {
+        let action = CustodyProofAction::PairingIssue {
+            request: Box::new(Issue {
+                schema: "ramflux.pairing.Issue.v2".into(),
+                version: 2,
+                spec,
+            }),
+        };
+        match self.apply(action)? {
+            NativeReply::Issued(issued) => Ok(*issued),
+            NativeReply::Failure(failure) => Err(failure_error(&failure)),
+            NativeReply::Created(_) => Err(SdkError::PairingCode("InvalidInput")),
+        }
+    }
+
+    fn create(&self, create: Create) -> Result<Created, SdkError> {
+        let action = CustodyProofAction::PairingCreate { request: Box::new(create) };
+        match self.apply(action)? {
+            NativeReply::Created(created) => Ok(*created),
+            NativeReply::Failure(failure) => Err(failure_error(&failure)),
+            NativeReply::Issued(_) => Err(SdkError::PairingCode("InvalidInput")),
+        }
+    }
 }
 
 /// HTTPS (or in-process) pairing relay. Production is [`HttpRelay`].

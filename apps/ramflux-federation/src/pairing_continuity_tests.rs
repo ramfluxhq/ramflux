@@ -1,44 +1,37 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Cross-component pairing over real TLS + node-owned store forwarding.
-use super::tests::{NodeMesh, PairingEnv, enable_pairing, spawn_node_mesh_at};
-use super::{PairingHttpSurface, pairing_limits, respond};
+//! Cross-component pairing over the real public listener + TLS front proxy.
+use super::pairing_limits;
+use super::tests::{NodeMesh, PairingEnv, enable_pairing_with_trusted_proxy, spawn_node_mesh_at};
 use crate::RouterMeshClient;
-use ramflux_node_core::NodeHttpRequest;
-use ramflux_node_core::pairing_relay::{
-    PairingClock, PairingRelayError, PairingRelayStore, TestPairingClock,
+use ramflux_crypto::custody::{
+    GenesisInput, MasterKey, RecoveryPhrase, SelfSigningKey, branch_exporter_hash, create_genesis,
+    sign_branch_proof_v3, sign_proxy_acceptance,
 };
-use ramflux_protocol::custody::DeviceRef;
+use ramflux_crypto::{X25519KeyPair, create_device_branch, random_32};
+use ramflux_node_core::NodeHttpRequest;
+use ramflux_node_core::pairing_relay::{PairingClock, PairingRelayStore, TestPairingClock};
 use ramflux_protocol::custody::pairing::local_dto::{
     Approve, Begin, BeginResult, Confirm, Join, LocalResult, Outcome, StatusRequest, Update,
 };
-use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, Created, Issued};
 use ramflux_protocol::custody::pairing::relay::{RelayFrame, Send};
+use ramflux_protocol::custody::{
+    BindingMode, BranchProofV3, CustodyMeshRequest, CustodyProofAction, CustodyRefusal,
+    CustodyServerFrame, DeviceRef, Publication, object_hash,
+};
 use ramflux_protocol::encode_base64url;
 use ramflux_sdk::SdkError;
 use ramflux_sdk::custody::pairing::{
-    HttpRelay, PairingActor, PairingConfig, PairingIdentity, PairingNative,
+    HttpRelay, PairingActor, PairingConfig, PairingIdentity, ProofPairingNative,
 };
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-struct StoreNative {
-    store: Arc<Mutex<PairingRelayStore>>,
-}
-
-impl PairingNative for StoreNative {
-    fn issue(&self, spec: CreateSpec) -> Result<Issued, SdkError> {
-        held(&self.store).issue(spec).map_err(relay_err)
-    }
-    fn create(&self, create: Create) -> Result<Created, SdkError> {
-        held(&self.store).create(create).map_err(relay_err)
-    }
-}
 
 struct Continuity {
     primary: PairingActor,
@@ -46,15 +39,38 @@ struct Continuity {
     clock: Arc<TestPairingClock>,
     store: Arc<Mutex<PairingRelayStore>>,
     origin: String,
+    public_addr: SocketAddr,
+    native: Arc<ProofPairingNative>,
+    published: PublishedPrimary,
     _env: PairingEnv,
     _node: NodeMesh,
     _tls: crate::test_directories::TestDirectory,
+}
+
+struct PublishedPrimary {
+    reference: DeviceRef,
+    master_public_key: String,
+    base_record_hash: String,
+    base_epoch: u64,
+}
+
+struct PrimaryProver {
+    service: Arc<ramflux_node_core::CustodyService>,
+    router: Arc<ramflux_node_core::RouterCore>,
+    redb: Arc<ramflux_node_core::RouterRedbStore>,
+    publication: ramflux_node_core::CustodyPublication,
+    branch: ramflux_crypto::DeviceBranch,
+    reference: DeviceRef,
+    node: ramflux_crypto::custody::VerifiedNodeRecord,
+    proxy_branch: ramflux_crypto::DeviceBranch,
+    connection: String,
 }
 
 #[tokio::test]
 async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
     let mut fx = Continuity::open()?;
     refuse_plaintext_http(&fx.origin)?;
+    refuse_direct_pairing(&fx.public_addr)?;
     let begun = begin_result(fx.primary.begin(begin_body()?).await?)?;
     let secret = begun.invite_token.recipient_token.clone();
     let op = begun.operation_id.clone();
@@ -188,16 +204,42 @@ async fn pairing_stale_generation_is_refused() -> TestResult {
     }
 }
 
+#[tokio::test]
+async fn pairing_begin_requires_current_primary() -> TestResult {
+    let fx = Continuity::open()?;
+    let mut other = PairingActor::new(
+        PairingIdentity {
+            account_id: "other".into(),
+            local_ref: DeviceRef {
+                account_anchor: fx.published.reference.account_anchor.clone(),
+                device_id: "other".into(),
+                device_epoch: 1,
+            },
+            master_public_key: Some(fx.published.master_public_key.clone()),
+            base_record_hash: fx.published.base_record_hash.clone(),
+            base_epoch: fx.published.base_epoch,
+            is_primary: true,
+        },
+        Some(Arc::clone(&fx.native) as _),
+        Arc::new(HttpRelay::from_config(&PairingConfig { enabled: true, extra_root_ca_pem: None })?)
+            as _,
+        PairingConfig { enabled: true, extra_root_ca_pem: None },
+    );
+    match other.begin(begin_body()?).await {
+        Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused)) => Ok(()),
+        other => Err(format!("non-primary begin: {other:?}").into()),
+    }
+}
+
 impl Continuity {
     fn open() -> TestResult<Self> {
-        let env = enable_pairing();
+        let env = enable_pairing_with_trusted_proxy("127.0.0.1");
         let tls_root = crate::test_certificates::temp_cert_root("pairing-continuity-tls")?;
         let ca = crate::test_certificates::issue_test_ca(&tls_root)?;
         let server =
             crate::test_certificates::issue_test_service_cert(&ca, "node-a", "ramflux-federation")?;
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        let origin = format!("https://localhost:{port}");
+        let front = TcpListener::bind("127.0.0.1:0")?;
+        let origin = format!("https://localhost:{}", front.local_addr()?.port());
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let clock = TestPairingClock::new(now);
         let node =
@@ -209,23 +251,63 @@ impl Continuity {
             client: ramflux_transport::MeshHttpClient::new(),
             async_mesh: None,
         });
-        let surface = PairingHttpSurface::open_if_enabled(Arc::clone(&router))?
-            .ok_or("pairing surface off")?;
+        let discovery = crate::http_listener_tests::context(&tls_root)?.discovery;
+        let public_addr = crate::public_http::serve_public_http(
+            "127.0.0.1:0",
+            crate::public_http::public_context(router, discovery)?,
+        )?;
         let server_config =
             rustls_server_config(&server.tls.service_cert, &server.tls.service_key)?;
-        std::thread::spawn(move || serve_pairing_tls(listener, surface, server_config));
+        std::thread::spawn(move || serve_tls_front(front, public_addr, server_config));
+        refuse_direct_pairing(&public_addr)?;
+        let prover = Arc::new(PrimaryProver::bootstrap(&node)?);
+        prover.publish()?;
+        let published = PublishedPrimary {
+            reference: prover.reference.clone(),
+            master_public_key: prover
+                .publication
+                .record
+                .body
+                .master_certificate
+                .body
+                .master_public_key
+                .clone(),
+            base_record_hash: object_hash(&prover.publication.record)?,
+            base_epoch: prover.publication.record.body.device_set_epoch,
+        };
+        let native = Arc::new(ProofPairingNative::new({
+            let prover = Arc::clone(&prover);
+            Arc::new(move |action| prover.run(action))
+        }));
         let config = PairingConfig { enabled: true, extra_root_ca_pem: Some(server.ca_pem) };
         let relay = Arc::new(HttpRelay::from_config(&config)?);
-        let native = Arc::new(StoreNative { store: Arc::clone(&node.store) });
         Ok(Self {
             primary: PairingActor::new(
-                identity("primary", true, true),
-                Some(native as _),
+                PairingIdentity {
+                    account_id: "primary".into(),
+                    local_ref: published.reference.clone(),
+                    master_public_key: Some(published.master_public_key.clone()),
+                    base_record_hash: published.base_record_hash.clone(),
+                    base_epoch: published.base_epoch,
+                    is_primary: true,
+                },
+                Some(Arc::clone(&native) as _),
                 Arc::clone(&relay) as _,
                 config.clone(),
             ),
             recipient: PairingActor::new(
-                identity("recipient", false, false),
+                PairingIdentity {
+                    account_id: "recipient".into(),
+                    local_ref: DeviceRef {
+                        account_anchor: String::new(),
+                        device_id: "recipient".into(),
+                        device_epoch: 1,
+                    },
+                    master_public_key: None,
+                    base_record_hash: encode_base64url([2u8; 32]),
+                    base_epoch: 1,
+                    is_primary: false,
+                },
                 None,
                 relay as _,
                 config,
@@ -233,6 +315,9 @@ impl Continuity {
             clock,
             store: Arc::clone(&node.store),
             origin,
+            public_addr,
+            native,
+            published,
             _env: env,
             _node: node,
             _tls: tls_root,
@@ -241,13 +326,13 @@ impl Continuity {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn serve_pairing_tls(
+fn serve_tls_front(
     listener: TcpListener,
-    surface: Arc<PairingHttpSurface>,
+    backend: SocketAddr,
     server_config: Arc<rustls::ServerConfig>,
 ) {
     loop {
-        let Ok((mut tcp, peer)) = listener.accept() else {
+        let Ok((mut tcp, _)) = listener.accept() else {
             continue;
         };
         let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
@@ -259,11 +344,35 @@ fn serve_pairing_tls(
         let Ok(request) = read_http_request(&mut tls) else {
             continue;
         };
-        let reply = respond(&surface, peer.ip(), &request, true);
-        let _ = reply.write_plain(&mut tls);
+        let Ok(mut upstream) = TcpStream::connect(backend) else {
+            continue;
+        };
+        let _ = upstream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = upstream.set_write_timeout(Some(Duration::from_secs(5)));
+        let forwarded = reconstruct_forwarded(&request);
+        if upstream.write_all(&forwarded).is_err() {
+            continue;
+        }
+        let mut reply = Vec::new();
+        if upstream.read_to_end(&mut reply).is_err() {
+            continue;
+        }
+        let _ = tls.write_all(&reply);
         tls.conn.send_close_notify();
         let _ = tls.flush();
     }
+}
+
+fn reconstruct_forwarded(request: &NodeHttpRequest) -> Vec<u8> {
+    let mut raw = format!(
+        "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 203.0.113.10\r\n\r\n",
+        request.method,
+        request.path,
+        request.body.len()
+    )
+    .into_bytes();
+    raw.extend_from_slice(&request.body);
+    raw
 }
 
 fn rustls_server_config(
@@ -343,6 +452,23 @@ fn refuse_plaintext_http(origin: &str) -> TestResult {
         Ok(0) | Err(_) => Ok(()),
         Ok(_) if !buf.starts_with(b"HTTP/1.1 200") => Ok(()),
         Ok(_) => Err("plaintext HTTP accepted".into()),
+    }
+}
+
+fn refuse_direct_pairing(addr: &SocketAddr) -> TestResult {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(
+        b"POST /client/pairing/v1/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}",
+    )?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf)?;
+    let response = String::from_utf8_lossy(&buf);
+    if response.starts_with("HTTP/1.1 400") && response.contains("tls required") {
+        Ok(())
+    } else {
+        Err(format!("direct pairing: {response}").into())
     }
 }
 
@@ -475,25 +601,140 @@ fn terminal_phase(phase: &str) -> bool {
     matches!(phase, "cancelled" | "expired" | "rejected" | "completed")
 }
 
-fn identity(device: &str, primary: bool, with_master: bool) -> PairingIdentity {
-    PairingIdentity {
-        account_id: device.into(),
-        local_ref: DeviceRef {
-            account_anchor: encode_base64url([1u8; 32]),
-            device_id: device.into(),
-            device_epoch: 1,
-        },
-        master_public_key: with_master.then(|| encode_base64url([3u8; 32])),
-        base_record_hash: encode_base64url([2u8; 32]),
-        base_epoch: 1,
-        is_primary: primary,
-    }
-}
-
 fn held(store: &Mutex<PairingRelayStore>) -> MutexGuard<'_, PairingRelayStore> {
     store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn relay_err(error: PairingRelayError) -> SdkError {
-    SdkError::PairingCode(error.code())
+fn wall() -> TestResult<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+impl PrimaryProver {
+    fn bootstrap(node: &NodeMesh) -> TestResult<Self> {
+        let now = wall()?;
+        let seed = 10_u8;
+        let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[seed; 32])?)?;
+        let primary = SelfSigningKey::from_vault_seed(&Zeroizing::new([seed + 1; 32]));
+        let branch = create_device_branch("alice", "primary", 1, [seed + 2; 32]);
+        let agreement = X25519KeyPair::from_seed([seed + 3; 32]);
+        let record = create_genesis(
+            &master,
+            &primary,
+            &branch,
+            &agreement,
+            GenesisInput {
+                principal_kind: ramflux_protocol::PrincipalKind::Human,
+                display_name: "Human".into(),
+                issued_at: now,
+                master_cert_id: encode_base64url([seed + 4; 32]),
+                branch_cert_id: encode_base64url([seed + 5; 32]),
+                external_human_primary: None,
+            },
+        )?;
+        let reference = DeviceRef {
+            account_anchor: record.body.account_anchor.clone(),
+            device_id: "primary".into(),
+            device_epoch: 1,
+        };
+        Ok(Self {
+            service: Arc::clone(&node.service),
+            router: Arc::clone(&node.router),
+            redb: Arc::clone(&node.redb),
+            publication: ramflux_node_core::CustodyPublication { record, compacted_ids: None },
+            branch,
+            reference,
+            node: node.node.clone(),
+            proxy_branch: node.proxy_branch.clone(),
+            connection: encode_base64url([seed; 32]),
+        })
+    }
+
+    fn publish(&self) -> TestResult {
+        match self.run(CustodyProofAction::Publish {
+            publication: Box::new(Publication {
+                record: self.publication.record.clone(),
+                compacted_ids: None,
+            }),
+        })? {
+            CustodyServerFrame::Published { .. } => Ok(()),
+            other => Err(format!("publish {other:?}").into()),
+        }
+    }
+
+    fn run(&self, action: CustodyProofAction) -> Result<CustodyServerFrame, SdkError> {
+        let now = wall().map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        let challenge = match self.service.mesh(
+            &self.router,
+            &self.redb,
+            CustodyMeshRequest::Challenge {
+                device_ref: self.reference.clone(),
+                action: action.clone(),
+                binding_mode: BindingMode::HomeRelayReceipt,
+                client_source: "192.0.2.1".into(),
+                connection_id: self.connection.clone(),
+            },
+            "ramflux-gateway",
+            now,
+        ) {
+            CustodyServerFrame::Challenge { challenge } => challenge,
+            other => return Ok(other),
+        };
+        let proof = self.proof(&challenge, now)?;
+        let observed = branch_exporter_hash(&[5; 32]);
+        let receipt = sign_proxy_acceptance(
+            &self.proxy_branch.signing_key,
+            &self.node,
+            &proof,
+            &observed,
+            encode_base64url(random_32().map_err(|error| SdkError::LocalBus(error.to_string()))?),
+            now,
+        )
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+        Ok(self.service.mesh(
+            &self.router,
+            &self.redb,
+            CustodyMeshRequest::Prove {
+                action,
+                proof: Box::new(proof),
+                receipt: Some(Box::new(receipt)),
+                connection_id: self.connection.clone(),
+            },
+            "ramflux-gateway",
+            now,
+        ))
+    }
+
+    fn proof(
+        &self,
+        challenge: &ramflux_protocol::custody::BranchChallenge,
+        now: u64,
+    ) -> Result<ramflux_protocol::custody::Envelope<BranchProofV3>, SdkError> {
+        let cert = self.publication.record.body.devices[0]
+            .branch_certificate
+            .as_ref()
+            .ok_or_else(|| SdkError::LocalBus("branch certificate".into()))?;
+        sign_branch_proof_v3(
+            &self.branch,
+            BranchProofV3 {
+                schema: ramflux_protocol::domain::BRANCH_PROOF_V3.into(),
+                version: 3,
+                device_ref: self.reference.clone(),
+                certificate_hash: object_hash(cert)
+                    .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+                record_hash: object_hash(&self.publication.record)
+                    .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+                proof_id: encode_base64url(
+                    random_32().map_err(|error| SdkError::LocalBus(error.to_string()))?,
+                ),
+                challenge_nonce: challenge.challenge_nonce.clone(),
+                action_hash: challenge.action_hash.clone(),
+                audience: challenge.audience.clone(),
+                binding_mode: challenge.binding_mode,
+                transport_binding: branch_exporter_hash(&[5; 32]),
+                issued_at: now,
+                expires_at: now.saturating_add(300),
+            },
+        )
+        .map_err(|error| SdkError::LocalBus(error.to_string()))
+    }
 }

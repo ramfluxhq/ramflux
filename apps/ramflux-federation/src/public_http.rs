@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
 use crate::http_response::HttpResponse;
@@ -19,10 +19,24 @@ pub(crate) struct FederationPublicHttpContext {
     pub(crate) pairing: Option<Arc<PairingHttpSurface>>,
 }
 
+/// Shared public-surface assembly. The binary and the continuity test both call this.
+/// # Errors
+/// Rejects a malformed pairing opt-in or trusted-proxy allowlist.
+pub(crate) fn public_context(
+    router: Arc<RouterMeshClient>,
+    discovery: FederationDiscoverySurface,
+) -> Result<FederationPublicHttpContext, ramflux_node_core::NodeCoreError> {
+    Ok(FederationPublicHttpContext {
+        pairing: crate::pairing_http::PairingHttpSurface::open_if_enabled(Arc::clone(&router))?,
+        router,
+        discovery,
+    })
+}
+
 pub(crate) fn serve_public_http(
     addr: &str,
     context: FederationPublicHttpContext,
-) -> Result<(), ramflux_node_core::NodeCoreError> {
+) -> Result<SocketAddr, ramflux_node_core::NodeCoreError> {
     let limit = crate::http_connections::connection_limit(
         true,
         ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS")
@@ -34,6 +48,11 @@ pub(crate) fn serve_public_http(
     let listener = TcpListener::bind(addr).map_err(|error| {
         ramflux_node_core::NodeCoreError::ItestHttp(format!(
             "federation public HTTP bind failed at {addr}: {error}"
+        ))
+    })?;
+    let bound = listener.local_addr().map_err(|error| {
+        ramflux_node_core::NodeCoreError::ItestHttp(format!(
+            "federation public HTTP local addr failed: {error}"
         ))
     })?;
     let connections = ramflux_node_core::ConnectionSet::new(limit);
@@ -51,7 +70,7 @@ pub(crate) fn serve_public_http(
             &shutdown,
         );
     })?;
-    Ok(())
+    Ok(bound)
 }
 
 fn run_public_http_listener(

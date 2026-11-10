@@ -520,7 +520,11 @@ impl PairingActor {
         let mut sas_secret = random_32()?;
         let device_ref = match ceremony.role {
             PairingRole::Initiator => ceremony.invitation.primary_ref.clone(),
-            PairingRole::Responder => local_ref.clone(),
+            PairingRole::Responder => DeviceRef {
+                account_anchor: common.account_anchor.clone(),
+                device_id: local_ref.device_id.clone(),
+                device_epoch: local_ref.device_epoch,
+            },
         };
         let (context, salt) = build_context(
             ceremony.role,
