@@ -4,7 +4,7 @@
 //! Crash reopen for pairing journal writers that exist on main (P04).
 //! Vault, [`crate::AccountIndex`], `authority.json` and node persistence cuts are later parts.
 
-use super::journal::{FloorRow, HeadRow, LiveRow, TerminalRow};
+use super::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 use crate::{AccountDb, StorageError};
 use rusqlite::params;
 
@@ -78,6 +78,56 @@ impl RecoveredPairing {
 }
 
 impl AccountDb {
+    /// Commit the adopted local authority and retire its acknowledged candidate atomically.
+    ///
+    /// # Errors
+    /// Rejects mismatched operations/hashes and rolls back the adoption if cleanup fails.
+    pub fn commit_pairing_adoption_cleanup(
+        &self,
+        adoption: &AdoptionRow,
+        terminal: &TerminalRow,
+    ) -> Result<(), StorageError> {
+        adoption.validate()?;
+        terminal.validate()?;
+        self.require_local(&adoption.account_id)?;
+        self.require_local(&terminal.account_id)?;
+        require(adoption.operation_id == terminal.operation_id, "operation_id")?;
+        require(terminal.record_hash.as_deref() == Some(&adoption.record_hash), "record_hash")?;
+        let transaction = self.connection.immediate_transaction()?;
+        self.put_pairing_adoption(adoption)?;
+        self.require_terminal_cleanup(terminal)?;
+        self.delete_live(&terminal.account_id, &terminal.operation_id)?;
+        self.delete_head(&terminal.account_id, &terminal.operation_id)?;
+        self.put_pairing_terminal(terminal)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Commit J7c adoption and the corresponding live phase in one account transaction.
+    ///
+    /// # Errors
+    /// Rejects malformed refs, account mismatch or a live candidate for a different hash.
+    pub fn commit_pairing_install(&self, adoption: &AdoptionRow) -> Result<(), StorageError> {
+        adoption.validate()?;
+        self.require_local(&adoption.account_id)?;
+        let transaction = self.connection.immediate_transaction()?;
+        if let Some(mut live) = self
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|live| live.operation_id == adoption.operation_id)
+        {
+            let head = self.pairing_head()?.ok_or(field("state"))?;
+            require(head.operation_id == adoption.operation_id, "operation_id")?;
+            require(head.candidate_hash == adoption.record_hash, "record_hash")?;
+            require(head.state == "acknowledged", "state")?;
+            live.phase = "locally_installed".into();
+            self.put_pairing_live(&live)?;
+        }
+        self.put_pairing_adoption(adoption)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Annex F writers whose production owners are later parts. P04J models existing writers only.
     #[must_use]
     pub const fn pairing_missing_crash_writers() -> &'static [(&'static str, &'static str)] {

@@ -2,12 +2,15 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant pairing install-store and SDK coordinator. Default-off.
+mod activate;
 mod coordinator;
+pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refresh_authority};
 pub mod install_gate;
 pub mod install_store;
 pub(crate) mod local_credential;
 pub(crate) mod publication;
 pub(crate) mod recipient;
+pub mod transfer_payload;
 mod transport;
 pub use coordinator::{
     PairingActor, PairingIdentity, handle_bus, install_actor, pairing_enabled,
@@ -28,8 +31,8 @@ pub use recipient::{
     unadmitted_data_unlock, unlock_with_provider,
 };
 pub use transport::{
-    HttpRelay, PairingConfig, PairingNative, PairingTransport, PreparedCreate, PreparedIssue,
-    ProofPairingNative,
+    FreshPairingNative, HttpRelay, PairingConfig, PairingNative, PairingTransport, PreparedCreate,
+    PreparedIssue, ProofPairingNative,
 };
 
 #[cfg(test)]

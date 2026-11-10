@@ -487,6 +487,35 @@ async fn pairing_non_primary_cannot_submit_stored_head() -> TestResult {
 }
 
 #[tokio::test]
+async fn pairing_non_primary_cannot_resume_submitted_head_before_persist() -> TestResult {
+    struct CountPersist(std::sync::atomic::AtomicUsize);
+    impl NodeHeadPersist for CountPersist {
+        fn persist_head(&self, _: &Publication, _: u64) -> Result<String, SdkError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(SdkError::PairingCode("PublicationPending"))
+        }
+    }
+    let harness = Harness::open("p18submitted").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    let (mut write, recipient) = enroll_write(&harness, "stolen-submitted", now + 1)?;
+    seed_prepared(&harness, &write)?;
+    let mut head = held_head(&harness)?;
+    head.state = "submitted".into();
+    harness.db.lock().map_err(|_| "db")?.put_pairing_head(&head)?;
+    write.publisher_ref = recipient.clone();
+    write.local_ref = recipient;
+    let persist = CountPersist(std::sync::atomic::AtomicUsize::new(0));
+    assert!(matches!(
+        publish_head(&harness.db, harness.root(), harness.fixture.vault.as_ref(), &write, &persist),
+        Err(SdkError::PairingCode("PrimaryRequired"))
+    ));
+    assert_eq!(persist.0.load(Ordering::SeqCst), 0);
+    assert_eq!(held_head(&harness)?, head);
+    Ok(())
+}
+
+#[tokio::test]
 async fn pairing_resume_refuses_kind_mismatch() -> TestResult {
     let harness = Harness::open("p09kind").await?;
     let now = Harness::now()?;

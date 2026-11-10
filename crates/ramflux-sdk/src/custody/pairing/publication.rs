@@ -289,7 +289,7 @@ fn retire_acknowledged(
     let invitation_id =
         write.invitation_id.clone().ok_or(SdkError::PairingField("invitation_id"))?;
     let local_role = adoption_local_role(db, write)?;
-    db.put_pairing_adoption(&AdoptionRow {
+    let adoption = AdoptionRow {
         account_id: write.account_id.clone(),
         operation_id: write.operation_id.clone(),
         record_hash: record_hash.to_owned(),
@@ -298,19 +298,22 @@ fn retire_acknowledged(
         branch_vault_ref: write.branch_vault_ref.clone(),
         data_vault_ref: write.data_vault_ref.clone(),
         primary_vault_ref: write.primary_vault_ref.clone(),
-    })?;
-    db.commit_pairing_terminal_cleanup(&TerminalRow {
-        account_id: write.account_id.clone(),
-        operation_id: write.operation_id.clone(),
-        invitation_id,
-        issuer_seq: write.issuer_seq,
-        local_seq: write.local_seq,
-        generation: write.generation,
-        outcome: "completed".into(),
-        record_hash: Some(record_hash.to_owned()),
-        finished_at,
-        cleanup: "done".into(),
-    })?;
+    };
+    db.commit_pairing_adoption_cleanup(
+        &adoption,
+        &TerminalRow {
+            account_id: write.account_id.clone(),
+            operation_id: write.operation_id.clone(),
+            invitation_id,
+            issuer_seq: write.issuer_seq,
+            local_seq: write.local_seq,
+            generation: write.generation,
+            outcome: "completed".into(),
+            record_hash: Some(record_hash.to_owned()),
+            finished_at,
+            cleanup: "done".into(),
+        },
+    )?;
     Ok(())
 }
 
@@ -448,7 +451,7 @@ fn adoption_local_role(db: &AccountDb, write: &HeadWrite) -> Result<String, SdkE
         Some(head) => decode_ref(&head.publisher_ref)?,
         None => write.publisher_ref.clone(),
     };
-    if publisher == write.local_ref { Ok("primary".into()) } else { Ok("recipient".into()) }
+    if publisher == write.local_ref { Ok("primary".into()) } else { Ok("secondary".into()) }
 }
 
 fn decode_candidate(bytes: &[u8]) -> Result<Publication, SdkError> {

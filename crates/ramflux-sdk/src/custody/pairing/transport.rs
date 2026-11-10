@@ -48,12 +48,95 @@ impl PairingConfig {
 
 /// Native Issue/Create apply target. Primary uses the existing S2 proof worker.
 pub trait PairingNative: std::marker::Send + std::marker::Sync {
+    /// Release the ceremony's proof connection on every terminal exit.
+    fn close(&self) {}
     /// # Errors
     /// Native Issue refusal, `Busy`, or `Retired`.
     fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>>;
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
     fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>>;
+}
+
+type NativeOpen<S> =
+    dyn Fn() -> BoxFut<Result<CustodyConnection<S>, SdkError>> + std::marker::Send + Sync;
+
+type NativeConnection<S> =
+    Arc<std::sync::Mutex<Option<Arc<tokio::sync::Mutex<CustodyConnection<S>>>>>>;
+
+/// A ceremony owns a fresh connection; the ordinary gateway connection is never shared.
+pub struct FreshPairingNative<S = ramflux_transport::GatewayTcpTlsStream> {
+    open: Arc<NativeOpen<S>>,
+    connection: NativeConnection<S>,
+}
+
+impl FreshPairingNative {
+    /// Build a factory over the ordinary authenticated custody connection constructor.
+    #[must_use]
+    pub fn new(
+        config: crate::custody::CustodyNetworkConfig,
+        vault: Arc<dyn crate::custody::PrimaryVault>,
+    ) -> Self {
+        Self::with_factory(Arc::new(move || {
+            let config = config.clone();
+            let vault = Arc::clone(&vault);
+            Box::pin(CustodyConnection::connect(config, vault))
+        }))
+    }
+}
+
+impl<S> FreshPairingNative<S> {
+    /// Factory seam for real transport fixtures. One call for each Issue, never gateway handoff.
+    #[must_use]
+    pub fn with_factory(open: Arc<NativeOpen<S>>) -> Self {
+        Self { open, connection: Arc::new(std::sync::Mutex::new(None)) }
+    }
+}
+
+impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static> PairingNative
+    for FreshPairingNative<S>
+{
+    fn close(&self) {
+        self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    }
+
+    fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>> {
+        self.close();
+        let open = Arc::clone(&self.open);
+        let slot = Arc::clone(&self.connection);
+        Box::pin(async move {
+            let connection = Arc::new(tokio::sync::Mutex::new(open().await?));
+            let native = ProofPairingNative::from_connection(Arc::clone(&connection));
+            match native.issue(spec).await {
+                Ok(issued) => {
+                    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(connection);
+                    Ok(issued)
+                }
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>> {
+        let connection =
+            self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let slot = Arc::clone(&self.connection);
+        Box::pin(async move {
+            let connection = connection.ok_or(SdkError::PairingCode("WrongContext"))?;
+            let result = ProofPairingNative::from_connection(connection).create(create).await;
+            if result.is_err() {
+                slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            }
+            result
+        })
+    }
+}
+
+impl<S> Drop for FreshPairingNative<S> {
+    fn drop(&mut self) {
+        self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    }
 }
 
 type ProveFn = dyn Fn(CustodyProofAction) -> BoxFut<Result<CustodyServerFrame, SdkError>>

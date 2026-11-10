@@ -16,6 +16,10 @@ mod vault;
 pub use ceremony::{CreateInput, CreationCeremony};
 pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
+pub(crate) use store::pairing::{
+    matches_install, verify_local as verify_pairing_local,
+    write_authority as write_pairing_authority,
+};
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
     accept_publication, account_exists, custody_vault_reference, export_agent_credentials,

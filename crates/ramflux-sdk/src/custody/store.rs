@@ -15,6 +15,7 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 mod genesis;
 mod networking;
+pub(crate) mod pairing;
 mod publication;
 #[cfg(test)]
 mod race_hooks;
@@ -227,6 +228,18 @@ pub(super) fn require_current_authority(
     })
 }
 impl BornAccount {
+    fn require_current_snapshot(&self) -> Result<(), SdkError> {
+        let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
+        let current = load_data_account(root, self.local_account_id(), super::network_now()?)?;
+        require_current_authority(&current.stored.pins, &current.verified)?;
+        pairing::require_installed_marker(root, &current)?;
+        if ramflux_protocol::custody::object_hash(current.record())?
+            != ramflux_protocol::custody::object_hash(self.record())?
+        {
+            return Err(SdkError::PairingCode("HeadChanged"));
+        }
+        Ok(())
+    }
     /// Build, but do not transmit, a branch-signed layer declaration endorsed by a new native head.
     /// The caller may publish the returned candidate only through an explicit later action.
     /// # Errors
@@ -347,10 +360,17 @@ impl BornAccount {
         &self,
         vault: &dyn PrimaryVault,
     ) -> Result<ramflux_crypto::custody::SelfSigningKey, SdkError> {
+        self.require_current_snapshot()?;
         if self.branch_pending() || self.authority_blocked {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
+        if self.stored.primary_vault_ref.is_empty()
+            || self.record().body.master_certificate.body.primary_device_ref.device_id
+                != self.local_device_id()?
+        {
+            return Err(SdkError::PairingCode("PrimaryRequired"));
+        }
         let primary = vault.load_primary(&self.stored.primary_vault_ref)?;
         if primary.public_key()
             != self.record().body.master_certificate.body.self_signing_public_key
@@ -369,11 +389,7 @@ impl BornAccount {
             return Err(SdkError::NetworkingPending);
         }
         require_current_authority(&self.stored.pins, &self.verified)?;
-        Ok(vault.load_primary(&self.stored.primary_vault_ref)?.sign_contact_card_v3(
-            &self.verified,
-            body,
-            now,
-        )?)
+        Ok(self.group_primary(vault)?.sign_contact_card_v3(&self.verified, body, now)?)
     }
     #[must_use]
     pub(crate) const fn branch_pending(&self) -> bool {
@@ -687,6 +703,9 @@ fn read_account(
     }
     let account =
         BornAccount { stored, verified, authority_blocked, networking_path: directory(root, id)? };
+    if require_current {
+        pairing::require_installed_marker(root, &account)?;
+    }
     let _ = account.networking_view(now);
     Ok(account)
 }
@@ -936,6 +955,7 @@ impl BornAccount {
         device_id: &str,
         now: u64,
     ) -> Result<(ramflux_protocol::custody::DeviceRef, super::BranchCredentials), SdkError> {
+        self.require_current_snapshot()?;
         if self.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }

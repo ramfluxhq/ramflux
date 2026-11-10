@@ -11,6 +11,31 @@ use super::helpers::{
 use crate::{AccountDb, AccountDbKey, AccountIndex, BackupDatabase, StorageError};
 use std::path::{Path, PathBuf};
 
+#[test]
+fn pairing_adoption_and_terminal_cleanup_are_one_transaction() -> TestResult {
+    let (root, db) = crate::tests::test_db("pair-module-adoption-atomic")?;
+    let submitted = submitted_head()?;
+    db.put_pairing_head(&submitted)?;
+    let mut adopted = adoption("secondary", None)?;
+    adopted.operation_id.clone_from(&submitted.operation_id);
+    adopted.record_hash.clone_from(&submitted.candidate_hash);
+    let mut finished = terminal();
+    finished.operation_id.clone_from(&submitted.operation_id);
+    finished.outcome = "completed".into();
+    finished.record_hash = Some(submitted.candidate_hash.clone());
+    assert!(db.commit_pairing_adoption_cleanup(&adopted, &finished).is_err());
+    assert!(db.pairing_adoption()?.is_none(), "failed cleanup committed adoption");
+    assert_eq!(db.pairing_head()?, Some(submitted));
+    db.put_pairing_head(&acknowledged_head()?)?;
+    db.commit_pairing_adoption_cleanup(&adopted, &finished)?;
+    drop(db);
+    let db = reopen(&root)?;
+    assert_eq!(db.pairing_adoption()?, Some(adopted));
+    assert!(db.pairing_head()?.is_none());
+    assert_eq!(db.pairing_terminal_rows()?, vec![finished]);
+    Ok(())
+}
+
 fn reopen(root: &Path) -> Result<AccountDb, StorageError> {
     AccountDb::open(
         &AccountIndex::open(root)?,
