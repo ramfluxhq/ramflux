@@ -64,6 +64,17 @@ pub enum NamedDeliveryMode {
     Ephemeral,
 }
 
+impl NamedDeliveryMode {
+    /// Wire string bound into AEAD associated data.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Durable => "durable",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+}
+
 /// Collapsed delivery class after the reset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +133,8 @@ pub enum OuterProfileError {
     CompactCiphertextField,
     #[error("compact candidate sidecar ciphertext field is required")]
     MissingCompactCiphertext,
+    #[error("named delivery_mode and collapse_tag are refused while schema v1 is off")]
+    NamedFieldsWhileGateOff,
 }
 
 /// Measured sizes checked before any ratchet or outbox commit.
@@ -457,6 +470,64 @@ pub fn refuse_live_bridge(envelope: &crate::Envelope) -> Result<(), OuterProfile
         return Err(OuterProfileError::Bridge);
     }
     Ok(())
+}
+
+/// Refuse named `delivery_mode` / `collapse_tag` while the v1 profile is off.
+///
+/// # Errors
+/// [`OuterProfileError::NamedFieldsWhileGateOff`] when either field is present
+/// and [`schema_v1_live`] is false.
+pub fn refuse_named_fields_while_gate_off(
+    envelope: &crate::Envelope,
+) -> Result<(), OuterProfileError> {
+    if schema_v1_live() {
+        return Ok(());
+    }
+    if envelope.delivery_mode.is_some() || envelope.collapse_tag.is_some() {
+        return Err(OuterProfileError::NamedFieldsWhileGateOff);
+    }
+    Ok(())
+}
+
+/// Parse the live envelope's named `delivery_mode` as [`NamedDeliveryMode`].
+///
+/// # Errors
+/// [`OuterProfileError::MissingMode`] when absent,
+/// [`OuterProfileError::UnknownMode`] when the string is not `durable` or
+/// `ephemeral`.
+pub fn parse_live_named_delivery_mode(
+    envelope: &crate::Envelope,
+) -> Result<NamedDeliveryMode, OuterProfileError> {
+    match envelope.delivery_mode.as_deref() {
+        None => Err(OuterProfileError::MissingMode),
+        Some("durable") => Ok(NamedDeliveryMode::Durable),
+        Some("ephemeral") => Ok(NamedDeliveryMode::Ephemeral),
+        Some(_) => Err(OuterProfileError::UnknownMode),
+    }
+}
+
+/// Decode the live envelope collapse tag (base64url, any length).
+///
+/// # Errors
+/// [`OuterProfileError::CollapseTag`] when the field is missing or not
+/// base64url.
+pub fn live_collapse_tag_bytes(envelope: &crate::Envelope) -> Result<Vec<u8>, OuterProfileError> {
+    let encoded = envelope.collapse_tag.as_deref().ok_or(OuterProfileError::CollapseTag)?;
+    decode_collapse_tag(encoded)
+}
+
+/// Decode the live envelope collapse tag as exactly 32 bytes.
+///
+/// # Errors
+/// [`OuterProfileError::CollapseTag`] when missing, not base64url, or not 32
+/// bytes.
+pub fn require_live_collapse_tag(
+    envelope: &crate::Envelope,
+) -> Result<[u8; 32], OuterProfileError> {
+    live_collapse_tag_bytes(envelope)?
+        .as_slice()
+        .try_into()
+        .map_err(|_| OuterProfileError::CollapseTag)
 }
 
 /// Candidate profile token on a verified, identity-bound discovery record.

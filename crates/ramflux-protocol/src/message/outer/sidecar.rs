@@ -122,10 +122,14 @@ pub(super) fn decode_sidecar_value(value: &Value, compact: bool) -> Result<(), O
     let sidecar: CandidateSidecar = serde_json::from_value(value.clone())
         .map_err(|error| map_strict_decode(&error, compact))?;
     sidecar.check_caps()?;
-    if compact
-        && sidecar.ciphertext.as_ref().is_some_and(|ciphertext| !ciphertext.ciphertext.is_empty())
-    {
-        return Err(OuterProfileError::CompactCiphertextField);
+    if compact {
+        match sidecar.ciphertext.as_ref() {
+            None => return Err(OuterProfileError::MissingCompactCiphertext),
+            Some(ciphertext) if !ciphertext.ciphertext.is_empty() => {
+                return Err(OuterProfileError::CompactCiphertextField);
+            }
+            Some(_) => {}
+        }
     }
     Ok(())
 }

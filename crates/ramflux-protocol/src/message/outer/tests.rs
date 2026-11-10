@@ -11,7 +11,8 @@ use super::{
     accept_after_size_preflight, advertised_client_protocol_versions, compact_cryptobox_bytes,
     decode_candidate_outer_ijson, decode_candidate_sidecar, decode_compact_candidate_sidecar,
     decode_compact_cryptobox, discover_verified_message_schema, encode_compact_cryptobox,
-    validate_candidate_delivery_mode, wire_encrypted_payload,
+    live_collapse_tag_bytes, parse_live_named_delivery_mode, refuse_named_fields_while_gate_off,
+    require_live_collapse_tag, validate_candidate_delivery_mode, wire_encrypted_payload,
 };
 use crate::schema_profile::{
     ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
@@ -597,6 +598,65 @@ fn compact_sidecar_requires_ciphertext_field() {
         OuterProfileError::MissingCompactCiphertext.to_string(),
         "compact candidate sidecar ciphertext field is required"
     );
+}
+
+#[test]
+fn compact_sidecar_requires_ciphertext_object() {
+    let absent = serde_json::to_vec(&json!({})).unwrap_or_default();
+    assert_eq!(
+        decode_compact_candidate_sidecar(&absent),
+        Err(OuterProfileError::MissingCompactCiphertext)
+    );
+    assert_eq!(decode_candidate_sidecar(&absent), Ok(()));
+}
+
+#[test]
+fn gate_off_refuses_named_delivery_mode_and_collapse_tag() {
+    assert!(!schema_v1_live());
+    let mut envelope = live_envelope(None);
+    assert_eq!(refuse_named_fields_while_gate_off(&envelope), Ok(()));
+    envelope.delivery_mode = Some("durable".to_owned());
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
+    envelope.delivery_mode = None;
+    envelope.collapse_tag = Some(collapse_tag());
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
+    envelope.delivery_mode = Some("durable".to_owned());
+    envelope.ext.ext.insert(
+        ephemeral::DELIVERY_MODE_EXTENSION.to_owned(),
+        Value::String("ephemeral".to_owned()),
+    );
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
+    assert_eq!(
+        OuterProfileError::NamedFieldsWhileGateOff.to_string(),
+        "named delivery_mode and collapse_tag are refused while schema v1 is off"
+    );
+}
+
+#[test]
+fn live_named_fields_parse_mode_and_require_32_byte_tag() {
+    let mut envelope = live_envelope(None);
+    assert_eq!(parse_live_named_delivery_mode(&envelope), Err(OuterProfileError::MissingMode));
+    envelope.delivery_mode = Some("bogus".to_owned());
+    assert_eq!(parse_live_named_delivery_mode(&envelope), Err(OuterProfileError::UnknownMode));
+    envelope.delivery_mode = Some("durable".to_owned());
+    assert_eq!(parse_live_named_delivery_mode(&envelope), Ok(NamedDeliveryMode::Durable));
+    assert_eq!(NamedDeliveryMode::Durable.as_str(), "durable");
+    assert_eq!(live_collapse_tag_bytes(&envelope), Err(OuterProfileError::CollapseTag));
+    envelope.collapse_tag = Some(crate::encode_base64url([0x00_u8; 31]));
+    let short = live_collapse_tag_bytes(&envelope).unwrap_or_default();
+    assert_eq!(short.len(), 31);
+    assert_eq!(require_live_collapse_tag(&envelope), Err(OuterProfileError::CollapseTag));
+    envelope.collapse_tag = Some(collapse_tag());
+    assert_eq!(require_live_collapse_tag(&envelope), Ok([0x22_u8; 32]));
 }
 
 #[test]

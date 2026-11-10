@@ -61,6 +61,8 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
     if single_entry_frame_size(envelope)? > ENTRY_FRAME_BYTE_CAP {
         return Err(NodeCoreError::PayloadTooLarge);
     }
+    ramflux_protocol::message::outer::refuse_named_fields_while_gate_off(envelope)
+        .map_err(map_outer_profile)?;
     if ramflux_protocol::schema_profile::schema_v1_live() {
         check_candidate_entry_bound(envelope)?;
     }
@@ -69,6 +71,15 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
 
 fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
+    ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope)
+        .map_err(map_named_field)?;
+    let tag = ramflux_protocol::message::outer::live_collapse_tag_bytes(envelope)
+        .map_err(map_named_field)?;
+    if tag.len() != 32 {
+        return Err(map_named_field(
+            ramflux_protocol::message::outer::OuterProfileError::CollapseTag,
+        ));
+    }
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         envelope.encrypted_payload.as_bytes(),
@@ -79,6 +90,10 @@ fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<
     let sizes = ramflux_protocol::message::outer::IngressSizes::measure_wire(envelope, 0, &[], &[])
         .map_err(map_outer_profile)?;
     ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)
+}
+
+fn map_named_field(error: ramflux_protocol::message::outer::OuterProfileError) -> NodeCoreError {
+    NodeCoreError::InvalidConfiguration(error.to_string())
 }
 
 fn map_outer_profile(error: ramflux_protocol::message::outer::OuterProfileError) -> NodeCoreError {

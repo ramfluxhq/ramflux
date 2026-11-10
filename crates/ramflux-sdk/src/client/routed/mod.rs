@@ -88,11 +88,17 @@ struct CandidateAadBinding<'a> {
     collapse_tag: [u8; 32],
 }
 
-fn parse_received_collapse_tag(tag: Option<&str>) -> Result<[u8; 32], SdkError> {
-    let raw =
-        ramflux_protocol::decode_base64url(tag.ok_or_else(|| invalid("collapse_tag is required"))?)
-            .map_err(|_| invalid("collapse_tag must be 32 bytes"))?;
-    raw.as_slice().try_into().map_err(|_| invalid("collapse_tag must be 32 bytes"))
+fn refuse_received_outer_fields(envelope: &ramflux_protocol::Envelope) -> Result<(), SdkError> {
+    ramflux_protocol::message::outer::refuse_named_fields_while_gate_off(envelope)
+        .map_err(map_size_preflight)?;
+    if !crate::client::target_selection::schema_v1_selected() {
+        return Ok(());
+    }
+    ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope)
+        .map_err(map_size_preflight)?;
+    ramflux_protocol::message::outer::require_live_collapse_tag(envelope)
+        .map_err(map_size_preflight)?;
+    Ok(())
 }
 
 pub(crate) fn associated_data(
@@ -120,19 +126,22 @@ pub(crate) fn associated_data_from_outer(
     recipient: &str,
     bundle: &[u8; 32],
 ) -> Result<Vec<u8>, SdkError> {
+    ramflux_protocol::message::outer::refuse_named_fields_while_gate_off(envelope)
+        .map_err(map_size_preflight)?;
     if !crate::client::target_selection::schema_v1_selected() {
         return associated_data_v2(&envelope.envelope_id, sender, recipient, bundle);
     }
-    let delivery_mode =
-        envelope.delivery_mode.as_deref().ok_or_else(|| invalid("delivery_mode is required"))?;
+    let delivery_mode = ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope)
+        .map_err(map_size_preflight)?;
     associated_data_bound(
         &envelope.envelope_id,
         sender,
         recipient,
         bundle,
         CandidateAadBinding {
-            delivery_mode,
-            collapse_tag: parse_received_collapse_tag(envelope.collapse_tag.as_deref())?,
+            delivery_mode: delivery_mode.as_str(),
+            collapse_tag: ramflux_protocol::message::outer::require_live_collapse_tag(envelope)
+                .map_err(map_size_preflight)?,
         },
     )
 }
@@ -472,6 +481,7 @@ impl RamfluxClient {
         local: &str,
     ) -> Result<Opened, SdkError> {
         self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
+        refuse_received_outer_fields(&entry.envelope)?;
         let envelope = decode(&entry.envelope)?;
         let (mut session, bundle) = self.recv_pair_session(
             &self.local_device_identity(local)?,

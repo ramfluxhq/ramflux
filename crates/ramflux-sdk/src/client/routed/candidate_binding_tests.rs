@@ -79,6 +79,25 @@ fn aead_failed(result: Result<Opened, SdkError>) -> Result<(), SdkError> {
     }
 }
 
+fn inbound_open(result: Result<Opened, SdkError>, expected: &str) -> Result<(), SdkError> {
+    match result {
+        Err(SdkError::InboundRejected(message)) if message == expected => Ok(()),
+        Err(error) => Err(invalid(&format!("exact {expected}, got {error}"))),
+        Ok(_) => Err(invalid(&format!("exact {expected}, got Ok"))),
+    }
+}
+
+fn inbound_decode(
+    result: Result<SdkDmEncryptedEnvelope, SdkError>,
+    expected: &str,
+) -> Result<(), SdkError> {
+    match result {
+        Err(SdkError::InboundRejected(message)) if message == expected => Ok(()),
+        Err(error) => Err(invalid(&format!("exact {expected}, got {error}"))),
+        Ok(_) => Err(invalid(&format!("exact {expected}, got Ok"))),
+    }
+}
+
 #[test]
 fn candidate_seal_writes_named_fields_and_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
@@ -158,32 +177,124 @@ fn sdk_decode_refuses_absent_compact_ciphertext_field() -> Result<(), SdkError> 
             object.remove("ciphertext");
         }
     })?;
-    match decode(&missing) {
-        Err(SdkError::InboundRejected(message))
-            if message == "compact candidate sidecar ciphertext field is required" =>
-        {
-            Ok(())
-        }
-        other => Err(invalid(&format!("exact missing ciphertext error, got {other:?}"))),
-    }
+    inbound_decode(decode(&missing), "compact candidate sidecar ciphertext field is required")
 }
+
+#[test]
+fn sdk_decode_refuses_absent_compact_ciphertext_object() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (_a, _b, entry) = sealed_pair()?;
+    let missing = rewrite_sidecar(&entry.envelope, |sidecar| {
+        if let Some(object) = sidecar.as_object_mut() {
+            object.remove("ciphertext");
+        }
+    })?;
+    inbound_decode(decode(&missing), "compact candidate sidecar ciphertext field is required")
+}
+
+const GATE_OFF_V2_AAD_GOLDEN: &[u8] = br#"["ramflux.sdk.envelope.aad.v2","aad-v2-golden",[95,204,188,78,87,206,108,231,22,135,120,138,131,53,234,166,144,158,255,72,86,227,216,174,1,195,102,74,15,153,26,204],[208,39,172,93,44,11,143,110,159,26,136,102,41,124,125,100,133,204,131,100,133,50,252,128,27,30,187,199,67,3,193,238],[17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],2]"#;
 
 #[test]
 fn gate_off_v2_aad_bytes_are_unchanged() -> Result<(), SdkError> {
     assert!(!ramflux_protocol::schema_profile::schema_v1_live());
     let bundle = [0x11_u8; 32];
     let aad = associated_data("aad-v2-golden", "alice", "bob", &bundle)?;
-    let expected = ramflux_protocol::canonical_json_bytes(&(
-        "ramflux.sdk.envelope.aad.v2",
-        "aad-v2-golden",
-        dm_device_id_hash("alice"),
-        dm_device_id_hash("bob"),
-        bundle,
-        2_u32,
-    ))?;
-    assert_eq!(aad, expected);
+    assert_eq!(aad, GATE_OFF_V2_AAD_GOLDEN);
     let text = String::from_utf8(aad).map_err(|_| invalid("aad utf8"))?;
     assert!(text.starts_with(r#"["ramflux.sdk.envelope.aad.v2","aad-v2-golden""#));
     assert!(!text.contains("aad.v3"));
+    Ok(())
+}
+
+const NAMED_FIELDS_GATE_OFF: &str =
+    "named delivery_mode and collapse_tag are refused while schema v1 is off";
+
+#[test]
+fn gate_off_named_delivery_mode_is_refused_by_open_routed() -> Result<(), SdkError> {
+    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let (a, b, entry) = sealed_pair()?;
+    let mut changed = entry;
+    changed.envelope.delivery_mode = Some("ephemeral".into());
+    resign(&a, &mut changed.envelope)?;
+    inbound_open(b.client.open_routed(&changed, "bob"), NAMED_FIELDS_GATE_OFF)
+}
+
+#[test]
+fn gate_off_named_collapse_tag_is_refused_by_open_routed() -> Result<(), SdkError> {
+    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let (a, b, entry) = sealed_pair()?;
+    let mut changed = entry;
+    changed.envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
+    resign(&a, &mut changed.envelope)?;
+    inbound_open(b.client.open_routed(&changed, "bob"), NAMED_FIELDS_GATE_OFF)
+}
+
+#[test]
+fn gate_off_named_field_conflicting_with_ext_bridge_is_refused_by_open_routed()
+-> Result<(), SdkError> {
+    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let (a, b, entry) = sealed_pair()?;
+    let mut changed = entry;
+    changed.envelope.delivery_mode = Some("durable".into());
+    changed.envelope.ext.ext.insert(
+        ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION.to_owned(),
+        serde_json::json!("ephemeral"),
+    );
+    resign(&a, &mut changed.envelope)?;
+    inbound_open(b.client.open_routed(&changed, "bob"), NAMED_FIELDS_GATE_OFF)
+}
+
+#[test]
+fn open_routed_refuses_missing_delivery_mode() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b, entry) = sealed_pair()?;
+    let mut changed = entry;
+    changed.envelope.delivery_mode = None;
+    resign(&a, &mut changed.envelope)?;
+    inbound_open(b.client.open_routed(&changed, "bob"), "delivery_mode is required")
+}
+
+#[test]
+fn open_routed_refuses_unknown_delivery_mode() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b, entry) = sealed_pair()?;
+    let mut changed = entry;
+    changed.envelope.delivery_mode = Some("bogus".into());
+    resign(&a, &mut changed.envelope)?;
+    inbound_open(b.client.open_routed(&changed, "bob"), "new profile rejects unknown delivery_mode")
+}
+
+#[test]
+fn open_routed_refuses_31_byte_collapse_tag() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b, entry) = sealed_pair()?;
+    let mut changed = entry;
+    changed.envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 31]));
+    resign(&a, &mut changed.envelope)?;
+    inbound_open(b.client.open_routed(&changed, "bob"), "collapse_tag must be 32 bytes")
+}
+
+#[test]
+fn established_pair_resigned_mode_mismatch_fails_aead_and_original_still_opens()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b, first) = sealed_pair()?;
+    let opened = b.client.open_routed(&first, "bob")?;
+    assert_eq!(opened.body.as_slice(), b"bind-body");
+    b.client.persist_pair(
+        &b.client.local_device_identity("bob")?,
+        &b.client.device_identity(&fixture_peer_reference(&b.client, "alice")?)?,
+        &opened.bundle_hash,
+        &opened.session,
+    )?;
+    let second = seal(&a, &b, message("candidate-bind-2", "c"), b"second-body")?;
+    let before = receiver_pair_snapshot(&b, &a)?;
+    assert!(!before.is_empty());
+    let mut changed = second.clone();
+    changed.envelope.delivery_mode = Some("ephemeral".into());
+    resign(&a, &mut changed.envelope)?;
+    aead_failed(b.client.open_routed(&changed, "bob"))?;
+    assert_eq!(before, receiver_pair_snapshot(&b, &a)?);
+    assert_eq!(b.client.open_routed(&second, "bob")?.body.as_slice(), b"second-body");
     Ok(())
 }
