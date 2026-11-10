@@ -47,7 +47,9 @@ impl RamfluxClient {
             return Ok(None);
         };
         if envelope.version != 1 || envelope.schema != "ramflux.sdk.dm_x3dh_envelope.v1" {
-            return Err(SdkError::LocalBus("invalid routed envelope".to_owned()));
+            // Group and other v1 payloads JSON-parse as this type via shared
+            // ciphertext fields. They are not a DM binding.
+            return Ok(None);
         }
         let mut binding = None;
         for conversation in self.conversation_list()? {

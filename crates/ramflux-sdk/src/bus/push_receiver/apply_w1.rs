@@ -279,14 +279,28 @@ fn hold_unrouted(
     entry: &GatewayInboxEntry,
     sequence: u64,
 ) -> Result<(), SdkError> {
-    let key = account.client.inbox_admission_key(entry)?;
+    let legacy_group = matches!(group_entry_is_sender_key_message(entry), Ok(true));
+    let computed = if legacy_group {
+        crate::client::group_quarantine::legacy_key(entry)?
+    } else {
+        account.client.inbox_admission_key(entry)?
+    };
     let at = now_unix_timestamp();
     run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, expected| {
         let generation = handle_generation();
+        let key = match tx.work_admission_key(sequence)? {
+            Some(existing) => existing,
+            None => computed.clone(),
+        };
         let gate = LegacyW1 { expected, generation };
         let hold = SourceHold { expected, generation };
-        match gate.effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at))? {
+        match gate
+            .effect_in(tx, sequence, None, || hold.unrouted_in(tx, entry, &key, at, legacy_group))?
+        {
             HoldDisposition::HeldLocal { .. } => {
+                if legacy_group {
+                    tx.account().retain_legacy_inbox(&key)?;
+                }
                 // SourceHold.admit_hold settle(Held) already covers C+1 in this
                 // transaction (P07). A second Held cover refuses "outside page"
                 // and rolls the hold, journal and cover back together.
@@ -360,6 +374,9 @@ async fn classify(
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
         return Ok(Kind::Routed);
+    }
+    if matches!(group_entry_is_sender_key_message(entry), Ok(true)) {
+        return Ok(Kind::LegacyHold);
     }
     let reference = account.client.inbound_device_reference(entry)?;
     if account.client.v2_blocks_legacy(&reference)? {

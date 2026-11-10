@@ -121,20 +121,25 @@ fn spawn_account_receive(
     work: mpsc::Sender<AccountWork>,
     timeouts: &RuntimeTimeouts,
 ) -> Vec<JoinHandle<()>> {
-    if handle.shared.session_push_advertise {
-        vec![
-            spawn_receive(receive::run_anchored(
-                handle.clone(),
-                work.clone(),
-                timeouts.clone(),
-                crate::bus::push_receiver::sweep::SweepSetting::from_process(),
-                crate::bus::push_receiver::sweep::SweepMode::Push,
-            )),
-            spawn_receive(crate::bus::push_receiver::intake::run(handle.clone(), work)),
-        ]
-    } else {
-        vec![spawn_receive(receive::run(handle.clone(), work, timeouts.clone()))]
+    if !handle.shared.session_push_advertise {
+        return vec![spawn_receive(receive::run(handle.clone(), work, timeouts.clone()))];
     }
+    let mode = if handle.session_is_push() {
+        crate::bus::push_receiver::sweep::SweepMode::Push
+    } else {
+        crate::bus::push_receiver::sweep::SweepMode::Compat
+    };
+    let mut children = vec![spawn_receive(receive::run_anchored(
+        handle.clone(),
+        work.clone(),
+        timeouts.clone(),
+        crate::bus::push_receiver::sweep::SweepSetting::from_process(),
+        mode,
+    ))];
+    if handle.session_is_push() {
+        children.push(spawn_receive(crate::bus::push_receiver::intake::run(handle.clone(), work)));
+    }
+    children
 }
 
 fn spawn_receive(fut: impl std::future::Future<Output = ()> + Send + 'static) -> JoinHandle<()> {

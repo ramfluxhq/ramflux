@@ -1397,9 +1397,10 @@ pub(crate) async fn dispatch_group_receive_request(
     request: &LocalBusFrame,
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
-    account.client.account_db()?.refuse_legacy_receive()?;
     let mut body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
-    if !crate::bus::account_runtime::head_refresh::take_receive_preparation() {
+    if crate::bus::account_runtime::head_refresh::take_receive_preparation() {
+        account.client.account_db()?.refuse_legacy_receive()?;
+    } else {
         super::super::sync_driver::run(account).await?;
     }
     if !crate::bus::couriers::head_refresh::inbound::blocked_roots(account, &body.group_id)?
@@ -1413,6 +1414,10 @@ pub(crate) async fn dispatch_group_receive_request(
         &body.conversation_id,
     )?;
     let mut engine = account.session_client().await?;
+    let persist_legacy_cursor = !crate::bus::push_receiver::apply_w1::is_active(
+        account.client.account_db()?,
+        &account.target_delivery_id,
+    )?;
     let receive_result = async {
         let mut entries = Vec::<GatewayInboxEntry>::new();
         let mut seen = BTreeSet::new();
@@ -1430,12 +1435,18 @@ pub(crate) async fn dispatch_group_receive_request(
         let mut imported_sender_keys = Vec::new();
         for entry in entries {
             if crate::client::routed::decode(&entry.envelope).is_ok() {
+                if !persist_legacy_cursor {
+                    continue;
+                }
                 let pool = account.relay_quic_pool()?;
                 let delivery =
                     account.client.apply_routed_entry(&mut engine, &pool, &entry, false).await?;
-                account
-                    .client
-                    .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                persist_group_receive_cursor(
+                    account,
+                    persist_legacy_cursor,
+                    engine.target_delivery_id(),
+                    entry.inbox_seq,
+                )?;
                 if delivery.routing.as_ref().is_some_and(|route| {
                     route.kind == crate::client::routed::Kind::GroupMessage
                         && route.conversation_id == body.conversation_id
@@ -1479,7 +1490,9 @@ pub(crate) async fn dispatch_group_receive_request(
                 };
             match delivery {
                 GroupGatewayDeliveryResult::SenderKeyDistribution(distribution) => {
-                    account.client.persist_gateway_receive_cursor(
+                    persist_group_receive_cursor(
+                        account,
+                        persist_legacy_cursor,
                         engine.target_delivery_id(),
                         entry.inbox_seq,
                     )?;
@@ -1489,7 +1502,9 @@ pub(crate) async fn dispatch_group_receive_request(
                     sender_key_distributions.push(serde_json::to_value(distribution)?);
                 }
                 GroupGatewayDeliveryResult::Message(plaintext) => {
-                    account.client.persist_gateway_receive_cursor(
+                    persist_group_receive_cursor(
+                        account,
+                        persist_legacy_cursor,
                         engine.target_delivery_id(),
                         entry.inbox_seq,
                     )?;
@@ -1521,9 +1536,12 @@ pub(crate) async fn dispatch_group_receive_request(
                     }
                 };
             if let GroupGatewayDeliveryResult::Message(plaintext) = delivery {
-                account
-                    .client
-                    .persist_gateway_receive_cursor(engine.target_delivery_id(), entry.inbox_seq)?;
+                persist_group_receive_cursor(
+                    account,
+                    persist_legacy_cursor,
+                    engine.target_delivery_id(),
+                    entry.inbox_seq,
+                )?;
                 gateway_entries.push(entry);
                 if !plaintext.is_empty() {
                     decrypted.push(group_plaintext_json(
@@ -1548,7 +1566,9 @@ pub(crate) async fn dispatch_group_receive_request(
             }
         }
         for entry in &gateway_entries {
-            account.client.ack_gateway_entry(&mut engine, entry, now_unix_timestamp()).await?;
+            if persist_legacy_cursor {
+                account.client.ack_gateway_entry(&mut engine, entry, now_unix_timestamp()).await?;
+            }
             account
                 .client
                 .account_db()?
@@ -1572,6 +1592,18 @@ pub(crate) async fn dispatch_group_receive_request(
         "pending_undecrypted_count": account.client.account_db()?.group_pending_undecrypted_count(&body.group_id)?,
         "messages": account.client.direct_messages(&body.conversation_id)?,
     })))
+}
+
+fn persist_group_receive_cursor(
+    account: &LocalBusAccountState,
+    persist_legacy_cursor: bool,
+    target: &str,
+    inbox_seq: u64,
+) -> Result<(), SdkError> {
+    if persist_legacy_cursor {
+        account.client.persist_gateway_receive_cursor(target, inbox_seq)?;
+    }
+    Ok(())
 }
 
 /// Project already verified native group history independently of the current receive page.

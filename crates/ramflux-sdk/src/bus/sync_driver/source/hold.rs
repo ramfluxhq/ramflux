@@ -65,14 +65,18 @@ impl SourceHold<'_> {
         entry: &GatewayInboxEntry,
         admission_key: &str,
         at: i64,
+        legacy_group: bool,
     ) -> Result<HoldDisposition, SdkError> {
         let source_key = format!("unrouted:{admission_key}");
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "envelope_id": entry.envelope.envelope_id,
             "claimed_source_device_id": entry.envelope.source_device_id,
             "payload_hash": entry.envelope.payload_hash,
             "inbox_seq": entry.inbox_seq,
         });
+        if legacy_group {
+            body["legacy_group"] = serde_json::json!(true);
+        }
         let input = ReceiveHold {
             sequence: entry.inbox_seq,
             admission_key,

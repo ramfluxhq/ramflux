@@ -14,6 +14,8 @@ use crate::bus::state::LocalBusAccountState;
 use crate::gateway::access::GatewayPushAccess;
 use crate::gateway::push_point::PointReply;
 use crate::gateway::push_resume::{PageReply, ResumePage};
+use crate::gateway::session_push::PageEntryRecord;
+use crate::{GatewayInboxEntry, time::now_unix_timestamp};
 use std::collections::BTreeMap;
 
 const PAGE_LIMIT: usize = super::super::connection_manager::receive::RECEIVE_PAGE_LIMIT;
@@ -44,15 +46,7 @@ pub(super) async fn receive(
     let mut applied = 0_usize;
     let mut pages = 0_u32;
     loop {
-        let page = match engine.resume_page(turn.cursor, PAGE_LIMIT).await? {
-            PageReply::Page(page) => *page,
-            PageReply::Refused(reason) => {
-                return Err(SdkError::GatewaySessionRejected(format!(
-                    "resume_page refused: {}",
-                    reason.as_str()
-                )));
-            }
-        };
+        let page = resume_one(account, engine, turn.cursor, PAGE_LIMIT).await?;
         pages = pages.saturating_add(1);
         if pages >= YIELD_AFTER {
             tokio::task::yield_now().await;
@@ -89,6 +83,56 @@ pub(super) async fn receive(
     let _ = now;
     flush_live_acks(account, generation).await?;
     Ok((applied, Vec::new()))
+}
+
+async fn resume_one(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    after: u64,
+    limit: usize,
+) -> Result<ResumePage, SdkError> {
+    if account.bound_session_mode().is_some_and(|mode| mode.is_push()) {
+        return match engine.resume_page(after, limit).await? {
+            PageReply::Page(page) => Ok(*page),
+            PageReply::Refused(reason) => Err(SdkError::GatewaySessionRejected(format!(
+                "resume_page refused: {}",
+                reason.as_str()
+            ))),
+        };
+    }
+    let entries = engine.resume_after(after, limit).await?;
+    Ok(legacy_page(after, limit, entries))
+}
+
+fn legacy_page(after: u64, limit: usize, entries: Vec<GatewayInboxEntry>) -> ResumePage {
+    use crate::bus::push_receiver::compat::fallback_deadline;
+    let high = entries.iter().map(|entry| entry.inbox_seq).max().unwrap_or(after);
+    let more = !entries.is_empty() && entries.len() == limit;
+    let covered = high;
+    let issued = if more { covered.saturating_add(1) } else { covered };
+    let first_seen = now_unix_timestamp();
+    ResumePage {
+        after_inbox_seq: after,
+        covered_through_seq: covered,
+        issued_inbox_seq: issued,
+        settled_through_seq: covered,
+        entries: entries
+            .into_iter()
+            .map(|entry| {
+                let ttl = i64::from(entry.envelope.ttl);
+                let deadline = fallback_deadline(entry.envelope.created_at, ttl, first_seen, None)
+                    .unwrap_or(crate::bus::push_receiver::compat::FallbackDeadline {
+                        expires_at: 0,
+                        fallback_clock_unverified: true,
+                        guaranteed_retirement: false,
+                    });
+                PageEntryRecord { retain_until: deadline.expires_at, entry }
+            })
+            .collect(),
+        known_losses: Vec::new(),
+        oversize_next: None,
+        more,
+    }
 }
 
 enum PageDrive {
