@@ -154,7 +154,13 @@ pub fn refresh_authority(
             version: 2,
             account_id: account_id.into(),
             account_anchor: reference.account_anchor.clone(),
-            operation_id: ramflux_protocol::encode_base64url(*super::super::random()?),
+            operation_id: match db.pairing_head()? {
+                Some(head) if head.state == "acknowledged" && head.candidate_hash == hash => {
+                    head.operation_id
+                }
+                Some(_) => return Err(SdkError::PairingCode("PublicationPending")),
+                None => ramflux_protocol::encode_base64url(*super::super::random()?),
+            },
             recipient_ref: reference,
             recipient_mode: "existing".into(),
             install_purpose: "authority_refresh".into(),

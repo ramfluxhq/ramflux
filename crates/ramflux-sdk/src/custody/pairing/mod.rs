@@ -4,7 +4,11 @@
 //! Dormant pairing install-store and SDK coordinator. Default-off.
 mod activate;
 mod coordinator;
+mod native_ports;
+mod participant;
 pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refresh_authority};
+pub use native_ports::{NativePairingPublication, NativePairingQuery};
+pub use participant::{LocalPairingParticipant, ParticipantContext};
 pub mod install_gate;
 pub mod install_store;
 pub(crate) mod local_credential;
@@ -35,6 +39,8 @@ pub use transport::{
     PreparedIssue, ProofPairingNative,
 };
 
+#[cfg(test)]
+mod component_tests;
 #[cfg(test)]
 mod prove_tests;
 #[cfg(test)]

@@ -7,6 +7,30 @@ use crate::{AccountDb, AccountDbKey, AccountIndex};
 use rusqlite::params;
 use std::path::Path;
 
+#[test]
+fn pairing_head_update_migrates_existing_fenced_candidate() -> TestResult {
+    let (_root, db) = crate::tests::test_db("pair-head-update-migration")?;
+    let old = super::super::schema::SCHEMA
+        .replace(",'head_update'", "")
+        .replace("\n    OR (kind='head_update' AND recipient_ref IS NULL AND revoked_ref IS NULL AND invitation_id IS NULL)", "");
+    db.connection.execute_batch("DROP TABLE pairing_head;")?;
+    db.connection.execute_batch(&old)?;
+    let existing = super::helpers::acknowledged_head()?;
+    db.put_pairing_head(&existing)?;
+    db.connection.call(|connection| super::super::schema::install(connection))?;
+    assert_eq!(db.pairing_head()?, Some(existing.clone()));
+    db.connection.execute("DELETE FROM pairing_head", [])?;
+    let mut update = existing;
+    update.kind = "head_update".into();
+    update.invitation_id = None;
+    update.recipient_ref = None;
+    db.put_pairing_head(&update)?;
+    assert_eq!(db.pairing_head()?, Some(update.clone()));
+    update.revoked_ref = Some(super::helpers::ref_bytes("dev-a")?);
+    assert!(db.put_pairing_head(&update).is_err());
+    Ok(())
+}
+
 pub(super) fn tables_and_indexes() -> TestResult {
     let (root, db) = crate::tests::test_db("pair04-tables")?;
     let names: Vec<String> = TABLES.iter().map(|t| (*t).to_owned()).collect();

@@ -109,8 +109,8 @@ pub fn open_payload(
         return Err(SdkError::PairingCode("TransferCapacity"));
     }
     // Typed serde visitors reject duplicate and unknown fields; no secret-bearing Value tree.
-    let payload: TransferPayload =
-        serde_json::from_slice(&plaintext).map_err(|_| SdkError::PairingCode("InvalidInput"))?;
+    let payload: TransferPayload = ramflux_protocol::parse_i_json_secret(&plaintext)
+        .map_err(|_| SdkError::PairingCode("InvalidInput"))?;
     let canonical = encode_payload(&payload, transcript, th)?;
     if canonical.as_slice() != plaintext.as_slice() {
         return Err(SdkError::PairingCode("InvalidInput"));

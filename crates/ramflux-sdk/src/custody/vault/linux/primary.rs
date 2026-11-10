@@ -300,7 +300,7 @@ impl PrimaryVault for LinuxPrimaryVault {
     }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
         if reference.starts_with(ramflux_storage::FileVaultSecretSource::OWNER_PREFIX) {
-            return Ok(());
+            return Err(SdkError::CustodyVaultUnavailable);
         }
         let (i, kind, prefix) = if reference.starts_with("branch:") {
             (1, 2, "branch:")

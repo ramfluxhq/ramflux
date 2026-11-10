@@ -30,6 +30,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use zeroize::{Zeroize, Zeroizing};
 
+mod workflow;
+
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
 const SYNC_STEPS: u32 = 64;
@@ -82,6 +84,7 @@ pub struct PairingIdentity {
 /// Actor-owned ceremony generation. One live run per actor.
 pub struct PairingActor {
     identity: PairingIdentity,
+    participant: Option<Arc<super::LocalPairingParticipant>>,
     native: Option<Arc<dyn PairingNative>>,
     transport: Arc<dyn PairingTransport>,
     config: PairingConfig,
@@ -121,9 +124,16 @@ struct Ceremony {
     offer_chunks: BTreeMap<u64, (String, u64, u64, String)>,
     reveal_sent: bool,
     frames_seen: u64,
+    sent_bytes: usize,
+    received_bytes: usize,
     head_state: Option<String>,
     verified_invite: Option<Envelope<Invitation>>,
     commitment_ref: Option<DeviceRef>,
+    transcript: Option<ramflux_protocol::custody::pairing::Transcript>,
+    enrollment: Option<Envelope<ramflux_protocol::custody::pairing::channel::EnrollmentBody>>,
+    record_hash: Option<String>,
+    record_epoch: Option<u64>,
+    channels: VecDeque<(u64, String)>,
 }
 
 enum SasHold {
@@ -142,6 +152,7 @@ impl PairingActor {
     ) -> Self {
         Self {
             identity,
+            participant: None,
             native,
             transport,
             config,
@@ -151,6 +162,12 @@ impl PairingActor {
             unsolicited: 0,
             recipient_stage: None,
         }
+    }
+
+    /// Attach the device-local storage participant used by SDK, bus and CLI ceremonies.
+    pub fn set_participant(&mut self, participant: Arc<super::LocalPairingParticipant>) {
+        self.recipient_stage = Some(participant.clone());
+        self.participant = Some(participant);
     }
 
     /// Inject recipient J0/J1 staging. Called before the recipient commitment.
@@ -200,6 +217,7 @@ impl PairingActor {
         if self.ceremony.as_ref().is_some_and(|c| !terminal(&c.phase)) {
             return Err(SdkError::PairingCode("Busy"));
         }
+        self.refresh_generation().await?;
         let spec = spec_from_begin(&self.identity, &begin)?;
         let prepared = PreparedIssue::prepare(spec.clone())?;
         let mut attempt = NativeAttempt { native: Arc::clone(&native), armed: true };
@@ -216,18 +234,27 @@ impl PairingActor {
         let request_id = created.request_id.clone();
         let invite_envelope = created.invitation.clone();
         let expires_at = invitation.expires_at;
+        let keys = self.load_public_keys(self.identity.local_ref.clone()).await?;
+        if let Some(participant) = self.participant.clone() {
+            let invitation = invite_envelope.clone();
+            tokio::task::spawn_blocking(move || {
+                participant.record_invitation(&invitation, generation)
+            })
+            .await
+            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+        }
         let mut ceremony = Self::open_ceremony(CeremonyOpen {
             operation_id: request_id.clone(),
             generation,
             role: PairingRole::Initiator,
             invitation,
-            verified_invite: None,
+            verified_invite: Some(invite_envelope.clone()),
             origin,
             token: primary_token,
             common: Some(common),
             display_name: begin.display_name,
         });
-        Self::start_sas_with_ref(&mut ceremony, &self.identity.local_ref)?;
+        Self::start_sas_with_ref(&mut ceremony, &self.identity.local_ref, keys)?;
         Self::queue_offer(&mut ceremony)?;
         Self::queue_commit(&mut ceremony)?;
         self.ceremony = Some(ceremony);
@@ -259,6 +286,7 @@ impl PairingActor {
         if self.ceremony.as_ref().is_some_and(|c| !terminal(&c.phase)) {
             return Err(SdkError::PairingCode("Busy"));
         }
+        self.refresh_generation().await?;
         verify_invitation(&join.token.invitation)?;
         let verified = join.token.invitation.clone();
         let invitation = verified.body.clone();
@@ -273,7 +301,24 @@ impl PairingActor {
             claim_nonce: encode_base64url(nonce),
         };
         let claimed = self.transport.claim(origin.clone(), claim.clone()).await?;
-        consume_claimed(&claimed, &claim, &invitation)?;
+        if let Err(error) = consume_claimed(&claimed, &claim, &invitation) {
+            let _ = self
+                .transport
+                .close(
+                    origin.clone(),
+                    Close {
+                        schema: "ramflux.pairing.Close.v2".into(),
+                        version: 2,
+                        invitation_id: invitation.invitation_id.clone(),
+                        issuer_seq: invitation.issuer_seq,
+                        role: "responder".into(),
+                        token: claim.recipient_token.clone(),
+                        reason: "protocol".into(),
+                    },
+                )
+                .await;
+            return Err(error);
+        }
         let generation = self.actor_generation;
         let ceremony = Self::open_ceremony(CeremonyOpen {
             operation_id: invitation.request_id.clone(),
@@ -345,9 +390,11 @@ impl PairingActor {
         if !self.identity.is_primary {
             return Err(SdkError::PairingCode("PrimaryRequired"));
         }
+        let real_workflow = self.participant.is_some();
         self.with_ceremony(|c| {
             check_generation(c, &approve.operation_id, approve.generation)?;
-            if c.phase != "mutually_confirmed" {
+            if c.phase != "mutually_confirmed" && !(real_workflow && c.phase == "proposal_pending")
+            {
                 return Err(SdkError::PairingCode("WrongContext"));
             }
             if !c.local_confirmed || !c.peer_mac_ok {
@@ -372,7 +419,12 @@ impl PairingActor {
             c.emoji = None;
             Ok(())
         })?;
-        self.status_update()
+        if real_workflow {
+            self.publish_workflow().await?;
+            self.sync_relay().await
+        } else {
+            self.status_update()
+        }
     }
 
     /// Cancel the current generation and wipe SAS secrets.
@@ -400,6 +452,12 @@ impl PairingActor {
     /// Transport, `Busy`, or protocol failure.
     pub async fn sync_relay(&mut self) -> Result<LocalResult, SdkError> {
         self.expire_live().await;
+        if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
+            self.flush_send().await?;
+            self.close_completed_relay().await;
+            self.clear_completed_secrets();
+            return self.status_update();
+        }
         for _ in 0..SYNC_STEPS {
             self.flush_send().await?;
             let polled = match self.poll_once().await {
@@ -409,6 +467,9 @@ impl PairingActor {
             };
             self.ingest(polled.frames).await?;
             if self.ceremony.as_ref().is_some_and(|c| terminal(&c.phase)) {
+                self.flush_send().await?;
+                self.close_completed_relay().await;
+                self.clear_completed_secrets();
                 break;
             }
             if polled.closed {
@@ -528,13 +589,24 @@ impl PairingActor {
             offer_chunks: BTreeMap::new(),
             reveal_sent: false,
             frames_seen: 0,
+            sent_bytes: 0,
+            received_bytes: 0,
             head_state: None,
             verified_invite: open.verified_invite,
             commitment_ref: None,
+            transcript: None,
+            enrollment: None,
+            record_hash: None,
+            record_epoch: None,
+            channels: VecDeque::new(),
         }
     }
 
-    fn start_sas_with_ref(ceremony: &mut Ceremony, local_ref: &DeviceRef) -> Result<(), SdkError> {
+    fn start_sas_with_ref(
+        ceremony: &mut Ceremony,
+        local_ref: &DeviceRef,
+        keys: Option<(String, String)>,
+    ) -> Result<(), SdkError> {
         if !matches!(ceremony.sas, SasHold::None) {
             return Err(SdkError::PairingCode("WrongContext"));
         }
@@ -554,6 +626,7 @@ impl PairingActor {
             device_ref,
             ceremony.display_name.clone(),
             &sas_secret,
+            keys,
         )?;
         let pending = commit(ceremony.role, &context, &sas_secret, &salt)?;
         sas_secret.zeroize();
@@ -595,9 +668,11 @@ impl PairingActor {
 
     async fn flush_send(&mut self) -> Result<(), SdkError> {
         loop {
-            let (origin, send) = {
+            let (origin, send, frame_bytes) = {
                 let Some(c) = self.ceremony.as_mut() else { return Ok(()) };
                 let Some(frame) = c.outbound.front().cloned() else { return Ok(()) };
+                let frame_bytes = ramflux_protocol::canonical_json_bytes(&frame)?.len();
+                check_direction_budget(c.next_send_seq, c.sent_bytes, frame_bytes)?;
                 let send = Send {
                     schema: "ramflux.pairing.Send.v2".into(),
                     version: 2,
@@ -608,13 +683,14 @@ impl PairingActor {
                     seq: c.next_send_seq,
                     frame,
                 };
-                (c.origin.clone(), send)
+                (c.origin.clone(), send, frame_bytes)
             };
             match self.transport.send(origin, send).await {
                 Ok(_) => {
                     if let Some(c) = self.ceremony.as_mut() {
                         c.outbound.pop_front();
-                        c.next_send_seq = c.next_send_seq.saturating_add(1);
+                        c.next_send_seq += 1;
+                        c.sent_bytes += frame_bytes;
                     }
                 }
                 Err(SdkError::PairingCode("Busy")) => return Ok(()),
@@ -645,8 +721,8 @@ impl PairingActor {
     }
 
     async fn ingest(&mut self, frames: Vec<QueuedFrame>) -> Result<(), SdkError> {
-        match self.ingest_inner(frames) {
-            Ok(()) => Ok(()),
+        let outcome = match self.ingest_inner(frames).await {
+            Ok(()) => self.advance_workflow().await,
             Err(error) => match protocol_fail_code(&error) {
                 Some(code) if self.ceremony.as_ref().is_some_and(|c| !terminal(&c.phase)) => {
                     let _ = self.fail("rejected", code).await;
@@ -654,21 +730,36 @@ impl PairingActor {
                 }
                 _ => Err(error),
             },
+        };
+        match outcome {
+            Err(error) if protocol_fail_code(&error).is_some() => {
+                self.fail("rejected", protocol_fail_code(&error).unwrap_or("WrongContext")).await?;
+                Ok(())
+            }
+            other => other,
         }
     }
 
-    fn ingest_inner(&mut self, frames: Vec<QueuedFrame>) -> Result<(), SdkError> {
+    async fn ingest_inner(&mut self, frames: Vec<QueuedFrame>) -> Result<(), SdkError> {
         let mut rest = Vec::new();
         let mut commits = Vec::new();
         for queued in frames {
             self.with_ceremony_mut(|c| {
-                c.frames_seen = c.frames_seen.saturating_add(1);
+                let expected = c.last_poll_seq.map_or(0, |seq| seq + 1);
+                if queued.seq != expected {
+                    return Err(SdkError::PairingCode("Replay"));
+                }
+                queued.frame.validate().map_err(|error| wire(&error))?;
+                let bytes = ramflux_protocol::canonical_json_bytes(&queued.frame)?.len();
+                check_direction_budget(c.frames_seen, c.received_bytes, bytes)?;
+                c.frames_seen += 1;
+                c.received_bytes += bytes;
                 c.last_poll_seq = Some(queued.seq);
                 Ok(())
             })?;
             match queued.frame {
                 RelayFrame::OfferChunk { object_id, index, count, total_bytes, bytes } => {
-                    self.ingest_offer_chunk(object_id, index, count, total_bytes, bytes)?;
+                    self.ingest_offer_chunk(object_id, index, count, total_bytes, bytes).await?;
                 }
                 RelayFrame::Commit { value } => commits.push(value),
                 other => rest.push(other),
@@ -686,9 +777,13 @@ impl PairingActor {
                 RelayFrame::Confirm { role, transcript_hash, mac } => {
                     self.ingest_confirm_mac(&role, &transcript_hash, &mac)?;
                 }
-                RelayFrame::OfferChunk { .. }
-                | RelayFrame::Channel { .. }
-                | RelayFrame::Commit { .. } => {}
+                RelayFrame::Channel { counter, ciphertext } => {
+                    self.with_ceremony_mut(|c| {
+                        c.channels.push_back((counter, ciphertext));
+                        Ok(())
+                    })?;
+                }
+                RelayFrame::OfferChunk { .. } | RelayFrame::Commit { .. } => {}
             }
         }
         self.maybe_mutually_confirmed()?;
@@ -715,7 +810,7 @@ impl PairingActor {
         })
     }
 
-    fn ingest_offer_chunk(
+    async fn ingest_offer_chunk(
         &mut self,
         object_id: String,
         index: u64,
@@ -730,12 +825,12 @@ impl PairingActor {
             accept_chunk(&mut c.offer_chunks, object_id, index, count, total_bytes, bytes)
         })?;
         if complete {
-            self.finish_offer()?;
+            self.finish_offer().await?;
         }
         Ok(())
     }
 
-    fn finish_offer(&mut self) -> Result<(), SdkError> {
+    async fn finish_offer(&mut self) -> Result<(), SdkError> {
         let assembled = self.with_ceremony_mut(|c| {
             let chunks: Vec<(u64, String, u64, u64, String)> = c
                 .offer_chunks
@@ -764,23 +859,33 @@ impl PairingActor {
             c.common = Some(offer.common);
             Ok(())
         })?;
-        let staged = self.stage_recipient_before_commit()?;
+        let staged = self.stage_recipient_before_commit().await?;
         let local_ref = staged.clone().unwrap_or(local_ref);
+        let keys = self.load_public_keys(local_ref.clone()).await?;
         self.with_ceremony_mut(|c| {
             c.commitment_ref.clone_from(&staged);
-            Self::start_sas_with_ref(c, &local_ref)?;
+            Self::start_sas_with_ref(c, &local_ref, keys)?;
             Self::queue_commit(c)
         })
     }
 
-    fn stage_recipient_before_commit(&self) -> Result<Option<DeviceRef>, SdkError> {
+    async fn stage_recipient_before_commit(&self) -> Result<Option<DeviceRef>, SdkError> {
         let Some(staging) = self.recipient_stage.as_ref() else {
             return Ok(None);
         };
         let invite = self.with_ceremony(|ceremony| {
             ceremony.verified_invite.clone().ok_or(SdkError::PairingCode("InvalidInput"))
         })?;
-        Ok(Some(staging.stage(&invite, self.frontend_generation)?))
+        let staging = Arc::clone(staging);
+        let generation = self.frontend_generation;
+        let ceremony_generation = self.actor_generation;
+        Ok(Some(
+            tokio::task::spawn_blocking(move || {
+                staging.stage_with_generation(&invite, generation, ceremony_generation)
+            })
+            .await
+            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??,
+        ))
     }
 
     #[cfg(test)]
@@ -834,6 +939,17 @@ impl PairingActor {
                     return Err(SdkError::PairingCode("WrongContext"));
                 }
             };
+            let local = pending.context()?.clone();
+            c.transcript = Some(ramflux_protocol::custody::pairing::Transcript {
+                schema: "ramflux.pairing.Transcript.v2".into(),
+                version: 2,
+                initiator: if c.role == PairingRole::Initiator {
+                    local.clone()
+                } else {
+                    peer.clone()
+                },
+                responder: if c.role == PairingRole::Responder { local } else { peer.clone() },
+            });
             let established = pending.establish(&peer, &salt)?;
             let th = established.transcript_hash();
             c.displayed_th = Some(th);
@@ -1093,11 +1209,12 @@ fn build_context(
     device_ref: DeviceRef,
     display_name: String,
     sas_secret: &[u8; 32],
+    keys: Option<(String, String)>,
 ) -> Result<(RoleContext, [u8; 32]), SdkError> {
     let mut branch = random_32()?;
     let mut agree = random_32()?;
     let salt = random_32()?;
-    let context = RoleContext {
+    let mut context = RoleContext {
         schema: "ramflux.pairing.RoleContext.v2".into(),
         version: 2,
         role: role.as_str().into(),
@@ -1111,6 +1228,10 @@ fn build_context(
         hpke_key: None,
         display_name,
     };
+    if let Some((branch_key, agreement_key)) = keys {
+        context.branch_key = branch_key;
+        context.agreement_key = agreement_key;
+    }
     branch.zeroize();
     agree.zeroize();
     context.validate().map_err(|e| wire(&e))?;
@@ -1158,7 +1279,7 @@ fn build_update(c: &Ceremony) -> Result<Update, SdkError> {
         lease_not_before,
         lease_expires_at,
         proposal_hash: if p >= 5 { c.displayed_proposal.clone() } else { None },
-        record_hash: None,
+        record_hash: c.record_hash.clone(),
         result: c.result.clone(),
         cleanup: c.cleanup.clone(),
     };
@@ -1244,9 +1365,7 @@ pub(crate) fn verify_invitation(envelope: &Envelope<Invitation>) -> Result<(), S
     let bytes = invitation_signing_bytes(&envelope.body).map_err(|e| wire(&e))?;
     verify_canonical_signature(&bytes, &envelope.signature, &envelope.body.node_key)
         .map_err(|_| SdkError::PairingCode("InvalidInput"))?;
-    if !envelope.body.public_origin.starts_with("https://") {
-        return Err(SdkError::PairingCode("InvalidInput"));
-    }
+    super::transport::require_https_origin(&envelope.body.public_origin)?;
     Ok(())
 }
 
@@ -1313,4 +1432,11 @@ impl Drop for Ceremony {
             SasHold::None => {}
         }
     }
+}
+
+fn check_direction_budget(frames: u64, bytes: usize, next: usize) -> Result<(), SdkError> {
+    if frames >= 272 || bytes.checked_add(next).is_none_or(|total| total > 4 * 1024 * 1024) {
+        return Err(SdkError::PairingCode("TransferCapacity"));
+    }
+    Ok(())
 }

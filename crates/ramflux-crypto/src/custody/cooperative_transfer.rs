@@ -133,5 +133,112 @@ pub fn cooperative_transfer_preserving_devices(
     primary.sign_record(body)
 }
 
+/// Independently check the complete roster and denial policy before the old primary approves.
+/// Both records must already have passed signature and custody verification.
+/// # Errors
+/// Rejects any unrelated authority change, removed branch, altered lease, or lost denial.
+pub fn verify_cooperative_preservation(
+    previous: &VerifiedRecord,
+    candidate: &VerifiedRecord,
+    destination: &DeviceRef,
+    fresh_destination: bool,
+) -> Result<(), CryptoError> {
+    let before = &previous.envelope().body;
+    let after = &candidate.envelope().body;
+    let old_master = &before.master_certificate.body;
+    let new_master = &after.master_certificate.body;
+    if new_master.primary_device_ref != *destination
+        || old_master.primary_device_ref == *destination
+        || new_master.self_signing_public_key == old_master.self_signing_public_key
+        || new_master.range_index <= old_master.range_index
+        || new_master.previous_certificate_hash.as_deref()
+            != Some(object_hash(&before.master_certificate)?.as_str())
+        || after.previous_record_hash.as_deref() != Some(object_hash(previous.envelope())?.as_str())
+        || after.issued_at < before.issued_at
+        || previous.revoked_ids() != candidate.revoked_ids()
+        || after.devices.len() != before.devices.len() + usize::from(fresh_destination)
+    {
+        return Err(reject("cooperative transfer preservation mismatch"));
+    }
+    let mut master = new_master.clone();
+    master.range_index = old_master.range_index;
+    master.self_signing_public_key.clone_from(&old_master.self_signing_public_key);
+    master.primary_device_ref = old_master.primary_device_ref.clone();
+    master.previous_certificate_hash.clone_from(&old_master.previous_certificate_hash);
+    master.issued_at = old_master.issued_at;
+    master.cert_id.clone_from(&old_master.cert_id);
+    if master != *old_master {
+        return Err(reject("cooperative transfer changed master policy"));
+    }
+    for old in &before.devices {
+        let next = after
+            .devices
+            .iter()
+            .find(|next| next.device_id == old.device_id)
+            .ok_or_else(|| reject("cooperative transfer omitted branch"))?;
+        let mut normalized = next.clone();
+        match (&old.branch_certificate, &next.branch_certificate) {
+            (Some(old_cert), Some(new_cert)) => {
+                let mut branch = new_cert.body.clone();
+                branch.master_certificate_hash.clone_from(&old_cert.body.master_certificate_hash);
+                branch.cert_id.clone_from(&old_cert.body.cert_id);
+                if branch != old_cert.body {
+                    return Err(reject("cooperative transfer changed branch policy"));
+                }
+            }
+            (None, None) => {}
+            _ => return Err(reject("cooperative transfer changed branch evidence")),
+        }
+        normalized.branch_certificate.clone_from(&old.branch_certificate);
+        if normalized != *old {
+            return Err(reject("cooperative transfer changed device identity or status"));
+        }
+    }
+    let prior_destination =
+        before.devices.iter().any(|device| device.device_id == destination.device_id);
+    if prior_destination == fresh_destination
+        || !after.devices.iter().any(|device| {
+            device.device_id == destination.device_id
+                && device.device_epoch == destination.device_epoch
+                && device.status == DeviceSetStatus::Active
+        })
+    {
+        return Err(reject("cooperative transfer destination mode mismatch"));
+    }
+    let mut normalized = after.clone();
+    normalized.devices.clone_from(&before.devices);
+    normalized.device_set_epoch = before.device_set_epoch;
+    normalized.issued_at = before.issued_at;
+    normalized.previous_record_hash.clone_from(&before.previous_record_hash);
+    normalized.master_certificate = before.master_certificate.clone();
+    normalize_checkpoint(before, &mut normalized)?;
+    normalized.section_hashes = ramflux_protocol::custody::section_hashes(&normalized)?;
+    if normalized != *before {
+        return Err(reject("cooperative transfer changed retained authority"));
+    }
+    Ok(())
+}
+
+fn normalize_checkpoint(before: &DeviceSet, after: &mut DeviceSet) -> Result<(), CryptoError> {
+    match (&before.revoked_device_checkpoint, &after.revoked_device_checkpoint) {
+        (None, None) => {}
+        (Some(old), Some(new)) => {
+            let mut body = new.body.clone();
+            body.master_certificate_hash.clone_from(&old.body.master_certificate_hash);
+            body.device_set_epoch = old.body.device_set_epoch;
+            body.previous_checkpoint_hash.clone_from(&old.body.previous_checkpoint_hash);
+            body.issued_at = old.body.issued_at;
+            if body != old.body
+                || new.body.previous_checkpoint_hash.as_deref() != Some(object_hash(old)?.as_str())
+            {
+                return Err(reject("cooperative transfer changed denial checkpoint"));
+            }
+            after.revoked_device_checkpoint = Some(old.clone());
+        }
+        _ => return Err(reject("cooperative transfer lost denial checkpoint")),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

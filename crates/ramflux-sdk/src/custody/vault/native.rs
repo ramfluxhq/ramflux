@@ -338,7 +338,7 @@ pub(super) fn get(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
 }
 pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
     if reference.starts_with(ramflux_storage::FileVaultSecretSource::OWNER_PREFIX) {
-        return Ok(());
+        return Err(unavailable());
     }
     let stores = readable()?;
     let primary = primary_items::delete(&stores[0], reference);

@@ -103,6 +103,7 @@ pub(crate) fn write_authority(
             capacity_retry_at: None,
             pending_branch: false,
             custody_v3_observed: true,
+            pairing_adoption_required: true,
             primary_vault_ref: String::new(),
             branch_vault_ref: install.branch_vault_ref.clone(),
             vault_class: vault.vault_class().into(),
@@ -115,6 +116,7 @@ pub(crate) fn write_authority(
             agent_provisioning_vault_ref: None,
         }
     };
+    stored.pairing_adoption_required = true;
     stored.record = authority.publication.record.clone();
     stored.compacted_ids.clone_from(&authority.publication.compacted_ids);
     stored.custodian_publication = authority.custodian_publication.clone().map(Box::new);
@@ -159,10 +161,14 @@ pub(super) fn require_installed_marker(root: &Path, account: &BornAccount) -> Re
     if !install_store::list_pending(root, id)?.is_empty() {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
-    if let Some(row) = install_store::read_installed(root, id)?
-        && (row.state != "installed" || !matches_install(account, &row)?)
-    {
-        return Err(SdkError::PairingCode("PublicationPending"));
+    match install_store::read_installed(root, id)? {
+        Some(row) if row.state != "installed" || !matches_install(account, &row)? => {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        None if account.stored.pairing_adoption_required => {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        _ => {}
     }
     Ok(())
 }
