@@ -395,6 +395,15 @@ impl LocalBusAccountState {
         self.receive_active_cache = None;
     }
 
+    /// Live session mode. `start_connection` moves the engine onto the worker, so the
+    /// connection handle is the production source; a test carrier on `engine` still wins.
+    pub(crate) fn bound_session_mode(&self) -> Option<crate::gateway::session_push::SessionMode> {
+        if let Some(engine) = self.engine.as_ref() {
+            return Some(engine.mode.clone());
+        }
+        self.connection.as_ref().map(ConnectionHandle::session_mode)
+    }
+
     pub(crate) fn connection_config(&self) -> Result<GatewaySessionConfig, SdkError> {
         let mut config = self.gateway_config.clone();
         let target = self.target_delivery_id.clone();

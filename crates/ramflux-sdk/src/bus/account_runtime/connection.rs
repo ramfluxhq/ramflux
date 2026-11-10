@@ -530,12 +530,12 @@ pub(crate) fn apply_ack_flush(
     }
     let turn = super::super::push_receiver::apply_w1::capture_turn(db, generation, target)?;
     if let Some(lookups) = lookups {
-        let capable_e = account.engine.as_ref().and_then(|engine| match &engine.mode {
-            crate::gateway::session_push::SessionMode::Push { incarnation } => {
+        let capable_e = match account.bound_session_mode() {
+            Some(crate::gateway::session_push::SessionMode::Push { incarnation }) => {
                 Some(incarnation.as_str().to_owned())
             }
             _ => None,
-        });
+        };
         let mut plans = Vec::with_capacity(lookups.len());
         for (sequence, lookup) in lookups {
             let decision = authorize_legacy_ack(
@@ -719,7 +719,12 @@ fn refresh_receive_status(
     handle: &crate::bus::connection_manager::ConnectionHandle,
 ) -> Result<(), SdkError> {
     use crate::bus::connection_manager::ReceiveStatus;
-    let db = account.client.account_db()?;
+    // A missing account DB is the observation-persist outage; skip counters so
+    // `record_session` still reports "networking observation persistence deferred".
+    let db = match account.client.account_db() {
+        Err(SdkError::AccountDbNotUnlocked) => return Ok(()),
+        other => other?,
+    };
     let receive = match db.receive_activation()? {
         ramflux_storage::ReceiveActivation::Inactive => None,
         ramflux_storage::ReceiveActivation::Activated => {

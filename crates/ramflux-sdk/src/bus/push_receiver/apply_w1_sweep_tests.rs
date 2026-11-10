@@ -43,8 +43,16 @@ struct Harness {
 
 fn open() -> Result<Harness, SdkError> {
     let root = tempfile::tempdir().expect("tmp");
-    let account =
+    let mut account =
         runtime_tests::account(root.path(), "acct", None, Arc::new(AtomicBool::new(false)))?;
+    if let Some(engine) = account.engine.as_mut() {
+        engine.mode = crate::gateway::session_push::SessionMode::Push {
+            incarnation: crate::gateway::session_push::IncarnationId::try_from(
+                "0123456789abcdef0123456789abcdef".to_owned(),
+            )
+            .expect("incarnation"),
+        };
+    }
     let target = account.target_delivery_id.clone();
     let db = account.client.account_db()?;
     db.install_receive_ledger_schema()?;

@@ -73,9 +73,7 @@ pub(crate) async fn apply_page(
 ) -> Result<ReceiveApplied, SdkError> {
     let mut source = source.map(|prepared| *prepared).transpose()?;
     let mut turn = turn.clone();
-    turn.compat = account.engine.as_ref().is_some_and(|engine| {
-        !matches!(engine.mode, crate::gateway::session_push::SessionMode::Push { .. })
-    });
+    turn.compat = account.bound_session_mode().is_some_and(|mode| !mode.is_push());
     refresh_cursor(account.client.account_db()?, &mut turn)?;
     let mut attempts = 0;
     #[cfg(test)]

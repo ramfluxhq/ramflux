@@ -118,9 +118,9 @@ impl SourceW0<'_> {
 
 /// Refuse the legacy receive path on an activated ledger.
 ///
-/// `turn` is `Some` only for a Push session: that is the ledger actor path
-/// an activated account must use, so it is not refused here. `None` is the
-/// legacy PrepareReceive/ApplyPage branch and is refused first.
+/// `turn` is `Some` when a live session is bound (Push, Compat, or
+/// Legacy-on-activated). `None` is standalone or inactive: the legacy
+/// PrepareReceive/ApplyPage branch, refused on an activated ledger.
 pub(crate) fn refuse_legacy_receive_unless_ledger_turn(
     account: &LocalBusAccountState,
     turn: Option<&ReceiveTurn>,
@@ -203,11 +203,14 @@ pub(crate) fn recover_standalone_retries(
     Ok(retries)
 }
 
-/// Session coordinates from S2's engine plus disk cursor/erase. `None` when the
-/// ledger is Inactive or no engine is bound (standalone). Activated without an
-/// epoch is [`ramflux_storage::MISSING_EPOCH`]. Push uses the negotiated
-/// incarnation; Legacy/Compat use the stored epoch. Extra DB reads stay behind
-/// the discriminator so live `PrepareReceive` cannot fail on them for inactive
+/// Session coordinates from the bound session plus disk cursor/erase. `None`
+/// when the ledger is Inactive or no session is bound (standalone).
+/// `start_connection` moves the live engine onto the worker, so the connection
+/// handle is the production coordinate source; a test carrier on
+/// `account.engine` still wins when present. Activated without an epoch is
+/// [`ramflux_storage::MISSING_EPOCH`]. Push uses the negotiated incarnation;
+/// Legacy/Compat use the stored epoch. Extra DB reads stay behind the
+/// discriminator so live `PrepareReceive` cannot fail on them for inactive
 /// accounts.
 pub(crate) fn actor_turn(
     account: &LocalBusAccountState,
@@ -225,11 +228,11 @@ pub(crate) fn actor_turn(
             }
         }
     }
-    let Some(engine) = account.engine.as_ref() else {
+    let Some(mode) = account.bound_session_mode() else {
         return Ok(None);
     };
     let target = account.target_delivery_id.clone();
-    let (incarnation, compat) = match &engine.mode {
+    let (incarnation, compat) = match &mode {
         SessionMode::Push { incarnation } => (incarnation.as_str().to_owned(), false),
         SessionMode::Legacy | SessionMode::Compat => {
             let stored = db
