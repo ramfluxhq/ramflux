@@ -161,7 +161,7 @@ impl RamfluxClient {
                 local_account_id,
                 &WrappedAccountDbKey {
                     key_wrapping_provider: "platform-local-vault".to_owned(),
-                    key_wrapping_ref: format!("platform-local-vault:{local_account_id}"),
+                    key_wrapping_ref: FileVaultSecretSource::owner_ref(local_account_id),
                     nonce,
                     wrapped_key,
                 },

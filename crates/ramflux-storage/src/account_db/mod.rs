@@ -221,7 +221,7 @@ impl AccountDb {
             wrap_with_vault_secret(key_encryption_key, self.current_key.bytes())?;
         Ok(WrappedAccountDbKey {
             key_wrapping_provider: "platform-local-vault".to_owned(),
-            key_wrapping_ref: format!("platform-local-vault:{}", self.local_account_id),
+            key_wrapping_ref: crate::FileVaultSecretSource::owner_ref(&self.local_account_id),
             nonce,
             wrapped_key,
         })

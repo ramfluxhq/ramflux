@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use zeroize::{Zeroize, Zeroizing};
 
 /// One-shot attended provider. Registered only by the owning local frontend.
-pub trait LocalCredentialProvider {
+pub trait LocalCredentialProvider: Send + Sync {
     /// Return a fresh setup/unlock secret or refuse. Never cache the result.
     ///
     /// # Errors
@@ -76,9 +76,21 @@ pub struct PersistedReservation {
 /// Field or I/O failures.
 pub fn persist_reservation(root: &Path, value: &PersistedReservation) -> Result<(), SdkError> {
     value.validate()?;
-    open_slot(&value.account_id, &value.reservation_id, value.frontend_generation);
+    bind_slot(root, value);
     let bytes = canonical_json_bytes(value).map_err(|_| SdkError::PairingField("json"))?;
     write_private(&reservation_path(root, &value.account_id), &bytes)
+}
+
+/// Remove the persisted reservation file. Missing files succeed.
+///
+/// # Errors
+/// I/O failures other than not-found.
+pub fn remove_reservation(root: &Path, account_id: &str) -> Result<(), SdkError> {
+    match std::fs::remove_file(reservation_path(root, account_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Load the persisted reservation for `account_id`.
@@ -131,24 +143,16 @@ impl PersistedReservation {
     }
 }
 
-/// Fence late callbacks for `account_id` before drop. Distinct from provider refusal.
-pub fn cancel_credential(account_id: &str) {
+/// Fence late callbacks for `(root, account_id)` before drop. Distinct from provider refusal.
+pub fn cancel_credential(root: &Path, account_id: &str) {
     let mut map = slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    match map.get_mut(account_id) {
-        Some(slot) => slot.cancelled = true,
-        None => {
-            map.insert(
-                account_id.into(),
-                AccountSlot {
-                    reservation_id: String::new(),
-                    generation: 0,
-                    cancelled: true,
-                    consumed: false,
-                },
-            );
-        }
+    let slot = map.entry(slot_key(root, account_id)).or_insert_with(AccountSlot::retired);
+    if slot.outstanding {
+        slot.request_generation = slot.request_generation.saturating_add(1);
+        record_cancel();
     }
-    record_cancel();
+    slot.cancelled = true;
+    slot.outstanding = false;
 }
 
 /// Acquire a twice-entered setup passphrase bound to the persisted reservation.
@@ -156,11 +160,12 @@ pub fn cancel_credential(account_id: &str) {
 /// # Errors
 /// `VaultUnavailable` on refusal/cancel; field errors on mismatch/binding.
 pub fn acquire_setup(
+    root: &Path,
     expected: &CredentialRequest,
     provider: &dyn LocalCredentialProvider,
     stored: &PersistedReservation,
 ) -> Result<SecretUtf8, SdkError> {
-    take_bound(expected, provider, stored, "setup")
+    take_bound(root, expected, provider, stored, "setup")
 }
 
 /// Acquire a re-entry unlock passphrase bound to the persisted reservation.
@@ -168,14 +173,16 @@ pub fn acquire_setup(
 /// # Errors
 /// `VaultUnavailable` on refusal/cancel; field errors on binding.
 pub fn acquire_unlock(
+    root: &Path,
     expected: &CredentialRequest,
     provider: &dyn LocalCredentialProvider,
     stored: &PersistedReservation,
 ) -> Result<SecretUtf8, SdkError> {
-    take_bound(expected, provider, stored, "unlock")
+    take_bound(root, expected, provider, stored, "unlock")
 }
 
 fn take_bound(
+    root: &Path,
     expected: &CredentialRequest,
     provider: &dyn LocalCredentialProvider,
     stored: &PersistedReservation,
@@ -186,14 +193,19 @@ fn take_bound(
         return Err(SdkError::PairingField("credential_action"));
     }
     let bound = stored.request(action)?;
-    admit_slot(expected, &bound)?;
+    admit_expected(expected, &bound)?;
+    let request_generation = begin_request(root, stored);
     match provider.provide(expected)? {
         CredentialOutcome::Refused => {
+            finish_request(root, stored, request_generation, None)?;
             record_cleanup(Owner::Refusal, [0_u8; 224]);
             Err(SdkError::PairingCode("VaultUnavailable"))
         }
         CredentialOutcome::Provided { passphrase, confirmation } => {
             let mut hold = CredentialHold { passphrase, confirmation };
+            if finish_request(root, stored, request_generation, Some(&mut hold)).is_err() {
+                return Err(SdkError::PairingCode("VaultUnavailable"));
+            }
             let input = CredentialInput {
                 passphrase: hold.passphrase.as_bytes(),
                 confirmation: hold.confirmation.as_ref().map(SecretUtf8::as_bytes),
@@ -204,13 +216,12 @@ fn take_bound(
             }
             let secret = SecretUtf8::from_bytes(hold.passphrase.as_bytes())?;
             hold.cleanup();
-            consume_slot(&expected.local_account_id);
             Ok(secret)
         }
     }
 }
 
-fn admit_slot(expected: &CredentialRequest, bound: &CredentialRequest) -> Result<(), SdkError> {
+fn admit_expected(expected: &CredentialRequest, bound: &CredentialRequest) -> Result<(), SdkError> {
     if expected.local_account_id != bound.local_account_id {
         return Err(SdkError::PairingField("credential_account"));
     }
@@ -220,46 +231,87 @@ fn admit_slot(expected: &CredentialRequest, bound: &CredentialRequest) -> Result
     if expected.frontend_generation != bound.frontend_generation {
         return Err(SdkError::PairingField("credential_generation"));
     }
+    Ok(())
+}
+
+fn begin_request(root: &Path, stored: &PersistedReservation) -> u64 {
+    let mut map = slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let slot = map.entry(slot_key(root, &stored.account_id)).or_insert_with(AccountSlot::empty);
+    slot.bind(stored);
+    slot.request_generation = slot.request_generation.saturating_add(1);
+    slot.cancelled = false;
+    slot.outstanding = true;
+    slot.request_generation
+}
+
+fn finish_request(
+    root: &Path,
+    stored: &PersistedReservation,
+    request_generation: u64,
+    hold: Option<&mut CredentialHold>,
+) -> Result<(), SdkError> {
     let mut map = slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let slot = map
-        .get_mut(&expected.local_account_id)
+        .get_mut(&slot_key(root, &stored.account_id))
         .ok_or(SdkError::PairingField("credential_reservation"))?;
-    if slot.cancelled || slot.consumed {
+    let retired = slot.cancelled
+        || slot.request_generation != request_generation
+        || slot.reservation_id != stored.reservation_id
+        || slot.frontend_generation != stored.frontend_generation;
+    slot.outstanding = false;
+    if retired {
+        if let Some(hold) = hold {
+            hold.cleanup();
+        }
+        record_cancel();
         return Err(SdkError::PairingCode("VaultUnavailable"));
-    }
-    if slot.reservation_id != expected.reservation_id
-        || slot.generation != expected.frontend_generation
-    {
-        return Err(SdkError::PairingField("credential_generation"));
     }
     Ok(())
 }
 
-fn open_slot(account_id: &str, reservation_id: &str, generation: u64) {
+fn bind_slot(root: &Path, stored: &PersistedReservation) {
     let mut map = slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    map.insert(
-        account_id.into(),
-        AccountSlot {
-            reservation_id: reservation_id.into(),
-            generation,
-            cancelled: false,
-            consumed: false,
-        },
-    );
+    let slot = map.entry(slot_key(root, &stored.account_id)).or_insert_with(AccountSlot::empty);
+    if slot.outstanding {
+        slot.request_generation = slot.request_generation.saturating_add(1);
+        record_cancel();
+    }
+    slot.bind(stored);
+    slot.cancelled = false;
+    slot.outstanding = false;
 }
 
-fn consume_slot(account_id: &str) {
-    let mut map = slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(slot) = map.get_mut(account_id) {
-        slot.consumed = true;
-    }
+fn slot_key(root: &Path, account_id: &str) -> String {
+    format!("{}\0{account_id}", root.as_os_str().to_string_lossy())
 }
 
 struct AccountSlot {
     reservation_id: String,
-    generation: u64,
+    frontend_generation: u64,
+    request_generation: u64,
     cancelled: bool,
-    consumed: bool,
+    outstanding: bool,
+}
+
+impl AccountSlot {
+    fn empty() -> Self {
+        Self {
+            reservation_id: String::new(),
+            frontend_generation: 0,
+            request_generation: 0,
+            cancelled: false,
+            outstanding: false,
+        }
+    }
+
+    fn retired() -> Self {
+        Self { cancelled: true, ..Self::empty() }
+    }
+
+    fn bind(&mut self, stored: &PersistedReservation) {
+        self.reservation_id.clone_from(&stored.reservation_id);
+        self.frontend_generation = stored.frontend_generation;
+    }
 }
 
 fn slots() -> &'static Mutex<HashMap<String, AccountSlot>> {
@@ -407,6 +459,13 @@ pub fn take_pairing_secret_drops() -> u64 {
     observer::take_drops()
 }
 
+/// Per-owner drop counts `(passphrase, confirmation, branch)` since the last take.
+#[cfg(test)]
+#[must_use]
+pub fn take_owner_drops() -> (u64, u64, u64) {
+    observer::take_owner_drops()
+}
+
 /// Bytes observed after the last explicit cleanup on this thread.
 #[cfg(test)]
 #[must_use]
@@ -421,11 +480,18 @@ pub fn last_wiped_confirmation_bytes() -> [u8; 224] {
     observer::last_confirmation()
 }
 
-/// `SecretUtf8` drop observations since the last take on this thread.
+/// `SecretUtf8` drops that still held leftover bytes since the last take.
 #[cfg(test)]
 #[must_use]
 pub fn take_secret_utf8_drops() -> u64 {
-    observer::take_secret_utf8()
+    observer::take_secret_utf8_leftover()
+}
+
+/// `SecretUtf8` drops that were already zeroized since the last take.
+#[cfg(test)]
+#[must_use]
+pub fn take_secret_utf8_zeroed() -> u64 {
+    observer::take_secret_utf8_zeroed()
 }
 
 /// Cancel-fence observations since the last take on this thread.
@@ -435,23 +501,53 @@ pub fn take_cancel_fences() -> u64 {
     observer::take_cancels()
 }
 
+/// Drop in-memory slots. Models a process restart over the persisted reservation.
+#[cfg(test)]
+pub fn forget_slots() {
+    slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+}
+
 #[cfg(test)]
 mod observer {
     use super::Owner;
     use std::cell::{Cell, RefCell};
     thread_local! {
         static CLEANUPS: Cell<u64> = const { Cell::new(0) };
-        static DROPS: Cell<u64> = const { Cell::new(0) };
+        static DROPS: RefCell<[u64; 4]> = const { RefCell::new([0; 4]) };
         static LAST: RefCell<[u8; 224]> = const { RefCell::new([0; 224]) };
         static LAST_CONFIRM: RefCell<[u8; 224]> = const { RefCell::new([0; 224]) };
-        static UTF8: Cell<u64> = const { Cell::new(0) };
+        static UTF8_LEFT: Cell<u64> = const { Cell::new(0) };
+        static UTF8_ZERO: Cell<u64> = const { Cell::new(0) };
         static CANCELS: Cell<u64> = const { Cell::new(0) };
+    }
+    fn owner_index(owner: Owner) -> usize {
+        match owner {
+            Owner::Passphrase => 0,
+            Owner::Confirmation => 1,
+            Owner::Branch => 2,
+            Owner::Refusal => 3,
+        }
     }
     pub fn take_cleanups() -> u64 {
         CLEANUPS.with(Cell::take)
     }
     pub fn take_drops() -> u64 {
-        DROPS.with(Cell::take)
+        DROPS.with(|slot| {
+            let mut counts = slot.borrow_mut();
+            let total = counts.iter().sum();
+            *counts = [0; 4];
+            total
+        })
+    }
+    pub fn take_owner_drops() -> (u64, u64, u64) {
+        DROPS.with(|slot| {
+            let mut counts = slot.borrow_mut();
+            let passphrase = counts[0];
+            let confirmation = counts[1];
+            let branch = counts[2];
+            *counts = [0; 4];
+            (passphrase, confirmation, branch)
+        })
     }
     pub fn last() -> [u8; 224] {
         LAST.with(|bytes| *bytes.borrow())
@@ -459,8 +555,11 @@ mod observer {
     pub fn last_confirmation() -> [u8; 224] {
         LAST_CONFIRM.with(|bytes| *bytes.borrow())
     }
-    pub fn take_secret_utf8() -> u64 {
-        UTF8.with(Cell::take)
+    pub fn take_secret_utf8_leftover() -> u64 {
+        UTF8_LEFT.with(Cell::take)
+    }
+    pub fn take_secret_utf8_zeroed() -> u64 {
+        UTF8_ZERO.with(Cell::take)
     }
     pub fn take_cancels() -> u64 {
         CANCELS.with(Cell::take)
@@ -472,11 +571,15 @@ mod observer {
             LAST_CONFIRM.with(|slot| *slot.borrow_mut() = bytes);
         }
     }
-    pub fn record_drop(_owner: Owner) {
-        DROPS.with(|count| count.set(count.get() + 1));
+    pub fn record_drop(owner: Owner) {
+        DROPS.with(|slot| slot.borrow_mut()[owner_index(owner)] += 1);
     }
-    pub fn record_secret_utf8(_leftover: bool) {
-        UTF8.with(|count| count.set(count.get() + 1));
+    pub fn record_secret_utf8(leftover: bool) {
+        if leftover {
+            UTF8_LEFT.with(|count| count.set(count.get() + 1));
+        } else {
+            UTF8_ZERO.with(|count| count.set(count.get() + 1));
+        }
     }
     pub fn record_cancel() {
         CANCELS.with(|count| count.set(count.get() + 1));

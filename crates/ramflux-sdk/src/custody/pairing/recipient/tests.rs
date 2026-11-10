@@ -10,12 +10,13 @@ use super::{
 use crate::SdkError;
 use crate::bus::native_account::unlock_from_provider;
 use crate::bus::state::LocalBusDaemonState;
-use crate::custody::pairing::install_store::{self, Install};
+use crate::custody::pairing::install_store;
 use crate::custody::pairing::local_credential::{
     CredentialOutcome, LocalCredentialProvider, PersistedReservation, RecipientSecrets, SecretUtf8,
-    acquire_setup, acquire_unlock, cancel_credential, last_wiped_confirmation_bytes,
+    acquire_setup, acquire_unlock, cancel_credential, forget_slots, last_wiped_confirmation_bytes,
     last_wiped_pairing_bytes, load_reservation, persist_reservation, take_cancel_fences,
-    take_pairing_secret_cleanups, take_pairing_secret_drops, take_secret_utf8_drops,
+    take_owner_drops, take_pairing_secret_cleanups, take_pairing_secret_drops,
+    take_secret_utf8_drops, take_secret_utf8_zeroed,
 };
 use crate::custody::{BranchCredentials, PrimaryVault, require_vault_reference};
 use ramflux_crypto::custody::SelfSigningKey;
@@ -24,9 +25,8 @@ use ramflux_protocol::custody::pairing::local_dto::CredentialRequest;
 use ramflux_protocol::custody::pairing::native::{Invitation, invitation_signing_bytes};
 use ramflux_protocol::custody::{DeviceRef, Envelope};
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::AdoptionRow;
+use ramflux_storage::{AdoptionRow, FileVaultSecretSource};
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
-use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -34,7 +34,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -91,16 +91,21 @@ fn invitation(
     })
 }
 
-struct Phrase {
+pub(crate) struct Phrase {
     passphrase: &'static [u8],
     confirmation: Option<&'static [u8]>,
     refuse: bool,
-    setups: Cell<u64>,
+    setups: AtomicU64,
 }
 
 impl Phrase {
-    fn setup(passphrase: &'static [u8]) -> Self {
-        Self { passphrase, confirmation: Some(passphrase), refuse: false, setups: Cell::new(0) }
+    pub(crate) fn setup(passphrase: &'static [u8]) -> Self {
+        Self {
+            passphrase,
+            confirmation: Some(passphrase),
+            refuse: false,
+            setups: AtomicU64::new(0),
+        }
     }
 
     fn mismatch() -> Self {
@@ -108,19 +113,19 @@ impl Phrase {
             passphrase: b"one-pass",
             confirmation: Some(b"two-pass"),
             refuse: false,
-            setups: Cell::new(0),
+            setups: AtomicU64::new(0),
         }
     }
 
     fn refuse() -> Self {
-        Self { passphrase: b"x", confirmation: None, refuse: true, setups: Cell::new(0) }
+        Self { passphrase: b"x", confirmation: None, refuse: true, setups: AtomicU64::new(0) }
     }
 }
 
 impl LocalCredentialProvider for Phrase {
     fn provide(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
         if request.action == "setup" {
-            self.setups.set(self.setups.get() + 1);
+            self.setups.fetch_add(1, Ordering::SeqCst);
         }
         if self.refuse {
             return Ok(CredentialOutcome::Refused);
@@ -136,12 +141,31 @@ impl LocalCredentialProvider for Phrase {
     }
 }
 
-struct DiskVault {
+pub(crate) struct LateCancel {
+    root: PathBuf,
+    account: String,
+}
+
+impl LocalCredentialProvider for LateCancel {
+    fn provide(&self, request: &CredentialRequest) -> Result<CredentialOutcome, SdkError> {
+        cancel_credential(&self.root, &self.account);
+        Ok(CredentialOutcome::Provided {
+            passphrase: SecretUtf8::from_bytes(PHRASE)?,
+            confirmation: if request.action == "setup" {
+                Some(SecretUtf8::from_bytes(PHRASE)?)
+            } else {
+                None
+            },
+        })
+    }
+}
+
+pub(crate) struct DiskVault {
     dir: PathBuf,
 }
 
 impl DiskVault {
-    fn open(dir: impl AsRef<Path>) -> Result<Self, SdkError> {
+    pub(crate) fn open(dir: impl AsRef<Path>) -> Result<Self, SdkError> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
         Ok(Self { dir })
@@ -196,6 +220,9 @@ impl PrimaryVault for DiskVault {
     }
 
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
+        if reference.starts_with(ramflux_storage::FileVaultSecretSource::OWNER_PREFIX) {
+            return Ok(());
+        }
         match fs::remove_file(self.slot(reference)) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -231,6 +258,7 @@ impl PrimaryVault for DiskVault {
     }
 
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+        require_vault_reference(reference, "agent-provisioning:")?;
         Ok(Zeroizing::new(
             fs::read(self.slot(reference)).map_err(|_| SdkError::CustodyVaultUnavailable)?,
         ))
@@ -322,7 +350,6 @@ fn bind(
 
 fn reopen_unlock(root: &Path, account_id: &str) -> TestResult<CredentialRequest> {
     let stored = load_reservation(root, account_id)?.ok_or("missing reservation")?;
-    persist_reservation(root, &stored)?;
     Ok(CredentialRequest {
         local_account_id: stored.account_id,
         reservation_id: stored.reservation_id,
@@ -368,60 +395,65 @@ fn closed_unlock_leg(root: &Path, account: &str) -> TestResult {
     Ok(())
 }
 
-async fn open_send_leg() -> TestResult {
-    let root = tempfile::tempdir()?;
+async fn existing_open_leg() -> TestResult {
+    let dest = tempfile::tempdir()?;
     let vault = crate::custody::tests::TestVault::default();
     let now = crate::custody::network_now()?;
     let native = crate::custody::tests::create_with_device(
-        root.path(),
+        dest.path(),
         "acct-open",
         "dev-open",
         &vault,
         now,
     )?;
-    let hash = ramflux_protocol::custody::object_hash(native.record())?;
     let mut client = crate::RamfluxClient::new();
-    client.open_account_index(root.path())?;
+    client.open_account_index(dest.path())?;
     client.seal_new_account_data("acct-open", &native.record().body.account_anchor, PHRASE)?;
-    client.unlock_account("acct-open", PHRASE)?;
-    let local = DeviceRef {
+    drop(client);
+    let data_ref = FileVaultSecretSource::owner_ref("acct-open");
+    let recipient_ref = DeviceRef {
         account_anchor: native.record().body.account_anchor.clone(),
         device_id: native.local_device_id()?.into(),
         device_epoch: 1,
     };
+    let invite = invitation("existing", 21, Some(recipient_ref.clone()))?;
+    let staged = stage_existing(&StageExisting {
+        new: StageNew {
+            root: dest.path(),
+            account_id: "acct-open",
+            invitation: &invite,
+            vault: &DiskVault::open(dest.path().join("disk-vault"))?,
+            provider: &Phrase::setup(PHRASE),
+            frontend_generation: 1,
+        },
+        recipient_ref: recipient_ref.clone(),
+        branch_vault_ref: native.branch_vault_ref(),
+        data_vault_ref: &data_ref,
+    })?;
+    closed_unlock_leg(dest.path(), "acct-open")?;
+    install_store::remove_pending(dest.path(), "acct-open", &staged.install.operation_id)?;
+    let hash = ramflux_protocol::custody::object_hash(native.record())?;
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(dest.path())?;
+    client.unlock_account("acct-open", PHRASE)?;
     client.account_db()?.put_pairing_adoption(&AdoptionRow {
         account_id: "acct-open".into(),
-        operation_id: b32(20),
+        operation_id: staged.install.operation_id.clone(),
         record_hash: hash.clone(),
-        local_ref: canonical_json_bytes(&local)?,
+        local_ref: canonical_json_bytes(&recipient_ref)?,
         local_role: "secondary".into(),
-        branch_vault_ref: native.branch_vault_ref().into(),
-        data_vault_ref: native.primary_vault_ref().into(),
+        branch_vault_ref: staged.branch_vault_ref.clone(),
+        data_vault_ref: staged.data_vault_ref.clone(),
         primary_vault_ref: None,
     })?;
     drop(client);
-    let installed = Install {
-        schema: "ramflux.pairing.Install.v2".into(),
-        version: 2,
-        account_id: "acct-open".into(),
-        account_anchor: native.record().body.account_anchor.clone(),
-        operation_id: b32(20),
-        recipient_ref: local,
-        recipient_mode: "new".into(),
-        install_purpose: "enroll".into(),
-        record_hash: Some(hash),
-        prior_record_hash: None,
-        branch_vault_ref: native.branch_vault_ref().into(),
-        data_vault_ref: native.primary_vault_ref().into(),
-        primary_vault_ref: None,
-        state: "installed".into(),
-        cleanup_ref: None,
-        cleanup_owner_ref: None,
-    };
+    let mut installed = staged.install;
+    installed.record_hash = Some(hash);
+    installed.state = "installed".into();
     installed.validate()?;
-    install_store::write_installed(root.path(), &installed)?;
-    let expected = bind(root.path(), "acct-open", &b32(11), 1, "unlock")?;
-    let mut state = daemon(root.path());
+    install_store::write_installed(dest.path(), &installed)?;
+    let expected = reopen_unlock(dest.path(), "acct-open")?;
+    let mut state = daemon(dest.path());
     unlock_from_provider(&mut state, "acct-open", &expected, &Phrase::setup(PHRASE), None)?;
     let account = state.accounts.get_mut("acct-open").ok_or("unlocked")?;
     assert!(account.activation_pending);
@@ -456,13 +488,10 @@ async fn pairing_recipient_stages_own_keys_without_primary() -> TestResult {
     assert_ne!(staged.reservation_id, invite.body.request_id);
     assert_eq!(ramflux_protocol::decode_base64url(&staged.reservation_id)?.len(), 32);
     require_vault_reference(&staged.branch_vault_ref, "branch:")?;
-    require_vault_reference(&staged.data_vault_ref, "")?;
+    assert_eq!(staged.data_vault_ref, FileVaultSecretSource::owner_ref(STAGE));
+    assert_ne!(staged.data_vault_ref, staged.branch_vault_ref);
     assert!(vault.load_primary(&staged.data_vault_ref).is_err());
-    assert!(
-        vault
-            .load_provisioning_secret(&format!("agent-provisioning:{}", staged.data_vault_ref))
-            .is_err()
-    );
+    assert!(vault.load_provisioning_secret(&format!("agent-provisioning:{}", b32(2))).is_err());
     drop(vault);
     let reopened = DiskVault::open(&vault_dir)?;
     let _ = reopened.load_branch(
@@ -475,7 +504,7 @@ async fn pairing_recipient_stages_own_keys_without_primary() -> TestResult {
     assert!(!ordinary_networking_allowed(root.path(), STAGE)?);
     assert!(!root.path().join("custody_accounts").join(STAGE).join("authority.json").exists());
     closed_unlock_leg(root.path(), STAGE)?;
-    open_send_leg().await
+    existing_open_leg().await
 }
 
 #[test]
@@ -531,6 +560,7 @@ fn existing_target_leg(root: &Path, _staged: &super::StagedRecipient) -> TestRes
         device_epoch: 1,
     };
     let invite = invitation("existing", 13, Some(recipient_ref.clone()))?;
+    let data_ref = FileVaultSecretSource::owner_ref("acct-exist");
     let counter = Phrase::setup(PHRASE);
     let refused = stage_existing(&StageExisting {
         new: StageNew {
@@ -543,10 +573,14 @@ fn existing_target_leg(root: &Path, _staged: &super::StagedRecipient) -> TestRes
         },
         recipient_ref: recipient_ref.clone(),
         branch_vault_ref: native.branch_vault_ref(),
-        data_vault_ref: native.primary_vault_ref(),
+        data_vault_ref: &data_ref,
     });
     assert!(matches!(refused, Err(SdkError::PairingCode("VaultUnavailable"))));
     assert_eq!(install_store::list_pending(dest_root.path(), "acct-exist")?.len(), 0);
+    assert!(
+        load_reservation(dest_root.path(), "acct-exist")?.is_none(),
+        "refusal removes pairing-reservation.json"
+    );
     let again = stage_existing(&StageExisting {
         new: StageNew {
             root: dest_root.path(),
@@ -558,11 +592,11 @@ fn existing_target_leg(root: &Path, _staged: &super::StagedRecipient) -> TestRes
         },
         recipient_ref,
         branch_vault_ref: native.branch_vault_ref(),
-        data_vault_ref: native.primary_vault_ref(),
+        data_vault_ref: &data_ref,
     })?;
-    assert_eq!(counter.setups.get(), 0, "zero-setup");
+    assert_eq!(counter.setups.load(Ordering::SeqCst), 0, "zero-setup");
     assert_eq!(again.branch_vault_ref, native.branch_vault_ref());
-    assert_eq!(again.data_vault_ref, native.primary_vault_ref());
+    assert_eq!(again.data_vault_ref, data_ref);
     assert_eq!(again.install.recipient_mode, "existing");
     let _ = root;
     Ok(())
@@ -605,33 +639,36 @@ fn pairing_owned_secret_cleanup_all_exits() -> TestResult {
     let root = tempfile::tempdir()?;
     let expected = bind(root.path(), "acct-mismatch", &b32(9), 1, "setup")?;
     let stored = load_reservation(root.path(), "acct-mismatch")?.ok_or("stored")?;
-    assert!(acquire_setup(&expected, &Phrase::mismatch(), &stored).is_err());
+    assert!(acquire_setup(root.path(), &expected, &Phrase::mismatch(), &stored).is_err());
     assert!(take_pairing_secret_cleanups() >= 1, "mismatch");
     assert_eq!(take_pairing_secret_drops(), 0);
+    assert_eq!(take_owner_drops(), (0, 0, 0));
     assert_confirmation_cleared();
     assert_wiped();
-    assert!(take_secret_utf8_drops() >= 1);
+    assert_eq!(take_secret_utf8_drops(), 0);
+    assert!(take_secret_utf8_zeroed() >= 1);
 
     let expected = bind(root.path(), "acct-refuse", &b32(10), 1, "setup")?;
     let stored = load_reservation(root.path(), "acct-refuse")?.ok_or("stored")?;
-    assert!(acquire_setup(&expected, &Phrase::refuse(), &stored).is_err());
+    assert!(acquire_setup(root.path(), &expected, &Phrase::refuse(), &stored).is_err());
     assert!(take_pairing_secret_cleanups() >= 1, "setup refuse");
 
     let expected = bind(root.path(), "acct-unlock", &b32(11), 1, "unlock")?;
     let stored = load_reservation(root.path(), "acct-unlock")?.ok_or("stored")?;
-    assert!(acquire_unlock(&expected, &Phrase::refuse(), &stored).is_err());
+    assert!(acquire_unlock(root.path(), &expected, &Phrase::refuse(), &stored).is_err());
 
     let expected = bind(root.path(), "acct-cancel", &b32(12), 1, "setup")?;
     let stored = load_reservation(root.path(), "acct-cancel")?.ok_or("stored")?;
-    cancel_credential("acct-cancel");
-    assert!(acquire_setup(&expected, &Phrase::setup(PHRASE), &stored).is_err());
+    let late = LateCancel { root: root.path().to_path_buf(), account: "acct-cancel".into() };
+    assert!(acquire_setup(root.path(), &expected, &late, &stored).is_err());
     assert!(take_cancel_fences() >= 1, "cancel");
     let _ = take_pairing_secret_cleanups();
     let _ = take_pairing_secret_drops();
 
     drop(RecipientSecrets::new(Zeroizing::new([3_u8; 64])));
     assert_eq!(take_pairing_secret_cleanups(), 1, "drop");
-    assert_eq!(take_pairing_secret_drops(), 1);
+    assert_eq!(take_owner_drops(), (0, 0, 1));
+    assert_eq!(take_pairing_secret_drops(), 0);
     assert_wiped();
 
     let mut owned = RecipientSecrets::new(Zeroizing::new([5_u8; 64]));
@@ -653,4 +690,30 @@ fn pairing_owned_secret_cleanup_all_exits() -> TestResult {
     };
     assert!(matches!(error, SdkError::CustodyVaultUnavailable));
     shared_keychain_leg()
+}
+
+#[test]
+fn pairing_credential_slot_rearms_across_unlock_and_restart() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let vault = DiskVault::open(root.path().join("disk-vault"))?;
+    let staged = stage_sample(root.path(), &vault, "acct-p08-slot")?;
+    drop(vault);
+    let expected = reopen_unlock(root.path(), "acct-p08-slot")?;
+    let stored = load_reservation(root.path(), "acct-p08-slot")?.ok_or("stored")?;
+    let late = LateCancel { root: root.path().to_path_buf(), account: "acct-p08-slot".into() };
+    assert!(acquire_unlock(root.path(), &expected, &late, &stored).is_err(), "late callback");
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(root.path())?;
+    unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;
+    drop(client);
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(root.path())?;
+    unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;
+    drop(client);
+    forget_slots();
+    let mut client = crate::RamfluxClient::new();
+    client.open_account_index(root.path())?;
+    unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;
+    assert_eq!(staged.install.state, "vault_durable");
+    Ok(())
 }

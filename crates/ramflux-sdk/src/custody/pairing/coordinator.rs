@@ -120,6 +120,7 @@ struct Ceremony {
     frames_seen: u64,
     head_state: Option<String>,
     verified_invite: Option<Envelope<Invitation>>,
+    commitment_ref: Option<DeviceRef>,
 }
 
 enum SasHold {
@@ -524,6 +525,7 @@ impl PairingActor {
             frames_seen: 0,
             head_state: None,
             verified_invite: open.verified_invite,
+            commitment_ref: None,
         }
     }
 
@@ -757,23 +759,31 @@ impl PairingActor {
             c.common = Some(offer.common);
             Ok(())
         })?;
-        self.stage_recipient_before_commit()?;
+        let staged = self.stage_recipient_before_commit()?;
+        let local_ref = staged.clone().unwrap_or(local_ref);
         self.with_ceremony_mut(|c| {
+            c.commitment_ref.clone_from(&staged);
             Self::start_sas_with_ref(c, &local_ref)?;
             Self::queue_commit(c)
         })
     }
 
-    fn stage_recipient_before_commit(&self) -> Result<(), SdkError> {
+    fn stage_recipient_before_commit(&self) -> Result<Option<DeviceRef>, SdkError> {
         let Some(staging) = self.recipient_stage.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
-        let (invite, generation) = self.with_ceremony(|ceremony| {
-            let invite =
-                ceremony.verified_invite.clone().ok_or(SdkError::PairingCode("InvalidInput"))?;
-            Ok((invite, ceremony.generation))
+        let invite = self.with_ceremony(|ceremony| {
+            ceremony.verified_invite.clone().ok_or(SdkError::PairingCode("InvalidInput"))
         })?;
-        staging.stage(&invite, generation)
+        Ok(Some(staging.stage(&invite, self.frontend_generation)?))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn commitment_device_id(&self) -> Option<String> {
+        self.ceremony.as_ref().and_then(|ceremony| {
+            ceremony.commitment_ref.as_ref().map(|device| device.device_id.clone())
+        })
     }
 
     fn ingest_reveal_chunk(

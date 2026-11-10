@@ -96,9 +96,18 @@ pub struct FileVaultSecretSource {
 }
 
 impl FileVaultSecretSource {
+    /// Namespace of the account-DB file-key owner. Distinct from primary/branch vault refs.
+    pub const OWNER_PREFIX: &'static str = "platform-local-vault:";
+
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self { root: root.as_ref().to_path_buf() }
+    }
+
+    /// Wrapping-ref the data-store key source records for `local_account_id`.
+    #[must_use]
+    pub fn owner_ref(local_account_id: &str) -> String {
+        format!("{}{local_account_id}", Self::OWNER_PREFIX)
     }
 
     #[must_use]
@@ -199,7 +208,7 @@ impl AccountKeyWrappingProvider for LocalVaultKeyWrappingProvider {
         let (nonce, wrapped_key) = wrap_with_vault_secret(&self.vault_secret, key.bytes())?;
         let wrapped = WrappedAccountDbKey {
             key_wrapping_provider: self.provider_name().to_owned(),
-            key_wrapping_ref: format!("platform-local-vault:{local_account_id}"),
+            key_wrapping_ref: FileVaultSecretSource::owner_ref(local_account_id),
             nonce,
             wrapped_key,
         };

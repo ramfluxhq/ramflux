@@ -8,7 +8,7 @@ use super::install_gate;
 use super::install_store::{self, Install};
 use super::local_credential::{
     LocalCredentialProvider, PersistedReservation, RecipientSecrets, SecretUtf8, acquire_setup,
-    acquire_unlock, load_reservation, persist_reservation,
+    acquire_unlock, load_reservation, persist_reservation, remove_reservation,
 };
 use crate::SdkError;
 use crate::custody::{BranchCredentials, PrimaryVault, require_vault_reference};
@@ -18,8 +18,9 @@ use ramflux_protocol::custody::pairing::native::Invitation;
 use ramflux_protocol::custody::pairing::{PairingWire, WireError};
 use ramflux_protocol::custody::{DeviceRef, Envelope};
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::{AccountDb, FloorRow, LiveRow};
-use std::path::Path;
+use ramflux_storage::{AccountDb, FileVaultSecretSource, FloorRow, LiveRow};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Inputs for new-recipient J0/J1 staging.
@@ -54,10 +55,41 @@ pub struct StagedRecipient {
 /// Join-path staging before the recipient commitment. Injected into [`super::PairingActor`].
 pub trait RecipientKeyStaging: Send + Sync {
     /// Stage own keys from the verified invitation before `queue_commit`.
+    /// Returns the staged device identity the Join commitment must cover.
     ///
     /// # Errors
     /// Reservation, provider, vault, or journal failures.
-    fn stage(&self, invitation: &Envelope<Invitation>, generation: u64) -> Result<(), SdkError>;
+    fn stage(
+        &self,
+        invitation: &Envelope<Invitation>,
+        generation: u64,
+    ) -> Result<DeviceRef, SdkError>;
+}
+
+/// Production [`RecipientKeyStaging`] over [`stage_new`].
+pub struct RecipientStaging {
+    pub root: PathBuf,
+    pub account_id: String,
+    pub vault: Arc<dyn PrimaryVault>,
+    pub provider: Arc<dyn LocalCredentialProvider>,
+}
+
+impl RecipientKeyStaging for RecipientStaging {
+    fn stage(
+        &self,
+        invitation: &Envelope<Invitation>,
+        generation: u64,
+    ) -> Result<DeviceRef, SdkError> {
+        Ok(stage_new(&StageNew {
+            root: &self.root,
+            account_id: &self.account_id,
+            invitation,
+            vault: &*self.vault,
+            provider: &*self.provider,
+            frontend_generation: generation,
+        })?
+        .recipient_ref)
+    }
 }
 
 /// J0+J1 for a NEW recipient. Generates a local branch seed. Never stores master/SS.
@@ -168,15 +200,15 @@ fn reserve_new(request: &StageNew<'_>) -> Result<StagedRecipient, SdkError> {
     )?;
     let branch_vault_ref = format!("branch:{hashed}");
     require_vault_reference(&branch_vault_ref, "branch:")?;
-    require_vault_reference(&hashed, "")?;
-    let install = reserved_install(request, &recipient_ref, &branch_vault_ref, &hashed)?;
+    let data_vault_ref = FileVaultSecretSource::owner_ref(request.account_id);
+    let install = reserved_install(request, &recipient_ref, &branch_vault_ref, &data_vault_ref)?;
     install_store::write_pending(request.root, &install)?;
     Ok(StagedRecipient {
         account_id: request.account_id.into(),
         reservation_id,
         recipient_ref,
         branch_vault_ref,
-        data_vault_ref: hashed,
+        data_vault_ref,
         install,
     })
 }
@@ -188,7 +220,7 @@ fn setup_secret(request: &StageNew<'_>, reservation_id: &str) -> Result<SecretUt
         return Err(SdkError::PairingField("credential_reservation"));
     }
     let expected = credential_request(request, reservation_id, "setup")?;
-    acquire_setup(&expected, request.provider, &stored)
+    acquire_setup(request.root, &expected, request.provider, &stored)
 }
 
 fn commit_new(
@@ -243,6 +275,13 @@ fn commit_vault_and_db(
         )?;
         client.unlock_account(request.account_id, passphrase)?;
         write_floor_live(client.account_db()?, request, staged)?;
+        let wrapped = client
+            .account_index()?
+            .load_wrapped_db_key(request.account_id)?
+            .ok_or(SdkError::PairingField("data_vault_ref"))?;
+        if wrapped.key_wrapping_ref != staged.data_vault_ref {
+            return Err(SdkError::PairingField("data_vault_ref"));
+        }
         Ok(())
     })();
     if outcome.is_err() {
@@ -329,10 +368,17 @@ fn require_existing_refs(
     if request.branch_vault_ref != native.branch_vault_ref() {
         return Err(SdkError::PairingField("branch_vault_ref"));
     }
-    if request.data_vault_ref != native.primary_vault_ref() {
+    if request.data_vault_ref != stored_data_vault_ref(request.new.root, request.new.account_id)? {
         return Err(SdkError::PairingField("data_vault_ref"));
     }
     Ok(())
+}
+
+fn stored_data_vault_ref(root: &Path, account_id: &str) -> Result<String, SdkError> {
+    let index = ramflux_storage::AccountIndex::open(root)?;
+    let wrapped =
+        index.load_wrapped_db_key(account_id)?.ok_or(SdkError::PairingField("data_vault_ref"))?;
+    Ok(wrapped.key_wrapping_ref)
 }
 
 fn unlock_existing(request: &StageExisting<'_>) -> Result<(), SdkError> {
@@ -351,8 +397,15 @@ fn unlock_existing(request: &StageExisting<'_>) -> Result<(), SdkError> {
     expected.validate_recipient_mode("existing").map_err(|error| wire(&error))?;
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(request.new.root)?;
-    let secret = acquire_unlock(&expected, request.new.provider, &stored)?;
+    let secret = match acquire_unlock(request.new.root, &expected, request.new.provider, &stored) {
+        Ok(secret) => secret,
+        Err(error) => {
+            let _ = remove_reservation(request.new.root, request.new.account_id);
+            return Err(error);
+        }
+    };
     client.unlock_account(request.new.account_id, secret.as_bytes())?;
+    let _ = client.account_db()?.load_actor_state::<String>("pairing/local-sentinel");
     Ok(())
 }
 
@@ -465,9 +518,9 @@ pub fn unlock_with_provider(
     let root = client.account_index()?.root().to_path_buf();
     let stored = load_reservation(&root, account_id)?
         .ok_or(SdkError::PairingField("credential_reservation"))?;
-    let secret = acquire_unlock(expected, provider, &stored)?;
+    let secret = acquire_unlock(&root, expected, provider, &stored)?;
     client.unlock_account(account_id, secret.as_bytes())
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

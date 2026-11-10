@@ -337,6 +337,9 @@ pub(super) fn get(reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     read_any(reference)?.ok_or_else(unavailable)
 }
 pub(super) fn delete(reference: &str) -> Result<(), SdkError> {
+    if reference.starts_with(ramflux_storage::FileVaultSecretSource::OWNER_PREFIX) {
+        return Ok(());
+    }
     let stores = readable()?;
     let primary = primary_items::delete(&stores[0], reference);
     // Fallback login-keychain items are best-effort for an entitled process: its own items

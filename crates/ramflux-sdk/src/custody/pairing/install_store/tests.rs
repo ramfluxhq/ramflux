@@ -85,6 +85,11 @@ fn authority_refresh_primary_and_secondary() -> Result<(), SdkError> {
     field(&encode(&dest), "primary_vault_ref");
     dest.primary_vault_ref = Some("vault-primary".into());
     encode(&dest)?;
+    dest.data_vault_ref = "vault-primary".into();
+    field(&encode(&dest), "data_vault_ref");
+    dest.data_vault_ref = "vault-data".into();
+    dest.branch_vault_ref = "vault-data".into();
+    field(&encode(&dest), "data_vault_ref");
     let mut source = base("transfer_source", "reserved");
     source.primary_vault_ref = Some("vault-primary".into());
     field(&encode(&source), "primary_vault_ref");

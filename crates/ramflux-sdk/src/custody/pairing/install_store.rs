@@ -121,9 +121,13 @@ impl Install {
         }
         ident(&self.branch_vault_ref, "branch_vault_ref")?;
         ident(&self.data_vault_ref, "data_vault_ref")?;
+        require(self.data_vault_ref != self.branch_vault_ref, "data_vault_ref")?;
         match self.primary_vault_ref.as_deref() {
             None => Ok(()),
-            Some(v) => ident(v, "primary_vault_ref"),
+            Some(v) => {
+                ident(v, "primary_vault_ref")?;
+                require(self.data_vault_ref != v, "data_vault_ref")
+            }
         }?;
         require(
             matches!(

@@ -299,6 +299,9 @@ impl PrimaryVault for LinuxPrimaryVault {
         Ok(Zeroizing::new(self.realm(2)?.read(reference, 3)?.bytes().to_vec()))
     }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
+        if reference.starts_with(ramflux_storage::FileVaultSecretSource::OWNER_PREFIX) {
+            return Ok(());
+        }
         let (i, kind, prefix) = if reference.starts_with("branch:") {
             (1, 2, "branch:")
         } else if reference.starts_with("agent-provisioning:") {

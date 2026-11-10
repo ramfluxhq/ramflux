@@ -441,3 +441,75 @@ fn held(store: &Mutex<PairingRelayStore>) -> MutexGuard<'_, PairingRelayStore> {
 fn relay_err(error: PairingRelayError) -> SdkError {
     SdkError::PairingCode(error.code())
 }
+
+#[tokio::test]
+async fn pairing_join_commitment_uses_staged_identity() -> TestResult {
+    use super::install_store;
+    use super::recipient::RecipientStaging;
+    use super::recipient::tests::{DiskVault, Phrase};
+    use crate::custody::PrimaryVault;
+    use crate::custody::pairing::local_credential::LocalCredentialProvider;
+    let mut fx = Fixture::open()?;
+    let root = tempfile::tempdir()?;
+    let vault: Arc<dyn PrimaryVault> = Arc::new(DiskVault::open(root.path().join("disk-vault"))?);
+    let provider: Arc<dyn LocalCredentialProvider> = Arc::new(Phrase::setup(b"correct-passphrase"));
+    fx.recipient.set_recipient_staging(Arc::new(RecipientStaging {
+        root: root.path().to_path_buf(),
+        account_id: "acct-stage-join".into(),
+        vault,
+        provider,
+    }));
+    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let op = begun.operation_id.clone();
+    let generation = begun.generation;
+    fx.recipient
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Recipient".into(),
+        })
+        .await?;
+    drive_sas(&mut fx, &op, generation).await?;
+    let pending = install_store::list_pending(root.path(), "acct-stage-join")?;
+    assert_eq!(pending.len(), 1);
+    let committed = fx.recipient.commitment_device_id().ok_or("commitment")?;
+    assert_eq!(committed, pending[0].recipient_ref.device_id);
+    assert_ne!(committed, "recipient");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_staging_failure_queues_no_commit() -> TestResult {
+    struct Fail;
+    impl super::recipient::RecipientKeyStaging for Fail {
+        fn stage(
+            &self,
+            _: &ramflux_protocol::custody::Envelope<
+                ramflux_protocol::custody::pairing::native::Invitation,
+            >,
+            _: u64,
+        ) -> Result<DeviceRef, SdkError> {
+            Err(SdkError::PairingCode("VaultUnavailable"))
+        }
+    }
+    let mut fx = Fixture::open()?;
+    fx.recipient.set_recipient_staging(Arc::new(Fail));
+    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let op = begun.operation_id.clone();
+    let generation = begun.generation;
+    fx.recipient
+        .join(Join {
+            schema: "ramflux.pairing.Join.v2".into(),
+            version: 2,
+            token: begun.invite_token,
+            display_name: "Recipient".into(),
+        })
+        .await?;
+    match drive_sas(&mut fx, &op, generation).await {
+        Err(error) if error.to_string().contains("VaultUnavailable") => {}
+        other => return Err(format!("staging failure: {other:?}").into()),
+    }
+    assert!(fx.recipient.commitment_device_id().is_none());
+    Ok(())
+}

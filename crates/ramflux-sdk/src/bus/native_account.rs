@@ -27,7 +27,7 @@ pub(crate) fn unlock_from_provider(
 ) -> Result<LocalBusCreatedAccount, SdkError> {
     let stored = load_reservation(&state.config.data_root, id)?
         .ok_or(SdkError::PairingField("credential_reservation"))?;
-    let secret = acquire_unlock(expected, provider, &stored)?;
+    let secret = acquire_unlock(&state.config.data_root, expected, provider, &stored)?;
     let passphrase = std::str::from_utf8(secret.as_bytes())
         .map_err(|_| SdkError::PairingField("credential_utf8"))?;
     unlock(state, id, Zeroizing::new(passphrase.to_owned()), home_node_id)
