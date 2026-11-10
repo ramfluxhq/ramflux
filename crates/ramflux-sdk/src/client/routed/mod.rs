@@ -87,6 +87,7 @@ const AAD_V3_DOMAIN: &str = "ramflux.sdk.envelope.aad.v3";
 struct CandidateAadBinding<'a> {
     delivery_mode: &'a str,
     collapse_tag: [u8; 32],
+    report_commitment: Option<[u8; 32]>,
 }
 
 fn refuse_received_outer_fields(envelope: &ramflux_protocol::Envelope) -> Result<(), SdkError> {
@@ -115,7 +116,7 @@ pub(crate) fn associated_data(
             sender,
             recipient,
             bundle,
-            CandidateAadBinding { delivery_mode, collapse_tag },
+            CandidateAadBinding { delivery_mode, collapse_tag, report_commitment: None },
         );
     }
     associated_data_v2(envelope_id, sender, recipient, bundle)
@@ -143,6 +144,10 @@ pub(crate) fn associated_data_from_outer(
             delivery_mode: delivery_mode.as_str(),
             collapse_tag: ramflux_protocol::message::outer::require_live_collapse_tag(envelope)
                 .map_err(map_size_preflight)?,
+            report_commitment: ramflux_protocol::message::outer::live_report_commitment_bytes(
+                envelope,
+            )
+            .map_err(map_size_preflight)?,
         },
     )
 }
@@ -170,6 +175,21 @@ fn associated_data_bound(
     bundle: &[u8; 32],
     binding: CandidateAadBinding<'_>,
 ) -> Result<Vec<u8>, SdkError> {
+    let generation = ramflux_protocol::schema_profile::MESSAGE_SCHEMA_V1_GENERATION;
+    if let Some(commitment) = binding.report_commitment {
+        return Ok(ramflux_protocol::canonical_json_bytes(&(
+            AAD_V3_DOMAIN,
+            envelope_id,
+            dm_device_id_hash(sender),
+            dm_device_id_hash(recipient),
+            bundle,
+            2_u32,
+            generation,
+            binding.delivery_mode,
+            binding.collapse_tag,
+            commitment,
+        ))?);
+    }
     Ok(ramflux_protocol::canonical_json_bytes(&(
         AAD_V3_DOMAIN,
         envelope_id,
@@ -177,7 +197,7 @@ fn associated_data_bound(
         dm_device_id_hash(recipient),
         bundle,
         2_u32,
-        ramflux_protocol::schema_profile::MESSAGE_SCHEMA_V1_GENERATION,
+        generation,
         binding.delivery_mode,
         binding.collapse_tag,
     ))?)
@@ -461,8 +481,10 @@ impl RamfluxClient {
         })?);
         let report = if route.kind == Kind::Direct
             && crate::client::target_selection::schema_v1_selected()
+            && !report::omit_direct_report()
         {
-            Some(report::assemble_direct_report(self, message, session, &inner, local)?)
+            let recipient = self.device_identity(&remote)?;
+            Some(report::assemble_direct_report(self, message, session, &inner, local, &recipient)?)
         } else {
             None
         };
@@ -477,14 +499,20 @@ impl RamfluxClient {
                 local,
                 &wire_remote,
                 &bundle,
-                CandidateAadBinding { delivery_mode: "durable", collapse_tag: report.collapse_tag },
+                CandidateAadBinding {
+                    delivery_mode: "durable",
+                    collapse_tag: report.collapse_tag,
+                    report_commitment: Some(report.report_commitment),
+                },
             )?
         } else {
             associated_data(&message.envelope_id, local, &wire_remote, &bundle)?
         };
         let ciphertext = session.encrypt(&plaintext, &aad)?;
-        let collapse_tag =
-            report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.collapse_tag));
+        let collapse_tag = report
+            .as_ref()
+            .map(|r| ramflux_protocol::encode_base64url(r.collapse_tag))
+            .or_else(|| report::omitted_nested_collapse_tag(&message.envelope_id));
         let report_commitment =
             report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.report_commitment));
         persist_sealed_pair(
@@ -526,6 +554,7 @@ impl RamfluxClient {
         self.authenticated_envelope_sender(HeadUse::NewAuthorization, entry)?;
         refuse_received_outer_fields(&entry.envelope)?;
         let envelope = decode(&entry.envelope)?;
+        report::refuse_payload_outer_mismatch(&entry.envelope, &envelope)?;
         let local_device = self.local_device_identity(local)?;
         let remote_device = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let (mut session, bundle) = self.recv_pair_session(
@@ -543,11 +572,13 @@ impl RamfluxClient {
         let decrypted = zeroize::Zeroizing::new(
             session.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?,
         );
-        if entry.envelope.report_commitment.is_some() {
-            self.persist_pair(&local_device, &remote_device, &bundle, &session)?;
-        }
         let inner = report::opened_inner_plaintext(&entry.envelope, &decrypted.plaintext)?;
         let plaintext: Plaintext = serde_json::from_slice(&inner)?;
+        report::refuse_direct_candidate_opening(
+            &entry.envelope,
+            &session,
+            &plaintext.routing.kind,
+        )?;
         if plaintext.routing.attachments && plaintext.routing.kind != Kind::Direct {
             return Err(invalid("attachment flag requires a direct route"));
         }

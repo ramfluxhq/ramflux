@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use x25519_dalek::PublicKey as X25519PublicKey;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{CryptoError, PrekeyBundle, X25519KeyPair, blake3_256, hkdf_sha256};
 use std::fmt;
@@ -50,6 +50,17 @@ impl fmt::Debug for X3dhOutput {
             .field("associated_secret", &"<redacted>")
             .field("bootstrap_transcript_hash", &"<redacted>")
             .finish()
+    }
+}
+
+impl X3dhOutput {
+    /// 64-byte X3DH SK (`root_seed || associated_secret`). Never persist this.
+    #[must_use]
+    pub fn secret_key(&self) -> Zeroizing<[u8; 64]> {
+        let mut sk = Zeroizing::new([0_u8; 64]);
+        sk[..32].copy_from_slice(&self.root_seed);
+        sk[32..].copy_from_slice(&self.associated_secret);
+        sk
     }
 }
 

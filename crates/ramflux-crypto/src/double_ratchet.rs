@@ -53,6 +53,7 @@ pub struct DmSession {
     pub skipped_message_keys: BTreeMap<String, MessageKeys>,
     skipped_message_secrets: BTreeMap<String, Secret32>,
     skipped_order: std::collections::VecDeque<String>,
+    collapse_key: Option<Secret32>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -82,6 +83,8 @@ pub struct DmSessionSnapshot {
     skipped_message_secrets: BTreeMap<String, [u8; 32]>,
     #[serde(default)]
     skipped_order: std::collections::VecDeque<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collapse_key: Option<[u8; 32]>,
 }
 
 impl std::fmt::Debug for DmSessionSnapshot {
@@ -95,6 +98,7 @@ impl Zeroize for DmSessionSnapshot {
         self.sending_chain_key.zeroize();
         self.receiving_chain_key.zeroize();
         self.dhs_private.zeroize();
+        self.collapse_key.zeroize();
         for secret in self.skipped_message_secrets.values_mut() {
             secret.zeroize();
         }
@@ -451,7 +455,27 @@ impl DmSession {
             skipped_message_keys: BTreeMap::new(),
             skipped_message_secrets: BTreeMap::new(),
             skipped_order: std::collections::VecDeque::new(),
+            collapse_key: None,
         }
+    }
+
+    /// Derive and store Kcollapse from the X3DH SK once per session incarnation.
+    ///
+    /// # Errors
+    /// Returns HKDF failure from [`crate::collapse_key`].
+    pub fn with_collapse_key_from_x3dh_sk(
+        mut self,
+        sk: &[u8],
+        pair_binding: &[u8],
+    ) -> Result<Self, CryptoError> {
+        let key = crate::collapse_key(sk, pair_binding)?;
+        self.collapse_key = Some(Secret32::new(*key));
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn collapse_key(&self) -> Option<&[u8; 32]> {
+        self.collapse_key.as_ref().map(Secret32::expose)
     }
 
     /// # Errors
@@ -685,6 +709,7 @@ impl DmSession {
                     )
                 })
                 .collect(),
+            collapse_key: self.collapse_key.as_ref().map(|key| *key.expose()),
         }
     }
 
@@ -732,6 +757,7 @@ impl DmSession {
                     )
                 })
                 .collect(),
+            collapse_key: snapshot.collapse_key.map(Secret32::new),
         })
     }
 

@@ -46,7 +46,9 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::AeadFailed
             | ramflux_crypto::CryptoError::KeyCommitmentMismatch
             | ramflux_crypto::CryptoError::CommitmentMismatch
-            | ramflux_crypto::CryptoError::ReportCommitmentMismatch,
+            | ramflux_crypto::CryptoError::ReportCommitmentMismatch
+            | ramflux_crypto::CryptoError::ReportCommitmentMissing
+            | ramflux_crypto::CryptoError::MissingCollapseKey,
         ) => Some("authentication_failed"),
         SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)) => Some("i_json_rejected"),
         SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),

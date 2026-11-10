@@ -122,6 +122,10 @@ impl RamfluxClient {
             output.bootstrap_transcript_hash,
             &ephemeral,
             recipient_bundle.signed_prekey,
+        )?
+        .with_collapse_key_from_x3dh_sk(
+            output.secret_key().as_ref(),
+            &output.bootstrap_transcript_hash,
         )?;
         let header = SdkDmX3dhHeader {
             bootstrap_sequence,
@@ -200,6 +204,10 @@ impl RamfluxClient {
             header.initiator_device_id_hash,
             output.bootstrap_transcript_hash,
             &signed_prekey,
+        )?
+        .with_collapse_key_from_x3dh_sk(
+            output.secret_key().as_ref(),
+            &output.bootstrap_transcript_hash,
         )
         .map_err(SdkError::from)
     }

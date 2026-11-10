@@ -63,7 +63,11 @@ pub fn candidate_report_a0_from_envelope(
         .ext
         .get("source_root_commitment")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ProtocolError::InvalidDomain {
+            expected: "source_authority",
+            actual: String::new(),
+        })?
         .to_owned();
     Ok(CandidateReportA0 {
         schema: envelope.schema.clone(),
@@ -73,7 +77,7 @@ pub fn candidate_report_a0_from_envelope(
         source_principal_id: envelope.source_principal_id.clone(),
         source_device_id: envelope.source_device_id.clone(),
         target_delivery_id: envelope.target_delivery_id.clone(),
-        delivery_class: CandidateDeliveryClass::Message,
+        delivery_class: candidate_delivery_class(&envelope.delivery_class)?,
         priority: envelope.priority.clone(),
         ttl_seconds: envelope.ttl,
         created_at: envelope.created_at,
@@ -83,6 +87,18 @@ pub fn candidate_report_a0_from_envelope(
         signature_alg: envelope.signed.signature_alg.clone(),
         source_authority,
     })
+}
+
+fn candidate_delivery_class(
+    class: &crate::DeliveryClass,
+) -> Result<CandidateDeliveryClass, ProtocolError> {
+    match class {
+        crate::DeliveryClass::OpaqueEvent => Ok(CandidateDeliveryClass::Message),
+        crate::DeliveryClass::NotificationWake => Ok(CandidateDeliveryClass::CallWake),
+        _ => {
+            Err(ProtocolError::InvalidDomain { expected: "message", actual: format!("{class:?}") })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +145,81 @@ mod tests {
         let encoded = encode_candidate_report_a0(&vector_a0())?;
         assert_eq!(hex_encode(&encoded), PINNED_A0_HEX);
         Ok(())
+    }
+
+    fn envelope(class: crate::DeliveryClass, authority: Option<&str>) -> crate::Envelope {
+        let mut envelope = crate::Envelope {
+            schema: crate::domain::ENVELOPE.to_owned(),
+            version: 1,
+            domain: crate::domain::ENVELOPE.to_owned(),
+            ext: crate::Ext::default(),
+            signed: crate::SignedFields {
+                signing_key_id: "device:alice".to_owned(),
+                signature_alg: SignatureAlg::Ed25519,
+                signature: String::new(),
+            },
+            envelope_id: "envelope".to_owned(),
+            source_principal_id: "alice".to_owned(),
+            source_device_id: "alice".to_owned(),
+            target_delivery_id: "bob".to_owned(),
+            routing_set_id: None,
+            delivery_class: class,
+            priority: Priority::Normal,
+            ttl: 300,
+            created_at: 1,
+            encrypted_payload: String::new(),
+            payload_hash: String::new(),
+            delivery_mode: Some("durable".to_owned()),
+            collapse_tag: Some(crate::encode_base64url([0x22_u8; 32])),
+            report_commitment: Some(crate::encode_base64url([0x33_u8; 32])),
+        };
+        if let Some(authority) = authority {
+            envelope.ext.ext.insert(
+                "source_root_commitment".into(),
+                serde_json::Value::String(authority.to_owned()),
+            );
+        }
+        envelope
+    }
+
+    #[test]
+    fn from_envelope_uses_device_signing_key_id_and_message_class() -> Result<(), ProtocolError> {
+        let a0 = candidate_report_a0_from_envelope(&envelope(
+            crate::DeliveryClass::OpaqueEvent,
+            Some("anchor"),
+        ))?;
+        assert_eq!(a0.signing_key_id, "device:alice");
+        assert_eq!(a0.delivery_class, CandidateDeliveryClass::Message);
+        assert_eq!(a0.source_authority, "anchor");
+        Ok(())
+    }
+
+    #[test]
+    fn from_envelope_maps_notification_wake_to_call_wake() -> Result<(), ProtocolError> {
+        let a0 = candidate_report_a0_from_envelope(&envelope(
+            crate::DeliveryClass::NotificationWake,
+            Some("anchor"),
+        ))?;
+        assert_eq!(a0.delivery_class, CandidateDeliveryClass::CallWake);
+        Ok(())
+    }
+
+    #[test]
+    fn from_envelope_refuses_missing_source_authority() {
+        let missing =
+            candidate_report_a0_from_envelope(&envelope(crate::DeliveryClass::OpaqueEvent, None));
+        assert!(matches!(
+            missing,
+            Err(ProtocolError::InvalidDomain { expected: "source_authority", .. })
+        ));
+        let mut empty = envelope(crate::DeliveryClass::OpaqueEvent, Some(""));
+        empty
+            .ext
+            .ext
+            .insert("source_root_commitment".into(), serde_json::Value::String(String::new()));
+        assert!(matches!(
+            candidate_report_a0_from_envelope(&empty),
+            Err(ProtocolError::InvalidDomain { expected: "source_authority", .. })
+        ));
     }
 }

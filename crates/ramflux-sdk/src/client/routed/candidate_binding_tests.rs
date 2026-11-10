@@ -160,8 +160,12 @@ fn resigned_outer_collapse_tag_mismatch_fails_aead_and_keeps_pair() -> Result<()
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b, entry) = sealed_pair()?;
     let before = receiver_pair_snapshot(&b, &a)?;
+    let forged = ramflux_protocol::encode_base64url([0x00_u8; 32]);
     let mut changed = entry.clone();
-    changed.envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
+    changed.envelope = rewrite_sidecar(&changed.envelope, |sidecar| {
+        sidecar["collapse_tag"] = serde_json::Value::String(forged.clone());
+    })?;
+    changed.envelope.collapse_tag = Some(forged);
     resign(&a, &mut changed.envelope)?;
     aead_failed(b.client.open_routed(&changed, "bob"))?;
     assert_eq!(before, receiver_pair_snapshot(&b, &a)?);

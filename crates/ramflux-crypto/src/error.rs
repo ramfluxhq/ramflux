@@ -71,6 +71,10 @@ pub enum CryptoError {
     ReportPaddingOrHeaderRefused,
     #[error("report opening commitment mismatch")]
     ReportCommitmentMismatch,
+    #[error("report commitment is required")]
+    ReportCommitmentMissing,
+    #[error("session collapse key is required")]
+    MissingCollapseKey,
     #[error("report opening A0 field exceeds u32 length")]
     ReportA0TooLarge,
 }

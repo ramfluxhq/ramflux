@@ -502,7 +502,11 @@ pub(crate) fn gateway_direct_message_envelope(
         version: 1,
         domain: "ramflux.envelope.v1".to_owned(),
         ext: ramflux_protocol::Ext::default(),
-        signed: sdk_signed_fields(""),
+        signed: if ramflux_protocol::schema_profile::schema_v1_live() {
+            crate::gateway::helpers::sdk_device_signed_fields(&config.device_id, "")
+        } else {
+            sdk_signed_fields("")
+        },
         envelope_id: message.envelope_id.clone(),
         // Attribution belongs to the authenticated signing device, not caller aliases.
         source_principal_id: config.device_branch.as_ref().map_or_else(
@@ -522,7 +526,13 @@ pub(crate) fn gateway_direct_message_envelope(
         collapse_tag: None,
         report_commitment: None,
     };
-    let nested = serde_json::from_slice::<SdkDmEncryptedEnvelope>(&message.encrypted_body).ok();
+    let nested = match serde_json::from_slice::<SdkDmEncryptedEnvelope>(&message.encrypted_body) {
+        Ok(value) => Some(value),
+        Err(_) if ramflux_protocol::schema_profile::schema_v1_live() => {
+            return Err(SdkError::InboundRejected("direct envelope sidecar is required".into()));
+        }
+        Err(_) => None,
+    };
     apply_candidate_named_fields_with(
         &mut envelope,
         nested.as_ref().and_then(|value| value.collapse_tag.as_deref()),

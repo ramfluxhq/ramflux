@@ -309,11 +309,11 @@ async fn e16_routed_import_receives_only_admitted_subset() -> TestResult {
 }
 #[tokio::test]
 async fn e16_routed_receive_mixed_valid_and_fenced_attachments_auto_fetch() -> TestResult {
-    Case::new()?.assert_mixed(false).await
+    Box::pin(Case::new()?.assert_mixed(false)).await
 }
 #[tokio::test]
 async fn e16_routed_item_fenced_between_registration_and_import_is_consumed() -> TestResult {
-    Case::new()?.assert_mixed(true).await
+    Box::pin(Case::new()?.assert_mixed(true)).await
 }
 #[tokio::test]
 async fn e16_m2_replay_refused_without_retry() -> TestResult {
@@ -335,7 +335,7 @@ async fn e16_m2_replay_refused_without_retry() -> TestResult {
 #[tokio::test]
 async fn e16_unrelated_valid_messages_progress() -> TestResult {
     let mut c = Case::new()?;
-    c.assert_mixed(false).await?;
+    Box::pin(c.assert_mixed(false)).await?;
     let entry = seal(&c.a, &c.b, message("next", "conversation"), b"next text")?;
     assert!(c.receive(&entry, false).await?.plaintext.is_some());
     assert_eq!(c.b.client.direct_messages("conversation")?.len(), 2);

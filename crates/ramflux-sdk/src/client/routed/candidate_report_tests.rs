@@ -2,7 +2,76 @@
 // Copyright (c) 2026 Span Brain
 
 use super::*;
+use crate::client::inbox_failure::deterministic;
 use ramflux_crypto::CryptoError;
+use ramflux_protocol::message::outer::{CandidateDeliveryClass, candidate_report_a0_from_envelope};
+
+struct OmitDirectReport;
+impl Drop for OmitDirectReport {
+    fn drop(&mut self) {
+        super::super::report::set_omit_direct_report(false);
+    }
+}
+
+fn omit_direct_report() -> OmitDirectReport {
+    super::super::report::set_omit_direct_report(true);
+    OmitDirectReport
+}
+
+fn pair(alice: u8, bob: u8) -> Result<(Fixture, Fixture), SdkError> {
+    let a = Fixture::new("alice", alice)?;
+    let mut b = Fixture::new("bob", bob)?;
+    friend(&mut b, &a)?;
+    Ok((a, b))
+}
+
+fn friend(receiver: &mut Fixture, sender: &Fixture) -> Result<(), SdkError> {
+    receiver.client.establish_friend_link(
+        "link",
+        sender.client.owned_device_identity()?.root_commitment(),
+        receiver.client.owned_device_identity()?.root_commitment(),
+    )?;
+    Ok(())
+}
+
+fn pool() -> Result<ramflux_transport::RelayQuicPool, SdkError> {
+    Ok(ramflux_transport::RelayQuicPool::new(
+        ramflux_transport::RelayQuicPoolConfig::functional_default()
+            .map_err(|error| invalid(&error.to_string()))?,
+    ))
+}
+
+async fn apply(receiver: &mut Fixture, entry: &GatewayInboxEntry) -> Result<Delivery, SdkError> {
+    ramflux_node_core::check_entry_bound(&entry.envelope)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut session =
+        GatewaySessionEngine::with_test_transport(receiver.config()?, Box::new(NoNetwork));
+    let pool = pool()?;
+    receiver.client.apply_routed_entry(&mut session, &pool, entry, false).await
+}
+
+fn projected(receiver: &Fixture, conversation: &str) -> Result<usize, SdkError> {
+    Ok(receiver.client.direct_messages(conversation)?.len())
+}
+
+fn crypto(result: Result<Delivery, SdkError>, want: &str) -> Result<(), SdkError> {
+    match result {
+        Err(error @ SdkError::Crypto(_)) if error.to_string().contains(want) => {
+            assert_eq!(deterministic(&error), Some("authentication_failed"));
+            Ok(())
+        }
+        Err(error) => Err(invalid(&format!("exact crypto {want}, got {error}"))),
+        Ok(_) => Err(invalid(&format!("exact crypto {want}, got Ok"))),
+    }
+}
+
+fn rejected(result: Result<Delivery, SdkError>, want: &str) -> Result<(), SdkError> {
+    match result {
+        Err(SdkError::InboundRejected(text)) if text.contains(want) => Ok(()),
+        Err(error) => Err(invalid(&format!("exact rejected {want}, got {error}"))),
+        Ok(_) => Err(invalid(&format!("exact rejected {want}, got Ok"))),
+    }
+}
 
 fn resign(sender: &Fixture, envelope: &mut ramflux_protocol::Envelope) -> Result<(), SdkError> {
     envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(
@@ -12,29 +81,43 @@ fn resign(sender: &Fixture, envelope: &mut ramflux_protocol::Envelope) -> Result
     Ok(())
 }
 
-fn report_mismatch(result: Result<Opened, SdkError>) -> Result<(), SdkError> {
-    match result {
-        Err(SdkError::Crypto(CryptoError::ReportCommitmentMismatch)) => {
-            assert_eq!(
-                SdkError::Crypto(CryptoError::ReportCommitmentMismatch).to_string(),
-                "crypto error: report opening commitment mismatch"
-            );
-            Ok(())
-        }
-        Err(error) => Err(invalid(&format!("exact report commitment mismatch, got {error}"))),
-        Ok(_) => Err(invalid("exact report commitment mismatch, got Ok")),
-    }
+fn rewrite_nested_commitment(
+    entry: &mut GatewayInboxEntry,
+    commitment: &str,
+) -> Result<(), SdkError> {
+    let bytes = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
+        .map_err(|_| invalid("payload"))?;
+    let compact = ramflux_protocol::message::outer::decode_compact_cryptobox(&bytes)
+        .map_err(|error| invalid(&error.to_string()))?;
+    let mut sidecar: serde_json::Value = serde_json::from_slice(compact.sidecar)?;
+    sidecar["report_commitment"] = serde_json::Value::String(commitment.to_owned());
+    let rebuilt = ramflux_protocol::message::outer::encode_compact_cryptobox(
+        compact.ciphertext,
+        &serde_json::to_vec(&sidecar)?,
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    entry.envelope.encrypted_payload = ramflux_protocol::encode_base64url(&rebuilt);
+    entry.envelope.payload_hash = ramflux_crypto::blake3_256_base64url(
+        ramflux_protocol::domain::ENVELOPE,
+        entry.envelope.encrypted_payload.as_bytes(),
+    );
+    Ok(())
 }
 
-#[test]
-fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkError> {
+fn reply_to(alice: &str) -> GatewayDirectMessage {
+    let mut reply = message("report-reply", "c");
+    reply.source_principal_id = "bob".to_owned();
+    reply.sender_id = "bob".to_owned();
+    reply.recipient_device_id = Some(alice.to_owned());
+    reply.target_delivery_id = alice.to_owned();
+    reply
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (_a, b, entry) = {
-        let a = Fixture::new("alice", 141)?;
-        let b = Fixture::new("bob", 142)?;
-        let entry = seal(&a, &b, message("report-ok", "c"), b"report-body")?;
-        (a, b, entry)
-    };
+    let (a, mut b) = pair(141, 142)?;
+    let entry = seal(&a, &b, message("report-ok", "c"), b"report-body")?;
     let tag = ramflux_protocol::decode_base64url(
         entry.envelope.collapse_tag.as_deref().ok_or_else(|| invalid("collapse_tag"))?,
     )
@@ -46,60 +129,172 @@ fn direct_seal_writes_tag_and_commitment_and_opens() -> Result<(), SdkError> {
     assert_eq!(tag.len(), 32);
     assert_eq!(commitment.len(), 32);
     assert_eq!(entry.envelope.delivery_mode.as_deref(), Some("durable"));
-    let opened = b.client.open_routed(&entry, "bob")?;
-    assert_eq!(opened.body.as_slice(), b"report-body");
+    let opened = apply(&mut b, &entry).await?;
+    assert!(opened.plaintext.is_some());
+    assert_eq!(projected(&b, "c")?, 1);
     Ok(())
 }
 
-#[test]
-fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkError> {
+#[tokio::test(flavor = "current_thread")]
+async fn tampered_opening_refused_and_next_message_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let a = Fixture::new("alice", 143)?;
-    let b = Fixture::new("bob", 144)?;
-    let entry = seal(&a, &b, message("report-tamper", "c"), b"tamper-body")?;
+    let (a, mut b) = pair(143, 144)?;
+    let first = seal(&a, &b, message("report-bootstrap", "c"), b"first-body")?;
+    apply(&mut b, &first).await?;
+    let second = seal(&a, &b, message("report-tamper", "c"), b"tamper-body")?;
+    let mut tampered = second.clone();
+    tampered.inbox_seq = 2;
+    tampered.envelope.created_at = tampered.envelope.created_at.saturating_add(1);
+    resign(&a, &mut tampered.envelope)?;
+    crypto(apply(&mut b, &tampered).await, "report opening commitment mismatch")?;
+    assert_eq!(projected(&b, "c")?, 1);
+    let mut next = seal(&a, &b, message("report-next", "c"), b"next-body")?;
+    next.inbox_seq = 3;
+    let opened = apply(&mut b, &next).await?;
+    assert!(opened.plaintext.is_some());
+    assert_eq!(projected(&b, "c")?, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn redelivery_after_uncommitted_open_still_opens() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(149, 150)?;
+    let entry = seal(&a, &b, message("report-redeliver", "c"), b"once")?;
+    super::super::receive::commit_fault::fail_before(
+        super::super::receive::commit_fault::Kind::Content,
+    );
+    match apply(&mut b, &entry).await {
+        Err(SdkError::LocalBus(text)) if text == "routed commit fault" => {}
+        Err(error) => return Err(invalid(&format!("exact commit fault, got {error}"))),
+        Ok(_) => return Err(invalid("exact commit fault, got Ok")),
+    }
+    assert_eq!(projected(&b, "c")?, 0);
+    let opened = apply(&mut b, &entry).await?;
+    assert!(opened.plaintext.is_some());
+    assert_eq!(projected(&b, "c")?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn collapse_tag_stable_across_dh_step() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (mut a, mut b) = pair(151, 152)?;
+    friend(&mut a, &b)?;
+    let first = seal(&a, &b, message("report-dh-1", "c"), b"one")?;
+    let tag = first.envelope.collapse_tag.clone();
+    apply(&mut b, &first).await?;
+    let reply = seal(&b, &a, reply_to("alice"), b"reply")?;
+    apply(&mut a, &reply).await?;
+    let mut second = seal(&a, &b, message("report-dh-2", "c"), b"two")?;
+    second.inbox_seq = 2;
+    assert_eq!(second.envelope.collapse_tag, tag);
+    apply(&mut b, &second).await?;
+    assert_eq!(projected(&b, "c")?, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_direct_commitment_refused_under_gate() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(153, 154)?;
+    let _omit = omit_direct_report();
+    let entry = seal(&a, &b, message("report-omit", "c"), b"evade")?;
+    assert!(entry.envelope.report_commitment.is_none());
+    crypto(apply(&mut b, &entry).await, "report commitment is required")?;
+    assert_eq!(projected(&b, "c")?, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a0_from_signed_envelope_uses_device_key_id_and_delivery_class() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(155, 156)?;
+    let entry = seal(&a, &b, message("report-a0", "c"), b"a0-body")?;
+    assert_eq!(entry.envelope.signed.signing_key_id, "device:alice");
+    assert_eq!(entry.envelope.delivery_class, ramflux_protocol::DeliveryClass::OpaqueEvent);
+    let a0 = candidate_report_a0_from_envelope(&entry.envelope)
+        .map_err(|error| invalid(&error.to_string()))?;
+    assert_eq!(a0.signing_key_id, "device:alice");
+    assert_eq!(a0.delivery_class, CandidateDeliveryClass::Message);
+    apply(&mut b, &entry).await?;
+    assert_eq!(projected(&b, "c")?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn payload_outer_commitment_mismatch_is_refused() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(157, 158)?;
+    let entry = seal(&a, &b, message("report-l5", "c"), b"l5")?;
     let mut tampered = entry.clone();
     tampered.envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
     resign(&a, &mut tampered.envelope)?;
-    report_mismatch(b.client.open_routed(&tampered, "bob"))?;
-    let next = seal(&a, &b, message("report-next", "c"), b"next-body")?;
-    let opened = b.client.open_routed(&next, "bob")?;
-    assert_eq!(opened.body.as_slice(), b"next-body");
+    rejected(apply(&mut b, &tampered).await, "payload report fields must match outer")?;
+    assert_eq!(projected(&b, "c")?, 0);
     Ok(())
 }
 
-#[test]
-fn two_direct_sends_produce_fresh_commitments() -> Result<(), SdkError> {
+#[tokio::test(flavor = "current_thread")]
+async fn ad_binds_report_commitment_so_matched_c_tamper_fails_aead() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let a = Fixture::new("alice", 145)?;
-    let b = Fixture::new("bob", 146)?;
+    let (a, mut b) = pair(159, 160)?;
+    let entry = seal(&a, &b, message("report-ad", "c"), b"ad")?;
+    let forged = ramflux_protocol::encode_base64url([0x00_u8; 32]);
+    let mut tampered = entry.clone();
+    rewrite_nested_commitment(&mut tampered, &forged)?;
+    tampered.envelope.report_commitment = Some(forged);
+    resign(&a, &mut tampered.envelope)?;
+    crypto(apply(&mut b, &tampered).await, "aead operation failed")?;
+    assert_eq!(projected(&b, "c")?, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn two_direct_sends_produce_fresh_commitments() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(145, 146)?;
     let first = seal(&a, &b, message("report-fresh-1", "c"), b"one")?;
-    let second = seal(&a, &b, message("report-fresh-2", "c"), b"two")?;
+    let mut second = seal(&a, &b, message("report-fresh-2", "c"), b"two")?;
+    second.inbox_seq = 2;
     let first_c = first.envelope.report_commitment.as_deref().ok_or_else(|| invalid("first C"))?;
     let second_c =
         second.envelope.report_commitment.as_deref().ok_or_else(|| invalid("second C"))?;
     assert_ne!(first_c, second_c);
-    let first_open = b.client.open_routed(&first, "bob")?;
-    let second_open = b.client.open_routed(&second, "bob")?;
-    assert_eq!(first_open.body.as_slice(), b"one");
-    assert_eq!(second_open.body.as_slice(), b"two");
-    let first_kf = ramflux_crypto::parse_report_plaintext(&first_open.decrypted.plaintext)?;
-    let second_kf = ramflux_crypto::parse_report_plaintext(&second_open.decrypted.plaintext)?;
-    assert_ne!(first_kf.opening(), second_kf.opening());
+    apply(&mut b, &first).await?;
+    apply(&mut b, &second).await?;
+    assert_eq!(projected(&b, "c")?, 2);
     Ok(())
 }
 
-#[test]
-fn gate_off_omits_report_fields_and_legacy_bytes_open() -> Result<(), SdkError> {
+#[tokio::test(flavor = "current_thread")]
+async fn gate_off_omits_report_fields_and_legacy_bytes_open() -> Result<(), SdkError> {
     assert!(!ramflux_protocol::schema_profile::schema_v1_live());
-    let a = Fixture::new("alice", 147)?;
-    let b = Fixture::new("bob", 148)?;
+    let (a, mut b) = pair(147, 148)?;
     let entry = seal(&a, &b, message("report-legacy", "c"), b"legacy-body")?;
     assert_eq!(entry.envelope.collapse_tag, None);
     assert_eq!(entry.envelope.report_commitment, None);
     let json = serde_json::to_vec(&entry.envelope)?;
     assert!(!json.windows(b"report_commitment".len()).any(|w| w == b"report_commitment"));
     assert!(!json.windows(b"collapse_tag".len()).any(|w| w == b"collapse_tag"));
-    let opened = b.client.open_routed(&entry, "bob")?;
-    assert_eq!(opened.body.as_slice(), b"legacy-body");
+    let opened = apply(&mut b, &entry).await?;
+    assert!(opened.plaintext.is_some());
+    assert_eq!(projected(&b, "c")?, 1);
     Ok(())
+}
+
+#[test]
+fn report_mismatch_maps_to_authentication_failed() {
+    assert_eq!(
+        deterministic(&SdkError::Crypto(CryptoError::ReportCommitmentMismatch)),
+        Some("authentication_failed")
+    );
+    assert_eq!(
+        deterministic(&SdkError::Crypto(CryptoError::ReportCommitmentMissing)),
+        Some("authentication_failed")
+    );
+    assert_eq!(
+        SdkError::Crypto(CryptoError::ReportCommitmentMismatch).to_string(),
+        "crypto error: report opening commitment mismatch"
+    );
 }

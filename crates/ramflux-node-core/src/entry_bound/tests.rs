@@ -470,6 +470,23 @@ fn candidate_entry_refuses_31_byte_collapse_tag() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn candidate_entry_refuses_31_byte_report_commitment() -> Result<(), Box<dyn std::error::Error>> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let mut envelope = compact_250kb_envelope()?;
+    envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x00_u8; 31]));
+    exact_config(check_entry_bound(&envelope), "report_commitment must be 32 bytes")
+}
+
+#[test]
+fn gate_off_named_report_commitment_is_refused_at_entry() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
+    envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
+    exact_mode_refused(check_entry_bound(&envelope))
+}
+
+#[test]
 fn candidate_compact_ciphertext_object_is_required() -> Result<(), Box<dyn std::error::Error>> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let missing = set_sidecar_field(&compact_250kb_envelope()?, |sidecar| {

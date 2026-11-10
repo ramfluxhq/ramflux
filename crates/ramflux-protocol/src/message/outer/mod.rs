@@ -129,6 +129,8 @@ pub enum OuterProfileError {
     Malformed,
     #[error("collapse_tag must be 32 bytes")]
     CollapseTag,
+    #[error("report_commitment must be 32 bytes")]
+    ReportCommitment,
     #[error("identifier exceeds 256 bytes")]
     Identifier,
     #[error("candidate outer envelope has unknown fields")]
@@ -533,6 +535,31 @@ pub fn require_live_collapse_tag(
         .as_slice()
         .try_into()
         .map_err(|_| OuterProfileError::CollapseTag)
+}
+
+/// Decode the live envelope report commitment as exactly 32 bytes when present.
+///
+/// # Errors
+/// [`OuterProfileError::ReportCommitment`] when present but not 32-byte base64url.
+pub fn live_report_commitment_bytes(
+    envelope: &crate::Envelope,
+) -> Result<Option<[u8; 32]>, OuterProfileError> {
+    let Some(encoded) = envelope.report_commitment.as_deref() else {
+        return Ok(None);
+    };
+    let raw = crate::decode_base64url(encoded).map_err(|_| OuterProfileError::ReportCommitment)?;
+    Ok(Some(raw.as_slice().try_into().map_err(|_| OuterProfileError::ReportCommitment)?))
+}
+
+/// Decode the live envelope report commitment as exactly 32 bytes.
+///
+/// # Errors
+/// [`OuterProfileError::ReportCommitment`] when missing, not base64url, or not 32
+/// bytes.
+pub fn require_live_report_commitment(
+    envelope: &crate::Envelope,
+) -> Result<[u8; 32], OuterProfileError> {
+    live_report_commitment_bytes(envelope)?.ok_or(OuterProfileError::ReportCommitment)
 }
 
 /// Candidate profile token on a verified, identity-bound discovery record.

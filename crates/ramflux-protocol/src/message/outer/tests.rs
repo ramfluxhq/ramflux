@@ -11,8 +11,9 @@ use super::{
     accept_after_size_preflight, advertised_client_protocol_versions, compact_cryptobox_bytes,
     decode_candidate_outer_ijson, decode_candidate_sidecar, decode_compact_candidate_sidecar,
     decode_compact_cryptobox, discover_verified_message_schema, encode_compact_cryptobox,
-    live_collapse_tag_bytes, parse_live_named_delivery_mode, refuse_named_fields_while_gate_off,
-    require_live_collapse_tag, validate_candidate_delivery_mode, wire_encrypted_payload,
+    live_collapse_tag_bytes, live_report_commitment_bytes, parse_live_named_delivery_mode,
+    refuse_named_fields_while_gate_off, require_live_collapse_tag, require_live_report_commitment,
+    validate_candidate_delivery_mode, wire_encrypted_payload,
 };
 use crate::schema_profile::{
     ACTIVE_STORAGE_GENERATION, MESSAGE_SCHEMA_V1_GENERATION, schema_v1_live,
@@ -711,7 +712,10 @@ fn helper_covers_candidate_fields(src: &str, names: &[String]) -> bool {
 fn candidate_only_fields_are_enumerated() {
     let src = include_str!("../../core_types.rs");
     let names = candidate_field_names_from_envelope_source(src);
-    assert_eq!(names, vec!["delivery_mode".to_owned(), "collapse_tag".to_owned()]);
+    assert_eq!(
+        names,
+        vec!["delivery_mode".to_owned(), "collapse_tag".to_owned(), "report_commitment".to_owned()]
+    );
     assert!(helper_covers_candidate_fields(src, &names));
     let extra: Vec<String> = all_envelope_field_names_from_source(src)
         .into_iter()
@@ -739,6 +743,13 @@ fn candidate_only_fields_are_enumerated() {
         refuse_named_fields_while_gate_off(&envelope),
         Err(OuterProfileError::NamedFieldsWhileGateOff)
     );
+    envelope.collapse_tag = None;
+    envelope.report_commitment = Some(crate::encode_base64url([0x33_u8; 32]));
+    assert!(envelope.candidate_fields_present());
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
 }
 
 #[test]
@@ -757,6 +768,13 @@ fn gate_off_refuses_named_delivery_mode_and_collapse_tag() {
         refuse_named_fields_while_gate_off(&envelope),
         Err(OuterProfileError::NamedFieldsWhileGateOff)
     );
+    envelope.collapse_tag = None;
+    envelope.report_commitment = Some(crate::encode_base64url([0x33_u8; 32]));
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
+    envelope.report_commitment = None;
     envelope.delivery_mode = Some("durable".to_owned());
     envelope.ext.ext.insert(
         ephemeral::DELIVERY_MODE_EXTENSION.to_owned(),
@@ -788,6 +806,12 @@ fn live_named_fields_parse_mode_and_require_32_byte_tag() {
     assert_eq!(require_live_collapse_tag(&envelope), Err(OuterProfileError::CollapseTag));
     envelope.collapse_tag = Some(collapse_tag());
     assert_eq!(require_live_collapse_tag(&envelope), Ok([0x22_u8; 32]));
+    assert_eq!(live_report_commitment_bytes(&envelope), Ok(None));
+    envelope.report_commitment = Some(crate::encode_base64url([0x00_u8; 31]));
+    assert_eq!(live_report_commitment_bytes(&envelope), Err(OuterProfileError::ReportCommitment));
+    assert_eq!(require_live_report_commitment(&envelope), Err(OuterProfileError::ReportCommitment));
+    envelope.report_commitment = Some(crate::encode_base64url([0x33_u8; 32]));
+    assert_eq!(require_live_report_commitment(&envelope), Ok([0x33_u8; 32]));
 }
 
 #[test]

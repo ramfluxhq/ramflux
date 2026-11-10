@@ -82,7 +82,9 @@ impl Envelope {
     /// be listed here; `candidate_only_fields_are_enumerated` fails otherwise.
     #[must_use]
     pub fn candidate_fields_present(&self) -> bool {
-        self.delivery_mode.is_some() || self.collapse_tag.is_some()
+        self.delivery_mode.is_some()
+            || self.collapse_tag.is_some()
+            || self.report_commitment.is_some()
     }
 }
 
