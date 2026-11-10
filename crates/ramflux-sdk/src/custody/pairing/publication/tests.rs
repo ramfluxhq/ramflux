@@ -444,6 +444,79 @@ async fn pairing_terminal_transition_deletes_head() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn pairing_publish_refuses_foreign_pending_head() -> TestResult {
+    let harness = Harness::open("p09fence").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    enroll_sibling(&harness, now)?;
+    let (seed, _) = enroll_write(&harness, "held", now.saturating_add(1))?;
+    seed_prepared(&harness, &seed)?;
+    let before_head = held_head(&harness)?;
+    let before_record = harness.account(now)?.record().clone();
+    let profile = profile_write(&harness, "Renamed Human", now.saturating_add(1))?;
+    let revoke = revoke_write(&harness, "sibling", now.saturating_add(1))?;
+    let (enroll, _) = enroll_write(&harness, "other", now.saturating_add(1))?;
+    assert_busy(&harness, &profile)?;
+    assert_busy(&harness, &revoke)?;
+    assert_busy(&harness, &enroll)?;
+    assert_eq!(held_head(&harness)?, before_head);
+    assert_eq!(harness.account(now)?.record(), &before_record);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_non_primary_cannot_submit_stored_head() -> TestResult {
+    let harness = Harness::open("p09stored").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    let (mut write, recipient) = enroll_write(&harness, "stolen", now.saturating_add(1))?;
+    seed_prepared(&harness, &write)?;
+    write.publisher_ref = recipient.clone();
+    write.local_ref = recipient;
+    match publish_head(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+        harness.persist.as_ref(),
+    ) {
+        Err(SdkError::PairingCode("PrimaryRequired")) => Ok(()),
+        other => Err(format!("non-primary submit: {other:?}").into()),
+    }
+}
+
+#[tokio::test]
+async fn pairing_resume_refuses_kind_mismatch() -> TestResult {
+    let harness = Harness::open("p09kind").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    let (seed, _) = enroll_write(&harness, "kind", now.saturating_add(1))?;
+    seed_prepared(&harness, &seed)?;
+    let mut profile = profile_write(&harness, "Renamed Human", now.saturating_add(1))?;
+    profile.operation_id = seed.operation_id.clone();
+    profile.invitation_id = seed.invitation_id.clone();
+    assert_busy(&harness, &profile)?;
+    Ok(())
+}
+
+fn held_head(harness: &Harness) -> TestResult<HeadRow> {
+    Ok(harness.db.lock().map_err(|_| "db")?.pairing_head()?.ok_or("head")?)
+}
+
+fn assert_busy(harness: &Harness, write: &HeadWrite) -> TestResult {
+    match publish_head(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        write,
+        harness.persist.as_ref(),
+    ) {
+        Err(SdkError::PairingCode("Busy")) => Ok(()),
+        other => Err(format!("expected Busy, got {other:?}").into()),
+    }
+}
+
 fn seed_prepared(harness: &Harness, write: &HeadWrite) -> TestResult {
     let account = harness.account(write.now)?;
     let primary = harness.primary(write.now)?;

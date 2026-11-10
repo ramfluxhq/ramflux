@@ -113,10 +113,11 @@ pub fn acknowledge_as_responder(
 }
 
 /// Write adoption and atomically delete the acknowledged head.
+/// `local_role` is derived from the stored head's publisher versus `write.local_ref`.
 ///
 /// # Errors
 /// Storage field errors when adoption or terminal cleanup is refused.
-pub fn retire_prepared_head(
+pub(crate) fn retire_prepared_head(
     db: &Mutex<AccountDb>,
     write: &HeadWrite,
     record_hash: &str,
@@ -132,13 +133,20 @@ fn publish_inside_fence(
     write: &HeadWrite,
     persist: &dyn NodeHeadPersist,
 ) -> Result<PublishedHead, SdkError> {
+    let account = load_account(root, &write.account_id, write.now)?;
+    let existing = journal(db, |db| Ok(db.pairing_head()?))?;
+    let primary = match existing.as_ref() {
+        Some(head) if head.operation_id == write.operation_id => {
+            let stored = decode_ref(&head.publisher_ref)?;
+            require_primary(&account, vault, &stored, &stored)?
+        }
+        _ => require_primary(&account, vault, &write.publisher_ref, &write.local_ref)?,
+    };
+    #[cfg(test)]
+    std::thread::yield_now();
     if let Some(published) = resume_submitted(db, root, write, persist)? {
         return Ok(published);
     }
-    let account = load_account(root, &write.account_id, write.now)?;
-    let primary = require_primary(&account, vault, &write.publisher_ref, &write.local_ref)?;
-    #[cfg(test)]
-    std::thread::yield_now();
     match write.kind {
         HeadKind::Enroll => enroll_head(db, root, &account, &primary, write, persist),
         HeadKind::Profile => profile_head(root, &account, &primary, write, persist),
@@ -157,11 +165,14 @@ fn resume_submitted(
         return Ok(None);
     };
     if head.operation_id != write.operation_id {
+        return Ok(None);
+    }
+    if head.kind != kind_label(write.kind) {
         return Err(SdkError::PairingCode("Busy"));
     }
     match head.state.as_str() {
         "acknowledged" => {
-            journal(db, |db| retire_acknowledged(db, write, &head.candidate_hash, write.now))?;
+            retire_prepared_head(db, write, &head.candidate_hash, write.now)?;
             Ok(Some(published_from_head(&head)?))
         }
         "prepared" | "submitted" => Ok(Some(submit_and_ack(db, root, write, persist, head)?)),
@@ -221,8 +232,12 @@ fn submit_and_ack(
     mut head: HeadRow,
 ) -> Result<PublishedHead, SdkError> {
     let publication = decode_candidate(&head.candidate)?;
+    let stored = decode_ref(&head.publisher_ref)?;
+    if stored != write.publisher_ref {
+        return Err(SdkError::PairingCode("PrimaryRequired"));
+    }
     if head.state == "prepared" {
-        validate_head_advance("prepared", "submitted", &write.publisher_ref, &write.local_ref)?;
+        validate_head_advance("prepared", "submitted", &stored, &write.local_ref)?;
         head.state = "submitted".into();
         journal(db, |db| {
             db.put_pairing_head(&head)?;
@@ -233,7 +248,7 @@ fn submit_and_ack(
     if published != head.candidate_hash {
         return Err(SdkError::PairingCode("HeadChanged"));
     }
-    validate_head_advance("submitted", "acknowledged", &write.publisher_ref, &write.local_ref)?;
+    validate_head_advance("submitted", "acknowledged", &stored, &write.local_ref)?;
     head.ack = Some(ack_bytes(&published, publication.record.body.device_set_epoch)?);
     head.state = "acknowledged".into();
     journal(db, |db| {
@@ -241,7 +256,7 @@ fn submit_and_ack(
         Ok(())
     })?;
     adopt_local(root, write, &publication)?;
-    journal(db, |db| retire_acknowledged(db, write, &published, write.now))?;
+    retire_prepared_head(db, write, &published, write.now)?;
     Ok(PublishedHead {
         record_hash: published,
         epoch: publication.record.body.device_set_epoch,
@@ -273,12 +288,13 @@ fn retire_acknowledged(
 ) -> Result<(), SdkError> {
     let invitation_id =
         write.invitation_id.clone().ok_or(SdkError::PairingField("invitation_id"))?;
+    let local_role = adoption_local_role(db, write)?;
     db.put_pairing_adoption(&AdoptionRow {
         account_id: write.account_id.clone(),
         operation_id: write.operation_id.clone(),
         record_hash: record_hash.to_owned(),
         local_ref: ref_bytes(&write.local_ref)?,
-        local_role: "primary".into(),
+        local_role,
         branch_vault_ref: write.branch_vault_ref.clone(),
         data_vault_ref: write.data_vault_ref.clone(),
         primary_vault_ref: write.primary_vault_ref.clone(),
@@ -314,7 +330,7 @@ fn prepared_enroll_row(
         operation_id: write.operation_id.clone(),
         invitation_id: Some(invitation_id),
         generation: write.generation,
-        kind: "enroll".into(),
+        kind: kind_label(HeadKind::Enroll).into(),
         base_record_hash: object_hash(account.record())?,
         base_epoch: account.record().body.device_set_epoch,
         publisher_ref: ref_bytes(&write.publisher_ref)?,
@@ -417,6 +433,22 @@ fn published_from_head(head: &HeadRow) -> Result<PublishedHead, SdkError> {
         epoch: publication.record.body.device_set_epoch,
         record: publication.record,
     })
+}
+
+fn kind_label(kind: HeadKind) -> &'static str {
+    match kind {
+        HeadKind::Enroll => "enroll",
+        HeadKind::Profile => "profile",
+        HeadKind::Revoke => "revoke",
+    }
+}
+
+fn adoption_local_role(db: &AccountDb, write: &HeadWrite) -> Result<String, SdkError> {
+    let publisher = match db.pairing_head()? {
+        Some(head) => decode_ref(&head.publisher_ref)?,
+        None => write.publisher_ref.clone(),
+    };
+    if publisher == write.local_ref { Ok("primary".into()) } else { Ok("recipient".into()) }
 }
 
 fn decode_candidate(bytes: &[u8]) -> Result<Publication, SdkError> {

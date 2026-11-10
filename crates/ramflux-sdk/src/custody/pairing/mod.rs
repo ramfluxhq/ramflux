@@ -21,7 +21,6 @@ pub use local_credential::{
 };
 pub use publication::{
     HeadKind, HeadWrite, NodeHeadPersist, PublishedHead, acknowledge_as_responder, publish_head,
-    retire_prepared_head,
 };
 pub use recipient::{
     RecipientKeyStaging, RecipientStaging, StageExisting, StageNew, StagedRecipient,
