@@ -27,11 +27,13 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 pub(super) const PUSH_E: &str = "0123456789abcdef0123456789abcdef";
 const CONVERSATION: &str = "healthy";
-/// Outer tokio timeout and inner real-time watchdog share this budget.
-/// QA default-thread whole-module wall time of `held()`+`ack_fence()` was
-/// 20.8-25.0 s over 5 runs (worst 24.976 s); 60 s is ~2.4x that worst case
-/// and matches the CI nextest slow-timeout.
-const LIFECYCLE_FENCE_GUARD: Duration = Duration::from_secs(60);
+/// Inner real-time watchdog budget. QA default-thread whole-module wall time
+/// of `held()`+`ack_fence()` was 20.8-25.0 s over 5 runs (worst 24.976 s);
+/// 45 s is ~1.8x that worst case and stays below the CI nextest kill point
+/// (`.config/nextest.toml`: 30 s period x terminate-after 2 = 60 s).
+const LIFECYCLE_FENCE_GUARD: Duration = Duration::from_secs(45);
+/// Outer timeout margin so the inner watchdog's message is the one that reports a hang.
+const LIFECYCLE_FENCE_OUTER: Duration = Duration::from_secs(47);
 
 pub(super) fn limits() -> RuntimeTimeouts {
     RuntimeTimeouts::held_for_test()
@@ -232,7 +234,7 @@ pub(super) async fn pump_quiet(
 #[tokio::test(flavor = "current_thread")]
 async fn lifecycle_fence() -> Case {
     tokio::time::timeout(
-        LIFECYCLE_FENCE_GUARD,
+        LIFECYCLE_FENCE_OUTER,
         LocalSet::new().run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
             LIFECYCLE_FENCE_GUARD,
             Box::pin(async {
