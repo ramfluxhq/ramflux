@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub(crate) async fn run(handle: ConnectionHandle, work: mpsc::Sender<AccountWork>) {
     let mut stop = handle.stopping();
     while wait_live(&handle, &mut stop).await {
-        run_session(&handle, &work, &mut stop).await;
+        Box::pin(run_session(&handle, &work, &mut stop)).await;
     }
 }
 
@@ -65,7 +65,8 @@ async fn run_session(
                 {
                     return;
                 }
-                if let Err(error) = handle_event(handle, work, &mut pending, event).await {
+                if let Err(error) = Box::pin(handle_event(handle, work, &mut pending, event)).await
+                {
                     tracing::debug!(%error, "deliver intake deferred");
                 }
             }
@@ -84,7 +85,7 @@ async fn handle_event(
             if generation != handle.generation() {
                 return Ok(());
             }
-            apply_capable(handle, work, pending, event).await
+            Box::pin(apply_capable(handle, work, pending, event)).await
         }
         SessionEvent::Lagged { generation, .. } => {
             if generation == handle.generation() {
@@ -105,14 +106,14 @@ async fn apply_capable(
 ) -> Result<(), SdkError> {
     match &*event {
         CapableEvent::Deliver { entry, incarnation_id, retain_until } => {
-            stage_and_admit(
+            Box::pin(stage_and_admit(
                 handle,
                 work,
                 pending,
                 entry.clone(),
                 incarnation_id.as_str(),
                 *retain_until,
-            )
+            ))
             .await
         }
         CapableEvent::Resync { .. } => {
