@@ -124,7 +124,9 @@ async fn manifest(
     };
     let response: ramflux_protocol::PrincipalLookupResponse<
         ramflux_node_core::DeviceManifestResponse,
-    > = crate::router_post_json_async(&context.router, "/mvp1/principal-lookup", &lookup).await?;
+    > = crate::registration::note_identity_rejection(
+        crate::router_post_json_async(&context.router, "/mvp1/principal-lookup", &lookup).await,
+    )?;
     response.manifest.ok_or_else(|| anyhow::anyhow!("voice endpoint authority unavailable"))
 }
 struct VoiceDeviceAuthority {

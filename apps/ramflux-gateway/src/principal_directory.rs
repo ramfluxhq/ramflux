@@ -32,7 +32,9 @@ pub(crate) async fn fetch(
         source: context.remote_addr.ip(),
     };
     let response: PrincipalLookupResponse<ramflux_node_core::DeviceManifestResponse> =
-        router_post_json_async(&context.router, "/mvp1/principal-lookup", &request).await?;
+        crate::registration::note_identity_rejection(
+            router_post_json_async(&context.router, "/mvp1/principal-lookup", &request).await,
+        )?;
     let frame = ramflux_node_core::GatewayServerFrame::PrincipalManifest { response };
     crate::session::write_gateway_handle(send, &frame).await
 }

@@ -64,6 +64,8 @@ apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 2 | E |
 apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 3 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/quic_dispatch.rs | dispatch_quic_json_request | 4 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/quic_dispatch.rs | forward_quic_envelope | 1 | C | admission=apps/ramflux-gateway/src/ingress.rs#parse_inner#1
+apps/ramflux-gateway/src/registration.rs | gateway_instance_rejection | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-gateway/src/registration.rs | log_gateway_identity_rejection | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-gateway/src/registration.rs | prepare | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/registration.rs | registration_result | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/registration.rs | registration_result | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -155,6 +157,7 @@ apps/ramflux-router/src/handlers.rs | handle_mvp6_friend_request | 1 | E | exclu
 apps/ramflux-router/src/handlers.rs | handle_mvp6_registration_policy | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | handle_s1_session_upsert | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-router/src/handlers.rs | mesh_fanout_response | 1 | A | strict=parse_i_json; admission=A ingress boundary
+apps/ramflux-router/src/handlers.rs | registration_peer_gate | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 1 | A | strict=parse_i_json; admission=A byte ingress
 apps/ramflux-router/src/handlers/session_push.rs | bound_ack | 2 | C | admission=apps/ramflux-router/src/handlers/session_push.rs#bound_ack#1
 apps/ramflux-router/src/handlers/session_push.rs | bound_nack | 1 | C | admission=apps/ramflux-router/src/handlers/session_push.rs#route#1

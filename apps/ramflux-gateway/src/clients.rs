@@ -471,7 +471,9 @@ pub(crate) async fn router_session_async(
     router: &RouterMeshClient,
     target_delivery_id: &str,
 ) -> Result<Option<ramflux_node_core::SessionDescriptor>, ramflux_transport::TransportError> {
-    router_get_json_async(router, &format!("/s1/session/{target_delivery_id}")).await
+    crate::registration::note_identity_rejection(
+        router_get_json_async(router, &format!("/s1/session/{target_delivery_id}")).await,
+    )
 }
 
 pub(crate) fn notify_offline_wake(
@@ -1384,10 +1386,15 @@ pub(crate) mod tests {
             "-subj",
             &format!("/CN={service_id}"),
         ])?;
+        let spiffe_uri = if service_id == "ramflux-gateway" {
+            format!("spiffe://{node_id}/ramflux-gateway/ramflux-gateway")
+        } else {
+            format!("spiffe://{node_id}/{service_id}")
+        };
         std::fs::write(
             &ext,
             format!(
-                "subjectAltName = DNS:{service_id}, DNS:localhost, URI:spiffe://{node_id}/{service_id}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+                "subjectAltName = DNS:{service_id}, DNS:localhost, URI:{spiffe_uri}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
             ),
         )?;
         run_openssl(&[

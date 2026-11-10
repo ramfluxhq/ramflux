@@ -9,6 +9,16 @@ use ramflux_transport::GatewayQuicResponse;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static GATEWAY_IDENTITY_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static GATEWAY_IDENTITY_ERROR_LOG_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+const IDENTITY_403_REASONS: [&str; 4] = [
+    "gateway_role_required",
+    "gateway_instance_missing",
+    "gateway_instance_mismatch",
+    "gateway_node_mismatch",
+];
 pub(crate) fn rejected(reason_code: IdentityDirectoryReason) -> GatewayQuicResponse {
     GatewayQuicResponse {
         status: 409,
@@ -91,38 +101,44 @@ pub(crate) fn gateway_instance_rejection(error: &ramflux_transport::TransportErr
     let ramflux_transport::TransportError::HttpStatus { status: 403, body } = error else {
         return false;
     };
-    serde_json::from_str::<serde_json::Value>(body)
+    ramflux_protocol::parse_i_json::<serde_json::Value>(body.as_bytes())
         .ok()
         .and_then(|value| {
             value.get("reason").and_then(serde_json::Value::as_str).map(str::to_owned)
         })
-        .is_some_and(|reason| {
-            matches!(reason.as_str(), "gateway_instance_missing" | "gateway_instance_mismatch")
-        })
+        .is_some_and(|reason| IDENTITY_403_REASONS.contains(&reason.as_str()))
 }
 
 pub(crate) fn log_gateway_identity_rejection(error: &ramflux_transport::TransportError) -> bool {
     let ramflux_transport::TransportError::HttpStatus { status: 403, body } = error else {
         return false;
     };
-    let reason = serde_json::from_str::<serde_json::Value>(body).ok().and_then(|value| {
-        value.get("reason").and_then(serde_json::Value::as_str).map(str::to_owned)
-    });
-    let Some(reason) = reason.filter(|reason| {
-        matches!(
-            reason.as_str(),
-            "gateway_role_required" | "gateway_instance_missing" | "gateway_instance_mismatch"
-        )
-    }) else {
+    let reason =
+        ramflux_protocol::parse_i_json::<serde_json::Value>(body.as_bytes()).ok().and_then(
+            |value| value.get("reason").and_then(serde_json::Value::as_str).map(str::to_owned),
+        );
+    let Some(reason) = reason.filter(|reason| IDENTITY_403_REASONS.contains(&reason.as_str()))
+    else {
         return false;
     };
     if !GATEWAY_IDENTITY_ERROR_LOGGED.swap(true, Ordering::AcqRel) {
+        #[cfg(test)]
+        GATEWAY_IDENTITY_ERROR_LOG_COUNT.fetch_add(1, Ordering::SeqCst);
         tracing::error!(
             reason,
             "gateway mesh configuration error: router rejected registration identity; check the gateway certificate and RAMFLUX_GATEWAY_ID"
         );
     }
     true
+}
+
+pub(crate) fn note_identity_rejection<T>(
+    result: Result<T, ramflux_transport::TransportError>,
+) -> Result<T, ramflux_transport::TransportError> {
+    if let Err(error) = &result {
+        let _ = log_gateway_identity_rejection(error);
+    }
+    result
 }
 
 pub(crate) async fn publish_prekey(
@@ -167,6 +183,26 @@ pub(crate) fn session_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn identity_403_logs_once_per_process() {
+        GATEWAY_IDENTITY_ERROR_LOGGED.store(false, Ordering::SeqCst);
+        GATEWAY_IDENTITY_ERROR_LOG_COUNT.store(0, Ordering::SeqCst);
+        let error = ramflux_transport::TransportError::HttpStatus {
+            status: 403,
+            body: r#"{"reason":"gateway_node_mismatch"}"#.into(),
+        };
+        assert!(log_gateway_identity_rejection(&error));
+        assert!(log_gateway_identity_rejection(&error));
+        assert_eq!(GATEWAY_IDENTITY_ERROR_LOG_COUNT.load(Ordering::SeqCst), 1);
+        assert!(gateway_instance_rejection(&error));
+        let text = ramflux_transport::TransportError::HttpStatus {
+            status: 403,
+            body: "gateway node mismatch".into(),
+        };
+        assert!(!gateway_instance_rejection(&text));
+        assert!(!log_gateway_identity_rejection(&text));
+    }
+
     #[test]
     fn malformed_registration_and_upstream_ack_are_typed_rejections() -> anyhow::Result<()> {
         let path = std::env::temp_dir().join("unused-registration-tls");

@@ -472,29 +472,25 @@ fn registration_peer_gate(
     let principal_lookup = request.method == "POST" && request.path == "/mvp1/principal-lookup";
     let reassertion = request.method == "POST" && request.path == "/mvp0/ephemeral-registrations";
     let session_get = request.method == "GET"
-        && request
-            .path
-            .strip_prefix("/s1/session/")
-            .is_some_and(|target| !target.is_empty() && !target.contains('/'));
+        && request.path.starts_with("/s1/session/")
+        && request.path.len() > "/s1/session/".len();
     if !(registration || principal_lookup || session_get) {
         return None;
     }
     if peer.service_id != "ramflux-gateway" {
-        return Some(MeshResponse::json(
-            "403 Forbidden",
-            serde_json::json!({"reason": "gateway_role_required"}).to_string().into_bytes(),
-        ));
+        return Some(gateway_identity_forbidden("gateway_role_required"));
     }
     if registration || principal_lookup {
         let Some(instance_id) = peer.instance_id.as_deref() else {
-            return Some(MeshResponse::json(
-                "403 Forbidden",
-                serde_json::json!({"reason": "gateway_instance_missing"}).to_string().into_bytes(),
-            ));
+            return Some(gateway_identity_forbidden("gateway_instance_missing"));
         };
         if !reassertion {
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
-                return None;
+            let Ok(value) = ramflux_protocol::parse_i_json::<serde_json::Value>(&request.body)
+            else {
+                return Some(MeshResponse::json(
+                    "400 Bad Request",
+                    serde_json::json!({"reason": "invalid_json"}).to_string().into_bytes(),
+                ));
             };
             let gateway_id =
                 value.get("gateway_id").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -513,16 +509,20 @@ fn registration_peer_gate(
         return None;
     }
     if peer.node_id != router.node_id() {
-        return Some(MeshResponse::text("403 Forbidden", "gateway node mismatch"));
+        return Some(gateway_identity_forbidden("gateway_node_mismatch"));
     }
     None
 }
 
-fn gateway_instance_mismatch() -> MeshResponse {
+fn gateway_identity_forbidden(reason: &'static str) -> MeshResponse {
     MeshResponse::json(
         "403 Forbidden",
-        serde_json::json!({"reason": "gateway_instance_mismatch"}).to_string().into_bytes(),
+        serde_json::json!({"reason": reason}).to_string().into_bytes(),
     )
+}
+
+fn gateway_instance_mismatch() -> MeshResponse {
+    gateway_identity_forbidden("gateway_instance_mismatch")
 }
 fn handle_mesh_request_inner(
     request: ramflux_transport::MeshHttpRequest,

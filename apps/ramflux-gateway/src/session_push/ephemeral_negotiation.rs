@@ -574,3 +574,49 @@ async fn row_late_hub_insert_reasserts_after_boot_change() -> TestResult {
     assert_online(&router_b, &runtime.session_id);
     Ok(())
 }
+
+#[tokio::test]
+async fn identity_403_latches_refused_boot_without_retry_loop() -> TestResult {
+    let mut fixture = Fixture::new("identity-403-latch")?;
+    let (send, _) = sink();
+    fixture
+        .context
+        .hub
+        .register_ephemeral(TARGET.into(), "session-live".into(), send, Some(ID.into()), 32)
+        .await?;
+    let boot = "boot-identity-403";
+    let readiness = Arc::clone(&fixture.context.hub.readiness);
+    let mesh = fixture.context.router.clone();
+    let hub = Arc::clone(&fixture.context.hub);
+    let gateway_id = fixture.context.gateway_id.clone();
+    let boot_owned = boot.to_owned();
+    let task = tokio::spawn(async move {
+        readiness.reassert_boot(&mesh, &hub, &gateway_id, &boot_owned).await;
+    });
+    let posted = fixture.next().await?;
+    assert_eq!(posted.path, "/mvp0/ephemeral-registrations");
+    posted.respond.send((403, json!({"reason": "gateway_node_mismatch"}))).map_err(|_| Retired)?;
+    task.await?;
+
+    let readiness = Arc::clone(&fixture.context.hub.readiness);
+    let mesh = fixture.context.router.clone();
+    let hub = Arc::clone(&fixture.context.hub);
+    let gateway_id = fixture.context.gateway_id.clone();
+    let boot_owned = boot.to_owned();
+    let task = tokio::spawn(async move {
+        readiness.reassert_boot(&mesh, &hub, &gateway_id, &boot_owned).await;
+    });
+    tokio::pin!(task);
+    tokio::select! {
+        req = fixture.requests.recv() => {
+            anyhow::bail!(
+                "identity 403 retried re-assertion: {}",
+                req.map(|row| row.path).unwrap_or_default()
+            );
+        }
+        join = &mut task => {
+            join?;
+            Ok(())
+        }
+    }
+}

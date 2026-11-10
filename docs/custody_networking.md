@@ -147,6 +147,12 @@ a space-separated list; `issue-certs.sh` writes each instance under
 `certs/gateway-{id}/`. DNS SANs remain the shared `ramflux-gateway` name used
 for TLS server-name verification.
 
+Router non-2xx QUIC mesh responses are JSON values, the same bodies TCP
+returns. Identity refusals are
+`{"reason":"gateway_role_required"|"gateway_instance_missing"|"gateway_instance_mismatch"|"gateway_node_mismatch"}`.
+A QUIC 400 `{"reason":…}` is a refusal, matching TCP; earlier QUIC non-2xx
+bodies were wrapped as `{"error":"<json-string>"}`.
+
 | Setting | Service | Meaning |
 | --- | --- | --- |
 | `RAMFLUX_CUSTODY_NODE_RECORD_FILE` | router | Bounded signed node identity JSON; absent/empty leaves native custody disabled. |

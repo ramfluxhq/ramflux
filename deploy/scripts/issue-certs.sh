@@ -22,6 +22,7 @@ node_id="${RAMFLUX_NODE_ID:-localhost}"
 gateway_id="${RAMFLUX_GATEWAY_ID:-ramflux-gateway}"
 
 valid_gateway_id() {
+  LC_ALL=C
   case "$1" in
     [a-z0-9]*) ;;
     *) return 1 ;;

@@ -35,6 +35,7 @@ async fn held_frame(
             ));
             assert!(held.body["now"].as_i64().is_some_and(|now| now > 1));
             forwarded["now"] = held.body["now"].clone();
+            forwarded["gateway_id"] = json!(fixture.context.gateway_id);
         }
         assert_eq!(held.body, forwarded);
         // The router retains the response sender while a distinct task must run.

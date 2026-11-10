@@ -358,7 +358,36 @@ fn row_principal_lookup_and_session_get_gates() -> TestResult {
         },
     )?;
     assert_eq!(response.status, "403 Forbidden");
+    assert_eq!(serde_json::from_slice::<Value>(&response.body)?["reason"], "gateway_node_mismatch");
     assert!(router.state().session("foreign-node").is_none());
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn row_unparseable_registration_body_is_bad_request() -> TestResult {
+    let (router, path) = fresh("p05-unparseable-body")?;
+    let response = super::super::handle_mesh_request_value(
+        ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/s1/session/upsert".into(),
+            body: b"{".to_vec(),
+        },
+        &router,
+        &ramflux_node_core::MeshPeerIdentity::gateway_for_test("gw-a"),
+    )?;
+    assert_eq!(response.status, "400 Bad Request");
+    assert_eq!(serde_json::from_slice::<Value>(&response.body)?["reason"], "invalid_json");
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn row_session_get_nested_target_is_gated() -> TestResult {
+    let (router, path) = fresh("p05-session-get-nested")?;
+    let response = mesh(&router, "GET", "/s1/session/a/b", &Value::Null, "ramflux-federation")?;
+    assert_eq!(response.status, "403 Forbidden");
+    assert_eq!(serde_json::from_slice::<Value>(&response.body)?["reason"], "gateway_role_required");
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -561,6 +590,8 @@ fn ephemeral_router_restart_reassertion() -> TestResult {
     row_empty_gateway_is_bad_request()?;
     row_ephemeral_session_rejects_another_instance_before_binding()?;
     row_principal_lookup_and_session_get_gates()?;
+    row_unparseable_registration_body_is_bad_request()?;
+    row_session_get_nested_target_is_gated()?;
     row_empty_target()?;
     row_empty_session()?;
     row_non_live_descriptor()?;

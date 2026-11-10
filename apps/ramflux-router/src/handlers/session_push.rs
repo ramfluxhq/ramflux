@@ -167,7 +167,7 @@ fn reassert(
         return Ok(super::gateway_instance_mismatch());
     }
     if peer.node_id != router.node_id() {
-        return Ok(MeshResponse::text("403 Forbidden", "gateway node mismatch"));
+        return Ok(super::gateway_identity_forbidden("gateway_node_mismatch"));
     }
     match router.state().reassert_ephemeral_registrations(&request.router_boot_id, &request.items) {
         Ok(applied) => reply(&ramflux_node_core::EphemeralRegistrationsResponse { applied }),

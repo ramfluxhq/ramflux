@@ -370,6 +370,9 @@ fn mesh_result(
             readiness.ready.store(false, Ordering::Release);
             Err(Retired.into())
         }
+        Ok(Err(error)) if crate::registration::log_gateway_identity_rejection(&error) => {
+            Err(Retired.into())
+        }
         // Transport/5xx failures retire this session. They do not demote other sessions.
         _ => Err(Retired.into()),
     }
@@ -745,11 +748,19 @@ pub(crate) async fn negotiate(
         }
     }
     let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
-    let _: ramflux_node_core::SessionDescriptor = tokio::time::timeout(
+    let upsert = tokio::time::timeout(
         REQUEST_TIMEOUT,
         crate::router_post_json_until(&context.router, "/s1/session/upsert", descriptor, deadline),
     )
-    .await??;
+    .await;
+    let _: ramflux_node_core::SessionDescriptor = match upsert {
+        Ok(Ok(descriptor)) => descriptor,
+        Ok(Err(error)) => {
+            let _ = crate::registration::log_gateway_identity_rejection(&error);
+            return Err(error.into());
+        }
+        Err(elapsed) => return Err(elapsed.into()),
+    };
     Ok(NegotiatedBinding { incarnation_id: None, ephemeral: false })
 }
 async fn capable_registration(

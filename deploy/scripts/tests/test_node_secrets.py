@@ -38,8 +38,17 @@ class NodeSecretsTests(unittest.TestCase):
                             str(legacy_cert), "-days", "1", "-extfile", str(legacy_ext)],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+            ca_before = subprocess.run(
+                ["openssl", "x509", "-in", str(root / "certs" / "ca.pem"), "-noout",
+                 "-fingerprint", "-sha256"],
+                check=True, capture_output=True, text=True).stdout
             subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ca_after = subprocess.run(
+                ["openssl", "x509", "-in", str(root / "certs" / "ca.pem"), "-noout",
+                 "-fingerprint", "-sha256"],
+                check=True, capture_output=True, text=True).stdout
+            self.assertEqual(ca_before, ca_after)
             for directory_name, instance in (("gateway", "gw-a"), ("gateway-gw-a", "gw-a"),
                                              ("gateway-gw-b", "gw-b")):
                 cert = root / "certs" / directory_name / "gateway.pem"
@@ -47,6 +56,18 @@ class NodeSecretsTests(unittest.TestCase):
                                       "subjectAltName"], check=True, capture_output=True, text=True).stdout
                 self.assertEqual(san.count(f"URI:spiffe://localhost/ramflux-gateway/{instance}"), 1)
                 self.assertNotIn("URI:spiffe://localhost/ramflux-gateway\n", san)
+
+    def test_uppercase_gateway_id_is_rejected_under_utf8_locale(self):
+        with tempfile.TemporaryDirectory(prefix="rf-gateway-id-locale-") as directory:
+            root = Path(directory)
+            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root), RAMFLUX_GATEWAY_ID="BAD",
+                       LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8")
+            subprocess.run(["sh", str(SCRIPTS / "bootstrap-ca.sh")], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result = subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid RAMFLUX_GATEWAY_ID", result.stderr)
 
     def test_bootstrap_keys_are_private_stable_and_outside_database_volumes(self):
         with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
