@@ -140,17 +140,29 @@ pub fn ordinary_session_admitted(
     account_id: &str,
 ) -> Result<bool, SdkError> {
     let root = client.account_index()?.root();
-    let adoption = client
-        .account_db()
-        .ok()
-        .and_then(|db| db.pairing_adoption().ok().flatten())
-        .map(|row| row.record_hash);
-    ordinary_session_admitted_at(
+    let adoption = client.account_db()?.pairing_adoption()?;
+    if !ordinary_session_admitted_at(
         root,
         account_id,
-        adoption.as_deref(),
+        adoption.as_ref().map(|row| row.record_hash.as_str()),
         authority_present(root, account_id),
-    )
+    )? {
+        return Ok(false);
+    }
+    let installed = install_store::read_installed(root, account_id)?;
+    match (installed, adoption) {
+        (None, None) => Ok(true),
+        (Some(install), Some(adoption)) => {
+            let account = crate::custody::load_data_account(
+                root,
+                account_id,
+                crate::custody::network_now()?,
+            )?;
+            Ok(super::activate::adoption(&install)? == adoption
+                && crate::custody::matches_install(&account, &install)?)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn ordinary_session_admitted_at(

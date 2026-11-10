@@ -202,6 +202,7 @@ impl PairingActor {
         }
         let spec = spec_from_begin(&self.identity, &begin)?;
         let prepared = PreparedIssue::prepare(spec.clone())?;
+        let mut attempt = NativeAttempt { native: Arc::clone(&native), armed: true };
         let issued = prepared.apply(native.as_ref()).await?;
         let prepared_create = PreparedCreate::prepare(issued.ticket, spec)?;
         let mut created = prepared_create.apply(native.as_ref()).await?;
@@ -244,6 +245,7 @@ impl PairingActor {
             },
         };
         result.validate().map_err(|e| wire(&e))?;
+        attempt.armed = false;
         Ok(local_begin(result))
     }
 
@@ -934,6 +936,9 @@ impl PairingActor {
     }
 
     async fn fail(&mut self, phase: &str, code: &'static str) -> Result<LocalResult, SdkError> {
+        if let Some(native) = &self.native {
+            native.close();
+        }
         let close = self.ceremony.as_mut().map(|c| {
             match &mut c.sas {
                 SasHold::Pending(pending) => pending.cleanup(),
@@ -990,6 +995,27 @@ impl PairingActor {
         f: impl FnOnce(&mut Ceremony) -> Result<T, SdkError>,
     ) -> Result<T, SdkError> {
         f(self.ceremony.as_mut().ok_or(SdkError::PairingCode("NotFound"))?)
+    }
+}
+
+struct NativeAttempt {
+    native: Arc<dyn PairingNative>,
+    armed: bool,
+}
+
+impl Drop for NativeAttempt {
+    fn drop(&mut self) {
+        if self.armed {
+            self.native.close();
+        }
+    }
+}
+
+impl Drop for PairingActor {
+    fn drop(&mut self) {
+        if let Some(native) = &self.native {
+            native.close();
+        }
     }
 }
 

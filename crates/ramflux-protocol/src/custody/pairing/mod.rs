@@ -69,7 +69,23 @@ fn bytes<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     canonical_json_bytes(value).map_err(|_| WireError::Json)
 }
 fn budget<T: Serialize>(value: &T, max: usize) -> Result<()> {
-    if bytes(value)?.len() > max { Err(WireError::Size) } else { Ok(()) }
+    // Object ordering does not change encoded size. Count directly without creating a
+    // serde Value or temporary String copies of transfer data keys.
+    struct Counter {
+        remaining: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.remaining = self.remaining.checked_sub(bytes.len()).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "pairing size limit")
+            })?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Counter { remaining: max }, value).map_err(|_| WireError::Size)
 }
 
 /// Shared canonical codec. Only encoders sort ordered collections.

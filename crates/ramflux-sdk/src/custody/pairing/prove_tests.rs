@@ -3,6 +3,7 @@
 
 //! Production `ProofPairingNative::from_connection` drives `CustodyConnection::prove`.
 use super::{PairingNative, ProofPairingNative};
+use crate::SdkError;
 use crate::custody::{CustodyConnection, CustodyNetworkConfig, memory_vault::MemoryPrimaryVault};
 use ramflux_protocol::custody::pairing::native::{Create, CreateSpec, CreateTicket};
 use ramflux_protocol::custody::{
@@ -142,6 +143,9 @@ fn proof_operations(sent: &[Vec<u8>]) -> Vec<String> {
     sent.iter()
         .filter_map(|bytes| {
             let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+            if value.get("frame_type")?.as_str()? != "prove" {
+                return None;
+            }
             Some(value.get("action")?.get("operation")?.as_str()?.to_owned())
         })
         .collect()
@@ -254,8 +258,14 @@ async fn pairing_native_from_connection_sends_pairing_issue_and_create_proofs() 
         connected.connection,
     )));
     let spec = dummy_spec(&anchor, "primary", record_hash);
-    let _ = PairingNative::issue(&native, spec.clone()).await;
-    let _ = PairingNative::create(&native, dummy_create(spec)).await;
+    assert!(matches!(
+        PairingNative::issue(&native, spec.clone()).await,
+        Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))
+    ));
+    assert!(matches!(
+        PairingNative::create(&native, dummy_create(spec)).await,
+        Err(SdkError::CustodyNetwork(CustodyRefusal::BindingRefused))
+    ));
     let added: Vec<String> =
         proof_operations(&connected.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
             .into_iter()

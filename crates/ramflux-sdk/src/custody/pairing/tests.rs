@@ -483,7 +483,9 @@ async fn pairing_join_commitment_uses_staged_identity() -> TestResult {
     drive_sas(&mut fx, &op, generation).await?;
     let pending = install_store::list_pending(root.path(), "acct-stage-join")?;
     assert_eq!(pending.len(), 1);
-    let committed = fx.recipient.commitment_device_id().ok_or("commitment")?;
+    let observed = update(fx.primary.status(&status_req(&op, generation)).await?)?;
+    let peer = observed.peer_ref.ok_or("primary did not receive staged commitment")?;
+    let committed = peer.device_id;
     assert_eq!(committed, pending[0].recipient_ref.device_id);
     assert_ne!(committed, "recipient");
     Ok(())
