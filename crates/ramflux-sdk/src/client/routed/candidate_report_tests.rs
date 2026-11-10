@@ -399,31 +399,68 @@ async fn gate_on_opaque_own_device_body_builds_envelope() -> Result<(), SdkError
 #[tokio::test(flavor = "current_thread")]
 async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(169, 170)?;
+    let (a, mut b) = pair(169, 170)?;
     let entry = seal(&a, &b, message("report-compact", "c"), b"compact-body")?;
     let compact = ramflux_protocol::decode_base64url(&entry.envelope.encrypted_payload)
         .map_err(|_| invalid("payload"))?;
     ramflux_protocol::message::outer::decode_compact_cryptobox(&compact)
         .map_err(|error| invalid(&error.to_string()))?;
-    let mut message = message("report-compact-rewrap", "c");
+    let mut message = message("report-compact", "c");
+    message.envelope_id.clone_from(&entry.envelope.envelope_id);
+    message.source_principal_id.clone_from(&entry.envelope.source_principal_id);
+    message.sender_id.clone_from(&entry.envelope.source_device_id);
+    message.target_delivery_id.clone_from(&entry.envelope.target_delivery_id);
     message.encrypted_body = compact;
+    message.created_at = entry.envelope.created_at;
+    message.ttl = entry.envelope.ttl;
     let envelope = gateway_direct_message_envelope(&a.config()?, &message, None)?;
     let nested = decode(&envelope)?;
     assert!(nested.collapse_tag.is_some());
     assert!(nested.report_commitment.is_some());
+    let mut rewrapped = entry.clone();
+    rewrapped.envelope = envelope;
+    let opened = apply(&mut b, &rewrapped).await?;
+    assert!(opened.plaintext.is_some());
+    assert_eq!(projected(&b, "c")?, 1);
     Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn abandoned_direct_seal_does_not_fail_later_control_send() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = pair(171, 172)?;
+    let _abandoned = super::seal_nested(
+        &a,
+        &b,
+        message("report-abandoned", "c"),
+        b"abandoned-body",
+        Route::direct(),
+    )?;
+    let (c, mut d) = pair(175, 176)?;
+    let entry = seal_as(
+        &c,
+        &d,
+        message("report-control-after-abandon", "c"),
+        br#"{"type":"pair.session.reset.v1"}"#,
+        Route::control(),
+    )?;
+    opened_kind(&apply(&mut d, &entry).await?, &Kind::Control)
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    let (a, b) = pair(171, 172)?;
-    let entry = seal(&a, &b, message("report-a0-drift", "c"), b"drift")?;
-    let nested = decode(&entry.envelope)?;
-    let mut message = message("report-a0-drift-wrap", "c");
-    message.encrypted_body = serde_json::to_vec(&nested)?;
-    super::super::report::set_committed_report_a0(b"drifted-a0".to_vec());
-    match gateway_direct_message_envelope(&a.config()?, &message, None) {
+    let (a, b) = pair(173, 174)?;
+    let (mut message, sealed) =
+        super::seal_nested(&a, &b, message("report-a0-drift", "c"), b"drift", Route::direct())?;
+    message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
+    message.ttl = message.ttl.saturating_add(1);
+    match gateway_direct_message_envelope_sealed(
+        &a.config()?,
+        &message,
+        None,
+        sealed.committed_a0.as_deref(),
+    ) {
         Err(SdkError::InboundRejected(text)) if text.contains("report a0 drifted") => Ok(()),
         Err(error) => Err(invalid(&format!("exact a0 drift, got {error}"))),
         Ok(_) => Err(invalid("exact a0 drift, got Ok")),

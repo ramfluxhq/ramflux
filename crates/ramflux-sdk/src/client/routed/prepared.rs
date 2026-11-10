@@ -5,7 +5,7 @@
 
 use super::{
     GatewayDirectMessage, GatewaySessionConfig, RamfluxClient, Route, SdkDeviceManifestResponse,
-    SdkDmEncryptedEnvelope, SdkDmX3dhHeader, SdkError, SealPair, invalid,
+    SdkDmX3dhHeader, SdkError, SealPair, invalid,
 };
 use crate::client::identity_authority::HeadUse;
 
@@ -91,7 +91,7 @@ impl RamfluxClient {
         body: &[u8],
         route: Route,
         material: SendMaterial,
-    ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+    ) -> Result<super::SealedRouted, SdkError> {
         let (mut session, header, bundle) = self.prepared_send_pair(
             config,
             message,

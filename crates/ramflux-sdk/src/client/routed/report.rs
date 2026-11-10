@@ -15,16 +15,37 @@ pub(super) struct DirectReport {
     pub collapse_tag: [u8; 32],
     pub report_commitment: [u8; 32],
     pub framed: ramflux_crypto::ReportFrame,
+    pub a0_bytes: Vec<u8>,
+}
+
+/// Nested packet plus the A0 committed at seal. Not a wire struct.
+pub(crate) struct SealedRouted {
+    pub packet: SdkDmEncryptedEnvelope,
+    pub committed_a0: Option<Vec<u8>>,
+}
+
+impl std::ops::Deref for SealedRouted {
+    type Target = SdkDmEncryptedEnvelope;
+    fn deref(&self) -> &Self::Target {
+        &self.packet
+    }
+}
+
+impl std::ops::DerefMut for SealedRouted {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.packet
+    }
+}
+
+impl serde::Serialize for SealedRouted {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.packet.serialize(serializer)
+    }
 }
 
 /// Fresh kf generated inside the Direct producer.
 pub(super) fn fresh_report_opening() -> Result<Zeroizing<[u8; 32]>, SdkError> {
     Ok(Zeroizing::new(ramflux_crypto::random_32()?))
-}
-
-thread_local! {
-    static COMMITTED_REPORT_A0: std::cell::RefCell<Option<Vec<u8>>> =
-        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -45,15 +66,6 @@ pub(super) fn omit_direct_report() -> bool {
 #[cfg(test)]
 pub(super) fn set_omit_direct_report(omit: bool) {
     OMIT_DIRECT_REPORT.with(|cell| cell.set(omit));
-}
-
-pub(crate) fn take_committed_report_a0() -> Option<Vec<u8>> {
-    COMMITTED_REPORT_A0.with(|cell| cell.borrow_mut().take())
-}
-
-#[cfg(test)]
-pub(super) fn set_committed_report_a0(bytes: Vec<u8>) {
-    COMMITTED_REPORT_A0.with(|cell| *cell.borrow_mut() = Some(bytes));
 }
 
 pub(crate) fn refuse_a0_mismatch(
@@ -95,11 +107,11 @@ pub(super) fn assemble_direct_report(
     )?)?;
     let a0_bytes = encode_candidate_report_a0(&a0)?;
     let report_commitment = ramflux_crypto::report_commitment(&opening, inner, &a0_bytes)?;
-    COMMITTED_REPORT_A0.with(|cell| *cell.borrow_mut() = Some(a0_bytes));
     Ok(DirectReport {
         collapse_tag,
         report_commitment,
         framed: ramflux_crypto::frame_report_plaintext(inner, &opening)?,
+        a0_bytes,
     })
 }
 

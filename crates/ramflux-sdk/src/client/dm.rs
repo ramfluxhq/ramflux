@@ -128,10 +128,11 @@ impl RamfluxClient {
         let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
             && serde_json::from_slice::<serde_json::Value>(plaintext)
                 .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
-        let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
+        let mut sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
+        let committed_a0 = sealed.committed_a0.take();
         let franking = include_franking_ext
             .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
+        message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
         let mut own_copy = None;
         // History replication controls must not become history messages themselves.
         if !own_history_control {
@@ -163,8 +164,12 @@ impl RamfluxClient {
             }
         }
         let result = async {
-            let envelope =
-                gateway_direct_message_envelope(engine.config(), &message, franking.as_ref())?;
+            let envelope = gateway_direct_message_envelope_sealed(
+                engine.config(),
+                &message,
+                franking.as_ref(),
+                committed_a0.as_deref(),
+            )?;
             // Persist the advanced send ratchet before the remote submit. A process death after the
             // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
             // same message key for a later message. If submit fails, skipping one send key is safe;
@@ -278,8 +283,13 @@ impl RamfluxClient {
         let sealed = self
             .seal_routed_as(engine, &message, &plaintext, crate::client::routed::Route::receipt())
             .await?;
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
-        let gateway_envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
+        message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
+        let gateway_envelope = gateway_direct_message_envelope_sealed(
+            engine.config(),
+            &message,
+            None,
+            sealed.committed_a0.as_deref(),
+        )?;
         let entry = engine.submit_envelope(gateway_envelope).await?;
         Ok(entry)
     }

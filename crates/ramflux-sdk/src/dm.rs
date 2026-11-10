@@ -492,6 +492,15 @@ pub(crate) fn gateway_direct_message_envelope(
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    gateway_direct_message_envelope_sealed(config, message, franking, None)
+}
+
+pub(crate) fn gateway_direct_message_envelope_sealed(
+    config: &GatewaySessionConfig,
+    message: &GatewayDirectMessage,
+    franking: Option<&SdkDmFrankingMetadata>,
+    committed_a0: Option<&[u8]>,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
@@ -526,7 +535,6 @@ pub(crate) fn gateway_direct_message_envelope(
         collapse_tag: None,
         report_commitment: None,
     };
-    let committed_a0 = crate::client::routed::take_committed_report_a0();
     let (nested_tag, nested_commitment) = nested_report_fields(&message.encrypted_body)?;
     apply_candidate_named_fields_with(
         &mut envelope,
@@ -553,7 +561,7 @@ pub(crate) fn gateway_direct_message_envelope(
         ramflux_crypto::sign_protocol_object(&envelope)?
     };
     if let Some(committed) = committed_a0 {
-        crate::client::routed::refuse_a0_mismatch(&envelope, &committed)?;
+        crate::client::routed::refuse_a0_mismatch(&envelope, committed)?;
     }
     Ok(envelope)
 }

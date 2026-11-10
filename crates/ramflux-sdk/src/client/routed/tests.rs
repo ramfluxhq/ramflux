@@ -121,13 +121,13 @@ fn seal(
 ) -> Result<GatewayInboxEntry, SdkError> {
     seal_as(sender, receiver, message, body, Route::direct())
 }
-fn seal_as(
+fn seal_nested(
     sender: &Fixture,
     receiver: &Fixture,
     mut message: GatewayDirectMessage,
     body: &[u8],
     route: Route,
-) -> Result<GatewayInboxEntry, SdkError> {
+) -> Result<(GatewayDirectMessage, SealedRouted), SdkError> {
     if receiver
         .client
         .account_db()?
@@ -188,8 +188,23 @@ fn seal_as(
             bundle: hash,
         },
     )?;
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let mut envelope = gateway_direct_message_envelope(&sender.config()?, &message, None)?;
+    Ok((message, sealed))
+}
+fn seal_as(
+    sender: &Fixture,
+    receiver: &Fixture,
+    message: GatewayDirectMessage,
+    body: &[u8],
+    route: Route,
+) -> Result<GatewayInboxEntry, SdkError> {
+    let (mut message, sealed) = seal_nested(sender, receiver, message, body, route)?;
+    message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
+    let mut envelope = gateway_direct_message_envelope_sealed(
+        &sender.config()?,
+        &message,
+        None,
+        sealed.committed_a0.as_deref(),
+    )?;
     // Adversarial fixtures can deliberately claim an owner the production sender cannot emit.
     envelope.source_principal_id.clone_from(&message.source_principal_id);
     envelope.signed.signature = ramflux_crypto::sign_protocol_object_with_device_branch(

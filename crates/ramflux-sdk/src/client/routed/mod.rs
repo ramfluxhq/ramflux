@@ -29,7 +29,7 @@ pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
 mod report;
 pub(crate) use receive::{Delivery, JoinedW1};
-pub(crate) use report::{refuse_a0_mismatch, take_committed_report_a0};
+pub(crate) use report::{SealedRouted, refuse_a0_mismatch};
 mod pair_lifecycle;
 mod prepared;
 mod recovery;
@@ -391,7 +391,7 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         body: &[u8],
         route: Route,
-    ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+    ) -> Result<SealedRouted, SdkError> {
         if route.kind == Kind::Direct {
             Box::pin(self.ensure_contact_request_before_direct(engine, message)).await?;
         }
@@ -423,7 +423,7 @@ impl RamfluxClient {
         body: &[u8],
         url: Option<&str>,
         route: Route,
-    ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+    ) -> Result<SealedRouted, SdkError> {
         let recipient = Self::qualified_recipient(message)?;
         let (mut session, header, bundle) = self.send_pair_session_from_url(
             &self.local_device_identity(&engine.config().device_id)?,
@@ -455,7 +455,7 @@ impl RamfluxClient {
         body: &[u8],
         route: Route,
         pair: SealPair<'_>,
-    ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+    ) -> Result<SealedRouted, SdkError> {
         self.require_backup_outbound_ready()?;
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
@@ -534,14 +534,17 @@ impl RamfluxClient {
         )?;
         self.finish_pair_retirement()?;
 
-        Ok(SdkDmEncryptedEnvelope {
-            source_principal_commitment: Some(self.own_account_anchor()?),
-            schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
-            version: 2,
-            x3dh: header,
-            ciphertext,
-            collapse_tag,
-            report_commitment,
+        Ok(SealedRouted {
+            packet: SdkDmEncryptedEnvelope {
+                source_principal_commitment: Some(self.own_account_anchor()?),
+                schema: "ramflux.sdk.dm_x3dh_envelope.v2".to_owned(),
+                version: 2,
+                x3dh: header,
+                ciphertext,
+                collapse_tag,
+                report_commitment,
+            },
+            committed_a0: report.map(|sealed| sealed.a0_bytes),
         })
     }
 

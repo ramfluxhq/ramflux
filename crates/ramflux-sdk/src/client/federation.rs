@@ -95,14 +95,14 @@ impl RamfluxClient {
         engine: &impl GatewaySessionAccess,
         message: &mut GatewayDirectMessage,
         plaintext: &[u8],
-        sealed: &SdkDmEncryptedEnvelope,
+        sealed: &crate::client::routed::SealedRouted,
         options: &FederatedSendOptions,
     ) -> Result<PendingForward, SdkError> {
         let copy_plain = options.route.kind == crate::client::routed::Kind::Direct;
         let attachments = options.route.attachments;
         let franking =
             options.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
-        message.encrypted_body = serde_json::to_vec(sealed)?;
+        message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
         let mut own_copy = None;
         self.account_db()?.write_transaction(|| {
             self.send_direct_message(
@@ -130,14 +130,18 @@ impl RamfluxClient {
             }
             Ok::<_, SdkError>(())
         })?;
-        let envelope =
-            match gateway_direct_message_envelope(engine.config(), message, franking.as_ref()) {
-                Ok(envelope) => envelope,
-                Err(error) => {
-                    self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), false);
-                    return Err(error);
-                }
-            };
+        let envelope = match gateway_direct_message_envelope_sealed(
+            engine.config(),
+            message,
+            franking.as_ref(),
+            sealed.committed_a0.as_deref(),
+        ) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                self.finish_own_sent_copy(&message.message_id, own_copy.as_deref(), false);
+                return Err(error);
+            }
+        };
         Ok(PendingForward { envelope, message: message.message_id.clone(), own_copy })
     }
 

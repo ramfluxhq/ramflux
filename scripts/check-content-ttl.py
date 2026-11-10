@@ -20,6 +20,7 @@ FORWARD = {
     'bus/protocol.rs': 'self.ttl',
     'bus/task_delivery.rs': 'envelope.ttl',
     'client/routed/mod.rs': 'persist.message.ttl',
+    'client/routed/report.rs': 'message.ttl',
 }
 
 

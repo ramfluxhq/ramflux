@@ -5,7 +5,7 @@
 
 use super::{
     Duration, GatewayDirectMessage, GatewaySessionAccess, LocalBusFederationRoute, RamfluxClient,
-    Route, SdkDmEncryptedEnvelope, SdkError, SealPair, invalid,
+    Route, SdkError, SealPair, invalid,
 };
 
 pub(crate) struct SealForward<'a> {
@@ -20,7 +20,7 @@ impl RamfluxClient {
         &self,
         engine: &impl GatewaySessionAccess,
         request: SealForward<'_>,
-    ) -> Result<SdkDmEncryptedEnvelope, SdkError> {
+    ) -> Result<super::SealedRouted, SdkError> {
         let SealForward { message, plaintext, federation, route, timeout } = request;
         let local = self.local_device_identity(&engine.config().device_id)?;
         self.require_pair_device_active(&local)?;
