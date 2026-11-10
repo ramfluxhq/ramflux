@@ -24,6 +24,7 @@ pub mod dm;
 pub mod dm_session;
 pub mod federation;
 pub(crate) mod generated_content;
+pub(crate) mod generated_control;
 pub mod group;
 mod group_control_roots;
 pub mod group_delivery;
