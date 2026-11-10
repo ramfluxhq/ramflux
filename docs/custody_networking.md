@@ -435,8 +435,9 @@ providers continue to return `CustodyVaultUnavailable`. The SDK feature
 `itest-memory-vault` is disabled by default and exposes an in-memory fixture only
 for integration tests. It permits provider injection into the same local-bus
 creation flow, still requiring the creation option and the complete ceremony.
-It is not a production vault or a file fallback, and losing the fixture process
-loses its credentials.
+It is not a production vault. `Default` stays process-local; `persist_at` is an
+explicit fixture option so a test daemon restart can reload wrapping keys.
+Production vaults never fall back to a file.
 
 Every non-test SDK build enabling `itest-memory-vault` fails to compile unless
 explicitly marked `RAMFLUX_ITEST_BUILD=1`; the itest repository supplies that marker

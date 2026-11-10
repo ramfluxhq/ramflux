@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Integration fixture. No persistence, synchronisation or production fallback.
+//! Integration fixture. `Default` is process-local. `persist_at` keeps wrapping
+//! keys across a test process restart. Not a production vault or production file fallback.
 use super::{BranchCredentials, PrimaryVault};
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
     sync::Mutex,
 };
 use zeroize::Zeroizing;
@@ -23,8 +25,22 @@ struct MigrationApprovals {
 pub struct MemoryPrimaryVault {
     entries: Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>,
     migration_approval: Mutex<MigrationApprovals>,
+    persist: Option<PathBuf>,
 }
 impl MemoryPrimaryVault {
+    /// Reload wrapping keys from `path` so a later fixture process can unlock.
+    /// `Default` stays process-local. Production vaults never use this file.
+    ///
+    /// # Errors
+    /// `CustodyVaultUnavailable` when an existing file cannot be read or decoded.
+    pub fn persist_at(path: impl Into<PathBuf>) -> Result<Self, SdkError> {
+        let path = path.into();
+        Ok(Self {
+            entries: Mutex::new(load_persisted(&path)?),
+            migration_approval: Mutex::new(MigrationApprovals::default()),
+            persist: Some(path),
+        })
+    }
     /// Grant one exact migration signature in the default-off integration fixture only.
     /// # Errors
     /// Refuses a pending approval or any already-consumed account/request pair.
@@ -63,7 +79,7 @@ impl MemoryPrimaryVault {
             return Err(SdkError::CustodyVaultUnavailable);
         }
         entries.insert(reference.into(), Zeroizing::new(bytes.to_vec()));
-        Ok(())
+        self.flush_locked(&entries)
     }
     fn get<const N: usize>(&self, reference: &str) -> Result<Zeroizing<[u8; N]>, SdkError> {
         let entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
@@ -75,6 +91,45 @@ impl MemoryPrimaryVault {
         seed.copy_from_slice(bytes);
         Ok(seed)
     }
+    fn flush_locked(&self, entries: &BTreeMap<String, Zeroizing<Vec<u8>>>) -> Result<(), SdkError> {
+        let Some(path) = self.persist.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        }
+        let encoded: BTreeMap<String, String> = entries
+            .iter()
+            .map(|(key, value)| (key.clone(), ramflux_protocol::encode_base64url(value.as_slice())))
+            .collect();
+        let bytes = serde_json::to_vec(&encoded).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        let tmp = tmp_path(path);
+        std::fs::write(&tmp, bytes).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        std::fs::rename(&tmp, path).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        Ok(())
+    }
+}
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    PathBuf::from(tmp)
+}
+fn load_persisted(path: &Path) -> Result<BTreeMap<String, Zeroizing<Vec<u8>>>, SdkError> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let bytes = std::fs::read(path).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    let encoded: BTreeMap<String, String> =
+        serde_json::from_slice(&bytes).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    let mut entries = BTreeMap::new();
+    for (reference, value) in encoded {
+        let raw = ramflux_protocol::decode_base64url(&value)
+            .map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        entries.insert(reference, Zeroizing::new(raw));
+    }
+    Ok(entries)
 }
 impl PrimaryVault for MemoryPrimaryVault {
     #[cfg(feature = "itest-memory-vault")]
@@ -86,8 +141,9 @@ impl PrimaryVault for MemoryPrimaryVault {
         Self::approve_migration_once_for_test(self, account, request_id)
     }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
-        self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?.remove(reference);
-        Ok(())
+        let mut entries = self.entries.lock().map_err(|_| SdkError::CustodyVaultUnavailable)?;
+        entries.remove(reference);
+        self.flush_locked(&entries)
     }
     fn home_authorization_preflight(&self) -> Result<(), SdkError> {
         Ok(())

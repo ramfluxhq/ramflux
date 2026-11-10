@@ -159,6 +159,6 @@ account kind, networking state and the one-use credential. A locked, pending or
 non-human custodian remains refused.
 
 Integration builds can explicitly select `rf daemon start --itest-memory-vault`
-only when compiled with the gated `itest-memory-vault` feature. Credentials then
-exist only in the daemon process; restarting that daemon loses them. Production
+only when compiled with the gated `itest-memory-vault` feature. The fixture stores
+wrapping keys next to `--data-root` so a test daemon restart can unlock. Production
 builds do not expose that option or silently substitute this provider.

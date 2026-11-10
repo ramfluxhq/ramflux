@@ -18,34 +18,7 @@ pub(crate) async fn dispatch_message_bus_request(
     match request.method.as_str() {
         "message.submit" => Box::pin(dispatch_message_submit_request(request, state)).await,
         "message.receive" => dispatch_message_receive_request(request, state, connection).await,
-        "message.ack" => {
-            let account_id = request_account_id(request)?;
-            let body: LocalBusMessageAckRequest = serde_json::from_value(request.body.clone())?;
-            let account = local_bus_account_mut(state, account_id)?;
-            if account.client.account_db()?.receive_ledger_installed()? {
-                return match crate::bus::push_receiver::managed_public_ack(&body) {
-                    Err(error) => Err(error),
-                    Ok(()) => Err(SdkError::InboundRejected(
-                        crate::bus::push_receiver::MANAGED_ACK_CODE.to_owned(),
-                    )),
-                };
-            }
-            let receiver = account.client.owned_device_identity()?;
-            if receiver.device_id() != body.receiver_device_id {
-                return Err(SdkError::InboundRejected(
-                    "ACK receiver differs from owned account".into(),
-                ));
-            }
-            let mut engine = account.session_client().await?;
-            let result = account
-                .client
-                .ack_gateway_delivery(&mut engine, &body.envelope_id, &receiver, body.received_at)
-                .await;
-            account.apply_session_metadata(engine);
-            let cursor = result?;
-            account.mark_acked(&body.envelope_id)?;
-            Ok(local_bus_ok(serde_json::to_value(cursor)?))
-        }
+        "message.ack" => dispatch_message_ack_request(request, state).await,
         "message.delete" => {
             let account_id = request_account_id(request)?;
             let account = local_bus_account(state, account_id)?;
@@ -384,6 +357,47 @@ async fn federated_manifest_gate(
         )
         .await?;
     Ok(ResolvedMessageRecipient { principal_id: Some(device.principal_id), principal_commitment })
+}
+
+async fn dispatch_message_ack_request(
+    request: &LocalBusFrame,
+    state: &mut LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
+    let account_id = request_account_id(request)?;
+    let body: LocalBusMessageAckRequest = serde_json::from_value(request.body.clone())?;
+    let account = local_bus_account_mut(state, account_id)?;
+    if account.client.account_db()?.receive_ledger_installed()? {
+        return match crate::bus::push_receiver::managed_public_ack(&body) {
+            Err(error) => Err(error),
+            Ok(()) => Err(SdkError::InboundRejected(
+                crate::bus::push_receiver::MANAGED_ACK_CODE.to_owned(),
+            )),
+        };
+    }
+    let receiver = account.client.owned_device_identity()?;
+    if receiver.device_id() != body.receiver_device_id {
+        return Err(SdkError::InboundRejected("ACK receiver differs from owned account".into()));
+    }
+    // Receive already ACKs with inbox_seq and keeps the delivery on the RAM page.
+    // A later `rf dm ack` must reuse that seq; envelope-id-only ACK misses retired rows.
+    let pending = account
+        .pending_deliveries
+        .iter()
+        .find(|entry| entry.envelope.envelope_id == body.envelope_id)
+        .cloned();
+    let mut engine = account.session_client().await?;
+    let result = if let Some(entry) = pending.as_ref() {
+        account.client.ack_gateway_entry(&mut engine, entry, body.received_at).await
+    } else {
+        account
+            .client
+            .ack_gateway_delivery(&mut engine, &body.envelope_id, &receiver, body.received_at)
+            .await
+    };
+    account.apply_session_metadata(engine);
+    let cursor = result?;
+    account.mark_acked(&body.envelope_id)?;
+    Ok(local_bus_ok(serde_json::to_value(cursor)?))
 }
 
 fn dispatch_message_delete(

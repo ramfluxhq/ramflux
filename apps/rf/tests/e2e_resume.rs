@@ -8,7 +8,7 @@
 mod e2e;
 
 use e2e::{
-    assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_send,
+    assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_send, dump_logs,
     exchange_contacts, shutdown_daemon, start_daemon, start_daemon_at, unique, unlock_account,
     wait_dm_texts,
 };
@@ -32,6 +32,7 @@ fn f2_restart_catchup_three_dms_once_in_order() -> e2e::Result<()> {
     }
     let bob_d = start_daemon_at(bob_socket, bob_root)?;
     unlock_account(&bob_d, &bob)?;
-    let received = wait_dm_texts(&bob_d, &bob, &conversation, &bodies)?;
+    let received = wait_dm_texts(&bob_d, &bob, &conversation, &bodies)
+        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
     assert_texts_once_in_order(&received, &bodies)
 }

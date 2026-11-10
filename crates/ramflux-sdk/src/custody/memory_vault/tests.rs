@@ -116,6 +116,77 @@ fn home_migration_memory_fixture_requires_a_new_explicit_approval_for_each_exact
     Ok(())
 }
 
+#[test]
+fn persist_at_reloads_primary_seed_after_drop() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Root::new()?;
+    let path = root.0.join("itest-memory-vault.json");
+    let key = SelfSigningKey::from_vault_seed(&Zeroizing::new([7; 32]));
+    {
+        let vault = MemoryPrimaryVault::persist_at(&path)?;
+        vault.store_new("primary-ref", &key)?;
+    }
+    let reloaded = MemoryPrimaryVault::persist_at(&path)?;
+    assert_eq!(*reloaded.load_primary("primary-ref")?.vault_seed(), *key.vault_seed());
+    Ok(())
+}
+
+#[test]
+fn persist_at_missing_file_starts_empty() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Root::new()?;
+    let vault = MemoryPrimaryVault::persist_at(root.0.join("itest-memory-vault.json"))?;
+    assert!(matches!(vault.load_primary("missing"), Err(SdkError::CustodyVaultUnavailable)));
+    Ok(())
+}
+
+#[test]
+fn persist_at_rejects_corrupt_json() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Root::new()?;
+    let path = root.0.join("itest-memory-vault.json");
+    std::fs::write(&path, b"{not-json")?;
+    assert!(matches!(
+        MemoryPrimaryVault::persist_at(&path),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    Ok(())
+}
+
+#[test]
+fn persist_at_rejects_invalid_base64url() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Root::new()?;
+    let path = root.0.join("itest-memory-vault.json");
+    std::fs::write(&path, br#"{"primary-ref":"@@@"}"#)?;
+    assert!(matches!(
+        MemoryPrimaryVault::persist_at(&path),
+        Err(SdkError::CustodyVaultUnavailable)
+    ));
+    Ok(())
+}
+
+#[test]
+fn persist_at_delete_removes_entry_from_file() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Root::new()?;
+    let path = root.0.join("itest-memory-vault.json");
+    let key = SelfSigningKey::from_vault_seed(&Zeroizing::new([9; 32]));
+    let vault = MemoryPrimaryVault::persist_at(&path)?;
+    vault.store_new("primary-ref", &key)?;
+    vault.delete("primary-ref")?;
+    drop(vault);
+    let reloaded = MemoryPrimaryVault::persist_at(&path)?;
+    assert!(matches!(reloaded.load_primary("primary-ref"), Err(SdkError::CustodyVaultUnavailable)));
+    Ok(())
+}
+
+#[test]
+fn default_vault_does_not_write_a_file() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Root::new()?;
+    let path = root.0.join("itest-memory-vault.json");
+    let vault = MemoryPrimaryVault::default();
+    let key = SelfSigningKey::from_vault_seed(&Zeroizing::new([3; 32]));
+    vault.store_new("primary-ref", &key)?;
+    assert!(!path.exists());
+    Ok(())
+}
+
 fn assert_older_provider_refuses(
     reference: &str,
     primary: &SelfSigningKey,

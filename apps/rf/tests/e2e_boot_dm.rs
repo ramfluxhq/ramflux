@@ -9,7 +9,8 @@ mod e2e;
 
 use e2e::{
     assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_ack,
-    dm_receipt_delivered, dm_send, exchange_contacts, start_daemon, unique, wait_dm_texts,
+    dm_receipt_delivered, dm_send, dump_logs, envelope_id_from_read, exchange_contacts,
+    start_daemon, unique, wait_dm_texts,
 };
 
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
@@ -29,8 +30,20 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     dm_send(&alice_d, &alice, &bob, &conversation, &message, body)?;
     let received = wait_dm_texts(&bob_d, &bob, &conversation, &[body])?;
     assert_texts_once_in_order(&received, &[body])?;
-    dm_ack(&bob_d, &bob, &conversation, &message)?;
-    let receipt = dm_receipt_delivered(&bob_d, &bob, &conversation, &message)?;
+    let envelope = envelope_id_from_read(&received).unwrap_or_else(|| message.clone());
+    if let Err(error) = dm_ack(&bob_d, &bob, &conversation, &envelope) {
+        return Err(format!(
+            "dm_ack envelope={envelope} message={message} received={received} error={error} logs={}",
+            dump_logs(&stack, &[&alice_d, &bob_d])
+        )
+        .into());
+    }
+    let receipt = dm_receipt_delivered(&bob_d, &bob, &conversation, &message).map_err(|error| {
+        format!(
+            "receipt delivered failed: {error}; logs={}",
+            dump_logs(&stack, &[&alice_d, &bob_d])
+        )
+    })?;
     if receipt.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
         return Err(format!("B receipt delivered was refused: {receipt}").into());
     }

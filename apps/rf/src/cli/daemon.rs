@@ -25,7 +25,7 @@ pub(crate) struct DaemonStart {
     /// Enable the temporary legacy fixture namespace (requires the matching build feature).
     #[arg(long, hide = true)]
     pub(crate) itest_legacy_accounts: bool,
-    /// Use a process-local credential vault for integration tests only.
+    /// Use the integration-fixture credential vault (test-only; wrapping keys persist under --data-root).
     #[cfg(feature = "itest-memory-vault")]
     #[arg(long)]
     pub(crate) itest_memory_vault: bool,
