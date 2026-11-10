@@ -41,6 +41,7 @@ pub(crate) mod inbox_failure;
 mod legacy_activation_guard_tests;
 pub(crate) mod legacy_w1;
 pub mod mcp_a2ui;
+pub(crate) mod message_mutations;
 mod native_branch;
 mod native_safety;
 #[cfg(test)]
