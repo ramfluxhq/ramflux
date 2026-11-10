@@ -20,7 +20,7 @@ mod publication;
 #[cfg(test)]
 mod race_hooks;
 mod recovery;
-pub(crate) use publication::accept_publication;
+pub(crate) use publication::{accept_publication, pending_head_fence_blocks};
 pub use recovery::RecoveryCeremony;
 pub(crate) use recovery::{finish_recovery, pending_restore};
 const MAX_STORED_AUTHORITY_BYTES: usize = 32 * 1024 * 1024;

@@ -6,6 +6,7 @@ mod coordinator;
 pub mod install_gate;
 pub mod install_store;
 pub(crate) mod local_credential;
+pub(crate) mod publication;
 pub(crate) mod recipient;
 mod transport;
 pub use coordinator::{
@@ -17,6 +18,10 @@ pub use install_store::{Install, decode, encode, write_installed, write_pending}
 pub use local_credential::{
     CredentialOutcome, LocalCredentialProvider, PersistedReservation, SecretUtf8, acquire_setup,
     acquire_unlock, cancel_credential, load_reservation, persist_reservation, remove_reservation,
+};
+pub use publication::{
+    HeadKind, HeadWrite, NodeHeadPersist, PublishedHead, acknowledge_as_responder, publish_head,
+    retire_prepared_head,
 };
 pub use recipient::{
     RecipientKeyStaging, RecipientStaging, StageExisting, StageNew, StagedRecipient,

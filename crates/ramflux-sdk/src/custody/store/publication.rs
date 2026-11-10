@@ -10,6 +10,15 @@ use ramflux_crypto::custody::PinOutcome;
 use ramflux_protocol::custody::CustodyAuthority;
 use std::{fs, os::unix::fs::OpenOptionsExt, path::Path};
 
+/// Durable `pairing_head` is a fence: another operation must not mint a second candidate.
+#[must_use]
+pub(crate) fn pending_head_fence_blocks(
+    pending_operation: Option<&str>,
+    writer_operation: &str,
+) -> bool {
+    pending_operation.is_some_and(|operation| operation != writer_operation)
+}
+
 pub(crate) fn accept_publication(
     root: &Path,
     id: &str,

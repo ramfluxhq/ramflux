@@ -42,13 +42,16 @@ pub fn pairing_enabled() -> bool {
 }
 
 /// Responder-only prepared→acknowledged. The publisher (local primary) must submit first.
+/// `publisher_ref` is the head's stored publisher; local current-primary may submit.
 /// # Errors
 /// `submitted_required` when the publisher skips submitted; `responder_submitted` otherwise.
 pub fn validate_head_advance(
     from: &str,
     to: &str,
-    publisher_is_local_primary: bool,
+    publisher_ref: &DeviceRef,
+    local_ref: &DeviceRef,
 ) -> Result<(), SdkError> {
+    let publisher_is_local_primary = publisher_ref == local_ref;
     match (from, to) {
         ("prepared", "submitted") | ("submitted", "acknowledged") if publisher_is_local_primary => {
             Ok(())

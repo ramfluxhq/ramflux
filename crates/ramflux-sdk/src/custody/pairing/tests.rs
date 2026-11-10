@@ -144,14 +144,24 @@ async fn pairing_lock_background_and_head_change() -> TestResult {
 
 #[test]
 fn pairing_head_advance_enforces_publisher_ref() -> TestResult {
-    validate_head_advance("prepared", "submitted", true)?;
-    validate_head_advance("submitted", "acknowledged", true)?;
-    validate_head_advance("prepared", "acknowledged", false)?;
-    match validate_head_advance("prepared", "acknowledged", true) {
+    let publisher = DeviceRef {
+        account_anchor: encode_base64url([2; 32]),
+        device_id: "publisher".into(),
+        device_epoch: 1,
+    };
+    let responder = DeviceRef {
+        account_anchor: encode_base64url([2; 32]),
+        device_id: "responder".into(),
+        device_epoch: 1,
+    };
+    validate_head_advance("prepared", "submitted", &publisher, &publisher)?;
+    validate_head_advance("submitted", "acknowledged", &publisher, &publisher)?;
+    validate_head_advance("prepared", "acknowledged", &publisher, &responder)?;
+    match validate_head_advance("prepared", "acknowledged", &publisher, &publisher) {
         Err(SdkError::PairingField("submitted_required")) => {}
         other => return Err(format!("publisher skip submitted: {other:?}").into()),
     }
-    match validate_head_advance("prepared", "submitted", false) {
+    match validate_head_advance("prepared", "submitted", &publisher, &responder) {
         Err(SdkError::PairingField("responder_submitted")) => {}
         other => return Err(format!("responder submitted: {other:?}").into()),
     }
