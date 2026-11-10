@@ -17,8 +17,9 @@ use std::time::Instant as WallClock;
 #[path = "receive_resync/work.rs"]
 mod work;
 
-// Test-only functional bound: S2-r1-completion-bound-decision.md (2026-11-05).
-const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(600);
+// Wall-clock cap on the durable recovery phase. It sits below the 120 s nextest kill window
+// for these tests (.config/nextest.toml) so a slow run fails with its own trace, not a SIGKILL.
+const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(100);
 
 struct Recovery {
     started: super::receive_ack::Started,

@@ -18,6 +18,14 @@ path = "junit.xml"
 filter = 'package(ramflux-gateway) & test(=custody::tests::nat::gateway::ten_existing_sdk_clients_behind_one_ip_register_in_waves_with_ninety_seconds_per_flight)'
 slow-timeout = { period = "60s", terminate-after = 2 }
 
+# Durable overflow recovery applies 266 authenticated inbox entries (the 256-entry session
+# buffer plus overflow) through the real writer, about 0.2 s each on a loaded runner. Steady
+# progress is policed by recover()'s 10 s silence guard; this only widens the kill window to
+# 120 s. recover() fails with diagnostics at 100 s, before nextest terminates the process.
+[[profile.default.overrides]]
+filter = 'package(ramflux-sdk) & test(/^bus::account_runtime::tests::receive_resync::receive_resync_recovers_/)'
+slow-timeout = { period = "60s", terminate-after = 2 }
+
 # The configured router test includes a 2,000-connection lifecycle check.
 [profile.shutdown]
 inherits = "ci"
