@@ -523,29 +523,33 @@ async fn connected_and_sweep_real() -> Case {
     }
     let live_at = tokio::time::Instant::now();
     handle.notify_receive_wake();
-    let mut idle = 0_u32;
+    // spawn_blocking inhibits auto-advance while catch-up waits on redb / a
+    // std-thread oneshot (not a tokio timer). Measure the 100 ms bound only
+    // after that work finishes, over time the actor actually controls.
+    let (release_hold, hold) = std::sync::mpsc::channel::<()>();
+    let inhibit = tokio::task::spawn_blocking(move || {
+        let _ = hold.recv();
+    });
+    let wait_resume = std::time::Instant::now();
     loop {
         drain_ready(&mut runtime).await?;
         poll_spawned().await;
         if !gateway.lock().map_err(|_| "gateway")?.resumes.is_empty() {
             break;
         }
-        if live_at.elapsed() > catch_up {
+        if wait_resume.elapsed() > Duration::from_secs(10) {
             break;
         }
         let busy = handle.queued_calls() > 0 || handle.in_flight_calls() > 0;
         if busy {
-            idle = 0;
             let work = runtime.connection_work.recv().await.ok_or("connection work closed")?;
             runtime.apply_connection_work(work).await?;
             continue;
         }
         tokio::task::yield_now().await;
-        idle = idle.saturating_add(1);
-        if idle >= 4 {
-            break;
-        }
     }
+    drop(release_hold);
+    let _ = inhibit.await;
     let within = live_at.elapsed();
     let in_100 = gateway.lock().map_err(|_| "gateway")?.resumes.len();
     assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100} elapsed={within:?}");
