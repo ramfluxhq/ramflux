@@ -76,8 +76,6 @@ pub(crate) struct BindOutcome {
     pub authority: Option<LedgerAuthority>,
 }
 
-const CURSOR_NOT_INCREASING: &str = "receive cursor is not strictly increasing";
-
 /// Read-only startup incarnation E and cursor C.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StartupCursor {
@@ -228,14 +226,13 @@ impl LedgerExecutor {
         Ok(LedgerAuthority::wa(seq, writer_id))
     }
 
-    /// Generic receive-checkpoint write. The receive-cursor namespace requires W2 or reset
-    /// and the caller's open receive transaction. The token is consumed.
+    /// Generic receive-checkpoint write. The receive-cursor namespace requires a Reset
+    /// token (W2 writes C through `cover_in`) and the caller's open receive transaction.
+    /// The token is consumed.
     ///
     /// # Errors
     /// [`StorageError::AuthorizationRejected`] when the token cannot write C, is bound to
     /// another transaction, or the writer is closed.
-    /// [`StorageError::Integrity`] `"receive cursor is not strictly increasing"` when a W2
-    /// write is not strictly above durable C.
     pub(crate) fn persist_receive_checkpoint_in(
         &self,
         tx: &ReceiveTransaction<'_>,
@@ -244,17 +241,11 @@ impl LedgerExecutor {
     ) -> Result<(), SdkError> {
         tx.require_writer()?;
         let (kind, token_seq, writer_id) = token.into_parts();
-        if !matches!(kind, AuthorityKind::W2 | AuthorityKind::Reset) || token_seq != seq {
+        if kind != AuthorityKind::Reset || token_seq != seq {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
         }
         if writer_id != tx.writer_id() {
             return Err(SdkError::Storage(StorageError::AuthorizationRejected));
-        }
-        if kind == AuthorityKind::W2 {
-            let current = tx.receive_cursor()?;
-            if seq <= current {
-                return Err(SdkError::Storage(StorageError::Integrity(CURSOR_NOT_INCREASING)));
-            }
         }
         tx.persist_receive_cursor(seq)?;
         hooks::record_sql(seq, kind);

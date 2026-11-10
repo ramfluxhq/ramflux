@@ -30,8 +30,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-const CURSOR_NOT_INCREASING: &str = "receive cursor is not strictly increasing";
-
 struct Harness {
     _root: tempfile::TempDir,
     db: AccountDb,
@@ -551,8 +549,8 @@ fn assert_token_binding(exec: &LedgerExecutor, db: &AccountDb) -> Result<(), Sdk
         .authority
         .expect("w2");
         match exec.persist_receive_checkpoint_in(tx, token, 2).map_err(into_storage) {
-            Err(StorageError::Integrity(CURSOR_NOT_INCREASING)) => Ok(()),
-            other => panic!("expected strictly increasing, got {other:?}"),
+            Err(StorageError::AuthorizationRejected) => Ok(()),
+            other => panic!("W2 must not write C through persist, got {other:?}"),
         }
     })?;
     db.receive_transaction(expected(db, 2)?, 1, |tx| {
@@ -652,7 +650,7 @@ fn real_storage_positive_paths() -> Result<(), SdkError> {
         let token = minted.authority.expect("covered W2 mints a token");
         assert_eq!(tx.receive_cursor()?, 2);
         match exec.persist_receive_checkpoint_in(tx, token, 2).map_err(into_storage) {
-            Err(StorageError::Integrity(CURSOR_NOT_INCREASING)) => Ok(()),
+            Err(StorageError::AuthorizationRejected) => Ok(()),
             other => panic!("storage already wrote C=2; W2 persist must refuse, got {other:?}"),
         }
     })?;

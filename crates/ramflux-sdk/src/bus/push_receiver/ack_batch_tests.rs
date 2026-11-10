@@ -6,6 +6,7 @@
 
 use super::ack_batch::SourceWa;
 use crate::SdkError;
+use crate::client::own_device_copy::receipts::{OwnCopyAckBinding, own_copy_acknowledged};
 use crate::client::own_device_copy::w1::{LOCATORS, SequenceLocator, locator_key};
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ProjectionStore, ReceiveAckApply, ReceiveAckApplyResult,
@@ -103,12 +104,37 @@ fn persist_locator(
     sequence: u64,
 ) -> Result<SequenceLocator, StorageError> {
     db.send_direct_message("thread", message, "peer", b"locator")?;
+    let binding = OwnCopyAckBinding {
+        committed_key: format!("own-device/committed-packet/{message}"),
+        receipt_key: format!("own-device/message-receipt/{message}"),
+        fingerprint: format!("fp-{message}"),
+    };
+    db.persist_actor_state(
+        &binding.committed_key,
+        &serde_json::json!({
+            "fingerprint": binding.fingerprint,
+            "valid_until": 600,
+            "expires_at": 900,
+            "acknowledged": false,
+        }),
+    )?;
+    db.persist_actor_state(
+        &binding.receipt_key,
+        &serde_json::json!({
+            "fingerprint": binding.fingerprint,
+            "source": "s",
+            "target": "t",
+            "valid_until": 600,
+            "expires_at": 900,
+            "acknowledged": false,
+        }),
+    )?;
     let locator = SequenceLocator {
         target: "t".to_owned(),
         incarnation: "e".to_owned(),
         sequence,
         acknowledged: false,
-        ack: None,
+        ack: Some(binding),
     };
     db.persist_message_actor_state(message, &locator_key(message), &locator)?;
     Ok(locator)
@@ -190,6 +216,12 @@ fn own_copy_locator_terminal_and_expiry() -> TestResult {
     let locator =
         db.load_actor_state::<SequenceLocator>(&locator_key("expired"))?.expect("locator");
     assert!(!locator.acknowledged, "expiry never marks");
+    let expired_binding = locator.ack.as_ref().expect("expired binding");
+    assert_eq!(
+        own_copy_acknowledged(&db, expired_binding)?,
+        (Some(false), Some(false)),
+        "expiry never marks the existing marker"
+    );
     assert!(db.actor_state_keys(LOCATORS)?.contains(&locator_key("expired")));
 
     cover_terminal(&db, 1, 2)?;
@@ -202,6 +234,12 @@ fn own_copy_locator_terminal_and_expiry() -> TestResult {
     let locator =
         db.load_actor_state::<SequenceLocator>(&locator_key("settled"))?.expect("locator");
     assert!(locator.acknowledged, "already_settled marks the locator");
+    let settled_binding = locator.ack.as_ref().expect("settled binding");
+    assert_eq!(
+        own_copy_acknowledged(&db, settled_binding)?,
+        (Some(true), Some(true)),
+        "already_settled marks the existing marker"
+    );
 
     cover_terminal(&db, 2, 3)?;
     persist_locator(&db, "gone", 3)?;
@@ -212,6 +250,12 @@ fn own_copy_locator_terminal_and_expiry() -> TestResult {
     );
     let locator = db.load_actor_state::<SequenceLocator>(&locator_key("gone"))?.expect("locator");
     assert!(locator.acknowledged, "not_found marks the locator");
+    let gone_binding = locator.ack.as_ref().expect("gone binding");
+    assert_eq!(
+        own_copy_acknowledged(&db, gone_binding)?,
+        (Some(true), Some(true)),
+        "not_found marks the existing marker"
+    );
     drop(db);
     drop(root);
     Ok(())
