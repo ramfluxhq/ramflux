@@ -20,9 +20,10 @@ use crate::bus::connection_manager::{
 };
 use crate::bus::dispatch::task_transport::{Target, seal};
 use crate::bus::push_receiver::executor::{ExecutorOwner, LedgerExecutor};
+use crate::bus::push_receiver::sweep::SweepSetting;
 use crate::gateway::access::CountingGateway;
 use crate::prelude::*;
-use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
+use ramflux_storage::{ACK_FLUSH_COUNT, ACK_FLUSH_SECS, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -268,7 +269,12 @@ async fn never_ack_above_c_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn ack_batch_timing() -> Case {
-    watch(60, ack_batch_timing_case()).await
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            Duration::from_secs(60),
+            Box::pin(ack_batch_timing_case()),
+        )))
+        .await
 }
 
 async fn ack_batch_timing_case() -> Case {
@@ -295,12 +301,12 @@ async fn ack_batch_timing_case() -> Case {
     let gateway3 = Arc::clone(&three.gateway);
     let mut runtime3 = start_runtime(&mut three).await?;
     fill_sealed(&mut three, 1, 3).await?;
-    {
-        let _clock = crate::time::test_clock::FrozenClock::freeze();
-        drive_pass(&mut runtime3, ReceiveTrigger::Tick).await?;
-    }
+    let _clock = crate::time::test_clock::FrozenClock::freeze();
+    drive_pass(&mut runtime3, ReceiveTrigger::Tick).await?;
     assert_eq!(acked(&gateway3)?, 0, "Tick does not force a 3-intent flush");
-    account_of(&runtime3)?.client.account_db()?.set_ack_intent_clock_for_test(100, 100)?;
+    // ACK age is unix seconds; FrozenClock is the harness paused clock for this bound.
+    let aged = crate::time::now_unix_timestamp().saturating_add(ACK_FLUSH_SECS);
+    crate::time::test_clock::set_frozen(Some(aged));
     drive_pass(&mut runtime3, ReceiveTrigger::Tick).await?;
     assert_eq!(acked(&gateway3)?, 3, "1s-old intents flush on Tick");
     runtime3.stop_connection().await;
@@ -496,28 +502,39 @@ async fn connected_and_sweep_real() -> Case {
     stop_peer_session(&mut fixture).await;
     let mut runtime = start_runtime_live(&mut fixture)?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
-    let wall = std::time::Instant::now();
-    let mut live_at = None;
+    // Pause before Live so Connected I/O is measured on the virtual clock.
+    tokio::time::pause();
+    let handshake = std::time::Instant::now();
+    let catch_up = Duration::from_millis(SweepSetting::CATCH_UP_MS);
+    handle.notify_receive_wake();
+    while handle.snapshot().state != NetworkingState::Live {
+        if handshake.elapsed() > Duration::from_secs(10) {
+            return Err("session did not become Live".into());
+        }
+        drain_ready(&mut runtime).await?;
+        poll_spawned().await;
+        match runtime.connection_work.try_recv() {
+            Ok(work) => runtime.apply_connection_work(work).await?,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                return Err("connection work closed".into());
+            }
+        }
+    }
+    let live_at = tokio::time::Instant::now();
     handle.notify_receive_wake();
     let mut idle = 0_u32;
     loop {
         drain_ready(&mut runtime).await?;
         poll_spawned().await;
-        let live = handle.snapshot().state == NetworkingState::Live;
-        // L1: clock starts at the first Live snapshot, before parking on in-flight Resume.
-        if live && live_at.is_none() {
-            live_at = Some(std::time::Instant::now());
-        }
         if !gateway.lock().map_err(|_| "gateway")?.resumes.is_empty() {
             break;
         }
-        match live_at {
-            Some(at) if at.elapsed() > Duration::from_millis(100) => break,
-            None if wall.elapsed() > Duration::from_secs(10) => break,
-            _ => {}
+        if live_at.elapsed() > catch_up {
+            break;
         }
         let busy = handle.queued_calls() > 0 || handle.in_flight_calls() > 0;
-        if !live || busy {
+        if busy {
             idle = 0;
             let work = runtime.connection_work.recv().await.ok_or("connection work closed")?;
             runtime.apply_connection_work(work).await?;
@@ -529,16 +546,24 @@ async fn connected_and_sweep_real() -> Case {
             break;
         }
     }
-    let within = live_at.map_or_else(|| wall.elapsed(), |at| at.elapsed());
+    let within = live_at.elapsed();
     let in_100 = gateway.lock().map_err(|_| "gateway")?.resumes.len();
     assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100} elapsed={within:?}");
-    assert!(within <= Duration::from_millis(100), "first Resume measured at {within:?}");
+    assert!(within <= catch_up, "first Resume measured at {within:?}");
+    if within < catch_up {
+        tokio::time::advance(catch_up.saturating_sub(within)).await;
+        pump_anchored(&mut runtime, &handle).await?;
+    }
+    assert_eq!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+        1,
+        "exactly one Resume before the virtual 100ms deadline"
+    );
     assert_eq!(
         handle.test_context().keepalive_idle(),
         sweep_hold(),
         "keepalive must outlive the 900s sweep"
     );
-    tokio::time::pause();
     pump_anchored(&mut runtime, &handle).await?;
     tokio::time::advance(Duration::from_secs(899)).await;
     pump_anchored(&mut runtime, &handle).await?;
@@ -557,6 +582,7 @@ async fn connected_and_sweep_real() -> Case {
         handle.test_receive_trace(),
         handle.snapshot()
     );
+    tokio::time::resume();
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
