@@ -22,8 +22,9 @@ pub(super) async fn receive(
     engine: &mut impl GatewayPushAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
-    let account_id = account.client.account_db()?.local_account_id.clone();
-    let _exec = LedgerExecutor::bind_standalone(account_id)?;
+    let db = account.client.account_db()?;
+    let key = format!("{}:{}", db.path.display(), db.local_account_id);
+    let _exec = LedgerExecutor::bind_standalone(key)?;
     account.client.prune_surface_resync_state()?;
     let generation = account
         .connection

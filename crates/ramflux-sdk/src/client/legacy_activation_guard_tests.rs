@@ -386,7 +386,10 @@ async fn standalone_receive_refuses_while_actor_bound() -> TestResult {
             .activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?,
         ReceiveMigrateResult::Migrated
     );
-    let account_id = fixture.client.account_db()?.local_account_id.clone();
+    let account_key = {
+        let db = fixture.client.account_db()?;
+        format!("{}:{}", db.path.display(), db.local_account_id)
+    };
     let mut account = LocalBusAccountState::disconnected(
         fixture.client,
         fixture.config.clone(),
@@ -399,14 +402,14 @@ async fn standalone_receive_refuses_while_actor_bound() -> TestResult {
         reason: crate::gateway::session_push::PageReason::Expired,
     });
     let _actor =
-        crate::bus::push_receiver::executor::LedgerExecutor::bind_actor(account_id.clone())?;
+        crate::bus::push_receiver::executor::LedgerExecutor::bind_actor(account_key.clone())?;
     let Err(error) = crate::bus::sync_driver::receive(&mut account, &mut counting, 1).await else {
         panic!("standalone while actor bound");
     };
     assert!(
         matches!(
             error,
-            SdkError::Storage(StorageError::AccountWriterBusy(ref id)) if *id == account_id
+            SdkError::Storage(StorageError::AccountWriterBusy(ref id)) if *id == account_key
         ),
         "standalone must refuse while the actor owns the account: {error:?}"
     );

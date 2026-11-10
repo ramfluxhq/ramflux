@@ -143,6 +143,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         courier_events: None,
     };
     let result = Box::pin(account.serve(ready)).await;
+    account.ledger = None;
     account.transfers.stop().await;
     if let Some(state) = account.state.accounts.get(&account.id) {
         let _ = state.client.recover_received_attachment_fetches();

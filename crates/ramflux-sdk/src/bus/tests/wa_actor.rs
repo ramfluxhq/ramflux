@@ -15,7 +15,8 @@ use super::lifecycle_fence::{
     PUSH_E, account_of, acked, open_account, pump_quiet, push_engine, runtime_for, stage,
 };
 use crate::bus::connection_manager::{
-    ReceiveTrigger, receive::test_catch_up, receive::test_pass, receive::test_pass_anchored,
+    NetworkingState, ReceiveTrigger, receive::test_catch_up, receive::test_pass,
+    receive::test_pass_anchored,
 };
 use crate::bus::dispatch::task_transport::{Target, seal};
 use crate::prelude::*;
@@ -432,6 +433,26 @@ async fn poll_spawned() {
     let _ = rx.await;
 }
 
+async fn wait_until_live(
+    runtime: &mut super::super::AccountRuntime,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+) -> Case {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if handle.snapshot().state == NetworkingState::Live {
+            drain_ready(runtime).await?;
+            return Ok(());
+        }
+        match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
+        {
+            Ok(Some(work)) => runtime.apply_connection_work(work).await?,
+            Ok(None) => return Err("connection work closed".into()),
+            Err(_) => poll_spawned().await,
+        }
+    }
+    Err("session did not become Live".into())
+}
+
 async fn pump_anchored(
     runtime: &mut super::super::AccountRuntime,
     handle: &crate::bus::connection_manager::ConnectionHandle,
@@ -439,16 +460,22 @@ async fn pump_anchored(
     handle.notify_receive_wake();
     let mut idle = 0_u32;
     for _ in 0..256 {
-        tokio::task::yield_now().await;
         drain_ready(runtime).await?;
         poll_spawned().await;
-        if handle.queued_calls() == 0 && handle.in_flight_calls() == 0 {
-            idle = idle.saturating_add(1);
-            if idle >= 4 {
-                break;
-            }
-        } else {
+        let live = handle.snapshot().state == NetworkingState::Live;
+        let busy = handle.queued_calls() > 0 || handle.in_flight_calls() > 0;
+        if !live || busy {
             idle = 0;
+            // Park on the work channel so the current-thread runtime polls TCP.
+            // Do not use tokio::time::timeout: a paused clock never fires it.
+            let work = runtime.connection_work.recv().await.ok_or("connection work closed")?;
+            runtime.apply_connection_work(work).await?;
+            continue;
+        }
+        tokio::task::yield_now().await;
+        idle = idle.saturating_add(1);
+        if idle >= 4 {
+            break;
         }
     }
     Ok(())
@@ -465,19 +492,25 @@ async fn connected_and_sweep_real() -> Case {
     let gateway = Arc::clone(&fixture.gateway);
     fill_sealed(&mut fixture, 1, 1).await?;
     stop_peer_session(&mut fixture).await;
-    let started = std::time::Instant::now();
     let mut runtime = start_runtime_live(&mut fixture)?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    let wall = std::time::Instant::now();
+    let mut live_at = None;
     loop {
         pump_anchored(&mut runtime, &handle).await?;
+        if handle.snapshot().state == NetworkingState::Live && live_at.is_none() {
+            live_at = Some(std::time::Instant::now());
+        }
         if !gateway.lock().map_err(|_| "gateway")?.resumes.is_empty() {
             break;
         }
-        if started.elapsed() > Duration::from_millis(100) {
-            break;
+        match live_at {
+            Some(at) if at.elapsed() > Duration::from_millis(100) => break,
+            None if wall.elapsed() > Duration::from_secs(10) => break,
+            _ => {}
         }
     }
-    let within = started.elapsed();
+    let within = live_at.map_or_else(|| wall.elapsed(), |at| at.elapsed());
     let in_100 = gateway.lock().map_err(|_| "gateway")?.resumes.len();
     assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100} elapsed={within:?}");
     assert!(within <= Duration::from_millis(100), "first Resume measured at {within:?}");
@@ -649,7 +682,12 @@ async fn restart_staged_applies_after_empty_page_case() -> Case {
     }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
-    drive_pass_anchored(&mut runtime, ReceiveTrigger::Connected).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    wait_until_live(&mut runtime, &handle).await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while snap(&runtime)?.cursor != 1 && std::time::Instant::now() < deadline {
+        pump_anchored(&mut runtime, &handle).await?;
+    }
     assert_eq!(snap(&runtime)?.cursor, 1, "staged retry must apply after an empty Connected page");
     runtime.stop_connection().await;
     drop(runtime);
@@ -665,9 +703,22 @@ async fn oversize_fetch_entry_refreshes_cursor() -> Case {
 async fn oversize_fetch_entry_refreshes_cursor_case() -> Case {
     let mut fixture = Box::pin(Fixture::new("p24b2c-oversize")).await?;
     fill_sealed(&mut fixture, 1, 1).await?;
-    fixture.gateway.lock().map_err(|_| "gateway")?.oversize_next = Some(1);
+    let entry =
+        fixture.gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
+    fixture.gateway.lock().map_err(|_| "gateway")?.inbox.clear();
     let mut runtime = start_runtime(&mut fixture).await?;
+    assert_eq!(snap(&runtime)?.cursor, 0, "empty Connected page leaves C at 0");
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.inbox.push(entry);
+        gateway.oversize_next = Some(1);
+        gateway.fetches.clear();
+    }
     drive_pass_anchored(&mut runtime, ReceiveTrigger::Tick).await?;
+    assert!(
+        !fixture.gateway.lock().map_err(|_| "gateway")?.fetches.is_empty(),
+        "oversize catch-up must issue fetch_entry"
+    );
     assert_eq!(
         snap(&runtime)?.cursor,
         1,

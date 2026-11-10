@@ -275,6 +275,7 @@ async fn pass(
 async fn serving(runtime: &mut AccountRuntime) -> Result<(), SdkError> {
     let (ready, _) = std::sync::mpsc::sync_channel(1);
     let result = runtime.serve(ready).await;
+    runtime.ledger = None;
     runtime.stop_courier().await;
     runtime.close_readers().await;
     result

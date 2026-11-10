@@ -53,6 +53,8 @@ pub(super) struct Gateway {
     pub resume_losses: Vec<(u64, u64, &'static str)>,
     /// Inclusive oversize sequence advertised on `resume_page` (`NeedPoint`).
     pub oversize_next: Option<u64>,
+    /// Sequences served by `fetch_entry`.
+    pub fetches: Vec<u64>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
     pub ack_hold: Option<Arc<AckHold>>,
@@ -528,7 +530,7 @@ fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
         .resume_issued
         .or_else(|| gateway.inbox.last().map(|entry| entry.inbox_seq))
         .unwrap_or(after);
-    let oversize_next = gateway.oversize_next;
+    let oversize_next = gateway.oversize_next.filter(|seq| *seq > after);
     let entries: Vec<Value> = gateway
         .inbox
         .iter()
@@ -569,7 +571,8 @@ fn fetch_entry_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
     let incarnation_id = value["incarnation_id"].as_str().ok_or("fetch incarnation")?.to_owned();
     let seq = value["inbox_seq"].as_u64().ok_or("fetch seq")?;
     let retain_until = now_unix_timestamp() + 300;
-    let gateway = shared.lock().map_err(|_| "gateway")?;
+    let mut gateway = shared.lock().map_err(|_| "gateway")?;
+    gateway.fetches.push(seq);
     let entry = gateway
         .inbox
         .iter()
