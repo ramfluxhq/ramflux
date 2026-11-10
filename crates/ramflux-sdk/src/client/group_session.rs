@@ -604,10 +604,12 @@ impl RamfluxClient {
     ) -> Result<Vec<u8>, SdkError> {
         self.require_backup_outbound_ready()?;
         self.assert_shared_group_send_capacity(group_id, sender_id)?;
+        let logical_event_id =
+            crate::client::target_selection::group_logical_event_id(group_id, None)?;
         let _ = self.candidate_group_target_plan(
             group_id,
             sender_id,
-            group_id,
+            &logical_event_id,
             ramflux_protocol::message::KindId::KindMessage,
         )?;
         let group = self.group_state(group_id)?;

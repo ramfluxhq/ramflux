@@ -10,8 +10,8 @@ mod writer;
 
 pub use evidence::KnownContentEvidence;
 pub use quota::{RawInnerQuota, RawInnerQuotaScope};
+pub(crate) use writer::raw_copy_deleted;
 pub use writer::{RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite};
-pub(crate) use writer::{message_deleted, raw_copy_deleted};
 
 #[cfg(test)]
 mod tests;

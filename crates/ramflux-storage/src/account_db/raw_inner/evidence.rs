@@ -49,7 +49,7 @@ impl AccountDb {
                     if db.is_autocommit() {
                         return Err(StorageError::AuthorizationRejected);
                     }
-                    if super::writer::message_deleted(db, &message)? {
+                    if super::super::deleted_messages::message_is_deleted_on(db, &message)? {
                         return Err(StorageError::AuthorizationRejected);
                     }
                     let existing: Option<Vec<u8>> = db

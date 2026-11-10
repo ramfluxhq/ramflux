@@ -76,7 +76,9 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
     if bytes.is_empty() || bytes.len() > max_bytes || metadata.len() > 4096 {
         return Err(StorageError::AuthorizationRejected);
     }
-    if message_deleted(db, owner_id)? || raw_copy_deleted(db, copy_id)? {
+    if super::super::deleted_messages::message_is_deleted_on(db, owner_id)?
+        || raw_copy_deleted(db, copy_id)?
+    {
         return Err(StorageError::AuthorizationRejected);
     }
     let recorded_source: Option<String> = db
@@ -162,7 +164,7 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
     if !exists {
         return Err(StorageError::AuthorizationRejected);
     }
-    if message_deleted(db, message_id)? {
+    if super::super::deleted_messages::message_is_deleted_on(db, message_id)? {
         return Err(StorageError::AuthorizationRejected);
     }
     let binding_id = format!("raw:{copy_id}");
@@ -183,10 +185,6 @@ pub(super) fn bind(db: &Connection, copy_id: &str, message_id: &str) -> Result<(
         params![binding_id, message_id],
     )?;
     Ok(())
-}
-
-pub(crate) fn message_deleted(db: &Connection, message_id: &str) -> Result<bool, StorageError> {
-    super::super::deleted_messages::message_is_deleted_on(db, message_id)
 }
 
 pub(crate) fn raw_copy_deleted(db: &Connection, copy_id: &str) -> Result<bool, StorageError> {

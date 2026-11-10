@@ -119,7 +119,7 @@ impl BackupDatabase {
         };
         let mut deleted_owners = BTreeSet::new();
         for owner in owners {
-            if super::raw_inner::message_deleted(&self.db, &owner)? {
+            if super::deleted_messages::message_is_deleted_on(&self.db, &owner)? {
                 deleted_owners.insert(owner);
             }
         }
@@ -150,7 +150,7 @@ impl BackupDatabase {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         for (copy_id, message_id) in bound_targets {
-            if super::raw_inner::message_deleted(&self.db, &message_id)? {
+            if super::deleted_messages::message_is_deleted_on(&self.db, &message_id)? {
                 deleted_copies.insert(copy_id);
             }
         }
@@ -163,7 +163,7 @@ impl BackupDatabase {
         };
         let mut deleted_evidence = Vec::new();
         for message_id in evidence_messages {
-            if super::raw_inner::message_deleted(&self.db, &message_id)? {
+            if super::deleted_messages::message_is_deleted_on(&self.db, &message_id)? {
                 deleted_evidence.push(message_id);
             }
         }
@@ -278,11 +278,6 @@ mod tests {
         Ok(())
     }
 
-    fn persist_mac_tombstone(db: &AccountDb, message: &str) -> Result<(), crate::StorageError> {
-        let mac = db.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())?;
-        db.persist_actor_state(&format!("message/deleted/{mac}"), &json!({"version":2}))
-    }
-
     #[test]
     fn deleted_raw_rows_are_removed_at_the_full_merge_footprint_boundary()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -315,7 +310,7 @@ mod tests {
             )
         })?;
         target.send_direct_message("thread", "message-target", "peer", b"body")?;
-        persist_mac_tombstone(&target, "message-target")?;
+        target.persist_mac_tombstone("message-target")?;
         assert!(target.message_is_deleted("message-target")?);
         let projection_deleted: i64 = target.connection.query_row(
             "SELECT deleted FROM direct_message_projection WHERE message_id='message-target'",

@@ -347,6 +347,24 @@ fn select_with_current_membership(
     recheck(&plan, &build()?)
 }
 
+/// Source-qualified group event id (OV-P05-L1). Never `group_id`: that key collapses
+/// every message in the group onto one fresh-cohort event.
+pub(crate) fn group_logical_event_id(
+    group_id: &str,
+    message_id: Option<&str>,
+) -> Result<String, SdkError> {
+    let id = match message_id {
+        Some(id) if !id.is_empty() => id.to_owned(),
+        _ => crate::new_surface_message_id()?,
+    };
+    if id == group_id {
+        return Err(SdkError::LocalBus(
+            "group logical_event_id must be the message id, not group_id".into(),
+        ));
+    }
+    Ok(id)
+}
+
 impl RamfluxClient {
     /// Run candidate selection only when the live profile is message schema v1.
     ///
