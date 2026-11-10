@@ -136,9 +136,9 @@ fn spawn_account_receive(
         crate::bus::push_receiver::sweep::SweepSetting::from_process(),
         mode,
     ))];
-    if handle.session_is_push() {
-        children.push(spawn_receive(crate::bus::push_receiver::intake::run(handle.clone(), work)));
-    }
+    // Advertise is known at bind; Push vs Compat is only set in `announce_live`.
+    // Intake waits for Live, then subscribes to the replaced hub.
+    children.push(spawn_receive(crate::bus::push_receiver::intake::run(handle.clone(), work)));
     children
 }
 

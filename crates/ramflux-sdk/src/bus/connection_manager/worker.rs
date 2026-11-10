@@ -271,7 +271,7 @@ async fn run_account(
         if let Some(host) = &resident.host {
             host.hub.disconnect(reason);
         }
-        disconnected(handle, reason, generation);
+        disconnected(handle, reason, resident.terminal_why.as_deref(), generation);
         drop(resident);
         if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
             break;
@@ -282,7 +282,12 @@ async fn run_account(
     }
 }
 
-fn disconnected(handle: &ConnectionHandle, reason: DisconnectReason, generation: u64) {
+fn disconnected(
+    handle: &ConnectionHandle,
+    reason: DisconnectReason,
+    why: Option<&str>,
+    generation: u64,
+) {
     update(handle, |snapshot| {
         snapshot.state = NetworkingState::NetworkingPending;
         snapshot.phase = if matches!(reason, DisconnectReason::Stop | DisconnectReason::Lock) {
@@ -292,7 +297,10 @@ fn disconnected(handle: &ConnectionHandle, reason: DisconnectReason, generation:
         };
         snapshot.active_transport_kind = None;
         snapshot.session_id = None;
-        snapshot.last_reason = Some(format!("{reason:?}"));
+        snapshot.last_reason = Some(match why {
+            Some(why) => format!("{reason:?}: {why}"),
+            None => format!("{reason:?}"),
+        });
         snapshot.retry_after_ms = None;
         snapshot.next_retry_at_ms = None;
     });
@@ -325,10 +333,23 @@ fn failed(handle: &ConnectionHandle, retry: &AdmissionRetry, error: &SdkError) {
     update(handle, |snapshot| {
         snapshot.phase = ConnectionPhase::Backoff;
         snapshot.cause = super::super::native_account::networking_reason(error);
-        snapshot.last_reason = Some(if matches!(error, SdkError::NodeTimeout { .. }) {
-            "AttemptTimeout".into()
+        let mapped = if matches!(error, SdkError::NodeTimeout { .. }) {
+            "AttemptTimeout".to_owned()
         } else {
             error.to_string()
+        };
+        snapshot.last_reason = Some({
+            #[cfg(test)]
+            {
+                match snapshot.last_reason.take() {
+                    Some(previous) if previous != mapped => format!("{mapped} after {previous}"),
+                    _ => mapped,
+                }
+            }
+            #[cfg(not(test))]
+            {
+                mapped
+            }
         });
         snapshot.retry_after_ms = delay;
         snapshot.next_retry_at_ms = delay.map(|delay| wall_ms().saturating_add(delay));
@@ -476,7 +497,7 @@ mod tests {
                 snapshot.next_retry_at_ms = Some(4242);
             });
             let generation = handle.generation();
-            disconnected(&handle, reason, generation);
+            disconnected(&handle, reason, None, generation);
             assert!(
                 matches!(events.recv().await?, ConnectionEvent::Disconnected { reason: r, generation: g } if r == reason && g == generation)
             );

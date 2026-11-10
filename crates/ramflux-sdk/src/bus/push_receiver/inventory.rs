@@ -170,7 +170,7 @@ pub(crate) const SITES: &[WriterSite] = &[
         class: WriterClass::ProductionLegacy,
         executor: "cover_in / persist_receive_checkpoint_in",
         hook: "SQL receive-checkpoint",
-        count: 4,
+        count: 1,
     },
     WriterSite {
         file: "src/bus/dispatch/group.rs",
@@ -267,6 +267,14 @@ pub(crate) const SITES: &[WriterSite] = &[
         executor: "remove_unrouted_in",
         hook: "hold-delete",
         count: 2,
+    },
+    WriterSite {
+        file: "src/bus/sync_driver/standalone.rs",
+        symbol: "engine.ack(",
+        class: WriterClass::ExecutorOwned,
+        executor: "SourceWa::select then engine.ack (standalone flush)",
+        hook: "outgoing ACK",
+        count: 1,
     },
     WriterSite {
         file: "src/bus/state.rs",

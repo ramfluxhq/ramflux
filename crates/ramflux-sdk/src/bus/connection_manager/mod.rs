@@ -75,10 +75,9 @@ impl SessionConnector for GatewayConnector {
         config: GatewaySessionConfig,
         deadline: Instant,
     ) -> SessionFuture<'_, GatewaySessionEngine> {
-        let native_deadline = config.custody.as_ref().map(|_| deadline);
         Box::pin(GatewaySessionEngine::connect_with_opener(
             config,
-            native_deadline,
+            Some(deadline),
             self.timeouts.clone(),
             Arc::new(crate::gateway::transport_opener::ConfiguredTransport),
         ))

@@ -23,10 +23,7 @@ pub(super) fn stage(
     account: &LocalBusAccountState,
     state: AckState,
 ) -> Result<PreparedAck, SdkError> {
-    let db = account.client.account_db()?;
-    if !crate::bus::push_receiver::apply_w1::is_active(db, &account.target_delivery_id)? {
-        db.refuse_legacy_receive()?;
-    }
+    account.client.account_db()?.refuse_legacy_receive()?;
     let receiver = account.client.owned_device_identity()?;
     if account.gateway_config.source_identity.as_ref() != Some(&receiver)
         || state.entry.target_delivery_id != account.target_delivery_id
@@ -55,25 +52,18 @@ pub(crate) fn finish(
     cursor: Result<GatewayCursor, SdkError>,
     backpressure: &mut super::super::contact_backpressure::Backpressure,
 ) -> Result<bool, SdkError> {
+    account.client.account_db()?.refuse_legacy_receive()?;
     let db = account.client.account_db()?;
-    let target = account.target_delivery_id.as_str();
-    let active = crate::bus::push_receiver::apply_w1::is_active(db, target)?;
-    if !active {
-        db.refuse_legacy_receive()?;
-    }
     let cursor = cursor?;
     #[cfg(test)]
     let started = std::time::Instant::now();
     db.write_transaction(|| {
-        if !active {
-            account.client.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
-            advance_cursor(&account.client, &account.target_delivery_id, state.entry.inbox_seq)?;
-        }
+        account.client.persist_gateway_cursor(&cursor.target_delivery_id, cursor.inbox_seq)?;
         backpressure.completed(&account.client, &state.entry)?;
         db.remove_inbox_retry(&state.key)?;
         db.remove_unrouted(&state.key)?;
         db.remove_unrouted(&state.entry.envelope.envelope_id)?;
-        Ok::<(), SdkError>(())
+        advance_cursor(&account.client, &account.target_delivery_id, state.entry.inbox_seq)
     })?;
     #[cfg(test)]
     if let Some(handle) = &account.connection {

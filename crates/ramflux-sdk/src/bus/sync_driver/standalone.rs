@@ -114,7 +114,11 @@ async fn resume_one(
     after: u64,
     limit: usize,
 ) -> Result<ResumePage, SdkError> {
-    if account.bound_session_mode().is_some_and(|mode| mode.is_push()) {
+    let use_push = match account.bound_session_mode() {
+        Some(mode) => mode.is_push(),
+        None => apply_w1::is_active(account.client.account_db()?, &account.target_delivery_id)?,
+    };
+    if use_push {
         return match engine.resume_page(after, limit).await? {
             PageReply::Page(page) => Ok(*page),
             PageReply::Refused(reason) => Err(SdkError::GatewaySessionRejected(format!(

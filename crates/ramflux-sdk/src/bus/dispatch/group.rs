@@ -1447,7 +1447,9 @@ pub(crate) async fn dispatch_group_receive_request(
         for entry in entries {
             if crate::client::routed::decode(&entry.envelope).is_ok() {
                 if !persist_legacy_cursor {
-                    continue;
+                    return Err(SdkError::Storage(StorageError::Integrity(
+                        ramflux_storage::LEGACY_RECEIVE_ACTIVATED,
+                    )));
                 }
                 let pool = account.relay_quic_pool()?;
                 let delivery =
