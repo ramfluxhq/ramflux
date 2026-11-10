@@ -86,6 +86,7 @@ pub struct PairingActor {
     frontend_generation: u64,
     ceremony: Option<Ceremony>,
     unsolicited: u32,
+    recipient_stage: Option<Arc<dyn super::recipient::RecipientKeyStaging>>,
 }
 
 struct Ceremony {
@@ -118,6 +119,7 @@ struct Ceremony {
     reveal_sent: bool,
     frames_seen: u64,
     head_state: Option<String>,
+    verified_invite: Option<Envelope<Invitation>>,
 }
 
 enum SasHold {
@@ -143,7 +145,16 @@ impl PairingActor {
             frontend_generation: 1,
             ceremony: None,
             unsolicited: 0,
+            recipient_stage: None,
         }
+    }
+
+    /// Inject recipient J0/J1 staging. Called before the recipient commitment.
+    pub fn set_recipient_staging(
+        &mut self,
+        staging: Arc<dyn super::recipient::RecipientKeyStaging>,
+    ) {
+        self.recipient_stage = Some(staging);
     }
 
     #[must_use]
@@ -205,6 +216,7 @@ impl PairingActor {
             generation,
             role: PairingRole::Initiator,
             invitation,
+            verified_invite: None,
             origin,
             token: primary_token,
             common: Some(common),
@@ -242,7 +254,8 @@ impl PairingActor {
             return Err(SdkError::PairingCode("Busy"));
         }
         verify_invitation(&join.token.invitation)?;
-        let invitation = join.token.invitation.body.clone();
+        let verified = join.token.invitation.clone();
+        let invitation = verified.body.clone();
         let origin = invitation.public_origin.clone();
         let nonce = random_32()?;
         let claim = Claim {
@@ -261,6 +274,7 @@ impl PairingActor {
             generation,
             role: PairingRole::Responder,
             invitation,
+            verified_invite: Some(verified),
             origin,
             token: Zeroizing::new(join.token.recipient_token.clone()),
             common: None,
@@ -509,6 +523,7 @@ impl PairingActor {
             reveal_sent: false,
             frames_seen: 0,
             head_state: None,
+            verified_invite: open.verified_invite,
         }
     }
 
@@ -742,10 +757,23 @@ impl PairingActor {
             c.common = Some(offer.common);
             Ok(())
         })?;
+        self.stage_recipient_before_commit()?;
         self.with_ceremony_mut(|c| {
             Self::start_sas_with_ref(c, &local_ref)?;
             Self::queue_commit(c)
         })
+    }
+
+    fn stage_recipient_before_commit(&self) -> Result<(), SdkError> {
+        let Some(staging) = self.recipient_stage.as_ref() else {
+            return Ok(());
+        };
+        let (invite, generation) = self.with_ceremony(|ceremony| {
+            let invite =
+                ceremony.verified_invite.clone().ok_or(SdkError::PairingCode("InvalidInput"))?;
+            Ok((invite, ceremony.generation))
+        })?;
+        staging.stage(&invite, generation)
     }
 
     fn ingest_reveal_chunk(
@@ -957,6 +985,7 @@ struct CeremonyOpen {
     generation: u64,
     role: PairingRole,
     invitation: Invitation,
+    verified_invite: Option<Envelope<Invitation>>,
     origin: String,
     token: Zeroizing<String>,
     common: Option<Common>,
@@ -1171,7 +1200,7 @@ fn bus_body<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> Result<T
     serde_json::from_value(body).map_err(SdkError::from)
 }
 
-fn verify_invitation(envelope: &Envelope<Invitation>) -> Result<(), SdkError> {
+pub(crate) fn verify_invitation(envelope: &Envelope<Invitation>) -> Result<(), SdkError> {
     envelope.body.validate().map_err(|e| wire(&e))?;
     let bytes = invitation_signing_bytes(&envelope.body).map_err(|e| wire(&e))?;
     verify_canonical_signature(&bytes, &envelope.signature, &envelope.body.node_key)

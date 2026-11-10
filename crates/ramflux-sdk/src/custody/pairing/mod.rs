@@ -15,11 +15,13 @@ pub use coordinator::{
 pub use install_gate::{Admission, ReopenGate, reopen};
 pub use install_store::{Install, decode, encode, write_installed, write_pending};
 pub use local_credential::{
-    CredentialOutcome, LocalCredentialProvider, SecretUtf8, acquire_setup, acquire_unlock,
+    CredentialOutcome, LocalCredentialProvider, PersistedReservation, SecretUtf8, acquire_setup,
+    acquire_unlock, cancel_credential, load_reservation, persist_reservation,
 };
 pub use recipient::{
-    StageExisting, StageNew, StagedRecipient, ordinary_networking_allowed, stage_existing,
-    stage_new, try_ordinary_network_send, unadmitted_data_unlock, unlock_with_provider,
+    RecipientKeyStaging, StageExisting, StageNew, StagedRecipient, ordinary_networking_allowed,
+    ordinary_session_admitted, stage_existing, stage_new, unadmitted_data_unlock,
+    unlock_with_provider,
 };
 pub use transport::{
     HttpRelay, PairingConfig, PairingNative, PairingTransport, PreparedCreate, PreparedIssue,

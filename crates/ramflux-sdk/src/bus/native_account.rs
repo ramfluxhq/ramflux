@@ -4,7 +4,9 @@
 //! Ordinary unlocked account state using public native authority and independent node pins.
 use super::state::{LocalBusAccountState, LocalBusDaemonState};
 use crate::client::identity_authority::HeadUse;
-use crate::custody::pairing::local_credential::{LocalCredentialProvider, acquire_unlock};
+use crate::custody::pairing::local_credential::{
+    LocalCredentialProvider, acquire_unlock, load_reservation,
+};
 use crate::{
     AccountNetworkingReason, GatewayCustodyConfig, GatewayQuicEndpointConfig, GatewaySessionConfig,
     LocalBusCreatedAccount, LocalBusCreatedAccountState, RamfluxClient, SdkError,
@@ -23,7 +25,9 @@ pub(crate) fn unlock_from_provider(
     provider: &dyn LocalCredentialProvider,
     home_node_id: Option<String>,
 ) -> Result<LocalBusCreatedAccount, SdkError> {
-    let secret = acquire_unlock(expected, provider)?;
+    let stored = load_reservation(&state.config.data_root, id)?
+        .ok_or(SdkError::PairingField("credential_reservation"))?;
+    let secret = acquire_unlock(expected, provider, &stored)?;
     let passphrase = std::str::from_utf8(secret.as_bytes())
         .map_err(|_| SdkError::PairingField("credential_utf8"))?;
     unlock(state, id, Zeroizing::new(passphrase.to_owned()), home_node_id)
@@ -48,6 +52,9 @@ pub(super) fn unlock(
         client.account_db()?.persist_actor_state("sync/node-id", &Some(&node_id))?;
     }
     drop(passphrase);
+    if !crate::custody::pairing::recipient::ordinary_session_admitted(&client, id)? {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
     let native = client.born_v3_account.as_ref().ok_or(SdkError::CustodySetupInvalid)?;
     let anchor = native.record().body.account_anchor.clone();
     if native.recovery_publication_pending(&root)? {
@@ -448,7 +455,9 @@ pub(super) fn record_networking_at(
 mod pairing_provider_unlock {
     use super::*;
     use crate::LocalBusConfig;
-    use crate::custody::pairing::local_credential::{CredentialOutcome, LocalCredentialProvider};
+    use crate::custody::pairing::local_credential::{
+        CredentialOutcome, LocalCredentialProvider, PersistedReservation, persist_reservation,
+    };
     use ramflux_protocol::encode_base64url;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -478,6 +487,14 @@ mod pairing_provider_unlock {
             frontend_generation: 1,
             action: "unlock".into(),
         };
+        persist_reservation(
+            root.path(),
+            &PersistedReservation {
+                account_id: "acct".into(),
+                reservation_id: expected.reservation_id.clone(),
+                frontend_generation: 1,
+            },
+        )?;
         let Err(error) = unlock_from_provider(&mut state, "acct", &expected, &Refuse, None) else {
             return Err("expected VaultUnavailable".into());
         };

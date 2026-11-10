@@ -13,6 +13,26 @@ use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;
 use zeroize::Zeroizing;
 
+/// Production vault-ref grammar used by Linux, macOS and test vaults.
+///
+/// `prefix` is `""` (primary), `"branch:"`, or `"agent-provisioning:"`. The remainder is a
+/// 43-character canonical base64url 32-byte id.
+///
+/// # Errors
+/// `CustodyVaultUnavailable` when the prefix or bound id is not the production grammar.
+pub(crate) fn require_vault_reference(reference: &str, prefix: &str) -> Result<(), SdkError> {
+    let rest = reference.strip_prefix(prefix).ok_or(SdkError::CustodyVaultUnavailable)?;
+    if rest.len() != 43 {
+        return Err(SdkError::CustodyVaultUnavailable);
+    }
+    let bytes =
+        ramflux_protocol::decode_base64url(rest).map_err(|_| SdkError::CustodyVaultUnavailable)?;
+    if bytes.len() != 32 || ramflux_protocol::encode_base64url(&bytes) != rest {
+        return Err(SdkError::CustodyVaultUnavailable);
+    }
+    Ok(())
+}
+
 /// Implementations must be non-synchronizing, primary-local and independent of data unlock.
 /// No bus method exposes these credentials; public authority reads do not load them.
 pub trait PrimaryVault: Send + Sync {

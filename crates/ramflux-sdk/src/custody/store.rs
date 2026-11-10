@@ -419,6 +419,14 @@ impl BornAccount {
         &self.stored.record
     }
     #[must_use]
+    pub(crate) fn branch_vault_ref(&self) -> &str {
+        &self.stored.branch_vault_ref
+    }
+    #[must_use]
+    pub(crate) fn primary_vault_ref(&self) -> &str {
+        &self.stored.primary_vault_ref
+    }
+    #[must_use]
     pub(crate) fn publication(&self) -> ramflux_protocol::custody::Publication {
         ramflux_protocol::custody::Publication {
             record: self.stored.record.clone(),
@@ -492,6 +500,29 @@ pub(crate) fn reserve_pairing_account(
     anchor: &str,
 ) -> Result<PathBuf, SdkError> {
     genesis::reserve_account(root, id, anchor)
+}
+
+/// Production vault-ref allocator (`custody_vault_reference.v1`). Same bytes as genesis.
+///
+/// # Errors
+/// Canonical encoding or path canonicalize failures.
+pub(crate) fn custody_vault_reference(
+    root: &Path,
+    account_id: &str,
+    anchor: &str,
+) -> Result<String, SdkError> {
+    Ok(ramflux_protocol::hash_base64url(
+        "ramflux.local.custody_vault_reference.v1",
+        &[
+            &[0_u8][..],
+            &ramflux_protocol::canonical_json_bytes(&(
+                root.canonicalize()?.to_string_lossy(),
+                account_id,
+                anchor,
+            ))?,
+        ]
+        .concat(),
+    ))
 }
 
 pub(crate) fn account_exists(root: &Path, id: &str) -> Result<bool, SdkError> {
@@ -733,18 +764,8 @@ pub(super) fn persist(
     pins.observe(&verified)?;
     pins.discard_retained_records();
     let dir = genesis::reserve_account(root, &input.local_account_id, &record.body.account_anchor)?;
-    let reference = ramflux_protocol::hash_base64url(
-        "ramflux.local.custody_vault_reference.v1",
-        &[
-            &[0_u8][..],
-            &ramflux_protocol::canonical_json_bytes(&(
-                root.canonicalize()?.to_string_lossy(),
-                &input.local_account_id,
-                &record.body.account_anchor,
-            ))?,
-        ]
-        .concat(),
-    );
+    let reference =
+        custody_vault_reference(root, &input.local_account_id, &record.body.account_anchor)?;
     let branch_reference = format!("branch:{reference}");
     let agent_provisioning_reference = (input.principal_kind
         == ramflux_protocol::PrincipalKind::HeadlessAi)

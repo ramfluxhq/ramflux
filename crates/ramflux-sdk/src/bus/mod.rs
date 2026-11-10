@@ -46,7 +46,7 @@ mod metadata;
 mod method_table;
 mod mutation_intent;
 mod mutations;
-mod native_account;
+pub(crate) mod native_account;
 mod networking_events;
 pub(crate) mod own_device_copy;
 pub mod protocol;

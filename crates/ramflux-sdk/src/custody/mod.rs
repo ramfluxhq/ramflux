@@ -18,10 +18,12 @@ pub use home_authorization::HomeAuthorizationRequest;
 pub use store::RecoveryCeremony;
 pub use store::{AgentProvisioningBundle, BornAccount, CreationState, load_account};
 pub(crate) use store::{
-    accept_publication, account_exists, export_agent_credentials, failed_setup, failed_setup_error,
-    list_accounts, load_data_account, reconcile_incomplete_markers, reserve_pairing_account,
+    accept_publication, account_exists, custody_vault_reference, export_agent_credentials,
+    failed_setup, failed_setup_error, list_accounts, load_data_account,
+    reconcile_incomplete_markers, reserve_pairing_account,
 };
 pub(crate) use store::{finish_recovery, pending_restore};
+pub(crate) use vault::require_vault_reference;
 pub use vault::{
     BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
     VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
