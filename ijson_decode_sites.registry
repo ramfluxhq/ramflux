@@ -858,6 +858,7 @@ crates/ramflux-transport/src/mesh_quic.rs | accept_request_on_connection_once | 
 crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_get_json_with_peer_ca_pems | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_get_json_with_peer_ca_pems_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_post_json_with_peer_ca_pems | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_post_json_with_peer_ca_pems_and_instance | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_post_json_with_peer_ca_pems_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-transport/src/mesh_quic.rs | mesh_quic_post_postcard_with_peer_ca_pems_async | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/mesh_quic.rs | raw_attachment_body | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
