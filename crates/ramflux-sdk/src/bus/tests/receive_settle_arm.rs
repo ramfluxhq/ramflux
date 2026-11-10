@@ -163,6 +163,7 @@ async fn case() -> TestResult {
         cursor: 2,
         generation,
         erasure_generation,
+        compat: false,
     };
 
     // Stale generation: the arm refuses before any write. The reply sender is dropped unsent.
@@ -279,6 +280,7 @@ async fn settle_retained_paused_case() -> Result<(), SdkError> {
             cursor: 1024,
             generation: 1,
             erasure_generation: db.privacy_erasure_generation()?,
+            compat: false,
         };
         (before, turn)
     };

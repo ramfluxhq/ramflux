@@ -149,14 +149,23 @@ pub(crate) async fn run_anchored(
     work: mpsc::Sender<AccountWork>,
     limits: RuntimeTimeouts,
     setting: crate::bus::push_receiver::sweep::SweepSetting,
-    mode: crate::bus::push_receiver::sweep::SweepMode,
+    mut mode: crate::bus::push_receiver::sweep::SweepMode,
 ) {
-    use crate::bus::push_receiver::sweep::Planner;
+    use crate::bus::push_receiver::sweep::{Planner, SweepMode};
     let mut stop = handle.stop.subscribe();
     let mut planner = Planner::new(&setting, mode);
+    let mut mode_locked = false;
     let origin = handle.receive_origin();
     loop {
         let snapshot = handle.snapshot();
+        if snapshot.state == NetworkingState::Live && !mode_locked {
+            let next = if handle.session_is_push() { SweepMode::Push } else { SweepMode::Compat };
+            if next != mode {
+                mode = next;
+                planner = Planner::new(&setting, mode);
+            }
+            mode_locked = true;
+        }
         let now_ms = handle.receive_now_ms();
         let view = crate::bus::push_receiver::sweep::View {
             live: snapshot.state == NetworkingState::Live,
@@ -183,6 +192,9 @@ pub(crate) async fn run_anchored(
                 Some((ok, paused)) => {
                     let finished_ms = handle.receive_now_ms();
                     handle.reorder().finish_catch_up(finished_ms);
+                    if ok {
+                        handle.note_catch_up_finished(finished_ms);
+                    }
                     planner.finish(now_ms, finished_ms, snapshot.generation, ok, paused);
                 }
             }
@@ -621,9 +633,16 @@ pub(crate) async fn flush_acks(
 ) -> Result<(), SdkError> {
     let now = crate::time::now_unix_timestamp();
     let (reply, response) = oneshot::channel();
-    work.send(AccountWork::AckFlush { generation, force, now, results: None, reply })
-        .await
-        .map_err(|_| handle.pending())?;
+    work.send(AccountWork::AckFlush {
+        generation,
+        force,
+        now,
+        results: None,
+        lookups: None,
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
     let selected = response.await.map_err(|_| handle.pending())??;
     let AckFlushReply::Selected { incarnation, mut sequences } = selected else {
         return Ok(());
@@ -635,25 +654,125 @@ pub(crate) async fn flush_acks(
     if sequences.is_empty() {
         return Ok(());
     }
+    if !handle.session_is_push() {
+        return flush_compat_acks(handle, work, generation, incarnation, sequences, call_timeout)
+            .await;
+    }
     let sent = sequences.clone();
     let batch = handle
         .call(move |engine| Box::pin(engine.ack_batch(sent)), Instant::now() + call_timeout)
         .await;
     let results = map_batch_results(&sequences, batch);
+    apply_ack_results_flush(handle, work, generation, incarnation, sequences, results).await
+}
+
+async fn flush_compat_acks(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    incarnation: String,
+    sequences: Vec<u64>,
+    call_timeout: std::time::Duration,
+) -> Result<(), SdkError> {
+    use crate::bus::push_receiver::compat::{LOOKUP_LIMIT, OwnedLookup};
+    let mut lookups = Vec::with_capacity(sequences.len());
+    for &sequence in &sequences {
+        let after = sequence.saturating_sub(1);
+        let lookup = match handle
+            .call(
+                move |engine| Box::pin(engine.resume_after(after, LOOKUP_LIMIT as usize)),
+                Instant::now() + call_timeout,
+            )
+            .await
+        {
+            Ok(entries) => match entries.first() {
+                Some(entry) if entry.inbox_seq == sequence => OwnedLookup::Entry {
+                    seq: sequence,
+                    envelope_id: entry.envelope.envelope_id.clone(),
+                    payload_hash: entry.envelope.payload_hash.clone(),
+                    incarnation: None,
+                },
+                Some(entry) => OwnedLookup::Empty { first_seq: Some(entry.inbox_seq) },
+                None => OwnedLookup::Empty { first_seq: None },
+            },
+            Err(_) => OwnedLookup::Timeout,
+        };
+        lookups.push((sequence, lookup));
+    }
+    let (reply, response) = oneshot::channel();
+    work.send(AccountWork::AckFlush {
+        generation,
+        force: false,
+        now: crate::time::now_unix_timestamp(),
+        results: None,
+        lookups: Some(lookups),
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
+    let AckFlushReply::Authorized { plans } = response.await.map_err(|_| handle.pending())?? else {
+        return Ok(());
+    };
+    let mut results = Vec::with_capacity(plans.len());
+    let mut sent_seqs = Vec::with_capacity(plans.len());
+    for plan in plans {
+        sent_seqs.push(plan.sequence);
+        let outcome = if let Some(envelope_id) = plan.envelope_id {
+            match send_legacy_ack(handle, envelope_id, plan.sequence, call_timeout).await {
+                Ok(()) => ramflux_storage::ReceiveAckOutcome::Acked,
+                Err(_) => ramflux_storage::ReceiveAckOutcome::Uncertain,
+            }
+        } else {
+            plan.outcome
+        };
+        results.push(ramflux_storage::ReceiveAckResult { sequence: plan.sequence, outcome });
+    }
+    apply_ack_results_flush(handle, work, generation, incarnation, sent_seqs, results).await
+}
+
+async fn send_legacy_ack(
+    handle: &ConnectionHandle,
+    envelope_id: String,
+    sequence: u64,
+    call_timeout: std::time::Duration,
+) -> Result<(), SdkError> {
+    let receiver = handle
+        .metadata()
+        .and_then(|meta| meta.config.source_identity)
+        .ok_or(SdkError::IdentityRootMissing)?;
+    let now = crate::time::now_unix_timestamp();
+    let mut ack = crate::dm::gateway_ack(&envelope_id, &receiver, now);
+    ack.ext.ext.insert("inbox_seq".into(), serde_json::json!(sequence));
+    handle
+        .call(move |engine| Box::pin(engine.ack(ack)), Instant::now() + call_timeout)
+        .await
+        .map(|_| ())
+}
+
+async fn apply_ack_results_flush(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    incarnation: String,
+    sequences: Vec<u64>,
+    results: Vec<ramflux_storage::ReceiveAckResult>,
+) -> Result<(), SdkError> {
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::AckFlush {
         generation,
         force: false,
         now: crate::time::now_unix_timestamp(),
         results: Some(AckFlushResults { incarnation, sequences, results }),
+        lookups: None,
         reply,
     })
     .await
     .map_err(|_| handle.pending())?;
     match response.await.map_err(|_| handle.pending())?? {
-        AckFlushReply::Applied(_) | AckFlushReply::Inactive | AckFlushReply::Selected { .. } => {
-            Ok(())
-        }
+        AckFlushReply::Applied(_)
+        | AckFlushReply::Inactive
+        | AckFlushReply::Selected { .. }
+        | AckFlushReply::Authorized { .. } => Ok(()),
     }
 }
 

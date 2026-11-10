@@ -203,10 +203,12 @@ pub(crate) fn recover_standalone_retries(
     Ok(retries)
 }
 
-/// Push-session coordinates from S2's engine plus disk cursor/erase. `None` when the
-/// ledger is Inactive or the session is not Push. Activated without an epoch is
-/// [`ramflux_storage::MISSING_EPOCH`]. Extra DB reads stay behind the discriminator
-/// so live `PrepareReceive` cannot fail on them for inactive accounts.
+/// Session coordinates from S2's engine plus disk cursor/erase. `None` when the
+/// ledger is Inactive or no engine is bound (standalone). Activated without an
+/// epoch is [`ramflux_storage::MISSING_EPOCH`]. Push uses the negotiated
+/// incarnation; Legacy/Compat use the stored epoch. Extra DB reads stay behind
+/// the discriminator so live `PrepareReceive` cannot fail on them for inactive
+/// accounts.
 pub(crate) fn actor_turn(
     account: &LocalBusAccountState,
     generation: u64,
@@ -226,17 +228,24 @@ pub(crate) fn actor_turn(
     let Some(engine) = account.engine.as_ref() else {
         return Ok(None);
     };
-    let SessionMode::Push { incarnation } = &engine.mode else {
-        return Ok(None);
-    };
     let target = account.target_delivery_id.clone();
+    let (incarnation, compat) = match &engine.mode {
+        SessionMode::Push { incarnation } => (incarnation.as_str().to_owned(), false),
+        SessionMode::Legacy | SessionMode::Compat => {
+            let stored = db
+                .receive_epoch(&target)?
+                .ok_or(ramflux_storage::StorageError::Integrity(ramflux_storage::MISSING_EPOCH))?;
+            (stored, true)
+        }
+    };
     let cursor = account.client.gateway_receive_cursor(&target)?;
     Ok(Some(ReceiveTurn {
         target,
-        incarnation: incarnation.as_str().to_owned(),
+        incarnation,
         cursor,
         generation,
         erasure_generation: db.privacy_erasure_generation()?,
+        compat,
     }))
 }
 

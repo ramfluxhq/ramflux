@@ -31,6 +31,7 @@ pub mod durability_test_hooks;
 compile_error!("durability-test-hooks must not be enabled in a production build");
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub use account_db::receive::ReceiveLedgerSnap;
+pub use account_db::receive::ReceiveStatusCounters;
 pub use account_db::receive::ack::{
     ACK_BATCH_MAX, ACK_FLUSH_COUNT, ACK_FLUSH_SECS, ReceiveAckApply, ReceiveAckApplyResult,
     ReceiveAckOutcome, ReceiveAckResult,

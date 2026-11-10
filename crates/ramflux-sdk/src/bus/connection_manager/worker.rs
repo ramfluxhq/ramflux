@@ -426,6 +426,7 @@ fn announce_live(
     *handle.shared.hub.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
         Arc::clone(&hub);
     handle.shared.read_clock.reset_to_now();
+    handle.set_session_mode(resident.mode.clone());
     resident.host = Some(HostFrames {
         hub,
         resync_needed: Arc::clone(&handle.shared.resync_needed),

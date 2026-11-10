@@ -76,6 +76,34 @@ pub(crate) enum LookupReply<'a> {
     Timeout,
 }
 
+/// Owned lookup carried across the actor channel for proof-gated compat ACK.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedLookup {
+    Entry { seq: u64, envelope_id: String, payload_hash: String, incarnation: Option<String> },
+    Empty { first_seq: Option<u64> },
+    FrameTooLarge { bytes: usize, entries: u32 },
+    Timeout,
+}
+
+impl OwnedLookup {
+    #[must_use]
+    pub(crate) fn as_reply(&self) -> LookupReply<'_> {
+        match self {
+            Self::Entry { seq, envelope_id, payload_hash, incarnation } => LookupReply::Entry {
+                seq: *seq,
+                envelope_id,
+                payload_hash,
+                incarnation: incarnation.as_deref(),
+            },
+            Self::Empty { first_seq } => LookupReply::Empty { first_seq: *first_seq },
+            Self::FrameTooLarge { bytes, entries } => {
+                LookupReply::FrameTooLarge { bytes: *bytes, entries: *entries }
+            }
+            Self::Timeout => LookupReply::Timeout,
+        }
+    }
+}
+
 pub(crate) struct CompatExecutor<'a> {
     pub expected: ReceiveExpectation<'a>,
     pub generation: u64,

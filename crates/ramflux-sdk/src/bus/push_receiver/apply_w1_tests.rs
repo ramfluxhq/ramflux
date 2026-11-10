@@ -254,10 +254,17 @@ impl ramflux_transport::GatewaySessionFrameSource for CountSends {
 
 fn attach_counter(account: &mut crate::bus::state::LocalBusAccountState) -> Arc<AtomicUsize> {
     let sends = Arc::new(AtomicUsize::new(0));
-    account.engine = Some(crate::gateway::GatewaySessionEngine::with_test_transport(
+    let mut engine = crate::gateway::GatewaySessionEngine::with_test_transport(
         account.gateway_config.clone(),
         Box::new(CountSends { sends: Arc::clone(&sends) }),
-    ));
+    );
+    engine.mode = crate::gateway::session_push::SessionMode::Push {
+        incarnation: crate::gateway::session_push::IncarnationId::try_from(
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        )
+        .expect("incarnation"),
+    };
+    account.engine = Some(engine);
     sends
 }
 
@@ -1026,6 +1033,37 @@ async fn projection_w1_admits_outbox() -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn compat_intent_transition() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    let mut engine = crate::gateway::GatewaySessionEngine::with_test_transport(
+        harness.account.gateway_config.clone(),
+        Box::new(CountSends { sends: Arc::new(AtomicUsize::new(0)) }),
+    );
+    engine.mode = crate::gateway::session_push::SessionMode::Legacy;
+    harness.account.engine = Some(engine);
+    let entry = live_dummy(&harness.account);
+    let key = "authenticated-projection-key".to_owned();
+    persist_projection_receipt_at(&harness.account, &entry.entry, &key)?;
+    set_projection_key(&key);
+    queue_projection();
+    drive(&mut harness.account, entry, || 1).await?;
+    let snap = harness
+        .account
+        .client
+        .account_db()?
+        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
+    assert_eq!(snap.cursor, 1, "compat W2 advances C");
+    assert_eq!(snap.intents, vec![1], "compat W2 writes the ACK intent");
+    assert_eq!(snap.work, 1, "CompatTerminal keeps the registered proof copy");
+    assert_eq!(
+        snap.receipts,
+        vec![(1, "completed".into())],
+        "CompatTerminal staged-without-work keeps the completed receipt"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn projection_w1_before_commit_keeps_w0() -> Result<(), SdkError> {
     let mut harness = open()?;
     let entry = live_dummy(&harness.account);
@@ -1308,7 +1346,7 @@ fn inactive_account_skips_w2_and_ack_flush() -> Result<(), SdkError> {
     assert!(!apply_w1::is_active(db, &target)?, "inactive discriminator skips the ledger route");
     assert!(db.receive_epoch(&target)?.is_none());
     assert!(db.projection_checkpoint(&format!("gateway_receive_cursor:{target}"))?.is_none());
-    let reply = crate::bus::apply_ack_flush(&account, 1, true, now_unix_timestamp(), None)?;
+    let reply = crate::bus::apply_ack_flush(&account, 1, true, now_unix_timestamp(), None, None)?;
     assert!(
         matches!(reply, crate::bus::connection_manager::AckFlushReply::Inactive),
         "inactive AckFlush must return Inactive, got {reply:?}"

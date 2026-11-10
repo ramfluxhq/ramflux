@@ -340,6 +340,22 @@ pub(crate) enum SessionMode {
     Push { incarnation: IncarnationId },
 }
 
+impl SessionMode {
+    #[must_use]
+    pub(crate) const fn is_push(&self) -> bool {
+        matches!(self, Self::Push { .. })
+    }
+
+    #[must_use]
+    pub(crate) const fn receive_label(&self) -> &'static str {
+        match self {
+            Self::Push { .. } => "push",
+            Self::Compat => "compat",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
 /// The second decode of the establishment frame bytes.
 #[derive(Debug, Deserialize)]
 struct EchoFrame {

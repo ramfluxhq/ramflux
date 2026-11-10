@@ -53,6 +53,7 @@ pub(crate) fn capture_turn(
         cursor: read_cursor(db, target)?,
         generation,
         erasure_generation: db.privacy_erasure_generation()?,
+        compat: false,
     })
 }
 
@@ -72,6 +73,9 @@ pub(crate) async fn apply_page(
 ) -> Result<ReceiveApplied, SdkError> {
     let mut source = source.map(|prepared| *prepared).transpose()?;
     let mut turn = turn.clone();
+    turn.compat = account.engine.as_ref().is_some_and(|engine| {
+        !matches!(engine.mode, crate::gateway::session_push::SessionMode::Push { .. })
+    });
     refresh_cursor(account.client.account_db()?, &mut turn)?;
     let mut attempts = 0;
     #[cfg(test)]
@@ -129,7 +133,7 @@ async fn apply_once(
                 client.apply_own_copy_w1_in(tx, entry, &manifest, expected, sequence, &message)?;
                 project_if_committed(tx, client, entry, sequence, expected)?;
                 ReplyOutbox::prune_marker_in(tx, &key)?;
-                cover_w1_outcome(tx, sequence, false, &[])?;
+                cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                 Ok(false)
             })?;
             Ok(())
@@ -148,7 +152,7 @@ async fn apply_once(
                 )?;
                 project_if_committed(tx, client, entry, sequence, expected)?;
                 ReplyOutbox::prune_marker_in(tx, &key)?;
-                cover_w1_outcome(tx, sequence, false, &[])?;
+                cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                 Ok(false)
             })?;
             Ok(())
@@ -164,7 +168,7 @@ async fn apply_once(
                     expected,
                     handle_generation(),
                 )?;
-                cover_w1_outcome(tx, sequence, held, &[])?;
+                cover_w1_outcome(tx, sequence, held, &[], turn.compat)?;
                 if !held {
                     ReplyOutbox::prune_marker_in(tx, &key)?;
                 }
@@ -207,11 +211,11 @@ async fn apply_routed_w1(
                     crate::client::routed::JoinedW1::Project(ctx) => {
                         let (projected, admitted, held) =
                             client.commit_routed_w1_in(tx, sequence, ctx)?;
-                        cover_w1_outcome(tx, sequence, held, &[])?;
+                        cover_w1_outcome(tx, sequence, held, &[], turn.compat)?;
                         Ok((projected, admitted))
                     }
                     crate::client::routed::JoinedW1::Cover => {
-                        cover_w1_outcome(tx, sequence, false, &[])?;
+                        cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                         Ok((None, Vec::new()))
                     }
                     crate::client::routed::JoinedW1::ContactBootstrap {
@@ -221,7 +225,7 @@ async fn apply_routed_w1(
                     } => {
                         tx.require_open_input(sequence)?;
                         client.commit_contact_request_bootstrap_in(entry, manifest, local)?;
-                        cover_w1_outcome(tx, sequence, false, &[])?;
+                        cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                         Ok((None, Vec::new()))
                     }
                 })
@@ -576,7 +580,7 @@ fn project_application(
     let key = projection_key(client, entry)?;
     run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
         project_with_key(tx, client, entry, sequence, expected, &key)?;
-        cover_w1_outcome(tx, sequence, false, &[])?;
+        cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
         Ok(false)
     })?;
     Ok(())
@@ -701,7 +705,7 @@ fn recover_own_copy(
             entry.inbox_seq,
             now_unix_timestamp(),
         )?;
-        cover_w1_outcome(tx, entry.inbox_seq, false, &[])?;
+        cover_w1_outcome(tx, entry.inbox_seq, false, &[], turn.compat)?;
         Ok(false)
     })?;
     Ok(())
@@ -748,6 +752,7 @@ fn cover_w1_outcome(
     sequence: u64,
     held: bool,
     gaps: &[ReceiveGap<'_>],
+    compat: bool,
 ) -> Result<(), SdkError> {
     #[cfg(test)]
     if let Some(text) = AFTER_W1_CUT.with(std::cell::Cell::take) {
@@ -755,6 +760,18 @@ fn cover_w1_outcome(
     }
     let covered = if held {
         cover_held_in(tx, sequence, gaps)?
+    } else if compat {
+        super::compat::CompatExecutor {
+            expected: ramflux_storage::ReceiveExpectation {
+                target: "",
+                incarnation: "",
+                cursor: 0,
+                generation: 0,
+                erasure_generation: 0,
+            },
+            generation: 0,
+        }
+        .admit_in(tx, &super::compat::AdmitRequest { sequence, now: now_unix_timestamp() })?
     } else {
         cover_terminal_in(tx, sequence, gaps)?
     };

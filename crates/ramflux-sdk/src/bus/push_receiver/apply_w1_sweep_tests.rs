@@ -219,10 +219,17 @@ impl ramflux_transport::GatewaySessionFrameSource for CountSends {
 
 fn attach_counter(account: &mut crate::bus::state::LocalBusAccountState) -> Arc<AtomicUsize> {
     let sends = Arc::new(AtomicUsize::new(0));
-    account.engine = Some(crate::gateway::GatewaySessionEngine::with_test_transport(
+    let mut engine = crate::gateway::GatewaySessionEngine::with_test_transport(
         account.gateway_config.clone(),
         Box::new(CountSends { sends: Arc::clone(&sends) }),
-    ));
+    );
+    engine.mode = crate::gateway::session_push::SessionMode::Push {
+        incarnation: crate::gateway::session_push::IncarnationId::try_from(
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        )
+        .expect("incarnation"),
+    };
+    account.engine = Some(engine);
     sends
 }
 

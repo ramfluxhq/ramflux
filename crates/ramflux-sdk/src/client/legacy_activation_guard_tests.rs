@@ -55,6 +55,12 @@ fn push_engine(config: crate::GatewaySessionConfig) -> GatewaySessionEngine {
     engine
 }
 
+fn legacy_engine(config: crate::GatewaySessionConfig) -> GatewaySessionEngine {
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.mode = SessionMode::Legacy;
+    engine
+}
+
 fn assert_activated(error: &SdkError) {
     assert!(
         matches!(error, SdkError::Storage(StorageError::Integrity(LEGACY_RECEIVE_ACTIVATED))),
@@ -355,6 +361,17 @@ async fn activation_revert_preserves_ledger() -> TestResult {
         Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
+    account.install_test_session(legacy_engine(advertised.clone()));
+    let turn = actor_turn(&account, 1)?;
+    assert!(
+        turn.as_ref().is_some_and(|turn| turn.compat),
+        "activated Legacy session must yield a compat ledger turn"
+    );
+    refuse_legacy_receive_unless_ledger_turn(&account, turn.as_ref())
+        .expect("compat ApplyPage (turn: Some) must not be refused");
+    prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
+        .expect("compat PrepareReceive (turn: Some) must not be refused");
+    account.engine = None;
     let mut counting = crate::gateway::access::CountingGateway::new(advertised);
     counting.page_losses.push(crate::gateway::session_push::KnownLoss {
         from_seq: 1,

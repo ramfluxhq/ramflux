@@ -50,13 +50,18 @@ pub(super) fn record_session(
             crate::custody::network_now()?,
         )?,
     };
-    body["session"] = serde_json::json!({
+    let mut session = serde_json::json!({
         "state": snapshot.state,
         "phase": snapshot.phase,
         "generation": snapshot.generation,
         "cause": snapshot.cause,
         "retry_after_ms": snapshot.retry_after_ms,
     });
+    if let Some(receive) = &snapshot.receive {
+        session["receive"] =
+            serde_json::to_value(receive).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    }
+    body["session"] = session;
     persist(account, previous.as_ref(), &body)
 }
 

@@ -15,7 +15,7 @@ mod metadata_child;
     allow(unused_imports, reason = "W0 on main and bus tests import this path")
 )]
 pub(crate) use account_work::ReceiveTurn;
-pub(crate) use account_work::{AccountWork, AckFlushReply, AckFlushResults};
+pub(crate) use account_work::{AccountWork, AckFlushReply, AckFlushResults, CompatAckPlan};
 mod client;
 pub(crate) use client::SessionClient;
 pub(crate) mod session_host;
@@ -27,6 +27,7 @@ use crate::gateway::frame_dispatch::FrameKind;
 use crate::{GatewaySessionConfig, GatewaySessionEngine, GatewaySessionState, SdkError};
 pub(crate) use model::{
     ConnectionEvent, ConnectionPhase, DisconnectReason, NetworkingSnapshot, NetworkingState,
+    ReceiveStatus,
 };
 use std::{
     any::Any,
@@ -94,6 +95,11 @@ pub(crate) struct SessionMetadata {
 struct Shared {
     timeouts: RuntimeTimeouts,
     session_push_advertise: bool,
+    session_mode: std::sync::Mutex<crate::gateway::session_push::SessionMode>,
+    compat_session: std::sync::Mutex<crate::bus::push_receiver::compat::CompatSession>,
+    catch_ups_total: AtomicU64,
+    last_catch_up_at_ms: std::sync::Mutex<Option<u64>>,
+    fallback_clock_unverified: std::sync::atomic::AtomicBool,
     snapshot: RwLock<NetworkingSnapshot>,
     metadata: RwLock<Option<SessionMetadata>>,
     hub: RwLock<Arc<SessionHub>>,
@@ -152,6 +158,11 @@ fn new_shared(
     Arc::new(Shared {
         timeouts: timeouts.clone(),
         session_push_advertise: config.session_push_advertise,
+        session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Legacy),
+        compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),
+        catch_ups_total: AtomicU64::new(0),
+        last_catch_up_at_ms: std::sync::Mutex::new(None),
+        fallback_clock_unverified: std::sync::atomic::AtomicBool::new(false),
         snapshot: RwLock::new(NetworkingSnapshot::pending(generation)),
         metadata: RwLock::new(None),
         hub: RwLock::new(Arc::new(SessionHub::new(generation))),
@@ -597,6 +608,72 @@ impl ConnectionHandle {
         &self,
     ) -> std::sync::MutexGuard<'_, crate::bus::push_receiver::reorder::ReorderBuffer> {
         self.shared.reorder.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[must_use]
+    pub(crate) fn session_mode(&self) -> crate::gateway::session_push::SessionMode {
+        self.shared.session_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    #[must_use]
+    pub(crate) fn session_is_push(&self) -> bool {
+        self.session_mode().is_push()
+    }
+
+    pub(crate) fn set_session_mode(&self, mode: crate::gateway::session_push::SessionMode) {
+        *self.shared.session_mode.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = mode;
+        *self.shared.compat_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::bus::push_receiver::compat::start_session();
+        self.shared.fallback_clock_unverified.store(false, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub(crate) fn compat_session(&self) -> crate::bus::push_receiver::compat::CompatSession {
+        self.shared.compat_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    pub(crate) fn set_compat_session(
+        &self,
+        session: crate::bus::push_receiver::compat::CompatSession,
+    ) {
+        *self.shared.compat_session.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            session;
+    }
+
+    pub(crate) fn note_catch_up_finished(&self, at_ms: u64) {
+        self.shared.catch_ups_total.fetch_add(1, Ordering::Relaxed);
+        *self
+            .shared
+            .last_catch_up_at_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(at_ms);
+    }
+
+    pub(crate) fn set_receive_status(&self, receive: Option<ReceiveStatus>) {
+        let mut snapshot =
+            self.shared.snapshot.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.receive = receive;
+    }
+
+    pub(crate) fn note_fallback_clock(&self, unverified: bool) {
+        if unverified {
+            self.shared.fallback_clock_unverified.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn fallback_clock_unverified(&self) -> bool {
+        self.shared.fallback_clock_unverified.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub(crate) fn catch_ups_total(&self) -> u64 {
+        self.shared.catch_ups_total.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub(crate) fn last_catch_up_at_ms(&self) -> Option<u64> {
+        *self.shared.last_catch_up_at_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[cfg(test)]

@@ -255,12 +255,18 @@ impl AccountRuntime {
                 );
                 let _ = reply.send(result.map(|accepted| (accepted, backpressure)));
             }
-            AccountWork::AckFlush { generation, force, now, results, reply } => {
+            AccountWork::AckFlush { generation, force, now, results, lookups, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
                     return false;
                 }
-                let _ =
-                    reply.send(apply_ack_flush(account, handle.generation(), force, now, results));
+                let _ = reply.send(apply_ack_flush(
+                    account,
+                    handle.generation(),
+                    force,
+                    now,
+                    results,
+                    lookups,
+                ));
             }
             _ => {}
         }
@@ -511,16 +517,67 @@ pub(crate) fn apply_ack_flush(
     force: bool,
     now: i64,
     results: Option<crate::bus::connection_manager::AckFlushResults>,
+    lookups: Option<Vec<(u64, crate::bus::push_receiver::compat::OwnedLookup)>>,
 ) -> Result<crate::bus::connection_manager::AckFlushReply, SdkError> {
-    use crate::bus::connection_manager::AckFlushReply;
+    use crate::bus::connection_manager::{AckFlushReply, CompatAckPlan};
     use crate::bus::push_receiver::ack_batch::SourceWa;
-    use ramflux_storage::ReceiveAckApply;
+    use crate::bus::push_receiver::compat::{AckDecision, authorize_legacy_ack};
+    use ramflux_storage::{ReceiveAckApply, ReceiveAckOutcome};
     let db = account.client.account_db()?;
     let target = account.target_delivery_id.as_str();
     if !super::super::push_receiver::apply_w1::is_active(db, target)? {
         return Ok(AckFlushReply::Inactive);
     }
     let turn = super::super::push_receiver::apply_w1::capture_turn(db, generation, target)?;
+    if let Some(lookups) = lookups {
+        let capable_e = account.engine.as_ref().and_then(|engine| match &engine.mode {
+            crate::gateway::session_push::SessionMode::Push { incarnation } => {
+                Some(incarnation.as_str().to_owned())
+            }
+            _ => None,
+        });
+        let mut plans = Vec::with_capacity(lookups.len());
+        for (sequence, lookup) in lookups {
+            let decision = authorize_legacy_ack(
+                db,
+                target,
+                &turn.incarnation,
+                sequence,
+                capable_e.as_deref(),
+                &lookup.as_reply(),
+            )?;
+            let plan = match decision {
+                AckDecision::Authorize => CompatAckPlan {
+                    sequence,
+                    envelope_id: match lookup {
+                        crate::bus::push_receiver::compat::OwnedLookup::Entry {
+                            envelope_id,
+                            ..
+                        } => Some(envelope_id),
+                        _ => None,
+                    },
+                    outcome: ReceiveAckOutcome::Acked,
+                },
+                AckDecision::SettleAbsent => CompatAckPlan {
+                    sequence,
+                    envelope_id: None,
+                    outcome: ReceiveAckOutcome::AlreadySettled,
+                },
+                AckDecision::RetainBackoff => CompatAckPlan {
+                    sequence,
+                    envelope_id: None,
+                    outcome: ReceiveAckOutcome::Transient,
+                },
+                AckDecision::Suspend | AckDecision::RefuseSequenceAlone => CompatAckPlan {
+                    sequence,
+                    envelope_id: None,
+                    outcome: ReceiveAckOutcome::Uncertain,
+                },
+            };
+            plans.push(plan);
+        }
+        return Ok(AckFlushReply::Authorized { plans });
+    }
     match results {
         None => {
             let sequences =
@@ -635,6 +692,12 @@ fn record_observation(
     if account.client.born_v3_account.is_none() {
         return false;
     }
+    if let Err(error) = refresh_receive_status(account, handle)
+        && !*warned
+    {
+        tracing::warn!(%error, "receive snapshot counters deferred; account remains open");
+        *warned = true;
+    }
     match super::super::networking_events::record_session(account, &handle.snapshot()) {
         Ok(changed) => {
             *warned = false;
@@ -649,6 +712,39 @@ fn record_observation(
             false
         }
     }
+}
+
+fn refresh_receive_status(
+    account: &crate::bus::state::LocalBusAccountState,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+) -> Result<(), SdkError> {
+    use crate::bus::connection_manager::ReceiveStatus;
+    let db = account.client.account_db()?;
+    let receive = match db.receive_activation()? {
+        ramflux_storage::ReceiveActivation::Inactive => None,
+        ramflux_storage::ReceiveActivation::Activated => {
+            let counters = db.receive_status_counters(&account.target_delivery_id)?;
+            let mode = handle.session_mode();
+            Some(ReceiveStatus {
+                mode: mode.receive_label().to_owned(),
+                last_catch_up_at: handle.last_catch_up_at_ms(),
+                catch_ups_total: handle.catch_ups_total(),
+                inbox_gaps_total: counters.inbox_gaps_total,
+                legacy_unverified_total: counters.legacy_unverified_total,
+                ack_intents_pending: counters.ack_intents_pending,
+                held_entries: counters.held_entries,
+                paused_reason: handle.compat_session().paused_reason.map(str::to_owned),
+                incarnation: counters.incarnation,
+                inbox_resets_total: counters.inbox_resets_total,
+                held_evicted_total: counters.held_evicted_total,
+                incarnation_unverified: counters.incarnation_unverified,
+                fallback_clock_unverified: handle.fallback_clock_unverified()
+                    || counters.incarnation_unverified_flag,
+            })
+        }
+    };
+    handle.set_receive_status(receive);
+    Ok(())
 }
 
 fn apply_metadata(

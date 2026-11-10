@@ -305,6 +305,23 @@ fn legacy_deadline_clock_skew() -> Result<(), SdkError> {
         fallback_deadline(i64::MAX, 1, i64::MAX, None).is_err(),
         "checked add refuses overflow"
     );
+    let status = crate::bus::connection_manager::ReceiveStatus {
+        mode: "compat".into(),
+        last_catch_up_at: None,
+        catch_ups_total: 0,
+        inbox_gaps_total: 0,
+        legacy_unverified_total: 0,
+        ack_intents_pending: 0,
+        held_entries: 0,
+        paused_reason: None,
+        incarnation: Some("e".into()),
+        inbox_resets_total: 0,
+        held_evicted_total: 0,
+        incarnation_unverified: 0,
+        fallback_clock_unverified: over.fallback_clock_unverified,
+    };
+    let value = serde_json::to_value(&status).expect("status");
+    assert_eq!(value["fallback_clock_unverified"], true, "clock diagnostic is on the snapshot");
     Ok(())
 }
 

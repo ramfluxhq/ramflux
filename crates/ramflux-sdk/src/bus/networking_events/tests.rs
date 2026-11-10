@@ -237,6 +237,7 @@ fn snapshot() -> super::super::connection_manager::NetworkingSnapshot {
         cause: None,
         active_transport_kind: None,
         session_id: None,
+        receive: None,
     }
 }
 
@@ -402,5 +403,15 @@ async fn start_connection_resets_stored_session_to_connecting() -> TestResult {
         .ok_or("stored reset")?;
     assert_eq!(stored, reset);
     account.connection.as_ref().ok_or("handle")?.stop().await;
+    Ok(())
+}
+
+#[test]
+fn inactive_snapshot_json_omits_receive() -> TestResult {
+    let view = snapshot();
+    let value = serde_json::to_value(&view)?;
+    assert!(value.get("receive").is_none(), "inactive JSON must omit receive: {value}");
+    assert_eq!(value["state"], "live");
+    assert_eq!(value["phase"], "live");
     Ok(())
 }

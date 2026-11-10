@@ -320,6 +320,96 @@ impl AccountDb {
             .map_or(Ok(0), |s| s.parse::<u64>().map_err(|_| StorageError::AuthorizationRejected))?;
         Ok((incarnation, cursor))
     }
+
+    /// Committed receive counters for the manager snapshot. Missing tables count as zero.
+    ///
+    /// # Errors
+    /// SQLite errors other than a missing table.
+    pub fn receive_status_counters(
+        &self,
+        target: &str,
+    ) -> Result<ReceiveStatusCounters, StorageError> {
+        let count = |sql: &str| -> Result<u64, StorageError> {
+            match self.connection.query_row(sql, rusqlite::params![target], |row| row.get(0)) {
+                Ok(value) => Ok(value),
+                Err(rusqlite::Error::SqliteFailure(code, _))
+                    if code.code == rusqlite::ErrorCode::Unknown =>
+                {
+                    Ok(0)
+                }
+                Err(error) => Err(error.into()),
+            }
+        };
+        let inbox_gaps_total =
+            count("SELECT count(*) FROM gateway_inbox_loss WHERE target_delivery_id=?1")?;
+        let legacy_unverified_total = count(
+            "SELECT count(*) FROM gateway_inbox_loss WHERE target_delivery_id=?1 AND classification='legacy_unverified'",
+        )?;
+        let ack_intents_pending =
+            count("SELECT count(*) FROM gateway_ack_intent WHERE target_delivery_id=?1")?;
+        let held_entries = count(
+            "SELECT count(*) FROM gateway_receive_receipt WHERE target_delivery_id=?1 AND disposition='held'",
+        )?;
+        let held_evicted_total = match self.connection.query_row(
+            "SELECT count(*) FROM runtime_journal WHERE topic='inbox.receive_failure' AND json_extract(CAST(body_json AS TEXT),'$.reason')='held_evicted'",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(value) => value,
+            Err(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::Unknown =>
+            {
+                0
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let (incarnation, retired_blob, verified): (Option<String>, Option<Vec<u8>>, Option<i64>) =
+            match self.connection.query_row(
+                "SELECT incarnation_id, retired_incarnations, incarnation_verified FROM gateway_receive_epoch WHERE target_delivery_id=?1",
+                rusqlite::params![target],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ) {
+                Ok(row) => (Some(row.0), Some(row.1), Some(row.2)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => (None, None, None),
+                Err(rusqlite::Error::SqliteFailure(code, _))
+                    if code.code == rusqlite::ErrorCode::Unknown =>
+                {
+                    (None, None, None)
+                }
+                Err(error) => return Err(error.into()),
+            };
+        let inbox_resets_total = retired_blob
+            .as_deref()
+            .map(retired_incarnations)
+            .transpose()?
+            .map_or(0, |retired| u64::try_from(retired.len()).unwrap_or(u64::MAX));
+        let incarnation_unverified = self.actor_state_usage("gateway/compat-suspended/")?.0;
+        Ok(ReceiveStatusCounters {
+            inbox_gaps_total,
+            legacy_unverified_total,
+            ack_intents_pending,
+            held_entries,
+            inbox_resets_total,
+            held_evicted_total,
+            incarnation_unverified,
+            incarnation,
+            incarnation_unverified_flag: verified == Some(0),
+        })
+    }
+}
+
+/// Committed receive counters the SDK snapshot copies.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReceiveStatusCounters {
+    pub inbox_gaps_total: u64,
+    pub legacy_unverified_total: u64,
+    pub ack_intents_pending: u64,
+    pub held_entries: u64,
+    pub inbox_resets_total: u64,
+    pub held_evicted_total: u64,
+    pub incarnation_unverified: u64,
+    pub incarnation: Option<String>,
+    pub incarnation_unverified_flag: bool,
 }
 
 pub(crate) fn retired_incarnations(blob: &[u8]) -> Result<Vec<String>, StorageError> {

@@ -331,6 +331,18 @@ async fn resume_one(
     limit: usize,
     call_timeout: std::time::Duration,
 ) -> Result<ResumePage, SdkError> {
+    if handle.session_is_push() {
+        return resume_push(handle, after, limit, call_timeout).await;
+    }
+    resume_legacy(handle, after, limit, call_timeout).await
+}
+
+async fn resume_push(
+    handle: &ConnectionHandle,
+    after: u64,
+    limit: usize,
+    call_timeout: std::time::Duration,
+) -> Result<ResumePage, SdkError> {
     match handle
         .call(
             move |engine| Box::pin(engine.resume_page(after, limit)),
@@ -343,6 +355,103 @@ async fn resume_one(
             "resume_page refused: {}",
             reason.as_str()
         ))),
+    }
+}
+
+async fn resume_legacy(
+    handle: &ConnectionHandle,
+    after: u64,
+    limit: usize,
+    call_timeout: std::time::Duration,
+) -> Result<ResumePage, SdkError> {
+    use crate::bus::push_receiver::compat::{FRAME_MAX_BYTES, FrameOutcome, on_legacy_frame};
+    let mut session = handle.compat_session();
+    let want = usize::try_from(session.limit).unwrap_or(limit).min(limit);
+    let entries = handle
+        .call(
+            move |engine| Box::pin(engine.resume_after(after, want)),
+            Instant::now() + call_timeout,
+        )
+        .await?;
+    let bytes =
+        serde_json::to_vec(&entries).map_or(FRAME_MAX_BYTES.saturating_add(1), |body| body.len());
+    let count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    match on_legacy_frame(&mut session, bytes, count, after) {
+        FrameOutcome::Accept { .. } => {
+            handle.set_compat_session(session);
+            Ok(legacy_page(handle, after, want, entries))
+        }
+        FrameOutcome::RetryFresh { limit: sticky } => {
+            handle.set_compat_session(session);
+            let sticky_usize = usize::try_from(sticky).unwrap_or(1);
+            let retry = handle
+                .call(
+                    move |engine| Box::pin(engine.resume_after(after, sticky_usize)),
+                    Instant::now() + call_timeout,
+                )
+                .await?;
+            let retry_bytes = serde_json::to_vec(&retry)
+                .map_or(FRAME_MAX_BYTES.saturating_add(1), |body| body.len());
+            let retry_count = u32::try_from(retry.len()).unwrap_or(u32::MAX);
+            let mut sticky_session = handle.compat_session();
+            match on_legacy_frame(&mut sticky_session, retry_bytes, retry_count, after) {
+                FrameOutcome::Accept { .. } => {
+                    handle.set_compat_session(sticky_session);
+                    Ok(legacy_page(handle, after, sticky_usize, retry))
+                }
+                FrameOutcome::Pause { reason } => {
+                    handle.set_compat_session(sticky_session);
+                    Err(SdkError::GatewaySessionRejected(reason.into()))
+                }
+                FrameOutcome::RetryFresh { .. } => {
+                    handle.set_compat_session(sticky_session);
+                    Err(SdkError::GatewaySessionRejected("legacy_frame_protocol".into()))
+                }
+            }
+        }
+        FrameOutcome::Pause { reason } => {
+            handle.set_compat_session(session);
+            Err(SdkError::GatewaySessionRejected(reason.into()))
+        }
+    }
+}
+
+fn legacy_page(
+    handle: &ConnectionHandle,
+    after: u64,
+    limit: usize,
+    entries: Vec<crate::GatewayInboxEntry>,
+) -> ResumePage {
+    use crate::bus::push_receiver::compat::fallback_deadline;
+    use crate::gateway::session_push::PageEntryRecord;
+    use crate::time::now_unix_timestamp;
+    let high = entries.iter().map(|entry| entry.inbox_seq).max().unwrap_or(after);
+    let more = !entries.is_empty() && entries.len() == limit;
+    let covered = high;
+    let issued = if more { covered.saturating_add(1) } else { covered };
+    let first_seen = now_unix_timestamp();
+    ResumePage {
+        after_inbox_seq: after,
+        covered_through_seq: covered,
+        issued_inbox_seq: issued,
+        settled_through_seq: covered,
+        entries: entries
+            .into_iter()
+            .map(|entry| {
+                let ttl = i64::from(entry.envelope.ttl);
+                let deadline = fallback_deadline(entry.envelope.created_at, ttl, first_seen, None)
+                    .unwrap_or(crate::bus::push_receiver::compat::FallbackDeadline {
+                        expires_at: 0,
+                        fallback_clock_unverified: true,
+                        guaranteed_retirement: false,
+                    });
+                handle.note_fallback_clock(deadline.fallback_clock_unverified);
+                PageEntryRecord { retain_until: deadline.expires_at, entry }
+            })
+            .collect(),
+        known_losses: Vec::new(),
+        oversize_next: None,
+        more,
     }
 }
 
@@ -643,6 +752,7 @@ mod entry_point_tests {
             cursor: 3,
             generation: 1,
             erasure_generation: 0,
+            compat: false,
         }
     }
 

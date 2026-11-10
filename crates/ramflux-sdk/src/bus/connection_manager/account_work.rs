@@ -5,7 +5,9 @@
 
 use super::SessionMetadata;
 use crate::{GatewaySessionConfig, SdkError};
-use ramflux_storage::{ReceiveAckApplyResult, ReceiveAckResult, ReceiveExpectation};
+use ramflux_storage::{
+    ReceiveAckApplyResult, ReceiveAckOutcome, ReceiveAckResult, ReceiveExpectation,
+};
 use tokio::{sync::oneshot, time::Instant};
 
 /// Exact WA result set the actor applies after `push_point::ack_batch`.
@@ -27,6 +29,19 @@ pub(crate) enum AckFlushReply {
         sequences: Vec<u64>,
     },
     Applied(ReceiveAckApplyResult),
+    /// Compat proof-gated plan: `envelope_id` Some means send a legacy ACK first.
+    Authorized {
+        plans: Vec<CompatAckPlan>,
+    },
+}
+
+/// One compat intent after `authorize_legacy_ack`. The connection child sends
+/// when `envelope_id` is set, then WA-applies `outcome` (or Uncertain on send loss).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CompatAckPlan {
+    pub sequence: u64,
+    pub envelope_id: Option<String>,
+    pub outcome: ReceiveAckOutcome,
 }
 
 /// Owned actor/durable coordinates carried on a receive turn. The commit fence
@@ -38,6 +53,8 @@ pub(crate) struct ReceiveTurn {
     pub cursor: u64,
     pub generation: u64,
     pub erasure_generation: i64,
+    /// True on an activated Legacy/Compat session: W2 is `CompatTerminal`.
+    pub compat: bool,
 }
 
 impl ReceiveTurn {
@@ -115,6 +132,7 @@ pub(crate) enum AccountWork {
         force: bool,
         now: i64,
         results: Option<AckFlushResults>,
+        lookups: Option<Vec<(u64, crate::bus::push_receiver::compat::OwnedLookup)>>,
         reply: oneshot::Sender<Result<AckFlushReply, SdkError>>,
     },
     ReceiveObservation {

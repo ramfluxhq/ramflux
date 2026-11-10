@@ -263,6 +263,7 @@ fn turn(
         cursor,
         generation,
         erasure_generation: account.client.account_db()?.privacy_erasure_generation()?,
+        compat: false,
     })
 }
 

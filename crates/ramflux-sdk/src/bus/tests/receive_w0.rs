@@ -35,6 +35,7 @@ fn turn(db: &AccountDb, generation: u64, incarnation: &str) -> Result<ReceiveTur
         cursor: 0,
         generation,
         erasure_generation: db.privacy_erasure_generation()?,
+        compat: false,
     })
 }
 
