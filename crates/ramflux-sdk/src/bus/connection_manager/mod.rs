@@ -124,6 +124,83 @@ struct Shared {
     keepalive_running: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     catch_up_yields: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    catch_up_yield_progress: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    yield_witness_at: std::sync::atomic::AtomicU32,
+    #[cfg(test)]
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static YIELD_WITNESS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn new_shared(
+    config: &GatewaySessionConfig,
+    timeouts: &RuntimeTimeouts,
+    generation: u64,
+    account_work: Option<mpsc::Sender<AccountWork>>,
+) -> Arc<Shared> {
+    let (changed, _) = watch::channel(generation);
+    let (events, _) = broadcast::channel(64);
+    Arc::new(Shared {
+        timeouts: timeouts.clone(),
+        session_push_advertise: config.session_push_advertise,
+        snapshot: RwLock::new(NetworkingSnapshot::pending(generation)),
+        metadata: RwLock::new(None),
+        hub: RwLock::new(Arc::new(SessionHub::new(generation))),
+        changed,
+        events,
+        resync_needed: Arc::new(resync::ResyncState::default()),
+        receive_wake: Arc::new(Notify::new()),
+        courier_wakes: [
+            "delivery-receipts",
+            "own-device-copy",
+            "contact-control",
+            "surface-resync",
+            "pair-reset",
+            "group-stage",
+            "group-requests",
+            "group-delivery",
+            "call-signaling",
+            "own-contact-backfill",
+        ]
+        .into_iter()
+        .map(|name| (name, Arc::new(Notify::new())))
+        .collect(),
+        account_work,
+        call_changed: Arc::new(Notify::new()),
+        #[cfg(test)]
+        live_waiters: std::sync::atomic::AtomicUsize::new(0),
+        #[cfg(test)]
+        keepalive_running: std::sync::atomic::AtomicBool::new(false),
+        #[cfg(test)]
+        catch_up_yields: std::sync::atomic::AtomicU32::new(0),
+        #[cfg(test)]
+        catch_up_yield_progress: std::sync::atomic::AtomicU32::new(0),
+        #[cfg(test)]
+        yield_witness_at: std::sync::atomic::AtomicU32::new(0),
+        #[cfg(test)]
+        in_flight: std::sync::atomic::AtomicUsize::new(0),
+        stop_reason: std::sync::Mutex::new(None),
+        #[cfg(test)]
+        removals: std::sync::Mutex::new(Vec::new()),
+        #[cfg(test)]
+        receive_trace: std::sync::Mutex::new(Vec::new()),
+        #[cfg(test)]
+        receive_completed: Arc::default(),
+        #[cfg(test)]
+        receive_profile: std::sync::Mutex::new(resync::ReceiveProfile::default()),
+        #[cfg(test)]
+        buffer_stats: Arc::new(std::sync::Mutex::new(
+            crate::gateway::host_frames::BufferStats::default(),
+        )),
+        retirement: std::sync::Mutex::new(None),
+        retirement_changed: Notify::new(),
+        read_clock: crate::gateway::host_frames::ReadClock::new(),
+    })
 }
 
 #[derive(Clone)]
@@ -154,6 +231,26 @@ struct Call {
     reply: oneshot::Sender<Result<(Erased, u64), SdkError>>,
     cancelled: watch::Receiver<bool>,
     place: OwnedSemaphorePermit,
+    #[cfg(test)]
+    _in_flight: InFlight,
+}
+
+#[cfg(test)]
+struct InFlight(Arc<Shared>);
+
+#[cfg(test)]
+impl InFlight {
+    fn new(shared: &Arc<Shared>) -> Self {
+        shared.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(Arc::clone(shared))
+    }
+}
+
+#[cfg(test)]
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct Child {
@@ -323,58 +420,7 @@ impl ConnectionHandle {
         account_work: Option<mpsc::Sender<AccountWork>>,
     ) -> Self {
         let generation = new_generation();
-        let (changed, _) = watch::channel(generation);
-        let (events, _) = broadcast::channel(64);
-        let shared = Arc::new(Shared {
-            timeouts: timeouts.clone(),
-            session_push_advertise: config.session_push_advertise,
-            snapshot: RwLock::new(NetworkingSnapshot::pending(generation)),
-            metadata: RwLock::new(None),
-            hub: RwLock::new(Arc::new(SessionHub::new(generation))),
-            changed,
-            events,
-            resync_needed: Arc::new(resync::ResyncState::default()),
-            receive_wake: Arc::new(Notify::new()),
-            courier_wakes: [
-                "delivery-receipts",
-                "own-device-copy",
-                "contact-control",
-                "surface-resync",
-                "pair-reset",
-                "group-stage",
-                "group-requests",
-                "group-delivery",
-                "call-signaling",
-                "own-contact-backfill",
-            ]
-            .into_iter()
-            .map(|name| (name, Arc::new(Notify::new())))
-            .collect(),
-            account_work,
-            call_changed: Arc::new(Notify::new()),
-            #[cfg(test)]
-            live_waiters: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
-            keepalive_running: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
-            catch_up_yields: std::sync::atomic::AtomicU32::new(0),
-            stop_reason: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            removals: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            receive_trace: std::sync::Mutex::new(Vec::new()),
-            #[cfg(test)]
-            receive_completed: Arc::default(),
-            #[cfg(test)]
-            receive_profile: std::sync::Mutex::new(resync::ReceiveProfile::default()),
-            #[cfg(test)]
-            buffer_stats: Arc::new(std::sync::Mutex::new(
-                crate::gateway::host_frames::BufferStats::default(),
-            )),
-            retirement: std::sync::Mutex::new(None),
-            retirement_changed: Notify::new(),
-            read_clock: crate::gateway::host_frames::ReadClock::new(),
-        });
+        let shared = new_shared(&config, &timeouts, generation, account_work);
         let (calls, receive) = mpsc::channel(2 * CALL_QUEUE);
         let (children, registrations) = mpsc::channel(32);
         let (stop, stopping) = watch::channel(false);
@@ -470,12 +516,44 @@ impl ConnectionHandle {
         #[cfg(not(test))]
         let _ = self;
         #[cfg(test)]
-        self.shared.catch_up_yields.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            self.shared.yield_witness_at.store(
+                YIELD_WITNESS.with(std::cell::Cell::get),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            self.shared.catch_up_yields.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn note_catch_up_yield_resumed(&self) {
+        #[cfg(not(test))]
+        let _ = self;
+        #[cfg(test)]
+        {
+            let before = self.shared.yield_witness_at.load(std::sync::atomic::Ordering::Relaxed);
+            let after = YIELD_WITNESS.with(std::cell::Cell::get);
+            self.shared
+                .catch_up_yield_progress
+                .store(after.saturating_sub(before), std::sync::atomic::Ordering::Relaxed);
+        }
     }
     #[cfg(test)]
     #[must_use]
     pub(crate) fn test_catch_up_yields(&self) -> u32 {
         self.shared.catch_up_yields.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn test_catch_up_yield_progress(&self) -> u32 {
+        self.shared.catch_up_yield_progress.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn in_flight_calls(&self) -> usize {
+        self.shared.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    #[cfg(test)]
+    pub(crate) fn bump_yield_witness() {
+        YIELD_WITNESS.with(|cell| cell.set(cell.get().saturating_add(1)));
     }
     /// Wake the receive loop without requesting resync (tests drive the paused clock).
     #[cfg(test)]
@@ -574,6 +652,8 @@ impl ConnectionHandle {
                 reply,
                 cancelled,
                 place,
+                #[cfg(test)]
+                _in_flight: InFlight::new(&self.shared),
             })
             .map_err(|_| full())?;
         let (result, stamped) = response.await.map_err(|_| self.pending())??;

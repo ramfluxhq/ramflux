@@ -50,9 +50,6 @@ pub(crate) struct Planner {
     /// Generation that currently owns `backoff_ms` / `retry_at_ms`.
     retry_generation: Option<u64>,
     backoff_ms: u64,
-    pub held_probe: bool,
-    pub held_gap: bool,
-    pub held_retry: bool,
 }
 
 impl SweepSetting {
@@ -134,9 +131,6 @@ impl Planner {
             retry_at_ms: None,
             retry_generation: None,
             backoff_ms: 0,
-            held_probe: false,
-            held_gap: false,
-            held_retry: false,
         }
     }
 
@@ -174,16 +168,16 @@ impl Planner {
         self.seen_generation != Some(view.generation)
     }
 
-    /// Records one pass outcome. Success marks the generation handled and anchors the idle
-    /// sweep at `finished_ms` unless `paused`. Failure schedules a retry after `finished_ms`.
-    /// A new generation resets backoff before the outcome is applied.
+    /// Records one pass outcome. Success marks the generation handled and anchors the next
+    /// idle sweep at `finished_ms` (paused or not: no immediate re-fire, no lost schedule).
+    /// Failure schedules a retry after `finished_ms`. A new generation resets backoff first.
     pub(crate) fn finish(
         &mut self,
         _started_ms: u64,
         finished_ms: u64,
         generation: u64,
         ok: bool,
-        paused: bool,
+        _paused: bool,
     ) {
         if self.retry_generation != Some(generation) {
             self.backoff_ms = 0;
@@ -192,7 +186,7 @@ impl Planner {
         }
         if ok {
             self.seen_generation = Some(generation);
-            self.note_completed(finished_ms, paused);
+            self.last_completed_ms = Some(finished_ms);
             self.backoff_ms = 0;
             self.retry_at_ms = None;
         } else {
@@ -202,13 +196,6 @@ impl Planner {
                 self.backoff_ms.saturating_mul(2).min(Self::RETRY_MAX_MS)
             };
             self.retry_at_ms = Some(finished_ms.saturating_add(self.backoff_ms));
-        }
-    }
-
-    /// Successful catch-up (not backpressure-stopped) anchors the idle sweep.
-    fn note_completed(&mut self, now_ms: u64, backpressure: bool) {
-        if !backpressure {
-            self.last_completed_ms = Some(now_ms);
         }
     }
 

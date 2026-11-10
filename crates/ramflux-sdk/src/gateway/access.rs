@@ -84,19 +84,6 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     ) -> GatewayCallFuture<'_, Vec<GatewayInboxEntry>>;
     /// # Errors
     /// Returns an error if the session exchange is refused, cancelled, or expires.
-    fn resume_page(
-        &mut self,
-        after_inbox_seq: u64,
-        limit: usize,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply>;
-    /// # Errors
-    /// Returns an error if the session exchange is refused, cancelled, or expires.
-    fn fetch_entry(
-        &mut self,
-        seq: u64,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply>;
-    /// # Errors
-    /// Returns an error if the session exchange is refused, cancelled, or expires.
     fn register_identity(
         &mut self,
         request: SdkIdentityRegisterRequest,
@@ -153,6 +140,23 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     fn close<'a>(&'a mut self, reason: &'a str) -> GatewayCallFuture<'a, ()>;
 }
 
+/// Crate-private Push catch-up: `resume_page` / `fetch_entry` stay off the public trait.
+pub(crate) trait GatewayPushAccess: GatewaySessionAccess {
+    /// # Errors
+    /// Returns an error if the session exchange is refused, cancelled, or expires.
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply>;
+    /// # Errors
+    /// Returns an error if the session exchange is refused, cancelled, or expires.
+    fn fetch_entry(
+        &mut self,
+        seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply>;
+}
+
 #[allow(private_interfaces)]
 impl GatewaySessionAccess for GatewaySessionEngine {
     fn config(&self) -> &GatewaySessionConfig {
@@ -197,19 +201,6 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         limit: usize,
     ) -> GatewayCallFuture<'_, Vec<GatewayInboxEntry>> {
         Box::pin(GatewaySessionEngine::resume_after(self, after_inbox_seq, limit))
-    }
-    fn resume_page(
-        &mut self,
-        after_inbox_seq: u64,
-        limit: usize,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
-        Box::pin(GatewaySessionEngine::resume_page(self, after_inbox_seq, limit))
-    }
-    fn fetch_entry(
-        &mut self,
-        seq: u64,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
-        Box::pin(GatewaySessionEngine::fetch_entry(self, seq))
     }
     fn register_identity(
         &mut self,
@@ -269,6 +260,22 @@ impl GatewaySessionAccess for GatewaySessionEngine {
     }
 }
 
+impl GatewayPushAccess for GatewaySessionEngine {
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
+        Box::pin(GatewaySessionEngine::resume_page(self, after_inbox_seq, limit))
+    }
+    fn fetch_entry(
+        &mut self,
+        seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
+        Box::pin(GatewaySessionEngine::fetch_entry(self, seq))
+    }
+}
+
 #[cfg(test)]
 fn unused<'a, T: Send + 'a>(name: &'static str) -> GatewayCallFuture<'a, T> {
     Box::pin(async move { Err(SdkError::LocalBus(name.into())) })
@@ -281,6 +288,8 @@ pub(crate) struct CountingGateway {
     session: GatewaySessionState,
     pub resumes: u32,
     pub acks: u32,
+    pub page_entries: Vec<crate::gateway::session_push::PageEntryRecord>,
+    pub page_losses: Vec<crate::gateway::session_push::KnownLoss>,
 }
 
 #[cfg(test)]
@@ -297,6 +306,8 @@ impl CountingGateway {
             },
             resumes: 0,
             acks: 0,
+            page_entries: Vec::new(),
+            page_losses: Vec::new(),
         }
     }
 }
@@ -362,33 +373,6 @@ impl GatewaySessionAccess for CountingGateway {
         self.resumes += 1;
         Box::pin(async move { Ok(Vec::new()) })
     }
-    fn resume_page(
-        &mut self,
-        after_inbox_seq: u64,
-        _limit: usize,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
-        self.resumes += 1;
-        Box::pin(async move {
-            Ok(crate::gateway::push_resume::PageReply::Page(Box::new(
-                crate::gateway::push_resume::ResumePage {
-                    after_inbox_seq,
-                    covered_through_seq: after_inbox_seq,
-                    issued_inbox_seq: after_inbox_seq,
-                    settled_through_seq: 0,
-                    entries: Vec::new(),
-                    known_losses: Vec::new(),
-                    oversize_next: None,
-                    more: false,
-                },
-            )))
-        })
-    }
-    fn fetch_entry(
-        &mut self,
-        _seq: u64,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
-        unused("fetch_entry")
-    }
     fn register_identity(
         &mut self,
         _request: SdkIdentityRegisterRequest,
@@ -444,5 +428,44 @@ impl GatewaySessionAccess for CountingGateway {
     }
     fn close<'a>(&'a mut self, _reason: &'a str) -> GatewayCallFuture<'a, ()> {
         unused("close")
+    }
+}
+
+#[cfg(test)]
+impl GatewayPushAccess for CountingGateway {
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        _limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
+        self.resumes += 1;
+        let entries = self.page_entries.clone();
+        let known_losses = self.page_losses.clone();
+        let covered = entries
+            .iter()
+            .map(|row| row.entry.inbox_seq)
+            .chain(known_losses.iter().map(|loss| loss.to_seq))
+            .max()
+            .unwrap_or(after_inbox_seq);
+        Box::pin(async move {
+            Ok(crate::gateway::push_resume::PageReply::Page(Box::new(
+                crate::gateway::push_resume::ResumePage {
+                    after_inbox_seq,
+                    covered_through_seq: covered,
+                    issued_inbox_seq: covered,
+                    settled_through_seq: 0,
+                    entries,
+                    known_losses,
+                    oversize_next: None,
+                    more: false,
+                },
+            )))
+        })
+    }
+    fn fetch_entry(
+        &mut self,
+        _seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
+        unused("fetch_entry")
     }
 }

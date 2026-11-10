@@ -52,6 +52,7 @@ async fn courier_native_private_unlock_starts_after_admission_and_preserves_pend
                 preempt,
                 connection_sender,
                 connection_work,
+                ledger: None,
                 transfers: crate::bus::account_runtime::uploads::Transfers::start(),
                 readers: Arc::new(Mutex::new(None)),
                 events,

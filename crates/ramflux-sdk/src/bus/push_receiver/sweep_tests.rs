@@ -68,7 +68,7 @@ fn sweep_setting() {
     assert_eq!(compat.decide(5_000, live(1)), Some(ResumeKind::Sweep));
 }
 
-/// One initial Resume within 100 ms; none until 900 s; probe/gap/retry held.
+/// One initial Resume within 100 ms; none until 900 s.
 #[test]
 fn connected_and_sweep() {
     let mut planner = default_push();
@@ -76,16 +76,12 @@ fn connected_and_sweep() {
     if let Some(kind) = fire(&mut planner, 0, 1) {
         resumes.push((0_u64, kind));
     }
-    planner.held_probe = true;
-    planner.held_gap = true;
-    planner.held_retry = true;
     let in_100ms = resumes.iter().filter(|(at, _)| *at <= SweepSetting::CATCH_UP_MS).count();
     assert_eq!(in_100ms, 1, "Connected catch-up Resume within 100ms");
     assert_eq!(planner.decide(SweepSetting::CATCH_UP_MS, live(1)), None);
     assert_eq!(planner.decide(899_999, live(1)), None);
     assert_eq!(resumes.len(), 1);
     assert_eq!(planner.decide(900_000, live(1)), Some(ResumeKind::Sweep));
-    assert!(planner.held_probe && planner.held_gap && planner.held_retry);
 }
 
 /// Initial catch-up then idle: no Resume in the old 5 s poll window (P25 completes Deliver).
@@ -174,14 +170,40 @@ fn connected_and_sweep_resets_backoff_on_generation_change() {
     assert_eq!(planner.decide(350, live(2)), Some(ResumeKind::Connected));
 }
 
-/// A paused success does not anchor the idle sweep.
+/// A paused success does not re-fire immediately and still schedules the next sweep.
 #[test]
-fn connected_and_sweep_paused_does_not_anchor() {
+fn connected_and_sweep_paused_schedules_next() {
     let mut planner = default_push();
     assert_eq!(planner.decide(0, live(1)), Some(ResumeKind::Connected));
     planner.finish(0, 40, 1, true, true);
-    assert_eq!(planner.decide(40, live(1)), None, "generation is handled");
-    assert_eq!(planner.decide(900_000, live(1)), None, "paused pass does not start the 900s sweep");
+    assert_eq!(planner.decide(40, live(1)), None, "no immediate re-fire after paused Connected");
+    assert_eq!(planner.wake_at_ms(40), Some(900_040));
+    assert_eq!(planner.decide(900_039, live(1)), None);
+    assert_eq!(planner.decide(900_040, live(1)), Some(ResumeKind::Sweep));
+}
+
+/// A paused Sweep does not re-fire immediately; the next Sweep waits the idle interval.
+#[test]
+fn connected_and_sweep_paused_sweep_waits_interval() {
+    let mut planner = default_push();
+    assert_eq!(fire(&mut planner, 0, 1), Some(ResumeKind::Connected));
+    assert_eq!(planner.decide(900_000, live(1)), Some(ResumeKind::Sweep));
+    planner.finish(900_000, 900_000, 1, true, true);
+    assert_eq!(planner.decide(900_040, live(1)), None, "no immediate re-fire after paused Sweep");
+    assert_eq!(planner.wake_at_ms(900_000), Some(1_800_000));
+    assert_eq!(planner.decide(1_799_999, live(1)), None);
+    assert_eq!(planner.decide(1_800_000, live(1)), Some(ResumeKind::Sweep));
+}
+
+/// Not-Live never emits a Resume, so the planner cannot spin.
+#[test]
+fn connected_and_sweep_not_live_does_not_spin() {
+    let mut planner = default_push();
+    assert_eq!(fire(&mut planner, 0, 1), Some(ResumeKind::Connected));
+    let dead = View { live: false, generation: 1, resync: false };
+    for now in [0, 1, 250, 5_000, 900_000, 1_800_000] {
+        assert_eq!(planner.decide(now, dead), None, "not-Live Resume at {now}");
+    }
 }
 
 #[derive(Clone, Default)]

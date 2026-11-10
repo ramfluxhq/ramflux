@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-owned receive, durable quarantine, and commit-before-ACK synchronization.
+use crate::gateway::GatewayPushAccess;
 use crate::prelude::*;
 use serde_json::json;
 
@@ -234,7 +235,7 @@ pub(crate) fn project_committed_message(
 
 pub(crate) async fn receive(
     account: &mut LocalBusAccountState,
-    engine: &mut impl GatewaySessionAccess,
+    engine: &mut impl GatewayPushAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
     if crate::bus::push_receiver::apply_w1::is_active(

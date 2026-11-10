@@ -295,6 +295,7 @@ fn ack_runtime(mut account: LocalBusAccountState) -> (super::super::AccountRunti
         preempt,
         connection_sender,
         connection_work,
+        ledger: None,
         transfers: super::super::uploads::Transfers::start(),
         id: "sender".into(),
         state: crate::bus::state::LocalBusDaemonState {

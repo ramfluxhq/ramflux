@@ -134,6 +134,7 @@ async fn case() -> TestResult {
         preempt,
         connection_sender,
         connection_work,
+        ledger: None,
         transfers: super::uploads::Transfers::start(),
         id: "settle-arm".into(),
         state: LocalBusDaemonState {
@@ -223,6 +224,7 @@ fn runtime_with_pending(
             preempt,
             connection_sender,
             connection_work,
+            ledger: None,
             transfers: super::uploads::Transfers::start(),
             id: id.into(),
             state: LocalBusDaemonState {

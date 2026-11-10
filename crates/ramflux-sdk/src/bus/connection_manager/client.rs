@@ -4,7 +4,7 @@
 //! A generation-fenced client capability; it never owns or reads a gateway stream.
 
 use super::{ConnectionHandle, SessionMetadata};
-use crate::gateway::access::{GatewayCallFuture, GatewaySessionAccess};
+use crate::gateway::access::{GatewayCallFuture, GatewayPushAccess, GatewaySessionAccess};
 use crate::prelude::*;
 use tokio::time::Instant;
 
@@ -156,27 +156,6 @@ impl GatewaySessionAccess for SessionClient {
             self.generation,
         ))
     }
-    fn resume_page(
-        &mut self,
-        after_inbox_seq: u64,
-        limit: usize,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
-        Box::pin(self.handle.call_generation(
-            move |engine| Box::pin(async move { engine.resume_page(after_inbox_seq, limit).await }),
-            self.deadline,
-            self.generation,
-        ))
-    }
-    fn fetch_entry(
-        &mut self,
-        seq: u64,
-    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
-        Box::pin(self.handle.call_generation(
-            move |engine| Box::pin(async move { engine.fetch_entry(seq).await }),
-            self.deadline,
-            self.generation,
-        ))
-    }
     fn register_identity(
         &mut self,
         request: SdkIdentityRegisterRequest,
@@ -278,6 +257,30 @@ impl GatewaySessionAccess for SessionClient {
         let reason = reason.to_owned();
         Box::pin(self.handle.call_generation(
             move |engine| Box::pin(async move { engine.close(&reason).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+}
+
+impl GatewayPushAccess for SessionClient {
+    fn resume_page(
+        &mut self,
+        after_inbox_seq: u64,
+        limit: usize,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_resume::PageReply> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.resume_page(after_inbox_seq, limit).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn fetch_entry(
+        &mut self,
+        seq: u64,
+    ) -> GatewayCallFuture<'_, crate::gateway::push_point::PointReply> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.fetch_entry(seq).await }),
             self.deadline,
             self.generation,
         ))

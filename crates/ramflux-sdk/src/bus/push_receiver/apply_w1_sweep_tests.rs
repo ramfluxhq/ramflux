@@ -1030,23 +1030,3 @@ fn seed_cover_seq1(
         Err(apply::ApplyError::Storage(error)) => Err(error.into()),
     }
 }
-
-#[tokio::test(flavor = "current_thread")]
-async fn covered_below_from_seeded_storage_plan() -> Result<(), SdkError> {
-    let harness = open()?;
-    assert_eq!(seed_cover_seq1(&harness.account)?, ApplyOutcome::Covered { cursor: 1 });
-    let db = harness.account.client.account_db()?;
-    let prepared = turn(&harness.account, 1)?;
-    let outcome = apply_w1::reconcile_entry(db, &prepared, 1, 1)?;
-    assert_eq!(outcome, ApplyOutcome::AlreadyCovered { cursor: 1 });
-    let mapped = apply_w1::map_page_outcome(outcome, 2);
-    let error = mapped.as_ref().err();
-    assert!(
-        matches!(
-            error,
-            Some(SdkError::Storage(StorageError::Integrity(text))) if *text == apply_w1::covered_below()
-        ),
-        "COVERED_BELOW from the real seeded plan via reconcile_entry: {error:?}"
-    );
-    Ok(())
-}

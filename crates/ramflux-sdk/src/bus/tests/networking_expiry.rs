@@ -96,6 +96,7 @@ impl Harness {
             preempt,
             connection_sender,
             connection_work,
+            ledger: None,
             transfers: super::uploads::Transfers::start(),
             id: "expiry-runtime".into(),
             state: LocalBusDaemonState {

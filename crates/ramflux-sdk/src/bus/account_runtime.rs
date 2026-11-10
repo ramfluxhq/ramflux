@@ -62,6 +62,7 @@ struct AccountRuntime {
     transfers: uploads::Transfers,
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
+    ledger: Option<super::push_receiver::executor::LedgerExecutor>,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -135,6 +136,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         transfers: uploads::Transfers::start(),
         connection_sender,
         connection_work,
+        ledger: None,
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]

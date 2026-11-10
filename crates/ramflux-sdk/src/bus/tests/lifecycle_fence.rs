@@ -102,6 +102,7 @@ pub(super) fn runtime_for(
         transfers: super::super::uploads::Transfers::start(),
         connection_sender,
         connection_work,
+        ledger: None,
         receive_gate_hook: None,
         courier_events: None,
     }

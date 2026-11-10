@@ -4,7 +4,10 @@
 //! Activated catch-up: real `resume_page` through `apply::apply_page`.
 
 use super::super::{AccountWork, ConnectionHandle, ReceiveTurn};
-use super::{ReceiveEntry, ReceiveTrigger, apply_entry, catch_up_yields, flush_acks};
+use super::{
+    ReceiveEntry, ReceiveTrigger, apply_entry, bind_retry_turns, catch_up_yields, entry_id,
+    flush_acks,
+};
 use crate::SdkError;
 use crate::bus::couriers::writer::Writer;
 use crate::bus::push_receiver::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage, ApplyPoint};
@@ -29,6 +32,7 @@ pub(super) struct CatchUp<'a> {
     pub turn: ReceiveTurn,
     pub cursor: u64,
     pub backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+    pub retries: Vec<ReceiveEntry>,
     pub limit: usize,
 }
 
@@ -42,10 +46,13 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
         mut turn,
         mut cursor,
         mut backpressure,
+        retries,
         limit,
     } = job;
     flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
         .await?;
+    let mut retries: std::collections::BTreeMap<_, _> =
+        retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
     let mut active = false;
     let mut paused = false;
     let mut pages = 0_u32;
@@ -57,74 +64,189 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
         if catch_up_yields(pages) {
             handle.note_catch_up_yield();
             tokio::task::yield_now().await;
+            handle.note_catch_up_yield_resumed();
             pages = 0;
         }
         let more = page.more;
-        let records = page.entries.clone();
-        loop {
-            let outcome = apply_resume(&writer, &turn, generation, &page).await?;
-            match step_outcome(outcome, &page, &mut turn)? {
-                Step::Covered => break,
-                Step::Paused => {
-                    paused = true;
-                    break;
-                }
-                Step::NeedStage { sequence, cursor: next } => {
-                    turn.cursor = next;
-                    let record = records.iter().find(|row| row.entry.inbox_seq == sequence).ok_or(
-                        SdkError::InboundRejected("receive page need-stage missing entry".into()),
-                    )?;
-                    let (accepted, next_bp) = apply_entry(
-                        handle,
-                        work,
-                        generation,
-                        ReceiveEntry {
-                            entry: record.entry.clone(),
-                            retry_key: None,
-                            replay: false,
-                            turn: Some(turn.clone()),
-                        },
-                        call_timeout,
-                        backpressure,
-                    )
-                    .await?;
-                    active |= accepted;
-                    backpressure = next_bp;
-                    applied = applied.saturating_add(1);
-                    if applied.is_multiple_of(ACK_FLUSH_COUNT) {
-                        flush_acks(handle, work, generation, false, call_timeout).await?;
-                    }
-                    turn.cursor = refresh_turn_cursor(&writer, &turn.target).await?;
-                }
-                Step::NeedPoint { seq, cursor: next } => {
-                    turn.cursor = next;
-                    let (next_paused, next_bp) = fetch_apply_point(
-                        handle,
-                        work,
-                        &writer,
-                        &mut turn,
-                        generation,
-                        seq,
-                        call_timeout,
-                        backpressure,
-                    )
-                    .await?;
-                    backpressure = next_bp;
-                    paused |= next_paused;
-                    if paused {
-                        break;
-                    }
-                }
-            }
-        }
+        let (next_active, next_paused, next_bp, next_applied) = drive_page(
+            handle,
+            work,
+            &writer,
+            &mut turn,
+            generation,
+            &page,
+            &mut retries,
+            call_timeout,
+            backpressure,
+            applied,
+        )
+        .await?;
+        active |= next_active;
+        paused |= next_paused;
+        backpressure = next_bp;
+        applied = next_applied;
         if paused || !more {
             break;
         }
         cursor = turn.cursor;
     }
+    if !paused {
+        let (next_active, next_bp) = apply_leftover(
+            handle,
+            work,
+            &writer,
+            &mut turn,
+            generation,
+            retries,
+            call_timeout,
+            backpressure,
+            applied,
+        )
+        .await?;
+        active |= next_active;
+        backpressure = next_bp;
+    }
     flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
         .await?;
     Ok(LedgerCatchUp { active, paused, backpressure })
+}
+
+#[allow(clippy::too_many_arguments, reason = "page drive shares the live handles")]
+async fn drive_page(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    writer: &Writer,
+    turn: &mut ReceiveTurn,
+    generation: u64,
+    page: &ResumePage,
+    retries: &mut std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
+    call_timeout: std::time::Duration,
+    mut backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+    mut applied: usize,
+) -> Result<(bool, bool, Box<crate::bus::contact_backpressure::Backpressure>, usize), SdkError> {
+    let mut active = false;
+    let mut paused = false;
+    let records = page.entries.clone();
+    loop {
+        let outcome = apply_resume(writer, turn, generation, page).await?;
+        match step_outcome(outcome, page, turn)? {
+            Step::Covered => break,
+            Step::Paused => {
+                paused = true;
+                break;
+            }
+            Step::NeedStage { sequence, cursor: next } => {
+                turn.cursor = next;
+                let (accepted, next_bp) = stage_page_entry(
+                    handle,
+                    work,
+                    writer,
+                    turn,
+                    generation,
+                    &records,
+                    sequence,
+                    retries,
+                    call_timeout,
+                    backpressure,
+                )
+                .await?;
+                active |= accepted;
+                backpressure = next_bp;
+                applied = applied.saturating_add(1);
+                if applied.is_multiple_of(ACK_FLUSH_COUNT) {
+                    flush_acks(handle, work, generation, false, call_timeout).await?;
+                }
+            }
+            Step::NeedPoint { seq, cursor: next } => {
+                turn.cursor = next;
+                let (next_paused, next_bp) = fetch_apply_point(
+                    handle,
+                    work,
+                    writer,
+                    turn,
+                    generation,
+                    seq,
+                    call_timeout,
+                    backpressure,
+                )
+                .await?;
+                backpressure = next_bp;
+                paused |= next_paused;
+                if paused {
+                    break;
+                }
+            }
+        }
+    }
+    Ok((active, paused, backpressure, applied))
+}
+
+#[allow(clippy::too_many_arguments, reason = "catch-up leftover shares the live handles")]
+async fn apply_leftover(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    writer: &Writer,
+    turn: &mut ReceiveTurn,
+    generation: u64,
+    retries: std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
+    call_timeout: std::time::Duration,
+    mut backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+    mut applied: usize,
+) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+    let mut leftover: Vec<_> = retries.into_values().collect();
+    leftover.sort_by_key(|entry| entry.entry.inbox_seq);
+    bind_retry_turns(&mut leftover, Some(turn));
+    let mut active = false;
+    for mut entry in leftover {
+        entry.turn = Some(turn.clone());
+        let (accepted, next) =
+            apply_entry(handle, work, generation, entry, call_timeout, backpressure).await?;
+        active |= accepted;
+        backpressure = next;
+        applied = applied.saturating_add(1);
+        if applied.is_multiple_of(ACK_FLUSH_COUNT) {
+            flush_acks(handle, work, generation, false, call_timeout).await?;
+        }
+        turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
+    }
+    Ok((active, backpressure))
+}
+
+#[allow(clippy::too_many_arguments, reason = "NeedStage apply shares the live handles")]
+async fn stage_page_entry(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    writer: &Writer,
+    turn: &mut ReceiveTurn,
+    generation: u64,
+    records: &[crate::gateway::session_push::PageEntryRecord],
+    sequence: u64,
+    retries: &mut std::collections::BTreeMap<(String, u64, String), ReceiveEntry>,
+    call_timeout: std::time::Duration,
+    backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
+    let record = records
+        .iter()
+        .find(|row| row.entry.inbox_seq == sequence)
+        .ok_or(SdkError::InboundRejected("receive page need-stage missing entry".into()))?;
+    let retry_key =
+        retries.remove(&entry_id(&record.entry)).and_then(|prepared| prepared.retry_key);
+    let (accepted, next) = apply_entry(
+        handle,
+        work,
+        generation,
+        ReceiveEntry {
+            entry: record.entry.clone(),
+            retry_key,
+            replay: false,
+            turn: Some(turn.clone()),
+        },
+        call_timeout,
+        backpressure,
+    )
+    .await?;
+    turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
+    Ok((accepted, next))
 }
 
 enum Step {
@@ -286,6 +408,7 @@ async fn fetch_apply_point(
                     )
                     .await?;
                     let _ = accepted;
+                    turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
                     Ok((false, next))
                 }
                 ApplyOutcome::Paused { cursor } => {

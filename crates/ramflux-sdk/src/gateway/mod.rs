@@ -4,6 +4,7 @@
 pub mod access;
 pub mod engine;
 pub(crate) mod transport_opener;
+pub(crate) use access::GatewayPushAccess;
 pub use access::{GatewayCallFuture, GatewaySessionAccess};
 pub(crate) mod frame_dispatch;
 pub mod helpers;

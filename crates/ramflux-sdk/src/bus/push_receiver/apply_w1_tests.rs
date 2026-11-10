@@ -891,24 +891,18 @@ fn persist_projection_receipt_at(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn need_point_gone_covers_and_records_loss() -> Result<(), SdkError> {
+async fn admit_open_need_point_is_integrity() -> Result<(), SdkError> {
     let mut harness = open()?;
     force_need_point();
-    apply_w1::queue_point_reply(crate::gateway::push_point::PointReply::Gone {
-        observed_issued_inbox_seq: 1,
-        reason: crate::gateway::session_push::EntryGoneReason::Expired,
-    });
     let entry = live_dummy(&harness.account);
-    drive(&mut harness.account, entry, || 1).await?;
-    let snap = harness
-        .account
-        .client
-        .account_db()?
-        .receive_ledger_snap_for_test(&harness.account.target_delivery_id)?;
-    assert_eq!(snap.cursor, 1, "Gone point covers the requested sequence");
+    let error = drive(&mut harness.account, entry, || 1).await.err();
     assert!(
-        snap.losses.iter().any(|loss| loss.3 == "expired"),
-        "FetchEntry Gone records the wire loss: {snap:?}"
+        matches!(
+            error,
+            Some(SdkError::Storage(StorageError::Integrity(text)))
+                if text == "receive admission cannot fetch a point from reconcile"
+        ),
+        "admit_open NeedPoint is a typed refusal: {error:?}"
     );
     Ok(())
 }

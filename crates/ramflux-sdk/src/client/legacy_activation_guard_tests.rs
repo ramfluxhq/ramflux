@@ -241,6 +241,11 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
         Ok(()) => panic!("legacy ApplyPage succeeded on an activated ledger"),
         Err(error) => assert_activated(&error),
     }
+    engine.page_losses.push(crate::gateway::session_push::KnownLoss {
+        from_seq: 1,
+        to_seq: 1,
+        reason: crate::gateway::session_push::PageReason::Expired,
+    });
     crate::bus::sync_driver::receive(&mut account, &mut engine, 1).await?;
     assert_eq!(
         crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
@@ -251,6 +256,11 @@ async fn activated_ledger_refuses_legacy_receive_and_ack_paths() -> TestResult {
     assert!(engine.resumes >= 1, "activated standalone catch-up sent a resume_page");
     assert_eq!(engine.acks, 0, "activated ACK path sent a wire ACK");
     assert_eq!(account.client.gateway_cursor(&target)?, 9);
+    assert_eq!(
+        account.client.account_db()?.receive_ledger_snap_for_test(&target)?.cursor,
+        1,
+        "standalone loss page covers C"
+    );
     Ok(())
 }
 
@@ -346,11 +356,63 @@ async fn activation_revert_preserves_ledger() -> TestResult {
         Err(error) => assert_activated(&error),
     }
     let mut counting = crate::gateway::access::CountingGateway::new(advertised);
+    counting.page_losses.push(crate::gateway::session_push::KnownLoss {
+        from_seq: 1,
+        to_seq: 1,
+        reason: crate::gateway::session_push::PageReason::Expired,
+    });
     crate::bus::sync_driver::receive(&mut account, &mut counting, 1).await?;
     assert_eq!(
         crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
         Some(crate::bus::push_receiver::executor::ExecutorOwner::Standalone)
     );
     assert!(counting.resumes >= 1, "standalone row issues resume_page");
+    assert_eq!(
+        account.client.account_db()?.receive_ledger_snap_for_test(&target)?.cursor,
+        1,
+        "standalone loss page covers C"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn standalone_receive_refuses_while_actor_bound() -> TestResult {
+    let fixture = Fixture::new("p24b2c-d5-busy").await?;
+    let target = fixture.config.target_delivery_id.clone();
+    assert_eq!(
+        fixture
+            .client
+            .account_db()?
+            .activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "e" })?,
+        ReceiveMigrateResult::Migrated
+    );
+    let account_id = fixture.client.account_db()?.local_account_id.clone();
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    let mut counting = CountingGateway::new(fixture.config.clone());
+    counting.page_losses.push(crate::gateway::session_push::KnownLoss {
+        from_seq: 1,
+        to_seq: 1,
+        reason: crate::gateway::session_push::PageReason::Expired,
+    });
+    let _actor =
+        crate::bus::push_receiver::executor::LedgerExecutor::bind_actor(account_id.clone())?;
+    let Err(error) = crate::bus::sync_driver::receive(&mut account, &mut counting, 1).await else {
+        panic!("standalone while actor bound");
+    };
+    assert!(
+        matches!(
+            error,
+            SdkError::Storage(StorageError::AccountWriterBusy(ref id)) if *id == account_id
+        ),
+        "standalone must refuse while the actor owns the account: {error:?}"
+    );
+    assert_eq!(
+        crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
+        Some(crate::bus::push_receiver::executor::ExecutorOwner::Actor)
+    );
     Ok(())
 }

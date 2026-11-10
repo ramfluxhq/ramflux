@@ -10,7 +10,7 @@ use super::super::push_receiver::executor::LedgerExecutor;
 use crate::SdkError;
 use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::state::LocalBusAccountState;
-use crate::gateway::access::GatewaySessionAccess;
+use crate::gateway::access::GatewayPushAccess;
 use crate::gateway::push_point::PointReply;
 use crate::gateway::push_resume::{PageReply, ResumePage};
 
@@ -19,13 +19,23 @@ const YIELD_AFTER: u32 = super::super::connection_manager::receive::RECEIVE_YIEL
 
 pub(super) async fn receive(
     account: &mut LocalBusAccountState,
-    engine: &mut impl GatewaySessionAccess,
+    engine: &mut impl GatewayPushAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
     let account_id = account.client.account_db()?.local_account_id.clone();
     let _exec = LedgerExecutor::bind_standalone(account_id)?;
     account.client.prune_surface_resync_state()?;
-    let generation = 1;
+    let generation = account
+        .connection
+        .as_ref()
+        .map_or(1, super::super::connection_manager::ConnectionHandle::generation);
+    let plan = super::source::w0::prepare_receive_turn(
+        account,
+        generation,
+        generation,
+        crate::bus::connection_manager::ReceiveTrigger::Connected,
+    )?;
+    let retries = plan.retries;
     let mut turn = apply_w1::capture_turn(
         account.client.account_db()?,
         generation,
@@ -50,74 +60,142 @@ pub(super) async fn receive(
             pages = 0;
         }
         let more = page.more;
-        let records = page.entries.clone();
-        loop {
-            let outcome = apply_owned(account, &turn, generation, &page)?;
-            match outcome {
-                ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
-                    let high = records
-                        .iter()
-                        .map(|row| row.entry.inbox_seq)
-                        .max()
-                        .unwrap_or(page.covered_through_seq);
-                    apply_w1::map_page_outcome(outcome, high)?;
-                    turn.cursor = cursor;
-                    break;
-                }
-                ApplyOutcome::Paused { cursor } => {
-                    turn.cursor = cursor;
-                    return Ok((applied, Vec::new()));
-                }
-                ApplyOutcome::NeedStage { sequence, cursor } => {
-                    turn.cursor = cursor;
-                    let record = records.iter().find(|row| row.entry.inbox_seq == sequence).ok_or(
-                        SdkError::InboundRejected("receive page need-stage missing entry".into()),
-                    )?;
-                    let entry = ReceiveEntry {
-                        entry: record.entry.clone(),
-                        retry_key: None,
-                        replay: false,
-                        turn: Some(turn.clone()),
-                    };
-                    let handle_generation = || generation;
-                    let (_, next) = apply_w1::apply_page(
-                        account,
-                        &turn,
-                        &handle_generation,
-                        entry,
-                        None,
-                        backpressure,
-                    )
-                    .await?;
-                    backpressure = next;
-                    applied = applied.saturating_add(1);
-                    apply_w1::refresh_cursor(account.client.account_db()?, &mut turn)?;
-                }
-                ApplyOutcome::NeedFetch { after } => {
-                    turn.cursor = after;
-                    backpressure = cover_point(
-                        account,
-                        engine,
-                        &mut turn,
-                        generation,
-                        after.saturating_add(1),
-                        backpressure,
-                    )
-                    .await?;
-                }
-                ApplyOutcome::NeedPoint { seq, cursor } => {
-                    turn.cursor = cursor;
-                    backpressure =
-                        cover_point(account, engine, &mut turn, generation, seq, backpressure)
-                            .await?;
-                }
+        match drive_page(account, engine, &mut turn, generation, &page, backpressure, applied)
+            .await?
+        {
+            PageDrive::Paused { applied } => return Ok((applied, Vec::new())),
+            PageDrive::Continue { backpressure: next, applied: next_applied } => {
+                backpressure = next;
+                applied = next_applied;
             }
         }
         if !more {
             break;
         }
     }
+    applied =
+        apply_leftover(account, &mut turn, generation, retries, backpressure, applied).await?;
+    let _ = now;
+    flush_live_acks(account, generation).await?;
     Ok((applied, Vec::new()))
+}
+
+enum PageDrive {
+    Paused { applied: usize },
+    Continue { backpressure: Box<Backpressure>, applied: usize },
+}
+
+#[allow(clippy::too_many_arguments, reason = "standalone page drive shares the live handles")]
+async fn drive_page(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    turn: &mut ReceiveTurn,
+    generation: u64,
+    page: &ResumePage,
+    mut backpressure: Box<Backpressure>,
+    mut applied: usize,
+) -> Result<PageDrive, SdkError> {
+    let records = page.entries.clone();
+    loop {
+        let outcome = apply_owned(account, turn, generation, page)?;
+        match outcome {
+            ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
+                let high = records
+                    .iter()
+                    .map(|row| row.entry.inbox_seq)
+                    .max()
+                    .unwrap_or(page.covered_through_seq);
+                apply_w1::map_page_outcome(outcome, high)?;
+                turn.cursor = cursor;
+                break;
+            }
+            ApplyOutcome::Paused { cursor } => {
+                turn.cursor = cursor;
+                return Ok(PageDrive::Paused { applied });
+            }
+            ApplyOutcome::NeedStage { sequence, cursor } => {
+                turn.cursor = cursor;
+                let record = records.iter().find(|row| row.entry.inbox_seq == sequence).ok_or(
+                    SdkError::InboundRejected("receive page need-stage missing entry".into()),
+                )?;
+                let entry = ReceiveEntry {
+                    entry: record.entry.clone(),
+                    retry_key: None,
+                    replay: false,
+                    turn: Some(turn.clone()),
+                };
+                let handle_generation = || generation;
+                let (_, next) = apply_w1::apply_page(
+                    account,
+                    turn,
+                    &handle_generation,
+                    entry,
+                    None,
+                    backpressure,
+                )
+                .await?;
+                backpressure = next;
+                applied = applied.saturating_add(1);
+                apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
+            }
+            ApplyOutcome::NeedFetch { after } => {
+                turn.cursor = after;
+                backpressure = cover_point(
+                    account,
+                    engine,
+                    turn,
+                    generation,
+                    after.saturating_add(1),
+                    backpressure,
+                )
+                .await?;
+            }
+            ApplyOutcome::NeedPoint { seq, cursor } => {
+                turn.cursor = cursor;
+                backpressure =
+                    cover_point(account, engine, turn, generation, seq, backpressure).await?;
+            }
+        }
+    }
+    Ok(PageDrive::Continue { backpressure, applied })
+}
+
+async fn apply_leftover(
+    account: &mut LocalBusAccountState,
+    turn: &mut ReceiveTurn,
+    generation: u64,
+    mut retries: Vec<ReceiveEntry>,
+    mut backpressure: Box<Backpressure>,
+    mut applied: usize,
+) -> Result<usize, SdkError> {
+    crate::bus::connection_manager::receive::bind_retry_turns(&mut retries, Some(turn));
+    for mut prepared in retries {
+        prepared.turn = Some(turn.clone());
+        let handle_generation = || generation;
+        let (_, next) =
+            apply_w1::apply_page(account, turn, &handle_generation, prepared, None, backpressure)
+                .await?;
+        backpressure = next;
+        applied = applied.saturating_add(1);
+        apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
+    }
+    let _ = backpressure;
+    Ok(applied)
+}
+
+async fn flush_live_acks(account: &LocalBusAccountState, generation: u64) -> Result<(), SdkError> {
+    let Some((handle, work)) = (account.connection.clone()).zip(account.connection_work.clone())
+    else {
+        return Ok(());
+    };
+    crate::bus::connection_manager::receive::flush_acks(
+        &handle,
+        &work,
+        generation,
+        true,
+        account.timeouts.call,
+    )
+    .await
 }
 
 fn apply_owned(
@@ -160,7 +238,7 @@ fn apply_owned(
 
 async fn cover_point(
     account: &mut LocalBusAccountState,
-    engine: &mut impl GatewaySessionAccess,
+    engine: &mut impl GatewayPushAccess,
     turn: &mut ReceiveTurn,
     generation: u64,
     seq: u64,

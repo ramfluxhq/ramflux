@@ -12,9 +12,11 @@
 
 use super::fixture::{Case, Fixture};
 use super::lifecycle_fence::{
-    PUSH_E, account_of, acked, open_account, pump_quiet, push_engine, runtime_for,
+    PUSH_E, account_of, acked, open_account, pump_quiet, push_engine, runtime_for, stage,
 };
-use crate::bus::connection_manager::{ReceiveTrigger, receive::test_catch_up, receive::test_pass};
+use crate::bus::connection_manager::{
+    ReceiveTrigger, receive::test_catch_up, receive::test_pass, receive::test_pass_anchored,
+};
 use crate::bus::dispatch::task_transport::{Target, seal};
 use crate::prelude::*;
 use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
@@ -68,6 +70,14 @@ fn sweep_timeouts() -> crate::bus::runtime_limits::RuntimeTimeouts {
 async fn start_runtime(
     fixture: &mut Fixture,
 ) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
+    let mut runtime = start_runtime_live(fixture)?;
+    pump_quiet(&mut runtime, Duration::from_millis(150)).await?;
+    Ok(runtime)
+}
+
+fn start_runtime_live(
+    fixture: &mut Fixture,
+) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
     let config = fixture.source.gateway_config.clone();
     let commitment = fixture.source.principal_commitment.clone();
     let carrier = push_engine(fixture.source.engine.take().ok_or("engine")?)?;
@@ -83,7 +93,6 @@ async fn start_runtime(
     }
     runtime.start_connection()?;
     runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
-    pump_quiet(&mut runtime, Duration::from_millis(150)).await?;
     Ok(runtime)
 }
 
@@ -337,15 +346,52 @@ async fn catch_up_yields_real_pass_case() -> Case {
     let mut runtime = start_runtime(&mut fixture).await?;
     fill_sealed(&mut fixture, 1, 17).await?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
-    drive_full_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    let competitor = tokio::task::spawn_local(async {
+        loop {
+            crate::bus::connection_manager::ConnectionHandle::bump_yield_witness();
+            tokio::task::yield_now().await;
+        }
+    });
+    drive_pass_anchored(&mut runtime, ReceiveTrigger::Tick).await?;
+    competitor.abort();
     assert!(
         handle.test_catch_up_yields() >= 1,
         "17 one-entry resume pages must yield after 16: {}",
         handle.test_catch_up_yields()
     );
+    assert!(
+        handle.test_catch_up_yield_progress() >= 1,
+        "must yield after 16: {}",
+        handle.test_catch_up_yield_progress()
+    );
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+async fn drive_pass_anchored(
+    runtime: &mut super::super::AccountRuntime,
+    trigger: ReceiveTrigger,
+) -> Case {
+    let handle = account_of(runtime)?.connection.clone().ok_or("handle")?;
+    let generation = handle.generation();
+    let work = runtime.connection_sender.clone();
+    let mut pass = tokio::task::spawn_local(async move {
+        test_pass_anchored(&handle, &work, generation, trigger, Duration::from_secs(8)).await
+    });
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut pass => {
+                result??;
+                break;
+            }
+            work = runtime.connection_work.recv() => {
+                runtime.apply_connection_work(work.ok_or("closed")?).await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -391,13 +437,18 @@ async fn pump_anchored(
     handle: &crate::bus::connection_manager::ConnectionHandle,
 ) -> Case {
     handle.notify_receive_wake();
-    for _ in 0..32 {
+    let mut idle = 0_u32;
+    for _ in 0..256 {
         tokio::task::yield_now().await;
         drain_ready(runtime).await?;
-        // Poll the session worker only after a call is queued. Polling it first
-        // lets idle_read observe the 900s virtual jump and retire the session.
-        if handle.queued_calls() > 0 {
-            poll_spawned().await;
+        poll_spawned().await;
+        if handle.queued_calls() == 0 && handle.in_flight_calls() == 0 {
+            idle = idle.saturating_add(1);
+            if idle >= 4 {
+                break;
+            }
+        } else {
+            idle = 0;
         }
     }
     Ok(())
@@ -414,10 +465,22 @@ async fn connected_and_sweep_real() -> Case {
     let gateway = Arc::clone(&fixture.gateway);
     fill_sealed(&mut fixture, 1, 1).await?;
     stop_peer_session(&mut fixture).await;
-    let mut runtime = start_runtime(&mut fixture).await?;
+    let started = std::time::Instant::now();
+    let mut runtime = start_runtime_live(&mut fixture)?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    loop {
+        pump_anchored(&mut runtime, &handle).await?;
+        if !gateway.lock().map_err(|_| "gateway")?.resumes.is_empty() {
+            break;
+        }
+        if started.elapsed() > Duration::from_millis(100) {
+            break;
+        }
+    }
+    let within = started.elapsed();
     let in_100 = gateway.lock().map_err(|_| "gateway")?.resumes.len();
-    assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100}");
+    assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100} elapsed={within:?}");
+    assert!(within <= Duration::from_millis(100), "first Resume measured at {within:?}");
     assert_eq!(
         handle.test_context().keepalive_idle(),
         sweep_hold(),
@@ -553,6 +616,63 @@ async fn contact_request_case() -> Case {
     drive_flush(&mut runtime, true).await?;
     assert_eq!(snap(&runtime)?.cursor, 1, "contact-request bootstrap covers C");
     assert_eq!(acked(&gateway)?, 1, "contact-request bootstrap is ACKed once");
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restart_staged_applies_after_empty_page() -> Case {
+    watch(40, restart_staged_applies_after_empty_page_case()).await
+}
+
+async fn restart_staged_applies_after_empty_page_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2c-restart-staged")).await?;
+    fill_sealed(&mut fixture, 1, 1).await?;
+    let entry =
+        fixture.gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
+    fixture.gateway.lock().map_err(|_| "gateway")?.inbox.clear();
+    let config = fixture.source.gateway_config.clone();
+    let commitment = fixture.source.principal_commitment.clone();
+    let carrier = push_engine(fixture.source.engine.take().ok_or("engine")?)?;
+    let account = open_account(&fixture.root, &config, &commitment)?;
+    activate(&account)?;
+    stage(&account, &entry)?;
+    let mut runtime = runtime_for(account, &fixture.root);
+    let hold = sweep_hold();
+    runtime.timeouts = sweep_timeouts();
+    if let Some(account) = runtime.state.accounts.get_mut("sender") {
+        account.gateway_config.timeout = hold;
+        account.gateway_config.quic_fallback_timeout = hold;
+        account.timeouts = runtime.timeouts.clone();
+    }
+    runtime.start_connection()?;
+    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = Some(carrier);
+    drive_pass_anchored(&mut runtime, ReceiveTrigger::Connected).await?;
+    assert_eq!(snap(&runtime)?.cursor, 1, "staged retry must apply after an empty Connected page");
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn oversize_fetch_entry_refreshes_cursor() -> Case {
+    watch(40, oversize_fetch_entry_refreshes_cursor_case()).await
+}
+
+async fn oversize_fetch_entry_refreshes_cursor_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2c-oversize")).await?;
+    fill_sealed(&mut fixture, 1, 1).await?;
+    fixture.gateway.lock().map_err(|_| "gateway")?.oversize_next = Some(1);
+    let mut runtime = start_runtime(&mut fixture).await?;
+    drive_pass_anchored(&mut runtime, ReceiveTrigger::Tick).await?;
+    assert_eq!(
+        snap(&runtime)?.cursor,
+        1,
+        "oversize fetch_entry must refresh C before the next resume"
+    );
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;

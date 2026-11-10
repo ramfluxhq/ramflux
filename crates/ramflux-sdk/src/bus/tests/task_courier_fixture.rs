@@ -51,6 +51,8 @@ pub(super) struct Gateway {
     pub resume_issued: Option<u64>,
     /// Known-loss intervals returned on every `resume_page` until cleared.
     pub resume_losses: Vec<(u64, u64, &'static str)>,
+    /// Inclusive oversize sequence advertised on `resume_page` (`NeedPoint`).
+    pub oversize_next: Option<u64>,
     pub manifests: BTreeMap<String, Value>,
     pub protocol_errors: Vec<String>,
     pub ack_hold: Option<Arc<AckHold>>,
@@ -311,6 +313,8 @@ async fn serve(
             && value.get("incarnation_id").is_some()
         {
             resume_page_response(shared, &value)?
+        } else if value["frame_type"].as_str() == Some("fetch_entry") {
+            fetch_entry_response(shared, &value)?
         } else {
             let frame: GatewayClientFrame = serde_json::from_value(value)?;
             let response = match frame {
@@ -524,11 +528,14 @@ fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
         .resume_issued
         .or_else(|| gateway.inbox.last().map(|entry| entry.inbox_seq))
         .unwrap_or(after);
+    let oversize_next = gateway.oversize_next;
     let entries: Vec<Value> = gateway
         .inbox
         .iter()
         .filter(|entry| {
-            entry.inbox_seq > after && !gateway.acked.contains(&entry.envelope.envelope_id)
+            entry.inbox_seq > after
+                && !gateway.acked.contains(&entry.envelope.envelope_id)
+                && oversize_next != Some(entry.inbox_seq)
         })
         .take(take)
         .map(|entry| json!({ "entry": entry, "retain_until": retain_until }))
@@ -553,8 +560,26 @@ fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
         "settled_through_seq": 0,
         "entries": entries,
         "known_losses": known_losses,
-        "oversize_next": null,
+        "oversize_next": oversize_next,
         "more": covered < issued,
+    }))
+}
+
+fn fetch_entry_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value> {
+    let incarnation_id = value["incarnation_id"].as_str().ok_or("fetch incarnation")?.to_owned();
+    let seq = value["inbox_seq"].as_u64().ok_or("fetch seq")?;
+    let retain_until = now_unix_timestamp() + 300;
+    let gateway = shared.lock().map_err(|_| "gateway")?;
+    let entry = gateway
+        .inbox
+        .iter()
+        .find(|row| row.inbox_seq == seq)
+        .cloned()
+        .ok_or("fetch missing entry")?;
+    Ok(json!({
+        "frame_type": "entry",
+        "incarnation_id": incarnation_id,
+        "record": { "entry": entry, "retain_until": retain_until },
     }))
 }
 

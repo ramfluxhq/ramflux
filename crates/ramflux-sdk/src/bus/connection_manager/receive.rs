@@ -278,6 +278,7 @@ async fn catch_up(
             turn,
             cursor,
             backpressure,
+            retries: plan.retries,
             limit: plan.limit.min(RECEIVE_PAGE_LIMIT),
         })
         .await?;
@@ -363,6 +364,18 @@ pub(crate) async fn test_pass(
     pass(handle, work, generation, trigger, call_timeout).await
 }
 
+/// Test entry to the activated `pass_anchored` (pages only; no contact-floor rescan).
+#[cfg(test)]
+pub(crate) async fn test_pass_anchored(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    call_timeout: std::time::Duration,
+) -> Result<(bool, bool), SdkError> {
+    pass_anchored(handle, work, generation, trigger, call_timeout).await
+}
+
 /// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one
 /// bounded page with the same durable floor and per-pass root deduplication as normal receive.
 async fn rescan(
@@ -422,7 +435,7 @@ async fn rescan(
         .await
 }
 
-fn entry_id(entry: &crate::GatewayInboxEntry) -> (String, u64, String) {
+pub(super) fn entry_id(entry: &crate::GatewayInboxEntry) -> (String, u64, String) {
     (entry.envelope.envelope_id.clone(), entry.inbox_seq, entry.envelope.payload_hash.clone())
 }
 

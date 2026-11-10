@@ -134,17 +134,8 @@ fn spawn_account_receive(
     }
 }
 
-/// Tests drive receive under `LocalSet`; `spawn_local` keeps the loop on that set so
-/// pause/advance wakes `sleep_until`. Production uses the multi-thread spawn.
 fn spawn_receive(fut: impl std::future::Future<Output = ()> + Send + 'static) -> JoinHandle<()> {
-    #[cfg(test)]
-    {
-        tokio::task::spawn_local(fut)
-    }
-    #[cfg(not(test))]
-    {
-        tokio::spawn(fut)
-    }
+    tokio::spawn(fut)
 }
 
 fn register_courier<F, R>(

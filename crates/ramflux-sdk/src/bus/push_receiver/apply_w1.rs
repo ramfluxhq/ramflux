@@ -103,7 +103,7 @@ async fn apply_once(
     cross_await().await;
     let entry = &prepared.entry;
     let sequence = entry.inbox_seq;
-    if !admit_open(account, turn, handle_generation(), prepared).await? {
+    if !admit_open(account, turn, handle_generation(), prepared)? {
         return Ok(());
     }
     let local_device = account.gateway_config.device_id.clone();
@@ -439,44 +439,36 @@ fn failure_of(
 /// Reconcile the single-entry page. `NeedStage` writes W0 using the cursor returned
 /// after any gap-prefix cover. `Covered`/`AlreadyCovered` with C >= seq skip W1.
 /// A cover that leaves C behind seq is a plan bug.
-async fn admit_open(
+fn admit_open(
     account: &mut LocalBusAccountState,
     turn: &mut ReceiveTurn,
     generation: u64,
     prepared: &ReceiveEntry,
 ) -> Result<bool, SdkError> {
     let sequence = prepared.entry.inbox_seq;
-    loop {
-        match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
-            ApplyOutcome::NeedStage { sequence: need, cursor } if need == sequence => {
-                turn.cursor = cursor;
-                return stage_open(account, turn, generation, prepared);
-            }
-            ApplyOutcome::NeedStage { .. } => {
-                return Err(SdkError::InboundRejected("receive page need-stage mismatch".into()));
-            }
-            ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
-                map_page_outcome(
-                    if cursor < sequence {
-                        ApplyOutcome::Covered { cursor }
-                    } else {
-                        ApplyOutcome::AlreadyCovered { cursor }
-                    },
-                    sequence,
-                )?;
-                return Ok(false);
-            }
-            ApplyOutcome::NeedPoint { seq, cursor } => {
-                turn.cursor = cursor;
-                fetch_and_cover_point(account, turn, generation, seq).await?;
-            }
-            ApplyOutcome::NeedFetch { after } => {
-                turn.cursor = after;
-                fetch_and_cover_point(account, turn, generation, after.saturating_add(1)).await?;
-            }
-            ApplyOutcome::Paused { .. } => return Ok(false),
+    match reconcile_entry(account.client.account_db()?, turn, generation, sequence)? {
+        ApplyOutcome::NeedStage { sequence: need, cursor } if need == sequence => {
+            turn.cursor = cursor;
+            stage_open(account, turn, generation, prepared)
         }
-        refresh_cursor(account.client.account_db()?, turn)?;
+        ApplyOutcome::NeedStage { .. } => {
+            Err(SdkError::InboundRejected("receive page need-stage mismatch".into()))
+        }
+        ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
+            map_page_outcome(
+                if cursor < sequence {
+                    ApplyOutcome::Covered { cursor }
+                } else {
+                    ApplyOutcome::AlreadyCovered { cursor }
+                },
+                sequence,
+            )?;
+            Ok(false)
+        }
+        ApplyOutcome::NeedPoint { .. } | ApplyOutcome::NeedFetch { .. } => Err(SdkError::Storage(
+            StorageError::Integrity("receive admission cannot fetch a point from reconcile"),
+        )),
+        ApplyOutcome::Paused { .. } => Ok(false),
     }
 }
 

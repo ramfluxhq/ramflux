@@ -205,6 +205,7 @@ pub(super) fn runtime(
         preempt,
         connection_sender,
         connection_work,
+        ledger: None,
         transfers: super::uploads::Transfers::start(),
         readers: Arc::new(Mutex::new(None)),
         events,

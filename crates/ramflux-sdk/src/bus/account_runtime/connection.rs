@@ -27,6 +27,12 @@ impl AccountRuntime {
             if self.state.config.test_session_connector.is_some() {
                 account.test_connector.clone_from(&self.state.config.test_session_connector);
             }
+            if self.ledger.is_none()
+                && let Ok(id) = account.client.account_db().map(|db| db.local_account_id.clone())
+            {
+                self.ledger =
+                    Some(crate::bus::push_receiver::executor::LedgerExecutor::bind_actor(id)?);
+            }
             if let Err(error) = account.start_connection() {
                 tracing::warn!(%error, "account connection manager startup deferred; account remains open");
             }
