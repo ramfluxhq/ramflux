@@ -546,7 +546,7 @@ crates/ramflux-sdk/src/bus/supervisor.rs | export_agent_credentials | 1 | E | ex
 crates/ramflux-sdk/src/bus/sync_driver.rs | append_pending_entries | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/sync_driver.rs | append_pending_entries | 2 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/sync_driver.rs | process_with_prepared_source | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs | merge_recovered | 1 | D | admitted-before-persist; stored row is not an ingress decoder
+crates/ramflux-sdk/src/bus/sync_driver/source/w0.rs | merge_retry_inputs | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 2 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/bus/task_courier_queue.rs | load | 3 | D | admitted-before-persist; stored row is not an ingress decoder

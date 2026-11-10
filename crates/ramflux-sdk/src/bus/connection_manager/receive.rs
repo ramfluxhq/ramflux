@@ -236,7 +236,7 @@ async fn pass(
     call_timeout: std::time::Duration,
 ) -> Result<bool, SdkError> {
     let (active, _, backpressure) =
-        catch_up(handle, work, generation, trigger, call_timeout).await?;
+        Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
     let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
     Ok(active || more)
 }
@@ -249,7 +249,8 @@ async fn pass_anchored(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<(bool, bool), SdkError> {
-    let (active, paused, _) = catch_up(handle, work, generation, trigger, call_timeout).await?;
+    let (active, paused, _) =
+        Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
     Ok((active, paused))
 }
 
@@ -269,7 +270,7 @@ async fn catch_up(
     let mut backpressure = plan.backpressure;
     let turn = plan.turn;
     if let Some(turn) = turn.clone() {
-        let done = receive_ledger::catch_up_ledger(receive_ledger::CatchUp {
+        let done = Box::pin(receive_ledger::catch_up_ledger(receive_ledger::CatchUp {
             handle,
             work,
             generation,
@@ -280,7 +281,7 @@ async fn catch_up(
             backpressure,
             retries: plan.retries,
             limit: plan.limit.min(RECEIVE_PAGE_LIMIT),
-        })
+        }))
         .await?;
         return Ok((done.active, done.paused, done.backpressure));
     }
@@ -348,7 +349,7 @@ pub(crate) async fn test_catch_up(
     call_timeout: std::time::Duration,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
     let (active, _, backpressure) =
-        catch_up(handle, work, generation, trigger, call_timeout).await?;
+        Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
     Ok((active, backpressure))
 }
 
@@ -361,7 +362,7 @@ pub(crate) async fn test_pass(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<bool, SdkError> {
-    pass(handle, work, generation, trigger, call_timeout).await
+    Box::pin(pass(handle, work, generation, trigger, call_timeout)).await
 }
 
 /// Test entry to the activated `pass_anchored` (pages only; no contact-floor rescan).
@@ -373,7 +374,7 @@ pub(crate) async fn test_pass_anchored(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<(bool, bool), SdkError> {
-    pass_anchored(handle, work, generation, trigger, call_timeout).await
+    Box::pin(pass_anchored(handle, work, generation, trigger, call_timeout)).await
 }
 
 /// Contact capacity can leave an unacknowledged range behind the live cursor. Redrive one
@@ -435,7 +436,7 @@ async fn rescan(
         .await
 }
 
-pub(super) fn entry_id(entry: &crate::GatewayInboxEntry) -> (String, u64, String) {
+pub(crate) fn entry_id(entry: &crate::GatewayInboxEntry) -> (String, u64, String) {
     (entry.envelope.envelope_id.clone(), entry.inbox_seq, entry.envelope.payload_hash.clone())
 }
 

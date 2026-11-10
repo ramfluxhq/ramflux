@@ -3,6 +3,7 @@
 
 //! Standalone public receive: the same ledger pass under `bind_standalone` (D5).
 
+use super::super::connection_manager::receive::entry_id;
 use super::super::connection_manager::{ReceiveEntry, ReceiveTurn};
 use super::super::push_receiver::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage, ApplyPoint};
 use super::super::push_receiver::apply_w1;
@@ -13,6 +14,7 @@ use crate::bus::state::LocalBusAccountState;
 use crate::gateway::access::GatewayPushAccess;
 use crate::gateway::push_point::PointReply;
 use crate::gateway::push_resume::{PageReply, ResumePage};
+use std::collections::BTreeMap;
 
 const PAGE_LIMIT: usize = super::super::connection_manager::receive::RECEIVE_PAGE_LIMIT;
 const YIELD_AFTER: u32 = super::super::connection_manager::receive::RECEIVE_YIELD_AFTER_PAGES;
@@ -35,7 +37,9 @@ pub(super) async fn receive(
         generation,
         &account.target_delivery_id,
     )?;
-    let retries = super::source::w0::recover_standalone_retries(account, &turn, generation)?;
+    let recovered = super::source::w0::recover_standalone_retries(account, &turn, generation)?;
+    let mut retries: BTreeMap<_, _> =
+        recovered.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
     let mut backpressure = Box::new(Backpressure::load(&account.client, now)?);
     let mut applied = 0_usize;
     let mut pages = 0_u32;
@@ -55,10 +59,22 @@ pub(super) async fn receive(
             pages = 0;
         }
         let more = page.more;
-        match drive_page(account, engine, &mut turn, generation, &page, backpressure, applied)
-            .await?
+        match drive_page(
+            account,
+            engine,
+            &mut turn,
+            generation,
+            &page,
+            &mut retries,
+            backpressure,
+            applied,
+        )
+        .await?
         {
-            PageDrive::Paused { applied } => return Ok((applied, Vec::new())),
+            PageDrive::Paused { applied } => {
+                flush_live_acks(account, generation).await?;
+                return Ok((applied, Vec::new()));
+            }
             PageDrive::Continue { backpressure: next, applied: next_applied } => {
                 backpressure = next;
                 applied = next_applied;
@@ -87,6 +103,7 @@ async fn drive_page(
     turn: &mut ReceiveTurn,
     generation: u64,
     page: &ResumePage,
+    retries: &mut BTreeMap<(String, u64, String), ReceiveEntry>,
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
 ) -> Result<PageDrive, SdkError> {
@@ -113,9 +130,10 @@ async fn drive_page(
                 let record = records.iter().find(|row| row.entry.inbox_seq == sequence).ok_or(
                     SdkError::InboundRejected("receive page need-stage missing entry".into()),
                 )?;
+                let retry_key = take_page_retry(retries, &record.entry);
                 let entry = ReceiveEntry {
                     entry: record.entry.clone(),
-                    retry_key: None,
+                    retry_key,
                     replay: false,
                     turn: Some(turn.clone()),
                 };
@@ -155,16 +173,25 @@ async fn drive_page(
     Ok(PageDrive::Continue { backpressure, applied })
 }
 
+fn take_page_retry(
+    retries: &mut BTreeMap<(String, u64, String), ReceiveEntry>,
+    entry: &crate::GatewayInboxEntry,
+) -> Option<String> {
+    retries.remove(&entry_id(entry)).and_then(|prepared| prepared.retry_key)
+}
+
 async fn apply_leftover(
     account: &mut LocalBusAccountState,
     turn: &mut ReceiveTurn,
     generation: u64,
-    mut retries: Vec<ReceiveEntry>,
+    retries: BTreeMap<(String, u64, String), ReceiveEntry>,
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
 ) -> Result<usize, SdkError> {
-    crate::bus::connection_manager::receive::bind_retry_turns(&mut retries, Some(turn));
-    for mut prepared in retries {
+    let mut leftover: Vec<_> = retries.into_values().collect();
+    leftover.sort_by_key(|entry| entry.entry.inbox_seq);
+    crate::bus::connection_manager::receive::bind_retry_turns(&mut leftover, Some(turn));
+    for mut prepared in leftover {
         prepared.turn = Some(turn.clone());
         let handle_generation = || generation;
         let (_, next) =
@@ -315,5 +342,67 @@ async fn cover_point(
             turn.cursor = cursor;
             Ok(backpressure)
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_key_tests {
+    use super::*;
+    use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, SignedFields};
+
+    fn inbox(seq: u64) -> crate::GatewayInboxEntry {
+        crate::GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: seq,
+            target_delivery_id: "t".into(),
+            envelope: Envelope {
+                schema: "ramflux.envelope.v1".into(),
+                version: 1,
+                domain: "test".into(),
+                ext: Ext::default(),
+                signed: SignedFields {
+                    signing_key_id: "key".into(),
+                    signature_alg: SignatureAlg::Ed25519,
+                    signature: "sig".into(),
+                },
+                envelope_id: format!("env-{seq}"),
+                source_principal_id: "source".into(),
+                source_device_id: "device".into(),
+                target_delivery_id: "t".into(),
+                routing_set_id: None,
+                delivery_class: DeliveryClass::OpaqueEvent,
+                priority: Priority::Normal,
+                ttl: 60,
+                created_at: 1,
+                encrypted_payload: "cipher".into(),
+                payload_hash: "hash".into(),
+                delivery_mode: None,
+                collapse_tag: None,
+                report_commitment: None,
+            },
+        }
+    }
+
+    #[test]
+    fn page_served_retry_keeps_key() {
+        let entry = inbox(1);
+        let mut retries = BTreeMap::from([(
+            entry_id(&entry),
+            ReceiveEntry {
+                entry: entry.clone(),
+                retry_key: Some("retry-1".into()),
+                replay: false,
+                turn: None,
+            },
+        )]);
+        assert_eq!(take_page_retry(&mut retries, &entry).as_deref(), Some("retry-1"));
+        assert_eq!(retries.len(), 0, "page-served retry must not remain as leftover");
+    }
+
+    #[test]
+    fn unknown_page_entry_has_no_retry_key() {
+        let entry = inbox(2);
+        let mut retries = BTreeMap::new();
+        assert_eq!(take_page_retry(&mut retries, &entry), None);
     }
 }

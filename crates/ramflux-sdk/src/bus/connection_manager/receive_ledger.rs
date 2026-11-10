@@ -14,7 +14,7 @@ use crate::bus::push_receiver::apply::{self, ApplyLoss, ApplyOutcome, ApplyPage,
 use crate::bus::push_receiver::apply_w1;
 use crate::gateway::push_point::PointReply;
 use crate::gateway::push_resume::{PageReply, ResumePage};
-use ramflux_storage::ACK_FLUSH_COUNT;
+use ramflux_storage::{ACK_FLUSH_COUNT, StorageError};
 use tokio::{sync::mpsc, time::Instant};
 
 pub(super) struct LedgerCatchUp {
@@ -390,9 +390,8 @@ async fn fetch_apply_point(
         PointReply::Entry(record) => {
             let outcome =
                 apply_point_on(writer, turn, generation, seq, point_entry(turn, seq)).await?;
-            match outcome {
-                ApplyOutcome::NeedStage { sequence, cursor } if sequence == seq => {
-                    turn.cursor = cursor;
+            match entry_point_step(turn, seq, outcome)? {
+                EntryPoint::Stage => {
                     let (accepted, next) = apply_entry(
                         handle,
                         work,
@@ -411,19 +410,8 @@ async fn fetch_apply_point(
                     turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
                     Ok((false, next))
                 }
-                ApplyOutcome::Paused { cursor } => {
-                    turn.cursor = cursor;
-                    Ok((true, backpressure))
-                }
-                other => {
-                    if let ApplyOutcome::Covered { cursor }
-                    | ApplyOutcome::AlreadyCovered { cursor } = other
-                    {
-                        apply_w1::map_page_outcome(other, seq)?;
-                        turn.cursor = cursor;
-                    }
-                    Ok((false, backpressure))
-                }
+                EntryPoint::Paused => Ok((true, backpressure)),
+                EntryPoint::Covered => Ok((false, backpressure)),
             }
         }
         PointReply::TooLarge { retain_until } => {
@@ -544,6 +532,42 @@ impl OwnedPoint {
     }
 }
 
+const ENTRY_POINT_REFETCH: &str = "receive entry point cannot re-fetch";
+
+#[derive(Debug)]
+enum EntryPoint {
+    Stage,
+    Paused,
+    Covered,
+}
+
+fn entry_point_step(
+    turn: &mut ReceiveTurn,
+    seq: u64,
+    outcome: ApplyOutcome,
+) -> Result<EntryPoint, SdkError> {
+    match outcome {
+        ApplyOutcome::NeedStage { sequence, cursor } if sequence == seq => {
+            turn.cursor = cursor;
+            Ok(EntryPoint::Stage)
+        }
+        ApplyOutcome::Paused { cursor } => {
+            turn.cursor = cursor;
+            Ok(EntryPoint::Paused)
+        }
+        ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
+            apply_w1::map_page_outcome(outcome, seq)?;
+            turn.cursor = cursor;
+            Ok(EntryPoint::Covered)
+        }
+        ApplyOutcome::NeedStage { .. }
+        | ApplyOutcome::NeedPoint { .. }
+        | ApplyOutcome::NeedFetch { .. } => {
+            Err(SdkError::Storage(StorageError::Integrity(ENTRY_POINT_REFETCH)))
+        }
+    }
+}
+
 fn finish_point(turn: &mut ReceiveTurn, seq: u64, outcome: ApplyOutcome) -> Result<(), SdkError> {
     match outcome {
         ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
@@ -564,4 +588,54 @@ fn finish_point(turn: &mut ReceiveTurn, seq: u64, outcome: ApplyOutcome) -> Resu
 async fn refresh_turn_cursor(writer: &Writer, target: &str) -> Result<u64, SdkError> {
     let target = target.to_owned();
     writer.apply(move |account| apply_w1::read_cursor(account.client.account_db()?, &target)).await
+}
+
+#[cfg(test)]
+mod entry_point_tests {
+    use super::*;
+
+    fn turn() -> ReceiveTurn {
+        ReceiveTurn {
+            target: "t".into(),
+            incarnation: "e".into(),
+            cursor: 3,
+            generation: 1,
+            erasure_generation: 0,
+        }
+    }
+
+    fn assert_refetch(result: &Result<EntryPoint, SdkError>, turn: &ReceiveTurn) {
+        assert!(
+            matches!(result, Err(SdkError::Storage(StorageError::Integrity(ENTRY_POINT_REFETCH)))),
+            "unexpected Entry must be Integrity: {result:?}"
+        );
+        assert_eq!(turn.cursor, 3, "unexpected Entry must not move C");
+    }
+
+    #[test]
+    fn need_stage_mismatch_is_integrity() {
+        let mut turn = turn();
+        assert_refetch(
+            &entry_point_step(&mut turn, 4, ApplyOutcome::NeedStage { sequence: 5, cursor: 9 }),
+            &turn,
+        );
+    }
+
+    #[test]
+    fn need_point_is_integrity() {
+        let mut turn = turn();
+        assert_refetch(
+            &entry_point_step(&mut turn, 4, ApplyOutcome::NeedPoint { seq: 4, cursor: 9 }),
+            &turn,
+        );
+    }
+
+    #[test]
+    fn need_fetch_is_integrity() {
+        let mut turn = turn();
+        assert_refetch(
+            &entry_point_step(&mut turn, 4, ApplyOutcome::NeedFetch { after: 9 }),
+            &turn,
+        );
+    }
 }

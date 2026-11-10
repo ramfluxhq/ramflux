@@ -19,6 +19,8 @@ use crate::bus::connection_manager::{
     receive::test_pass_anchored,
 };
 use crate::bus::dispatch::task_transport::{Target, seal};
+use crate::bus::push_receiver::executor::{ExecutorOwner, LedgerExecutor};
+use crate::gateway::access::CountingGateway;
 use crate::prelude::*;
 use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
@@ -496,9 +498,14 @@ async fn connected_and_sweep_real() -> Case {
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
     let wall = std::time::Instant::now();
     let mut live_at = None;
+    handle.notify_receive_wake();
+    let mut idle = 0_u32;
     loop {
-        pump_anchored(&mut runtime, &handle).await?;
-        if handle.snapshot().state == NetworkingState::Live && live_at.is_none() {
+        drain_ready(&mut runtime).await?;
+        poll_spawned().await;
+        let live = handle.snapshot().state == NetworkingState::Live;
+        // L1: clock starts at the first Live snapshot, before parking on in-flight Resume.
+        if live && live_at.is_none() {
             live_at = Some(std::time::Instant::now());
         }
         if !gateway.lock().map_err(|_| "gateway")?.resumes.is_empty() {
@@ -508,6 +515,18 @@ async fn connected_and_sweep_real() -> Case {
             Some(at) if at.elapsed() > Duration::from_millis(100) => break,
             None if wall.elapsed() > Duration::from_secs(10) => break,
             _ => {}
+        }
+        let busy = handle.queued_calls() > 0 || handle.in_flight_calls() > 0;
+        if !live || busy {
+            idle = 0;
+            let work = runtime.connection_work.recv().await.ok_or("connection work closed")?;
+            runtime.apply_connection_work(work).await?;
+            continue;
+        }
+        tokio::task::yield_now().await;
+        idle = idle.saturating_add(1);
+        if idle >= 4 {
+            break;
         }
     }
     let within = live_at.map_or_else(|| wall.elapsed(), |at| at.elapsed());
@@ -724,6 +743,38 @@ async fn oversize_fetch_entry_refreshes_cursor_case() -> Case {
         1,
         "oversize fetch_entry must refresh C before the next resume"
     );
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn start_connection_bind_refuses_standalone_receive() -> Case {
+    watch(40, start_connection_bind_refuses_standalone_receive_case()).await
+}
+
+async fn start_connection_bind_refuses_standalone_receive_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2c-d5-runtime-bind")).await?;
+    let mut runtime = start_runtime_live(&mut fixture)?;
+    let account_key = {
+        let db = account_of(&runtime)?.client.account_db()?;
+        format!("{}:{}", db.path.display(), db.local_account_id)
+    };
+    let config = account_of(&runtime)?.gateway_config.clone();
+    let mut counting = CountingGateway::new(config);
+    let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
+    let Err(error) = crate::bus::sync_driver::receive(account, &mut counting, 1).await else {
+        panic!("standalone while start_connection bound the actor");
+    };
+    assert!(
+        matches!(
+            error,
+            SdkError::Storage(StorageError::AccountWriterBusy(ref id)) if *id == account_key
+        ),
+        "standalone must refuse after start_connection bind: {error:?}"
+    );
+    assert_eq!(LedgerExecutor::last_bound_owner(), Some(ExecutorOwner::Actor));
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
