@@ -78,6 +78,68 @@ impl RecoveredPairing {
 }
 
 impl AccountDb {
+    /// Persist a candidate phase and matching live phase in the same transaction.
+    ///
+    /// # Errors
+    /// Refuses changed candidate identity or an invalid phase/context combination.
+    pub fn commit_pairing_head(&self, head: &HeadRow) -> Result<(), StorageError> {
+        let transaction = self.connection.immediate_transaction()?;
+        self.put_pairing_head(head)?;
+        if let Some(mut live) = self
+            .pairing_live_rows()?
+            .into_iter()
+            .find(|live| live.operation_id == head.operation_id)
+        {
+            live.phase.clone_from(&head.state);
+            live.candidate_id = Some(head.operation_id.clone());
+            self.put_pairing_live(&live)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Allocate the monotonic local floor and its live descriptor together.
+    ///
+    /// # Errors
+    /// Rejects stale floors, duplicate invitations and live capacity overflow.
+    pub fn commit_pairing_invitation(
+        &self,
+        floor: &FloorRow,
+        live: &LiveRow,
+    ) -> Result<(), StorageError> {
+        require(floor.account_id == live.account_id, "account_id")?;
+        let descriptor: ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::native::Invitation,
+        > = ramflux_protocol::parse_i_json(&live.descriptor).map_err(|_| field("descriptor"))?;
+        require(floor.account_anchor == descriptor.body.account_anchor, "account_anchor")?;
+        require(floor.issued_seq == live.local_seq, "local_seq")?;
+        require(floor.next_generation > live.generation, "generation")?;
+        let transaction = self.connection.immediate_transaction()?;
+        self.put_pairing_floor(floor)?;
+        self.put_pairing_live(live)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Retire an ordinary acknowledged head without fabricating an invitation/ceremony.
+    ///
+    /// # Errors
+    /// Refuses a different operation/hash, unacknowledged head, or pairing-owned candidate.
+    pub fn commit_ordinary_head_cleanup(&self, adoption: &AdoptionRow) -> Result<(), StorageError> {
+        adoption.validate()?;
+        self.require_local(&adoption.account_id)?;
+        let transaction = self.connection.immediate_transaction()?;
+        let head = self.pairing_head()?.ok_or(field("state"))?;
+        require(matches!(head.kind.as_str(), "head_update" | "revoke"), "kind")?;
+        require(head.operation_id == adoption.operation_id, "operation_id")?;
+        require(head.candidate_hash == adoption.record_hash, "record_hash")?;
+        require(head.state == "acknowledged", "state")?;
+        require(self.pairing_adoption()?.as_ref() == Some(adoption), "record_hash")?;
+        self.delete_head(&adoption.account_id, &adoption.operation_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Commit the adopted local authority and retire its acknowledged candidate atomically.
     ///
     /// # Errors

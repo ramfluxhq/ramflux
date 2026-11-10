@@ -338,8 +338,7 @@ crates/ramflux-protocol/src/canonical_json.rs | parse_fixture_value | 26 | E | e
 crates/ramflux-protocol/src/client_discovery.rs | client_discovery_signing_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/custody/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/custody/mod.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/custody/pairing/mod.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-protocol/src/custody/pairing/mod.rs | from_wire_bytes | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/custody/pairing/mod.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=original-byte I-JSON and closed typed pairing schemas; no secret Value tree
 crates/ramflux-protocol/src/device_address.rs | parse_qualified_device_id | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/dm_fs_v3/frames.rs | from_json | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/group_device_roots.rs | from_event | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -357,6 +356,7 @@ crates/ramflux-protocol/src/i_json.rs | decode_signed_envelope_ijson | 1 | C | a
 crates/ramflux-protocol/src/i_json.rs | decode_signed_nack_ijson | 1 | C | admission=crates/ramflux-protocol/src/i_json.rs#decode_signed_nack_ijson#1
 crates/ramflux-protocol/src/i_json.rs | parse_i_json | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/i_json.rs | parse_i_json | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-protocol/src/i_json.rs | parse_i_json_secret | 1 | E | excluded=generic owned-secret decoder primitive validates original bytes before typed deserialization; callers register admission
 crates/ramflux-protocol/src/i_json.rs | validate_i_json_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/identity_keys.rs | from_wire_bytes | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-protocol/src/identity_profile_v2.rs | decode_profile_document | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -730,6 +730,7 @@ crates/ramflux-sdk/src/custody/pairing/install_store.rs | decode | 1 | E | exclu
 crates/ramflux-sdk/src/custody/pairing/local_credential.rs | load_reservation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/pairing/publication.rs | decode_candidate | 1 | E | excluded=local own-db pairing head (Publication wrapping an Envelope); not network ingress
 crates/ramflux-sdk/src/custody/pairing/publication.rs | decode_ref | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/custody/pairing/transfer_payload.rs | open_payload | 1 | A | strict=parse_i_json_secret; admission=decrypted Auth HPKE original-byte strict payload then transcript/selection validation
 crates/ramflux-sdk/src/custody/vault/linux/init.rs | parse | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/presence.rs | approved_primary_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/dm.rs | nested_report_fields | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -807,6 +808,7 @@ crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_context | 1 | 
 crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_descriptor | 1 | E | excluded=local pairing journal rows written by this crate; outside the signed-envelope closure
 crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_publication | 1 | E | excluded=local pairing journal rows written by this crate; outside the signed-envelope closure
 crates/ramflux-storage/src/account_db/pairing/journal.rs | decode_ref | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-storage/src/account_db/pairing/recovery.rs | commit_pairing_invitation | 1 | A | strict=parse_i_json; admission=durable signed invitation descriptor
 crates/ramflux-storage/src/account_db/read_model.rs | client_audit_metadata | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/receive/erased_capture.rs | tuple_of | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/receive/hold.rs | load_holds | 1 | E | excluded=local hold rows written by this crate; outside the signed-envelope closure

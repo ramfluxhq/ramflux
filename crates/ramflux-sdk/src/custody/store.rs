@@ -48,6 +48,8 @@ pub(super) struct StoredAuthority {
     #[serde(default)]
     pending_branch: bool,
     custody_v3_observed: bool,
+    #[serde(default)]
+    pairing_adoption_required: bool,
     pub(super) primary_vault_ref: String,
     pub(super) branch_vault_ref: String,
     vault_class: String,
@@ -814,6 +816,7 @@ pub(super) fn persist(
             capacity_retry_at: None,
             pending_branch: false,
             custody_v3_observed: true,
+            pairing_adoption_required: false,
             primary_vault_ref: reference.clone(),
             branch_vault_ref: branch_reference.clone(),
             vault_class: vault.vault_class().into(),

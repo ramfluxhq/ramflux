@@ -148,11 +148,13 @@ pub enum Payload {
     CandidateReady {
         transfer_id: String,
         record_hash: String,
+        #[serde(deserialize_with = "super::required_nullable")]
         compacted_ids_hash: Option<String>,
     },
     TransferReady {
         transfer_id: String,
         record_hash: String,
+        #[serde(deserialize_with = "super::required_nullable")]
         compacted_ids_hash: Option<String>,
         preservation: Envelope<PreservationBody>,
     },
@@ -397,6 +399,7 @@ impl Channel {
 pub struct PendingInvitation {
     pub invitation_id: String,
     pub expires_at: u64,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub proposal_hash: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +408,7 @@ pub struct JournalEntry {
     pub operation_id: String,
     pub intent_hash: String,
     pub state: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub acknowledgement_hash: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

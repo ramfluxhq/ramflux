@@ -114,6 +114,24 @@ impl FileVaultSecretSource {
     pub fn vault_secret_path(&self, local_account_id: &str) -> PathBuf {
         self.root.join("vault").join(format!("{local_account_id}.key"))
     }
+
+    pub(crate) fn remove_erased_owner(&self, local_account_id: &str) -> Result<(), StorageError> {
+        let path = self.vault_secret_path(local_account_id);
+        let parent = path.parent().ok_or(StorageError::AuthorizationRejected)?;
+        for candidate in [parent, path.as_path()] {
+            match fs::symlink_metadata(candidate) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(StorageError::Integrity("account erase symlink"));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        fs::remove_file(&path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    }
 }
 
 impl VaultSecretSource for FileVaultSecretSource {

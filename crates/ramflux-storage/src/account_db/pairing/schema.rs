@@ -3,7 +3,7 @@
 
 //! Closed pairing table DDL. Installed on every account open; no schema-version collision.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) const TABLES: [&str; 5] =
     ["pairing_floor", "pairing_live", "pairing_head", "pairing_terminal", "pairing_adoption"];
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS pairing_head (
  operation_id TEXT NOT NULL CHECK(typeof(operation_id)='text' AND length(operation_id)=43),
  invitation_id TEXT CHECK(invitation_id IS NULL OR (typeof(invitation_id)='text' AND length(invitation_id)=43)),
  generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=1 AND generation<=9007199254740991),
- kind TEXT NOT NULL CHECK(kind IN ('enroll','transfer','revoke')),
+ kind TEXT NOT NULL CHECK(kind IN ('enroll','transfer','revoke','head_update')),
  base_record_hash TEXT NOT NULL CHECK(typeof(base_record_hash)='text' AND length(base_record_hash)=43),
  base_epoch INTEGER NOT NULL CHECK(typeof(base_epoch)='integer' AND base_epoch>=0 AND base_epoch<=9007199254740991),
  publisher_ref BLOB NOT NULL CHECK(typeof(publisher_ref)='blob' AND length(publisher_ref)>0 AND length(publisher_ref)<=4096),
@@ -78,7 +78,8 @@ CREATE TABLE IF NOT EXISTS pairing_head (
  PRIMARY KEY(account_id),
  UNIQUE(account_id, operation_id),
  CHECK((kind IN ('enroll','transfer') AND recipient_ref IS NOT NULL AND revoked_ref IS NULL AND invitation_id IS NOT NULL)
-    OR (kind='revoke' AND recipient_ref IS NULL AND revoked_ref IS NOT NULL AND invitation_id IS NULL)),
+    OR (kind='revoke' AND recipient_ref IS NULL AND revoked_ref IS NOT NULL AND invitation_id IS NULL)
+    OR (kind='head_update' AND recipient_ref IS NULL AND revoked_ref IS NULL AND invitation_id IS NULL)),
  CHECK((state='acknowledged' AND ack IS NOT NULL) OR (state<>'acknowledged' AND ack IS NULL))
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pairing_terminal (
@@ -127,7 +128,22 @@ END;
 /// # Errors
 /// Returns SQLite errors.
 pub(crate) fn install(db: &Connection) -> rusqlite::Result<()> {
-    db.execute_batch(SCHEMA)?;
+    let existing: Option<String> = db
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='pairing_head'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing.is_some_and(|sql| !sql.contains("'head_update'")) {
+        let transaction = db.unchecked_transaction()?;
+        db.execute_batch("ALTER TABLE pairing_head RENAME TO pairing_head_before_head_update;")?;
+        db.execute_batch(SCHEMA)?;
+        db.execute_batch("INSERT INTO pairing_head SELECT * FROM pairing_head_before_head_update; DROP TABLE pairing_head_before_head_update;")?;
+        transaction.commit()?;
+    } else {
+        db.execute_batch(SCHEMA)?;
+    }
     let _ = PHASES;
     Ok(())
 }

@@ -7,7 +7,10 @@ mod genesis;
 mod keys;
 mod management;
 mod recovery;
-pub use cooperative_transfer::{CooperativeTransferInput, cooperative_transfer_preserving_devices};
+pub use cooperative_transfer::{
+    CooperativeTransferInput, cooperative_transfer_preserving_devices,
+    verify_cooperative_preservation,
+};
 pub use recovery::{RecoveryInput, recover_primary};
 mod contact_card;
 pub use contact_card::verify_contact_card_v3;

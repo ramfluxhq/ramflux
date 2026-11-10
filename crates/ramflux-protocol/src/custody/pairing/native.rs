@@ -18,6 +18,7 @@ pub struct CreateSpec {
     pub base_epoch: u64,
     pub purpose: String,
     pub recipient_mode: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub destination_ref: Option<DeviceRef>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
@@ -200,11 +201,13 @@ pub struct Invitation {
     pub base_epoch: u64,
     pub purpose: String,
     pub recipient_mode: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub destination_ref: Option<DeviceRef>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
     pub lease_expires_at: u64,
     pub data_selection: Vec<DataSelection>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub transfer_id: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -394,6 +397,7 @@ pub struct Failure {
     pub schema: String,
     pub version: u32,
     pub code: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub retry_after_ms: Option<u64>,
 }
 impl PairingWire for Failure {

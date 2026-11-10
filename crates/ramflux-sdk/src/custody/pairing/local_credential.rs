@@ -280,8 +280,11 @@ fn bind_slot(root: &Path, stored: &PersistedReservation) {
     slot.outstanding = false;
 }
 
-fn slot_key(root: &Path, account_id: &str) -> String {
-    format!("{}\0{account_id}", root.as_os_str().to_string_lossy())
+type SlotKey = (PathBuf, String);
+fn slot_key(root: &Path, account_id: &str) -> SlotKey {
+    let normalized = std::fs::canonicalize(root)
+        .unwrap_or_else(|_| std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+    (normalized, account_id.into())
 }
 
 struct AccountSlot {
@@ -313,8 +316,8 @@ impl AccountSlot {
     }
 }
 
-fn slots() -> &'static Mutex<HashMap<String, AccountSlot>> {
-    static SLOTS: OnceLock<Mutex<HashMap<String, AccountSlot>>> = OnceLock::new();
+fn slots() -> &'static Mutex<HashMap<SlotKey, AccountSlot>> {
+    static SLOTS: OnceLock<Mutex<HashMap<SlotKey, AccountSlot>>> = OnceLock::new();
     SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -498,10 +501,13 @@ pub fn take_cancel_fences() -> u64 {
     observer::take_cancels()
 }
 
-/// Drop in-memory slots. Models a process restart over the persisted reservation.
+/// Drop only the fixture account slot. Parallel fixtures keep their cancellation fences.
 #[cfg(test)]
-pub fn forget_slots() {
-    slots().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+pub fn forget_slots(root: &Path, account_id: &str) {
+    slots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&slot_key(root, account_id));
 }
 
 #[cfg(test)]

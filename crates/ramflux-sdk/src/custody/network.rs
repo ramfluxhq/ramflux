@@ -85,11 +85,18 @@ impl CustodyConnection<GatewayTcpTlsStream> {
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
     ) -> Result<Self, SdkError> {
-        Box::pin(Self::connect_inner(config, vault)).await
+        Box::pin(Self::connect_inner(config, vault, false)).await
+    }
+    pub(crate) async fn connect_for_proof(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+    ) -> Result<Self, SdkError> {
+        Box::pin(Self::connect_inner(config, vault, true)).await
     }
     async fn connect_inner(
         config: CustodyNetworkConfig,
         vault: Arc<dyn PrimaryVault>,
+        proof_only: bool,
     ) -> Result<Self, SdkError> {
         let endpoint = (
             config.gateway_address,
@@ -98,18 +105,19 @@ impl CustodyConnection<GatewayTcpTlsStream> {
             config.timeout,
         );
         let mut retry = super::retry::AdmissionRetry::default();
-        let ((), connection) = Box::pin(Self::connect_with(config, vault, &mut retry, || async {
-            let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
-                "0.0.0.0:0".parse().map_err(|_| invalid())?,
-                endpoint.0,
-                &endpoint.1,
-                &endpoint.2,
-                endpoint.3,
-            )
+        let ((), connection) =
+            Box::pin(Self::connect_with_mode(config, vault, &mut retry, proof_only, || async {
+                let (_, tls) = ramflux_transport::TcpTlsGatewayClient::connect(
+                    "0.0.0.0:0".parse().map_err(|_| invalid())?,
+                    endpoint.0,
+                    &endpoint.1,
+                    &endpoint.2,
+                    endpoint.3,
+                )
+                .await?;
+                Ok(((), tls.into_tls_stream()))
+            }))
             .await?;
-            Ok(((), tls.into_tls_stream()))
-        }))
-        .await?;
         Ok(connection)
     }
 }
@@ -124,8 +132,21 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
     {
+        Self::connect_with_mode(config, vault, retry, false, open).await
+    }
+    pub(crate) async fn connect_with_mode<T, F, Fut>(
+        config: CustodyNetworkConfig,
+        vault: Arc<dyn PrimaryVault>,
+        retry: &mut super::retry::AdmissionRetry,
+        proof_only: bool,
+        open: F,
+    ) -> Result<(T, Self), SdkError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(T, S), SdkError>>,
+    {
         let mut budget = retry.begin_attempt().await;
-        let result = Self::connect_attempt(config, vault, open, &mut budget).await;
+        let result = Self::connect_attempt(config, vault, open, &mut budget, proof_only).await;
         if let Err(error) = &result {
             retry.record(error, tokio::time::Instant::now());
         }
@@ -136,6 +157,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         vault: Arc<dyn PrimaryVault>,
         mut open: F,
         budget: &mut super::retry::Budget,
+        proof_only: bool,
     ) -> Result<(T, Self), SdkError>
     where
         F: FnMut() -> Fut,
@@ -150,7 +172,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         let _flight =
             super::retry::single_flight(&config.account_root, &config.account_id, budget).await?;
         super::capacity_backoff::check(&capacity_key)?;
-        let result = Self::connect_admitted(&config, vault, &mut open, budget).await;
+        let result = Self::connect_admitted(&config, vault, &mut open, budget, proof_only).await;
         if let Err(error) = &result {
             super::capacity_backoff::record_error(capacity_key, error);
         }
@@ -161,6 +183,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         vault: Arc<dyn PrimaryVault>,
         mut open: F,
         budget: &mut super::retry::Budget,
+        proof_only: bool,
     ) -> Result<(T, Self), SdkError>
     where
         F: FnMut() -> Fut,
@@ -188,6 +211,9 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         super::capacity_hint::check_account(&authority.account, now()?)?;
         let (mut transport, opened) = Self::open_admitted(config, &mut open, budget).await?;
         let mut connection = Self::from_authority(authority, opened, config);
+        if proof_only {
+            return Ok((transport, connection));
+        }
         let actions = connection.registration_actions()?;
         let mut next = 0;
         loop {

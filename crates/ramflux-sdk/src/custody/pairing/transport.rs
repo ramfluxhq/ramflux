@@ -18,6 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 const POLL_SECS: u64 = 2;
 const CHUNK: usize = 8192;
@@ -56,13 +57,23 @@ pub trait PairingNative: std::marker::Send + std::marker::Sync {
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
     fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>>;
+    /// Publish a user-approved exact candidate on this ceremony's authenticated connection.
+    fn publish(
+        &self,
+        _publication: ramflux_protocol::custody::Publication,
+    ) -> BoxFut<Result<String, SdkError>> {
+        Box::pin(async { Err(SdkError::PairingCode("UpdateRequired")) })
+    }
 }
 
 type NativeOpen<S> =
     dyn Fn() -> BoxFut<Result<CustodyConnection<S>, SdkError>> + std::marker::Send + Sync;
 
-type NativeConnection<S> =
-    Arc<std::sync::Mutex<Option<Arc<tokio::sync::Mutex<CustodyConnection<S>>>>>>;
+struct NativeState<S> {
+    generation: u64,
+    connection: Option<Arc<tokio::sync::Mutex<CustodyConnection<S>>>>,
+}
+type NativeConnection<S> = Arc<std::sync::Mutex<NativeState<S>>>;
 
 /// A ceremony owns a fresh connection; the ordinary gateway connection is never shared.
 pub struct FreshPairingNative<S = ramflux_transport::GatewayTcpTlsStream> {
@@ -80,7 +91,7 @@ impl FreshPairingNative {
         Self::with_factory(Arc::new(move || {
             let config = config.clone();
             let vault = Arc::clone(&vault);
-            Box::pin(CustodyConnection::connect(config, vault))
+            Box::pin(CustodyConnection::connect_for_proof(config, vault))
         }))
     }
 }
@@ -89,28 +100,58 @@ impl<S> FreshPairingNative<S> {
     /// Factory seam for real transport fixtures. One call for each Issue, never gateway handoff.
     #[must_use]
     pub fn with_factory(open: Arc<NativeOpen<S>>) -> Self {
-        Self { open, connection: Arc::new(std::sync::Mutex::new(None)) }
+        Self {
+            open,
+            connection: Arc::new(std::sync::Mutex::new(NativeState {
+                generation: 0,
+                connection: None,
+            })),
+        }
     }
 }
 
 impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static> PairingNative
     for FreshPairingNative<S>
 {
+    fn publish(
+        &self,
+        publication: ramflux_protocol::custody::Publication,
+    ) -> BoxFut<Result<String, SdkError>> {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection
+            .clone();
+        Box::pin(async move {
+            ProofPairingNative::from_connection(
+                connection.ok_or(SdkError::PairingCode("WrongContext"))?,
+            )
+            .publish(publication)
+            .await
+        })
+    }
     fn close(&self) {
-        self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let mut state = self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.generation = state.generation.wrapping_add(1);
+        state.connection.take();
     }
 
     fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>> {
         self.close();
         let open = Arc::clone(&self.open);
         let slot = Arc::clone(&self.connection);
+        let generation = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).generation;
         Box::pin(async move {
             let connection = Arc::new(tokio::sync::Mutex::new(open().await?));
             let native = ProofPairingNative::from_connection(Arc::clone(&connection));
             match native.issue(spec).await {
                 Ok(issued) => {
-                    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(connection);
+                    let mut state = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if state.generation != generation {
+                        return Err(SdkError::PairingCode("WrongContext"));
+                    }
+                    state.connection = Some(connection);
                     Ok(issued)
                 }
                 Err(error) => Err(error),
@@ -119,14 +160,26 @@ impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static
     }
 
     fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>> {
-        let connection =
-            self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection
+            .clone();
         let slot = Arc::clone(&self.connection);
         Box::pin(async move {
             let connection = connection.ok_or(SdkError::PairingCode("WrongContext"))?;
-            let result = ProofPairingNative::from_connection(connection).create(create).await;
+            let result =
+                ProofPairingNative::from_connection(Arc::clone(&connection)).create(create).await;
             if result.is_err() {
-                slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                let mut state = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state
+                    .connection
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &connection))
+                {
+                    state.connection.take();
+                }
             }
             result
         })
@@ -135,7 +188,9 @@ impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static
 
 impl<S> Drop for FreshPairingNative<S> {
     fn drop(&mut self) {
-        self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let mut state = self.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.generation = state.generation.wrapping_add(1);
+        state.connection.take();
     }
 }
 
@@ -171,6 +226,19 @@ impl ProofPairingNative {
 }
 
 impl PairingNative for ProofPairingNative {
+    fn publish(
+        &self,
+        publication: ramflux_protocol::custody::Publication,
+    ) -> BoxFut<Result<String, SdkError>> {
+        let prove = Arc::clone(&self.prove);
+        Box::pin(async move {
+            match prove(CustodyProofAction::Publish { publication: Box::new(publication) }).await? {
+                CustodyServerFrame::Published { record_hash } => Ok(record_hash),
+                CustodyServerFrame::Refused { code, .. } => Err(code.into()),
+                _ => Err(SdkError::PairingCode("InvalidInput")),
+            }
+        })
+    }
     fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>> {
         let prove = Arc::clone(&self.prove);
         Box::pin(async move {
@@ -313,9 +381,9 @@ impl HttpRelay {
         value: &T,
     ) -> Result<R, SdkError> {
         require_https_origin(origin)?;
-        let body = value.to_wire_bytes().map_err(|e| wire(&e))?;
+        let body = Zeroizing::new(value.to_wire_bytes().map_err(|e| wire(&e))?);
         let path = format!("/client/pairing/v1/{route}");
-        let (status, reply) = post(&self.client, origin, &path, &body).await?;
+        let (status, reply) = post(&self.client, origin, &path, body).await?;
         if status != reqwest::StatusCode::OK {
             return Err(status_error(status, &reply));
         }
@@ -470,68 +538,68 @@ fn failure_error(failure: &Failure) -> SdkError {
     }
 }
 
-fn status_error(status: reqwest::StatusCode, body: &[u8]) -> SdkError {
-    let text = std::str::from_utf8(body).unwrap_or("request rejected");
-    SdkError::LocalBus(format!("{status}: {text}"))
+fn status_error(status: reqwest::StatusCode, _body: &[u8]) -> SdkError {
+    SdkError::LocalBus(format!("pairing HTTPS status {status}"))
 }
 
-fn require_https_origin(origin: &str) -> Result<(), SdkError> {
+pub(super) fn require_https_origin(origin: &str) -> Result<(), SdkError> {
     let url = reqwest::Url::parse(origin).map_err(|_| SdkError::PairingCode("InvalidInput"))?;
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
     {
         return Err(SdkError::PairingCode("InvalidInput"));
     }
     Ok(())
 }
 
+struct ErasingBody(Zeroizing<Vec<u8>>);
+impl AsRef<[u8]> for ErasingBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 async fn post(
     client: &reqwest::Client,
     origin: &str,
     path: &str,
-    body: &[u8],
+    body: Zeroizing<Vec<u8>>,
 ) -> Result<(reqwest::StatusCode, Vec<u8>), SdkError> {
-    let url = format!("{origin}{path}");
-    let request = client
-        .post(&url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::CONNECTION, "close")
-        .body(body.to_vec());
-    let response = tokio::time::timeout(REQUEST_DEADLINE, request.send())
-        .await
-        .map_err(|_| {
-            SdkError::from(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "pairing HTTPS deadline expired",
-            ))
-        })?
-        .map_err(http_error)?;
-    let status = response.status();
-    if let Some(length) = response.content_length()
-        && length > MAX_BODY as u64
-    {
-        return Err(SdkError::PairingCode("InvalidInput"));
-    }
-    let mut bytes = Vec::new();
-    let mut response = response;
-    while let Some(chunk) = tokio::time::timeout(REQUEST_DEADLINE, response.chunk())
-        .await
-        .map_err(|_| {
-            SdkError::from(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "pairing HTTPS deadline expired",
-            ))
-        })?
-        .map_err(http_error)?
-    {
-        if bytes.len().saturating_add(chunk.len()) > MAX_BODY {
+    tokio::time::timeout(REQUEST_DEADLINE, async {
+        let url = format!("{}{path}", origin.trim_end_matches('/'));
+        let mut response = client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONNECTION, "close")
+            .body(bytes::Bytes::from_owner(ErasingBody(body)))
+            .send()
+            .await
+            .map_err(http_error)?;
+        let status = response.status();
+        if response.content_length().is_some_and(|length| length > MAX_BODY as u64) {
             return Err(SdkError::PairingCode("InvalidInput"));
         }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok((status, bytes))
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(http_error)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_BODY {
+                return Err(SdkError::PairingCode("InvalidInput"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((status, bytes))
+    })
+    .await
+    .map_err(|_| {
+        SdkError::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "pairing HTTPS deadline expired",
+        ))
+    })?
 }
 
 fn http_error(error: reqwest::Error) -> SdkError {

@@ -71,6 +71,8 @@ fn cooperative_transfer_keeps_all_branch_keys_and_denials() -> TestResult {
             },
         )?;
         let accepted = verify_record(&next, now + 1, None, None)?;
+        verify_cooperative_preservation(&verified, &accepted, &destination, fresh)?;
+        assert_rejects_changed_lease(&verified, &next, &primary, &destination, fresh, now + 1)?;
         assert_eq!(next.body.devices.len(), source.body.devices.len() + usize::from(fresh));
         assert_eq!(next.body.master_certificate.body.primary_device_ref, destination);
         assert_eq!(decode_epoch(next.body.device_set_epoch)?.0, 8);
@@ -130,5 +132,28 @@ fn assert_retained(
             _ => return Err("retained branch certificate disappeared".into()),
         }
     }
+    Ok(())
+}
+
+fn assert_rejects_changed_lease(
+    source: &VerifiedRecord,
+    candidate: &Envelope<DeviceSet>,
+    primary: &SelfSigningKey,
+    destination: &DeviceRef,
+    fresh: bool,
+    now: u64,
+) -> TestResult {
+    let mut body = candidate.body.clone();
+    let device = body
+        .devices
+        .iter_mut()
+        .find(|device| device.device_id == "device-c")
+        .ok_or("retained C")?;
+    let mut cert = device.branch_certificate.as_ref().ok_or("branch certificate")?.body.clone();
+    cert.expires_at -= 1;
+    device.branch_certificate = Some(primary.certify_branch(cert)?);
+    let signed = primary.sign_record(body)?;
+    let verified = verify_record(&signed, now, None, None)?;
+    assert!(verify_cooperative_preservation(source, &verified, destination, fresh).is_err());
     Ok(())
 }

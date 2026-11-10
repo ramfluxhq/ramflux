@@ -47,6 +47,19 @@ pub fn validate_i_json_bytes(bytes: &[u8]) -> Result<(), ProtocolError> {
     validated.map_err(ProtocolError::IJson)
 }
 
+/// Decode owned secret-bearing DTOs without creating a `Value` tree containing secret copies.
+/// The original bytes satisfy exactly the same I-JSON predicate as `parse_i_json`.
+///
+/// # Errors
+/// Rejects invalid I-JSON, trailing input or a value that does not match the target schema.
+pub fn parse_i_json_secret<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolError> {
+    validate_i_json_bytes(bytes)?;
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let value = T::deserialize(&mut decoder).map_err(ProtocolError::IJson)?;
+    decoder.end().map_err(ProtocolError::IJson)?;
+    Ok(value)
+}
+
 /// Decode a signed envelope from its original JSON bytes using the I-JSON predicate.
 /// # Errors
 /// Returns [`ProtocolError::IJson`] when the bytes are not valid I-JSON or do not match the schema.
@@ -311,6 +324,29 @@ impl<'de> Visitor<'de> for StrictVisitor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_typed_decoder_keeps_the_original_byte_ijson_predicate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Owned {
+            token: String,
+        }
+        let good = super::parse_i_json_secret::<Owned>(br#"{"token":"marker"}"#)?;
+        assert_eq!(good.token, "marker");
+        for invalid in [
+            br#"{"token":"first","token":"second"}"#.as_slice(),
+            br#"{"token":"first","\u0074oken":"second"}"#.as_slice(),
+            br#"{"token":"\ud800"}"#.as_slice(),
+            br#"{"token":"\uffff"}"#.as_slice(),
+            br#"{"token":"marker","n":9007199254740993}"#.as_slice(),
+            br#"{"token":"marker"} null"#.as_slice(),
+        ] {
+            assert!(super::parse_i_json_secret::<Owned>(invalid).is_err());
+        }
+        Ok(())
+    }
+
     use super::{
         I_JSON_REJECTED, decode_signed_ack_ijson, decode_signed_envelope_ijson,
         decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection,

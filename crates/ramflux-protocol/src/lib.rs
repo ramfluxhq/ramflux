@@ -48,7 +48,7 @@ pub use a2ui_state::*;
 pub use i_json::{
     I_JSON_REJECTED, MAX_SAFE_JSON_INTEGER, decode_signed_ack_ijson, decode_signed_envelope_ijson,
     decode_signed_nack_ijson, i_json_rejection_body, is_i_json_rejection, parse_i_json,
-    validate_i_json_bytes, validate_i_json_value,
+    parse_i_json_secret, validate_i_json_bytes, validate_i_json_value,
 };
 pub use tasks::*;
 

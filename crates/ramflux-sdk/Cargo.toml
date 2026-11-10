@@ -46,6 +46,7 @@ object-ipc-crash-seam = []
 durability-test-hooks = ["ramflux-storage/durability-test-hooks"]
 
 [dependencies]
+bytes.workspace = true
 ed25519-dalek.workspace = true
 prost.workspace = true
 # path dep for local dev; switch to git tag dep when GitHub repos exist

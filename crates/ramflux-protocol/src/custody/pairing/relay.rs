@@ -183,6 +183,7 @@ pub struct Poll {
     pub issuer_seq: u64,
     pub role: String,
     pub token: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub after_seq: Option<u64>,
 }
 impl PairingWire for Poll {

@@ -59,6 +59,68 @@ struct LossyPersist {
     fail_once: AtomicBool,
 }
 
+#[tokio::test]
+async fn pairing_head_update_is_durable_before_network_and_reconciles_same_hash() -> TestResult {
+    struct InspectingPersist<'a> {
+        db: &'a Mutex<AccountDb>,
+        root: &'a Path,
+        account_id: &'a str,
+        inner: &'a RouterPersist,
+        lose_reply: AtomicBool,
+    }
+    impl NodeHeadPersist for InspectingPersist<'_> {
+        fn persist_head(&self, publication: &Publication, now: u64) -> Result<String, SdkError> {
+            let head = self
+                .db
+                .lock()
+                .map_err(|_| SdkError::PairingCode("Busy"))?
+                .pairing_head()?
+                .ok_or(SdkError::PairingField("state"))?;
+            assert_eq!(head.kind, "head_update");
+            assert_eq!(head.state, "submitted");
+            assert_eq!(head.candidate_hash, object_hash(&publication.record)?);
+            // This is the real production callback: no authority lock may span network work.
+            let lock =
+                crate::custody::pairing::activate::authority_lock(self.root, self.account_id)?;
+            drop(lock);
+            let hash = self.inner.persist_head(publication, now)?;
+            if self.lose_reply.swap(false, Ordering::SeqCst) {
+                return Err(SdkError::PairingCode("PublicationPending"));
+            }
+            Ok(hash)
+        }
+    }
+    let harness = Harness::open("head-update-fence").await?;
+    let now = Harness::now()?;
+    persist_current(&harness, now)?;
+    let write = profile_write(&harness, "Journaled profile", now + 1)?;
+    let persist = InspectingPersist {
+        db: &harness.db,
+        root: harness.root(),
+        account_id: &harness.id,
+        inner: harness.persist.as_ref(),
+        lose_reply: AtomicBool::new(true),
+    };
+    assert!(matches!(
+        publish_head(&harness.db, harness.root(), harness.fixture.vault.as_ref(), &write, &persist),
+        Err(SdkError::PairingCode("PublicationPending"))
+    ));
+    let uncertain = held_head(&harness)?;
+    let other = profile_write(&harness, "Cannot bypass uncertain head", now + 1)?;
+    assert_busy(&harness, &other)?;
+    let published = publish_head(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+        &persist,
+    )?;
+    assert_eq!(published.record_hash, uncertain.candidate_hash);
+    assert_eq!(harness.account(now + 1)?.record().body.profile.display_name, "Journaled profile");
+    assert!(harness.db.lock().map_err(|_| "db")?.pairing_head()?.is_none());
+    Ok(())
+}
+
 impl NodeHeadPersist for LossyPersist {
     fn persist_head(&self, publication: &Publication, now: u64) -> Result<String, SdkError> {
         let hash = self.inner.persist_head(publication, now)?;

@@ -353,7 +353,10 @@ impl HeadRow {
         optional_b32(self.invitation_id.as_deref(), "invitation_id")?;
         integer(self.generation, "generation")?;
         require(self.generation >= 1, "generation")?;
-        require(matches!(self.kind.as_str(), "enroll" | "transfer" | "revoke"), "kind")?;
+        require(
+            matches!(self.kind.as_str(), "enroll" | "transfer" | "revoke" | "head_update"),
+            "kind",
+        )?;
         b32(&self.base_record_hash, "base_record_hash")?;
         integer(self.base_epoch, "base_epoch")?;
         decode_ref(&self.publisher_ref, "publisher_ref")?;
@@ -377,6 +380,11 @@ impl HeadRow {
                     self.recipient_ref.as_ref().ok_or(field("recipient_ref"))?,
                     "recipient_ref",
                 )?;
+            }
+            "head_update" => {
+                require(self.invitation_id.is_none(), "invitation_id")?;
+                require(self.recipient_ref.is_none(), "recipient_ref")?;
+                require(self.revoked_ref.is_none(), "revoked_ref")?;
             }
             "revoke" => {
                 require(self.invitation_id.is_none(), "invitation_id")?;

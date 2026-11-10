@@ -67,6 +67,7 @@ pub struct TransferBegin {
     pub schema: String,
     pub version: u32,
     pub recipient_mode: String,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub destination_ref: Option<DeviceRef>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
@@ -228,15 +229,22 @@ pub struct Update {
     pub generation: u64,
     pub phase: String,
     pub expires_at: u64,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub transcript_hash: Option<String>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub emoji_indices: Option<Vec<u64>>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub peer_ref: Option<DeviceRef>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub peer_name: Option<String>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
     pub lease_expires_at: u64,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub proposal_hash: Option<String>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub record_hash: Option<String>,
+    #[serde(deserialize_with = "super::required_nullable")]
     pub result: Option<String>,
     pub cleanup: String,
 }

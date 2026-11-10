@@ -29,8 +29,8 @@ type BoxFut<T> = Pin<Box<dyn Future<Output = T> + std::marker::Send>>;
 const WALL: u64 = 1_760_000_000;
 const ORIGIN: &str = "https://relay.example:443";
 
-struct StoreNative {
-    store: Arc<Mutex<PairingRelayStore>>,
+pub(super) struct StoreNative {
+    pub(super) store: Arc<Mutex<PairingRelayStore>>,
 }
 
 impl PairingNative for StoreNative {
@@ -44,8 +44,8 @@ impl PairingNative for StoreNative {
     }
 }
 
-struct MemoryRelay {
-    store: Arc<Mutex<PairingRelayStore>>,
+pub(super) struct MemoryRelay {
+    pub(super) store: Arc<Mutex<PairingRelayStore>>,
 }
 
 impl PairingTransport for MemoryRelay {

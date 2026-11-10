@@ -694,7 +694,7 @@ fn pairing_credential_slot_rearms_across_unlock_and_restart() -> TestResult {
     drop(vault);
     let expected = reopen_unlock(root.path(), "acct-p08-slot")?;
     let stored = load_reservation(root.path(), "acct-p08-slot")?.ok_or("stored")?;
-    let late = LateCancel { root: root.path().to_path_buf(), account: "acct-p08-slot".into() };
+    let late = LateCancel { root: root.path().join("."), account: "acct-p08-slot".into() };
     assert!(acquire_unlock(root.path(), &expected, &late, &stored).is_err(), "late callback");
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(root.path())?;
@@ -704,7 +704,7 @@ fn pairing_credential_slot_rearms_across_unlock_and_restart() -> TestResult {
     client.open_account_index(root.path())?;
     unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;
     drop(client);
-    forget_slots();
+    forget_slots(root.path(), "acct-p08-slot");
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(root.path())?;
     unlock_with_provider(&mut client, "acct-p08-slot", &expected, &Phrase::setup(PHRASE))?;

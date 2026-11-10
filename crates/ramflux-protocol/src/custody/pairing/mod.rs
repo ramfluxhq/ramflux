@@ -38,11 +38,11 @@ fn require(ok: bool, field: &'static str) -> Result<()> {
     if ok { Ok(()) } else { Err(WireError::Field(field)) }
 }
 fn b32(value: &str, field: &'static str) -> Result<()> {
-    require(
-        value.len() == 43
-            && decode_base64url(value).is_ok_and(|v| v.len() == 32 && encode_base64url(v) == value),
-        field,
-    )
+    require(value.len() == 43, field)?;
+    let decoded =
+        zeroize::Zeroizing::new(decode_base64url(value).map_err(|_| WireError::Field(field))?);
+    let canonical = zeroize::Zeroizing::new(encode_base64url(decoded.as_slice()));
+    require(decoded.len() == 32 && canonical.as_str() == value, field)
 }
 fn integer(value: u64, field: &'static str) -> Result<()> {
     require(value <= MAX_SAFE_JSON_INTEGER, field)
@@ -88,6 +88,14 @@ fn budget<T: Serialize>(value: &T, max: usize) -> Result<()> {
     serde_json::to_writer(Counter { remaining: max }, value).map_err(|_| WireError::Size)
 }
 
+fn required_nullable<'de, D, T>(decoder: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(decoder)
+}
+
 /// Shared canonical codec. Only encoders sort ordered collections.
 pub trait PairingWire: Serialize + DeserializeOwned + Clone {
     const LIMIT: usize;
@@ -117,16 +125,13 @@ pub trait PairingWire: Serialize + DeserializeOwned + Clone {
         if input.len() > Self::LIMIT {
             return Err(WireError::Size);
         }
-        let raw: serde_json::Value = crate::parse_i_json(input).map_err(|_| WireError::Json)?;
-        let value: Self = serde_json::from_value(raw.clone()).map_err(|_| WireError::Shape)?;
-        if serde_json::to_value(&value).map_err(|_| WireError::Json)? != raw {
-            return Err(WireError::Shape);
-        }
+        crate::validate_i_json_bytes(input).map_err(|_| WireError::Json)?;
+        let value: Self = crate::parse_i_json_secret(input).map_err(|_| WireError::Shape)?;
         if input.len() > value.received_limit() {
             return Err(WireError::Size);
         }
         value.validate()?;
-        if bytes(&value)? != input {
+        if zeroize::Zeroizing::new(bytes(&value)?).as_slice() != input {
             return Err(WireError::NonCanonical);
         }
         Ok(value)
@@ -152,15 +157,18 @@ pub struct Common {
     pub device_set_epoch: u64,
     pub principal_kind: String,
     pub sas_suite: String,
+    #[serde(deserialize_with = "required_nullable")]
     pub hpke_suite: Option<String>,
     pub purpose: String,
     pub requested_role: String,
     pub recipient_mode: String,
+    #[serde(deserialize_with = "required_nullable")]
     pub destination_ref: Option<DeviceRef>,
     pub capabilities: Vec<String>,
     pub lease_not_before: u64,
     pub lease_expires_at: u64,
     pub expires_at: u64,
+    #[serde(deserialize_with = "required_nullable")]
     pub transfer_id: Option<String>,
     pub data_selection: Vec<DataSelection>,
 }
@@ -282,6 +290,7 @@ pub struct RoleContext {
     pub branch_key: String,
     pub agreement_key: String,
     pub sas_key: String,
+    #[serde(deserialize_with = "required_nullable")]
     pub hpke_key: Option<String>,
     pub display_name: String,
 }
