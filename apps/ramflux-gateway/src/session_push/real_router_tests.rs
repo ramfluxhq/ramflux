@@ -94,10 +94,12 @@ async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()>
         }
     })
     .await?;
-    let legacy = negotiate(&context, &auth(false)?, &descriptor()).await?;
+    let mut session = descriptor();
+    session.gateway_id = context.gateway_id.clone();
+    let legacy = negotiate(&context, &auth(false)?, &session).await?;
     assert_eq!(legacy.incarnation_id, None);
     assert!(!legacy.ephemeral);
-    let binding = negotiate(&context, &auth(true)?, &descriptor()).await?;
+    let binding = negotiate(&context, &auth(true)?, &session).await?;
     let id = binding
         .incarnation_id
         .ok_or_else(|| anyhow::anyhow!("actual router refused capable binding"))?;
