@@ -970,7 +970,13 @@ async fn gap_timer_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn coalesced_resync() -> Case {
-    watch(25, coalesced_resync_case()).await
+    // Real-time watchdog only: a tokio timeout can fire if catch-up registers a
+    // long `limits.sync` sleep under a paused clock.
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            coalesced_resync_case(),
+        ))))
+        .await
 }
 
 async fn coalesced_resync_case() -> Case {
@@ -995,14 +1001,22 @@ async fn coalesced_resync_case() -> Case {
     publish_resync(&handle, 0);
     publish_resync(&handle, 0);
     handle.notify_receive_wake();
-    pump_anchored(&mut runtime, &handle).await?;
-    let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
-    assert!(
-        resumes > connected,
-        "Resync hint runs catch-up: {resumes} vs {connected} err={:?} trace={:?}",
-        handle.test_receive_last_error(),
-        handle.test_receive_trace()
-    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        pump_anchored(&mut runtime, &handle).await?;
+        let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+        if resumes > connected {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Resync hint runs catch-up: {resumes} vs {connected} err={:?} trace={:?}",
+                handle.test_receive_last_error(),
+                handle.test_receive_trace()
+            )
+            .into());
+        }
+    }
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
@@ -1011,7 +1025,13 @@ async fn coalesced_resync_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn buffered_push_survives_router_retirement() -> Case {
-    watch(25, buffered_push_survives_router_retirement_case()).await
+    // Real-time watchdog only: catch-up under a paused clock can register a
+    // long `limits.sync` sleep that would fire `watch(25)`.
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(
+            buffered_push_survives_router_retirement_case(),
+        ))))
+        .await
 }
 
 async fn buffered_push_survives_router_retirement_case() -> Case {
@@ -1038,7 +1058,9 @@ async fn buffered_push_survives_router_retirement_case() -> Case {
         served.resume_issued = Some(2);
         served.inbox.clear();
     }
-    drive_full_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    handle.reorder().note_hint(crate::bus::push_receiver::reorder::CatchUpHint::Resync);
+    handle.notify_receive_wake();
+    pump_anchored(&mut runtime, &handle).await?;
     let held = snap(&runtime)?;
     assert!(
         held.receipts.iter().any(|row| row.0 == 2 && row.1 == "staged"),

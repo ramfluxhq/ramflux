@@ -169,8 +169,15 @@ pub(crate) async fn run_anchored(
                 handle.reorder().note_hint(hint_of(kind));
             }
             let trigger = trigger_of(Some(kind));
-            match run_one_anchored(&handle, &work, &limits, snapshot.generation, trigger, &mut stop)
-                .await
+            match Box::pin(run_one_anchored(
+                &handle,
+                &work,
+                &limits,
+                snapshot.generation,
+                trigger,
+                &mut stop,
+            ))
+            .await
             {
                 None => break,
                 Some((ok, paused)) => {
@@ -182,22 +189,20 @@ pub(crate) async fn run_anchored(
             continue;
         }
         if reorder_catch_up_due(&handle, now_ms) {
-            match run_one_anchored(
+            let Some(_) = Box::pin(run_one_anchored(
                 &handle,
                 &work,
                 &limits,
                 snapshot.generation,
                 ReceiveTrigger::Tick,
                 &mut stop,
-            )
+            ))
             .await
-            {
-                None => break,
-                Some(_) => {
-                    let finished_ms = handle.receive_now_ms();
-                    handle.reorder().finish_catch_up(finished_ms);
-                }
-            }
+            else {
+                break;
+            };
+            let finished_ms = handle.receive_now_ms();
+            handle.reorder().finish_catch_up(finished_ms);
             continue;
         }
         let wait = anchored_wait(&handle, origin, now_ms, &planner, snapshot.state);
