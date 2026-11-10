@@ -28,6 +28,7 @@ pub(crate) mod compat;
 pub(crate) mod erase_support;
 #[cfg(test)]
 mod guard_tests;
+pub(crate) mod intake;
 pub(crate) mod keepalive;
 #[cfg(test)]
 mod keepalive_tests;

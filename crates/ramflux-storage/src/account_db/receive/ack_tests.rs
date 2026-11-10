@@ -171,6 +171,23 @@ fn ack_lost_before_and_after_commit() -> Result<(), StorageError> {
 }
 
 #[test]
+fn held_at_or_below_c_is_not_selected() -> Result<(), StorageError> {
+    let (root, db) = setup("ack-held-at-c")?;
+    stage(&db, "e", 0, 1)?;
+    assert_eq!(cover(&db, "e", 0, 1, ReceiveCoverKind::Terminal)?, ReceiveCoverResult::Covered);
+    assert_eq!(due(&db, "e", 1, now(), true)?, vec![1], "terminal intent at C is due");
+    db.set_receipt_disposition_for_test(1, "held")?;
+    assert_eq!(
+        due(&db, "e", 1, now(), true)?,
+        Vec::<u64>::new(),
+        "held receipt at seq<=C is excluded"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn never_ack_above_c() -> Result<(), StorageError> {
     let (root, db) = setup("ack-above-c")?;
     stage(&db, "e", 0, 1)?;

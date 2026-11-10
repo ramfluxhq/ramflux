@@ -111,7 +111,7 @@ pub(super) fn start(
             }));
     }
     if let Some(work) = handle.shared.account_work.clone() {
-        auxiliary.push(spawn_account_receive(handle, work, timeouts));
+        auxiliary.extend(spawn_account_receive(handle, work, timeouts));
     }
     auxiliary
 }
@@ -120,17 +120,20 @@ fn spawn_account_receive(
     handle: &ConnectionHandle,
     work: mpsc::Sender<AccountWork>,
     timeouts: &RuntimeTimeouts,
-) -> JoinHandle<()> {
+) -> Vec<JoinHandle<()>> {
     if handle.shared.session_push_advertise {
-        spawn_receive(receive::run_anchored(
-            handle.clone(),
-            work,
-            timeouts.clone(),
-            crate::bus::push_receiver::sweep::SweepSetting::from_process(),
-            crate::bus::push_receiver::sweep::SweepMode::Push,
-        ))
+        vec![
+            spawn_receive(receive::run_anchored(
+                handle.clone(),
+                work.clone(),
+                timeouts.clone(),
+                crate::bus::push_receiver::sweep::SweepSetting::from_process(),
+                crate::bus::push_receiver::sweep::SweepMode::Push,
+            )),
+            spawn_receive(crate::bus::push_receiver::intake::run(handle.clone(), work)),
+        ]
     } else {
-        spawn_receive(receive::run(handle.clone(), work, timeouts.clone()))
+        vec![spawn_receive(receive::run(handle.clone(), work, timeouts.clone()))]
     }
 }
 

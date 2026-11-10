@@ -71,6 +71,13 @@ impl super::ConnectionHandle {
     pub(crate) fn test_receive_trace(&self) -> Vec<(super::ReceiveTrigger, bool)> {
         self.shared.receive_trace.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
+    pub(crate) fn test_receive_last_error(&self) -> Option<String> {
+        self.shared
+            .receive_last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[cfg(test)]

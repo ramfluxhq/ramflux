@@ -246,13 +246,15 @@ async fn never_ack_above_c_case() -> Case {
         let account = account_of(&runtime)?;
         let target = account.target_delivery_id.clone();
         let db = account.client.account_db()?;
+        db.seed_held_receive_for_test(&target, PUSH_E, 1, b"{}")?;
+        db.seed_ack_intent_for_test(&target, PUSH_E, 1)?;
         db.seed_held_receive_for_test(&target, PUSH_E, 2, b"{}")?;
         db.seed_ack_intent_for_test(&target, PUSH_E, 2)?;
         db.seed_ack_intent_for_test(&target, PUSH_E, 9)?;
         assert_eq!(
             db.receive_ledger_snap_for_test(&target)?.intents,
-            vec![2, 9],
-            "held seq 2 and seq>C 9 sit above C"
+            vec![1, 2, 9],
+            "held seq<=C plus held seq 2 and seq>C 9"
         );
     }
     crate::time::test_clock::set_frozen(Some(100));
@@ -260,7 +262,7 @@ async fn never_ack_above_c_case() -> Case {
     crate::time::test_clock::set_frozen(None);
     flushed?;
     assert_eq!(acked(&gateway)?, 1, "actor never ACKs held or seq>C intents");
-    assert_eq!(snap(&runtime)?.intents, vec![2, 9]);
+    assert_eq!(snap(&runtime)?.intents, vec![1, 2, 9]);
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
@@ -430,7 +432,7 @@ async fn drain_ready(runtime: &mut super::super::AccountRuntime) -> Case {
     Ok(())
 }
 
-/// `LocalSet` starves `tokio::spawn` (`run_anchored`). Waiting on a spawned oneshot
+/// `LocalSet` starves `tokio::spawn` (session worker). Waiting on a spawned oneshot
 /// forces the current-thread scheduler to poll that queue. Do not `sleep` after
 /// `pause()`: auto-advance is off, so a sleep never completes.
 async fn poll_spawned() {
@@ -582,8 +584,9 @@ async fn connected_and_sweep_real() -> Case {
     let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
     assert!(
         resumes >= 2,
-        "Sweep Resume at 900s: resumes={resumes} trace={:?} snap={:?}",
+        "Sweep Resume at 900s: resumes={resumes} trace={:?} err={:?} snap={:?}",
         handle.test_receive_trace(),
+        handle.test_receive_last_error(),
         handle.snapshot()
     );
     tokio::time::resume();
@@ -805,6 +808,282 @@ async fn start_connection_bind_refuses_standalone_receive_case() -> Case {
         "standalone must refuse after start_connection bind: {error:?}"
     );
     assert_eq!(LedgerExecutor::last_bound_owner(), Some(ExecutorOwner::Actor));
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+fn push_incarnation() -> crate::gateway::session_push::IncarnationId {
+    crate::gateway::session_push::IncarnationId::try_from(PUSH_E.to_owned()).expect("incarnation")
+}
+
+fn publish_deliver(
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+    entry: GatewayInboxEntry,
+) {
+    handle.publish_capable(crate::gateway::session_push::CapableEvent::Deliver {
+        entry,
+        incarnation_id: push_incarnation(),
+        retain_until: crate::time::now_unix_timestamp().saturating_add(300),
+    });
+}
+
+fn publish_resync(handle: &crate::bus::connection_manager::ConnectionHandle, after: u64) {
+    handle.publish_capable(crate::gateway::session_push::CapableEvent::Resync {
+        incarnation_id: push_incarnation(),
+        target_delivery_id: "sender".into(),
+        after_inbox_seq: after,
+        reason: crate::gateway::session_push::ResyncReason::QueueFull,
+    });
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn routed_committed_covers_and_acks() -> Case {
+    watch(25, routed_committed_covers_and_acks_case()).await
+}
+
+async fn routed_committed_covers_and_acks_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("h1-committed")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    let mut runtime = start_runtime(&mut fixture).await?;
+    fill_sealed(&mut fixture, 1, 2).await?;
+    let first = gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("entry")?;
+    {
+        let account = account_of(&runtime)?;
+        let key = account.client.authenticated_committed_key(
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            &first,
+        )?;
+        account.client.account_db()?.persist_actor_state(
+            &key,
+            &crate::client::routed::Committed {
+                routing: crate::client::routed::Routing {
+                    kind: crate::client::routed::Kind::Direct,
+                    conversation_id: "healthy".into(),
+                    group_id: None,
+                    message_id: "committed-seed".into(),
+                    group_message_id: None,
+                    attachments: false,
+                },
+                entry: first,
+                projected: false,
+            },
+        )?;
+    }
+    crate::bus::push_receiver::apply_w1::set_projection_error(SdkError::IdentityRootMissing);
+    drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    drive_flush(&mut runtime, true).await?;
+    assert_eq!(snap(&runtime)?.cursor, 2, "committed-receipt cover via IdentityRootMissing");
+    assert_eq!(acked(&gateway)?, 2);
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reorder_and_gap() -> Case {
+    watch(25, reorder_and_gap_case()).await
+}
+
+async fn reorder_and_gap_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2d-reorder")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    stop_peer_session(&mut fixture).await;
+    let mut runtime = start_runtime(&mut fixture).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    fill_sealed(&mut fixture, 1, 2).await?;
+    let entries = gateway.lock().map_err(|_| "gateway")?.inbox.clone();
+    let seq2 = entries.iter().find(|e| e.inbox_seq == 2).cloned().ok_or("seq2")?;
+    let seq1 = entries.iter().find(|e| e.inbox_seq == 1).cloned().ok_or("seq1")?;
+    tokio::time::pause();
+    publish_deliver(&handle, seq2);
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(snap(&runtime)?.cursor, 0, "hole stays until the sibling arrives");
+    assert!(
+        snap(&runtime)?.receipts.iter().any(|row| row.0 == 2 && row.1 == "staged"),
+        "Deliver seq 2 is durable W0: {:?}",
+        snap(&runtime)?.receipts
+    );
+    tokio::time::advance(Duration::from_millis(200)).await;
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+        1,
+        "no Resume before the sibling arrives"
+    );
+    publish_deliver(&handle, seq1);
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(snap(&runtime)?.cursor, 2, "contiguous apply of 1 then 2");
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn gap_timer() -> Case {
+    watch(25, gap_timer_case()).await
+}
+
+async fn gap_timer_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2d-gap")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    stop_peer_session(&mut fixture).await;
+    let mut runtime = start_runtime(&mut fixture).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    fill_sealed(&mut fixture, 1, 2).await?;
+    let seq2 = gateway
+        .lock()
+        .map_err(|_| "gateway")?
+        .inbox
+        .iter()
+        .find(|e| e.inbox_seq == 2)
+        .cloned()
+        .ok_or("seq2")?;
+    let connected = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    tokio::time::pause();
+    publish_deliver(&handle, seq2);
+    pump_anchored(&mut runtime, &handle).await?;
+    tokio::time::advance(Duration::from_millis(499)).await;
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+        connected,
+        "no Resume before 500 ms"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    pump_anchored(&mut runtime, &handle).await?;
+    assert!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len() > connected,
+        "exactly one Resume at 500 ms err={:?} trace={:?}",
+        handle.test_receive_last_error(),
+        handle.test_receive_trace()
+    );
+    assert_eq!(snap(&runtime)?.cursor, 2, "gap catch-up covers the hole");
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coalesced_resync() -> Case {
+    watch(25, coalesced_resync_case()).await
+}
+
+async fn coalesced_resync_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2d-resync")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    stop_peer_session(&mut fixture).await;
+    let mut runtime = start_runtime(&mut fixture).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    fill_sealed(&mut fixture, 1, 2).await?;
+    let seq2 = gateway
+        .lock()
+        .map_err(|_| "gateway")?
+        .inbox
+        .iter()
+        .find(|e| e.inbox_seq == 2)
+        .cloned()
+        .ok_or("seq2")?;
+    let connected = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    tokio::time::pause();
+    publish_deliver(&handle, seq2);
+    pump_anchored(&mut runtime, &handle).await?;
+    publish_resync(&handle, 0);
+    publish_resync(&handle, 0);
+    handle.notify_receive_wake();
+    pump_anchored(&mut runtime, &handle).await?;
+    let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    assert!(
+        resumes > connected,
+        "Resync hint runs catch-up: {resumes} vs {connected} err={:?} trace={:?}",
+        handle.test_receive_last_error(),
+        handle.test_receive_trace()
+    );
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn buffered_push_survives_router_retirement() -> Case {
+    watch(25, buffered_push_survives_router_retirement_case()).await
+}
+
+async fn buffered_push_survives_router_retirement_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2d-retire")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    stop_peer_session(&mut fixture).await;
+    let mut runtime = start_runtime(&mut fixture).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    fill_sealed(&mut fixture, 1, 2).await?;
+    let seq2 = gateway
+        .lock()
+        .map_err(|_| "gateway")?
+        .inbox
+        .iter()
+        .find(|e| e.inbox_seq == 2)
+        .cloned()
+        .ok_or("seq2")?;
+    tokio::time::pause();
+    publish_deliver(&handle, seq2);
+    pump_anchored(&mut runtime, &handle).await?;
+    {
+        let mut served = gateway.lock().map_err(|_| "gateway")?;
+        served.resume_losses = vec![(1, 2, "expired")];
+        served.resume_issued = Some(2);
+        served.inbox.clear();
+    }
+    drive_full_pass(&mut runtime, ReceiveTrigger::Tick).await?;
+    let held = snap(&runtime)?;
+    assert!(
+        held.receipts.iter().any(|row| row.0 == 2 && row.1 == "staged"),
+        "durable W0 survives retirement: {held:?}"
+    );
+    assert!(
+        !held.losses.iter().any(|row| row.0 <= 2 && row.1 >= 2 && row.3 == "expired" && row.0 != 1),
+        "seq 2 is not a loss: {held:?}"
+    );
+    runtime.stop_connection().await;
+    drop(runtime);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn push_without_polling() -> Case {
+    watch(25, push_without_polling_case()).await
+}
+
+async fn push_without_polling_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p24b2d-nopoll")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    stop_peer_session(&mut fixture).await;
+    let mut runtime = start_runtime(&mut fixture).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    fill_sealed(&mut fixture, 1, 1).await?;
+    let connected = gateway.lock().map_err(|_| "gateway")?.resumes.len();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+        connected,
+        "idle 5s must not Resume"
+    );
+    let seq1 = gateway.lock().map_err(|_| "gateway")?.inbox.first().cloned().ok_or("seq1")?;
+    publish_deliver(&handle, seq1);
+    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(snap(&runtime)?.cursor, 1, "Deliver applies without a poll");
+    assert_eq!(
+        gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+        connected,
+        "Deliver path does not Resume"
+    );
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;

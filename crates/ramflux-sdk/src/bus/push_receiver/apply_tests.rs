@@ -7,7 +7,9 @@ use super::apply::{
     ApplyError, ApplyFault, ApplyLoss, ApplyOutcome, ApplyPage, ApplyPoint, apply_page,
     apply_point, cover_held, run as with_reject, validate_page, validate_point,
 };
-use super::reorder::{AdmitOutcome, MAX_REFS, PAGE_LIMIT, ReorderBuffer, ReorderError, Tick};
+use super::reorder::{
+    AdmitOutcome, DurableW0, MAX_REFS, PAGE_LIMIT, ReorderBuffer, ReorderError, Tick,
+};
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ReceiveCoverResult, ReceiveExpectation,
     ReceiveLedgerSnap, ReceiveStage, ReceiveStageResult, StorageError,
@@ -259,7 +261,12 @@ fn reorder_follows_cover() -> Result<(), ReorderError> {
     let mut buffer = ReorderBuffer::new(0);
     for seq in [1001, 1002, 1500, 1501, 1502] {
         assert_eq!(
-            buffer.admit(0, seq, 8, true),
+            buffer.admit(
+                0,
+                seq,
+                8,
+                DurableW0::from_stage(seq, ReceiveStageResult::Staged).expect("witness"),
+            ),
             AdmitOutcome::Buffered { seq, evicted: Vec::new() }
         );
     }
@@ -297,7 +304,12 @@ fn reorder_follows_cover() -> Result<(), ReorderError> {
     assert_eq!(buffer.tick(2_000), Tick::Idle);
 
     assert_eq!(
-        buffer.admit(2_000, FAR + 5, 8, true),
+        buffer.admit(
+            2_000,
+            FAR + 5,
+            8,
+            DurableW0::from_stage(FAR + 5, ReceiveStageResult::Staged).expect("witness"),
+        ),
         AdmitOutcome::Buffered { seq: FAR + 5, evicted: Vec::new() }
     );
     assert!(buffer.hole());

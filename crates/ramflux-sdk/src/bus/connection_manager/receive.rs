@@ -151,70 +151,56 @@ pub(crate) async fn run_anchored(
     setting: crate::bus::push_receiver::sweep::SweepSetting,
     mode: crate::bus::push_receiver::sweep::SweepMode,
 ) {
-    use crate::bus::push_receiver::sweep::{Planner, ResumeKind};
+    use crate::bus::push_receiver::sweep::Planner;
     let mut stop = handle.stop.subscribe();
     let mut planner = Planner::new(&setting, mode);
-    let origin = Instant::now();
+    let origin = handle.receive_origin();
     loop {
         let snapshot = handle.snapshot();
-        let now_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let now_ms = handle.receive_now_ms();
         let view = crate::bus::push_receiver::sweep::View {
             live: snapshot.state == NetworkingState::Live,
             generation: snapshot.generation,
             resync: handle.resync_needed(),
         };
-        if let Some(kind) = planner.decide(now_ms, view) {
-            let trigger = match kind {
-                ResumeKind::Connected => ReceiveTrigger::Connected,
-                ResumeKind::Sweep => ReceiveTrigger::Tick,
-                ResumeKind::Resync => ReceiveTrigger::Resync,
-            };
-            tracing::trace!(?trigger, generation = snapshot.generation, "account receive pass");
-            #[cfg(test)]
-            handle
-                .shared
-                .receive_trace
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((trigger, false));
-            let epoch = handle.resync_epoch();
-            let pass = timeout(
-                limits.sync,
-                pass_anchored(&handle, &work, snapshot.generation, trigger, limits.call),
-            );
-            let result = tokio::select! {biased;_=stop.changed()=>break,result=pass=>result};
-            let (ok, paused) = match &result {
-                Ok(Ok((_, paused))) => (true, *paused),
-                _ => (false, false),
-            };
-            match result {
-                Ok(Ok(_)) => {
-                    handle.resync_applied(snapshot.generation, epoch);
-                    #[cfg(test)]
-                    handle
-                        .shared
-                        .receive_trace
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push((trigger, true));
-                    #[cfg(test)]
-                    handle.shared.receive_completed.notify_one();
-                }
-                Ok(Err(error)) => tracing::debug!(%error,"receive pass deferred"),
-                Err(_) => tracing::debug!("receive pass deadline expired"),
+        let resume = planner.decide(now_ms, view);
+        if let Some(kind) = resume {
+            if handle.reorder().in_flight() {
+                handle.reorder().note_hint(hint_of(kind));
             }
-            let finished_ms = u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
-            planner.finish(now_ms, finished_ms, snapshot.generation, ok, paused);
+            let trigger = trigger_of(Some(kind));
+            match run_one_anchored(&handle, &work, &limits, snapshot.generation, trigger, &mut stop)
+                .await
+            {
+                None => break,
+                Some((ok, paused)) => {
+                    let finished_ms = handle.receive_now_ms();
+                    handle.reorder().finish_catch_up(finished_ms);
+                    planner.finish(now_ms, finished_ms, snapshot.generation, ok, paused);
+                }
+            }
             continue;
         }
-        // Not live: decide() cannot fire, so wait for wake instead of a past deadline spin.
-        let wait = if snapshot.state == NetworkingState::Live {
-            planner
-                .wake_at_ms(now_ms)
-                .and_then(|ms| origin.checked_add(std::time::Duration::from_millis(ms)))
-        } else {
-            None
-        };
+        if reorder_catch_up_due(&handle, now_ms) {
+            match run_one_anchored(
+                &handle,
+                &work,
+                &limits,
+                snapshot.generation,
+                ReceiveTrigger::Tick,
+                &mut stop,
+            )
+            .await
+            {
+                None => break,
+                Some(_) => {
+                    let finished_ms = handle.receive_now_ms();
+                    handle.reorder().finish_catch_up(finished_ms);
+                }
+            }
+            continue;
+        }
+        let wait = anchored_wait(&handle, origin, now_ms, &planner, snapshot.state);
         tokio::select! {biased;
             _ = stop.changed() => break,
             () = handle.receive_wake() => {}
@@ -226,6 +212,131 @@ pub(crate) async fn run_anchored(
             } => {}
         }
     }
+}
+
+fn hint_of(
+    kind: crate::bus::push_receiver::sweep::ResumeKind,
+) -> crate::bus::push_receiver::reorder::CatchUpHint {
+    use crate::bus::push_receiver::reorder::CatchUpHint;
+    use crate::bus::push_receiver::sweep::ResumeKind;
+    match kind {
+        ResumeKind::Connected => CatchUpHint::Connected,
+        ResumeKind::Sweep => CatchUpHint::SafetySweep,
+        ResumeKind::Resync => CatchUpHint::Resync,
+    }
+}
+
+fn trigger_of(kind: Option<crate::bus::push_receiver::sweep::ResumeKind>) -> ReceiveTrigger {
+    use crate::bus::push_receiver::sweep::ResumeKind;
+    match kind {
+        Some(ResumeKind::Connected) => ReceiveTrigger::Connected,
+        Some(ResumeKind::Resync) => ReceiveTrigger::Resync,
+        Some(ResumeKind::Sweep) | None => ReceiveTrigger::Tick,
+    }
+}
+
+fn reorder_catch_up_due(handle: &ConnectionHandle, now_ms: u64) -> bool {
+    matches!(
+        handle.reorder().tick(now_ms),
+        crate::bus::push_receiver::reorder::Tick::CatchUp { .. }
+    )
+}
+
+fn anchored_wait(
+    handle: &ConnectionHandle,
+    origin: Instant,
+    now_ms: u64,
+    planner: &crate::bus::push_receiver::sweep::Planner,
+    state: NetworkingState,
+) -> Option<Instant> {
+    if state != NetworkingState::Live {
+        return None;
+    }
+    let planner_at = planner.wake_at_ms(now_ms);
+    let gap_at = handle.reorder().gap_deadline_ms();
+    planner_at
+        .into_iter()
+        .chain(gap_at)
+        .min()
+        .and_then(|ms| origin.checked_add(std::time::Duration::from_millis(ms)))
+}
+
+async fn run_one_anchored(
+    handle: &ConnectionHandle,
+    work: &mpsc::Sender<AccountWork>,
+    limits: &RuntimeTimeouts,
+    generation: u64,
+    trigger: ReceiveTrigger,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<(bool, bool)> {
+    tracing::trace!(?trigger, generation, "account receive pass");
+    #[cfg(test)]
+    handle
+        .shared
+        .receive_trace
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((trigger, false));
+    let epoch = handle.resync_epoch();
+    let pass = timeout(limits.sync, pass_anchored(handle, work, generation, trigger, limits.call));
+    let result = tokio::select! {
+        biased;
+        _ = stop.changed() => {
+            #[cfg(test)]
+            {
+                *handle
+                    .shared
+                    .receive_last_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some("receive pass stopped".into());
+            }
+            return None;
+        }
+        result = pass => result
+    };
+    let (ok, paused) = match &result {
+        Ok(Ok((_, paused))) => (true, *paused),
+        _ => (false, false),
+    };
+    match result {
+        Ok(Ok(_)) => {
+            handle.resync_applied(generation, epoch);
+            #[cfg(test)]
+            handle
+                .shared
+                .receive_trace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((trigger, true));
+            #[cfg(test)]
+            handle.shared.receive_completed.notify_one();
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "receive pass deferred");
+            #[cfg(test)]
+            {
+                *handle
+                    .shared
+                    .receive_last_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            }
+        }
+        Err(_) => {
+            tracing::debug!("receive pass deadline expired");
+            #[cfg(test)]
+            {
+                *handle
+                    .shared
+                    .receive_last_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some("receive pass deadline expired".into());
+            }
+        }
+    }
+    Some((ok, paused))
 }
 
 async fn pass(
@@ -440,7 +551,7 @@ pub(crate) fn entry_id(entry: &crate::GatewayInboxEntry) -> (String, u64, String
     (entry.envelope.envelope_id.clone(), entry.inbox_seq, entry.envelope.payload_hash.clone())
 }
 
-async fn apply_entry(
+pub(crate) async fn apply_entry(
     handle: &ConnectionHandle,
     work: &mpsc::Sender<AccountWork>,
     generation: u64,
@@ -509,9 +620,13 @@ pub(crate) async fn flush_acks(
         .await
         .map_err(|_| handle.pending())?;
     let selected = response.await.map_err(|_| handle.pending())??;
-    let AckFlushReply::Selected { incarnation, sequences } = selected else {
+    let AckFlushReply::Selected { incarnation, mut sequences } = selected else {
         return Ok(());
     };
+    {
+        let buffer = handle.reorder();
+        sequences.retain(|seq| !buffer.is_overflowed(*seq));
+    }
     if sequences.is_empty() {
         return Ok(());
     }
@@ -692,6 +807,9 @@ pub(crate) async fn test_redrive(
                             },
                         ),
                     }));
+                }
+                AccountWork::StageIntake { reply, .. } => {
+                    let _ = reply.send(Ok(None));
                 }
                 _ => return Err(SdkError::NetworkingPending),
             }

@@ -5,8 +5,8 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 use super::apply::{ApplyError, ApplyLoss, ApplyOutcome, ApplyPage, apply_page};
 use super::reorder::{
-    AdmitOutcome, CatchUpHint, MAX_REF_BYTES, MAX_REFS, PAGE_LIMIT, ReorderBuffer, ReorderError,
-    Tick, YIELD_AFTER_PAGES,
+    AdmitOutcome, CatchUpHint, DurableW0, MAX_REF_BYTES, MAX_REFS, PAGE_LIMIT, ReorderBuffer,
+    ReorderError, Tick, YIELD_AFTER_PAGES,
 };
 use ramflux_storage::{
     AccountDb, AccountDbKey, AccountIndex, ReceiveExpectation, ReceiveLedgerSnap, ReceiveStage,
@@ -35,10 +35,14 @@ fn apply_order(buffer: &mut ReorderBuffer, first: u64) -> Result<Vec<u64>, Reord
     Ok(order)
 }
 
+fn witness(seq: u64) -> DurableW0 {
+    DurableW0::from_stage(seq, ReceiveStageResult::Staged).expect("staged witness")
+}
+
 fn admit_range(buffer: &mut ReorderBuffer, from: u64, count: usize, bytes: usize) {
     for offset in 0..count {
         let seq = from.saturating_add(offset as u64);
-        let got = buffer.admit(0, seq, bytes, true);
+        let got = buffer.admit(0, seq, bytes, witness(seq));
         assert!(
             matches!(&got, AdmitOutcome::Buffered { seq: got_seq, evicted } if *got_seq == seq && evicted.is_empty()),
             "{got:?}"
@@ -49,9 +53,9 @@ fn admit_range(buffer: &mut ReorderBuffer, from: u64, count: usize, bytes: usize
 #[test]
 fn reorder_and_gap() -> Result<(), ReorderError> {
     let mut filled = buf();
-    assert_eq!(filled.admit(0, 2, 8, true), buffered(2));
+    assert_eq!(filled.admit(0, 2, 8, witness(2)), buffered(2));
     assert_eq!(filled.tick(200), Tick::Idle, "no Resume before the sibling arrives");
-    assert_eq!(filled.admit(200, 1, 8, true), AdmitOutcome::ReadyToApply { seq: 1 });
+    assert_eq!(filled.admit(200, 1, 8, witness(1)), AdmitOutcome::ReadyToApply { seq: 1 });
     assert!(
         matches!(filled.applied(200, 2), Err(ReorderError::Protocol(msg)) if msg.contains("contiguous")),
         "arrival order must not apply"
@@ -62,7 +66,7 @@ fn reorder_and_gap() -> Result<(), ReorderError> {
     assert_eq!(filled.tick(500), Tick::Idle, "hole filled before 500 ms, no Resume");
 
     let mut missing = buf();
-    assert_eq!(missing.admit(0, 2, 8, true), buffered(2));
+    assert_eq!(missing.admit(0, 2, 8, witness(2)), buffered(2));
     assert_eq!(missing.tick(499), Tick::Idle);
     assert_eq!(missing.tick(500), catch_up(0), "one pull at 500 ms for a missing sibling");
     assert_eq!(missing.tick(500), Tick::Idle, "exactly one catch-up in flight");
@@ -72,7 +76,7 @@ fn reorder_and_gap() -> Result<(), ReorderError> {
 #[test]
 fn gap_timer() {
     let mut buffer = buf();
-    assert_eq!(buffer.admit(0, 2, 8, true), buffered(2));
+    assert_eq!(buffer.admit(0, 2, 8, witness(2)), buffered(2));
     assert_eq!(buffer.tick(0), Tick::Idle);
     assert_eq!(buffer.tick(499), Tick::Idle, "no Resume before 500 ms");
     assert_eq!(buffer.tick(500), catch_up(0), "exactly one Resume at 500 ms");
@@ -83,7 +87,7 @@ fn gap_timer() {
 #[test]
 fn coalesced_resync() {
     let mut held = buf();
-    assert_eq!(held.admit(0, 2, 8, true), buffered(2));
+    assert_eq!(held.admit(0, 2, 8, witness(2)), buffered(2));
     held.note_hint(CatchUpHint::Resync);
     assert_eq!(held.tick(0), catch_up(0));
     held.note_hint(CatchUpHint::Lagged);
@@ -103,8 +107,8 @@ fn coalesced_resync() {
 #[test]
 fn cover_rearms_remaining_hole() {
     let mut buffer = buf();
-    assert_eq!(buffer.admit(0, 1005, 8, true), buffered(1005));
-    assert_eq!(buffer.admit(0, 1006, 8, true), buffered(1006));
+    assert_eq!(buffer.admit(0, 1005, 8, witness(1005)), buffered(1005));
+    assert_eq!(buffer.admit(0, 1006, 8, witness(1006)), buffered(1006));
     buffer.covered(500, 1000).expect("forward cover");
     assert!(buffer.hole(), "1001..=1004 are still lost after the cover");
     assert_eq!(buffer.tick(999), Tick::Idle, "re-armed at the cover, not the old admit");
@@ -122,30 +126,47 @@ fn resync_survives_local_work() {
     assert_eq!(buffer.tick(0), Tick::Idle, "no follow-up was requested");
 }
 
+#[test]
+fn filled_hole_drops_follow_up() {
+    let mut buffer = buf();
+    assert_eq!(buffer.admit(0, 2, 8, witness(2)), buffered(2));
+    buffer.note_hint(CatchUpHint::Resync);
+    assert_eq!(buffer.tick(0), catch_up(0));
+    buffer.note_hint(CatchUpHint::Lagged);
+    assert!(buffer.follow_up());
+    assert_eq!(buffer.admit(0, 1, 8, witness(1)), AdmitOutcome::ReadyToApply { seq: 1 });
+    buffer.applied(0, 1).expect("C+1");
+    buffer.applied(0, 2).expect("contiguous");
+    assert!(!buffer.hole());
+    buffer.finish_catch_up(0);
+    assert_eq!(buffer.tick(0), Tick::Idle, "a filled hole must not pull again");
+}
+
 fn overflow_and_yield() {
     let mut refs = buf();
     admit_range(&mut refs, 2, MAX_REFS, 8);
     assert_eq!(refs.len(), MAX_REFS);
     let top = 2 + MAX_REFS as u64;
-    let overflow = refs.admit(0, top, 8, true);
+    let overflow = refs.admit(0, top, 8, witness(top));
     assert_eq!(overflow, AdmitOutcome::Evicted { seq: top, evicted: vec![top] }, "self-eviction");
     assert_eq!(refs.len(), MAX_REFS, "lowest-first retention");
     assert!(!refs.contains(top));
-    assert_eq!(refs.overflow_acks(), 0, "overflow sends no ACK");
+    assert_eq!(refs.overflow_acks(), 1, "overflow counts the dropped RAM ref");
+    assert!(refs.is_overflowed(top));
 
     let mut bulky = buf();
     admit_range(&mut bulky, 2, 8, MAX_REF_BYTES / 8);
-    let over_bytes = bulky.admit(0, 10, 1, true);
+    let over_bytes = bulky.admit(0, 10, 1, witness(10));
     assert_eq!(over_bytes, AdmitOutcome::Evicted { seq: 10, evicted: vec![10] });
     assert_eq!(bulky.bytes(), MAX_REF_BYTES);
-    assert_eq!(bulky.overflow_acks(), 0);
+    assert_eq!(bulky.overflow_acks(), 1);
 
     // One large low ref evicts several higher refs: every dropped seq is reported, highest first.
     let mut many = buf();
     for seq in 10..18 {
-        assert_eq!(many.admit(0, seq, MAX_REF_BYTES / 8, true), buffered(seq));
+        assert_eq!(many.admit(0, seq, MAX_REF_BYTES / 8, witness(seq)), buffered(seq));
     }
-    let big_low = many.admit(0, 5, MAX_REF_BYTES / 2, true);
+    let big_low = many.admit(0, 5, MAX_REF_BYTES / 2, witness(5));
     assert_eq!(
         big_low,
         AdmitOutcome::Buffered { seq: 5, evicted: vec![17, 16, 15, 14] },
@@ -165,7 +186,7 @@ fn overflow_and_yield() {
 
     let mut turn = buf();
     admit_range(&mut turn, 2, 70, 8);
-    assert_eq!(turn.admit(0, 1, 8, true), AdmitOutcome::ReadyToApply { seq: 1 });
+    assert_eq!(turn.admit(0, 1, 8, witness(1)), AdmitOutcome::ReadyToApply { seq: 1 });
     turn.applied(0, 1).expect("C+1");
     assert_eq!(turn.peek_contiguous().len(), PAGE_LIMIT as usize, "64 boundaries per turn");
 }
@@ -251,11 +272,15 @@ fn buffered_push_survives_router_retirement() -> Result<(), ApplyError> {
 fn ram_only_page_marks_loss() -> Result<(), ApplyError> {
     let harness = open()?;
     let db = &harness.db;
+    assert!(
+        DurableW0::from_stage(2, ReceiveStageResult::PausedWork).is_none(),
+        "a pause is not a durable W0 witness"
+    );
     let mut ram = buf();
     assert_eq!(
-        ram.admit(0, 2, 8, false),
+        ram.admit(0, 2, 8, witness(1)),
         AdmitOutcome::Refused { seq: 2 },
-        "higher push without W0 is not a RAM-only copy"
+        "a witness for a different seq cannot admit"
     );
     let losses = [ApplyLoss { from_seq: 1, to_seq: 2, reason: "expired" }];
     assert_eq!(
@@ -275,7 +300,7 @@ fn durable_stage_survives_retirement() -> Result<(), ApplyError> {
     let db = &harness.db;
     stage(db, 0, 2)?;
     let mut buffer = buf();
-    assert_eq!(buffer.admit(0, 2, 8, true), buffered(2));
+    assert_eq!(buffer.admit(0, 2, 8, witness(2)), buffered(2));
     drop(buffer);
     let losses = [ApplyLoss { from_seq: 1, to_seq: 2, reason: "expired" }];
     assert_eq!(

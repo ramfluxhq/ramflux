@@ -293,12 +293,10 @@ fn prune_on_terminal(
     auth_key: &str,
 ) -> Result<(), StorageError> {
     tx.require_writer()?;
-    let covered = tx.cover(ReceiveCover {
-        sequence,
-        kind: ReceiveCoverKind::Terminal,
-        gaps: &[],
-        retain_until: 0,
-    })?;
+    let covered = tx.cover_at(
+        ReceiveCover { sequence, kind: ReceiveCoverKind::Terminal, gaps: &[], retain_until: 0 },
+        now_unix_timestamp(),
+    )?;
     if covered != ReceiveCoverResult::Covered {
         return Err(StorageError::Integrity("reply outbox terminal cover paused"));
     }

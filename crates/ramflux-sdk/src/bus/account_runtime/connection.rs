@@ -181,7 +181,8 @@ impl AccountRuntime {
             AccountWork::PrepareReceive { .. }
             | AccountWork::ApplyPage { .. }
             | AccountWork::SettleRetained { .. }
-            | AccountWork::ReceiveObservation { .. } => {
+            | AccountWork::ReceiveObservation { .. }
+            | AccountWork::StageIntake { .. } => {
                 return self.apply_receive_turn(&handle, work).await;
             }
             AccountWork::AckPermit { .. }
@@ -343,6 +344,9 @@ impl AccountRuntime {
                     event,
                     &mut self.networking_observation_warned,
                 ));
+            }
+            work @ AccountWork::StageIntake { .. } => {
+                reply_stage_intake(account, handle, work);
             }
             _ => return Ok(false),
         }
@@ -658,6 +662,27 @@ fn apply_metadata(
         account.persist_push_route_seq();
         account.forget_confirmed_push_clear();
     }
+}
+
+fn reply_stage_intake(
+    account: &LocalBusAccountState,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+    work: AccountWork,
+) {
+    let AccountWork::StageIntake { generation, entry, incarnation, retain_until, reply } = work
+    else {
+        return;
+    };
+    if generation != handle.generation() || reply.is_closed() {
+        return;
+    }
+    let _ = reply.send(crate::bus::push_receiver::intake::stage_on_actor(
+        account,
+        generation,
+        &entry,
+        &incarnation,
+        retain_until,
+    ));
 }
 
 /// WS settlement of a retained terminal entry inside the lifecycle fence (moved out of

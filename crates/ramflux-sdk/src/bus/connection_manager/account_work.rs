@@ -121,6 +121,16 @@ pub(crate) enum AccountWork {
         generation: u64,
         event: super::ConnectionEvent,
     },
+    /// Deliver intake: durable W0 on the account writer, then a reorder witness.
+    StageIntake {
+        generation: u64,
+        entry: Box<crate::GatewayInboxEntry>,
+        incarnation: String,
+        retain_until: i64,
+        reply: oneshot::Sender<
+            Result<Option<(crate::bus::push_receiver::reorder::DurableW0, ReceiveTurn)>, SdkError>,
+        >,
+    },
     Metadata {
         metadata: Box<SessionMetadata>,
     },

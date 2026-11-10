@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant reorder admission: durable W0 first, then RAM refs, one gap timer, coalesced catch-up.
-use std::collections::BTreeMap;
+use ramflux_storage::ReceiveStageResult;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Inclusive RAM reference cap (§7).
 pub(crate) const MAX_REFS: usize = 256;
@@ -65,6 +66,40 @@ pub(crate) enum ReorderError {
     Protocol(&'static str),
 }
 
+impl std::fmt::Display for ReorderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Protocol(text) => f.write_str(text),
+        }
+    }
+}
+
+/// Witness that `seq` has a durable W0 receipt (`Staged` or already `Existing`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DurableW0 {
+    seq: u64,
+}
+
+impl DurableW0 {
+    /// Only a successful W0 stage produces a witness. Pause, erase and conflict do not.
+    #[must_use]
+    pub(crate) fn from_stage(seq: u64, result: ReceiveStageResult) -> Option<Self> {
+        match result {
+            ReceiveStageResult::Staged | ReceiveStageResult::Existing => Some(Self { seq }),
+            ReceiveStageResult::Conflict { .. }
+            | ReceiveStageResult::Erased
+            | ReceiveStageResult::PausedWork
+            | ReceiveStageResult::PausedBytes
+            | ReceiveStageResult::PausedIntents => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn seq(self) -> u64 {
+        self.seq
+    }
+}
+
 #[derive(Default)]
 struct CatchUp {
     in_flight: bool,
@@ -96,6 +131,10 @@ impl CatchUp {
             self.pending = true;
         }
     }
+
+    fn drop_follow_up(&mut self) {
+        self.follow_up = false;
+    }
 }
 
 /// RAM reorder refs after durable W0. Payload never lives only in this map.
@@ -107,6 +146,7 @@ pub(crate) struct ReorderBuffer {
     catch_up: CatchUp,
     local_work: bool,
     overflow_acks: u64,
+    overflowed: BTreeSet<u64>,
     cover_steps: u64,
 }
 
@@ -121,6 +161,7 @@ impl ReorderBuffer {
             catch_up: CatchUp::default(),
             local_work: false,
             overflow_acks: 0,
+            overflowed: BTreeSet::new(),
             cover_steps: 0,
         }
     }
@@ -152,6 +193,19 @@ impl ReorderBuffer {
     }
 
     #[must_use]
+    pub(crate) fn is_overflowed(&self, seq: u64) -> bool {
+        self.overflowed.contains(&seq)
+    }
+
+    /// Moves C forward to a durable cursor. A lagging catch-up must not move C backwards.
+    ///
+    /// # Errors
+    /// Returns a protocol error when `new_c` would move C backwards through [`Self::covered`].
+    pub(crate) fn advance_cursor(&mut self, now_ms: u64, new_c: u64) -> Result<(), ReorderError> {
+        if new_c > self.cursor { self.covered(now_ms, new_c) } else { Ok(()) }
+    }
+
+    #[must_use]
     pub(crate) fn in_flight(&self) -> bool {
         self.catch_up.in_flight
     }
@@ -171,22 +225,22 @@ impl ReorderBuffer {
         self.refs.keys().next().is_some_and(|&seq| seq > self.cursor.saturating_add(1))
     }
 
-    /// Higher pushes require a durable W0 receipt. `seq == C+1` applies directly.
+    /// Higher pushes require a durable W0 witness. `seq == C+1` applies directly after W0.
     pub(crate) fn admit(
         &mut self,
         now_ms: u64,
         seq: u64,
         ref_bytes: usize,
-        staged: bool,
+        witness: DurableW0,
     ) -> AdmitOutcome {
+        if witness.seq != seq {
+            return AdmitOutcome::Refused { seq };
+        }
         if seq == 0 || seq <= self.cursor {
             return AdmitOutcome::Duplicate { seq };
         }
         if seq == self.cursor.saturating_add(1) {
             return AdmitOutcome::ReadyToApply { seq };
-        }
-        if !staged {
-            return AdmitOutcome::Refused { seq };
         }
         if self.refs.contains_key(&seq) {
             return AdmitOutcome::Duplicate { seq };
@@ -211,7 +265,8 @@ impl ReorderBuffer {
             self.refs.remove(&seq);
             self.bytes = self.bytes.saturating_sub(n);
             evicted.push(seq);
-            self.overflow_acks = 0;
+            self.overflowed.insert(seq);
+            self.overflow_acks = self.overflow_acks.saturating_add(1);
             self.catch_up.request();
         }
         evicted
@@ -243,6 +298,7 @@ impl ReorderBuffer {
             self.bytes = self.bytes.saturating_sub(n);
         }
         self.cursor = seq;
+        self.clear_overflow_through(seq);
         // A contiguous apply can leave a hole behind: that hole starts its own gap timer now.
         self.gap_started_at = if self.hole() { self.gap_started_at.or(Some(now_ms)) } else { None };
         Ok(())
@@ -269,8 +325,18 @@ impl ReorderBuffer {
             self.bytes = self.bytes.saturating_sub(*n);
         }
         self.cursor = new_c;
+        self.clear_overflow_through(new_c);
         self.gap_started_at = if self.hole() { Some(now_ms) } else { None };
         Ok(())
+    }
+
+    fn clear_overflow_through(&mut self, new_c: u64) {
+        match new_c.checked_add(1) {
+            Some(first_kept) => {
+                self.overflowed = self.overflowed.split_off(&first_kept);
+            }
+            None => self.overflowed.clear(),
+        }
     }
 
     /// Lowest-first contiguous refs, capped at [`PAGE_LIMIT`] per turn.
@@ -301,12 +367,25 @@ impl ReorderBuffer {
     }
 
     /// Ends the in-flight run. A hole that outlives the run re-arms the gap timer (L4), so
-    /// recovery does not wait for the next push or the safety sweep.
+    /// recovery does not wait for the next push or the safety sweep. A filled hole drops
+    /// the coalesced follow-up so the run does not pull again (P22 r2 L2).
     pub(crate) fn finish_catch_up(&mut self, now_ms: u64) {
+        if !self.hole() {
+            self.catch_up.drop_follow_up();
+        }
         self.catch_up.finish();
         if self.hole() && self.gap_started_at.is_none() {
             self.gap_started_at = Some(now_ms);
         }
+    }
+
+    /// Absolute origin-ms when the gap timer is due. `None` while a run is in flight or no hole.
+    #[must_use]
+    pub(crate) fn gap_deadline_ms(&self) -> Option<u64> {
+        if self.catch_up.in_flight {
+            return None;
+        }
+        self.gap_started_at.map(|started| started.saturating_add(GAP_WAIT_MS))
     }
 
     /// Records one catch-up page. True when the run must yield after 16 pages.
@@ -350,6 +429,9 @@ impl ReorderBuffer {
     }
 
     fn should_fire_gap(&self, now_ms: u64) -> bool {
+        if self.catch_up.in_flight {
+            return false;
+        }
         let Some(started) = self.gap_started_at else {
             return false;
         };

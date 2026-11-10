@@ -110,6 +110,8 @@ struct Shared {
     #[cfg(test)]
     receive_trace: std::sync::Mutex<Vec<(ReceiveTrigger, bool)>>,
     #[cfg(test)]
+    receive_last_error: std::sync::Mutex<Option<String>>,
+    #[cfg(test)]
     receive_completed: Arc<Notify>,
     #[cfg(test)]
     receive_profile: std::sync::Mutex<resync::ReceiveProfile>,
@@ -118,6 +120,8 @@ struct Shared {
     retirement: std::sync::Mutex<Option<(u64, DisconnectReason)>>,
     retirement_changed: Notify,
     read_clock: Arc<crate::gateway::host_frames::ReadClock>,
+    reorder: std::sync::Mutex<crate::bus::push_receiver::reorder::ReorderBuffer>,
+    receive_origin: Instant,
     #[cfg(test)]
     live_waiters: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -190,6 +194,8 @@ fn new_shared(
         #[cfg(test)]
         receive_trace: std::sync::Mutex::new(Vec::new()),
         #[cfg(test)]
+        receive_last_error: std::sync::Mutex::new(None),
+        #[cfg(test)]
         receive_completed: Arc::default(),
         #[cfg(test)]
         receive_profile: std::sync::Mutex::new(resync::ReceiveProfile::default()),
@@ -200,6 +206,8 @@ fn new_shared(
         retirement: std::sync::Mutex::new(None),
         retirement_changed: Notify::new(),
         read_clock: crate::gateway::host_frames::ReadClock::new(),
+        reorder: std::sync::Mutex::new(crate::bus::push_receiver::reorder::ReorderBuffer::new(0)),
+        receive_origin: Instant::now(),
     })
 }
 
@@ -503,6 +511,9 @@ impl ConnectionHandle {
     pub(crate) fn snapshot(&self) -> NetworkingSnapshot {
         self.shared.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
+    pub(crate) fn snapshot_watch(&self) -> watch::Receiver<u64> {
+        self.shared.changed.subscribe()
+    }
     pub(crate) fn metadata(&self) -> Option<SessionMetadata> {
         self.shared.metadata.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
@@ -558,7 +569,43 @@ impl ConnectionHandle {
     /// Wake the receive loop without requesting resync (tests drive the paused clock).
     #[cfg(test)]
     pub(crate) fn notify_receive_wake(&self) {
+        self.wake_receive();
+    }
+
+    pub(crate) fn wake_receive(&self) {
         self.shared.receive_wake.notify_one();
+    }
+
+    pub(crate) fn stopping(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+
+    pub(crate) fn call_timeout(&self) -> std::time::Duration {
+        self.shared.timeouts.call
+    }
+
+    pub(crate) fn receive_origin(&self) -> Instant {
+        self.shared.receive_origin
+    }
+
+    #[must_use]
+    pub(crate) fn receive_now_ms(&self) -> u64 {
+        u64::try_from(self.shared.receive_origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn reorder(
+        &self,
+    ) -> std::sync::MutexGuard<'_, crate::bus::push_receiver::reorder::ReorderBuffer> {
+        self.shared.reorder.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_capable(&self, event: crate::gateway::session_push::CapableEvent) {
+        self.shared
+            .hub
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publish_capable(event);
     }
     pub(crate) fn pending(&self) -> SdkError {
         let snapshot = self.snapshot();

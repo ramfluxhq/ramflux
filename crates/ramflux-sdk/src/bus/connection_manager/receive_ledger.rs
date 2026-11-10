@@ -53,6 +53,7 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
         .await?;
     let mut retries: std::collections::BTreeMap<_, _> =
         retries.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
+    sync_reorder_cursor(handle, turn.cursor)?;
     let mut active = false;
     let mut paused = false;
     let mut pages = 0_u32;
@@ -130,7 +131,10 @@ async fn drive_page(
     loop {
         let outcome = apply_resume(writer, turn, generation, page).await?;
         match step_outcome(outcome, page, turn)? {
-            Step::Covered => break,
+            Step::Covered => {
+                mark_reorder_covered(handle, turn.cursor)?;
+                break;
+            }
             Step::Paused => {
                 paused = true;
                 break;
@@ -225,10 +229,11 @@ async fn stage_page_entry(
     call_timeout: std::time::Duration,
     backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
 ) -> Result<(bool, Box<crate::bus::contact_backpressure::Backpressure>), SdkError> {
-    let record = records
-        .iter()
-        .find(|row| row.entry.inbox_seq == sequence)
-        .ok_or(SdkError::InboundRejected("receive page need-stage missing entry".into()))?;
+    let Some(record) = records.iter().find(|row| row.entry.inbox_seq == sequence) else {
+        require_disk_stage(writer, turn, generation, sequence).await?;
+        sync_reorder_cursor(handle, turn.cursor)?;
+        return Ok((false, backpressure));
+    };
     let retry_key =
         retries.remove(&entry_id(&record.entry)).and_then(|prepared| prepared.retry_key);
     let (accepted, next) = apply_entry(
@@ -246,7 +251,44 @@ async fn stage_page_entry(
     )
     .await?;
     turn.cursor = refresh_turn_cursor(writer, &turn.target).await?;
+    sync_reorder_cursor(handle, turn.cursor)?;
     Ok((accepted, next))
+}
+
+/// Resume pages can omit a body the gateway has retired. Durable W0 is then the source of truth.
+async fn require_disk_stage(
+    writer: &Writer,
+    turn: &ReceiveTurn,
+    generation: u64,
+    sequence: u64,
+) -> Result<(), SdkError> {
+    let turn = turn.clone();
+    writer
+        .apply(move |account| {
+            let recovered =
+                crate::bus::sync_driver::source::w0::SourceW0::from_actor(&turn, generation)
+                    .recover_from_disk(account.client.account_db()?)?;
+            if recovered.iter().any(|input| input.sequence == sequence) {
+                Ok(())
+            } else {
+                Err(SdkError::InboundRejected("receive page need-stage missing entry".into()))
+            }
+        })
+        .await
+}
+
+fn sync_reorder_cursor(handle: &ConnectionHandle, cursor: u64) -> Result<(), SdkError> {
+    handle
+        .reorder()
+        .advance_cursor(handle.receive_now_ms(), cursor)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))
+}
+
+fn mark_reorder_covered(handle: &ConnectionHandle, cursor: u64) -> Result<(), SdkError> {
+    handle
+        .reorder()
+        .covered(handle.receive_now_ms(), cursor)
+        .map_err(|error| SdkError::InboundRejected(error.to_string()))
 }
 
 enum Step {
