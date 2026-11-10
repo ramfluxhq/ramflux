@@ -912,3 +912,16 @@ fn control_route_selects_control_kind() {
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::GroupControl), KindId::KindControl);
     assert_eq!(kind_id_for_route(&crate::client::routed::Kind::Direct), KindId::KindMessage);
 }
+
+#[test]
+fn group_logical_event_id_is_message_id_not_group_id() -> TestResult {
+    assert!(
+        group_logical_event_id("g1", Some("g1")).is_err(),
+        "using group_id as the event id must fail"
+    );
+    assert_eq!(group_logical_event_id("g1", Some("msg-1"))?, "msg-1");
+    let generated = group_logical_event_id("g1", None)?;
+    assert_ne!(generated, "g1");
+    assert_ne!(generated, "");
+    Ok(())
+}

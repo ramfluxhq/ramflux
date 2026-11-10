@@ -23,6 +23,7 @@ pub(crate) mod delivery_receipts;
 pub mod dm;
 pub mod dm_session;
 pub mod federation;
+pub(crate) mod generated_content;
 pub mod group;
 mod group_control_roots;
 pub mod group_delivery;

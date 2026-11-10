@@ -5,7 +5,10 @@
 //! Native field value sets and proof validation stay with the named §3.1 owners:
 //! Surface P15, Call P16, Task P17, own-history P18 and `SelfSync` P19. No result
 //! from this module authorizes side effects or ACK; authenticated retention is P10.
-use super::{Content, Entity, EntityKind, Message, Service, ServiceAction, content, registry};
+use super::{
+    Content, Delete, Edit, Entity, EntityKind, Message, MessageRef, Reaction, Receipt, Service,
+    ServiceAction, content, registry,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum complete exact Inner bytes.
@@ -47,7 +50,7 @@ pub enum ValidationError {
     /// Control operation disagrees with its payload.
     #[error("control operation/payload mismatch")]
     Operation,
-    /// Invalid reaction token or entity range.
+    /// Invalid reaction token, entity range, missing Edit replacement, or empty `MessageRef`.
     #[error("invalid message content")]
     Content,
     /// Embedded descriptor is invalid or the requested type is absent.
@@ -174,10 +177,10 @@ pub fn validate_reaction_token(token: &str) -> Result<(), ValidationError> {
 pub fn validate_content(content: &Content) -> Result<(), ValidationError> {
     match content.value.as_ref().ok_or(ValidationError::MissingChoice)? {
         content::Value::Message(message) => validate_message(message),
-        content::Value::Edit(edit) => {
-            validate_message(edit.replacement.as_ref().ok_or(ValidationError::Content)?)
-        }
-        content::Value::Reaction(reaction) => validate_reaction_token(&reaction.token),
+        content::Value::Edit(edit) => validate_edit(edit),
+        content::Value::Delete(delete) => validate_delete(delete),
+        content::Value::Reaction(reaction) => validate_reaction(reaction),
+        content::Value::Receipt(receipt) => validate_receipt(receipt),
         content::Value::Service(service) => validate_service(service),
         content::Value::Control(control) => {
             use prost::Message as _;
@@ -194,15 +197,16 @@ pub fn validate_content(content: &Content) -> Result<(), ValidationError> {
 }
 
 /// Pin add/remove names exactly one target message; the target is never inferred.
+/// Present `MessageRef` values must carry a non-empty id.
 /// # Errors
-/// Returns an error when a pin service kind has no target.
+/// Returns an error when a pin service kind has no target or any named ref is empty.
 pub fn validate_service(service: &Service) -> Result<(), ValidationError> {
     let pin = service.action == ServiceAction::ServicePinAdded as i32
         || service.action == ServiceAction::ServicePinRemoved as i32;
     if pin && service.target.is_none() {
         return Err(ValidationError::Content);
     }
-    Ok(())
+    validate_optional_message_ref(service.target.as_ref())
 }
 
 /// Validate Unicode-scalar entity ranges in one pass over text plus entity rows.
@@ -224,6 +228,10 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
             || message.forward.is_some())
     {
         return Err(ValidationError::Content);
+    }
+    validate_optional_message_ref(message.reply_to.as_ref())?;
+    if let Some(forward) = message.forward.as_ref() {
+        validate_optional_message_ref(forward.original.as_ref())?;
     }
     validate_mention_spans(message)?;
     let scalars = message.text.chars().count();
@@ -251,6 +259,36 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
         }
     }
     Ok(())
+}
+
+fn validate_edit(edit: &Edit) -> Result<(), ValidationError> {
+    validate_optional_message_ref(edit.target.as_ref())?;
+    validate_message(edit.replacement.as_ref().ok_or(ValidationError::Content)?)
+}
+
+fn validate_delete(delete: &Delete) -> Result<(), ValidationError> {
+    delete.targets.iter().try_for_each(validate_message_ref)
+}
+
+fn validate_reaction(reaction: &Reaction) -> Result<(), ValidationError> {
+    validate_optional_message_ref(reaction.target.as_ref())?;
+    validate_reaction_token(&reaction.token)
+}
+
+fn validate_receipt(receipt: &Receipt) -> Result<(), ValidationError> {
+    receipt.targets.iter().try_for_each(validate_message_ref)
+}
+
+/// A named target must identify one message; empty `id` does not name a target.
+fn validate_message_ref(reference: &MessageRef) -> Result<(), ValidationError> {
+    if reference.id.is_empty() {
+        return Err(ValidationError::Content);
+    }
+    Ok(())
+}
+
+fn validate_optional_message_ref(reference: Option<&MessageRef>) -> Result<(), ValidationError> {
+    reference.map_or(Ok(()), validate_message_ref)
 }
 
 fn mention_rule(error: MentionError) -> ValidationError {
@@ -475,6 +513,87 @@ mod tests {
                 ..Default::default()
             },
             MentionError::TextLimit,
+        );
+    }
+
+    #[test]
+    fn empty_message_ref_is_content_error() {
+        let empty =
+            MessageRef { id: vec![], conversation_id: "c".into(), author_anchor: "a".into() };
+        let named =
+            MessageRef { id: vec![7], conversation_id: "c".into(), author_anchor: "a".into() };
+        assert_eq!(
+            validate_message(&Message { reply_to: Some(empty.clone()), ..Default::default() }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_message(&Message {
+                forward: Some(super::super::Forward {
+                    original: Some(empty.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_service(&Service {
+                action: ServiceAction::ServicePinAdded as i32,
+                target: Some(empty.clone()),
+                ..Default::default()
+            }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_service(&Service {
+                action: ServiceAction::ServicePinAdded as i32,
+                target: Some(named.clone()),
+                ..Default::default()
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            validate_content(&Content {
+                value: Some(content::Value::Edit(Edit {
+                    target: Some(empty.clone()),
+                    replacement: Some(Message { text: "x".into(), ..Default::default() }),
+                    ..Default::default()
+                })),
+            }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_content(&Content {
+                value: Some(content::Value::Delete(Delete {
+                    targets: vec![empty.clone()],
+                    ..Default::default()
+                })),
+            }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_content(&Content {
+                value: Some(content::Value::Reaction(Reaction {
+                    target: Some(empty.clone()),
+                    token: "👍".into(),
+                    ..Default::default()
+                })),
+            }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_content(&Content {
+                value: Some(content::Value::Receipt(Receipt {
+                    targets: vec![empty],
+                    state: 1,
+                    ..Default::default()
+                })),
+            }),
+            Err(ValidationError::Content)
+        );
+        assert_eq!(
+            validate_message(&Message { reply_to: Some(named), ..Default::default() }),
+            Ok(())
         );
     }
 }
