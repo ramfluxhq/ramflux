@@ -486,7 +486,7 @@ fn run_gateway_forward_mesh_listener(
     result
 }
 
-async fn gateway_forward_mesh_connection_loop(
+pub(crate) async fn gateway_forward_mesh_connection_loop(
     connection: ramflux_transport::MeshQuicConnection,
     hub: Arc<GatewaySessionHub>,
 ) -> anyhow::Result<()> {

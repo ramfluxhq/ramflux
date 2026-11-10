@@ -3,7 +3,7 @@
 
 //! Real-mTLS gateway forward listener identity bind (GW-INSTANCE-IDENTITY-01 Part B).
 
-use super::{GatewaySessionHub, handle_gateway_forward_mesh_request};
+use super::{GatewaySessionHub, gateway_forward_mesh_connection_loop};
 use crate::ephemeral_forward::{GatewayForwardEphemeralRequest, PATH as EPHEMERAL_FORWARD_PATH};
 use crate::session_push::tests::support::{ID, sink};
 use crate::{GatewayForwardDeliverRequest, GatewayPeerDirectory, GatewaySendHandle};
@@ -179,22 +179,9 @@ fn spawn_forward_listener(
             loop {
                 let connection =
                     server.accept_connection().await.map_err(|error| error.to_string())?;
-                let peer_spiffe_uri = connection.peer_spiffe_uri().map(str::to_owned);
                 let hub = Arc::clone(&hub);
                 tokio::spawn(async move {
-                    loop {
-                        let Ok(accepted) =
-                            MeshQuicServer::accept_request_on_connection(&connection).await
-                        else {
-                            return;
-                        };
-                        let _ = handle_gateway_forward_mesh_request(
-                            accepted,
-                            Arc::clone(&hub),
-                            peer_spiffe_uri.clone(),
-                        )
-                        .await;
-                    }
+                    let _ = gateway_forward_mesh_connection_loop(connection, hub).await;
                 });
             }
         });
@@ -449,5 +436,81 @@ fn forward_deliver_refuses_gateway_claiming_another_instance()
     let (status, reason) = identity_reason(error)?;
     assert_eq!(status, 403);
     assert_eq!(reason, "gateway_instance_mismatch");
+    Ok(())
+}
+
+fn ephemeral_forward_request(
+    source_gateway_id: &str,
+    envelope_id: &str,
+) -> GatewayForwardEphemeralRequest {
+    GatewayForwardEphemeralRequest {
+        source_gateway_id: source_gateway_id.to_owned(),
+        target_delivery_id: TARGET.to_owned(),
+        forwarded: true,
+        envelope: ephemeral_envelope(TARGET, envelope_id),
+        expires_at_ms: EXPIRES_AT_MS,
+    }
+}
+
+#[test]
+fn forward_ephemeral_refuses_federation_peer() -> Result<(), Box<dyn std::error::Error>> {
+    let (server, ca, gw_b) = start_gw_b_listener()?;
+    let federation = issue_test_service_cert(&ca, NODE, "ramflux-federation", None)?;
+    let Err(error) = post_json(
+        &server.endpoint,
+        EPHEMERAL_FORWARD_PATH,
+        &federation,
+        &gw_b,
+        &ephemeral_forward_request("gw-a", "env-ephemeral-federation"),
+    ) else {
+        return Err("federation peer must be refused on ephemeral forward".into());
+    };
+    let (status, reason) = identity_reason(error)?;
+    assert_eq!(status, 403);
+    assert_eq!(reason, "gateway_role_required");
+    Ok(())
+}
+
+#[test]
+fn forward_ephemeral_refuses_gateway_claiming_another_instance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server, ca, gw_b) = start_gw_b_listener()?;
+    let gw_b_client = issue_test_service_cert(&ca, NODE, "ramflux-gateway", Some("gw-b"))?;
+    let Err(error) = post_json(
+        &server.endpoint,
+        EPHEMERAL_FORWARD_PATH,
+        &gw_b_client,
+        &gw_b,
+        &ephemeral_forward_request("gw-c", "env-ephemeral-claim-c"),
+    ) else {
+        return Err("gw-b cannot claim source gw-c on ephemeral forward".into());
+    };
+    let (status, reason) = identity_reason(error)?;
+    assert_eq!(status, 403);
+    assert_eq!(reason, "gateway_instance_mismatch");
+    Ok(())
+}
+
+#[test]
+fn forward_deliver_refuses_legacy_gateway_without_instance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server, ca, gw_b) = start_gw_b_listener()?;
+    let legacy = issue_test_service_cert(&ca, NODE, "ramflux-gateway", None)?;
+    let request = GatewayForwardDeliverRequest {
+        source_gateway_id: "gw-a".to_owned(),
+        target_delivery_id: TARGET.to_owned(),
+        forwarded: true,
+        incarnation_id: None,
+        retain_until: None,
+        frame: deliver_frame("env-legacy", TARGET),
+    };
+    let Err(error) =
+        post_json(&server.endpoint, GatewayPeerDirectory::forward_path(), &legacy, &gw_b, &request)
+    else {
+        return Err("legacy gateway cert without instance must be refused".into());
+    };
+    let (status, reason) = identity_reason(error)?;
+    assert_eq!(status, 403);
+    assert_eq!(reason, "gateway_instance_missing");
     Ok(())
 }
