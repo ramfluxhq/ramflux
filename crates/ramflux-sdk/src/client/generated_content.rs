@@ -112,6 +112,51 @@ impl RamfluxClient {
         )
     }
 
+    /// Encode an Edit body on the shared event stream (P14).
+    /// # Errors
+    /// Same as [`Self::encode_generated_inner`].
+    pub fn encode_generated_edit(
+        stream: &mut GeneratedEventStream,
+        event_id: Vec<u8>,
+        edit: g::Edit,
+    ) -> Result<Vec<u8>, SdkError> {
+        let identity = stream.next(event_id)?;
+        Self::encode_generated_inner(
+            identity,
+            &g::Content { value: Some(g::content::Value::Edit(edit)) },
+        )
+    }
+
+    /// Encode a Delete body on the shared event stream (P14).
+    /// # Errors
+    /// Same as [`Self::encode_generated_inner`].
+    pub fn encode_generated_delete(
+        stream: &mut GeneratedEventStream,
+        event_id: Vec<u8>,
+        delete: g::Delete,
+    ) -> Result<Vec<u8>, SdkError> {
+        let identity = stream.next(event_id)?;
+        Self::encode_generated_inner(
+            identity,
+            &g::Content { value: Some(g::content::Value::Delete(delete)) },
+        )
+    }
+
+    /// Encode a Reaction body on the shared event stream (P14).
+    /// # Errors
+    /// Same as [`Self::encode_generated_inner`].
+    pub fn encode_generated_reaction(
+        stream: &mut GeneratedEventStream,
+        event_id: Vec<u8>,
+        reaction: g::Reaction,
+    ) -> Result<Vec<u8>, SdkError> {
+        let identity = stream.next(event_id)?;
+        Self::encode_generated_inner(
+            identity,
+            &g::Content { value: Some(g::content::Value::Reaction(reaction)) },
+        )
+    }
+
     /// Encode a user Receipt body. Distinct from transport ACK (T13).
     /// # Errors
     /// Same as [`Self::encode_generated_inner`].
