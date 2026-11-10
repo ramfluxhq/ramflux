@@ -41,16 +41,18 @@ pub(crate) async fn dispatch_a2i_bus_request(
             })))
         }
         "a2i.list" | "a2i.list_pending" => {
-            let mut engine = account.session_client().await?;
-            let received = account.client.receive_a2i_control_events(&mut engine, 100).await;
-            account.apply_session_metadata(engine);
-            let received = received?;
-            for event in received {
-                let key = crate::client::routed::control::a2i_key(
-                    &account.client.a2i_event_identity(&event)?,
-                    &event.event_id,
-                )?;
-                account.pending_a2i.entry(key).or_insert(event);
+            if !crate::bus::push_receiver::apply_w1::account_is_active(account)? {
+                let mut engine = account.session_client().await?;
+                let received = account.client.receive_a2i_control_events(&mut engine, 100).await;
+                account.apply_session_metadata(engine);
+                let received = received?;
+                for event in received {
+                    let key = crate::client::routed::control::a2i_key(
+                        &account.client.a2i_event_identity(&event)?,
+                        &event.event_id,
+                    )?;
+                    account.pending_a2i.entry(key).or_insert(event);
+                }
             }
             restore_a2i_cache(account)?;
             let events = account

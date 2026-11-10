@@ -65,7 +65,20 @@ async fn run_with_receive_clock(
 ) -> Result<usize, SdkError> {
     let tasks_applied = maintain_local(account)?;
     let mut engine = account.session_client().await?;
-    let result = receive(account, &mut engine, receive_now()).await;
+    let now = receive_now();
+    #[cfg(test)]
+    let _pinned = crate::time::FixedClock::set(now);
+    account.client.first_activate_receive_ledger(&account.target_delivery_id)?;
+    let active = crate::bus::push_receiver::apply_w1::is_active(
+        account.client.account_db()?,
+        &account.target_delivery_id,
+    )?;
+    let bound = crate::bus::push_receiver::apply_w1::receive_executor_bound(account)?;
+    let result = if active && bound {
+        standalone::receive_on_actor_bind(account, &mut engine, now).await
+    } else {
+        receive(account, &mut engine, now).await
+    };
     account.apply_session_metadata(engine);
     let (received, _replies) = result?;
     #[cfg(test)]

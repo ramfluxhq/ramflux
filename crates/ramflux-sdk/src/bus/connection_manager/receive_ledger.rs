@@ -107,7 +107,10 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
         active |= next_active;
         backpressure = next_bp;
     }
-    flush_acks(handle, work, generation, trigger == ReceiveTrigger::Connected, call_timeout)
+    // Resync/Connected drain a remainder smaller than ACK_FLUSH_COUNT (16).
+    // A Tick pass that applied work also flushes the remainder so a short inbox
+    // does not wait on the 1s age rule (courier ACK hold, first-page catch-up).
+    flush_acks(handle, work, generation, trigger != ReceiveTrigger::Tick || active, call_timeout)
         .await?;
     Ok(LedgerCatchUp { active, paused, backpressure })
 }

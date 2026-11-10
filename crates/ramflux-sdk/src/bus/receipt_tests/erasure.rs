@@ -73,19 +73,14 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
         super::erasure_audit::assert_erased(&raw, &forbidden, "privacy-envelope-id")?;
         drop(raw);
         sync_driver::process(&mut recipient, &mut receiver, &pool, &entry).await?;
-        recipient.client.ack_gateway_entry(&mut receiver, &entry, now_unix_timestamp()).await?;
+        maybe_legacy_ack(&mut recipient, &mut receiver, &entry).await?;
         assert!(!recipient.client.account_db()?.has_inbox_retry(&committed)?);
         assert!(
             recipient.client.account_db()?.latest_journal_event("message.undeliverable")?.is_none()
         );
         assert_eq!(recipient.client.account_db()?.message_content("privacy-envelope-id")?, None);
     }
-    assert!(
-        mail.lock()
-            .map_err(|_| "mailbox")?
-            .acked
-            .contains(&(b.device.clone(), entry.envelope.envelope_id.clone()))
-    );
+    maybe_assert_legacy_mailbox_ack(&recipient, &mail, &b.device, &entry.envelope.envelope_id)?;
     // Different bytes miss the marker and go through the normal authenticated/decryption path.
     let changed = source
         .client
@@ -110,6 +105,36 @@ async fn deleted_routed_replay_is_acked_without_decrypt_retry_or_identity_dead_l
     drop(recipient);
     drop(source);
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+async fn maybe_legacy_ack(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl crate::gateway::access::GatewaySessionAccess,
+    entry: &GatewayInboxEntry,
+) -> TestResult {
+    if crate::bus::push_receiver::apply_w1::account_is_active(account)? {
+        return Ok(());
+    }
+    account.client.ack_gateway_entry(engine, entry, now_unix_timestamp()).await?;
+    Ok(())
+}
+
+fn maybe_assert_legacy_mailbox_ack(
+    account: &LocalBusAccountState,
+    mail: &Shared,
+    device: &str,
+    envelope_id: &str,
+) -> TestResult {
+    if crate::bus::push_receiver::apply_w1::account_is_active(account)? {
+        return Ok(());
+    }
+    assert!(
+        mail.lock()
+            .map_err(|_| "mailbox")?
+            .acked
+            .contains(&(device.to_owned(), envelope_id.to_owned()))
+    );
     Ok(())
 }
 

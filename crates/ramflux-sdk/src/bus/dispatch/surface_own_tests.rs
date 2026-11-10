@@ -958,7 +958,14 @@ async fn receive_first_bootstrap(
         client.account_db()?.message_content(&committed[0].message_id)?,
         Some(b"peer to restored device".to_vec())
     );
-    assert!(client.account_db()?.has_inbox_retry(&admission)?, "ACK failure remains retryable");
+    let db = client.account_db()?;
+    let mut retryable = db.has_inbox_retry(&admission)?;
+    if let Some(incarnation) = db.receive_epoch(&target)? {
+        retryable |= !db
+            .due_ack_intents(&target, &incarnation, crate::time::now_unix_timestamp(), 64)?
+            .is_empty();
+    }
+    assert!(retryable, "ACK failure remains retryable");
     assert!(
         !client.account_db()?.has_gateway_ack(
             &client.owned_device_identity()?,

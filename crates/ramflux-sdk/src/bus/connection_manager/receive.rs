@@ -586,6 +586,7 @@ pub(crate) async fn apply_entry(
         crate::bus::sync_driver::source::prepare(&writer, entry, backpressure).await?;
     #[cfg(test)]
     handle.test_record_receive("source", source_started.elapsed());
+    let ledger = entry.turn.is_some();
     let (reply, response) = oneshot::channel();
     work.send(AccountWork::ApplyPage {
         generation,
@@ -598,8 +599,11 @@ pub(crate) async fn apply_entry(
     .await
     .map_err(|_| handle.pending())?;
     let (prepared, backpressure) = response.await.map_err(|_| handle.pending())??;
-    let Some(prepared) = prepared else { return Ok((false, backpressure)) };
-    if let Some(envelope) = prepared.pair_reply {
+    let pair_reply = prepared
+        .as_ref()
+        .and_then(|ack| ack.pair_reply.clone())
+        .or_else(crate::bus::push_receiver::apply_w1::take_pair_reply);
+    if let Some(envelope) = pair_reply {
         let submitted = handle
             .call(
                 move |engine| Box::pin(engine.submit_envelope(envelope)),
@@ -610,6 +614,10 @@ pub(crate) async fn apply_entry(
             tracing::debug!(%error, "encrypted reset acknowledgement awaits a later reset");
         }
     }
+    if ledger {
+        return Ok((true, backpressure));
+    }
+    let Some(prepared) = prepared else { return Ok((false, backpressure)) };
     ack_prepared(
         handle,
         work,
@@ -889,7 +897,7 @@ pub(crate) async fn test_redrive(
                         reply.send(crate::bus::sync_driver::prepare_receive(account, generation));
                 }
                 AccountWork::Courier(step) => step.apply(account),
-                AccountWork::ApplyPage { entry, source, backpressure, reply, .. } => {
+                AccountWork::ApplyPage { generation, turn, entry, source, backpressure, reply } => {
                     if let Some(key) = &entry.retry_key
                         && crate::bus::couriers::head_refresh::inbound::eligible(account, key)
                     {
@@ -902,13 +910,8 @@ pub(crate) async fn test_redrive(
                         );
                     }
                     let _ = reply.send(
-                        crate::bus::sync_driver::apply_prepared_receive(
-                            account,
-                            *entry,
-                            source,
-                            backpressure,
-                        )
-                        .await,
+                        redrive_apply_page(account, generation, turn, *entry, source, backpressure)
+                            .await,
                     );
                 }
                 AccountWork::ReceiveObservation { .. } => {}
@@ -945,4 +948,46 @@ pub(crate) async fn test_redrive(
     child.abort();
     let _ = child.await;
     result?
+}
+
+#[cfg(test)]
+async fn redrive_apply_page(
+    account: &mut crate::bus::state::LocalBusAccountState,
+    generation: u64,
+    turn: Option<Box<ReceiveTurn>>,
+    entry: ReceiveEntry,
+    source: crate::bus::sync_driver::source::PreparedSource,
+    backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+) -> Result<ReceiveApplied, SdkError> {
+    let target = account.target_delivery_id.clone();
+    let active =
+        crate::bus::push_receiver::apply_w1::is_active(account.client.account_db()?, &target)?;
+    if !active && turn.is_none() {
+        return crate::bus::sync_driver::apply_prepared_receive(
+            account,
+            entry,
+            source,
+            backpressure,
+        )
+        .await;
+    }
+    let turn = match turn {
+        Some(turn) => *turn,
+        None => crate::bus::push_receiver::apply_w1::capture_turn(
+            account.client.account_db()?,
+            generation,
+            &target,
+        )?,
+    };
+    let applied = Box::pin(crate::bus::push_receiver::apply_w1::apply_page(
+        account,
+        &turn,
+        &|| generation,
+        entry,
+        source,
+        backpressure,
+    ))
+    .await?;
+    crate::bus::push_receiver::apply_w1::replay_projected(account)?;
+    Ok(applied)
 }

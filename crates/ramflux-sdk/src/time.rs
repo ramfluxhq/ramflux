@@ -6,15 +6,18 @@
 use crate::prelude::*;
 
 /// Pins the wall clock of the current test thread until dropped, so signed bytes are
-/// deterministic.
+/// deterministic. Drop restores the previous pin (including an outer `FrozenClock`).
 #[cfg(test)]
-pub(crate) struct FixedClock;
+pub(crate) struct FixedClock {
+    previous: Option<i64>,
+}
 
 #[cfg(test)]
 impl FixedClock {
     pub(crate) fn set(now: i64) -> Self {
+        let previous = test_clock::frozen();
         test_clock::set_frozen(Some(now));
-        Self
+        Self { previous }
     }
 
     /// Moves the current thread's pinned clock to `now`; the pin lasts until its guard drops.
@@ -26,7 +29,7 @@ impl FixedClock {
 #[cfg(test)]
 impl Drop for FixedClock {
     fn drop(&mut self) {
-        test_clock::set_frozen(None);
+        test_clock::set_frozen(self.previous);
     }
 }
 

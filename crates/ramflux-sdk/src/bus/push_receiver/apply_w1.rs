@@ -16,6 +16,7 @@ use crate::client::inbox_failure::{deterministic, verified_failure_policy, wire_
 use crate::client::legacy_w1::LegacyW1;
 use crate::client::reply_outbox::{MARKER, ReplyOutbox};
 use crate::prelude::*;
+use ramflux_protocol::Envelope;
 use ramflux_storage::{
     AccountDb, MISSING_EPOCH, ProjectionStore, ReceiveActivation, ReceiveCoverResult,
     ReceiveExpectation, ReceiveFailure, ReceiveFailureKind, ReceiveGap, ReceiveStage,
@@ -26,6 +27,19 @@ use ramflux_storage::{
 const BINDING_ATTEMPTS: u32 = 3;
 const BINDING_GIVE_UP: &str = "legacy binding changed after 3 attempts";
 const COVERED_BELOW: &str = "receive page covered below sequence";
+
+thread_local! {
+    static PAIR_REPLY: std::cell::RefCell<Option<Envelope>> = const { std::cell::RefCell::new(None) };
+}
+
+fn stash_pair_reply(reply: Option<Envelope>) {
+    PAIR_REPLY.with(|cell| *cell.borrow_mut() = reply);
+}
+
+/// Pair-reset reply produced by the last successful [`apply_page`]. Connection apply submits it.
+pub(crate) fn take_pair_reply() -> Option<Envelope> {
+    PAIR_REPLY.with(|cell| cell.borrow_mut().take())
+}
 
 /// True when the P24b1 discriminator is Activated. Activated without an epoch is Integrity.
 pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> {
@@ -38,6 +52,18 @@ pub(crate) fn is_active(db: &AccountDb, target: &str) -> Result<bool, SdkError> 
             Ok(true)
         }
     }
+}
+
+/// Activated receive is the actor `ApplyPage` path. Standalone `sync_driver::run` must not bind.
+pub(crate) fn account_is_active(account: &LocalBusAccountState) -> Result<bool, SdkError> {
+    is_active(account.client.account_db()?, &account.target_delivery_id)
+}
+
+/// Same key as [`super::executor::LedgerExecutor::bind_actor`]. Skip standalone while it is held.
+pub(crate) fn receive_executor_bound(account: &LocalBusAccountState) -> Result<bool, SdkError> {
+    let db = account.client.account_db()?;
+    let key = format!("{}:{}", db.path.display(), db.local_account_id);
+    Ok(super::executor::LedgerExecutor::is_bound(&key))
 }
 
 /// Prepare-time coordinates for one `ApplyPage`: message generation plus DB cursor/E/erase.
@@ -85,13 +111,25 @@ pub(crate) async fn apply_page(
             Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
             Err(SdkError::PairRecoveryRequired) => {
                 recover_own_copy(account, &turn, handle_generation(), &prepared.entry)?;
+                stash_pair_reply(None);
                 break;
             }
             Err(error) => return Err(error),
-            Ok(()) => break,
+            Ok(reply) => {
+                stash_pair_reply(reply);
+                break;
+            }
         }
     }
     Ok((None, backpressure))
+}
+
+/// Publish durable application-outbox rows into RAM after a production `ApplyPage`.
+pub(crate) fn replay_projected(account: &mut LocalBusAccountState) -> Result<(), SdkError> {
+    crate::client::application_outbox::replay(
+        account.client.account_db()?,
+        &mut account.pending_deliveries,
+    )
 }
 
 async fn apply_once(
@@ -100,28 +138,32 @@ async fn apply_once(
     handle_generation: &dyn Fn() -> u64,
     prepared: &ReceiveEntry,
     source: &mut Option<crate::client::routed::PreparedInbound>,
-) -> Result<(), SdkError> {
+) -> Result<Option<Envelope>, SdkError> {
     #[cfg(test)]
     cross_await().await;
     let entry = &prepared.entry;
     let sequence = entry.inbox_seq;
-    if !admit_open(account, turn, handle_generation(), prepared)? {
-        return Ok(());
+    let cover = admit_open(account, turn, handle_generation(), prepared)?;
+    if !cover && !held_retry_open(account, turn, handle_generation(), sequence, prepared)? {
+        return Ok(None);
     }
     let local_device = account.gateway_config.device_id.clone();
     let own_copy = source.as_mut().and_then(|prepared| prepared.own_copy_manifest.take());
-    let kind = match classify(account, entry, own_copy).await {
-        Ok(kind) => kind,
-        Err(error) => match failure_of(&error, entry)? {
-            Some((kind, code)) => Kind::PolicyFailure(kind, code),
-            None => return Err(error),
-        },
-    };
+    let (kind, classified_pending) = classified_kind(account, entry, own_copy).await?;
     #[cfg(test)]
     after_classify(account.client.account_db()?);
     match kind {
         Kind::Routed => {
-            apply_routed_w1(account, turn, handle_generation, prepared, source.take()).await
+            Box::pin(apply_routed_or_defer(
+                account,
+                turn,
+                handle_generation,
+                prepared,
+                source.take(),
+                cover,
+                classified_pending,
+            ))
+            .await
         }
         Kind::OwnCopy(manifest) => {
             let message = entry.envelope.envelope_id.clone();
@@ -134,7 +176,7 @@ async fn apply_once(
                 cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                 Ok(false)
             })?;
-            Ok(())
+            Ok(None)
         }
         Kind::LegacyDm { conversation } => {
             let client = &account.client;
@@ -153,7 +195,7 @@ async fn apply_once(
                 cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                 Ok(false)
             })?;
-            Ok(())
+            Ok(None)
         }
         Kind::LegacyA2i => {
             let client = &account.client;
@@ -172,77 +214,286 @@ async fn apply_once(
                 }
                 Ok(held)
             })?;
-            Ok(())
+            Ok(None)
         }
-        Kind::LegacyHold => hold_unrouted(account, turn, handle_generation, entry, sequence),
+        Kind::LegacyHold => {
+            hold_unrouted(account, turn, handle_generation, entry, sequence)?;
+            Ok(None)
+        }
         Kind::PolicyFailure(kind, code) => {
-            admit_failure(account, turn, handle_generation, entry, sequence, (kind, code))
+            let key = account.client.inbox_admission_key(entry)?;
+            admit_failure(account, turn, handle_generation, entry, sequence, &key, (kind, code))?;
+            Ok(None)
         }
-        Kind::Projection => project_application(account, turn, handle_generation, entry, sequence),
+        Kind::Projection => {
+            project_application(account, turn, handle_generation, entry, sequence)?;
+            Ok(None)
+        }
         Kind::TerminalReply => {
-            settle_reply_terminal(account, turn, handle_generation, entry, sequence)
+            settle_reply_terminal(account, turn, handle_generation, entry, sequence)?;
+            Ok(None)
+        }
+    }
+}
+
+async fn classified_kind(
+    account: &LocalBusAccountState,
+    entry: &GatewayInboxEntry,
+    own_copy: Option<crate::SdkDeviceManifestResponse>,
+) -> Result<(Kind, Option<SdkError>), SdkError> {
+    match classify(account, entry, own_copy).await {
+        Ok(kind) => Ok((kind, None)),
+        Err(error) => {
+            if crate::client::routed::decode(&entry.envelope).is_ok() && directory_pending(&error) {
+                Ok((Kind::Routed, Some(error)))
+            } else {
+                match failure_of(&error, entry)? {
+                    Some((kind, code)) => Ok((Kind::PolicyFailure(kind, code), None)),
+                    None => Err(error),
+                }
+            }
         }
     }
 }
 
 /// Open/decrypt outside the fence; persist + terminal (or held) cover in the same fenced tx.
+/// Directory/head misses become a held retry plus retain, not a page abort.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "joins classify-pending root with the routed W1 deferral"
+)]
+async fn apply_routed_or_defer(
+    account: &mut LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    prepared: &ReceiveEntry,
+    source: Option<crate::client::routed::PreparedInbound>,
+    cover: bool,
+    classified_pending: Option<SdkError>,
+) -> Result<Option<Envelope>, SdkError> {
+    match Box::pin(apply_routed_w1(account, turn, handle_generation, prepared, source, cover)).await
+    {
+        Ok(reply) => Ok(reply),
+        Err(error) if directory_pending(&error) => {
+            defer_routed_pending(
+                account,
+                turn,
+                handle_generation,
+                &prepared.entry,
+                retain_error(classified_pending, error),
+            )?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Prefer a classify miss that already names the blocked root over a later
+/// directory `InboundPending` (which `retain` cannot key).
+fn retain_error(classified: Option<SdkError>, applied: SdkError) -> SdkError {
+    match classified {
+        Some(error) if retain_root(&error).is_some() => error,
+        _ => applied,
+    }
+}
+
+fn retain_root(error: &SdkError) -> Option<&str> {
+    match error {
+        SdkError::DirectoryAuthorityUnavailable { root, .. }
+        | SdkError::SenderManifestRequired { root }
+        | SdkError::FreshHeadRequired { root } => Some(root.as_str()),
+        _ => None,
+    }
+}
+
+fn directory_pending(error: &SdkError) -> bool {
+    matches!(
+        error,
+        SdkError::DirectoryAuthorityUnavailable { .. }
+            | SdkError::InboundPending(_)
+            | SdkError::SenderManifestRequired { .. }
+            | SdkError::FreshHeadRequired { .. }
+    )
+}
+
+fn defer_routed_pending(
+    account: &mut LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    entry: &GatewayInboxEntry,
+    error: SdkError,
+) -> Result<(), SdkError> {
+    let (kind, code) = match failure_of(&error, entry)? {
+        Some(pair) => pair,
+        None if directory_pending(&error) => (ReceiveFailureKind::Retryable, "inbound_pending"),
+        None => return Err(error),
+    };
+    let computed = account.client.inbox_admission_key(entry)?;
+    let key = staged_admission_key(account, turn, handle_generation(), entry.inbox_seq, &computed)?;
+    let already = account.client.account_db()?.has_inbox_retry(&key)?;
+    admit_failure(account, turn, handle_generation, entry, entry.inbox_seq, &key, (kind, code))?;
+    // Leftover persist-without-cover re-opens W1. Skip only while the first
+    // root is still blocking; a granted/cancelled attempt must re-retain so
+    // group.receive waits again if the head is stale.
+    if already && crate::bus::couriers::head_refresh::inbound::blocking(account, &key) {
+        return Ok(());
+    }
+    crate::bus::couriers::head_refresh::inbound::retain(account, entry, &key, &error)?;
+    Ok(())
+}
+
+fn staged_admission_key(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    generation: u64,
+    sequence: u64,
+    computed: &str,
+) -> Result<String, SdkError> {
+    Ok(account.client.account_db()?.receive_transaction(
+        turn.expected(),
+        generation,
+        |tx| match tx.work_admission_key(sequence)? {
+            Some(existing) => Ok(existing),
+            None => Ok(computed.to_owned()),
+        },
+    )?)
+}
+
 async fn apply_routed_w1(
     account: &mut LocalBusAccountState,
     turn: &ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
     prepared: &ReceiveEntry,
     source: Option<crate::client::routed::PreparedInbound>,
-) -> Result<(), SdkError> {
-    let mut engine = account.live_session_client()?;
+    cover: bool,
+) -> Result<Option<Envelope>, SdkError> {
     let pool = account.relay_quic_pool()?;
-    let sequence = prepared.entry.inbox_seq;
     let generation = handle_generation();
-    account
+    if account.connection.is_some() {
+        let mut engine = account.live_session_client()?;
+        // Fill directory coordinates without switching the live transport kind
+        // (test injectors stay on Injected; a TcpTls overlay would talk HTTP
+        // to a directory fixture and lose the typed FreshHeadRequired).
+        if engine.config.tcp_gateway_addr.is_none()
+            && account.gateway_config.tcp_gateway_addr.is_some()
+        {
+            engine.config.tcp_gateway_addr = account.gateway_config.tcp_gateway_addr;
+            engine.config.ca_cert.clone_from(&account.gateway_config.ca_cert);
+            engine.config.server_name.clone_from(&account.gateway_config.server_name);
+        }
+        let result =
+            join_routed_w1(account, &mut engine, &pool, turn, generation, prepared, source, cover)
+                .await;
+        account.apply_session_metadata(engine);
+        return result;
+    }
+    let seed_directory = account.gateway_config.tcp_gateway_addr.is_some()
+        || account.engine.as_ref().is_some_and(|engine| engine.config.tcp_gateway_addr.is_some());
+    if !seed_directory {
+        return account.live_session_client().map(|_| None);
+    }
+    let mut engine = account.engine.take().ok_or(SdkError::GatewaySessionNotEstablished)?;
+    let result =
+        join_routed_w1(account, &mut engine, &pool, turn, generation, prepared, source, cover)
+            .await;
+    account.engine = Some(engine);
+    result
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "joins the live session or seed engine onto one W1 persist"
+)]
+async fn join_routed_w1(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl crate::gateway::access::GatewaySessionAccess,
+    pool: &ramflux_transport::RelayQuicPool,
+    turn: &ReceiveTurn,
+    generation: u64,
+    prepared: &ReceiveEntry,
+    source: Option<crate::client::routed::PreparedInbound>,
+    cover: bool,
+) -> Result<Option<Envelope>, SdkError> {
+    let sequence = prepared.entry.inbox_seq;
+    let entry = &prepared.entry;
+    let delivery = account
         .client
-        .apply_routed_entry_joining(
-            &mut engine,
-            &pool,
-            &prepared.entry,
-            source.map(Ok),
-            |client, write| {
-                run_fenced(client.account_db()?, generation, turn, |tx, _| match write {
-                    crate::client::routed::JoinedW1::Project(ctx) => {
-                        let (projected, admitted, held) =
-                            client.commit_routed_w1_in(tx, sequence, ctx)?;
-                        cover_w1_outcome(tx, sequence, held, &[], turn.compat)?;
-                        Ok((projected, admitted))
-                    }
-                    crate::client::routed::JoinedW1::Cover => {
-                        cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
-                        Ok((None, Vec::new()))
-                    }
-                    crate::client::routed::JoinedW1::ContactBootstrap {
-                        entry,
-                        manifest,
-                        local,
-                    } => {
-                        tx.require_open_input(sequence)?;
-                        client.commit_contact_request_bootstrap_in(entry, manifest, local)?;
-                        cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
-                        Ok((None, Vec::new()))
-                    }
-                })
-            },
-        )
+        .apply_routed_entry_joining(engine, pool, entry, source.map(Ok), |client, write| {
+            run_fenced(client.account_db()?, generation, turn, |tx, expected| match write {
+                crate::client::routed::JoinedW1::Project(ctx) => {
+                    let (projected, admitted, held) =
+                        client.commit_routed_w1_in(tx, sequence, ctx)?;
+                    project_if_committed(tx, client, entry, sequence, expected)?;
+                    cover_or_retire_retry(tx, sequence, held, turn, cover)?;
+                    Ok((projected, admitted))
+                }
+                crate::client::routed::JoinedW1::Cover => {
+                    project_if_committed(tx, client, entry, sequence, expected)?;
+                    cover_or_retire_retry(tx, sequence, false, turn, cover)?;
+                    Ok((None, Vec::new()))
+                }
+                crate::client::routed::JoinedW1::ContactBootstrap { entry, manifest, local } => {
+                    tx.require_open_input(sequence)?;
+                    client.commit_contact_request_bootstrap_in(entry, manifest, local)?;
+                    cover_or_retire_retry(tx, sequence, false, turn, cover)?;
+                    Ok((None, Vec::new()))
+                }
+            })
+        })
         .await?;
-    account.apply_session_metadata(engine);
+    Ok(delivery.pair_reply)
+}
+
+fn cover_or_retire_retry(
+    tx: &ReceiveTransaction<'_>,
+    sequence: u64,
+    held: bool,
+    turn: &ReceiveTurn,
+    cover: bool,
+) -> Result<(), SdkError> {
+    if cover {
+        return cover_w1_outcome(tx, sequence, held, &[], turn.compat);
+    }
+    if !held && let Some(key) = tx.work_admission_key(sequence)? {
+        tx.account().remove_inbox_retry(&key)?;
+    }
     Ok(())
 }
 
+fn held_retry_open(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    generation: u64,
+    sequence: u64,
+    prepared: &ReceiveEntry,
+) -> Result<bool, SdkError> {
+    let db = account.client.account_db()?;
+    if let Some(key) = &prepared.retry_key
+        && db.has_inbox_retry(key)?
+    {
+        return Ok(true);
+    }
+    Ok(db.receive_transaction(turn.expected(), generation, |tx| {
+        match tx.work_admission_key(sequence)? {
+            Some(key) => tx.account().has_inbox_retry(&key),
+            None => Ok(false),
+        }
+    })?)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "failure admission keeps the live key, policy, and cover together"
+)]
 fn admit_failure(
     account: &LocalBusAccountState,
     turn: &ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
     entry: &GatewayInboxEntry,
     sequence: u64,
+    computed: &str,
     (kind, error_code): (ReceiveFailureKind, &'static str),
 ) -> Result<(), SdkError> {
-    let key = account.client.inbox_admission_key(entry)?;
     let json = serde_json::to_vec(entry)?;
     let at = now_unix_timestamp();
     // The verified sender policy, exactly as live retry admission builds it.
@@ -250,6 +501,16 @@ fn admit_failure(
         verified_failure_policy(&account.client, &account.gateway_config.device_id, entry, at)?;
     run_fenced(account.client.account_db()?, handle_generation(), turn, |tx, expected| {
         let _ = expected;
+        let key = match tx.work_admission_key(sequence)? {
+            Some(existing) => existing,
+            None => computed.to_owned(),
+        };
+        // Leftover persist-without-cover re-opens held W1; a still-retryable
+        // outcome must keep the original backoff. Re-deferring from wall-clock
+        // `now` would make the row due immediately on the next group.receive.
+        if tx.account().has_inbox_retry(&key)? {
+            return Ok(true);
+        }
         match SourceFailure::admit_in(
             tx,
             ReceiveFailure {
@@ -405,8 +666,9 @@ async fn classify(
 /// An authenticated entry that an earlier routed commit already settled. A transferred
 /// reply marker ranks above a pending projection: W0 then only needs its terminal cover
 /// (the projection already transferred with the reply). A committed receipt without a
-/// marker means only the application projection is still owed. Missing identity is
-/// nothing owed; every other key-derivation error (including storage) propagates.
+/// marker means only the application projection is still owed. Missing identity or an
+/// incomplete sender cache is nothing settled yet; every other key-derivation error
+/// (including storage) propagates.
 fn settled_routed_kind(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
@@ -414,6 +676,16 @@ fn settled_routed_kind(
     let auth_key = match projection_key(&account.client, entry) {
         Ok(key) => key,
         Err(error) if identity_absence(&error) => return Ok(None),
+        // Incomplete cache / stale head: nothing is settled yet. Fall through to
+        // decode (routed W1) or sender-key hold. DirectoryAuthorityUnavailable
+        // still propagates so the settled-key probe stays a typed miss.
+        Err(
+            SdkError::InboundPending(_)
+            | SdkError::FreshHeadRequired { .. }
+            | SdkError::SenderManifestRequired { .. },
+        ) => {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     let db = account.client.account_db()?;
@@ -426,13 +698,13 @@ fn settled_routed_kind(
     Ok(None)
 }
 
-/// Maps a classification error to a failure-policy admission. Shares live
+/// Maps a classification or W1-apply error to a failure-policy admission. Shares live
 /// `quarantine_failure`'s wire-signature, `deterministic()` and oversized-retry
-/// mapping, and differs in three ways: this adapter propagates `InboundRejected`
+/// mapping, and differs in two ways: this adapter propagates `InboundRejected`
 /// (live dead-letters it as `routing_rejected`); it has no `routed_seen_marker`
-/// short-circuit; it defers only `InboundPending` (live defers every
-/// non-deterministic error). Local state refusals and everything else keep W0
-/// staged and propagate.
+/// short-circuit. Directory lookup and `InboundPending` stay retryable so a
+/// missing peer manifest or stale head cannot abort the receive pass. Local
+/// state refusals and everything else keep W0 staged and propagate.
 fn failure_of(
     error: &SdkError,
     entry: &GatewayInboxEntry,
@@ -791,12 +1063,17 @@ fn cover_w1_outcome(
         cover_terminal_in(tx, sequence, gaps)?
     };
     match covered {
-        ReceiveCoverResult::Covered => Ok(()),
-        ReceiveCoverResult::Paused if held => Ok(()),
+        ReceiveCoverResult::Covered => {}
+        ReceiveCoverResult::Paused if held => return Ok(()),
         ReceiveCoverResult::Paused => {
-            Err(SdkError::InboundRejected("receive terminal cover paused".into()))
+            return Err(SdkError::InboundRejected("receive terminal cover paused".into()));
         }
     }
+    // Compat keeps ledger work until WA; the inbox retry is only the W1 deferral.
+    if !held && let Some(key) = tx.work_admission_key(sequence)? {
+        tx.account().remove_inbox_retry(&key)?;
+    }
+    Ok(())
 }
 
 /// Validate/reconcile the single-entry page before W1. `NeedStage` is the live sequence

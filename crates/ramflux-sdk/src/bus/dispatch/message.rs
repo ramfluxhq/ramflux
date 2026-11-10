@@ -791,7 +791,9 @@ pub(crate) async fn dispatch_message_receive_request(
         .iter()
         .map(|entry| entry.envelope.envelope_id.clone())
         .collect::<BTreeSet<_>>();
-    super::super::sync_driver::run(account).await?;
+    if !crate::bus::push_receiver::apply_w1::receive_executor_bound(account)? {
+        super::super::sync_driver::run(account).await?;
+    }
     receive_bound_legacy(account, &body).await?;
     if body.auto_fetch_attachments {
         super::super::attachment_scheduler::fetch_for_page(

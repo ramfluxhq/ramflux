@@ -16,6 +16,7 @@ use crate::gateway::push_point::PointReply;
 use crate::gateway::push_resume::{PageReply, ResumePage};
 use crate::gateway::session_push::PageEntryRecord;
 use crate::{GatewayInboxEntry, time::now_unix_timestamp};
+use serde_json::json;
 use std::collections::BTreeMap;
 
 const PAGE_LIMIT: usize = super::super::connection_manager::receive::RECEIVE_PAGE_LIMIT;
@@ -26,9 +27,31 @@ pub(super) async fn receive(
     engine: &mut impl GatewayPushAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
-    let db = account.client.account_db()?;
-    let key = format!("{}:{}", db.path.display(), db.local_account_id);
-    let _exec = LedgerExecutor::bind_standalone(key)?;
+    receive_inner(account, engine, now, true).await
+}
+
+/// Same pass as [`receive`] while the actor already holds the exclusive bind (D5).
+pub(super) async fn receive_on_actor_bind(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    now: i64,
+) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
+    receive_inner(account, engine, now, false).await
+}
+
+async fn receive_inner(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    now: i64,
+    bind_standalone: bool,
+) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
+    let _exec = if bind_standalone {
+        let db = account.client.account_db()?;
+        let key = format!("{}:{}", db.path.display(), db.local_account_id);
+        Some(LedgerExecutor::bind_standalone(key)?)
+    } else {
+        None
+    };
     account.client.prune_surface_resync_state()?;
     let generation = account
         .connection
@@ -66,7 +89,7 @@ pub(super) async fn receive(
         .await?
         {
             PageDrive::Paused { applied } => {
-                flush_live_acks(account, generation).await?;
+                flush_live_acks(account, engine, generation).await?;
                 return Ok((applied, Vec::new()));
             }
             PageDrive::Continue { backpressure: next, applied: next_applied } => {
@@ -81,7 +104,7 @@ pub(super) async fn receive(
     applied =
         apply_leftover(account, &mut turn, generation, retries, backpressure, applied).await?;
     let _ = now;
-    flush_live_acks(account, generation).await?;
+    flush_live_acks(account, engine, generation).await?;
     Ok((applied, Vec::new()))
 }
 
@@ -191,6 +214,7 @@ async fn drive_page(
                     backpressure,
                 )
                 .await?;
+                apply_w1::replay_projected(account)?;
                 backpressure = next;
                 applied = applied.saturating_add(1);
                 apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
@@ -241,6 +265,7 @@ async fn apply_leftover(
         let (_, next) =
             apply_w1::apply_page(account, turn, &handle_generation, prepared, None, backpressure)
                 .await?;
+        apply_w1::replay_projected(account)?;
         backpressure = next;
         applied = applied.saturating_add(1);
         apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
@@ -249,19 +274,60 @@ async fn apply_leftover(
     Ok(applied)
 }
 
-async fn flush_live_acks(account: &LocalBusAccountState, generation: u64) -> Result<(), SdkError> {
-    let Some((handle, work)) = (account.connection.clone()).zip(account.connection_work.clone())
-    else {
+async fn flush_live_acks(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    generation: u64,
+) -> Result<(), SdkError> {
+    if let Some((handle, work)) = (account.connection.clone()).zip(account.connection_work.clone())
+    {
+        return crate::bus::connection_manager::receive::flush_acks(
+            &handle,
+            &work,
+            generation,
+            true,
+            account.timeouts.call,
+        )
+        .await;
+    }
+    flush_engine_acks(account, engine, generation).await
+}
+
+async fn flush_engine_acks(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    generation: u64,
+) -> Result<(), SdkError> {
+    let db = account.client.account_db()?;
+    let target = account.target_delivery_id.as_str();
+    if !apply_w1::is_active(db, target)? {
         return Ok(());
-    };
-    crate::bus::connection_manager::receive::flush_acks(
-        &handle,
-        &work,
-        generation,
-        true,
-        account.timeouts.call,
-    )
-    .await
+    }
+    let turn = apply_w1::capture_turn(db, generation, target)?;
+    let sequences =
+        crate::bus::push_receiver::ack_batch::SourceWa { expected: turn.expected(), generation }
+            .select(db, now_unix_timestamp(), true)?;
+    if sequences.is_empty() {
+        return Ok(());
+    }
+    let receiver = account.client.owned_device_identity()?;
+    let now = now_unix_timestamp();
+    for seq in sequences {
+        let Some(envelope_id) = account
+            .pending_deliveries
+            .iter()
+            .find(|entry| entry.inbox_seq == seq)
+            .map(|entry| entry.envelope.envelope_id.clone())
+        else {
+            continue;
+        };
+        let mut ack = crate::dm::gateway_ack(&envelope_id, &receiver, now);
+        ack.ext.ext.insert("inbox_seq".into(), json!(seq));
+        if engine.ack(ack).await.is_err() {
+            tracing::debug!(seq, "standalone ACK remains pending after transport failure");
+        }
+    }
+    Ok(())
 }
 
 fn apply_owned(
@@ -374,6 +440,7 @@ async fn cover_point(
                 backpressure,
             )
             .await?;
+            apply_w1::replay_projected(account)?;
             apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
             Ok(next)
         }

@@ -99,6 +99,13 @@ pub(crate) fn eligible(account: &LocalBusAccountState, key: &str) -> bool {
     account.head_refresh.inbound.ready.contains(key)
 }
 
+/// True while a retry is retained and still waiting for its first refresh.
+/// A granted attempt (`eligible`) is not blocking: leftover W1 must re-retain
+/// if that attempt is cancelled or the head is stale again.
+pub(crate) fn blocking(account: &LocalBusAccountState, key: &str) -> bool {
+    account.head_refresh.inbound.entries.contains_key(key) && !eligible(account, key)
+}
+
 pub(crate) fn entries(
     account: &LocalBusAccountState,
 ) -> impl Iterator<Item = (&String, &GatewayInboxEntry)> {

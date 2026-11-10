@@ -68,6 +68,9 @@ pub(super) fn applied(id: Option<&str>) {
     }
 }
 impl Hook {
+    pub(crate) fn has_entered(&self) -> bool {
+        self.used.load(Ordering::Acquire)
+    }
     pub(crate) fn has_applied(&self) -> bool {
         self.applied.load(Ordering::Acquire)
     }

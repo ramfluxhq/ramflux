@@ -296,40 +296,9 @@ impl AccountRuntime {
                 let _ = reply.send(result);
             }
             AccountWork::ApplyPage { generation, turn, entry, source, backpressure, reply } => {
-                if generation != handle.generation() || reply.is_closed() {
-                    return Ok(false);
-                }
-                let target = entry.entry.target_delivery_id.clone();
-                let active = match ledger_is_active(account, handle.generation(), &target) {
-                    Ok(active) => active,
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                        return Ok(false);
-                    }
-                };
-                if !active {
-                    self.apply_receive_entry(generation, *entry, source, backpressure, reply)
-                        .await?;
-                    return Ok(false);
-                }
-                let turn = match page_turn(account, generation, &target, turn) {
-                    Ok(turn) => turn,
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                        return Ok(false);
-                    }
-                };
-                let current = handle.clone();
-                let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
-                    account,
-                    &turn,
-                    &|| current.generation(),
-                    *entry,
-                    source,
-                    backpressure,
-                ))
-                .await;
-                let _ = reply.send(result);
+                return self
+                    .drive_apply_page(handle, generation, turn, *entry, source, backpressure, reply)
+                    .await;
             }
             AccountWork::SettleRetained { generation, turn, sequence, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
@@ -356,6 +325,100 @@ impl AccountRuntime {
             }
             _ => return Ok(false),
         }
+        Ok(false)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors AccountWork::ApplyPage fields onto the activated W1 driver"
+    )]
+    async fn drive_apply_page(
+        &mut self,
+        handle: &crate::bus::connection_manager::ConnectionHandle,
+        generation: u64,
+        turn: Option<Box<super::super::connection_manager::ReceiveTurn>>,
+        entry: super::super::connection_manager::ReceiveEntry,
+        source: super::super::sync_driver::source::PreparedSource,
+        backpressure: Box<super::super::contact_backpressure::Backpressure>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<super::super::connection_manager::ReceiveApplied, SdkError>,
+        >,
+    ) -> Result<bool, SdkError> {
+        if generation != handle.generation() || reply.is_closed() {
+            return Ok(false);
+        }
+        let Some(account) = self.state.accounts.get_mut(&self.id) else {
+            return Ok(false);
+        };
+        let target = entry.entry.target_delivery_id.clone();
+        let active = match ledger_is_active(account, handle.generation(), &target) {
+            Ok(active) => active,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return Ok(false);
+            }
+        };
+        if !active {
+            self.apply_receive_entry(generation, entry, source, backpressure, reply).await?;
+            return Ok(false);
+        }
+        let turn = match page_turn(account, generation, &target, turn) {
+            Ok(turn) => turn,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return Ok(false);
+            }
+        };
+        let current = handle.clone();
+        #[cfg(test)]
+        let started = {
+            if let Some(handle) = &account.connection {
+                handle.test_record_receive("apply-start", std::time::Duration::ZERO);
+            }
+            std::time::Instant::now()
+        };
+        let result = Box::pin(super::super::push_receiver::apply_w1::apply_page(
+            account,
+            &turn,
+            &|| current.generation(),
+            entry,
+            source,
+            backpressure,
+        ))
+        .await;
+        let result = match result {
+            Ok(applied) => {
+                super::super::push_receiver::apply_w1::replay_projected(account).map(|()| applied)
+            }
+            Err(error) => Err(error),
+        };
+        #[cfg(test)]
+        if result.is_ok()
+            && let Some(handle) = &account.connection
+        {
+            handle.test_record_receive("apply", started.elapsed());
+            handle.test_record_receive("projection", started.elapsed());
+        }
+        if let Some(handle) = &account.connection {
+            handle.wake_couriers();
+        }
+        let request = crate::LocalBusFrame::request(
+            "receive",
+            Some(self.id.clone()),
+            "sync",
+            "sync.run",
+            serde_json::json!({}),
+        );
+        #[cfg(test)]
+        let published = std::time::Instant::now();
+        self.publish(&request).await?;
+        #[cfg(test)]
+        if let Some(handle) =
+            self.state.accounts.get(&self.id).and_then(|account| account.connection.as_ref())
+        {
+            handle.test_record_receive("publish", published.elapsed());
+        }
+        let _ = reply.send(result);
         Ok(false)
     }
 

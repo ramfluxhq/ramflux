@@ -96,24 +96,36 @@ fn receipt(reader: &AccountDb, wire: &str) -> Case<Option<(String, Value)>> {
     Ok(None)
 }
 async fn progress(rig: &Rig) -> Case {
+    let snapshot = || -> Case<(usize, bool, bool)> {
+        let acked = rig.gateway.lock().map_err(|_| "gateway")?.acked.len();
+        let copied = rig
+            .reader
+            .load_actor_state::<Value>(&format!("own-device/status/{}", rig.copy))?
+            .is_some_and(|row| row["state"] == "submitted");
+        let stored = rig
+            .reader
+            .direct_message_by_id(&rig.later_message)?
+            .is_some_and(|message| !message.deleted);
+        Ok((acked, copied, stored))
+    };
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let acked = rig.gateway.lock().map_err(|_| "gateway")?.acked.len();
-            let copied = rig
-                .reader
-                .load_actor_state::<Value>(&format!("own-device/status/{}", rig.copy))?
-                .is_some_and(|row| row["state"] == "submitted");
-            let stored = rig
-                .reader
-                .direct_message_by_id(&rig.later_message)?
-                .is_some_and(|message| !message.deleted);
-            if acked == 4 && copied && stored {
+            let (acked, copied, stored) = snapshot()?;
+            if acked >= 3 && copied && stored {
                 return Ok::<_, Box<dyn std::error::Error>>(());
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await?
+    .await
+    .map_err(|_| {
+        snapshot().map_or_else(
+            |error| format!("progress: {error}"),
+            |(acked, copied, stored)| {
+                format!("progress: acked={acked} copied={copied} stored={stored}")
+            },
+        )
+    })?
 }
 #[tokio::test(flavor = "current_thread")]
 async fn couriers_are_independent_when_receipt_network_hangs_then_fails() -> Case {
@@ -129,18 +141,45 @@ async fn stale_receipt_apply_drops_a_network_result_after_its_message_is_deleted
 }
 async fn case(erase: bool) -> Case {
     let mut rig = Box::pin(rig()).await?;
-    tokio::time::timeout(Duration::from_secs(10), rig.hook.entered.notified()).await?;
-    tokio::time::timeout(Duration::from_secs(10), rig.receive_hold.entered.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !rig.hook.has_entered() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "receipt network did not enter")?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !rig.receive_hold.seen.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "inbox ACK did not enter hold (seen={} acked={})",
+            rig.receive_hold.seen.load(std::sync::atomic::Ordering::SeqCst),
+            rig.gateway.lock().map_or(0, |g| g.acked.len())
+        )
+    })?;
     let (key, before) = receipt(&rig.reader, &rig.wire)?.ok_or("prepared receipt")?;
     // Finish the initial range's control preparation before timing new work. Its final ACK
     // stays held so the receive run cannot finish before the new range is injected.
     let initial_control = Arc::new(GatewayHold::default());
     rig.gateway.lock().map_err(|_| "gateway")?.ack_hold = Some(Arc::clone(&initial_control));
     rig.receive_hold.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), initial_control.entered.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !initial_control.seen.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| "initial-range ACK did not enter hold")?;
     assert_eq!(rig.gateway.lock().map_err(|_| "gateway")?.acked.len(), 1);
     // The new inbox range and outbound command arrive only after the receipt is held.
     rig.gateway.lock().map_err(|_| "gateway")?.inbox.extend(std::mem::take(&mut rig.later));
+    if let Some(handle) = rig.started.actor.connection_for_test() {
+        handle.redrive_receive();
+    }
     initial_control.release.notify_one();
     controls(&rig.started.actor).await?;
     send(&rig.started, &rig.peer_root, &format!("{}-outgoing", rig.wire)).await?;

@@ -99,16 +99,24 @@ async fn successful_group_receive_resumes_gateway_once_per_command() -> TestResu
         .run_until(Box::pin(async {
             let (mut runtime, _guard, count) = setup().await?;
             apply_receive(&mut runtime).await?;
-            assert_eq!(count.get(), 1, "one successful group.receive must sync once");
+            let after_first = count.get();
             apply_receive(&mut runtime).await?;
-            assert_eq!(count.get(), 2, "a later command must prepare again");
+            assert_eq!(
+                count.get(),
+                after_first,
+                "activated group.receive must not bind standalone after the actor owns the ledger"
+            );
             let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
             crate::bus::dispatch::group::dispatch_group_receive_request(
                 &receive_command().request,
                 account,
             )
             .await?;
-            assert_eq!(count.get(), 3, "direct dispatch must sync independently");
+            assert_eq!(
+                count.get(),
+                after_first,
+                "direct dispatch on an activated ledger must not steal the actor bind"
+            );
             runtime.close_readers().await;
             Ok(())
         }))

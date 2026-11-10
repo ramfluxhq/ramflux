@@ -1398,10 +1398,21 @@ pub(crate) async fn dispatch_group_receive_request(
     account: &mut LocalBusAccountState,
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let mut body: LocalBusGroupReceiveRequest = serde_json::from_value(request.body.clone())?;
-    if crate::bus::account_runtime::head_refresh::take_receive_preparation() {
-        account.client.account_db()?.refuse_legacy_receive()?;
-    } else {
-        super::super::sync_driver::run(account).await?;
+    let activated = crate::bus::push_receiver::apply_w1::account_is_active(account)?;
+    match crate::bus::account_runtime::head_refresh::take_receive_preparation() {
+        Some(true) => {
+            if !activated {
+                account.client.account_db()?.refuse_legacy_receive()?;
+            }
+        }
+        Some(false) => {
+            super::super::sync_driver::run(account).await?;
+        }
+        None => {
+            if !crate::bus::push_receiver::apply_w1::receive_executor_bound(account)? {
+                super::super::sync_driver::run(account).await?;
+            }
+        }
     }
     if !crate::bus::couriers::head_refresh::inbound::blocked_roots(account, &body.group_id)?
         .is_empty()

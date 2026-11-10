@@ -129,6 +129,12 @@ impl LedgerExecutor {
         &self.account
     }
 
+    /// True while actor or standalone already holds this account's exclusive bind.
+    #[must_use]
+    pub(crate) fn is_bound(account: &str) -> bool {
+        lock_registry().contains_key(account)
+    }
+
     /// W2 cover inside the caller's open receive transaction.
     ///
     /// # Errors

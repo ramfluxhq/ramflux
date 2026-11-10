@@ -17,8 +17,11 @@ tokio::task_local! {
     pub(super) static RECEIVE_PREPARED: Cell<bool>;
 }
 
-pub(crate) fn take_receive_preparation() -> bool {
-    RECEIVE_PREPARED.try_with(|prepared| prepared.replace(false)).unwrap_or(false)
+/// `None` outside an actor command (direct dispatch). `Some(true)` means prepare
+/// already ran receive; `Some(false)` means a refresh cleared that and dispatch
+/// must replay under the actor bind.
+pub(crate) fn take_receive_preparation() -> Option<bool> {
+    RECEIVE_PREPARED.try_with(|prepared| prepared.replace(false)).ok()
 }
 
 /// Test fixture: the account actor sets this after a successful `group.receive` prepare.
@@ -101,10 +104,17 @@ impl AccountRuntime {
             // durable hold/retry before advancing its cursor and acknowledging.
             // Redelivery uses the admission key/receipt to avoid a second apply;
             // an unfinished pass never grants reusable preparation.
-            tokio::time::timeout_at(deadline, crate::bus::sync_driver::run(account))
-                .await
-                .map_err(|_| pending(account))??;
-            receive_prepared = true;
+            // The actor bind owns receive after start_connection. Standalone run
+            // would return AccountWriterBusy. Unbound tests still Resume here.
+            if !crate::bus::push_receiver::apply_w1::receive_executor_bound(account)? {
+                tokio::time::timeout_at(deadline, crate::bus::sync_driver::run(account))
+                    .await
+                    .map_err(|_| pending(account))??;
+            }
+            // A held retry must be replayed after refresh. `run` may persist-without-cover
+            // while the head is still stale; claiming preparation would skip dispatch.
+            receive_prepared =
+                account.client.account_db()?.due_inbox_retry_rows(i64::MAX)?.is_empty();
         }
         loop {
             let Some(account) = self.state.accounts.get_mut(&self.id) else {

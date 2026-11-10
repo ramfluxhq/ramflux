@@ -80,6 +80,7 @@ impl Gateway {
 pub(super) struct GatewayHold {
     pub entered: tokio::sync::Notify,
     pub release: tokio::sync::Notify,
+    pub seen: std::sync::atomic::AtomicBool,
 }
 pub(super) type AckHold = GatewayHold;
 
@@ -310,6 +311,12 @@ async fn serve(
         let response = if let Some(path) = value["path"].as_str() {
             public_lookup(path, shared).await?
         } else if value["frame_type"].as_str() == Some("ack_batch") {
+            let hold = { shared.lock().map_err(|_| "gateway")?.ack_hold.take() };
+            if let Some(hold) = hold {
+                hold.seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                hold.entered.notify_one();
+                hold.release.notified().await;
+            }
             ack_batch_response(shared, &value)?
         } else if value["frame_type"].as_str() == Some("resume")
             && value.get("incarnation_id").is_some()
@@ -419,6 +426,7 @@ async fn serve(
                 GatewayClientFrame::Ack { ack } => {
                     let hold = { shared.lock().map_err(|_| "gateway")?.ack_hold.take() };
                     if let Some(hold) = hold {
+                        hold.seen.store(true, std::sync::atomic::Ordering::SeqCst);
                         hold.entered.notify_one();
                         hold.release.notified().await;
                     }
@@ -448,6 +456,7 @@ async fn serve(
 
 async fn wait_at(hold: Option<Arc<GatewayHold>>) {
     if let Some(hold) = hold {
+        hold.seen.store(true, std::sync::atomic::Ordering::SeqCst);
         hold.entered.notify_one();
         hold.release.notified().await;
     }
