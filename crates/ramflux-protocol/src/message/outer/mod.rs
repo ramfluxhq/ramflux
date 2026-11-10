@@ -472,18 +472,19 @@ pub fn refuse_live_bridge(envelope: &crate::Envelope) -> Result<(), OuterProfile
     Ok(())
 }
 
-/// Refuse named `delivery_mode` / `collapse_tag` while the v1 profile is off.
+/// Refuse any named candidate-profile field while the v1 profile is off.
 ///
 /// # Errors
-/// [`OuterProfileError::NamedFieldsWhileGateOff`] when either field is present
-/// and [`schema_v1_live`] is false.
+/// [`OuterProfileError::NamedFieldsWhileGateOff`] when
+/// [`crate::Envelope::candidate_fields_present`] is true and [`schema_v1_live`]
+/// is false.
 pub fn refuse_named_fields_while_gate_off(
     envelope: &crate::Envelope,
 ) -> Result<(), OuterProfileError> {
     if schema_v1_live() {
         return Ok(());
     }
-    if envelope.delivery_mode.is_some() || envelope.collapse_tag.is_some() {
+    if envelope.candidate_fields_present() {
         return Err(OuterProfileError::NamedFieldsWhileGateOff);
     }
     Ok(())

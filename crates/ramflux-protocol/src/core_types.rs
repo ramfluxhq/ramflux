@@ -71,6 +71,16 @@ impl Envelope {
     pub fn delivery_mode_bridge(&self) -> Option<&Value> {
         self.ext.ext.get(crate::ephemeral::DELIVERY_MODE_EXTENSION)
     }
+
+    /// True when any candidate-profile field is present on the live envelope.
+    ///
+    /// Gate-off refusal uses this helper at every ingress. A new candidate-only
+    /// `Option` field on [`Envelope`] (doc comment containing `Candidate`) must
+    /// be listed here; `candidate_only_fields_are_enumerated` fails otherwise.
+    #[must_use]
+    pub fn candidate_fields_present(&self) -> bool {
+        self.delivery_mode.is_some() || self.collapse_tag.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

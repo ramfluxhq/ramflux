@@ -382,6 +382,30 @@ fn row_not_local() -> TestResult {
     Ok(())
 }
 
+fn row_gate_off_named_candidate_field_is_refused() -> TestResult {
+    anyhow::ensure!(!ramflux_protocol::schema_profile::schema_v1_live());
+    let (router, path) = fresh("p06b-gate-off-named")?;
+    establish_capable(&router, TARGET)?;
+    let mut envelope = signed_ephemeral("named", TARGET)?;
+    envelope.delivery_mode = Some("durable".into());
+    envelope.collapse_tag = Some("junk".into());
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_seed(&envelope, sign_seed())?;
+    match ramflux_node_core::check_entry_bound(&envelope) {
+        Err(ramflux_node_core::NodeCoreError::DeliveryModeRefused) => {}
+        other => anyhow::bail!("node entry exact DeliveryModeRefused, got {other:?}"),
+    }
+    let expires = computed_expires(&envelope, now_ms())?;
+    let exact = router.state().route_ephemeral(&envelope, expires, now_ms());
+    assert_eq!(exact, EphemeralRouteResult::Dropped(EphemeralDropReason::Invalid));
+    let response = observe_post(&router, &path, TARGET, &request_body(&envelope, expires)?)?;
+    assert_eq!(response, EphemeralRouteResponse::Dropped { reason: EphemeralDropReason::Invalid });
+    assert_no_dispatch(&router, TARGET, &response);
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
 fn row_decode_invalid() -> TestResult {
     let (router, path) = fresh("p06-decode")?;
     establish_capable(&router, TARGET)?;
@@ -428,6 +452,7 @@ fn ephemeral_route_read_only() -> TestResult {
     row_no_map_entry()?;
     row_map_ne_descriptor()?;
     row_not_local()?;
+    row_gate_off_named_candidate_field_is_refused()?;
     row_decode_invalid()?;
     Ok(())
 }

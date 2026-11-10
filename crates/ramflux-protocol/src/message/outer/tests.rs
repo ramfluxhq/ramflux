@@ -610,6 +610,72 @@ fn compact_sidecar_requires_ciphertext_object() {
     assert_eq!(decode_candidate_sidecar(&absent), Ok(()));
 }
 
+fn candidate_field_names_from_envelope_source(src: &str) -> Vec<String> {
+    let Some(start) = src.find("pub struct Envelope {") else {
+        return Vec::new();
+    };
+    let Some((body, _)) = src[start..].split_once("\n}") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut pending_candidate = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("///") && trimmed.contains("Candidate") {
+            pending_candidate = true;
+            continue;
+        }
+        if trimmed.starts_with("///") || trimmed.starts_with("#[") {
+            continue;
+        }
+        if pending_candidate {
+            if let Some(rest) = trimmed.strip_prefix("pub ") {
+                let name = rest.split(':').next().unwrap_or("").trim();
+                if !name.is_empty() {
+                    names.push(name.to_owned());
+                }
+            }
+            pending_candidate = false;
+        }
+    }
+    names
+}
+
+fn helper_covers_candidate_fields(src: &str, names: &[String]) -> bool {
+    let Some(helper) = src.split("fn candidate_fields_present").nth(1) else {
+        return false;
+    };
+    let Some(helper) = helper.split("\n    }").next() else {
+        return false;
+    };
+    names.iter().all(|name| helper.contains(&format!("self.{name}.is_some()")))
+}
+
+#[test]
+fn candidate_only_fields_are_enumerated() {
+    let src = include_str!("../../core_types.rs");
+    let names = candidate_field_names_from_envelope_source(src);
+    assert_eq!(names, vec!["delivery_mode".to_owned(), "collapse_tag".to_owned()]);
+    assert!(helper_covers_candidate_fields(src, &names));
+    assert!(!schema_v1_live());
+    let mut envelope = live_envelope(None);
+    assert!(!envelope.candidate_fields_present());
+    assert_eq!(refuse_named_fields_while_gate_off(&envelope), Ok(()));
+    envelope.delivery_mode = Some("durable".to_owned());
+    assert!(envelope.candidate_fields_present());
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
+    envelope.delivery_mode = None;
+    envelope.collapse_tag = Some(collapse_tag());
+    assert!(envelope.candidate_fields_present());
+    assert_eq!(
+        refuse_named_fields_while_gate_off(&envelope),
+        Err(OuterProfileError::NamedFieldsWhileGateOff)
+    );
+}
+
 #[test]
 fn gate_off_refuses_named_delivery_mode_and_collapse_tag() {
     assert!(!schema_v1_live());

@@ -409,15 +409,19 @@ fn exact_config(
     }
 }
 
-const NAMED_FIELDS_GATE_OFF: &str =
-    "named delivery_mode and collapse_tag are refused while schema v1 is off";
+fn exact_mode_refused(result: Result<(), NodeCoreError>) -> Result<(), Box<dyn std::error::Error>> {
+    match result {
+        Err(NodeCoreError::DeliveryModeRefused) => Ok(()),
+        other => Err(format!("exact DeliveryModeRefused, got {other:?}").into()),
+    }
+}
 
 #[test]
 fn gate_off_named_delivery_mode_is_refused_at_entry() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!ramflux_protocol::schema_profile::schema_v1_live());
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.delivery_mode = Some("ephemeral".into());
-    exact_config(check_entry_bound(&envelope), NAMED_FIELDS_GATE_OFF)
+    exact_mode_refused(check_entry_bound(&envelope))
 }
 
 #[test]
@@ -425,7 +429,7 @@ fn gate_off_named_collapse_tag_is_refused_at_entry() -> Result<(), Box<dyn std::
     assert!(!ramflux_protocol::schema_profile::schema_v1_live());
     let mut envelope = nested_sdk_envelope(&[7_u8; 32])?;
     envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 32]));
-    exact_config(check_entry_bound(&envelope), NAMED_FIELDS_GATE_OFF)
+    exact_mode_refused(check_entry_bound(&envelope))
 }
 
 #[test]
@@ -438,7 +442,7 @@ fn gate_off_named_field_conflicting_with_ext_bridge_is_refused()
         ramflux_protocol::ephemeral::DELIVERY_MODE_EXTENSION.to_owned(),
         serde_json::json!("ephemeral"),
     );
-    exact_config(check_entry_bound(&envelope), NAMED_FIELDS_GATE_OFF)
+    exact_mode_refused(check_entry_bound(&envelope))
 }
 
 #[test]
@@ -446,7 +450,7 @@ fn candidate_entry_refuses_missing_delivery_mode() -> Result<(), Box<dyn std::er
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.delivery_mode = None;
-    exact_config(check_entry_bound(&envelope), "delivery_mode is required")
+    exact_mode_refused(check_entry_bound(&envelope))
 }
 
 #[test]
@@ -454,7 +458,7 @@ fn candidate_entry_refuses_unknown_delivery_mode() -> Result<(), Box<dyn std::er
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.delivery_mode = Some("bogus".into());
-    exact_config(check_entry_bound(&envelope), "new profile rejects unknown delivery_mode")
+    exact_mode_refused(check_entry_bound(&envelope))
 }
 
 #[test]
@@ -462,7 +466,7 @@ fn candidate_entry_refuses_31_byte_collapse_tag() -> Result<(), Box<dyn std::err
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let mut envelope = compact_250kb_envelope()?;
     envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x00_u8; 31]));
-    exact_config(check_entry_bound(&envelope), "collapse_tag must be 32 bytes")
+    exact_mode_refused(check_entry_bound(&envelope))
 }
 
 #[test]

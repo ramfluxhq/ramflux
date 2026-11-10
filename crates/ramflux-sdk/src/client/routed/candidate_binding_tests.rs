@@ -289,7 +289,7 @@ fn established_pair_resigned_mode_mismatch_fails_aead_and_original_still_opens()
     )?;
     let second = seal(&a, &b, message("candidate-bind-2", "c"), b"second-body")?;
     let before = receiver_pair_snapshot(&b, &a)?;
-    assert!(!before.is_empty());
+    assert_ne!(before.len(), 0);
     let mut changed = second.clone();
     changed.envelope.delivery_mode = Some("ephemeral".into());
     resign(&a, &mut changed.envelope)?;

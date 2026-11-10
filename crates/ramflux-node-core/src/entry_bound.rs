@@ -72,11 +72,11 @@ pub fn check_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), No
 fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<(), NodeCoreError> {
     ramflux_protocol::message::outer::refuse_live_bridge(envelope).map_err(map_outer_profile)?;
     ramflux_protocol::message::outer::parse_live_named_delivery_mode(envelope)
-        .map_err(map_named_field)?;
+        .map_err(map_outer_profile)?;
     let tag = ramflux_protocol::message::outer::live_collapse_tag_bytes(envelope)
-        .map_err(map_named_field)?;
+        .map_err(map_outer_profile)?;
     if tag.len() != 32 {
-        return Err(map_named_field(
+        return Err(map_outer_profile(
             ramflux_protocol::message::outer::OuterProfileError::CollapseTag,
         ));
     }
@@ -92,10 +92,6 @@ fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<
     ramflux_protocol::message::outer::check_ingress_caps(sizes).map_err(map_outer_profile)
 }
 
-fn map_named_field(error: ramflux_protocol::message::outer::OuterProfileError) -> NodeCoreError {
-    NodeCoreError::InvalidConfiguration(error.to_string())
-}
-
 fn map_outer_profile(error: ramflux_protocol::message::outer::OuterProfileError) -> NodeCoreError {
     use ramflux_protocol::message::outer::OuterProfileError;
     match error {
@@ -103,7 +99,9 @@ fn map_outer_profile(error: ramflux_protocol::message::outer::OuterProfileError)
         OuterProfileError::Bridge
         | OuterProfileError::DualField
         | OuterProfileError::UnknownMode
-        | OuterProfileError::MissingMode => NodeCoreError::DeliveryModeRefused,
+        | OuterProfileError::MissingMode
+        | OuterProfileError::NamedFieldsWhileGateOff
+        | OuterProfileError::CollapseTag => NodeCoreError::DeliveryModeRefused,
         _ => NodeCoreError::InvalidConfiguration(error.to_string()),
     }
 }

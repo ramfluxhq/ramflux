@@ -21,6 +21,7 @@ impl RouterCore {
         now: u64,
         lease_seconds: u64,
     ) -> Result<RouterForwardPreparation, NodeCoreError> {
+        crate::check_entry_bound(&envelope)?;
         ramflux_protocol::ephemeral::require_durable(&envelope)?;
         let Some(head) = store.migration_forward_window(&envelope.target_delivery_id, now)? else {
             return closed_preparation(self, store, &envelope, now);
