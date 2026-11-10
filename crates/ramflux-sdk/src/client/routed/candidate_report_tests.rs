@@ -4,7 +4,9 @@
 use super::*;
 use crate::client::inbox_failure::deterministic;
 use ramflux_crypto::CryptoError;
-use ramflux_protocol::message::outer::{CandidateDeliveryClass, candidate_report_a0_from_envelope};
+use ramflux_protocol::message::outer::{
+    CandidateDeliveryClass, candidate_report_a0_from_envelope, encode_candidate_report_a0,
+};
 
 struct OmitDirectReport;
 impl Drop for OmitDirectReport {
@@ -413,7 +415,13 @@ async fn gate_on_compact_rewrap_body_builds_and_opens() -> Result<(), SdkError> 
     message.encrypted_body = compact;
     message.created_at = entry.envelope.created_at;
     message.ttl = entry.envelope.ttl;
-    let envelope = gateway_direct_message_envelope(&a.config()?, &message, None)?;
+    let committed = encode_candidate_report_a0(
+        &candidate_report_a0_from_envelope(&entry.envelope)
+            .map_err(|error| invalid(&error.to_string()))?,
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    let envelope =
+        gateway_direct_message_envelope_sealed(&a.config()?, &message, None, Some(&committed))?;
     let nested = decode(&envelope)?;
     assert!(nested.collapse_tag.is_some());
     assert!(nested.report_commitment.is_some());
@@ -467,7 +475,7 @@ async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
     }
 }
 
-fn producer_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
+fn helper_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = pair(alice, bob)?;
     let (mut message, sealed) =
@@ -481,18 +489,81 @@ fn producer_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn task_transport_producer_a0_drift_is_a_send_error() -> Result<(), SdkError> {
-    producer_a0_drift(181, 182, "report-task-a0-drift")
+async fn helper_a0_drift_task_transport() -> Result<(), SdkError> {
+    helper_a0_drift(181, 182, "report-task-a0-drift")
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn group_producer_a0_drift_is_a_send_error() -> Result<(), SdkError> {
-    producer_a0_drift(183, 184, "report-group-a0-drift")
+async fn helper_a0_drift_group() -> Result<(), SdkError> {
+    helper_a0_drift(183, 184, "report-group-a0-drift")
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn outbox_producer_a0_drift_is_a_send_error() -> Result<(), SdkError> {
-    producer_a0_drift(185, 186, "report-outbox-a0-drift")
+async fn helper_a0_drift_outbox() -> Result<(), SdkError> {
+    helper_a0_drift(185, 186, "report-outbox-a0-drift")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn none_wrapper_refuses_direct_payload() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = pair(187, 188)?;
+    let (mut message, sealed) = super::seal_nested(
+        &a,
+        &b,
+        message("report-wrapper-direct", "c"),
+        b"direct",
+        Route::direct(),
+    )?;
+    message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
+    match gateway_direct_message_envelope(&a.config()?, &message, None) {
+        Err(SdkError::InboundRejected(text))
+            if text.contains("direct payload requires committed a0") =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(invalid(&format!("exact wrapper guard, got {error}"))),
+        Ok(_) => Err(invalid("exact wrapper guard, got Ok")),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_transport_prepared_a0_drift_is_a_send_error() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (mut a, b) = pair(189, 190)?;
+    if a.client
+        .account_db()?
+        .client_record("device", &b.client.local_device_reference(&b.id)?)?
+        .is_none()
+    {
+        super::review::trust(&a, &b)?;
+    }
+    let identity = b.client.owned_device_identity()?;
+    let bundle = b.client.load_x3dh_private_state(&b.client.local_device_identity(&b.id)?)?.bundle;
+    let engine = GatewaySessionEngine::with_test_transport(a.config()?, Box::new(NoNetwork));
+    let account = LocalBusAccountState::new(std::mem::take(&mut a.client), engine, a.id.clone());
+    let target = crate::bus::dispatch::task_transport::Target {
+        device: b.id.clone(),
+        identity,
+        delivery: b.id.clone(),
+        federation: None,
+        own: false,
+    };
+    let mut draft = crate::bus::dispatch::task_transport::prepared::Draft::new(
+        &account,
+        target,
+        "c",
+        b"prepared-drift",
+        Route::direct(),
+    )?;
+    draft.drift_ttl = true;
+    match draft.seal(
+        &account,
+        crate::client::routed::SendMaterial { manifest: None, bundle: Some(bundle) },
+    ) {
+        Err(SdkError::InboundRejected(text)) if text.contains("report a0 drifted") => Ok(()),
+        Err(error) => Err(invalid(&format!("exact prepared a0 drift, got {error}"))),
+        Ok(_) => Err(invalid("exact prepared a0 drift, got Ok")),
+    }
 }
 
 #[test]

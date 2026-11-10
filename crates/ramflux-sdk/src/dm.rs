@@ -487,13 +487,23 @@ fn wire_payload(encrypted_body: &[u8]) -> Result<String, SdkError> {
     })
 }
 
-/// Already-encrypted / no-seal paths. Direct seal sites use `gateway_envelope_from_sealed`.
+/// Already-encrypted / no-seal paths. Direct report payloads must use
+/// `gateway_envelope_from_sealed` so committed A0 is drift-checked.
 pub(crate) fn gateway_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    refuse_direct_payload_without_committed_a0(&message.encrypted_body)?;
     gateway_direct_message_envelope_sealed(config, message, franking, None)
+}
+
+fn refuse_direct_payload_without_committed_a0(body: &[u8]) -> Result<(), SdkError> {
+    let (tag, commitment) = nested_report_fields(body)?;
+    if tag.is_some() || commitment.is_some() {
+        return Err(SdkError::InboundRejected("direct payload requires committed a0".into()));
+    }
+    Ok(())
 }
 
 pub(crate) fn gateway_envelope_from_sealed(

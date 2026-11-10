@@ -75,7 +75,7 @@ pub(super) async fn forced_preparation(
 }
 
 #[derive(Clone)]
-pub(in crate::bus) struct Target {
+pub(crate) struct Target {
     pub device: String,
     pub identity: ramflux_crypto::RootQualifiedDeviceRef,
     pub delivery: String,
@@ -807,4 +807,4 @@ pub(in crate::bus) fn manifest_test_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-pub(in crate::bus) mod prepared;
+pub(crate) mod prepared;

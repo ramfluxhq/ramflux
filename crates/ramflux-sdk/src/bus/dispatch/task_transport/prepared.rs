@@ -9,16 +9,18 @@ use crate::client::task::carrier::Carrier;
 use crate::prelude::*;
 use serde_json::Value;
 
-pub(in crate::bus) struct Draft {
+pub(crate) struct Draft {
     pub target: Target,
     pub request: SendMaterialRequest,
     config: GatewaySessionConfig,
     message: GatewayDirectMessage,
     route: crate::client::routed::Route,
     body: zeroize::Zeroizing<Vec<u8>>,
+    #[cfg(test)]
+    pub(crate) drift_ttl: bool,
 }
 impl Draft {
-    pub(in crate::bus) fn new(
+    pub(crate) fn new(
         account: &LocalBusAccountState,
         target: Target,
         conversation: &str,
@@ -49,9 +51,11 @@ impl Draft {
             message,
             route,
             body: zeroize::Zeroizing::new(body.to_vec()),
+            #[cfg(test)]
+            drift_ttl: false,
         })
     }
-    pub(in crate::bus) fn seal(
+    pub(crate) fn seal(
         mut self,
         account: &LocalBusAccountState,
         material: SendMaterial,
@@ -63,6 +67,10 @@ impl Draft {
             self.route,
             material,
         )?;
+        #[cfg(test)]
+        if self.drift_ttl {
+            self.message.ttl = self.message.ttl.saturating_add(1);
+        }
         crate::dm::gateway_envelope_from_sealed(&self.config, &mut self.message, sealed, None)
     }
 }
