@@ -55,8 +55,11 @@ fn start_gateway_tls_probe(
     stream.flush()?;
     stream.get_ref().set_read_timeout(Some(Duration::from_millis(25)))?;
     Ok(std::thread::spawn(move || {
+        wait_for_gateway_shutdown_start(
+            &shutdown_started,
+            Instant::now() + Duration::from_secs(10),
+        )?;
         let deadline = Instant::now() + Duration::from_secs(10);
-        wait_for_gateway_shutdown_start(&shutdown_started, deadline)?;
         read_gateway_response_to_close(&mut stream, deadline)?;
         connection_closed.store(true, Ordering::SeqCst);
         Ok(())

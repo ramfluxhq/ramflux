@@ -61,7 +61,7 @@ fn configured_shutdown_with_probes(
     assert_clean_reopen(&fixture.database)?;
     let modes: &[&str] =
         if matches!(service, "ramflux-router" | "ramflux-retention" | "ramflux-federation") {
-            &["pooled", "handshake", "raw"]
+            &["pooled", "handshake", "raw", "probe"]
         } else {
             &["probe"]
         };
@@ -341,12 +341,14 @@ fn run_case(
         service,
         mode,
         shutdown_bound(service)?,
-        (service == "ramflux-gateway" && mode == "probe").then_some(&shutdown_started),
+        (mode == "probe").then_some(&shutdown_started),
     )?;
-    let gateway_connection_closed_at_exit = (service == "ramflux-gateway" && mode == "probe")
-        .then(|| probe_closed.load(Ordering::SeqCst));
     wait_for_request_peer(peer.as_mut(), mode)?;
-    finish_shutdown_probe(probe, gateway_connection_closed_at_exit)?;
+    finish_shutdown_probe(
+        probe,
+        probe_closed.as_ref(),
+        service == "ramflux-gateway" && mode == "probe",
+    )?;
     let mut logs = log_reader.thread.join().map_err(|_| "stdout reader panicked")?;
     if let Some(mut stderr) = child.0.stderr.take() {
         stderr.read_to_string(&mut logs)?;
@@ -400,22 +402,22 @@ fn start_configured_probe(
         Ok(Some(start_request_probe(
             &fixture.probe_addr,
             fixture.probe_udp,
-            false,
             Arc::clone(shutdown_started),
+            shutdown_bound(service)?,
         )?))
     }
 }
 
 fn finish_shutdown_probe(
     probe: Option<ShutdownProbe>,
-    gateway_connection_closed_at_exit: Option<bool>,
+    probe_closed: &AtomicBool,
+    require_closed_at_exit: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let probe_result = probe.map(|probe| probe.join().map_err(|_| "request probe panicked"));
-    if gateway_connection_closed_at_exit == Some(false) {
-        return Err("gateway TLS connection remained open when the process exited".into());
+    if let Some(probe) = probe {
+        probe.join().map_err(|_| "request probe panicked")??;
     }
-    if let Some(result) = probe_result {
-        result??;
+    if require_closed_at_exit && !probe_closed.load(Ordering::SeqCst) {
+        return Err("gateway TLS connection remained open when the process exited".into());
     }
     Ok(())
 }
@@ -484,17 +486,34 @@ fn wait_for_ready(
 fn start_request_probe(
     addr: &str,
     udp: bool,
-    wait_for_drain: bool,
-    shutdown_complete: Arc<AtomicBool>,
+    shutdown_started: Arc<AtomicBool>,
+    close_bound: Duration,
 ) -> Result<std::thread::JoinHandle<Result<(), std::io::Error>>, std::io::Error> {
     if udp {
-        let socket = UdpSocket::bind("127.0.0.1:0")?;
-        socket.connect(addr)?;
-        return Ok(std::thread::spawn(move || {
-            let _ = socket.send(b"shutdown-race")?;
-            Ok(())
-        }));
+        return start_udp_close_probe(addr, shutdown_started, close_bound);
     }
+    start_tcp_http_close_probe(addr, shutdown_started, close_bound)
+}
+
+fn start_udp_close_probe(
+    addr: &str,
+    shutdown_started: Arc<AtomicBool>,
+    close_bound: Duration,
+) -> Result<std::thread::JoinHandle<Result<(), std::io::Error>>, std::io::Error> {
+    let socket = UdpSocket::bind("127.0.0.1:0")?;
+    socket.connect(addr)?;
+    socket.send(b"shutdown-race")?;
+    Ok(std::thread::spawn(move || {
+        wait_for_probe_shutdown_start(&shutdown_started)?;
+        read_udp_probe_to_close(&socket, close_bound)
+    }))
+}
+
+fn start_tcp_http_close_probe(
+    addr: &str,
+    shutdown_started: Arc<AtomicBool>,
+    close_bound: Duration,
+) -> Result<std::thread::JoinHandle<Result<(), std::io::Error>>, std::io::Error> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut stream = loop {
         match TcpStream::connect(addr) {
@@ -508,62 +527,145 @@ fn start_request_probe(
     };
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;
     stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n")?;
-    if wait_for_drain {
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let admitted = Instant::now() + Duration::from_millis(80);
+    while Instant::now() < admitted {
+        std::thread::sleep(Duration::from_millis(10));
     }
     Ok(std::thread::spawn(move || {
-        if wait_for_drain {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !shutdown_complete.load(Ordering::SeqCst) {
-                assert!(
-                    Instant::now() < deadline,
-                    "gateway shutdown-complete signal exceeded 10-second hang guard"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-
-            let close_deadline = Instant::now() + Duration::from_secs(10);
-            let mut chunk = [0; 1024];
-            let mut response = Vec::new();
-            loop {
-                let remaining = close_deadline.saturating_duration_since(Instant::now());
-                assert!(
-                    !remaining.is_zero(),
-                    "gateway socket did not close within the 10-second hang guard"
-                );
-                stream.set_read_timeout(Some(remaining))?;
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                        ) =>
-                    {
-                        assert!(
-                            Instant::now() < close_deadline,
-                            "gateway socket did not close within the 10-second hang guard"
-                        );
-                    }
-                    Ok(read) => response.extend_from_slice(&chunk[..read]),
-                    Err(error) => return Err(error),
-                }
-            }
-            if !response.is_empty() && !is_well_formed_http_error_response(&response) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "probe received neither EOF/reset nor a well-formed HTTP error response: {response:?}"
-                    ),
-                ));
-            }
-        }
-        Ok(())
+        wait_for_probe_shutdown_start(&shutdown_started)?;
+        read_http_probe_to_close(&mut stream, close_bound)
     }))
 }
 
-pub fn is_well_formed_http_error_response(response: &[u8]) -> bool {
+fn wait_for_probe_shutdown_start(shutdown_started: &AtomicBool) -> Result<(), std::io::Error> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !shutdown_started.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "shutdown signal exceeded 10-second hang guard",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn read_http_probe_to_close(
+    stream: &mut TcpStream,
+    close_bound: Duration,
+) -> Result<(), std::io::Error> {
+    let deadline = Instant::now() + close_bound;
+    let mut chunk = [0; 1024];
+    let mut response = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "socket did not close within the shutdown hang guard",
+            ));
+        }
+        stream.set_read_timeout(Some(remaining))?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => response.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    reject_malformed_http_close(&response)
+}
+
+fn read_udp_probe_to_close(
+    socket: &UdpSocket,
+    close_bound: Duration,
+) -> Result<(), std::io::Error> {
+    let deadline = Instant::now() + close_bound;
+    let mut chunk = [0; 1024];
+    let mut response = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        socket.set_read_timeout(Some(remaining))?;
+        match socket.recv(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => response.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    reject_malformed_http_close(&response)
+}
+
+fn reject_malformed_http_close(response: &[u8]) -> Result<(), std::io::Error> {
+    if response.is_empty()
+        || is_well_formed_http_error_response(response)
+        || is_well_formed_tls_alert(response)
+    {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "probe received neither EOF/reset nor a well-formed HTTP error response: {response:?}"
+        ),
+    ))
+}
+
+fn is_well_formed_tls_alert(response: &[u8]) -> bool {
+    if response.is_empty() {
+        return false;
+    }
+    let mut rest = response;
+    while !rest.is_empty() {
+        if rest.len() < 7 || rest[0] != 0x15 || rest[1] != 0x03 || !matches!(rest[2], 0x01..=0x03) {
+            return false;
+        }
+        let len = u16::from_be_bytes([rest[3], rest[4]]) as usize;
+        if len != 2 || rest.len() < 5 + len {
+            return false;
+        }
+        if !matches!(rest[5], 1 | 2) {
+            return false;
+        }
+        rest = &rest[5 + len..];
+    }
+    true
+}
+
+fn is_well_formed_http_error_response(response: &[u8]) -> bool {
     let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
         return false;
     };
