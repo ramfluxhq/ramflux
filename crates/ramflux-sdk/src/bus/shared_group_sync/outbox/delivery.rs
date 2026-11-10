@@ -185,12 +185,17 @@ async fn deliver_one(
     } else {
         client.seal_routed_as(engine, &message, &bytes, route).await?
     };
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
+    // GroupControl has no Direct report payload; into_parts still carries committed_a0 (None).
     intent.active = Some(StagedEnvelope {
         federation,
         root: root.into(),
         device: device.device_id.clone(),
-        envelope: crate::dm::gateway_direct_message_envelope(engine.config(), &message, None)?,
+        envelope: crate::dm::gateway_envelope_from_sealed(
+            engine.config(),
+            &mut message,
+            sealed,
+            None,
+        )?,
     });
     // Persist each sealed attempt before submit; application-level state replay is harmless.
     persist_intent(client, intent)?;

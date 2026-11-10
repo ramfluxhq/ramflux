@@ -78,7 +78,7 @@ pub(crate) async fn request_entry(
             bundle: Some(device.prekey_bundle.clone()),
         },
     )?;
-    packet.schema = super::ENVELOPE_SCHEMA.into();
+    packet.packet.schema = super::ENVELOPE_SCHEMA.into();
     message.encrypted_body = serde_json::to_vec(&packet)?;
     Ok(GatewayInboxEntry {
         forwarded: false,

@@ -137,7 +137,8 @@ impl RamfluxClient {
         let sealed =
             self.seal_routed_as(engine, &draft.message, &draft.body, Route::control()).await?;
         if self.pair_control_draft_current(&draft)? {
-            let envelope = self.finish_pair_control_draft(engine.config(), draft, &sealed)?;
+            let envelope =
+                self.finish_pair_control_draft(engine.config(), draft, &sealed.packet)?;
             if let Err(refusal) = engine.submit_classified(envelope).await? {
                 return Err(self.pair_control_refused(
                     &local,

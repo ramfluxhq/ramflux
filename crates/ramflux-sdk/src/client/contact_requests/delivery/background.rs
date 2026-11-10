@@ -539,10 +539,10 @@ fn seal(
         material,
     )?;
     if plan.plan.intent.kind == Decision::Request {
-        sealed.schema = ENVELOPE_SCHEMA.into();
+        sealed.packet.schema = ENVELOPE_SCHEMA.into();
     }
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    crate::dm::gateway_direct_message_envelope(&plan.plan.config, &message, None).map(Some)
+    // Control carrier; no Direct report payload.
+    crate::dm::gateway_envelope_from_sealed(&plan.plan.config, &mut message, sealed, None).map(Some)
 }
 fn complete(
     account: &LocalBusAccountState,

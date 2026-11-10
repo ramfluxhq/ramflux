@@ -46,7 +46,7 @@ pub(super) fn carrier(
             bundle,
         },
     )?;
-    packet.schema = crate::client::contact_requests::ENVELOPE_SCHEMA.into();
+    packet.packet.schema = crate::client::contact_requests::ENVELOPE_SCHEMA.into();
     message.encrypted_body = serde_json::to_vec(&packet)?;
     Ok(GatewayInboxEntry {
         forwarded: false,

@@ -156,10 +156,10 @@ pub(super) async fn submit_pair_control(
 ) -> Result<(), SdkError> {
     let mut route = crate::client::routed::Route::control();
     route.group_id = group.map(str::to_owned);
-    let packet = client.seal_routed_as(engine, &message, body, route).await?;
-    message.encrypted_body = serde_json::to_vec(&packet)?;
+    let sealed = client.seal_routed_as(engine, &message, body, route).await?;
+    // Pair control has no Direct report payload; into_parts still carries committed_a0 (None).
     engine
-        .submit_envelope(gateway_direct_message_envelope(engine.config(), &message, None)?)
+        .submit_envelope(gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?)
         .await?;
     Ok(())
 }

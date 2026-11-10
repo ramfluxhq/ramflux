@@ -487,12 +487,24 @@ fn wire_payload(encrypted_body: &[u8]) -> Result<String, SdkError> {
     })
 }
 
+/// Already-encrypted / no-seal paths. Direct seal sites use `gateway_envelope_from_sealed`.
 pub(crate) fn gateway_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     gateway_direct_message_envelope_sealed(config, message, franking, None)
+}
+
+pub(crate) fn gateway_envelope_from_sealed(
+    config: &GatewaySessionConfig,
+    message: &mut GatewayDirectMessage,
+    sealed: crate::client::routed::SealedRouted,
+    franking: Option<&SdkDmFrankingMetadata>,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    let (packet, committed_a0) = sealed.into_parts();
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    gateway_direct_message_envelope_sealed(config, message, franking, committed_a0.as_deref())
 }
 
 pub(crate) fn gateway_direct_message_envelope_sealed(

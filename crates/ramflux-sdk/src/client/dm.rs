@@ -63,6 +63,7 @@ impl RamfluxClient {
             &message.sender_id,
             &message.encrypted_body,
         )?;
+        // Already-encrypted body; this path does not seal a Direct report.
         let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
         engine.submit_envelope(envelope).await
     }
@@ -75,6 +76,7 @@ impl RamfluxClient {
         mut message: GatewayDirectMessage,
     ) -> Result<GatewayInboxEntry, SdkError> {
         message.ttl = self.content_ttl()?;
+        // Already-encrypted body; this path does not seal a Direct report.
         let envelope = gateway_direct_message_envelope(engine.config(), &message, None)?;
         engine.submit_envelope(envelope).await
     }
@@ -128,11 +130,11 @@ impl RamfluxClient {
         let own_history_control = matches!(route.kind, crate::client::routed::Kind::Control)
             && serde_json::from_slice::<serde_json::Value>(plaintext)
                 .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
-        let mut sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
-        let committed_a0 = sealed.committed_a0.take();
+        let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
+        let (packet, committed_a0) = sealed.into_parts();
         let franking = include_franking_ext
-            .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
-        message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
+            .then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
+        message.encrypted_body = serde_json::to_vec(&packet)?;
         let mut own_copy = None;
         // History replication controls must not become history messages themselves.
         if !own_history_control {
@@ -283,13 +285,8 @@ impl RamfluxClient {
         let sealed = self
             .seal_routed_as(engine, &message, &plaintext, crate::client::routed::Route::receipt())
             .await?;
-        message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
-        let gateway_envelope = gateway_direct_message_envelope_sealed(
-            engine.config(),
-            &message,
-            None,
-            sealed.committed_a0.as_deref(),
-        )?;
+        let gateway_envelope =
+            gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
         let entry = engine.submit_envelope(gateway_envelope).await?;
         Ok(entry)
     }

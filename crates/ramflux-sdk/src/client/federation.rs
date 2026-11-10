@@ -100,8 +100,9 @@ impl RamfluxClient {
     ) -> Result<PendingForward, SdkError> {
         let copy_plain = options.route.kind == crate::client::routed::Kind::Direct;
         let attachments = options.route.attachments;
-        let franking =
-            options.franking.then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.ciphertext));
+        let franking = options
+            .franking
+            .then(|| SdkDmFrankingMetadata::from_ciphertext(&sealed.packet.ciphertext));
         message.encrypted_body = serde_json::to_vec(&sealed.packet)?;
         let mut own_copy = None;
         self.account_db()?.write_transaction(|| {

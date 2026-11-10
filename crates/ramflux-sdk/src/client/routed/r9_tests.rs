@@ -302,10 +302,13 @@ async fn upgrade_inflight(sequence: Option<u64>) -> Result<(), SdkError> {
     let (mut ae, asent) = Wire::engine(&alice, &bob)?;
     let msg = outgoing(&alice, &bob, "after-upgrade");
     let sealed = alice.client.seal_routed_as(&mut ae, &msg, b"upgraded", Route::direct()).await?;
-    assert!(sealed.x3dh.as_ref().and_then(|header| header.bootstrap_sequence).is_some());
+    assert!(sealed.packet.x3dh.as_ref().and_then(|header| header.bootstrap_sequence).is_some());
     let value = serde_json::to_value(&sealed)?;
     assert_eq!(value["x3dh"]["bootstrap_ordering_version"], 2);
-    assert_ne!(sealed.ciphertext.session_id, decode(&legacy.envelope)?.ciphertext.session_id);
+    assert_ne!(
+        sealed.packet.ciphertext.session_id,
+        decode(&legacy.envelope)?.ciphertext.session_id
+    );
     alice.client.apply_routed_entry(&mut ae, &pool()?, &last(&bsent)?, false).await?;
     bob.client.apply_routed_entry(&mut be, &pool()?, &last(&asent)?, false).await?;
     assert_eq!(active(&alice, "bob")?, active(&bob, "alice")?);

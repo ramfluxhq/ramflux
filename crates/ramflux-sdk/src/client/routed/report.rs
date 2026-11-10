@@ -19,21 +19,17 @@ pub(super) struct DirectReport {
 }
 
 /// Nested packet plus the A0 committed at seal. Not a wire struct.
+#[must_use]
 pub(crate) struct SealedRouted {
     pub packet: SdkDmEncryptedEnvelope,
     pub committed_a0: Option<Vec<u8>>,
 }
 
-impl std::ops::Deref for SealedRouted {
-    type Target = SdkDmEncryptedEnvelope;
-    fn deref(&self) -> &Self::Target {
-        &self.packet
-    }
-}
-
-impl std::ops::DerefMut for SealedRouted {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.packet
+impl SealedRouted {
+    /// Split into the nested packet (wire body) and the A0 committed at seal.
+    #[must_use]
+    pub(crate) fn into_parts(self) -> (SdkDmEncryptedEnvelope, Option<Vec<u8>>) {
+        (self.packet, self.committed_a0)
     }
 }
 

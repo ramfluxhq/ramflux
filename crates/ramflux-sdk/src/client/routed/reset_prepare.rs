@@ -175,7 +175,7 @@ impl RamfluxClient {
             Route::control(),
             material,
         )?;
-        self.finish_pair_control_draft(config, draft, &sealed).map(Some)
+        self.finish_pair_control_draft(config, draft, &sealed.packet).map(Some)
     }
     pub(super) fn pair_control_draft_current(
         &self,
@@ -203,6 +203,7 @@ impl RamfluxClient {
             )?;
         }
         draft.message.encrypted_body = serde_json::to_vec(sealed)?;
+        // Pair control has no Direct report payload.
         super::gateway_direct_message_envelope(config, &draft.message, None)
     }
 }

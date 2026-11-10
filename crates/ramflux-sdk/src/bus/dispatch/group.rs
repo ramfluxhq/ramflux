@@ -1022,21 +1022,21 @@ pub(crate) async fn dispatch_group_send_request(
             } else {
                 let mut engine = account.session_client().await?;
                 let entry = async {
-                    message.encrypted_body = serde_json::to_vec(
-                        &account
-                            .client
-                            .seal_routed_as(
-                                &mut engine,
-                                &message,
-                                &encrypted_body,
-                                crate::client::routed::Route::group_message(&body.group_id),
-                            )
-                            .await?,
-                    )?;
-                    engine
-                        .submit_envelope(gateway_direct_message_envelope(
-                            engine.config(),
+                    let sealed = account
+                        .client
+                        .seal_routed_as(
+                            &mut engine,
                             &message,
+                            &encrypted_body,
+                            crate::client::routed::Route::group_message(&body.group_id),
+                        )
+                        .await?;
+                    // GroupMessage has no Direct report payload; into_parts still carries committed_a0 (None).
+                    engine
+                        .submit_envelope(gateway_envelope_from_sealed(
+                            engine.config(),
+                            &mut message,
+                            sealed,
                             None,
                         )?)
                         .await
@@ -1124,11 +1124,12 @@ pub(crate) async fn dispatch_group_send_request(
                         .await;
                     let entry = match sealed {
                         Ok(sealed) => {
-                            message.encrypted_body = serde_json::to_vec(&sealed)?;
+                            // GroupMessage has no Direct report payload; into_parts still carries committed_a0 (None).
                             engine
-                                .submit_envelope(gateway_direct_message_envelope(
+                                .submit_envelope(gateway_envelope_from_sealed(
                                     engine.config(),
-                                    &message,
+                                    &mut message,
+                                    sealed,
                                     None,
                                 )?)
                                 .await

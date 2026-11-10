@@ -467,6 +467,34 @@ async fn a0_drift_is_a_send_error() -> Result<(), SdkError> {
     }
 }
 
+fn producer_a0_drift(alice: u8, bob: u8, id: &str) -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = pair(alice, bob)?;
+    let (mut message, sealed) =
+        super::seal_nested(&a, &b, message(id, "c"), b"drift", Route::direct())?;
+    message.ttl = message.ttl.saturating_add(1);
+    match gateway_envelope_from_sealed(&a.config()?, &mut message, sealed, None) {
+        Err(SdkError::InboundRejected(text)) if text.contains("report a0 drifted") => Ok(()),
+        Err(error) => Err(invalid(&format!("exact a0 drift, got {error}"))),
+        Ok(_) => Err(invalid("exact a0 drift, got Ok")),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_transport_producer_a0_drift_is_a_send_error() -> Result<(), SdkError> {
+    producer_a0_drift(181, 182, "report-task-a0-drift")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn group_producer_a0_drift_is_a_send_error() -> Result<(), SdkError> {
+    producer_a0_drift(183, 184, "report-group-a0-drift")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn outbox_producer_a0_drift_is_a_send_error() -> Result<(), SdkError> {
+    producer_a0_drift(185, 186, "report-outbox-a0-drift")
+}
+
 #[test]
 fn report_mismatch_maps_to_authentication_failed() {
     assert_eq!(

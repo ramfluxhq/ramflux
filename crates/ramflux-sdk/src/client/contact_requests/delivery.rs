@@ -551,17 +551,18 @@ async fn send_one(
                 .map_err(|_| invalid("contact carrier lifetime is invalid"))?,
         ),
     };
-    let mut packet = client
+    let mut sealed = client
         .seal_routed_as(engine, &message, body, crate::client::routed::Route::control())
         .await?;
     if intent.kind == Decision::Request {
-        packet.schema = ENVELOPE_SCHEMA.into();
+        sealed.packet.schema = ENVELOPE_SCHEMA.into();
     }
-    message.encrypted_body = serde_json::to_vec(&packet)?;
+    // Control carrier; no Direct report payload.
     engine
-        .submit_envelope(crate::dm::gateway_direct_message_envelope(
+        .submit_envelope(crate::dm::gateway_envelope_from_sealed(
             engine.config(),
-            &message,
+            &mut message,
+            sealed,
             None,
         )?)
         .await?;

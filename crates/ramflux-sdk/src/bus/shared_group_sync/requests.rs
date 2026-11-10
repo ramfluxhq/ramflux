@@ -128,13 +128,18 @@ async fn seal_and_send(
         } else {
             account.client.seal_routed_as(&mut engine, &message, &bytes, route).await?
         };
-        message.encrypted_body = serde_json::to_vec(&sealed)?;
+        // GroupControl has no Direct report payload; into_parts still carries committed_a0 (None).
         let attempt = Attempt {
             id: id.into(),
             packet,
             root,
             device: device.device_id,
-            envelope: crate::dm::gateway_direct_message_envelope(engine.config(), &message, None)?,
+            envelope: crate::dm::gateway_envelope_from_sealed(
+                engine.config(),
+                &mut message,
+                sealed,
+                None,
+            )?,
             federation,
             expires_at,
         };

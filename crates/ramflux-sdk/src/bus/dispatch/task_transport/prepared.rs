@@ -63,8 +63,7 @@ impl Draft {
             self.route,
             material,
         )?;
-        self.message.encrypted_body = serde_json::to_vec(&sealed)?;
-        crate::dm::gateway_direct_message_envelope(&self.config, &self.message, None)
+        crate::dm::gateway_envelope_from_sealed(&self.config, &mut self.message, sealed, None)
     }
 }
 pub(in crate::bus) fn own_targets(account: &LocalBusAccountState) -> Result<Vec<Target>, SdkError> {

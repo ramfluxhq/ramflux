@@ -349,8 +349,8 @@ pub(in crate::bus) async fn seal(
     } else {
         account.client.seal_routed_as(engine, &message, body, kind).await?
     };
-    message.encrypted_body = serde_json::to_vec(&sealed)?;
-    let envelope = crate::dm::gateway_direct_message_envelope(engine.config(), &message, None)?;
+    let envelope =
+        crate::dm::gateway_envelope_from_sealed(engine.config(), &mut message, sealed, None)?;
     Ok(SealedDelivery {
         envelope,
         federation: target.federation.clone().map(|route| Destination {

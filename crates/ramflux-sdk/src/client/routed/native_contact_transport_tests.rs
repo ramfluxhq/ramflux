@@ -250,6 +250,9 @@ async fn native_contact_request_crosses_the_ordinary_transport_before_first_dire
         created_at: now_unix_timestamp(),
         ttl: 3600,
     };
-    sender.client.seal_routed_as(&mut engine, &message, b"first message", Route::direct()).await?;
+    let _sealed = sender
+        .client
+        .seal_routed_as(&mut engine, &message, b"first message", Route::direct())
+        .await?;
     Ok(())
 }
