@@ -37,6 +37,30 @@ pub(crate) fn serve_public_http(
     addr: &str,
     context: FederationPublicHttpContext,
 ) -> Result<SocketAddr, ramflux_node_core::NodeCoreError> {
+    let bind = open_public_bind(addr)?;
+    let bound = bind.addr;
+    ramflux_node_core::spawn_service_worker("ramflux-federation-public-http", move |shutdown| {
+        run_public_http_listener(
+            &bind.listener,
+            &context,
+            &bind.connections,
+            bind.limits,
+            &bind.source_limits,
+            &shutdown,
+        );
+    })?;
+    Ok(bound)
+}
+
+struct PublicBind {
+    addr: SocketAddr,
+    listener: TcpListener,
+    connections: Arc<ramflux_node_core::ConnectionSet>,
+    limits: ramflux_node_core::HttpRequestLimits,
+    source_limits: Arc<PublicSourceLimits>,
+}
+
+fn open_public_bind(addr: &str) -> Result<PublicBind, ramflux_node_core::NodeCoreError> {
     let limit = crate::http_connections::connection_limit(
         true,
         ramflux_node_core::environment::var("RAMFLUX_FEDERATION_PUBLIC_MAX_CONNECTIONS")
@@ -55,22 +79,58 @@ pub(crate) fn serve_public_http(
             "federation public HTTP local addr failed: {error}"
         ))
     })?;
-    let connections = ramflux_node_core::ConnectionSet::new(limit);
-    tracing::info!(addr, limit, "federation public client HTTP surface listening");
     listener
         .set_nonblocking(true)
         .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
-    ramflux_node_core::spawn_service_worker("ramflux-federation-public-http", move |shutdown| {
-        run_public_http_listener(
-            &listener,
-            &context,
-            &connections,
-            limits,
-            &source_limits,
-            &shutdown,
-        );
-    })?;
-    Ok(bound)
+    tracing::info!(addr, limit, "federation public client HTTP surface listening");
+    Ok(PublicBind {
+        addr: bound,
+        listener,
+        connections: ramflux_node_core::ConnectionSet::new(limit),
+        limits,
+        source_limits,
+    })
+}
+
+#[cfg(test)]
+pub(crate) struct PublicHttpGuard {
+    shutdown: tokio_util::sync::CancellationToken,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl Drop for PublicHttpGuard {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn serve_public_http_owned(
+    addr: &str,
+    context: FederationPublicHttpContext,
+) -> Result<(SocketAddr, PublicHttpGuard), ramflux_node_core::NodeCoreError> {
+    let bind = open_public_bind(addr)?;
+    let bound = bind.addr;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let worker = shutdown.clone();
+    let thread = std::thread::Builder::new()
+        .name("ramflux-federation-public-http".into())
+        .spawn(move || {
+            run_public_http_listener(
+                &bind.listener,
+                &context,
+                &bind.connections,
+                bind.limits,
+                &bind.source_limits,
+                &worker,
+            );
+        })
+        .map_err(|error| ramflux_node_core::NodeCoreError::ItestHttp(error.to_string()))?;
+    Ok((bound, PublicHttpGuard { shutdown, thread: Some(thread) }))
 }
 
 fn run_public_http_listener(

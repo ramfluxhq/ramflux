@@ -59,7 +59,7 @@ async fn create(socket: &Path, id: &str, principal: &str) -> Result<String> {
     assert_eq!(confirmed.state, CreationState::NetworkingPending);
     Ok(anchor)
 }
-pub(super) fn node(
+pub(crate) fn node(
     now: u64,
     certificate_hash: String,
 ) -> Result<ramflux_crypto::custody::VerifiedNodeRecord> {

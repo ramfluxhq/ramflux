@@ -18,4 +18,6 @@ pub use transport::{
 };
 
 #[cfg(test)]
+mod prove_tests;
+#[cfg(test)]
 mod tests;

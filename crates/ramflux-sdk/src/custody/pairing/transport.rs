@@ -4,6 +4,7 @@
 //! S2 Prepare→Apply native issuance and the pairing HTTPS client.
 //! Dormant: talks only to pairing routes; grants no account session.
 use crate::SdkError;
+use crate::custody::CustodyConnection;
 use ramflux_protocol::custody::pairing::PairingWire;
 use ramflux_protocol::custody::pairing::native::{
     Create, CreateSpec, Created, Failure, Issue, Issued, NativeReply,
@@ -49,66 +50,80 @@ impl PairingConfig {
 pub trait PairingNative: std::marker::Send + std::marker::Sync {
     /// # Errors
     /// Native Issue refusal, `Busy`, or `Retired`.
-    fn issue(&self, spec: CreateSpec) -> Result<Issued, SdkError>;
+    fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>>;
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
-    fn create(&self, create: Create) -> Result<Created, SdkError>;
+    fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>>;
 }
+
+type ProveFn = dyn Fn(CustodyProofAction) -> BoxFut<Result<CustodyServerFrame, SdkError>>
+    + std::marker::Send
+    + Sync;
 
 /// Production Issue/Create: authenticated custody `pairing_issue` / `pairing_create`.
 pub struct ProofPairingNative {
-    prove: Arc<
-        dyn Fn(CustodyProofAction) -> Result<CustodyServerFrame, SdkError>
-            + std::marker::Send
-            + Sync,
-    >,
+    prove: Arc<ProveFn>,
 }
 
 impl ProofPairingNative {
-    /// Wrap the existing custody proof worker (challenge → prove → Pairing reply).
+    /// Wrap a custody proof worker (challenge → prove → Pairing reply).
+    /// Test fixtures may inject a hand-signed closure; production uses [`Self::from_connection`].
     #[must_use]
-    pub fn new(
-        prove: Arc<
-            dyn Fn(CustodyProofAction) -> Result<CustodyServerFrame, SdkError>
-                + std::marker::Send
-                + Sync,
-        >,
-    ) -> Self {
+    pub fn new(prove: Arc<ProveFn>) -> Self {
         Self { prove }
     }
 
-    fn apply(&self, action: CustodyProofAction) -> Result<NativeReply, SdkError> {
-        match (self.prove)(action)? {
-            CustodyServerFrame::Pairing { reply } => Ok(reply.reply),
-            CustodyServerFrame::Refused { code, .. } => Err(code.into()),
-            _ => Err(SdkError::PairingCode("InvalidInput")),
-        }
+    /// Production constructor: Issue/Create run through `CustodyConnection::prove`.
+    /// Wiring into SDK construction stays CARRY P16.
+    #[must_use]
+    pub fn from_connection<S>(connection: Arc<tokio::sync::Mutex<CustodyConnection<S>>>) -> Self
+    where
+        S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static,
+    {
+        Self::new(Arc::new(move |action| {
+            let connection = Arc::clone(&connection);
+            Box::pin(async move { connection.lock().await.prove(action).await })
+        }))
     }
 }
 
 impl PairingNative for ProofPairingNative {
-    fn issue(&self, spec: CreateSpec) -> Result<Issued, SdkError> {
-        let action = CustodyProofAction::PairingIssue {
-            request: Box::new(Issue {
-                schema: "ramflux.pairing.Issue.v2".into(),
-                version: 2,
-                spec,
-            }),
-        };
-        match self.apply(action)? {
-            NativeReply::Issued(issued) => Ok(*issued),
-            NativeReply::Failure(failure) => Err(failure_error(&failure)),
-            NativeReply::Created(_) => Err(SdkError::PairingCode("InvalidInput")),
-        }
+    fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>> {
+        let prove = Arc::clone(&self.prove);
+        Box::pin(async move {
+            let action = CustodyProofAction::PairingIssue {
+                request: Box::new(Issue {
+                    schema: "ramflux.pairing.Issue.v2".into(),
+                    version: 2,
+                    spec,
+                }),
+            };
+            match apply_prove(prove.as_ref(), action).await? {
+                NativeReply::Issued(issued) => Ok(*issued),
+                NativeReply::Failure(failure) => Err(failure_error(&failure)),
+                NativeReply::Created(_) => Err(SdkError::PairingCode("InvalidInput")),
+            }
+        })
     }
 
-    fn create(&self, create: Create) -> Result<Created, SdkError> {
-        let action = CustodyProofAction::PairingCreate { request: Box::new(create) };
-        match self.apply(action)? {
-            NativeReply::Created(created) => Ok(*created),
-            NativeReply::Failure(failure) => Err(failure_error(&failure)),
-            NativeReply::Issued(_) => Err(SdkError::PairingCode("InvalidInput")),
-        }
+    fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>> {
+        let prove = Arc::clone(&self.prove);
+        Box::pin(async move {
+            let action = CustodyProofAction::PairingCreate { request: Box::new(create) };
+            match apply_prove(prove.as_ref(), action).await? {
+                NativeReply::Created(created) => Ok(*created),
+                NativeReply::Failure(failure) => Err(failure_error(&failure)),
+                NativeReply::Issued(_) => Err(SdkError::PairingCode("InvalidInput")),
+            }
+        })
+    }
+}
+
+async fn apply_prove(prove: &ProveFn, action: CustodyProofAction) -> Result<NativeReply, SdkError> {
+    match prove(action).await? {
+        CustodyServerFrame::Pairing { reply } => Ok(reply.reply),
+        CustodyServerFrame::Refused { code, .. } => Err(code.into()),
+        _ => Err(SdkError::PairingCode("InvalidInput")),
     }
 }
 
@@ -137,8 +152,8 @@ impl PreparedIssue {
     /// Apply the prepared Issue on the native proof path.
     /// # Errors
     /// Native Issue refusal.
-    pub fn apply(&self, native: &dyn PairingNative) -> Result<Issued, SdkError> {
-        native.issue(self.spec.clone())
+    pub async fn apply(&self, native: &dyn PairingNative) -> Result<Issued, SdkError> {
+        native.issue(self.spec.clone()).await
     }
 
     #[must_use]
@@ -171,8 +186,8 @@ impl PreparedCreate {
     /// Apply the prepared Create on the native proof path.
     /// # Errors
     /// Native Create refusal.
-    pub fn apply(&self, native: &dyn PairingNative) -> Result<Created, SdkError> {
-        native.create(self.create.clone())
+    pub async fn apply(&self, native: &dyn PairingNative) -> Result<Created, SdkError> {
+        native.create(self.create.clone()).await
     }
 
     #[must_use]

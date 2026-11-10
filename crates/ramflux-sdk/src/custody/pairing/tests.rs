@@ -34,11 +34,13 @@ struct StoreNative {
 }
 
 impl PairingNative for StoreNative {
-    fn issue(&self, spec: CreateSpec) -> Result<Issued, SdkError> {
-        held(&self.store).issue(spec).map_err(relay_err)
+    fn issue(&self, spec: CreateSpec) -> BoxFut<Result<Issued, SdkError>> {
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { held(&store).issue(spec).map_err(relay_err) })
     }
-    fn create(&self, create: Create) -> Result<Created, SdkError> {
-        held(&self.store).create(create).map_err(relay_err)
+    fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>> {
+        let store = Arc::clone(&self.store);
+        Box::pin(async move { held(&store).create(create).map_err(relay_err) })
     }
 }
 

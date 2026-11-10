@@ -187,9 +187,9 @@ impl PairingActor {
         }
         let spec = spec_from_begin(&self.identity, &begin)?;
         let prepared = PreparedIssue::prepare(spec.clone())?;
-        let issued = prepared.apply(native.as_ref())?;
+        let issued = prepared.apply(native.as_ref()).await?;
         let prepared_create = PreparedCreate::prepare(issued.ticket, spec)?;
-        let mut created = prepared_create.apply(native.as_ref())?;
+        let mut created = prepared_create.apply(native.as_ref()).await?;
         created.validate_create(prepared_create.create()).map_err(|e| wire(&e))?;
         let invitation = created.invitation.body.clone();
         let origin = invitation.public_origin.clone();

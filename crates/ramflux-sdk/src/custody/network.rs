@@ -369,7 +369,10 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     pub(super) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         self.credentials.prekey_bundle()
     }
-    async fn prove(&mut self, action: CustodyProofAction) -> Result<CustodyServerFrame, SdkError> {
+    pub(crate) async fn prove(
+        &mut self,
+        action: CustodyProofAction,
+    ) -> Result<CustodyServerFrame, SdkError> {
         let response = exchange(
             &mut self.stream,
             &CustodyClientFrame::Challenge {
