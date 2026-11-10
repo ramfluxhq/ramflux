@@ -20,12 +20,11 @@ use crate::custody::pairing::local_credential::{
 };
 use crate::custody::{BranchCredentials, PrimaryVault, require_vault_reference};
 use ramflux_crypto::custody::SelfSigningKey;
-use ramflux_protocol::canonical_json_bytes;
 use ramflux_protocol::custody::pairing::local_dto::CredentialRequest;
 use ramflux_protocol::custody::pairing::native::{Invitation, invitation_signing_bytes};
 use ramflux_protocol::custody::{DeviceRef, Envelope};
 use ramflux_protocol::encode_base64url;
-use ramflux_storage::{AdoptionRow, FileVaultSecretSource};
+use ramflux_storage::FileVaultSecretSource;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -432,26 +431,21 @@ async fn existing_open_leg() -> TestResult {
     })?;
     closed_unlock_leg(dest.path(), "acct-open")?;
     install_store::remove_pending(dest.path(), "acct-open", &staged.install.operation_id)?;
-    let hash = ramflux_protocol::custody::object_hash(native.record())?;
     let mut client = crate::RamfluxClient::new();
     client.open_account_index(dest.path())?;
     client.unlock_account("acct-open", PHRASE)?;
-    client.account_db()?.put_pairing_adoption(&AdoptionRow {
-        account_id: "acct-open".into(),
-        operation_id: staged.install.operation_id.clone(),
-        record_hash: hash.clone(),
-        local_ref: canonical_json_bytes(&recipient_ref)?,
-        local_role: "secondary".into(),
-        branch_vault_ref: staged.branch_vault_ref.clone(),
-        data_vault_ref: staged.data_vault_ref.clone(),
-        primary_vault_ref: None,
-    })?;
+    crate::custody::pairing::refresh_authority(
+        dest.path(),
+        client.account_db()?,
+        &vault,
+        "acct-open",
+        &ramflux_protocol::custody::CustodyAuthority {
+            publication: native.publication(),
+            custodian_publication: None,
+        },
+        now,
+    )?;
     drop(client);
-    let mut installed = staged.install;
-    installed.record_hash = Some(hash);
-    installed.state = "installed".into();
-    installed.validate()?;
-    install_store::write_installed(dest.path(), &installed)?;
     let expected = reopen_unlock(dest.path(), "acct-open")?;
     let mut state = daemon(dest.path());
     unlock_from_provider(&mut state, "acct-open", &expected, &Phrase::setup(PHRASE), None)?;
