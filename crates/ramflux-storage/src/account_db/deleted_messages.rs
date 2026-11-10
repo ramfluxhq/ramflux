@@ -137,6 +137,14 @@ impl AccountDb {
         self.remove_actor_state(&legacy_deletion_marker_key(message))
     }
 
+    /// Persist the MAC tombstone that [`Self::message_is_deleted`] observes.
+    ///
+    /// Shared by raw-inner and backup-footprint tests (OV-P12-H).
+    #[cfg(test)]
+    pub(crate) fn persist_mac_tombstone(&self, message: &str) -> Result<(), StorageError> {
+        self.persist_deletion_marker(message)
+    }
+
     fn message_sender_is_local(
         &self,
         conversation: &str,

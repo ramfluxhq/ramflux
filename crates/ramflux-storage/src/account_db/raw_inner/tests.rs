@@ -833,11 +833,6 @@ fn full_merge_does_not_restore_a_bound_raw_copy_after_target_deletion() -> TestR
     Ok(())
 }
 
-fn persist_mac_tombstone(db: &AccountDb, message: &str) -> Result<(), StorageError> {
-    let mac = db.account_mac(b"ramflux/tombstone-key/v1", message.as_bytes())?;
-    db.persist_actor_state(&format!("message/deleted/{mac}"), &serde_json::json!({"version":2}))
-}
-
 #[test]
 fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> TestResult {
     let root = crate::tests::temp_root("raw-inner-mac-tombstone-merge");
@@ -858,7 +853,7 @@ fn full_merge_does_not_restore_a_raw_copy_deleted_only_by_mac_tombstone() -> Tes
         })
     })?;
     target.send_direct_message("thread", "mac-only-message", "sender", b"body")?;
-    persist_mac_tombstone(&target, "mac-only-message")?;
+    target.persist_mac_tombstone("mac-only-message")?;
     assert!(
         matches!(target.message_is_deleted("mac-only-message"), Ok(true)),
         "MAC tombstone must make message_is_deleted return true"
