@@ -30,18 +30,12 @@ pub(super) async fn receive(
         .connection
         .as_ref()
         .map_or(1, super::super::connection_manager::ConnectionHandle::generation);
-    let plan = super::source::w0::prepare_receive_turn(
-        account,
-        generation,
-        generation,
-        crate::bus::connection_manager::ReceiveTrigger::Connected,
-    )?;
-    let retries = plan.retries;
     let mut turn = apply_w1::capture_turn(
         account.client.account_db()?,
         generation,
         &account.target_delivery_id,
     )?;
+    let retries = super::source::w0::recover_standalone_retries(account, &turn, generation)?;
     let mut backpressure = Box::new(Backpressure::load(&account.client, now)?);
     let mut applied = 0_usize;
     let mut pages = 0_u32;

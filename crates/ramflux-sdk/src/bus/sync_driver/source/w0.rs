@@ -12,7 +12,7 @@
 //! receive transaction (nested `write_transaction` is a SAVEPOINT).
 #![allow(dead_code)]
 
-use crate::bus::connection_manager::{ReceivePlan, ReceiveTurn};
+use crate::bus::connection_manager::{ReceiveEntry, ReceivePlan, ReceiveTurn};
 use crate::bus::state::LocalBusAccountState;
 use crate::gateway::session_push::SessionMode;
 use crate::{RamfluxClient, SdkError};
@@ -164,6 +164,10 @@ pub(crate) fn prepare_receive_turn(
 
 /// Adds each recovered staged/held entry to the plan unless the plan already carries it.
 fn merge_recovered(plan: &mut ReceivePlan, inputs: &[ramflux_storage::RecoveryInput]) {
+    merge_retry_inputs(&mut plan.retries, inputs);
+}
+
+fn merge_retry_inputs(retries: &mut Vec<ReceiveEntry>, inputs: &[ramflux_storage::RecoveryInput]) {
     for input in inputs {
         let entry = match serde_json::from_slice::<crate::GatewayInboxEntry>(&input.entry_json) {
             Ok(entry) => entry,
@@ -173,19 +177,30 @@ fn merge_recovered(plan: &mut ReceivePlan, inputs: &[ramflux_storage::RecoveryIn
                 continue;
             }
         };
-        let known = plan.retries.iter().any(|prepared| {
+        let known = retries.iter().any(|prepared| {
             prepared.entry.inbox_seq == entry.inbox_seq
                 && prepared.entry.envelope.envelope_id == entry.envelope.envelope_id
         });
         if !known {
-            plan.retries.push(crate::bus::connection_manager::ReceiveEntry {
-                entry,
-                retry_key: None,
-                replay: false,
-                turn: None,
-            });
+            retries.push(ReceiveEntry { entry, retry_key: None, replay: false, turn: None });
         }
     }
+}
+
+/// Leftover W0/W1 rows for standalone catch-up. Activated standalone has no Push
+/// engine, so [`prepare_receive_turn`] would refuse as a legacy path.
+pub(crate) fn recover_standalone_retries(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: u64,
+) -> Result<Vec<ReceiveEntry>, SdkError> {
+    let recovered = account
+        .client
+        .account_db()
+        .and_then(|db| SourceW0::from_actor(turn, handle_generation).recover_from_disk(db))?;
+    let mut retries = Vec::new();
+    merge_retry_inputs(&mut retries, &recovered);
+    Ok(retries)
 }
 
 /// Push-session coordinates from S2's engine plus disk cursor/erase. `None` when the
