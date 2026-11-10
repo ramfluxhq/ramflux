@@ -240,5 +240,43 @@ fn normalize_checkpoint(before: &DeviceSet, after: &mut DeviceSet) -> Result<(),
     Ok(())
 }
 
+impl SelfSigningKey {
+    /// Approve an exact independently checked candidate with the old management authority.
+    /// The caller must bind this body to its locally confirmed, still-live SAS transcript.
+    /// # Errors
+    /// Refuses a foreign signer, nonpreserving candidate, changed hashes or expired approval.
+    pub fn sign_cooperative_preservation(
+        &self,
+        previous: &VerifiedRecord,
+        candidate: &VerifiedRecord,
+        body: ramflux_protocol::custody::pairing::channel::PreservationBody,
+        now: u64,
+    ) -> Result<Envelope<ramflux_protocol::custody::pairing::channel::PreservationBody>, CryptoError>
+    {
+        use ramflux_protocol::custody::pairing::PairingWire as _;
+        body.validate().map_err(|_| reject("cooperative preservation body"))?;
+        if self.public_key()
+            != previous.envelope().body.master_certificate.body.self_signing_public_key
+            || body.old_record_hash != object_hash(previous.envelope())?
+            || body.new_record_hash != object_hash(candidate.envelope())?
+            || body.expires_at <= now
+            || body.expires_at > now.saturating_add(300)
+        {
+            return Err(reject("cooperative preservation authority or context"));
+        }
+        verify_cooperative_preservation(
+            previous,
+            candidate,
+            &body.destination_ref,
+            body.recipient_mode == "new",
+        )?;
+        let signature = self.sign_group_state_bytes(&ramflux_protocol::custody::signing_bytes(
+            &body.schema,
+            &body,
+        )?);
+        Ok(Envelope { body, signature })
+    }
+}
+
 #[cfg(test)]
 mod tests;

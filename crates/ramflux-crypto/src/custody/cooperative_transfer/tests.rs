@@ -82,6 +82,14 @@ fn cooperative_transfer_keeps_all_branch_keys_and_denials() -> TestResult {
         assert_eq!(next.body.revoked_delegation_ids, source.body.revoked_delegation_ids);
         assert_retained(&source, &next, &accepted, now + 1)?;
         assert!(accepted.revoked_ids().contains("retired"));
+        assert_exact_preservation_signature(
+            &verified,
+            &accepted,
+            (&old, &primary),
+            &destination,
+            fresh,
+            now + 1,
+        )?;
         assert!(old.sign_record(next.body.clone()).is_err());
     }
     Ok(())
@@ -155,5 +163,41 @@ fn assert_rejects_changed_lease(
     let signed = primary.sign_record(body)?;
     let verified = verify_record(&signed, now, None, None)?;
     assert!(verify_cooperative_preservation(source, &verified, destination, fresh).is_err());
+    Ok(())
+}
+
+fn assert_exact_preservation_signature(
+    previous: &VerifiedRecord,
+    candidate: &VerifiedRecord,
+    signers: (&SelfSigningKey, &SelfSigningKey),
+    destination: &DeviceRef,
+    fresh: bool,
+    now: u64,
+) -> TestResult {
+    let (old, replacement) = signers;
+    let body = ramflux_protocol::custody::pairing::channel::PreservationBody {
+        schema: "ramflux.identity.transfer.preserve.v1".into(),
+        version: 1,
+        transfer_id: encode_base64url([91; 32]),
+        transcript_hash: encode_base64url([92; 32]),
+        old_record_hash: object_hash(previous.envelope())?,
+        new_record_hash: object_hash(candidate.envelope())?,
+        destination_ref: destination.clone(),
+        recipient_mode: if fresh { "new" } else { "existing" }.into(),
+        policy: "preserve_all_existing".into(),
+        expires_at: now + 300,
+    };
+    let signed = old.sign_cooperative_preservation(previous, candidate, body.clone(), now)?;
+    crate::verify_canonical_signature(
+        &ramflux_protocol::custody::signing_bytes(&signed.body.schema, &signed.body)?,
+        &signed.signature,
+        &old.public_key(),
+    )?;
+    assert!(
+        replacement.sign_cooperative_preservation(previous, candidate, body.clone(), now).is_err()
+    );
+    let mut changed = body;
+    changed.new_record_hash = encode_base64url([93; 32]);
+    assert!(old.sign_cooperative_preservation(previous, candidate, changed, now).is_err());
     Ok(())
 }
