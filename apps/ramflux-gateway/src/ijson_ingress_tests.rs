@@ -248,7 +248,12 @@ fn http_request(
         forwarded_proto: None,
         forwarded_for: None,
     };
-    crate::itest_http::dispatch_protected_itest_request(&mut server, router, &request)?;
+    crate::itest_http::dispatch_protected_itest_request(
+        &mut server,
+        router,
+        &request,
+        "ramflux-gateway",
+    )?;
     drop(server);
     let mut response = Vec::new();
     client.read_to_end(&mut response)?;

@@ -56,6 +56,7 @@ pub(crate) fn serve_gateway_quic(
     let tcp_addr: SocketAddr = tcp_addr.parse()?;
     let tcp_server_config = ramflux_transport::tcp_gateway_server_config(&tls)?;
     let gateway_id = gateway_instance_id_from_env();
+    crate::state::validate_gateway_mesh_identity(config, &gateway_id)?;
     let peers = gateway_peer_directory_from_env(config, &gateway_id)?;
     #[cfg(feature = "itest-local-mint")]
     let relay_service_key = gateway_relay_service_key(config)?;

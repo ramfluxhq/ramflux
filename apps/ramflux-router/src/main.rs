@@ -44,6 +44,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "startup coordinates the router's configured runtime")]
 fn run_service(service: &'static str) -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if let Some(command) = inbox_maintenance::parse(&args)? {
@@ -94,7 +95,12 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let home_node_forward = local_federation_forward_client_from_env(&config);
         let state = Arc::new(router);
         let store = Arc::new(store);
-        let router = Arc::new(router_handle_from_env(state, store, home_node_forward));
+        let router = Arc::new(router_handle_from_env(
+            state,
+            store,
+            home_node_forward,
+            config.node_id.clone(),
+        ));
         router.enable_custody(&config)?;
         custody_listener::start(&config, Arc::clone(&router))?;
         retention::start(Arc::clone(&router));
@@ -195,8 +201,9 @@ fn router_handle_from_env(
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
     home_node_forward: Option<router_runtime::LocalFederationForwardClient>,
+    node_id: String,
 ) -> router_runtime::RouterHandle {
-    router_runtime::RouterHandle::tokio(state, store, home_node_forward)
+    router_runtime::RouterHandle::tokio_with_node_id(state, store, home_node_forward, node_id)
 }
 
 fn local_federation_forward_client_from_env(

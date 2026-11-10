@@ -38,8 +38,11 @@ pub(crate) async fn fetch(
 }
 pub(crate) fn registration_forwarding_failure(
     error: &dyn std::fmt::Display,
+    log_warning: bool,
 ) -> ramflux_transport::GatewayQuicResponse {
-    tracing::warn!(%error, stage="identity_registration_forward", request_kind="identity_register", "gateway registration forwarding failed");
+    if log_warning {
+        tracing::warn!(%error, stage="identity_registration_forward", request_kind="identity_register", "gateway registration forwarding failed");
+    }
     ramflux_transport::GatewayQuicResponse {
         status: 503,
         body: serde_json::json!(ramflux_protocol::IdentityRegistrationFailure {
@@ -81,7 +84,9 @@ mod tests {
 pub(crate) fn registration_context(
     request: &mut ramflux_node_core::IdentityRegisterRequest,
     source: std::net::IpAddr,
+    gateway_id: &str,
 ) -> anyhow::Result<()> {
+    gateway_id.clone_into(&mut request.gateway_id);
     request.source_ip_hash = Some(ramflux_node_core::source_ip_hash(&source.to_string()));
     request.now = i64::try_from(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs(),
@@ -117,7 +122,8 @@ mod registration_tests {
             registration_pow: None,
             source_ip_hash: Some("forged".into()),
         };
-        super::registration_context(&mut request, "2001:db8:1:2::1".parse()?)?;
+        super::registration_context(&mut request, "2001:db8:1:2::1".parse()?, "gw-a")?;
+        assert_eq!(request.gateway_id, "gw-a");
         assert_eq!(
             request.source_ip_hash,
             Some(ramflux_node_core::source_ip_hash("2001:db8:1:2::1"))
@@ -126,9 +132,10 @@ mod registration_tests {
             request.source_ip_hash,
             Some(ramflux_node_core::source_ip_hash("2001:db8:1:2::ffff"))
         );
-        super::registration_context(&mut request, "192.0.2.1".parse()?)?;
+        super::registration_context(&mut request, "192.0.2.1".parse()?, "gw-b")?;
+        assert_eq!(request.gateway_id, "gw-b");
         assert_eq!(request.source_ip_hash, Some(ramflux_node_core::source_ip_hash("192.0.2.1")));
-        super::registration_context(&mut request, "::ffff:192.0.2.1".parse()?)?;
+        super::registration_context(&mut request, "::ffff:192.0.2.1".parse()?, "gw-b")?;
         assert_eq!(request.source_ip_hash, Some(ramflux_node_core::source_ip_hash("192.0.2.1")));
         assert!(request.now > 1);
         Ok(())

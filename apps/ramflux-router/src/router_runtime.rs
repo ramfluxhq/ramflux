@@ -17,6 +17,7 @@ const ROUTER_FORWARD_TIMEOUT_SECONDS_DEFAULT: u64 = 20;
 pub(crate) struct TokioRouterRuntime {
     state: Arc<ramflux_node_core::RouterCore>,
     store: Arc<ramflux_node_core::RouterRedbStore>,
+    node_id: String,
     home_node_forward: Option<LocalFederationForwardClient>,
     forward_semaphore: Arc<tokio::sync::Semaphore>,
     forward_timeout: Duration,
@@ -43,6 +44,7 @@ impl TokioRouterRuntime {
         state: Arc<ramflux_node_core::RouterCore>,
         store: Arc<ramflux_node_core::RouterRedbStore>,
         home_node_forward: Option<LocalFederationForwardClient>,
+        node_id: String,
     ) -> Self {
         let concurrency =
             ramflux_node_core::environment::parsed::<usize>(ROUTER_FORWARD_CONCURRENCY_ENV)
@@ -56,6 +58,7 @@ impl TokioRouterRuntime {
             state,
             store,
             home_node_forward,
+            node_id,
             concurrency,
             Duration::from_secs(timeout_seconds),
         )
@@ -65,12 +68,14 @@ impl TokioRouterRuntime {
         state: Arc<ramflux_node_core::RouterCore>,
         store: Arc<ramflux_node_core::RouterRedbStore>,
         home_node_forward: Option<LocalFederationForwardClient>,
+        node_id: String,
         concurrency: usize,
         forward_timeout: Duration,
     ) -> Self {
         Self {
             state,
             store,
+            node_id,
             home_node_forward,
             forward_semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency.max(1))),
             forward_timeout,
@@ -117,12 +122,33 @@ impl LocalFederationForwardClient {
 }
 
 impl RouterHandle {
+    #[cfg(test)]
     pub(crate) fn tokio(
         state: Arc<ramflux_node_core::RouterCore>,
         store: Arc<ramflux_node_core::RouterRedbStore>,
         home_node_forward: Option<LocalFederationForwardClient>,
     ) -> Self {
-        Self::Tokio(Arc::new(TokioRouterRuntime::new(state, store, home_node_forward)))
+        Self::tokio_with_node_id(state, store, home_node_forward, "test-node")
+    }
+
+    pub(crate) fn tokio_with_node_id(
+        state: Arc<ramflux_node_core::RouterCore>,
+        store: Arc<ramflux_node_core::RouterRedbStore>,
+        home_node_forward: Option<LocalFederationForwardClient>,
+        node_id: impl Into<String>,
+    ) -> Self {
+        Self::Tokio(Arc::new(TokioRouterRuntime::new(
+            state,
+            store,
+            home_node_forward,
+            node_id.into(),
+        )))
+    }
+
+    pub(crate) fn node_id(&self) -> &str {
+        match self {
+            Self::Tokio(runtime) => &runtime.node_id,
+        }
     }
 
     pub(crate) fn state(&self) -> &ramflux_node_core::RouterCore {
@@ -1383,6 +1409,7 @@ pub(crate) mod tests {
             state,
             store,
             Some(client),
+            "test-node".to_owned(),
             concurrency,
             forward_timeout,
         );

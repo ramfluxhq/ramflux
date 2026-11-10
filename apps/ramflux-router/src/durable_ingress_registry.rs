@@ -861,6 +861,213 @@ fn assert_transport_matrix(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture proves instance binding across real TCP and QUIC mTLS"
+)]
+async fn gateway_registration_is_bound_to_authenticated_instance_on_tcp_and_tokio_quic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pki = MeshPki::new("gw-instance-identity")?;
+    let (state, store, path) = crate::router_runtime::tests::test_router("gw-instance-identity")?;
+    let router = Arc::new(crate::router_runtime::RouterHandle::tokio_with_node_id(
+        state, store, None, "node-a",
+    ));
+
+    let (status, _) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-gateway",
+        &registration_session("tcp-own", "gw-a"),
+        &pki.gateway_a,
+    )?;
+    assert_eq!(status, 200, "gateway A registers itself over TCP mTLS");
+    let before = router.state().session("tcp-own");
+    let (status, body) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-gateway",
+        &registration_session("tcp-own", "gw-a"),
+        &pki.gateway_b,
+    )?;
+    assert_eq!(status, 403, "gateway B cannot register as A over TCP mTLS");
+    assert_eq!(body["reason"], "gateway_instance_mismatch");
+    assert_eq!(router.state().session("tcp-own"), before);
+    let (status, body) = tls_marked_post(
+        &router,
+        &pki,
+        "/mvp1/identity/register",
+        "ramflux-gateway",
+        &serde_json::json!({"gateway_id":"gw-a"}),
+        &pki.gateway_b,
+    )?;
+    assert_eq!(status, 403, "identity register cannot claim another instance");
+    assert_eq!(body["reason"], "gateway_instance_mismatch");
+    let (status, body) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-gateway",
+        &registration_session("tcp-legacy", "gw-a"),
+        &pki.gateway,
+    )?;
+    assert_eq!(status, 403, "legacy gateway identity has no instance");
+    assert_eq!(body["reason"], "gateway_instance_missing");
+    let (status, body) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-federation",
+        &registration_session("tcp-federation", "gw-a"),
+        &pki.federation,
+    )?;
+    assert_eq!(status, 403, "federation cannot register a gateway session");
+    assert_eq!(body["reason"], "gateway_role_required");
+    let (status, body) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-gateway",
+        &registration_session("tcp-empty", ""),
+        &pki.gateway_a,
+    )?;
+    assert_eq!(status, 400, "empty gateway id is a bad request");
+    assert_eq!(body["reason"], "gateway_id_empty");
+    let (status, _) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-gateway",
+        &registration_session("tcp-move", "gw-a"),
+        &pki.gateway_a,
+    )?;
+    assert_eq!(status, 200);
+    let (status, _) = tls_marked_post(
+        &router,
+        &pki,
+        "/s1/session/upsert",
+        "ramflux-gateway",
+        &registration_session("tcp-move", "gw-b"),
+        &pki.gateway_b,
+    )?;
+    assert_eq!(status, 200, "gateway B can take over a moved target");
+    assert_eq!(
+        router.state().session("tcp-move").as_ref().map(|row| row.gateway_id.as_str()),
+        Some("gw-b")
+    );
+
+    let roots = pki.ca_pem.clone();
+    let server = ramflux_transport::MeshQuicServer::bind_with_pem_roots_provider(
+        "127.0.0.1:0",
+        &pki.router,
+        Arc::new(move || Ok(vec![roots.clone()])),
+    )?;
+    let endpoint = server.local_addr()?.to_string();
+    let server_router = Arc::clone(&router);
+    let peer_auth = crate::serve::RouterAsyncMeshPeerAuth {
+        local_service_id: "ramflux-router".to_owned(),
+        allowed_service_ids: std::collections::BTreeSet::from(["ramflux-gateway".to_owned()]),
+    };
+    let accept_task = tokio::spawn(async move {
+        while let Ok(connection) = server.accept_connection().await {
+            let connection_router = Arc::clone(&server_router);
+            let connection_auth = peer_auth.clone();
+            tokio::spawn(async move {
+                let _ = crate::serve::router_async_mesh_quic_connection_loop(
+                    connection,
+                    connection_router,
+                    connection_auth,
+                )
+                .await;
+            });
+        }
+    });
+    let (status, _) = post_instance_session(
+        &endpoint,
+        &pki,
+        &pki.gateway_a,
+        &registration_session("quic-own", "gw-a"),
+    )
+    .await?;
+    assert_eq!(status, 200, "gateway A registers itself over tokio QUIC mTLS");
+    let before = router.state().session("quic-own");
+    let (status, body) = post_instance_session(
+        &endpoint,
+        &pki,
+        &pki.gateway_b,
+        &registration_session("quic-own", "gw-a"),
+    )
+    .await?;
+    assert_eq!(status, 403, "gateway B cannot register as A over tokio QUIC mTLS");
+    assert_eq!(body["reason"], "gateway_instance_mismatch");
+    assert_eq!(router.state().session("quic-own"), before);
+    let (status, _) = post_instance_session(
+        &endpoint,
+        &pki,
+        &pki.gateway_a,
+        &registration_session("quic-move", "gw-a"),
+    )
+    .await?;
+    assert_eq!(status, 200);
+    let (status, _) = post_instance_session(
+        &endpoint,
+        &pki,
+        &pki.gateway_b,
+        &registration_session("quic-move", "gw-b"),
+    )
+    .await?;
+    assert_eq!(status, 200);
+    assert_eq!(
+        router.state().session("quic-move").as_ref().map(|row| row.gateway_id.as_str()),
+        Some("gw-b")
+    );
+    accept_task.abort();
+    drop(router);
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+fn registration_session(target: &str, gateway_id: &str) -> ramflux_node_core::SessionDescriptor {
+    ramflux_node_core::SessionDescriptor {
+        target_delivery_id: target.to_owned(),
+        device_id: "device".to_owned(),
+        gateway_id: gateway_id.to_owned(),
+        session_id: format!("session-{target}"),
+        device_epoch: 1,
+        session_seq: 1,
+        last_cursor: None,
+        push_alias_hash: None,
+        lifecycle: ramflux_node_core::SessionLifecycle::Live,
+    }
+}
+
+async fn post_instance_session(
+    endpoint: &str,
+    pki: &MeshPki,
+    client_tls: &ramflux_transport::MeshTlsConfig,
+    session: &ramflux_node_core::SessionDescriptor,
+) -> Result<(u16, serde_json::Value), Box<dyn std::error::Error>> {
+    let response =
+        ramflux_transport::mesh_quic_post_json_with_peer_ca_pems_async::<_, serde_json::Value>(
+            endpoint,
+            "/s1/session/upsert",
+            client_tls,
+            "ramflux-router",
+            std::slice::from_ref(&pki.ca_pem),
+            session,
+        )
+        .await;
+    match response {
+        Ok(value) => Ok((200, value)),
+        Err(ramflux_transport::TransportError::HttpStatus { status, body }) => {
+            Ok((status, serde_json::from_str(&body)?))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(feature = "itest-http")]
 fn assert_http_families(
     handle: &crate::router_runtime::RouterHandle,
@@ -962,12 +1169,24 @@ fn tls_marked_post<T: serde::Serialize>(
     let endpoint = server.local_addr()?.to_string();
     let handle = handle.clone();
     let peer = peer.to_owned();
+    let ca_pem = pki.ca_pem.clone();
+    let server_tls = pki.router.clone();
     let worker = std::thread::spawn(move || -> Result<(), String> {
-        let mut stream = server.accept().map_err(|error| error.to_string())?;
+        let accepted = server
+            .accept_authenticated_with_pem_roots(&server_tls, &[ca_pem])
+            .map_err(|error| error.to_string())?;
+        let allowed = std::collections::BTreeSet::from([peer]);
+        let identity = ramflux_node_core::authorize_mesh_peer(
+            "ramflux-router",
+            &allowed,
+            accepted.peer_spiffe_uri.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut stream = accepted.stream;
         let tcp = stream.sock.try_clone().map_err(|error| error.to_string())?;
         let set = ramflux_node_core::ConnectionSet::new(4);
         let guard = set.register(&tcp).map_err(|error| error.to_string())?.ok_or("tls register")?;
-        crate::handlers::handle_mesh_request(&mut stream, &handle, &peer, &guard)
+        crate::handlers::handle_mesh_request(&mut stream, &handle, &identity, &guard)
             .map_err(|error| error.to_string())?;
         Ok(())
     });
@@ -1025,8 +1244,11 @@ fn assert_quic_families(
 
 struct MeshPki {
     root: PathBuf,
+    ca_pem: String,
     router: ramflux_transport::MeshTlsConfig,
     gateway: ramflux_transport::MeshTlsConfig,
+    gateway_a: ramflux_transport::MeshTlsConfig,
+    gateway_b: ramflux_transport::MeshTlsConfig,
     federation: ramflux_transport::MeshTlsConfig,
 }
 
@@ -1060,10 +1282,35 @@ impl MeshPki {
             "-subj",
             "/CN=S6c P03 CA",
         ])?;
+        let ca_pem = std::fs::read_to_string(&ca)?;
         Ok(Self {
-            router: mesh_service(&root, &ca_key, &ca, "ramflux-router")?,
-            gateway: mesh_service(&root, &ca_key, &ca, "ramflux-gateway")?,
-            federation: mesh_service(&root, &ca_key, &ca, "ramflux-federation")?,
+            router: mesh_service(&root, &ca_key, &ca, "router", "ramflux-router", None)?,
+            gateway: mesh_service(&root, &ca_key, &ca, "gateway", "ramflux-gateway", None)?,
+            gateway_a: mesh_service(
+                &root,
+                &ca_key,
+                &ca,
+                "gateway-a",
+                "ramflux-gateway",
+                Some("gw-a"),
+            )?,
+            gateway_b: mesh_service(
+                &root,
+                &ca_key,
+                &ca,
+                "gateway-b",
+                "ramflux-gateway",
+                Some("gw-b"),
+            )?,
+            federation: mesh_service(
+                &root,
+                &ca_key,
+                &ca,
+                "federation",
+                "ramflux-federation",
+                None,
+            )?,
+            ca_pem,
             root,
         })
     }
@@ -1073,15 +1320,19 @@ fn mesh_service(
     root: &Path,
     ca_key: &Path,
     ca: &Path,
-    id: &str,
+    cert_name: &str,
+    service_id: &str,
+    instance_id: Option<&str>,
 ) -> Result<ramflux_transport::MeshTlsConfig, Box<dyn std::error::Error>> {
-    let dir = root.join(id);
+    let dir = root.join(cert_name);
     std::fs::create_dir_all(&dir)?;
     let key = dir.join("key.pem");
     let csr = dir.join("req.csr");
     let cert = dir.join("cert.pem");
     let ext = dir.join("ext.cnf");
     openssl(&["genpkey", "-algorithm", "ED25519", "-out", path_str(&key)?])?;
+    let spiffe_path =
+        instance_id.map_or_else(|| service_id.to_owned(), |id| format!("{service_id}/{id}"));
     openssl(&[
         "req",
         "-new",
@@ -1090,12 +1341,12 @@ fn mesh_service(
         "-out",
         path_str(&csr)?,
         "-subj",
-        &format!("/CN={id}"),
+        &format!("/CN={cert_name}"),
     ])?;
     std::fs::write(
         &ext,
         format!(
-            "subjectAltName = DNS:{id}, DNS:localhost, URI:spiffe://node-a/{id}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
+            "subjectAltName = DNS:{service_id}, DNS:localhost, URI:spiffe://node-a/{spiffe_path}\nextendedKeyUsage = serverAuth, clientAuth\nkeyUsage = digitalSignature\n"
         ),
     )?;
     openssl(&[

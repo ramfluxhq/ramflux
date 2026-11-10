@@ -1517,6 +1517,10 @@ pub(crate) mod tests {
             mesh_peer_service_id(Some("spiffe://node-a/ramflux-gateway")).as_deref(),
             Some("ramflux-gateway")
         );
+        assert_eq!(
+            mesh_peer_service_id(Some("spiffe://node-a/ramflux-gateway/gw-a")).as_deref(),
+            Some("ramflux-gateway")
+        );
         assert!(mesh_peer_service_id(None).is_none());
         assert!(mesh_peer_service_id(Some("not-spiffe")).is_none());
     }

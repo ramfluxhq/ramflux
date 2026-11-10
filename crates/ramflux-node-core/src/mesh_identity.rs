@@ -9,7 +9,31 @@ use crate::NodeCoreError;
 pub struct MeshPeerIdentity {
     pub node_id: String,
     pub service_id: String,
+    pub instance_id: Option<String>,
     pub spiffe_uri: String,
+}
+
+impl MeshPeerIdentity {
+    /// Creates a gateway identity for router unit tests.
+    #[must_use]
+    pub fn gateway_for_test(instance: impl Into<String>) -> Self {
+        let node_id = "test-node".to_owned();
+        let service_id = "ramflux-gateway".to_owned();
+        let instance_id = instance.into();
+        let spiffe_uri = format!("spiffe://{node_id}/{service_id}/{instance_id}");
+        Self { node_id, service_id, instance_id: Some(instance_id), spiffe_uri }
+    }
+}
+
+/// Returns whether `value` matches the gateway instance-id grammar.
+#[must_use]
+pub fn is_valid_gateway_instance_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 /// # Errors
@@ -18,17 +42,34 @@ pub fn parse_mesh_spiffe_uri(spiffe_uri: &str) -> Result<MeshPeerIdentity, NodeC
     let Some(rest) = spiffe_uri.strip_prefix("spiffe://") else {
         return Err(NodeCoreError::ItestHttp("peer certificate SAN is not SPIFFE".to_owned()));
     };
-    let Some((node_id, service_id)) = rest.split_once('/') else {
+    let Some((node_id, service_path)) = rest.split_once('/') else {
         return Err(NodeCoreError::ItestHttp("peer SPIFFE SAN missing service path".to_owned()));
     };
+    let mut segments = service_path.split('/');
+    let Some(service_id) = segments.next() else {
+        return Err(NodeCoreError::ItestHttp(
+            "peer SPIFFE SAN is not a Ramflux service".to_owned(),
+        ));
+    };
+    let instance_id = segments.next();
     if node_id.is_empty() || service_id.is_empty() || !service_id.starts_with("ramflux-") {
         return Err(NodeCoreError::ItestHttp(
             "peer SPIFFE SAN is not a Ramflux service".to_owned(),
         ));
     }
+    if segments.next().is_some()
+        || instance_id.is_some_and(|instance| {
+            service_id != "ramflux-gateway" || !is_valid_gateway_instance_id(instance)
+        })
+    {
+        return Err(NodeCoreError::ItestHttp(
+            "peer SPIFFE SAN has an invalid service instance".to_owned(),
+        ));
+    }
     Ok(MeshPeerIdentity {
         node_id: node_id.to_owned(),
         service_id: service_id.to_owned(),
+        instance_id: instance_id.map(str::to_owned),
         spiffe_uri: spiffe_uri.to_owned(),
     })
 }

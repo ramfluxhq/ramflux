@@ -15,6 +15,7 @@ pub(crate) fn serve_itest_http(
     router: &RouterMeshClient,
     store: &Arc<ramflux_node_core::GatewayRedbStore>,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
+    gateway_id: &str,
 ) -> anyhow::Result<()> {
     let addr = ramflux_node_core::environment::var("RAMFLUX_ITEST_GATEWAY_HTTP_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:18081".to_owned());
@@ -40,11 +41,14 @@ pub(crate) fn serve_itest_http(
         let router = router.clone();
         let state = Arc::clone(state);
         let store = Arc::clone(store);
+        let gateway_id = gateway_id.to_owned();
         std::thread::spawn(move || {
             let Some(_in_flight) = ramflux_node_core::begin_service_request() else {
                 return;
             };
-            if let Err(error) = handle_itest_request(&mut stream, &router, &state, &store) {
+            if let Err(error) =
+                handle_itest_request(&mut stream, &router, &state, &store, &gateway_id)
+            {
                 let body = format!("{error}");
                 if let Err(write_error) = ramflux_node_core::write_itest_text_response(
                     &mut stream,
@@ -65,6 +69,7 @@ pub(crate) fn handle_itest_request(
     router: &RouterMeshClient,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: &ramflux_node_core::GatewayRedbStore,
+    gateway_id: &str,
 ) -> anyhow::Result<()> {
     let read_timeout = gateway_state(state)?.pre_auth_read_timeout();
     let request =
@@ -98,7 +103,7 @@ pub(crate) fn handle_itest_request(
         ramflux_node_core::write_itest_json_response(stream, "401 Unauthorized", &challenge)?;
         return Ok(());
     }
-    dispatch_protected_itest_request(stream, router, &request)
+    dispatch_protected_itest_request(stream, router, &request, gateway_id)
 }
 
 #[cfg(feature = "itest-http")]
@@ -151,6 +156,7 @@ pub(crate) fn dispatch_protected_itest_request(
     stream: &mut TcpStream,
     router: &RouterMeshClient,
     request: &ramflux_node_core::NodeHttpRequest,
+    gateway_id: &str,
 ) -> anyhow::Result<()> {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => {
@@ -230,7 +236,9 @@ pub(crate) fn dispatch_protected_itest_request(
         }
         ("POST", "/mvp1/identity/register") => {
             let response = match ramflux_protocol::parse_i_json(&request.body) {
-                Ok(body) => crate::registration::forward(router, body, stream.peer_addr()?.ip()),
+                Ok(body) => {
+                    crate::registration::forward(router, body, stream.peer_addr()?.ip(), gateway_id)
+                }
                 Err(_) => crate::registration::rejected(
                     ramflux_protocol::IdentityDirectoryReason::InvalidRegistration,
                 ),

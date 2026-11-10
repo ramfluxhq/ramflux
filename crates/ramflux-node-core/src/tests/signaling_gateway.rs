@@ -627,7 +627,50 @@ fn mesh_spiffe_authorization_accepts_uri_san_identity() -> Result<(), Box<dyn st
     )?;
     assert_eq!(peer.node_id, "localhost");
     assert_eq!(peer.service_id, "ramflux-gateway");
+    assert_eq!(peer.instance_id, None);
     Ok(())
+}
+
+#[test]
+fn mesh_identity_parses_gateway_instance_without_changing_role()
+-> Result<(), Box<dyn std::error::Error>> {
+    let allowed = BTreeSet::from(["ramflux-gateway".to_owned()]);
+    let peer =
+        authorize_mesh_peer("ramflux-router", &allowed, Some("spiffe://n/ramflux-gateway/gw-a"))?;
+    assert_eq!(peer.service_id, "ramflux-gateway");
+    assert_eq!(peer.instance_id.as_deref(), Some("gw-a"));
+
+    for local_service in
+        ["ramflux-router", "ramflux-notify", "ramflux-retention", "ramflux-signaling"]
+    {
+        let authorized =
+            authorize_mesh_peer(local_service, &allowed, Some("spiffe://n/ramflux-gateway/gw-a"))?;
+        assert_eq!(authorized.service_id, "ramflux-gateway");
+        assert_eq!(authorized.instance_id.as_deref(), Some("gw-a"));
+    }
+
+    for service in
+        ["ramflux-notify", "ramflux-retention", "ramflux-signaling", "ramflux-federation"]
+    {
+        let parsed = parse_mesh_spiffe_uri(&format!("spiffe://n/{service}"))?;
+        assert_eq!(parsed.service_id, service);
+        assert_eq!(parsed.instance_id, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn mesh_identity_rejects_invalid_gateway_instance_paths() {
+    for uri in [
+        "spiffe://n/ramflux-federation/x",
+        "spiffe://n/ramflux-gateway/",
+        "spiffe://n/ramflux-gateway/a/b",
+        "spiffe://n/ramflux-gateway/GW",
+        "spiffe://n/ramflux-gateway/a%2Fb",
+        "spiffe://n/ramflux-gateway/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert!(parse_mesh_spiffe_uri(uri).is_err(), "accepted {uri}");
+    }
 }
 
 #[test]

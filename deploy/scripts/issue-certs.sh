@@ -19,6 +19,45 @@ fi
 
 services='gateway router notify federation relay signaling retention'
 node_id="${RAMFLUX_NODE_ID:-localhost}"
+gateway_id="${RAMFLUX_GATEWAY_ID:-ramflux-gateway}"
+
+valid_gateway_id() {
+  case "$1" in
+    [a-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *[!a-z0-9-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 63 ]
+}
+
+validate_gateway_instances() {
+  valid_gateway_id "${gateway_id}" || {
+    printf 'invalid RAMFLUX_GATEWAY_ID: %s\n' "${gateway_id}" >&2
+    return 1
+  }
+  for _id in ${RAMFLUX_GATEWAY_INSTANCES:-}; do
+    valid_gateway_id "${_id}" || {
+      printf 'invalid RAMFLUX_GATEWAY_INSTANCES id: %s\n' "${_id}" >&2
+      return 1
+    }
+  done
+}
+
+gateway_instance_uri_is_complete() {
+  _dir="$1"
+  _id="$2"
+  [ -s "${_dir}/gateway-key.pem" ] && [ -s "${_dir}/gateway.pem" ] \
+    && [ -s "${_dir}/ca.pem" ] || return 1
+  _kpub=$(openssl pkey -in "${_dir}/gateway-key.pem" -pubout 2>/dev/null) || return 1
+  _cpub=$(openssl x509 -in "${_dir}/gateway.pem" -pubkey -noout 2>/dev/null) || return 1
+  [ "${_kpub}" = "${_cpub}" ] || return 1
+  openssl verify -CAfile "${ca_cert}" "${_dir}/gateway.pem" >/dev/null 2>&1 || return 1
+  _uris=$(openssl x509 -in "${_dir}/gateway.pem" -noout -ext subjectAltName 2>/dev/null \
+    | grep -o 'URI:spiffe://[^,[:space:]]*' || true)
+  [ "${_uris}" = "URI:spiffe://${node_id}/ramflux-gateway/${_id}" ]
+}
 
 normalize_service_mesh_permissions() {
   for _service in ${services}; do
@@ -50,12 +89,17 @@ service_is_complete() {
     [ "${_kpub}" = "${_cpub}" ] || return 1
     openssl verify -CAfile "${ca_cert}" "${_sd}/${_service}.pem" >/dev/null 2>&1 || return 1
   done
+  gateway_instance_uri_is_complete "${cert_dir}/gateway" "${gateway_id}" || return 1
+  for _id in ${RAMFLUX_GATEWAY_INSTANCES:-}; do
+    gateway_instance_uri_is_complete "${cert_dir}/gateway-${_id}" "${_id}" || return 1
+  done
   return 0
 }
 
 issue_one_service() {
   _service="$1"
-  _service_dir="${cert_dir}/${_service}"
+  _service_dir="${2:-${cert_dir}/${_service}}"
+  _gateway_instance="${3:-${gateway_id}}"
   mkdir -p "${_service_dir}"
   _key="${_service_dir}/${_service}-key.pem"
   _cert="${_service_dir}/${_service}.pem"
@@ -64,8 +108,12 @@ issue_one_service() {
   _tmp_ext=$(mktemp "${_service_dir}/.ext.XXXXXX")
   _tmp_cert=$(mktemp "${_service_dir}/.cert.XXXXXX")
   openssl genpkey -algorithm ED25519 -out "${_tmp_key}"
+  _spiffe_service="ramflux-${_service}"
+  if [ "${_service}" = gateway ]; then
+    _spiffe_service="ramflux-gateway/${_gateway_instance}"
+  fi
   cat > "${_tmp_ext}" <<EOF
-subjectAltName = DNS:ramflux-${_service}, DNS:${_service}, DNS:localhost, URI:spiffe://${node_id}/ramflux-${_service}
+subjectAltName = DNS:ramflux-${_service}, DNS:${_service}, DNS:localhost, URI:spiffe://${node_id}/${_spiffe_service}
 extendedKeyUsage = serverAuth, clientAuth
 keyUsage = digitalSignature
 EOF
@@ -189,6 +237,7 @@ ensure_node_secrets() {
 }
 
 issue_certs_locked() {
+  validate_gateway_instances
   ensure_node_secrets
   if service_is_complete; then
     normalize_service_mesh_permissions
@@ -196,6 +245,9 @@ issue_certs_locked() {
   fi
   for _service in ${services}; do
     issue_one_service "${_service}"
+  done
+  for _id in ${RAMFLUX_GATEWAY_INSTANCES:-}; do
+    issue_one_service gateway "${cert_dir}/gateway-${_id}" "${_id}"
   done
   normalize_service_mesh_permissions
 }

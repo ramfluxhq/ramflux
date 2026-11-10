@@ -489,10 +489,21 @@ async fn mesh_tls_post<T: serde::Serialize + Send + 'static>(
     let endpoint = server.local_addr()?.to_string();
     let worker_router = Arc::clone(router);
     let worker_peer = peer.to_owned();
+    let server_tls = pki.router.clone();
+    let ca_pem = pki.ca_pem.clone();
     let worker_socket = Arc::new(std::sync::Mutex::new(None));
     let worker_socket_for_thread = Arc::clone(&worker_socket);
     let worker = std::thread::spawn(move || -> Result<(), String> {
-        let mut stream = server.accept().map_err(|error| error.to_string())?;
+        let accepted = server
+            .accept_authenticated_with_pem_roots(&server_tls, &[ca_pem])
+            .map_err(|error| error.to_string())?;
+        let identity = ramflux_node_core::authorize_mesh_peer(
+            "ramflux-router",
+            &std::collections::BTreeSet::from([worker_peer]),
+            accepted.peer_spiffe_uri.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut stream = accepted.stream;
         let tcp = stream.sock.try_clone().map_err(|error| error.to_string())?;
         *worker_socket_for_thread.lock().map_err(|_| "mesh worker socket lock poisoned")? =
             Some(tcp.try_clone().map_err(|error| error.to_string())?);
@@ -505,7 +516,7 @@ async fn mesh_tls_post<T: serde::Serialize + Send + 'static>(
             match crate::handlers::handle_mesh_request(
                 &mut stream,
                 &worker_router,
-                &worker_peer,
+                &identity,
                 &guard,
             ) {
                 Ok(true) => {}

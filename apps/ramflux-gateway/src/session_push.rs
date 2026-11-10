@@ -80,6 +80,7 @@ pub(crate) struct Readiness {
     ready: AtomicBool,
     ephemeral: AtomicBool,
     asserted_boot: Mutex<Option<String>>,
+    refused_boot: Mutex<Option<String>>,
     #[cfg(test)]
     clock: Mutex<Option<DiscoveryClock>>,
 }
@@ -246,6 +247,9 @@ async fn reassert_if_boot_changed(
     let Some(gateway_id) = gateway_id else {
         return;
     };
+    if state.refused_boot.lock().is_ok_and(|refused_boot| refused_boot.as_deref() == Some(boot)) {
+        return;
+    }
     let items = hub.ephemeral_registrations(gateway_id, boot).await;
     if items.is_empty() {
         return;
@@ -254,7 +258,7 @@ async fn reassert_if_boot_changed(
     for chunk in items.chunks(ramflux_node_core::EPHEMERAL_REASSERTION_ITEM_BOUND) {
         let body = json!({"router_boot_id": boot, "items": chunk});
         let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
-        if tokio::time::timeout(
+        let result = tokio::time::timeout(
             REQUEST_TIMEOUT,
             crate::router_post_json_until::<Value, Value>(
                 router,
@@ -263,12 +267,17 @@ async fn reassert_if_boot_changed(
                 deadline,
             ),
         )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .is_none()
-        {
-            break;
+        .await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) if crate::registration::gateway_instance_rejection(&error) => {
+                crate::registration::log_gateway_identity_rejection(&error);
+                if let Ok(mut refused_boot) = state.refused_boot.lock() {
+                    *refused_boot = Some(boot.to_owned());
+                }
+                return;
+            }
+            _ => break,
         }
         posted = posted.saturating_add(chunk.len());
     }

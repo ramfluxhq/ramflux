@@ -169,10 +169,19 @@ pub fn extract_spiffe_uri_from_certificate(
     else {
         return Ok(None);
     };
-    Ok(san.value.general_names.iter().find_map(|name| match name {
+    let mut spiffe_uris = san.value.general_names.iter().filter_map(|name| match name {
         GeneralName::URI(uri) if uri.starts_with("spiffe://") => Some((*uri).to_owned()),
         _ => None,
-    }))
+    });
+    let Some(spiffe_uri) = spiffe_uris.next() else {
+        return Ok(None);
+    };
+    if spiffe_uris.next().is_some() {
+        return Err(TransportError::Tls(
+            "peer certificate has multiple SPIFFE URI SANs".to_owned(),
+        ));
+    }
+    Ok(Some(spiffe_uri))
 }
 
 struct HandshakeIo<'a> {
@@ -206,5 +215,29 @@ impl std::io::Write for HandshakeIo<'_> {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         std::io::Write::flush(self.socket)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn multiple_spiffe_uri_sans_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, rcgen::KeyPair::generate()?)?;
+        let key = rcgen::KeyPair::generate()?;
+        let mut leaf_params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+        leaf_params.subject_alt_names = vec![
+            rcgen::SanType::URI("spiffe://node/ramflux-gateway/gw-a".try_into()?),
+            rcgen::SanType::URI("spiffe://node/ramflux-gateway/gw-b".try_into()?),
+        ];
+        let leaf = leaf_params.signed_by(&key, &ca)?;
+        let certificate = rustls::pki_types::CertificateDer::from(leaf.der().to_vec());
+        assert!(matches!(
+            super::extract_spiffe_uri_from_certificate(&certificate),
+            Err(super::TransportError::Tls(message)) if message.contains("multiple SPIFFE URI SANs")
+        ));
+        Ok(())
     }
 }

@@ -320,7 +320,7 @@ fn log_router_itest_request(request: &ramflux_node_core::NodeHttpRequest) {
 pub(crate) fn handle_mesh_request(
     stream: &mut ramflux_transport::MeshTlsServerStream,
     router: &crate::router_runtime::RouterHandle,
-    peer_service_id: &str,
+    peer: &ramflux_node_core::MeshPeerIdentity,
     connection: &ramflux_node_core::ConnectionGuard,
 ) -> anyhow::Result<bool> {
     let _deadline = if router.home_migration_enabled() {
@@ -376,7 +376,7 @@ pub(crate) fn handle_mesh_request(
         path = %request.path,
         "router mesh request received"
     );
-    let response = match handle_mesh_request_value(request, router, peer_service_id) {
+    let response = match handle_mesh_request_value(request, router, peer) {
         Ok(response) => response,
         Err(error) => match i_json_rejection(&error) {
             Some(body) => {
@@ -397,6 +397,32 @@ pub(crate) struct MeshResponse {
     pub(crate) keep_alive: bool,
 }
 
+pub(crate) trait MeshPeerArgument {
+    fn identity(self) -> ramflux_node_core::MeshPeerIdentity;
+}
+
+impl MeshPeerArgument for &ramflux_node_core::MeshPeerIdentity {
+    fn identity(self) -> ramflux_node_core::MeshPeerIdentity {
+        self.clone()
+    }
+}
+
+#[cfg(test)]
+impl MeshPeerArgument for &str {
+    fn identity(self) -> ramflux_node_core::MeshPeerIdentity {
+        if self == "ramflux-gateway" {
+            ramflux_node_core::MeshPeerIdentity::gateway_for_test("gateway")
+        } else {
+            ramflux_node_core::MeshPeerIdentity {
+                node_id: "test-node".to_owned(),
+                service_id: self.to_owned(),
+                instance_id: None,
+                spiffe_uri: format!("spiffe://test-node/{self}"),
+            }
+        }
+    }
+}
+
 impl MeshResponse {
     fn json(status: &'static str, body: Vec<u8>) -> Self {
         Self { status, content_type: "application/json", body, keep_alive: true }
@@ -415,14 +441,88 @@ impl MeshResponse {
 pub(crate) fn handle_mesh_request_value(
     request: ramflux_transport::MeshHttpRequest,
     router: &crate::router_runtime::RouterHandle,
-    peer_service_id: &str,
+    peer: impl MeshPeerArgument,
 ) -> anyhow::Result<MeshResponse> {
+    let peer = peer.identity();
+    if let Some(response) = registration_peer_gate(&request, router, &peer) {
+        return Ok(response);
+    }
+    let peer_service_id = peer.service_id.as_str();
     if let Some(response) =
-        session_push::route(&request.method, &request.path, &request.body, router, peer_service_id)?
+        session_push::route(&request.method, &request.path, &request.body, router, &peer)?
     {
         return Ok(response);
     }
     handle_mesh_request_inner(request, router, peer_service_id)
+}
+
+fn registration_peer_gate(
+    request: &ramflux_transport::MeshHttpRequest,
+    router: &crate::router_runtime::RouterHandle,
+    peer: &ramflux_node_core::MeshPeerIdentity,
+) -> Option<MeshResponse> {
+    let registration = request.method == "POST"
+        && matches!(
+            request.path.as_str(),
+            "/s1/session"
+                | "/s1/session/upsert"
+                | "/mvp0/ephemeral-registrations"
+                | "/mvp1/identity/register"
+        );
+    let principal_lookup = request.method == "POST" && request.path == "/mvp1/principal-lookup";
+    let reassertion = request.method == "POST" && request.path == "/mvp0/ephemeral-registrations";
+    let session_get = request.method == "GET"
+        && request
+            .path
+            .strip_prefix("/s1/session/")
+            .is_some_and(|target| !target.is_empty() && !target.contains('/'));
+    if !(registration || principal_lookup || session_get) {
+        return None;
+    }
+    if peer.service_id != "ramflux-gateway" {
+        return Some(MeshResponse::json(
+            "403 Forbidden",
+            serde_json::json!({"reason": "gateway_role_required"}).to_string().into_bytes(),
+        ));
+    }
+    if registration || principal_lookup {
+        let Some(instance_id) = peer.instance_id.as_deref() else {
+            return Some(MeshResponse::json(
+                "403 Forbidden",
+                serde_json::json!({"reason": "gateway_instance_missing"}).to_string().into_bytes(),
+            ));
+        };
+        if !reassertion {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+                return None;
+            };
+            let gateway_id =
+                value.get("gateway_id").and_then(serde_json::Value::as_str).unwrap_or("");
+            if gateway_id.is_empty() && registration {
+                return Some(MeshResponse::json(
+                    "400 Bad Request",
+                    serde_json::json!({"reason": "gateway_id_empty"}).to_string().into_bytes(),
+                ));
+            }
+            if gateway_id != instance_id {
+                return Some(gateway_instance_mismatch());
+            }
+        }
+    }
+    if reassertion {
+        return None;
+    }
+    if peer.node_id != router.node_id() {
+        return Some(MeshResponse::text("403 Forbidden", "gateway node mismatch"));
+    }
+    None
+}
+
+fn gateway_instance_mismatch() -> MeshResponse {
+    MeshResponse::json(
+        "403 Forbidden",
+        serde_json::json!({"reason": "gateway_instance_mismatch"}).to_string().into_bytes(),
+    )
 }
 fn handle_mesh_request_inner(
     request: ramflux_transport::MeshHttpRequest,
@@ -524,9 +624,10 @@ fn handle_mesh_request_inner(
 pub(crate) async fn handle_mesh_quic_request_value(
     request: &ramflux_transport::GatewayQuicRequest,
     router: &crate::router_runtime::RouterHandle,
-    peer_service_id: &str,
+    peer: impl MeshPeerArgument,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
-    handle_mesh_quic_request_raw(request, None, router, peer_service_id).await
+    let peer = peer.identity();
+    handle_mesh_quic_request_raw(request, None, router, &peer).await
 }
 
 /// As [`handle_mesh_quic_request_value`], with the body bytes as received (see below).
@@ -534,8 +635,9 @@ pub(crate) async fn handle_mesh_quic_request_raw(
     request: &ramflux_transport::GatewayQuicRequest,
     raw_body: Option<&[u8]>,
     router: &crate::router_runtime::RouterHandle,
-    peer_service_id: &str,
+    peer: &ramflux_node_core::MeshPeerIdentity,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
+    let peer_service_id = peer.service_id.as_str();
     let body = match raw_body {
         Some(raw) => raw.to_vec(),
         None => serde_json::to_vec(&request.body)?,
@@ -613,11 +715,11 @@ pub(crate) async fn handle_mesh_quic_request_raw(
         || request.path == ramflux_node_core::MIGRATION_PEER_PATH
     {
         let router = router.clone();
-        let peer = peer_service_id.to_owned();
+        let peer = peer.clone();
         tokio::task::spawn_blocking(move || handle_mesh_request_value(mesh_request, &router, &peer))
             .await??
     } else {
-        handle_mesh_request_value(mesh_request, router, peer_service_id)?
+        handle_mesh_request_value(mesh_request, router, peer)?
     };
     Ok(ramflux_transport::GatewayQuicResponse {
         status: mesh_response_status_code(response.status),

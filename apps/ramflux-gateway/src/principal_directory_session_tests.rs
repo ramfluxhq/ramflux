@@ -69,6 +69,7 @@ async fn raw_name_lookup_rejects_known_and_unknown_queries_before_router_io() ->
                 body: serde_json::Value::Null,
             },
             context.remote_addr.ip(),
+            &context.gateway_id,
         )
         .await?;
         assert_eq!(response.status, 401);

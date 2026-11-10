@@ -187,7 +187,19 @@ pub(crate) fn gateway_peer_directory_from_env(
     config: &ramflux_node_core::NodeServiceConfig,
     local_gateway_id: &str,
 ) -> anyhow::Result<GatewayPeerDirectory> {
-    let Some(peers_value) = non_empty_env(GATEWAY_PEERS_ENV) else {
+    gateway_peer_directory_from_value(
+        config,
+        local_gateway_id,
+        non_empty_env(GATEWAY_PEERS_ENV).as_deref(),
+    )
+}
+
+fn gateway_peer_directory_from_value(
+    config: &ramflux_node_core::NodeServiceConfig,
+    local_gateway_id: &str,
+    peers_value: Option<&str>,
+) -> anyhow::Result<GatewayPeerDirectory> {
+    let Some(peers_value) = peers_value else {
         return Ok(GatewayPeerDirectory::empty(config));
     };
     let mut peers = BTreeMap::new();
@@ -201,6 +213,9 @@ pub(crate) fn gateway_peer_directory_from_env(
                 "invalid RAMFLUX_GATEWAY_PEERS entry with empty gateway id"
             ));
         }
+        if !ramflux_node_core::is_valid_gateway_instance_id(gateway_id) {
+            anyhow::bail!("invalid gateway peer instance id in RAMFLUX_GATEWAY_PEERS");
+        }
         if gateway_id == local_gateway_id {
             continue;
         }
@@ -213,6 +228,38 @@ pub(crate) fn gateway_peer_directory_from_env(
         vec![std::fs::read_to_string(&config.mesh.ca_cert)?]
     };
     Ok(GatewayPeerDirectory { tls: mesh_tls_config(config), peer_ca_pems, peers: Arc::new(peers) })
+}
+
+pub(crate) fn validate_gateway_mesh_identity(
+    config: &ramflux_node_core::NodeServiceConfig,
+    gateway_id: &str,
+) -> anyhow::Result<()> {
+    if !ramflux_node_core::is_valid_gateway_instance_id(gateway_id) {
+        anyhow::bail!("invalid RAMFLUX_GATEWAY_ID");
+    }
+    let cert_file = std::fs::File::open(&config.mesh.service_cert)?;
+    let mut reader = std::io::BufReader::new(cert_file);
+    let mut certificates = rustls_pemfile::certs(&mut reader);
+    let certificate = certificates
+        .next()
+        .transpose()?
+        .ok_or_else(|| anyhow::anyhow!("gateway service certificate has no certificate"))?;
+    if certificates.next().transpose()?.is_some() {
+        anyhow::bail!("gateway service certificate contains multiple certificates");
+    }
+    let spiffe_uri = ramflux_transport::extract_spiffe_uri_from_certificate(&certificate)?
+        .ok_or_else(|| anyhow::anyhow!("gateway service certificate has no SPIFFE URI SAN"))?;
+    let identity = ramflux_node_core::parse_mesh_spiffe_uri(&spiffe_uri)?;
+    let Some(instance_id) = identity.instance_id.as_deref() else {
+        anyhow::bail!("gateway service certificate has no instance id");
+    };
+    if instance_id != gateway_id {
+        anyhow::bail!("gateway service certificate instance does not match RAMFLUX_GATEWAY_ID");
+    }
+    if identity.node_id != config.node_id {
+        anyhow::bail!("gateway service certificate node id does not match configured node id");
+    }
+    Ok(())
 }
 
 fn gateway_instance_id_from_value(value: Option<&str>) -> String {
@@ -273,8 +320,132 @@ fn mesh_tls_config(
 mod tests {
     use super::{
         DEFAULT_GATEWAY_ID, default_gateway_peer_server_name, gateway_instance_id_from_value,
-        parse_gateway_peer_spec,
+        gateway_peer_directory_from_value, parse_gateway_peer_spec,
     };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::Path,
+    };
+
+    struct TestRoot(std::path::PathBuf);
+
+    impl TestRoot {
+        fn new() -> anyhow::Result<Self> {
+            let suffix = ramflux_protocol::encode_base64url(&ramflux_crypto::random_32()?[..8]);
+            let path = std::env::temp_dir()
+                .join(format!("rf-gateway-instance-start-{}-{suffix}", std::process::id()));
+            std::fs::create_dir_all(&path)?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn config(root: &Path, node_id: &str) -> ramflux_node_core::NodeServiceConfig {
+        ramflux_node_core::NodeServiceConfig {
+            node_id: node_id.to_owned(),
+            service_id: "ramflux-gateway".to_owned(),
+            redb_path: root.join("gateway.redb").display().to_string(),
+            node_service_signing_seed_b64url: None,
+            mesh: ramflux_node_core::MeshConfig {
+                listen_addr: "127.0.0.1:0".to_owned(),
+                ca_cert: root.join("ca.pem").display().to_string(),
+                service_cert: root.join("gateway.pem").display().to_string(),
+                service_key: root.join("gateway-key.pem").display().to_string(),
+                allowed_service_ids: BTreeSet::new(),
+                endpoints: BTreeMap::new(),
+            },
+            gateway: None,
+            signaling: None,
+            relay: None,
+        }
+    }
+
+    fn openssl(args: &[&str]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            std::process::Command::new("openssl").args(args).status()?.success(),
+            "openssl command failed: {args:?}"
+        );
+        Ok(())
+    }
+
+    fn path_str(path: &Path) -> anyhow::Result<&str> {
+        path.to_str().ok_or_else(|| anyhow::anyhow!("non-UTF-8 test path"))
+    }
+
+    fn require_error(result: anyhow::Result<()>) -> anyhow::Result<anyhow::Error> {
+        match result {
+            Ok(()) => anyhow::bail!("expected gateway identity validation error"),
+            Err(error) => Ok(error),
+        }
+    }
+
+    fn issue_test_certificate(root: &Path, spiffe_uri: &str) -> anyhow::Result<()> {
+        let ca_key = root.join("ca-key.pem");
+        let ca = root.join("ca.pem");
+        let key = root.join("gateway-key.pem");
+        let csr = root.join("gateway.csr");
+        let cert = root.join("gateway.pem");
+        let ext = root.join("gateway.ext");
+        let (ca_key_path, ca_path, key_path, csr_path, cert_path, ext_path) = (
+            path_str(&ca_key)?,
+            path_str(&ca)?,
+            path_str(&key)?,
+            path_str(&csr)?,
+            path_str(&cert)?,
+            path_str(&ext)?,
+        );
+        openssl(&["genpkey", "-algorithm", "ED25519", "-out", ca_key_path])?;
+        openssl(&[
+            "req",
+            "-x509",
+            "-new",
+            "-key",
+            ca_key_path,
+            "-out",
+            ca_path,
+            "-days",
+            "1",
+            "-subj",
+            "/CN=gateway identity test CA",
+        ])?;
+        openssl(&["genpkey", "-algorithm", "ED25519", "-out", key_path])?;
+        openssl(&[
+            "req",
+            "-new",
+            "-key",
+            key_path,
+            "-out",
+            csr_path,
+            "-subj",
+            "/CN=ramflux-gateway",
+        ])?;
+        std::fs::write(
+            &ext,
+            format!("subjectAltName=URI:{spiffe_uri}\nextendedKeyUsage=serverAuth,clientAuth\n"),
+        )?;
+        openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            csr_path,
+            "-CA",
+            ca_path,
+            "-CAkey",
+            ca_key_path,
+            "-CAcreateserial",
+            "-out",
+            cert_path,
+            "-days",
+            "1",
+            "-extfile",
+            ext_path,
+        ])
+    }
 
     #[test]
     fn gateway_instance_id_defaults_and_trims_env_value() {
@@ -298,6 +469,48 @@ mod tests {
             ("10.0.0.9:7443".to_owned(), "ramflux-gateway-b".to_owned())
         );
         assert_eq!(default_gateway_peer_server_name("ramflux-gateway-b"), "ramflux-gateway-b");
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "covers each gateway startup identity refusal")]
+    fn gateway_start_identity_checks_bind_certificate_node_and_instance() -> anyhow::Result<()> {
+        let directory = TestRoot::new()?;
+        let root = directory.0.as_path();
+        let config = config(root, "localhost");
+        issue_test_certificate(root, "spiffe://localhost/ramflux-gateway/gw-a")?;
+        super::validate_gateway_mesh_identity(&config, "gw-a")?;
+        let error = require_error(super::validate_gateway_mesh_identity(&config, "gw-b"))?;
+        assert_eq!(
+            error.to_string(),
+            "gateway service certificate instance does not match RAMFLUX_GATEWAY_ID"
+        );
+        let error = require_error(super::validate_gateway_mesh_identity(&config, "GW"))?;
+        assert_eq!(error.to_string(), "invalid RAMFLUX_GATEWAY_ID");
+
+        issue_test_certificate(root, "spiffe://localhost/ramflux-gateway")?;
+        let error = require_error(super::validate_gateway_mesh_identity(&config, "gw-a"))?;
+        assert_eq!(error.to_string(), "gateway service certificate has no instance id");
+
+        issue_test_certificate(root, "spiffe://foreign/ramflux-gateway/gw-a")?;
+        let error = require_error(super::validate_gateway_mesh_identity(&config, "gw-a"))?;
+        assert_eq!(
+            error.to_string(),
+            "gateway service certificate node id does not match configured node id"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_peer_directory_rejects_invalid_peer_instance_ids() -> anyhow::Result<()> {
+        let directory = TestRoot::new()?;
+        let config = config(&directory.0, "localhost");
+        let Err(error) =
+            gateway_peer_directory_from_value(&config, "gw-a", Some("GW-B=ramflux-gateway-b:7443"))
+        else {
+            anyhow::bail!("invalid peer id must refuse start");
+        };
+        assert_eq!(error.to_string(), "invalid gateway peer instance id in RAMFLUX_GATEWAY_PEERS");
         Ok(())
     }
 }

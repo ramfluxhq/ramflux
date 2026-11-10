@@ -13,6 +13,12 @@ use std::path::PathBuf;
 type TestResult = anyhow::Result<()>;
 
 fn call(router: &RouterHandle, method: &str, path: &str, body: Value) -> anyhow::Result<Value> {
+    let instance = body
+        .get("gateway_id")
+        .or_else(|| body.get("session").and_then(|session| session.get("gateway_id")))
+        .and_then(Value::as_str)
+        .unwrap_or("gateway");
+    let peer = ramflux_node_core::MeshPeerIdentity::gateway_for_test(instance);
     let response = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: method.into(),
@@ -20,7 +26,7 @@ fn call(router: &RouterHandle, method: &str, path: &str, body: Value) -> anyhow:
             body: serde_json::to_vec(&body)?,
         },
         router,
-        "ramflux-gateway",
+        &peer,
     )?;
     Ok(serde_json::from_slice(&response.body)?)
 }

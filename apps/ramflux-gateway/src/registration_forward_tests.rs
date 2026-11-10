@@ -57,7 +57,7 @@ pub(crate) fn registration(
         proof,
         device_set: Some(set),
         target_delivery_id: "delivery".into(),
-        gateway_id: "gateway-b".into(),
+        gateway_id: "gw-x".into(),
         session_id: "session-b".into(),
         push_alias_hash: None,
         now,
@@ -66,6 +66,10 @@ pub(crate) fn registration(
     })
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one real-mTLS fixture verifies forwarding and proof replay behavior"
+)]
 async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_not_burn_proof()
 -> TestResult {
     let directory = temp_cert_root("registration-forward")?;
@@ -103,6 +107,9 @@ async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_
             if forwarded.proof.key_binding != expected_proof.key_binding {
                 return Err("forwarding dropped v2 key binding".into());
             }
+            if forwarded.gateway_id != "gateway-b" {
+                return Err("forwarding trusted client-chosen gateway id".into());
+            }
             if forwarded.source_ip_hash.as_deref() == Some("caller-claim") {
                 return Err("forwarding trusted caller source".into());
             }
@@ -135,15 +142,21 @@ async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_
     };
     let mut bad = honest.clone();
     bad.proof.signature = encode_base64url([0; 64]);
-    let rejected = dispatch_quic_json_request(&client, send(&bad)?, "127.0.0.1".parse()?).await?;
+    let rejected =
+        dispatch_quic_json_request(&client, send(&bad)?, "127.0.0.1".parse()?, "gateway-b").await?;
     assert_eq!(rejected.status, 409);
     assert_eq!(rejected.body["error"]["reason_code"], "invalid_registration");
     assert_eq!(store.identity_registry_write_count(), 0);
     let accepted =
-        dispatch_quic_json_request(&client, send(&honest)?, "127.0.0.1".parse()?).await?;
+        dispatch_quic_json_request(&client, send(&honest)?, "127.0.0.1".parse()?, "gateway-b")
+            .await?;
     assert_eq!(accepted.status, 200);
     assert_eq!(accepted.body["session_bound"], true);
     assert_eq!(store.identity_registry_write_count(), 1);
+    assert_eq!(
+        state.session("delivery").as_ref().map(|row| row.gateway_id.as_str()),
+        Some("gateway-b")
+    );
     let mut live = state.session("delivery").ok_or("registered session")?;
     live.session_id = "live-session".into();
     live.gateway_id = "live-gateway".into();
@@ -151,12 +164,14 @@ async fn signed_registration_survives_gateway_forwarding_and_bad_signature_does_
     live.last_cursor = Some("cursor-8".into());
     state.upsert_session(live.clone())?;
     let response =
-        dispatch_quic_json_request(&client, send(&renewed)?, "127.0.0.1".parse()?).await?;
+        dispatch_quic_json_request(&client, send(&renewed)?, "127.0.0.1".parse()?, "gateway-b")
+            .await?;
     assert_eq!(response.status, 200);
     assert_eq!(state.session("delivery"), Some(live));
     for replay in [&honest, &renewed] {
         let response =
-            dispatch_quic_json_request(&client, send(replay)?, "127.0.0.1".parse()?).await?;
+            dispatch_quic_json_request(&client, send(replay)?, "127.0.0.1".parse()?, "gateway-b")
+                .await?;
         assert_eq!(response.status, 409);
     }
     worker.join().map_err(|_| "router worker panicked")?.map_err(std::io::Error::other)?;

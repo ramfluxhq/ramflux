@@ -138,8 +138,13 @@ async fn handle_gateway_quic_stream_with_connection(
         let Some(_request) = ramflux_node_core::begin_service_request() else {
             return Ok(());
         };
-        let response =
-            dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
+        let response = dispatch_quic_json_request(
+            &context.router,
+            request,
+            context.remote_addr.ip(),
+            &context.gateway_id,
+        )
+        .await?;
         let write_started = Instant::now();
         ramflux_transport::write_quic_json_frame(&mut send, &response).await?;
         ramflux_node_core::record_gateway_quic_response_write_us(elapsed_us(write_started));
@@ -195,8 +200,13 @@ pub(crate) async fn handle_gateway_tcp_tls_stream(
         let Some(_request) = ramflux_node_core::begin_service_request() else {
             return Ok(());
         };
-        let response =
-            dispatch_quic_json_request(&context.router, request, context.remote_addr.ip()).await?;
+        let response = dispatch_quic_json_request(
+            &context.router,
+            request,
+            context.remote_addr.ip(),
+            &context.gateway_id,
+        )
+        .await?;
         ramflux_transport::write_gateway_session_json(&mut *send, &response).await?;
     }
     Ok(())
@@ -876,6 +886,7 @@ pub(crate) async fn run_gateway_session_loop_until_closed(
                         &context.router,
                         serde_json::json!(request),
                         context.remote_addr.ip(),
+                        &context.gateway_id,
                     )
                     .await;
                     write_gateway_handle(&send, &crate::registration::session_response(response))

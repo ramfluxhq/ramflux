@@ -773,10 +773,12 @@ fn issue_certificate(
     let csr = root.join(format!("{name}.csr"));
     let cert = root.join(format!("{name}.pem"));
     let extensions = root.join(format!("{name}.ext"));
+    let spiffe_service =
+        if service == "ramflux-gateway" { "ramflux-gateway/ramflux-gateway" } else { service };
     std::fs::write(
         &extensions,
         format!(
-            "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1,URI:spiffe://localhost/{service}\n"
+            "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1,URI:spiffe://localhost/{spiffe_service}\n"
         ),
     )?;
     openssl(&[
@@ -888,7 +890,7 @@ fn assert_committed_request(
             if let Some(session) = session {
                 assert_eq!(session.session_id, "shutdown-session");
                 assert_eq!(session.device_id, "shutdown-device");
-                assert_eq!(session.gateway_id, "shutdown-gateway");
+                assert_eq!(session.gateway_id, "ramflux-gateway");
                 assert_eq!(session.device_epoch, 1);
                 assert_eq!(session.session_seq, 1);
             }

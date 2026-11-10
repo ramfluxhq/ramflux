@@ -320,6 +320,7 @@ fn drive_itest_http_control(
         &mut server,
         &context.router,
         &request,
+        &context.gateway_id,
     ) {
         Ok(()) => {
             drop(server);
@@ -350,7 +351,12 @@ fn drive_itest_http_marked(
     let context = crate::session::tests::test_gateway_context()?;
     let (mut server, mut client) = loopback()?;
     let request = envelope_http_request(&submit.envelope)?;
-    crate::itest_http::dispatch_protected_itest_request(&mut server, &context.router, &request)?;
+    crate::itest_http::dispatch_protected_itest_request(
+        &mut server,
+        &context.router,
+        &request,
+        &context.gateway_id,
+    )?;
     drop(server);
     let mut response = Vec::new();
     client.read_to_end(&mut response)?;

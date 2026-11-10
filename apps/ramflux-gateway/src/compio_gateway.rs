@@ -170,13 +170,18 @@ async fn handle_gateway_compio_quic_stream(
     let crate::ingress::Ingress::Request(request) = first else {
         anyhow::bail!("gateway ingress dispatch mismatch");
     };
-    let response = if let Some(response) =
-        crate::principal_directory::reject_unauthenticated(&request)
-    {
-        response
-    } else {
-        dispatch_gateway_request_blocking(context.router.clone(), request, remote_addr.ip()).await?
-    };
+    let response =
+        if let Some(response) = crate::principal_directory::reject_unauthenticated(&request) {
+            response
+        } else {
+            dispatch_gateway_request_blocking(
+                context.router.clone(),
+                request,
+                remote_addr.ip(),
+                context.gateway_id.clone(),
+            )
+            .await?
+        };
     send.write_json_message(&response).await?;
     send.finish()?;
     Ok(())
@@ -245,6 +250,7 @@ async fn dispatch_gateway_request_blocking(
     router: crate::RouterMeshClient,
     request: ramflux_transport::GatewayQuicRequest,
     source: std::net::IpAddr,
+    gateway_id: String,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
     let (sender, receiver) =
         tokio::sync::oneshot::channel::<anyhow::Result<ramflux_transport::GatewayQuicResponse>>();
@@ -254,7 +260,7 @@ async fn dispatch_gateway_request_blocking(
             .build()
             .map_err(Into::into)
             .and_then(|runtime| {
-                runtime.block_on(dispatch_quic_json_request(&router, request, source))
+                runtime.block_on(dispatch_quic_json_request(&router, request, source, &gateway_id))
             });
         let _result = sender.send(result);
     })?;

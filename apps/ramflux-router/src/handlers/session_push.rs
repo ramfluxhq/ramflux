@@ -20,10 +20,11 @@ pub(super) fn route(
     path: &str,
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
-    peer: &str,
+    peer: &ramflux_node_core::MeshPeerIdentity,
 ) -> anyhow::Result<Option<MeshResponse>> {
     if (method, path) == ("POST", "/mvp0/nack-bound") {
-        return bound_nack(ramflux_protocol::parse_i_json(body)?, router, peer).map(Some);
+        return bound_nack(ramflux_protocol::parse_i_json(body)?, router, &peer.service_id)
+            .map(Some);
     }
     let capable_page = path.starts_with("/mvp1/inbox/")
         && path.split('?').nth(1).is_some_and(|q| q.split('&').any(|p| p == "session_push=1"));
@@ -43,7 +44,7 @@ pub(super) fn route(
     if !handled {
         return Ok(None);
     }
-    if peer != "ramflux-gateway" {
+    if peer.service_id != "ramflux-gateway" {
         return Ok(Some(MeshResponse::text(
             "403 Forbidden",
             "session push requires authenticated gateway",
@@ -73,7 +74,7 @@ pub(super) fn route(
                 router_boot_id: router.state().router_boot_id().to_owned(),
             })
         }
-        ("POST", "/mvp0/ephemeral-registrations") => reassert(body, router),
+        ("POST", "/mvp0/ephemeral-registrations") => reassert(body, router, peer),
         ("POST", "/mvp0/envelope-ephemeral") => envelope_ephemeral(body, router),
         ("POST", "/mvp0/ack-bound-batch") => {
             match serde_json::from_slice::<ramflux_node_core::SessionAckBatchRequest>(body) {
@@ -143,12 +144,31 @@ fn envelope_ephemeral(
 fn reassert(
     body: &[u8],
     router: &crate::router_runtime::RouterHandle,
+    peer: &ramflux_node_core::MeshPeerIdentity,
 ) -> anyhow::Result<MeshResponse> {
     let Ok(request) =
         serde_json::from_slice::<ramflux_node_core::EphemeralRegistrationsRequest>(body)
     else {
         return refused(SessionPushReason::InvalidSeq, None);
     };
+    let Some(instance_id) = peer.instance_id.as_deref() else {
+        return Ok(MeshResponse::json(
+            "403 Forbidden",
+            serde_json::json!({"reason": "gateway_instance_missing"}).to_string().into_bytes(),
+        ));
+    };
+    if request.items.iter().any(|item| item.gateway_id.is_empty()) {
+        return Ok(MeshResponse::json(
+            "400 Bad Request",
+            serde_json::json!({"reason": "gateway_id_empty"}).to_string().into_bytes(),
+        ));
+    }
+    if request.items.iter().any(|item| item.gateway_id != instance_id) {
+        return Ok(super::gateway_instance_mismatch());
+    }
+    if peer.node_id != router.node_id() {
+        return Ok(MeshResponse::text("403 Forbidden", "gateway node mismatch"));
+    }
     match router.state().reassert_ephemeral_registrations(&request.router_boot_id, &request.items) {
         Ok(applied) => reply(&ramflux_node_core::EphemeralRegistrationsResponse { applied }),
         Err(ramflux_node_core::EphemeralReassertionError::BootMismatch) => {

@@ -147,7 +147,7 @@ elif mode == "request":
     if service == "ramflux-router":
         request(peer, "/s1/session/upsert", {
             "target_delivery_id": "shutdown-target", "device_id": "shutdown-device",
-            "gateway_id": "shutdown-gateway", "session_id": "shutdown-session",
+            "gateway_id": "ramflux-gateway", "session_id": "shutdown-session",
             "device_epoch": 1, "session_seq": 1, "last_cursor": None,
             "push_alias_hash": None, "lifecycle": "Live",
         })

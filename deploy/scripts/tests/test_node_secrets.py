@@ -12,6 +12,42 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 
 
 class NodeSecretsTests(unittest.TestCase):
+    def test_gateway_legacy_leaf_is_reissued_with_exact_instance_uri(self):
+        with tempfile.TemporaryDirectory(prefix="rf-gateway-instance-cert-") as directory:
+            root = Path(directory)
+            env = dict(os.environ, RAMFLUX_DEPLOY_DIR=str(root), RAMFLUX_NODE_ID="localhost",
+                       RAMFLUX_GATEWAY_ID="gw-a", RAMFLUX_GATEWAY_INSTANCES="gw-a gw-b")
+            for script in ("bootstrap-ca.sh", "issue-certs.sh"):
+                subprocess.run(["sh", str(SCRIPTS / script)], env=env, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            gateway = root / "certs" / "gateway"
+            legacy_csr = gateway / "legacy.csr"
+            legacy_ext = gateway / "legacy.ext"
+            legacy_cert = gateway / "gateway.pem"
+            legacy_ext.write_text(
+                "subjectAltName=DNS:ramflux-gateway,URI:spiffe://localhost/ramflux-gateway\n"
+                "extendedKeyUsage=serverAuth,clientAuth\nkeyUsage=digitalSignature\n"
+            )
+            subprocess.run(["openssl", "req", "-new", "-key", str(gateway / "gateway-key.pem"),
+                            "-out", str(legacy_csr), "-subj", "/CN=ramflux-gateway"],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["openssl", "x509", "-req", "-in", str(legacy_csr), "-CA",
+                            str(root / "certs" / "ca.pem"), "-CAkey",
+                            str(root / "certs" / "ca-key.pem"), "-CAcreateserial", "-out",
+                            str(legacy_cert), "-days", "1", "-extfile", str(legacy_ext)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            subprocess.run(["sh", str(SCRIPTS / "issue-certs.sh")], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for directory_name, instance in (("gateway", "gw-a"), ("gateway-gw-a", "gw-a"),
+                                             ("gateway-gw-b", "gw-b")):
+                cert = root / "certs" / directory_name / "gateway.pem"
+                san = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-ext",
+                                      "subjectAltName"], check=True, capture_output=True, text=True).stdout
+                self.assertEqual(san.count(f"URI:spiffe://localhost/ramflux-gateway/{instance}"), 1)
+                self.assertNotIn("URI:spiffe://localhost/ramflux-gateway\n", san)
+
     def test_bootstrap_keys_are_private_stable_and_outside_database_volumes(self):
         with tempfile.TemporaryDirectory(prefix="rf-node-secrets-") as directory:
             root = Path(directory)

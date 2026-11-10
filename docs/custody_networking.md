@@ -138,11 +138,21 @@ registration and channel binding do not independently provide DM forward secrecy
 The optional profile follows [the custody wire specification](root_key_custody_wire.md).
 Provision its node-root signature separately from the gateway's proxy credential.
 
+Each gateway mesh certificate identifies one instance with the SPIFFE URI
+`spiffe://{node_id}/ramflux-gateway/{gateway_id}`. The instance id grammar is
+`[a-z0-9][a-z0-9-]{0,62}`. `RAMFLUX_GATEWAY_ID` selects the local id (default
+`ramflux-gateway`) and must match both the certificate URI and the gateway
+configuration. For multi-instance issuance, set `RAMFLUX_GATEWAY_INSTANCES` to
+a space-separated list; `issue-certs.sh` writes each instance under
+`certs/gateway-{id}/`. DNS SANs remain the shared `ramflux-gateway` name used
+for TLS server-name verification.
+
 | Setting | Service | Meaning |
 | --- | --- | --- |
 | `RAMFLUX_CUSTODY_NODE_RECORD_FILE` | router | Bounded signed node identity JSON; absent/empty leaves native custody disabled. |
 | `RAMFLUX_CUSTODY_NODE_PUBLIC_KEY` | router, gateway | Independently configured receiving-node identity key; a proxy TLS certificate cannot supply it. On the gateway, absent/empty disables custody and skips its pool/nofile initialization. |
-| `RAMFLUX_GATEWAY_ID` | gateway | Exact proxy instance identity in the signed node record; defaults to `ramflux-gateway`. Every instance needs its own authorized proxy key. |
+| `RAMFLUX_GATEWAY_ID` | gateway | Exact proxy instance identity in the signed node record and mesh SPIFFE URI; defaults to `ramflux-gateway`. Must match the local gateway certificate. Every instance needs its own authorized proxy key. |
+| `RAMFLUX_GATEWAY_INSTANCES` | deploy | Optional space-separated gateway ids to issue as `certs/gateway-{id}/`; each id uses the gateway instance grammar above. |
 | `RAMFLUX_CUSTODY_PROXY_SIGNING_SEED` | gateway | Dedicated software Ed25519 proxy seed, canonical base64url; required for receipt mode. Keep it separate from node-root and relay receipt keys. |
 | `RAMFLUX_CUSTODY_TCP_ADDR` | router | Optional direct client TLS listener, disabled when unset; requires separate public TLS credentials and a signed certificate pin. |
 | `RAMFLUX_CUSTODY_TLS_CERT_FILE`, `RAMFLUX_CUSTODY_TLS_KEY_FILE` | router | Public client-facing certificate chain/key, separate from mesh TLS. The signed node record pins the leaf DER SHA-256 hash as canonical base64url in `client_tls_certificate_sha256`. Shared mesh signing keys are refused, including differently encoded certificates using the same key. |

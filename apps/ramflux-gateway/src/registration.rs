@@ -6,6 +6,9 @@ use ramflux_protocol::{
     IdentityDirectoryReason, IdentityRegistrationFailure, IdentityRegistrationFailureBody,
 };
 use ramflux_transport::GatewayQuicResponse;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static GATEWAY_IDENTITY_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn rejected(reason_code: IdentityDirectoryReason) -> GatewayQuicResponse {
     GatewayQuicResponse {
         status: 409,
@@ -20,8 +23,9 @@ pub(crate) fn forward(
     router: &crate::RouterMeshClient,
     body: serde_json::Value,
     source: std::net::IpAddr,
+    gateway_id: &str,
 ) -> GatewayQuicResponse {
-    let request = match prepare(body, source) {
+    let request = match prepare(body, source, gateway_id) {
         Ok(request) => request,
         Err(response) => return response,
     };
@@ -29,7 +33,11 @@ pub(crate) fn forward(
         match crate::router_post_json(router, "/mvp1/identity/register", &request) {
             Ok(response) => response,
             Err(error) => {
-                return crate::principal_directory::registration_forwarding_failure(&error);
+                let identity_error = log_gateway_identity_rejection(&error);
+                return crate::principal_directory::registration_forwarding_failure(
+                    &error,
+                    !identity_error,
+                );
             }
         };
     registration_result(response)
@@ -40,13 +48,14 @@ const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 fn prepare(
     body: serde_json::Value,
     source: std::net::IpAddr,
+    gateway_id: &str,
 ) -> Result<ramflux_node_core::IdentityRegisterRequest, GatewayQuicResponse> {
     let mut request: ramflux_node_core::IdentityRegisterRequest = match serde_json::from_value(body)
     {
         Ok(request) => request,
         Err(_) => return Err(rejected(IdentityDirectoryReason::InvalidRegistration)),
     };
-    if crate::principal_directory::registration_context(&mut request, source).is_err() {
+    if crate::principal_directory::registration_context(&mut request, source, gateway_id).is_err() {
         return Err(rejected(IdentityDirectoryReason::RegistrationUnavailable));
     }
     Ok(request)
@@ -56,8 +65,9 @@ pub(crate) async fn forward_async(
     router: &crate::RouterMeshClient,
     body: serde_json::Value,
     source: std::net::IpAddr,
+    gateway_id: &str,
 ) -> GatewayQuicResponse {
-    let request = match prepare(body, source) {
+    let request = match prepare(body, source, gateway_id) {
         Ok(request) => request,
         Err(response) => return response,
     };
@@ -69,9 +79,50 @@ pub(crate) async fn forward_async(
     .await
     {
         Ok(Ok(response)) => registration_result(response),
-        Ok(Err(error)) => crate::principal_directory::registration_forwarding_failure(&error),
-        Err(error) => crate::principal_directory::registration_forwarding_failure(&error),
+        Ok(Err(error)) => {
+            let identity_error = log_gateway_identity_rejection(&error);
+            crate::principal_directory::registration_forwarding_failure(&error, !identity_error)
+        }
+        Err(error) => crate::principal_directory::registration_forwarding_failure(&error, true),
     }
+}
+
+pub(crate) fn gateway_instance_rejection(error: &ramflux_transport::TransportError) -> bool {
+    let ramflux_transport::TransportError::HttpStatus { status: 403, body } = error else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value.get("reason").and_then(serde_json::Value::as_str).map(str::to_owned)
+        })
+        .is_some_and(|reason| {
+            matches!(reason.as_str(), "gateway_instance_missing" | "gateway_instance_mismatch")
+        })
+}
+
+pub(crate) fn log_gateway_identity_rejection(error: &ramflux_transport::TransportError) -> bool {
+    let ramflux_transport::TransportError::HttpStatus { status: 403, body } = error else {
+        return false;
+    };
+    let reason = serde_json::from_str::<serde_json::Value>(body).ok().and_then(|value| {
+        value.get("reason").and_then(serde_json::Value::as_str).map(str::to_owned)
+    });
+    let Some(reason) = reason.filter(|reason| {
+        matches!(
+            reason.as_str(),
+            "gateway_role_required" | "gateway_instance_missing" | "gateway_instance_mismatch"
+        )
+    }) else {
+        return false;
+    };
+    if !GATEWAY_IDENTITY_ERROR_LOGGED.swap(true, Ordering::AcqRel) {
+        tracing::error!(
+            reason,
+            "gateway mesh configuration error: router rejected registration identity; check the gateway certificate and RAMFLUX_GATEWAY_ID"
+        );
+    }
+    true
 }
 
 pub(crate) async fn publish_prekey(
@@ -130,7 +181,8 @@ mod tests {
             client: ramflux_transport::MeshHttpClient::new(),
             async_mesh: None,
         };
-        let response = forward(&router, serde_json::json!({"proof":null}), "127.0.0.1".parse()?);
+        let response =
+            forward(&router, serde_json::json!({"proof":null}), "127.0.0.1".parse()?, "gateway");
         assert_eq!(response.body["error"]["reason_code"], "invalid_registration");
         assert!(matches!(
             session_response(GatewayQuicResponse {

@@ -8,6 +8,7 @@ pub(crate) async fn dispatch_quic_json_request(
     router: &RouterMeshClient,
     request: ramflux_transport::GatewayQuicRequest,
     source: std::net::IpAddr,
+    gateway_id: &str,
 ) -> anyhow::Result<ramflux_transport::GatewayQuicResponse> {
     if let Some(response) = crate::principal_directory::reject_unauthenticated(&request) {
         return Ok(response);
@@ -38,7 +39,13 @@ pub(crate) async fn dispatch_quic_json_request(
             serde_json::to_value(response)?
         }
         ("POST", "/mvp1/identity/register") => {
-            return Ok(crate::registration::forward_async(router, request.body, source).await);
+            return Ok(crate::registration::forward_async(
+                router,
+                request.body,
+                source,
+                gateway_id,
+            )
+            .await);
         }
         ("POST", "/mvp1/prekey/publish") => {
             let prekey: ramflux_node_core::PrekeyPublishRequest =

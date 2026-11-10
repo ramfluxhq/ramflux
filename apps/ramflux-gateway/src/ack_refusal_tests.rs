@@ -82,6 +82,7 @@ async fn legacy_ack_relays_forward_backpressure() -> anyhow::Result<()> {
             body: serde_json::to_value(ack()?)?,
         },
         std::net::Ipv4Addr::LOCALHOST.into(),
+        &context.gateway_id,
     )
     .await?;
     anyhow::ensure!(
@@ -116,7 +117,12 @@ fn http_refusal(router: &crate::RouterMeshClient) -> anyhow::Result<()> {
         forwarded_proto: None,
         forwarded_for: None,
     };
-    crate::itest_http::dispatch_protected_itest_request(&mut server, router, &request)?;
+    crate::itest_http::dispatch_protected_itest_request(
+        &mut server,
+        router,
+        &request,
+        "ramflux-gateway",
+    )?;
     drop(server);
     let mut bytes = String::new();
     client.read_to_string(&mut bytes)?;

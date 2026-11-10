@@ -18,6 +18,17 @@ const GATEWAY: &str = "gateway";
 const SESSION: &str = "session";
 
 fn call(router: &RouterHandle, method: &str, path: &str, body: &Value) -> anyhow::Result<Value> {
+    call_as(router, method, path, body, GATEWAY)
+}
+
+fn call_as(
+    router: &RouterHandle,
+    method: &str,
+    path: &str,
+    body: &Value,
+    instance: &str,
+) -> anyhow::Result<Value> {
+    let peer = ramflux_node_core::MeshPeerIdentity::gateway_for_test(instance);
     let response = super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: method.into(),
@@ -25,7 +36,7 @@ fn call(router: &RouterHandle, method: &str, path: &str, body: &Value) -> anyhow
             body: serde_json::to_vec(body)?,
         },
         router,
-        "ramflux-gateway",
+        &peer,
     )?;
     Ok(serde_json::from_slice(&response.body)?)
 }
@@ -37,6 +48,16 @@ fn mesh(
     body: &Value,
     peer: &str,
 ) -> anyhow::Result<super::super::MeshResponse> {
+    let identity = if peer == "ramflux-gateway" {
+        ramflux_node_core::MeshPeerIdentity::gateway_for_test(GATEWAY)
+    } else {
+        ramflux_node_core::MeshPeerIdentity {
+            node_id: "test-node".into(),
+            service_id: peer.into(),
+            instance_id: None,
+            spiffe_uri: format!("spiffe://test-node/{peer}"),
+        }
+    };
     super::super::handle_mesh_request_value(
         ramflux_transport::MeshHttpRequest {
             method: method.into(),
@@ -44,7 +65,7 @@ fn mesh(
             body: serde_json::to_vec(body)?,
         },
         router,
-        peer,
+        &identity,
     )
 }
 
@@ -77,7 +98,7 @@ fn capable_request(
 
 fn establish_capable(router: &RouterHandle, target: &str, gateway: &str) -> TestResult {
     let body = serde_json::to_value(capable_request(target, gateway, SESSION, 1))?;
-    let response = call(router, "POST", "/s1/session", &body)?;
+    let response = call_as(router, "POST", "/s1/session", &body, gateway)?;
     anyhow::ensure!(response["session_id"] == SESSION, "{response}");
     Ok(())
 }
@@ -88,11 +109,21 @@ fn boot_id(router: &RouterHandle) -> anyhow::Result<String> {
 }
 
 fn reassert(router: &RouterHandle, boot: &str, items: &Value) -> anyhow::Result<Value> {
-    call(
+    reassert_as(router, boot, items, GATEWAY)
+}
+
+fn reassert_as(
+    router: &RouterHandle,
+    boot: &str,
+    items: &Value,
+    instance: &str,
+) -> anyhow::Result<Value> {
+    call_as(
         router,
         "POST",
         "/mvp0/ephemeral-registrations",
         &json!({"router_boot_id": boot, "items": items}),
+        instance,
     )
 }
 
@@ -220,7 +251,8 @@ fn row_asserting_gateway_mismatch_refused() -> TestResult {
     let (router, path, _) = restarted_live("p05-gw-a", "target-gw-a", "gateway-b")?;
     let boot = boot_id(&router)?;
     let before = router.state().ephemeral_map_len();
-    let response = reassert(&router, &boot, &items_for("target-gw-a", SESSION, "gateway-a"))?;
+    let response =
+        reassert_as(&router, &boot, &items_for("target-gw-a", SESSION, "gateway-a"), "gateway-a")?;
     assert_eq!(response["applied"], 0);
     assert_eq!(router.state().ephemeral_map_len(), before);
     assert_unsupported(&router, "target-gw-a");
@@ -229,7 +261,7 @@ fn row_asserting_gateway_mismatch_refused() -> TestResult {
     Ok(())
 }
 
-fn row_mixed_batch_skips_gateway_mismatch() -> TestResult {
+fn row_mixed_batch_gateway_mismatch_refuses_whole_request() -> TestResult {
     let (router, path) = fresh("p05-mixed")?;
     establish_capable(&router, "target-mix-1", GATEWAY)?;
     establish_capable(&router, "target-mix-2", "gateway-b")?;
@@ -244,23 +276,89 @@ fn row_mixed_batch_skips_gateway_mismatch() -> TestResult {
         item_json("target-mix-2", SESSION, "gateway-a"),
         item_json("target-mix-3", SESSION, GATEWAY),
     ]);
+    let before = restored.state().ephemeral_map_len();
     let response = reassert(&restored, &boot, &items)?;
-    assert_eq!(response["applied"], 2);
-    assert_online(&restored, "target-mix-1", GATEWAY, SESSION);
-    assert_online(&restored, "target-mix-3", GATEWAY, SESSION);
+    assert_eq!(response["reason"], "gateway_instance_mismatch");
+    assert_eq!(restored.state().ephemeral_map_len(), before);
+    assert_unsupported(&restored, "target-mix-1");
     assert_unsupported(&restored, "target-mix-2");
-    assert_eq!(restored.state().ephemeral_map_len(), 2);
+    assert_unsupported(&restored, "target-mix-3");
     drop(restored);
     std::fs::remove_file(path)?;
     Ok(())
 }
 
-fn row_empty_gateway() -> TestResult {
+fn row_empty_gateway_is_bad_request() -> TestResult {
     let (router, path, _) = restarted_live("p05-empty-g", "target-empty-g", GATEWAY)?;
     let boot = boot_id(&router)?;
     let response = reassert(&router, &boot, &items_for("target-empty-g", SESSION, ""))?;
-    assert_eq!(response["applied"], 0);
+    assert_eq!(response["reason"], "gateway_id_empty");
     assert_unsupported(&router, "target-empty-g");
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn row_ephemeral_session_rejects_another_instance_before_binding() -> TestResult {
+    let (router, path) = fresh("p05-ephemeral-instance")?;
+    let body = serde_json::to_value(capable_request("target-other-instance", "gw-b", SESSION, 1))?;
+    let response = super::super::handle_mesh_request_value(
+        ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/s1/session".into(),
+            body: serde_json::to_vec(&body)?,
+        },
+        &router,
+        &ramflux_node_core::MeshPeerIdentity::gateway_for_test("gw-a"),
+    )?;
+    assert_eq!(response.status, "403 Forbidden");
+    let body: Value = serde_json::from_slice(&response.body)?;
+    assert_eq!(body["reason"], "gateway_instance_mismatch");
+    assert!(router.state().session("target-other-instance").is_none());
+    assert!(!router.state().ephemeral_map_contains("target-other-instance"));
+    drop(router);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+fn row_principal_lookup_and_session_get_gates() -> TestResult {
+    let (router, path) = fresh("p05-principal-gates")?;
+    let response = super::super::handle_mesh_request_value(
+        ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/mvp1/principal-lookup".into(),
+            body: br#"{"gateway_id":"gw-b"}"#.to_vec(),
+        },
+        &router,
+        &ramflux_node_core::MeshPeerIdentity::gateway_for_test("gw-a"),
+    )?;
+    assert_eq!(response.status, "403 Forbidden");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&response.body)?["reason"],
+        "gateway_instance_mismatch"
+    );
+
+    let response = mesh(&router, "GET", "/s1/session/target", &Value::Null, "ramflux-federation")?;
+    assert_eq!(response.status, "403 Forbidden");
+    let response = super::super::handle_mesh_request_value(
+        ramflux_transport::MeshHttpRequest {
+            method: "POST".into(),
+            path: "/s1/session/upsert".into(),
+            body: serde_json::to_vec(&serde_json::to_value(descriptor(
+                "foreign-node",
+                "gw-a",
+                SESSION,
+                1,
+            ))?)?,
+        },
+        &router,
+        &ramflux_node_core::MeshPeerIdentity {
+            node_id: "foreign-node".into(),
+            ..ramflux_node_core::MeshPeerIdentity::gateway_for_test("gw-a")
+        },
+    )?;
+    assert_eq!(response.status, "403 Forbidden");
+    assert!(router.state().session("foreign-node").is_none());
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -269,7 +367,8 @@ fn row_empty_gateway() -> TestResult {
 fn row_asserting_gateway_match_accepted() -> TestResult {
     let (router, path, _) = restarted_live("p05-gw-b", "target-gw-b", "gateway-b")?;
     let boot = boot_id(&router)?;
-    let response = reassert(&router, &boot, &items_for("target-gw-b", SESSION, "gateway-b"))?;
+    let response =
+        reassert_as(&router, &boot, &items_for("target-gw-b", SESSION, "gateway-b"), "gateway-b")?;
     assert_eq!(response["applied"], 1);
     assert_online(&router, "target-gw-b", "gateway-b", SESSION);
     drop(router);
@@ -458,8 +557,10 @@ fn ephemeral_router_restart_reassertion() -> TestResult {
     row_descriptor_mismatch()?;
     row_asserting_gateway_mismatch_refused()?;
     row_asserting_gateway_match_accepted()?;
-    row_mixed_batch_skips_gateway_mismatch()?;
-    row_empty_gateway()?;
+    row_mixed_batch_gateway_mismatch_refuses_whole_request()?;
+    row_empty_gateway_is_bad_request()?;
+    row_ephemeral_session_rejects_another_instance_before_binding()?;
+    row_principal_lookup_and_session_get_gates()?;
     row_empty_target()?;
     row_empty_session()?;
     row_non_live_descriptor()?;
