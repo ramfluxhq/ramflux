@@ -526,17 +526,12 @@ pub(crate) fn gateway_direct_message_envelope(
         collapse_tag: None,
         report_commitment: None,
     };
-    let nested = match serde_json::from_slice::<SdkDmEncryptedEnvelope>(&message.encrypted_body) {
-        Ok(value) => Some(value),
-        Err(_) if ramflux_protocol::schema_profile::schema_v1_live() => {
-            return Err(SdkError::InboundRejected("direct envelope sidecar is required".into()));
-        }
-        Err(_) => None,
-    };
+    let committed_a0 = crate::client::routed::take_committed_report_a0();
+    let (nested_tag, nested_commitment) = nested_report_fields(&message.encrypted_body)?;
     apply_candidate_named_fields_with(
         &mut envelope,
-        nested.as_ref().and_then(|value| value.collapse_tag.as_deref()),
-        nested.as_ref().and_then(|value| value.report_commitment.as_deref()),
+        nested_tag.as_deref(),
+        nested_commitment.as_deref(),
     );
     if let Some(source) = &config.source_identity {
         if source.device_id() != envelope.source_device_id {
@@ -557,7 +552,42 @@ pub(crate) fn gateway_direct_message_envelope(
     } else {
         ramflux_crypto::sign_protocol_object(&envelope)?
     };
+    if let Some(committed) = committed_a0 {
+        crate::client::routed::refuse_a0_mismatch(&envelope, &committed)?;
+    }
     Ok(envelope)
+}
+
+fn nested_report_fields(body: &[u8]) -> Result<(Option<String>, Option<String>), SdkError> {
+    if let Ok(compact) = ramflux_protocol::message::outer::decode_compact_cryptobox(body) {
+        ramflux_protocol::message::outer::decode_compact_candidate_sidecar(compact.sidecar)
+            .map_err(|error| SdkError::InboundRejected(error.to_string()))?;
+        return sidecar_report_fields(compact.sidecar);
+    }
+    match serde_json::from_slice::<SdkDmEncryptedEnvelope>(body) {
+        Ok(nested) => {
+            require_direct_sidecar_commitment(nested.collapse_tag, nested.report_commitment)
+        }
+        Err(_) => Ok((None, None)),
+    }
+}
+
+fn sidecar_report_fields(sidecar: &[u8]) -> Result<(Option<String>, Option<String>), SdkError> {
+    let nested: SdkDmEncryptedEnvelope = serde_json::from_slice(sidecar)?;
+    require_direct_sidecar_commitment(nested.collapse_tag, nested.report_commitment)
+}
+
+fn require_direct_sidecar_commitment(
+    collapse_tag: Option<String>,
+    report_commitment: Option<String>,
+) -> Result<(Option<String>, Option<String>), SdkError> {
+    if ramflux_protocol::schema_profile::schema_v1_live()
+        && collapse_tag.is_some()
+        && report_commitment.is_none()
+    {
+        return Err(SdkError::InboundRejected("direct envelope sidecar is required".into()));
+    }
+    Ok((collapse_tag, report_commitment))
 }
 
 /// Candidate v1 outer envelope. Live [`gateway_direct_message_envelope`] is unchanged.

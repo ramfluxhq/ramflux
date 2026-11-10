@@ -725,7 +725,8 @@ crates/ramflux-sdk/src/custody/pairing/install_store.rs | decode | 1 | E | exclu
 crates/ramflux-sdk/src/custody/pairing/local_credential.rs | load_reservation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/linux/init.rs | parse | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/presence.rs | approved_primary_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
-crates/ramflux-sdk/src/dm.rs | gateway_direct_message_envelope | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/dm.rs | nested_report_fields | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/dm.rs | sidecar_report_fields | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/ephemeral/receiver.rs | admit | 1 | A | strict=parse_i_json; admission=A ingress boundary
 crates/ramflux-sdk/src/ephemeral/send.rs | decode_ephemeral_result | 1 | A | strict=parse_i_json; admission=A ingress boundary
 crates/ramflux-sdk/src/gateway/engine.rs | fetch_principal_manifest | 1 | E | excluded=manifest response field; enclosing gateway frame is already strictly decoded

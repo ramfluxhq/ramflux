@@ -22,6 +22,11 @@ pub(super) fn fresh_report_opening() -> Result<Zeroizing<[u8; 32]>, SdkError> {
     Ok(Zeroizing::new(ramflux_crypto::random_32()?))
 }
 
+thread_local! {
+    static COMMITTED_REPORT_A0: std::cell::RefCell<Option<Vec<u8>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(test)]
 thread_local! {
     static OMIT_DIRECT_REPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -42,12 +47,28 @@ pub(super) fn set_omit_direct_report(omit: bool) {
     OMIT_DIRECT_REPORT.with(|cell| cell.set(omit));
 }
 
-pub(super) fn omitted_nested_collapse_tag(envelope_id: &str) -> Option<String> {
-    if !omit_direct_report() {
-        return None;
+pub(crate) fn take_committed_report_a0() -> Option<Vec<u8>> {
+    COMMITTED_REPORT_A0.with(|cell| cell.borrow_mut().take())
+}
+
+#[cfg(test)]
+pub(super) fn set_committed_report_a0(bytes: Vec<u8>) {
+    COMMITTED_REPORT_A0.with(|cell| *cell.borrow_mut() = Some(bytes));
+}
+
+pub(crate) fn refuse_a0_mismatch(
+    envelope: &ramflux_protocol::Envelope,
+    committed: &[u8],
+) -> Result<(), SdkError> {
+    let live = encode_candidate_report_a0(
+        &candidate_report_a0_from_envelope(envelope)
+            .map_err(|error| invalid(&error.to_string()))?,
+    )
+    .map_err(|error| invalid(&error.to_string()))?;
+    if live.as_slice() != committed {
+        return Err(invalid("report a0 drifted from sealed envelope"));
     }
-    let (tag, _) = crate::dm::derived_candidate_binding(envelope_id);
-    Some(ramflux_protocol::encode_base64url(tag))
+    Ok(())
 }
 
 pub(super) fn assemble_direct_report(
@@ -74,6 +95,7 @@ pub(super) fn assemble_direct_report(
     )?)?;
     let a0_bytes = encode_candidate_report_a0(&a0)?;
     let report_commitment = ramflux_crypto::report_commitment(&opening, inner, &a0_bytes)?;
+    COMMITTED_REPORT_A0.with(|cell| *cell.borrow_mut() = Some(a0_bytes));
     Ok(DirectReport {
         collapse_tag,
         report_commitment,
@@ -86,11 +108,6 @@ pub(super) fn opened_inner_plaintext(
     plaintext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
     let Some(commitment) = envelope.report_commitment.as_deref() else {
-        if crate::client::target_selection::schema_v1_selected()
-            && let Ok(parsed) = ramflux_crypto::parse_report_plaintext(plaintext)
-        {
-            return Ok(Zeroizing::new(parsed.inner().to_vec()));
-        }
         return Ok(Zeroizing::new(plaintext.to_vec()));
     };
     let parsed = ramflux_crypto::parse_report_plaintext(plaintext)?;
@@ -122,9 +139,15 @@ pub(super) fn refuse_payload_outer_mismatch(
     outer: &ramflux_protocol::Envelope,
     nested: &SdkDmEncryptedEnvelope,
 ) -> Result<(), SdkError> {
-    if nested.collapse_tag.as_deref() != outer.collapse_tag.as_deref()
-        || nested.report_commitment.as_deref() != outer.report_commitment.as_deref()
-    {
+    let tag_mismatch = nested
+        .collapse_tag
+        .as_deref()
+        .is_some_and(|tag| Some(tag) != outer.collapse_tag.as_deref());
+    let commitment_mismatch = nested
+        .report_commitment
+        .as_deref()
+        .is_some_and(|commitment| Some(commitment) != outer.report_commitment.as_deref());
+    if tag_mismatch || commitment_mismatch {
         return Err(invalid("payload report fields must match outer"));
     }
     Ok(())

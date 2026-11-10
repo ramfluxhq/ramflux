@@ -29,6 +29,7 @@ pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
 mod report;
 pub(crate) use receive::{Delivery, JoinedW1};
+pub(crate) use report::{refuse_a0_mismatch, take_committed_report_a0};
 mod pair_lifecycle;
 mod prepared;
 mod recovery;
@@ -509,10 +510,8 @@ impl RamfluxClient {
             associated_data(&message.envelope_id, local, &wire_remote, &bundle)?
         };
         let ciphertext = session.encrypt(&plaintext, &aad)?;
-        let collapse_tag = report
-            .as_ref()
-            .map(|r| ramflux_protocol::encode_base64url(r.collapse_tag))
-            .or_else(|| report::omitted_nested_collapse_tag(&message.envelope_id));
+        let collapse_tag =
+            report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.collapse_tag));
         let report_commitment =
             report.as_ref().map(|r| ramflux_protocol::encode_base64url(r.report_commitment));
         persist_sealed_pair(
