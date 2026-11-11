@@ -13,7 +13,7 @@ use std::{
     },
 };
 type Case<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-struct Forwarder {
+pub(super) struct Forwarder {
     endpoint: String,
     calls: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
@@ -24,12 +24,12 @@ impl Drop for Forwarder {
     }
 }
 #[derive(Default)]
-struct ForwardHold {
-    entered: tokio::sync::Notify,
-    dropped: tokio::sync::Notify,
-    release: AtomicBool,
+pub(super) struct ForwardHold {
+    pub(super) entered: tokio::sync::Notify,
+    pub(super) dropped: tokio::sync::Notify,
+    pub(super) release: AtomicBool,
 }
-fn forwarder(hold: Option<Arc<ForwardHold>>) -> Case<Forwarder> {
+pub(super) fn forwarder(hold: Option<Arc<ForwardHold>>) -> Case<Forwarder> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let endpoint = format!("http://{}", listener.local_addr()?);
@@ -119,7 +119,7 @@ fn serve(
     stream.flush()?;
     Ok(())
 }
-fn contact(
+pub(super) fn contact(
     own: &crate::prekey::SdkDeviceManifestResponse,
     peer: &crate::client::native_test_support::Fixture,
     forward: &Forwarder,
@@ -234,7 +234,9 @@ async fn case() -> Case {
     Ok(())
 }
 
-async fn seed_peer(client: &RamfluxClient) -> Case<crate::client::native_test_support::Fixture> {
+pub(super) async fn seed_peer(
+    client: &RamfluxClient,
+) -> Case<crate::client::native_test_support::Fixture> {
     let peer = Box::pin(crate::client::native_test_support::Fixture::with_device(
         "keyed-contact-peer",
         "peer-device",

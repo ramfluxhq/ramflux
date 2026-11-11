@@ -34,15 +34,16 @@ async fn case() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (client, config) =
         Box::pin(budgets::native_config(&fixture, budgets::Origin::ExplicitEngine)).await?;
     let own = manifest(&client).map_err(|e| e as Box<dyn std::error::Error>)?;
+    let peer = Box::pin(super::keyed::seed_peer(&client)).await?;
     let reader = client.account_db()?.open_reader()?;
-    let hold = Arc::new(ordinary::HeldAck {
-        id: "held-native-rpc".into(),
-        entered: tokio::sync::Notify::new(),
-        release: tokio::sync::Notify::new(),
-    });
+    // Default-on first activation holds the live RPC on a federated contact after admission.
+    let hold = Arc::new(super::keyed::ForwardHold::default());
+    let forward = super::keyed::forwarder(Some(Arc::clone(&hold)))?;
     fixture.script.lock().map_err(|_| "script lock")?.ordinary = Some(ordinary::SessionScript {
-        manifests: BTreeMap::from([(own.principal_commitment.clone(), own)]),
-        held_ack: Some(Arc::clone(&hold)),
+        manifests: BTreeMap::from([
+            (own.principal_commitment.clone(), own.clone()),
+            (peer.manifest.principal_commitment.clone(), peer.manifest.clone()),
+        ]),
         ..ordinary::SessionScript::default()
     });
     let actor = Box::pin(NativeActor::start(
@@ -79,10 +80,7 @@ async fn case() -> std::result::Result<(), Box<dyn std::error::Error>> {
     })?;
     started.await?;
     let generation = connection.generation();
-    let mut request = frame(
-        "message.ack",
-        json!({"envelope_id":"held-native-rpc","receiver_device_id":"primary","received_at":1}),
-    );
+    let mut request = super::keyed::contact(&own, &peer, &forward)?;
     request.operation_id = Some("native-preempted-rpc".into());
     let fingerprint = ramflux_crypto::blake3_256_base64url(
         "ramflux.operation.v1",
@@ -108,7 +106,7 @@ async fn case() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ),
         "effects-started receipt must remain fail closed"
     );
-    hold.release.notify_one();
+    hold.release.store(true, Ordering::Release);
     tokio::time::sleep(Duration::from_millis(25)).await;
     assert_eq!(connection.snapshot().state, NetworkingState::NetworkingPending);
     assert!(connection.metadata().is_none());
