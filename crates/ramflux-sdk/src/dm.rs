@@ -626,6 +626,7 @@ pub(crate) fn candidate_direct_message_envelope(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     collapse_tag: [u8; 32],
+    report_commitment: [u8; 32],
     mode: ramflux_protocol::message::outer::NamedDeliveryMode,
 ) -> Result<ramflux_protocol::message::outer::CandidateOuterEnvelope, SdkError> {
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
@@ -659,6 +660,7 @@ pub(crate) fn candidate_direct_message_envelope(
         encrypted_payload,
         payload_hash,
         collapse_tag: ramflux_protocol::encode_base64url(collapse_tag),
+        report_commitment: ramflux_protocol::encode_base64url(report_commitment),
         delivery_mode: mode,
         node_report_receipt: None,
         signed: sdk_signed_fields(""),
