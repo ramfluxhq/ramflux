@@ -45,14 +45,19 @@ impl GeneratedEventStream {
     /// Allocate the next source-qualified identity on this stream.
     /// # Errors
     /// Refuses an empty event id.
-    pub fn next(&mut self, event_id: Vec<u8>) -> Result<g::EventIdentity, SdkError> {
-        if event_id.is_empty() {
+    pub fn next(&mut self, event_id: impl AsRef<[u8]>) -> Result<g::EventIdentity, SdkError> {
+        if event_id.as_ref().is_empty() {
             return Err(invalid("generated event id must be source-qualified"));
         }
-        self.device_sequence = self.device_sequence.saturating_add(1);
-        self.hlc = self.hlc.saturating_add(1);
+        self.device_sequence = self
+            .device_sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid("generated sequence exhausted"))?;
+        self.hlc = self.hlc.checked_add(1).ok_or_else(|| invalid("generated clock exhausted"))?;
         Ok(g::EventIdentity {
-            id: event_id,
+            id: g::identity::derive(&self.author, &self.conversation_id, self.device_sequence)
+                .map_err(content_error)?
+                .to_vec(),
             conversation_id: self.conversation_id.clone(),
             author: Some(self.author.clone()),
             device_sequence: self.device_sequence,
@@ -71,7 +76,7 @@ impl RamfluxClient {
         identity: g::EventIdentity,
         content: &g::Content,
     ) -> Result<Vec<u8>, SdkError> {
-        if identity.id.is_empty() {
+        if identity.id.len() != 32 {
             return Err(invalid("generated event id must be source-qualified"));
         }
         validation::validate_content(content).map_err(content_error)?;
@@ -181,7 +186,7 @@ impl RamfluxClient {
         check_wire(bytes)?;
         let inner = g::Inner::decode(bytes).map_err(|_| invalid("invalid generated inner"))?;
         let identity = inner.identity.ok_or_else(|| invalid("generated inner identity missing"))?;
-        if identity.id.is_empty() {
+        if identity.id.len() != 32 {
             return Err(invalid("generated event id must be source-qualified"));
         }
         let content =

@@ -74,7 +74,7 @@ impl RamfluxClient {
         expires_at: u64,
     ) -> Result<Vec<u8>, SdkError> {
         let identity = g::EventIdentity {
-            id: message.message_id.as_bytes().to_vec(), conversation_id: message.conversation_id.clone(),
+            id: ramflux_crypto::random_32()?.to_vec(), conversation_id: message.conversation_id.clone(),
             author: Some(g::QualifiedDevice {
                 account_anchor: source.root_commitment().into(), device_id: source.device_id().into(),
                 device_epoch: self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch,

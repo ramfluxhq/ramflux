@@ -51,6 +51,9 @@ impl AccountDb {
                 self.connection.execute_batch(&format!("CREATE TRIGGER inbox_recovery_{table}_{action} {timing} {action} ON {table} {guard} BEGIN UPDATE runtime_inbox_recovery SET revision=revision+1; INSERT INTO runtime_inbox_changes VALUES('group',{subject},(SELECT revision FROM runtime_inbox_recovery)) ON CONFLICT(kind,subject) DO UPDATE SET revision=excluded.revision; END;"))?;
             }
         }
+        for action in ["INSERT", "UPDATE"] {
+            self.connection.execute_batch(&format!("DROP TRIGGER IF EXISTS inbox_recovery_message_{action}; CREATE TRIGGER inbox_recovery_message_{action} AFTER {action} ON runtime_message_content BEGIN UPDATE runtime_inbox_recovery SET revision=revision+1; INSERT INTO runtime_inbox_changes VALUES('message_target',NEW.conversation_id||'/'||NEW.message_id,(SELECT revision FROM runtime_inbox_recovery)) ON CONFLICT(kind,subject) DO UPDATE SET revision=excluded.revision; END;"))?;
+        }
         // Upgrade old holds without extending their original local lifetime.
         for (table, time, attempts) in [
             ("runtime_inbox_retry", "created_at", "attempts"),

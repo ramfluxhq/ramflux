@@ -154,7 +154,7 @@ impl AccountDb {
     pub fn redrive_inbox_changes(&self, at: i64) -> Result<usize, StorageError> {
         self.write_transaction(|| {
             if self.load_actor_state::<i64>("inbox/redrive-at")?.is_some_and(|last| at<=last) { return Ok(0); }
-            let mut q=self.connection.prepare("SELECT p.envelope_key FROM runtime_inbox_policy p JOIN runtime_inbox_retry r USING(envelope_key) WHERE p.failure_class IN ('group','manifest') AND p.expires_at>?1 AND p.attempts < CASE WHEN p.trusted=1 THEN 8 ELSE 3 END AND (p.last_redrive=0 OR p.last_redrive<=?1-60) AND EXISTS(SELECT 1 FROM runtime_inbox_changes c WHERE c.kind=p.failure_class AND c.subject=p.subject AND c.revision>p.last_revision) ORDER BY p.first_seen LIMIT 8")?;
+            let mut q=self.connection.prepare("SELECT p.envelope_key FROM runtime_inbox_policy p JOIN runtime_inbox_retry r USING(envelope_key) WHERE p.failure_class IN ('group','manifest','message_target') AND p.expires_at>?1 AND p.attempts < CASE WHEN p.trusted=1 THEN 8 ELSE 3 END AND (p.last_redrive=0 OR p.last_redrive<=?1-60) AND EXISTS(SELECT 1 FROM runtime_inbox_changes c WHERE c.kind=p.failure_class AND c.subject=p.subject AND c.revision>p.last_revision) ORDER BY p.first_seen LIMIT 8")?;
             let keys=q.query_map(params![at],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
             drop(q);
             let mut changed=0;

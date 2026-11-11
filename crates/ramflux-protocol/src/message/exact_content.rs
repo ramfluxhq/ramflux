@@ -14,11 +14,12 @@ pub fn message_in_force(inner: &[u8]) -> Result<&[u8], ValidationError> {
         1 => Ok(scanned.body),
         3 => {
             let mut fields = scanned.body;
+            let mut replacement = None;
             while !fields.is_empty() {
                 let field = wire::field(&mut fields)?;
-                if field.tag == 4 { return Ok(field.bytes); }
+                if field.tag == 4 && replacement.replace(field.bytes).is_some() { return Err(ValidationError::NonCanonical); }
             }
-            Err(ValidationError::Content)
+            replacement.ok_or(ValidationError::Content)
         }
         _ => Err(ValidationError::Content),
     }

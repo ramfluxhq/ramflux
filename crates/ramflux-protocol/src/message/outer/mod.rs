@@ -91,6 +91,9 @@ pub enum CandidateDeliveryClass {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateOuterEnvelope {
+    #[serde(flatten)]
+    pub ext: crate::Ext,
+    pub routing_set_id: Option<String>,
     pub schema: String,
     pub version: u32,
     pub domain: String,
@@ -100,6 +103,7 @@ pub struct CandidateOuterEnvelope {
     pub target_delivery_id: String,
     pub delivery_class: CandidateDeliveryClass,
     pub priority: crate::Priority,
+    #[serde(rename = "ttl")]
     pub ttl_seconds: u32,
     pub created_at: i64,
     pub encrypted_payload: String,
@@ -466,9 +470,7 @@ pub fn accept_after_size_preflight(
 pub fn candidate_outer_sender_signed_bytes(
     outer: &CandidateOuterEnvelope,
 ) -> Result<Vec<u8>, ProtocolError> {
-    let mut sender = outer.clone();
-    sender.node_report_receipt = None;
-    crate::signed_bytes(&sender)
+    Ok(crate::sender_signed_transcript(outer, crate::SenderTranscriptMode::WithCiphertext)?.bytes)
 }
 
 /// Refuse a live envelope that still carries the signed ext bridge.

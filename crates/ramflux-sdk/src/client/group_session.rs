@@ -21,7 +21,7 @@ impl RamfluxClient {
         }
         Ok(Some(state.snapshot().state_hash.clone()))
     }
-    fn validate_group_key_head(
+    pub(crate) fn validate_group_key_head(
         &self,
         group: &str,
         epoch: u64,
@@ -62,7 +62,7 @@ impl RamfluxClient {
         let head = self.current_group_key_head(group_id, group_key_epoch)?;
         self.load_group_key_at_head(group_id, sender, group_key_epoch, direction, head.as_deref())
     }
-    fn load_group_key_at_head(
+    pub(crate) fn load_group_key_at_head(
         &self,
         group_id: &str,
         sender: &ramflux_crypto::RootQualifiedDeviceRef,

@@ -1046,6 +1046,7 @@ async fn routed_committed_covers_and_acks_case() -> Case {
                 },
                 entry: first,
                 projected: false,
+                erasure_targets: Vec::new(),
             },
         )?;
     }

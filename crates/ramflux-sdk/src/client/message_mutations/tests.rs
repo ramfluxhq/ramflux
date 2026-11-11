@@ -146,3 +146,14 @@ fn erasure_fields_require_floor_raise_and_profile_reset() -> TestResult {
     admit_erasure_field(PROFILE_FLOOR + 1, PROFILE_FLOOR + 1)?;
     Ok(())
 }
+
+#[test]
+fn edit_digest_uses_framed_domain_and_exact_plain_content() -> Result<(), Box<dyn std::error::Error>> {
+    let target = ramflux_protocol::message::MessageRef {
+        id: (0..32).collect(), conversation_id: "c".into(), author_anchor: "author".into(),
+    };
+    let digest = super::digest_exact_content(&target, b"\x0a\x05hello")?;
+    let expected = [0xc7,0x12,0x3b,0xa3,0x1a,0xda,0x58,0xbf,0xe8,0xfb,0x6a,0x0b,0x02,0xfd,0x0a,0x29,0x2e,0x89,0x95,0x4d,0x73,0xc1,0x7e,0xc0,0x40,0x7b,0xd8,0xf9,0xa7,0x63,0x22,0xb5];
+    assert_eq!(digest, expected, "independent Python BLAKE3 transcript vector");
+    Ok(())
+}

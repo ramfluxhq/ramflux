@@ -3,6 +3,12 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
+    #[error("sender ciphertext payload hash mismatch")]
+    PayloadHashMismatch,
+    #[error("origin evidence must omit encrypted_payload")]
+    EvidenceContainsCiphertext,
+    #[error("sender transcript requires envelope v2 schema, domain and version")]
+    SenderTranscriptProfile,
     #[error("transport protocol error: {0}")]
     TransportProtocol(String),
     #[error("invalid identity record: {0}")]

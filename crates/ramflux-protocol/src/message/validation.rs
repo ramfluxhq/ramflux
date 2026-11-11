@@ -204,6 +204,12 @@ pub fn validate_content(content: &Content) -> Result<(), ValidationError> {
 pub fn validate_service(service: &Service) -> Result<(), ValidationError> {
     let pin = service.action == ServiceAction::ServicePinAdded as i32
         || service.action == ServiceAction::ServicePinRemoved as i32;
+    if !service.native_authority_proof.is_empty()
+        || service.subjects.len() > 64
+        || service.text.as_ref().is_some_and(|text| text.len() > 1024)
+    {
+        return Err(ValidationError::Content);
+    }
     if pin && service.target.is_none() {
         return Err(ValidationError::Content);
     }
@@ -232,6 +238,11 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
     }
     validate_optional_message_ref(message.reply_to.as_ref())?;
     if let Some(forward) = message.forward.as_ref() {
+        if !forward.origin_assertion.is_empty()
+            || forward.original_display_name.as_ref().is_some_and(|name| name.len() > 256)
+        {
+            return Err(ValidationError::Content);
+        }
         validate_optional_message_ref(forward.original.as_ref())?;
     }
     validate_mention_spans(message)?;
@@ -263,7 +274,12 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
 }
 
 fn validate_edit(edit: &Edit) -> Result<(), ValidationError> {
-    if edit.previous_content_digest.len() != 32 || edit.revision == 0 || edit.target.is_none() {
+    if edit.previous_content_digest.len() != 32
+        || edit.revision == 0
+        || edit.revision > 1_000_000
+        || edit.target.is_none()
+        || edit.replacement.as_ref().is_some_and(|message| message.sealed_group.is_some())
+    {
         return Err(ValidationError::Content);
     }
     validate_optional_message_ref(edit.target.as_ref())?;
@@ -271,21 +287,46 @@ fn validate_edit(edit: &Edit) -> Result<(), ValidationError> {
 }
 
 fn validate_delete(delete: &Delete) -> Result<(), ValidationError> {
+    if delete.targets.is_empty()
+        || delete.targets.len() > 256
+        || delete.tombstone_id.len() != 32
+        || !matches!(delete.scope, 1 | 2)
+        || !delete.native_group_authorization.is_empty()
+    {
+        return Err(ValidationError::Content);
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    if delete.targets.iter().any(|target| !ids.insert(target.id.as_slice())) {
+        return Err(ValidationError::Content);
+    }
     delete.targets.iter().try_for_each(validate_message_ref)
 }
 
 fn validate_reaction(reaction: &Reaction) -> Result<(), ValidationError> {
+    if reaction.target.is_none() || reaction.operation_id.len() != 32 {
+        return Err(ValidationError::Content);
+    }
     validate_optional_message_ref(reaction.target.as_ref())?;
     validate_reaction_token(&reaction.token)
 }
 
 fn validate_receipt(receipt: &Receipt) -> Result<(), ValidationError> {
+    if receipt.targets.is_empty()
+        || receipt.targets.len() > 256
+        || !matches!(receipt.state, 1 | 2)
+        || receipt.receiver.is_none()
+    {
+        return Err(ValidationError::Content);
+    }
     receipt.targets.iter().try_for_each(validate_message_ref)
 }
 
 /// A named target must identify one message; empty `id` does not name a target.
 fn validate_message_ref(reference: &MessageRef) -> Result<(), ValidationError> {
-    if reference.id.is_empty() {
+    if reference.id.len() != 32
+        || reference.conversation_id.is_empty()
+        || reference.author_anchor.is_empty()
+    {
         return Err(ValidationError::Content);
     }
     Ok(())
@@ -525,7 +566,7 @@ mod tests {
         let empty =
             MessageRef { id: vec![], conversation_id: "c".into(), author_anchor: "a".into() };
         let named =
-            MessageRef { id: vec![7], conversation_id: "c".into(), author_anchor: "a".into() };
+            MessageRef { id: vec![7; 32], conversation_id: "c".into(), author_anchor: "a".into() };
         assert_eq!(
             validate_message(&Message { reply_to: Some(empty.clone()), ..Default::default() }),
             Err(ValidationError::Content)

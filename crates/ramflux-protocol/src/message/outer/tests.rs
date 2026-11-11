@@ -72,17 +72,17 @@ fn candidate_value(mode: &str) -> Value {
     json!({
         "schema": CANDIDATE_ENVELOPE_SCHEMA,
         "version": 2,
-        "domain": crate::domain::ENVELOPE,
+        "domain": "ramflux.envelope.v2",
         "envelope_id": "envelope",
         "source_principal_id": "principal",
         "source_device_id": "device",
         "target_delivery_id": "target",
         "delivery_class": "message",
         "priority": "normal",
-        "ttl_seconds": 300,
+        "ttl": 300,
         "created_at": 1_762_128_000_i64,
-        "encrypted_payload": "payload",
-        "payload_hash": "hash",
+        "encrypted_payload": "cGF5bG9hZA",
+        "payload_hash": crate::hash_base64url(crate::domain::ENVELOPE, b"cGF5bG9hZA"),
         "collapse_tag": collapse_tag(),
         "report_commitment": report_commitment(),
         "delivery_mode": mode,
@@ -99,9 +99,10 @@ const LIVE_ENVELOPE_GOLDEN: &[u8] = br#"{"created_at":1000,"delivery_class":"opa
 
 fn candidate_outer(mode: NamedDeliveryMode) -> CandidateOuterEnvelope {
     CandidateOuterEnvelope {
+        ext: Default::default(), routing_set_id: None,
         schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         version: 2,
-        domain: crate::domain::ENVELOPE.to_owned(),
+        domain: "ramflux.envelope.v2".to_owned(),
         envelope_id: "envelope".to_owned(),
         source_principal_id: "principal".to_owned(),
         source_device_id: "device".to_owned(),
@@ -409,7 +410,8 @@ fn candidate_outer_round_trip_and_sender_excludes_receipt() -> Result<(), Box<dy
     let outer: CandidateOuterEnvelope = decode_candidate_outer_ijson(&serde_json::to_vec(&value)?)?;
     assert_eq!(outer.delivery_class, CandidateDeliveryClass::Message);
     let signed = super::candidate_outer_sender_signed_bytes(&outer)?;
-    let signed_json: Value = serde_json::from_slice(&signed)?;
+    assert!(signed.starts_with(crate::SENDER_TRANSCRIPT_PREFIX));
+    let signed_json: Value = serde_json::from_slice(&signed[crate::SENDER_TRANSCRIPT_PREFIX.len()..])?;
     assert!(
         signed_json.get("node_report_receipt").is_none()
             || signed_json["node_report_receipt"].is_null()

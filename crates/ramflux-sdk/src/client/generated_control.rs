@@ -301,6 +301,13 @@ fn validate_friend(body: &g::FriendControl) -> Result<(), SdkError> {
         || body.link_id.is_empty()
         || body.requester.is_empty()
         || body.target.is_empty()
+        || body
+            .remove_scope
+            .as_deref()
+            .is_some_and(|scope| !matches!(scope, "me" | "own_devices" | "both"))
+        || (body.remove_scope.is_some() && body.action != 3)
+        || (body.blocked && body.action != 4)
+        || (body.capability_revoked_at.is_some() && !matches!(body.action, 3 | 4))
     {
         return Err(refused("friend control requires action 1-5 and link identities"));
     }
