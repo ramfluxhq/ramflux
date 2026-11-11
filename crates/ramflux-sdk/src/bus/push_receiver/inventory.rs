@@ -285,6 +285,14 @@ pub(crate) const SITES: &[WriterSite] = &[
         count: 4,
     },
     WriterSite {
+        file: "src/bus/contact_backpressure.rs",
+        symbol: "set_projection_checkpoint",
+        class: WriterClass::ProductionLegacy,
+        executor: "Inactive clamp of resume C to due floor-1 (same SQL receive-cursor as persist_receive_cursor_if_inactive)",
+        hook: "SQL receive-checkpoint; Inactive only",
+        count: 1,
+    },
+    WriterSite {
         file: "src/bus/method_table.rs",
         symbol: "message.ack",
         class: WriterClass::ProductionLegacy,

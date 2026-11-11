@@ -809,7 +809,8 @@ async fn projection_propagates(
     pin: fn(&SdkError) -> bool,
 ) -> Result<(), SdkError> {
     let mut harness = open()?;
-    queue_own_copy();
+    // OwnCopy has no routed projection arm; Kind::Projection still calls projection_key.
+    queue_projection();
     set_projection_error(error);
     let entry = live_dummy(&harness.account);
     let refused = drive(&mut harness.account, entry, || 1).await;
