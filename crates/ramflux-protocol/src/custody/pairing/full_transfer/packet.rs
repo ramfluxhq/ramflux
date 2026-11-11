@@ -110,7 +110,7 @@ pub enum DataPacket {
     },
     Stop {
         code: FullError,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(deserialize_with = "super::super::required_nullable")]
         retry_after_ms: Option<u64>,
     },
 }
@@ -265,9 +265,7 @@ impl Serialize for DataPacket {
             }
             Self::Stop { code, retry_after_ms } => {
                 fields!(map, "code" => code, "kind" => "stop");
-                if let Some(retry) = retry_after_ms {
-                    map.serialize_entry("retry_after_ms", retry)?;
-                }
+                map.serialize_entry("retry_after_ms", retry_after_ms)?;
             }
         }
         map.end()

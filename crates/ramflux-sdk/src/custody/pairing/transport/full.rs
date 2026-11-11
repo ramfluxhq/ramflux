@@ -10,7 +10,10 @@ use ramflux_protocol::custody::pairing::{
     PairingWire,
     full_transfer::{
         PACKET_BYTES, SecretBase64,
-        relay::{PollFullControl, SendFull, SendFullControl},
+        relay::{
+            CloseFull, HelloFull, PollFull, PollFullControl, PollFullDiscovery, ProveFull,
+            SendFull, SendFullControl,
+        },
     },
 };
 use reqwest::header::HeaderValue;
@@ -22,6 +25,7 @@ mod sealed {
 /// Only compiled full-role request codecs can create this authenticated transport request.
 pub trait FullRelayRequest: sealed::Sealed + Sync {
     fn route(&self) -> &'static str;
+    fn arm(&self) -> &'static str;
     fn scope(&self) -> (&str, &str, &str, &SecretBase64);
     /// # Errors
     /// Refuses a malformed or oversized complete full-profile body.
@@ -29,6 +33,9 @@ pub trait FullRelayRequest: sealed::Sealed + Sync {
 }
 impl sealed::Sealed for SendFull {}
 impl FullRelayRequest for SendFull {
+    fn arm(&self) -> &'static str {
+        "send"
+    }
     fn route(&self) -> &'static str {
         "send"
     }
@@ -41,6 +48,9 @@ impl FullRelayRequest for SendFull {
 }
 impl sealed::Sealed for SendFullControl {}
 impl FullRelayRequest for SendFullControl {
+    fn arm(&self) -> &'static str {
+        "send_control"
+    }
     fn route(&self) -> &'static str {
         "send"
     }
@@ -53,6 +63,9 @@ impl FullRelayRequest for SendFullControl {
 }
 impl sealed::Sealed for PollFullControl {}
 impl FullRelayRequest for PollFullControl {
+    fn arm(&self) -> &'static str {
+        "poll_control"
+    }
     fn route(&self) -> &'static str {
         "poll"
     }
@@ -63,6 +76,35 @@ impl FullRelayRequest for PollFullControl {
         self.encode_secret().map_err(|error| wire(&error))
     }
 }
+macro_rules! scoped_request {
+    ($ty:ty, $route:literal, $arm:literal) => {
+        impl sealed::Sealed for $ty {}
+        impl FullRelayRequest for $ty {
+            fn route(&self) -> &'static str {
+                $route
+            }
+            fn arm(&self) -> &'static str {
+                $arm
+            }
+            fn scope(&self) -> (&str, &str, &str, &SecretBase64) {
+                (&self.lease_id, &self.epoch, &self.role, &self.token)
+            }
+            fn encode_full(&self) -> Result<Zeroizing<Vec<u8>>, SdkError> {
+                self.encode_secret().map_err(|error| wire(&error))
+            }
+        }
+    };
+}
+scoped_request!(PollFull, "poll", "poll");
+scoped_request!(CloseFull, "close", "close");
+/// The only closed pre-token controls; the original bounded claim route carries them.
+pub trait FullClaimRequest: sealed::Sealed + PairingWire + Sync {}
+impl sealed::Sealed for HelloFull {}
+impl FullClaimRequest for HelloFull {}
+impl sealed::Sealed for PollFullDiscovery {}
+impl FullClaimRequest for PollFullDiscovery {}
+impl sealed::Sealed for ProveFull {}
+impl FullClaimRequest for ProveFull {}
 fn prepare(value: &impl FullRelayRequest) -> Result<(HeaderValue, Zeroizing<Vec<u8>>), SdkError> {
     use std::io::Write;
     let body = value.encode_full()?;
@@ -80,6 +122,16 @@ fn prepare(value: &impl FullRelayRequest) -> Result<(HeaderValue, Zeroizing<Vec<
     Ok((authorization, body))
 }
 impl HttpRelay {
+    /// Exchange one bounded discovery/proof control before role tokens exist.
+    /// # Errors
+    /// Refuses non-TLS origins, malformed original bytes, size/deadline and typed relay errors.
+    pub async fn full_claim<R: PairingWire>(
+        &self,
+        origin: &str,
+        request: &impl FullClaimRequest,
+    ) -> Result<R, SdkError> {
+        self.round(origin, "claim", request).await
+    }
     /// Full-role HTTP exchange. Closed request codecs bind A2 to the exact serialized body.
     /// Existing add-device relay limits and decoding remain unchanged.
     /// # Errors
@@ -91,6 +143,7 @@ impl HttpRelay {
     ) -> Result<R, SdkError> {
         require_https_origin(origin)?;
         let (authorization, body) = prepare(request)?;
+        let response_limit = R::LIMIT.min(PACKET_BYTES);
         let reply = tokio::time::timeout(REQUEST_DEADLINE, async {
             let url =
                 format!("{}/client/pairing/v1/{}", origin.trim_end_matches('/'), request.route());
@@ -100,17 +153,19 @@ impl HttpRelay {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .header(reqwest::header::CONNECTION, "close")
                 .header(reqwest::header::AUTHORIZATION, authorization)
+                .header("x-ramflux-pairing-arm", request.arm())
                 .body(bytes::Bytes::from_owner(ErasingBody(body)))
                 .send()
                 .await
                 .map_err(http_error)?;
             let status = response.status();
-            if response.content_length().is_some_and(|length| length > PACKET_BYTES as u64) {
+            if response.content_length().is_some_and(|length| length > response_limit as u64) {
                 return Err(SdkError::PairingCode("InvalidInput"));
             }
-            let mut bytes = Zeroizing::new(Vec::with_capacity(PACKET_BYTES));
+            let mut bytes = Zeroizing::new(Vec::with_capacity(response_limit));
             while let Some(chunk) = response.chunk().await.map_err(http_error)? {
-                if bytes.len().checked_add(chunk.len()).is_none_or(|length| length > PACKET_BYTES) {
+                if bytes.len().checked_add(chunk.len()).is_none_or(|length| length > response_limit)
+                {
                     return Err(SdkError::PairingCode("InvalidInput"));
                 }
                 bytes.extend_from_slice(&chunk);

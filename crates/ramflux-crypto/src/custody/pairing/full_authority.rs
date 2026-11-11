@@ -7,11 +7,11 @@ use crate::{
     custody::{VerifiedNodeRecord, VerifiedRecord},
     verify_canonical_signature,
 };
+use ramflux_protocol::custody::Envelope;
 use ramflux_protocol::custody::pairing::{
     PairingWire,
     full_transfer::lease::{DataGrant, DataLease, LeaseRequest, ResumeProof},
 };
-use ramflux_protocol::custody::{Envelope, object_hash};
 
 type Result<T = ()> = std::result::Result<T, CryptoError>;
 fn changed() -> CryptoError {
@@ -58,35 +58,32 @@ pub fn verify_full_prepublication_authority(
     Ok(())
 }
 
-/// Independently check the exact published candidate and fresh native head for tail continuation.
-/// `expected_candidate_hash` comes from the durable publication owner, never a relay hint.
+/// A6 DATA-ONLY node relay admission after publication. This never authenticates an
+/// endpoint's exact candidate, manifest chain, J6 installation or ordinary authority.
 /// # Errors
-/// Refuses a different publication, source removal, changed keys or loss of B's primary role.
-pub fn verify_full_tail_authority(
-    grant: &DataGrant,
-    published: &VerifiedRecord,
-    expected_candidate_hash: &str,
-    current: &VerifiedRecord,
-    now: u64,
-) -> Result {
+/// Refuses old roles, removed/revoked refs, changed original branch keys or expired grants.
+pub fn verify_full_tail_authority(grant: &DataGrant, current: &VerifiedRecord, now: u64) -> Result {
     grant.validate()?;
     if grant.expires_at <= now {
         return Err(CryptoError::Pairing("LeaseExpired"));
     }
-    if object_hash(published.envelope())? != expected_candidate_hash {
+    if current.envelope().body.master_certificate.body.primary_device_ref != grant.destination_ref {
         return Err(changed());
     }
-    for (authority, at) in [(published, published.envelope().body.issued_at), (current, now)] {
-        if authority.envelope().body.master_certificate.body.primary_device_ref
-            != grant.destination_ref
-        {
-            return Err(changed());
-        }
-        active(authority, &grant.source_ref, &grant.branch_keys.source, at)?;
-        active(authority, &grant.destination_ref, &grant.branch_keys.destination, at)?;
-    }
-    if current.envelope().body.device_set_epoch < published.envelope().body.device_set_epoch {
-        return Err(changed());
+    active(current, &grant.source_ref, &grant.branch_keys.source, now)?;
+    active(current, &grant.destination_ref, &grant.branch_keys.destination, now)?;
+    Ok(())
+}
+
+/// Both endpoints require a full day of remaining data lease before constructing J3.
+/// # Errors
+/// Refuses expired/short leases and malformed grants before candidate/signing-key creation.
+pub fn verify_full_j3_lease_margin(grant: &DataGrant, now: u64) -> Result {
+    grant.validate()?;
+    if grant.expires_at.checked_sub(now).is_none_or(|remaining| {
+        remaining < ramflux_protocol::custody::pairing::full_transfer::MIN_J3_LEASE_SECONDS
+    }) {
+        return Err(CryptoError::Pairing("LeaseExpired"));
     }
     Ok(())
 }
@@ -173,6 +170,52 @@ pub fn verify_full_resume_pair(
             .map_err(|_| CryptoError::Pairing("WrongContext"))?;
     }
     Ok(())
+}
+
+/// OVP-01: reconstruct every grant operand from B's own SAS/private bootstrap before signing.
+/// # Errors
+/// Refuses changed refs/keys/commitment/profile, another pinned node or an invalid expiry.
+pub fn verify_full_grant_offer(
+    context: &ramflux_protocol::custody::pairing::context_v3::TranscriptV3,
+    start: &ramflux_protocol::custody::pairing::full_transfer::relay::StartFull,
+    offered: &DataGrant,
+    pinned_node_id: &str,
+    now: u64,
+) -> Result<DataGrant> {
+    context.validate()?;
+    start.validate()?;
+    offered.validate()?;
+    let transfer_id = context
+        .initiator
+        .common
+        .transfer_id
+        .as_ref()
+        .ok_or(CryptoError::Pairing("WrongContext"))?;
+    if start.transfer_id != *transfer_id
+        || offered.expires_at <= now
+        || offered.expires_at
+            > now.checked_add(604_800 + 300).ok_or(CryptoError::Pairing("WrongContext"))?
+    {
+        return Err(CryptoError::Pairing("WrongContext"));
+    }
+    let expected = DataGrant {
+        schema: "ramflux.pairing.full_transfer.data_grant.v1".into(),
+        version: 1,
+        transfer_id: transfer_id.clone(),
+        node_id: pinned_node_id.into(),
+        source_ref: context.initiator.device_ref.clone(),
+        destination_ref: context.responder.device_ref.clone(),
+        branch_keys: ramflux_protocol::custody::pairing::full_transfer::lease::BranchKeys {
+            source: context.initiator.branch_key.clone(),
+            destination: context.responder.branch_key.clone(),
+        },
+        opaque_commitment: start.opaque_commitment.clone(),
+        expires_at: offered.expires_at,
+    };
+    if &expected != offered {
+        return Err(CryptoError::Pairing("WrongContext"));
+    }
+    Ok(expected)
 }
 
 #[cfg(test)]

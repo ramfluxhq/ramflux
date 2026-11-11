@@ -306,6 +306,9 @@ pub struct ChargedFullBody {
     _permit: FullBodyPermit,
 }
 impl FullBodyPermit {
+    pub(super) fn reserved_bytes(&self) -> usize {
+        self.bytes
+    }
     /// Transfer the single already-charged allocation; no body copy or serialization occurs.
     /// # Errors
     /// Refuses a truncated body or an allocation capacity larger than its charged declaration.

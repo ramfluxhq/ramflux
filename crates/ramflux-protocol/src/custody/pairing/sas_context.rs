@@ -14,6 +14,7 @@ mod sealed {
 pub trait SasContext: PairingWire + sealed::Sealed {
     const VERSION: u32;
     fn role(&self) -> &str;
+    fn purpose(&self) -> &str;
     fn sas_key(&self) -> &str;
     /// # Errors
     /// Returns field/shape failures without normalizing the committed context.
@@ -26,6 +27,9 @@ impl SasContext for RoleContext {
     const VERSION: u32 = 2;
     fn role(&self) -> &str {
         &self.role
+    }
+    fn purpose(&self) -> &str {
+        &self.common.purpose
     }
     fn sas_key(&self) -> &str {
         &self.sas_key
@@ -48,6 +52,9 @@ impl SasContext for RoleContextV3 {
     const VERSION: u32 = 3;
     fn role(&self) -> &str {
         &self.role
+    }
+    fn purpose(&self) -> &str {
+        &self.common.purpose
     }
     fn sas_key(&self) -> &str {
         &self.sas_key

@@ -213,20 +213,12 @@ fn full_tail_admission_accepts_expected_demotion_and_rejects_other_publication_o
         },
     )?;
     let published = verify_record(&candidate, now + 1, None, None)?;
-    let hash = object_hash(&candidate)?;
-    verify_full_tail_authority(&grant, &published, &hash, &published, now + 1)?;
+    verify_full_tail_authority(&grant, &published, now + 1)?;
     assert!(verify_full_prepublication_authority(&grant, &published, now + 1).is_err());
-    assert!(verify_full_tail_authority(&grant, &published, &b(41), &published, now + 1).is_err());
     let revoked = new_primary.revoke_device(&published, "primary", now + 2)?;
     assert!(
-        verify_full_tail_authority(
-            &grant,
-            &published,
-            &hash,
-            &verify_record(&revoked, now + 2, None, None)?,
-            now + 2
-        )
-        .is_err()
+        verify_full_tail_authority(&grant, &verify_record(&revoked, now + 2, None, None)?, now + 2)
+            .is_err()
     );
     Ok(())
 }
@@ -288,5 +280,125 @@ fn full_data_lease_uses_independently_trusted_node_and_original_grant() -> TestR
     replaced.signature = sign_canonical_bytes_with_seed(&replaced.body.signing_bytes()?, [56; 32]);
     assert!(verify_full_data_lease(&replaced, &grant, &node, now).is_err());
     assert!(verify_full_data_lease(&signed, &grant, &node, signed.body.expires_at).is_err());
+    Ok(())
+}
+
+#[test]
+fn pairing_full_tail_relay_admission_is_data_only() -> TestResult {
+    tail_admission_predicate()
+}
+
+#[test]
+fn pairing_full_tail_admission_predicate() -> TestResult {
+    tail_admission_predicate()
+}
+
+fn tail_admission_predicate() -> TestResult {
+    let (primary, genesis, grant) = fixture()?;
+    let now = genesis.body.issued_at;
+    let linked = enroll(&primary, &genesis, "device-b", 10)?;
+    let old = verify_record(&linked, now, None, None)?;
+    assert!(
+        matches!(
+            verify_full_tail_authority(&grant, &old, now),
+            Err(CryptoError::Pairing("HeadChanged"))
+        ),
+        "A-primary is not tail state"
+    );
+    let master = crate::custody::MasterKey::from_phrase(
+        &crate::custody::RecoveryPhrase::from_entropy(&[0; 32])?,
+    )?;
+    let management = SelfSigningKey::generate()?;
+    let candidate = crate::custody::cooperative_transfer_preserving_devices(
+        &master,
+        &management,
+        &old,
+        crate::custody::CooperativeTransferInput {
+            destination: grant.destination_ref.clone(),
+            fresh_destination: None,
+            highest_observed_range: 0,
+            issued_at: now + 1,
+            master_cert_id: b(50),
+        },
+    )?;
+    let current = verify_record(&candidate, now + 1, None, None)?;
+    verify_full_tail_authority(&grant, &current, now + 1)?;
+    // Passing the data-only predicate grants no prepublication/source-primary permission.
+    assert!(verify_full_prepublication_authority(&grant, &current, now + 1).is_err());
+    for changed in 0..5 {
+        let mut wrong = grant.clone();
+        match changed {
+            0 => wrong.branch_keys.source = public_key_base64url_from_seed([90; 32]),
+            1 => wrong.branch_keys.destination = public_key_base64url_from_seed([91; 32]),
+            2 => wrong.source_ref.device_epoch += 1,
+            3 => wrong.destination_ref.device_epoch += 1,
+            _ => {
+                wrong.source_ref.account_anchor = b(92);
+                wrong.destination_ref.account_anchor = b(92);
+            }
+        }
+        assert!(matches!(
+            verify_full_tail_authority(&wrong, &current, now + 1),
+            Err(CryptoError::Pairing("HeadChanged"))
+        ));
+    }
+    let demoted = crate::custody::cooperative_transfer_preserving_devices(
+        &master,
+        &SelfSigningKey::generate()?,
+        &current,
+        crate::custody::CooperativeTransferInput {
+            destination: grant.source_ref.clone(),
+            fresh_destination: None,
+            highest_observed_range: ramflux_protocol::custody::decode_epoch(
+                current.envelope().body.device_set_epoch,
+            )?
+            .0,
+            issued_at: now + 2,
+            master_cert_id: b(51),
+        },
+    )?;
+    let demoted = verify_record(&demoted, now + 2, None, None)?;
+    assert!(matches!(
+        verify_full_tail_authority(&grant, &demoted, now + 2),
+        Err(CryptoError::Pairing("HeadChanged"))
+    ));
+    let revoked = management.revoke_device(&current, &grant.source_ref.device_id, now + 2)?;
+    let revoked = verify_record(&revoked, now + 2, None, None)?;
+    assert!(matches!(
+        verify_full_tail_authority(&grant, &revoked, now + 2),
+        Err(CryptoError::Pairing("HeadChanged"))
+    ));
+    let mut absent = candidate.body.clone();
+    absent.devices.retain(|device| device.device_id != grant.source_ref.device_id);
+    let absent = management.sign_record(absent)?;
+    let absent = verify_record(&absent, now + 1, None, None)?;
+    assert!(matches!(
+        verify_full_tail_authority(&grant, &absent, now + 1),
+        Err(CryptoError::Pairing("HeadChanged"))
+    ));
+    assert!(matches!(
+        verify_full_tail_authority(&grant, &current, grant.expires_at),
+        Err(CryptoError::Pairing("LeaseExpired"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn pairing_full_j3_lease_margin_is_checked_before_candidate() -> TestResult {
+    let (_, _, mut grant) = fixture()?;
+    let now = grant.expires_at - 604_800;
+    for hours in [23, 24, 25] {
+        grant.expires_at = now + hours * 3600;
+        let result = verify_full_j3_lease_margin(&grant, now);
+        if hours < 24 {
+            assert!(matches!(result, Err(CryptoError::Pairing("LeaseExpired"))));
+        } else {
+            result?;
+        }
+    }
+    for expiry in [now - 1, now, u64::MAX] {
+        grant.expires_at = expiry;
+        assert!(verify_full_j3_lease_margin(&grant, now).is_err());
+    }
     Ok(())
 }

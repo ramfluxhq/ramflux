@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::*;
+mod discovery;
 mod resume;
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::full_transfer::lease::{
@@ -79,6 +80,10 @@ fn pairing_full_auth_prebody_header_scope_epoch_and_no_oracle() -> TestResult {
 #[test]
 fn pairing_full_shared_queue_retries_ready_control_release_and_retired_buffers() -> TestResult {
     run_native_lease(Some(resume::ControlCase::Queue))
+}
+#[test]
+fn pairing_full_mesh_permit_scope_race_and_release() -> TestResult {
+    run_native_lease(Some(resume::ControlCase::Mesh))
 }
 fn run_native_lease(control_case: Option<resume::ControlCase>) -> TestResult {
     let path = temp_store_path("pairing-full-data-lease")?;

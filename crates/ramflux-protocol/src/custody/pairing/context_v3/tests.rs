@@ -80,7 +80,7 @@ fn pairing_v3_refuses_v2_reply_and_duplicate_context_fields() -> TestResult {
 }
 
 #[test]
-fn pairing_v3_common_preserves_selected_keys_arm_but_full_roles_refuse_it() -> TestResult {
+fn pairing_v3_common_and_roles_refuse_selected_keys_and_enroll() -> TestResult {
     let value = fixture()?;
     let mut common =
         CommonV3::from_wire_bytes(&canonical_json_bytes(&value["initiator"]["common"])?)?;
@@ -88,8 +88,8 @@ fn pairing_v3_common_preserves_selected_keys_arm_but_full_roles_refuse_it() -> T
         key_id: "history".into(),
         purpose: "history".into(),
     }]);
-    let encoded = common.to_wire_bytes()?;
-    assert_eq!(CommonV3::from_wire_bytes(&encoded)?.data_selection, common.data_selection);
+    assert_eq!(common.validate(), Err(super::super::WireError::Field("UpdateRequired")));
+    assert!(CommonV3::from_wire_bytes(&canonical_json_bytes(&common)?).is_err());
     let mut role = RoleContextV3::from_wire_bytes(&canonical_json_bytes(&value["initiator"])?)?;
     role.common = common;
     assert_eq!(role.validate(), Err(super::super::WireError::Field("UpdateRequired")));
@@ -135,5 +135,55 @@ fn pairing_v3_full_invitation_projection_preserves_bindings_and_refuses_selected
         CommonV3::from_full_invitation(&invitation, common.master_public_key.clone()),
         Err(WireError::Field("UpdateRequired"))
     );
+    Ok(())
+}
+
+#[test]
+fn pairing_v3_independent_commitment_and_transcript_preimages() -> TestResult {
+    let vectors: Value =
+        serde_json::from_str(include_str!("../../../../fixtures/pairing_v3/vectors.json"))?;
+    let transcript = TranscriptV3::from_wire_bytes(&canonical_json_bytes(&vectors["transcript"])?)?;
+    assert_eq!(canonical_json_bytes(&fixture()?)?, transcript.to_wire_bytes()?);
+    let encode_hex = |bytes: &[u8]| -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        bytes
+            .iter()
+            .flat_map(|byte| {
+                [char::from(HEX[usize::from(byte >> 4)]), char::from(HEX[usize::from(byte & 15)])]
+            })
+            .collect()
+    };
+    let th = transcript_preimage(&transcript)?;
+    assert_eq!(encode_hex(&th), vectors["vectors"]["v3_transcript"]["preimage_hex"]);
+    for (name, context, salt) in [
+        ("initiator", &transcript.initiator, [11; 32]),
+        ("responder", &transcript.responder, [12; 32]),
+    ] {
+        let preimage = context_commitment_preimage(context, &salt)?;
+        assert_eq!(encode_hex(&preimage), vectors["vectors"][format!("v3_{name}")]["preimage_hex"]);
+        assert_ne!(
+            vectors["vectors"][format!("v3_{name}")]["sha256"],
+            vectors["vectors"][format!("v2_{name}")]["sha256"]
+        );
+    }
+    assert_ne!(
+        vectors["vectors"]["v3_transcript"]["sha256"],
+        vectors["vectors"]["v2_transcript"]["sha256"]
+    );
+    let mut missing = vectors["transcript"].clone();
+    missing["responder"].as_object_mut().ok_or("role")?.remove("transfer_profile");
+    assert!(TranscriptV3::from_wire_bytes(&canonical_json_bytes(&missing)?).is_err());
+    let duplicate = String::from_utf8(transcript.responder.to_wire_bytes()?)?.replace(
+        "\"transfer_profile\":\"full_account_data_v1\"",
+        "\"transfer_profile\":\"full_account_data_v1\",\"transfer_profile\":\"full_account_data_v1\"");
+    assert!(RoleContextV3::from_wire_bytes(duplicate.as_bytes()).is_err());
+    for purpose in ["enroll", "unknown"] {
+        let mut invalid = vectors["transcript"].clone();
+        for role in ["initiator", "responder"] {
+            invalid[role]["common"]["purpose"] = json!(purpose);
+            invalid[role]["common"]["requested_role"] = json!("secondary");
+        }
+        assert!(TranscriptV3::from_wire_bytes(&canonical_json_bytes(&invalid)?).is_err());
+    }
     Ok(())
 }

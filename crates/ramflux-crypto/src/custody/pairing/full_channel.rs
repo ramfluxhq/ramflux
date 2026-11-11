@@ -14,6 +14,9 @@ use ramflux_protocol::custody::pairing::full_transfer::PACKETS_PER_KEY;
 use std::collections::VecDeque;
 use zeroize::{Zeroize, Zeroizing};
 
+const RESUME_STOP: &[u8] =
+    b"{\"code\":\"ResumeRequired\",\"kind\":\"stop\",\"retry_after_ms\":null}";
+
 pub const FULL_PACKET_PLAINTEXT_BYTES: usize =
     ramflux_protocol::custody::pairing::full_transfer::PACKET_PLAINTEXT_BYTES;
 pub enum FullOpened {
@@ -62,7 +65,9 @@ impl FullDataCipher {
         if plaintext.len() > FULL_PACKET_PLAINTEXT_BYTES {
             return self.fail("InvalidInput");
         }
-        if self.sent == PACKETS_PER_KEY {
+        if self.sent >= PACKETS_PER_KEY
+            || (self.sent == PACKETS_PER_KEY - 1 && plaintext != RESUME_STOP)
+        {
             return Err(CryptoError::Pairing("ResumeRequired"));
         }
         if self.outgoing.len() == 2 {
@@ -82,6 +87,9 @@ impl FullDataCipher {
         let output = std::mem::take(&mut *output);
         self.outgoing.push_back((counter, output.clone()));
         self.sent += 1;
+        if plaintext == RESUME_STOP {
+            self.retire_material();
+        }
         Ok((counter, output))
     }
     /// Retries return identical cached ciphertext and never invoke Seal again.
@@ -130,8 +138,8 @@ impl FullDataCipher {
         if counter != self.received {
             return self.fail("Replay");
         }
-        if counter == PACKETS_PER_KEY {
-            return Err(CryptoError::Pairing("ResumeRequired"));
+        if counter >= PACKETS_PER_KEY {
+            return self.fail("ResumeRequired");
         }
         let length = ciphertext.len() - 16;
         let mut plaintext = Zeroizing::new(ciphertext[..length].to_vec());
@@ -147,11 +155,17 @@ impl FullDataCipher {
         {
             return self.fail("channel_aead");
         }
+        if counter == PACKETS_PER_KEY - 1 && plaintext.as_slice() != RESUME_STOP {
+            return self.fail("ResumeRequired");
+        }
         if self.incoming.len() == 2 {
             self.incoming.pop_front();
         }
         self.incoming.push_back((counter, ciphertext.to_vec()));
         self.received += 1;
+        if plaintext.as_slice() == RESUME_STOP {
+            self.retire_material();
+        }
         Ok(FullOpened::New(plaintext))
     }
     fn aad(&self, role: u8, counter: u64) -> Zeroizing<Vec<u8>> {
@@ -164,13 +178,16 @@ impl FullDataCipher {
     fn live(&self) -> Result<(), CryptoError> {
         if self.dead { Err(CryptoError::Pairing("Retired")) } else { Ok(()) }
     }
-    fn fail<T>(&mut self, code: &'static str) -> Result<T, CryptoError> {
+    fn retire_material(&mut self) {
         self.send.zeroize();
         self.receive.zeroize();
         self.context.zeroize();
         self.dead = true;
         self.outgoing.clear();
         self.incoming.clear();
+    }
+    fn fail<T>(&mut self, code: &'static str) -> Result<T, CryptoError> {
+        self.retire_material();
         Err(CryptoError::Pairing(code))
     }
 }

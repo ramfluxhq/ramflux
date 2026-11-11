@@ -32,6 +32,10 @@ pub const PACKET_BYTES: usize = 524_288;
 pub const PACKET_PLAINTEXT_BYTES: usize = 349_528 + 1024;
 pub const PACKET_CIPHERTEXT_BYTES: usize = PACKET_PLAINTEXT_BYTES + 16;
 pub const LEASE_SECONDS: u64 = 604_800;
+/// Controller-confirmed reserve required by both endpoints before constructing J3.
+pub const MIN_J3_LEASE_SECONDS: u64 = 86_400;
+/// Controller-confirmed endpoint tail limit; the relay cannot inspect encrypted manifests.
+pub const MAX_TAIL_BYTES: u64 = 1_073_741_824;
 pub const PACKETS_PER_KEY: u64 = 65_536;
 
 /// Full-profile counts are exact decimal strings, including values above JSON's safe integer.
@@ -187,6 +191,10 @@ impl PairingWire for Manifest {
                 )?;
             }
         }
+        require(
+            self.kind != ManifestKind::Tail || self.total_bytes.0 <= MAX_TAIL_BYTES,
+            "NoSpace",
+        )?;
         require(
             self.chunk_bytes.0 == u64::from(CHUNK_BYTES)
                 && self.chunk_count.0 == chunk_layout(self.total_bytes.0)?.0,

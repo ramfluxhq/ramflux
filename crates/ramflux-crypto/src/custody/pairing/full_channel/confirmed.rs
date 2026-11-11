@@ -10,6 +10,7 @@ pub struct FullConfirmedChannel {
     base_manifest_hash: String,
     ready: bool,
     manifest_started: bool,
+    initial_epoch: bool,
 }
 impl FullConfirmedChannel {
     /// The binding hash is frozen by `StartFull` and Auth-HPKE, not supplied by the Ready peer.
@@ -31,7 +32,21 @@ impl FullConfirmedChannel {
             base_manifest_hash,
             ready: false,
             manifest_started: false,
+            initial_epoch: true,
         })
+    }
+    /// A reconnect starts the currently streamed manifest, while Ready still binds the base.
+    /// The receiver's durable manifest ledger must apply all three M2 rules before chunks.
+    /// # Errors
+    /// Refuses a malformed original base hash.
+    pub fn resume(
+        role: PairingRole,
+        keys: FullDataKeys,
+        base_manifest_hash: String,
+    ) -> Result<Self, CryptoError> {
+        let mut channel = Self::new(role, keys, base_manifest_hash)?;
+        channel.initial_epoch = false;
+        Ok(channel)
     }
     /// Seal Ready once after successful HPKE open. Repeated polls use retry(0).
     /// # Errors
@@ -75,7 +90,7 @@ impl FullConfirmedChannel {
         self.ready = true;
         Ok(())
     }
-    /// Seal ordinary packets after Ready, with the base `SourceManifest` first from A.
+    /// Seal ordinary packets after Ready, with the current `SourceManifest` first from A.
     /// # Errors
     /// Refuses premature data or a different first A object, then preserves cipher counters.
     pub fn seal_packet(&mut self, packet: &DataPacket) -> Result<(u64, Vec<u8>), CryptoError> {
@@ -83,8 +98,11 @@ impl FullConfirmedChannel {
         if !self.ready {
             return Err(CryptoError::Pairing("PublicationPending"));
         }
+        if Self::is_ready_shape(packet) && !self.manifest_started {
+            return Err(CryptoError::Pairing("WrongContext"));
+        }
         let first = self.cipher.role == PairingRole::Initiator && !self.manifest_started;
-        if first && !self.is_base_manifest(packet) {
+        if first && !self.is_first_manifest(packet) {
             return Err(CryptoError::Pairing("ManifestMismatch"));
         }
         let sealed = self.cipher.seal(&packet.encode_secret()?)?;
@@ -111,17 +129,23 @@ impl FullConfirmedChannel {
         let Ok(packet) = DataPacket::from_wire_bytes(&bytes) else {
             return self.cipher.fail("InvalidInput");
         };
+        if Self::is_ready_shape(&packet) {
+            return if self.manifest_started { Ok(None) } else { self.cipher.fail("WrongContext") };
+        }
         if self.cipher.role == PairingRole::Responder && !self.manifest_started {
-            if !self.is_base_manifest(&packet) {
+            if !self.is_first_manifest(&packet) {
                 return self.cipher.fail("ManifestMismatch");
             }
             self.manifest_started = true;
         }
         Ok(Some(packet))
     }
-    fn is_base_manifest(&self, packet: &DataPacket) -> bool {
+    fn is_first_manifest(&self, packet: &DataPacket) -> bool {
         matches!(packet, DataPacket::Manifest { manifest_hash, offset, .. }
-            if manifest_hash == &self.base_manifest_hash && offset.0 == 0)
+            if (!self.initial_epoch || manifest_hash == &self.base_manifest_hash) && offset.0 == 0)
+    }
+    fn is_ready_shape(packet: &DataPacket) -> bool {
+        matches!(packet, DataPacket::Receipt { durable_through: None, credit: 0, .. })
     }
     /// # Errors
     /// Refuses packets outside the bounded retry cache.

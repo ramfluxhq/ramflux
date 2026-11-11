@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::*;
+mod full_resume;
 use ramflux_protocol::custody::pairing::context_v3::{RoleContextV3, TranscriptV3};
 use serde_json::json;
 
@@ -45,8 +46,17 @@ fn pairing_v3_commit_refuses_v2_reply_without_downgrade() -> Result {
     let transcript = full_transcript()?;
     let mut a = commit(PairingRole::Initiator, &transcript.initiator, &INIT_SECRET, &INIT_SALT)?;
     let old = transfer_transcript()?;
-    let b = commit(PairingRole::Responder, &old.responder, &RESP_SECRET, &RESP_SALT)?;
-    a.store_peer_commitment(PairingRole::Responder, b.commitment())?;
+    assert!(matches!(
+        commit(PairingRole::Responder, &old.responder, &RESP_SECRET, &RESP_SALT),
+        Err(CryptoError::Pairing("UpdateRequired"))
+    ));
+    let old_commit =
+        Sha256::digest(ramflux_protocol::custody::pairing::context_commitment_preimage(
+            &old.responder,
+            &RESP_SALT,
+        )?)
+        .into();
+    a.store_peer_commitment(PairingRole::Responder, old_commit)?;
     assert!(matches!(
         a.establish_wire(&old.responder.to_wire_bytes()?, &RESP_SALT),
         Err(CryptoError::Pairing("UpdateRequired"))
@@ -88,5 +98,52 @@ fn pairing_v3_rejects_and_retires_channel_before_human_confirmation() -> Result 
         Err(CryptoError::Pairing("human_confirmation_required"))
     ));
     assert!(a.confirm_local(&a.transcript_hash(), true).is_err());
+    Ok(())
+}
+
+#[test]
+fn pairing_v3_independent_hash_vectors() -> Result {
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../ramflux-protocol/fixtures/pairing_v3/vectors.json"
+    )))
+    .map_err(|_| CryptoError::Pairing("fixture"))?;
+    for name in [
+        "v2_transcript",
+        "v2_initiator",
+        "v2_responder",
+        "v3_transcript",
+        "v3_initiator",
+        "v3_responder",
+        "missing_profile_transcript",
+        "missing_profile_responder",
+    ] {
+        let vector = &vectors["vectors"][name];
+        let preimage =
+            decode_hex(vector["preimage_hex"].as_str().ok_or(CryptoError::Pairing("fixture"))?)?;
+        assert_eq!(
+            hex(&sha256(&preimage)),
+            vector["sha256"].as_str().ok_or(CryptoError::Pairing("fixture"))?
+        );
+    }
+    let t = TranscriptV3::from_wire_bytes(&canonical_json_bytes(&vectors["transcript"])?)?;
+    let th = ramflux_protocol::custody::pairing::context_v3::transcript_preimage(&t)?;
+    assert_eq!(hex(&sha256(&th)), vectors["vectors"]["v3_transcript"]["sha256"]);
+    for (name, role, salt) in
+        [("v3_initiator", &t.initiator, [11; 32]), ("v3_responder", &t.responder, [12; 32])]
+    {
+        let bytes = ramflux_protocol::custody::pairing::context_v3::context_commitment_preimage(
+            role, &salt,
+        )?;
+        assert_eq!(hex(&sha256(&bytes)), vectors["vectors"][name]["sha256"]);
+    }
+    assert_ne!(
+        vectors["vectors"]["missing_profile_transcript"]["sha256"],
+        vectors["vectors"]["v3_transcript"]["sha256"]
+    );
+    assert_ne!(
+        vectors["vectors"]["missing_profile_responder"]["sha256"],
+        vectors["vectors"]["v3_responder"]["sha256"]
+    );
     Ok(())
 }

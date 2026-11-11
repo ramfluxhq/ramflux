@@ -184,6 +184,12 @@ impl CustodyService {
     pub fn pairing_relay(&self) -> Option<&Arc<Mutex<crate::pairing_relay::PairingRelayStore>>> {
         self.pairing.as_ref()
     }
+    /// Independently verified local node identity for data-only pairing relay admission.
+    #[must_use]
+    pub fn pairing_node(&self) -> &VerifiedNodeRecord {
+        &self.node
+    }
+
     /// Attach migration only with the custody listener's independently verified node signer.
     /// # Errors
     /// Rejects a signer for a different node or key.

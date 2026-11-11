@@ -5,6 +5,8 @@
 mod activate;
 pub(crate) mod admission;
 mod coordinator;
+mod full_bootstrap;
+pub use full_bootstrap::{FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest};
 mod native_ports;
 mod participant;
 pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refresh_authority};
@@ -36,8 +38,8 @@ pub use recipient::{
     unadmitted_data_unlock, unlock_with_provider,
 };
 pub use transport::{
-    FreshPairingNative, FullRelayRequest, HttpRelay, PairingConfig, PairingNative,
-    PairingTransport, PreparedCreate, PreparedIssue, ProofPairingNative,
+    FreshPairingNative, FullClaimRequest, FullRelayRequest, HttpRelay, PairingConfig,
+    PairingNative, PairingTransport, PreparedCreate, PreparedIssue, ProofPairingNative,
 };
 
 #[cfg(test)]

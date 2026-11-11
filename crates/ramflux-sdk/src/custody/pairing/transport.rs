@@ -6,7 +6,7 @@
 mod full;
 use crate::SdkError;
 use crate::custody::CustodyConnection;
-pub use full::FullRelayRequest;
+pub use full::{FullClaimRequest, FullRelayRequest};
 use ramflux_protocol::custody::Envelope;
 use ramflux_protocol::custody::pairing::PairingWire;
 use ramflux_protocol::custody::pairing::full_transfer::lease::{DataLease, LeaseRequest};

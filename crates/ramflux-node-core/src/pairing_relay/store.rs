@@ -202,6 +202,97 @@ impl PairingRelayStore {
         self.full_resume.as_mut().ok_or(PairingRelayError::Retired)?.begin(offer, admission)
     }
 
+    fn full_server(
+        &mut self,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<&mut super::full_resume::FullResumeServer, PairingRelayError> {
+        if self.full_resume.is_none() {
+            self.full_resume = Some(Box::new(super::full_resume::FullResumeServer::new(
+                super::full_resume::FullResumeConfig {
+                    clock: Arc::clone(&self.clock),
+                    node_id: admission.node().envelope().body.node_id.clone(),
+                    node_key: self.node_key.clone(),
+                    boot_id: self.boot_id_b64.clone(),
+                    allocations: self.allocations.clone(),
+                },
+            )?));
+        }
+        self.full_resume.as_deref_mut().ok_or(PairingRelayError::WrongContext)
+    }
+    /// A3 A-first proposal. Frozen role operands and the original deadline cannot be replaced.
+    /// # Errors
+    /// Refuses B-first, another pending account lease, cooldown, replay or untrusted native scope.
+    pub fn hello_full(
+        &mut self,
+        source: IpAddr,
+        hello: &ramflux_protocol::custody::pairing::full_transfer::relay::HelloFull,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::relay::FullDiscovery,
+        PairingRelayError,
+    > {
+        let _guard = admit()?;
+        hello.validate().map_err(|error| wire(&error))?;
+        self.prune()?;
+        let now = self.now()?;
+        super::full_resume::FullResumeServer::verify_discovery_lease(
+            &hello.lease,
+            admission,
+            &self.node_key,
+            now.wall,
+        )?;
+        if hello.role == "responder"
+            && !self
+                .full_resume
+                .as_ref()
+                .is_some_and(|server| server.has_pending(&hello.lease.body.lease_id))
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        self.admit_claim_budget(
+            source,
+            parse_id(&hello.lease.body.lease_id, "lease_id")?,
+            now.mono,
+        )?;
+        self.full_server(admission)?.hello(hello, admission)
+    }
+    /// Bounded pre-token discovery poll. Missing discovery allocates no server/pending entry.
+    /// # Errors
+    /// Returns `NotFound` without a pending entry, or fixed lease/native/rate refusals.
+    pub fn poll_full_discovery(
+        &mut self,
+        source: IpAddr,
+        poll: &ramflux_protocol::custody::pairing::full_transfer::relay::PollFullDiscovery,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::relay::FullDiscovery,
+        PairingRelayError,
+    > {
+        let _guard = admit()?;
+        poll.validate().map_err(|error| wire(&error))?;
+        self.prune()?;
+        let now = self.now()?;
+        super::full_resume::FullResumeServer::verify_discovery_lease(
+            &poll.lease,
+            admission,
+            &self.node_key,
+            now.wall,
+        )?;
+        if !self
+            .full_resume
+            .as_ref()
+            .is_some_and(|server| server.has_pending(&poll.lease.body.lease_id))
+        {
+            return Err(PairingRelayError::NotFound);
+        }
+        self.admit_claim_budget(
+            source,
+            parse_id(&poll.lease.body.lease_id, "lease_id")?,
+            now.mono,
+        )?;
+        self.full_server(admission)?.poll_discovery(poll, admission)
+    }
+
     /// Complete the reconnect only with both original branches' matching fresh signatures.
     /// # Errors
     /// Refuses old/nonmatching boot/nonce/keys, changed native authority and slot/byte metadata Busy.
@@ -271,6 +362,68 @@ impl PairingRelayStore {
         self.reserve_full_body(&auth.route(), bytes, admission)
     }
 
+    /// Authenticate A2 before looking up native account/head state, preserving its no-oracle rule.
+    /// Release this store lock before loaning the current native owner, then reauthenticate
+    /// on admission/claim/enqueue so an intervening epoch retirement cannot race through.
+    /// # Errors
+    /// Unknown lease, wrong token/epoch and expired state all refuse without disclosing scope.
+    pub fn full_authenticated_grant(
+        &mut self,
+        authorization: &super::FullAuthorization<'_>,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        PairingRelayError,
+    > {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .authenticated_grant(&authorization.route())
+    }
+
+    /// Federation-only internal admission: issue one opaque five-second body reservation.
+    /// The authenticated mesh owner checks its service peer before invoking this method.
+    /// # Errors
+    /// Refuses stale scope/native authority, arm/length limits and body/metadata Busy.
+    pub fn admit_full_forward(
+        &mut self,
+        request: &super::FullMeshAdmit,
+        peer: &crate::MeshPeerIdentity,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullMeshPermit, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .admit_forward(request, peer, admission)
+    }
+    /// Consume a mesh reservation BEFORE allocating/reading its forwarded raw body.
+    /// # Errors
+    /// Refuses expired/reused permits or changed authenticated scope without consuming a valid claim.
+    pub fn take_full_forward(
+        &mut self,
+        claim: &super::FullForwardClaim<'_>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullSendPermit, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .take_forward(claim, admission)
+    }
+
+    /// Apply the complete raw mesh body only after its one-use claim and scope checks.
+    /// # Errors
+    /// Refuses changed arm/scope/length, stale native authority and queue/control bounds.
+    pub fn accept_full_forward(
+        &mut self,
+        permit: super::FullSendPermit,
+        body: Vec<u8>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullAdmittedReply, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .accept_forward(permit, body, admission)
+    }
+
     /// Consume one A2 body permit into the bounded shared queue after current-native recheck.
     /// # Errors
     /// Refuses header/body mismatch, replay, stale admission or resource Busy.
@@ -304,7 +457,10 @@ impl PairingRelayStore {
     /// Data-resource observations are separate from the ordinary relay's byte walker.
     /// # Errors
     /// Refuses unavailable accounting state.
-    pub fn full_resume_stats(&self) -> Result<Option<super::FullResumeStats>, PairingRelayError> {
+    pub fn full_resume_stats(
+        &mut self,
+    ) -> Result<Option<super::FullResumeStats>, PairingRelayError> {
+        self.prune()?;
         self.full_resume.as_ref().map(|server| server.stats()).transpose()
     }
 

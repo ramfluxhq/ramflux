@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::*;
+mod mesh;
 mod queues;
 use crate::pairing_relay::{
     FullNativeAdmission, FullResumeChallenge, FullResumeOffer, FullResumeProgress, FullResumeToken,
@@ -26,7 +27,7 @@ fn signed(
 }
 fn token(progress: FullResumeProgress) -> TestResult<FullResumeToken> {
     match progress {
-        FullResumeProgress::Ready(token) => Ok(token),
+        FullResumeProgress::Ready(token) => Ok(*token),
         FullResumeProgress::Pending => {
             Err("both original proofs did not establish data-only state".into())
         }
@@ -59,6 +60,7 @@ pub(super) enum ControlCase {
     WrongRoleToken,
     Header,
     Queue,
+    Mesh,
 }
 
 pub(super) fn prove_resume(
@@ -73,8 +75,7 @@ pub(super) fn prove_resume(
         .custody_record(&driver.reference.account_anchor, NOW)?
         .ok_or("native record missing")?;
     let current = ramflux_crypto::custody::verify_record(&record.record, NOW, None, None)?;
-    let admission =
-        FullNativeAdmission::BeforePublication { node: &driver.node, current: &current };
+    let admission = FullNativeAdmission::for_current(&driver.node, &current, &lease.body.grant);
     let offer = offer(lease, 41);
     let challenge = locked(relay)?.begin_full_resume(
         IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
@@ -121,6 +122,8 @@ pub(super) fn prove_resume(
         clock.advance_secs(1);
         if matches!(case, ControlCase::Header) {
             prove_headers(relay, &initiator, &responder, &admission)?;
+        } else if matches!(case, ControlCase::Mesh) {
+            mesh::prove(relay, &initiator, &responder, &admission, clock)?;
         } else if matches!(case, ControlCase::Queue) {
             prove_control(relay, &initiator, &responder, &admission, ControlCase::Replay)?;
             queues::prove(relay, &initiator, &responder, &admission, clock)?;
