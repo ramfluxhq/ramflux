@@ -176,7 +176,14 @@ fn held_at_or_below_c_is_not_selected() -> Result<(), StorageError> {
     stage(&db, "e", 0, 1)?;
     assert_eq!(cover(&db, "e", 0, 1, ReceiveCoverKind::Terminal)?, ReceiveCoverResult::Covered);
     assert_eq!(due(&db, "e", 1, now(), true)?, vec![1], "terminal intent at C is due");
-    db.set_receipt_disposition_for_test(1, "held")?;
+    // Terminal cover releases the receipt; plant a held row so the SQL exclusion is observable.
+    db.write_transaction(|| -> Result<(), StorageError> {
+        db.connection.execute(
+            "INSERT INTO gateway_receive_receipt VALUES('t','e',?1,'held',0,1)",
+            params![1u64.to_be_bytes().as_slice()],
+        )?;
+        Ok(())
+    })?;
     assert_eq!(
         due(&db, "e", 1, now(), true)?,
         Vec::<u64>::new(),
