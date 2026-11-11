@@ -86,7 +86,9 @@ mod sqlite_work;
 
 pub use account_db::AccountDb;
 pub use account_db::full_transfer::{
-    EncryptedStageChunk, FullStageKey, FullTransferStage, StageDirection, WrappedFullStageKey,
+    CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule, FullStageKey,
+    FullTransferStage, MergeRule, StageDirection, VariantRule, WrappedFullStageKey,
+    full_census_hash,
 };
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{
