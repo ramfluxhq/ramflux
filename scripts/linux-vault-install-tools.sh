@@ -11,7 +11,14 @@ if ! sudo timeout 10s runuser -u _apt -- getent ahostsv4 archive.ubuntu.com; the
   sudo timeout 10s getent ahostsv4 archive.ubuntu.com || true
   sudo timeout 10s resolvectl status || true
   sudo timeout 20s systemctl restart systemd-resolved
-  sudo timeout 10s runuser -u _apt -- getent ahostsv4 archive.ubuntu.com
+  if ! sudo timeout 10s runuser -u _apt -- getent ahostsv4 archive.ubuntu.com; then
+    echo 'Runner upstream DNS is unavailable; using public DNS for this disposable job'
+    default_link=$(ip -o -4 route show default | awk '{for (i=1; i<NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+    test -n "$default_link"
+    sudo timeout 10s resolvectl dns "$default_link" 1.1.1.1 8.8.8.8
+    sudo timeout 10s resolvectl flush-caches
+    sudo timeout 10s runuser -u _apt -- getent ahostsv4 archive.ubuntu.com
+  fi
 fi
 
 sources_dir=$(mktemp -d)
