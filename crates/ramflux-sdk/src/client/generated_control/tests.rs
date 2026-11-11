@@ -274,7 +274,10 @@ fn round_trip_all_operations() -> TestResult {
             control.clone(),
         )?;
         let (identity, decoded) = RamfluxClient::decode_generated_inner(&encoded)?;
-        assert_eq!(identity.id, event_id);
+        g::identity::verify(&identity)?;
+        assert_eq!(identity.id.len(), 32);
+        assert_eq!(identity.device_sequence, u64::try_from(index)? + 1);
+        assert_ne!(identity.id, event_id);
         let content::Value::Control(decoded_control) =
             decoded.value.ok_or("missing decoded control")?
         else {

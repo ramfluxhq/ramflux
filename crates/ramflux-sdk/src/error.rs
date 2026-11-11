@@ -82,6 +82,8 @@ impl std::fmt::Display for GeneratedRefusalCode {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error(transparent)]
+    GeneratedApi(#[from] Box<crate::bindings::AdapterError>),
     #[error("receive epoch reconciliation refused: {0}")]
     ReceiveEpochReconcile(#[from] ReceiveEpochReconcileFailure),
     #[error(transparent)]
@@ -324,5 +326,11 @@ impl From<SyncError> for SdkError {
             SyncError::ObjectErased => Self::ObjectErased,
             other => Self::Sync(other),
         }
+    }
+}
+
+impl From<crate::bindings::AdapterError> for SdkError {
+    fn from(error: crate::bindings::AdapterError) -> Self {
+        Self::GeneratedApi(Box::new(error))
     }
 }

@@ -164,6 +164,31 @@ impl AccountDb {
         Ok(serde_json::from_slice(&metadata_json)?)
     }
 
+    /// Content-free generated identities and the durable sequence of each row's last change.
+    /// # Errors
+    /// Returns storage or metadata decoding errors.
+    pub fn generated_message_identities(
+        &self,
+        conversation: &str,
+    ) -> Result<Vec<(ramflux_protocol::message::EventIdentity, u64)>, StorageError> {
+        let mut query = self.connection.prepare(
+            "SELECT a.state_json,coalesce(s.seq,0)
+            FROM direct_message_projection m JOIN runtime_actor_state a
+              ON a.state_kind='routed/generated-identity/'||m.message_id
+            LEFT JOIN runtime_message_sequence s ON s.message_id=m.message_id
+            WHERE m.conversation_id=?1",
+        )?;
+        query
+            .query_map(params![conversation], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .map(|row| {
+                let (bytes, seq) = row?;
+                Ok((serde_json::from_slice(&bytes)?, seq))
+            })
+            .collect()
+    }
+
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn direct_messages(
@@ -390,6 +415,21 @@ impl AccountDb {
             })
         })?;
         Ok(tombstone)
+    }
+
+    /// Return the recorded scope and id for a message's narrow tombstone projection.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn message_tombstone_for_message(
+        &self,
+        conversation: &str,
+        message: &str,
+    ) -> Result<Option<MessageTombstoneRecord>, StorageError> {
+        Ok(self.connection.query_row(
+            "SELECT tombstone_id,conversation_id,message_id,delete_scope FROM message_tombstone_projection WHERE conversation_id=?1 AND message_id=?2 ORDER BY created_at DESC,tombstone_id DESC LIMIT 1",
+            params![conversation,message], |row| Ok(MessageTombstoneRecord {
+                tombstone_id:row.get(0)?,conversation_id:row.get(1)?,message_id:row.get(2)?,delete_scope:row.get(3)?
+            })).optional()?)
     }
 
     /// # Errors

@@ -293,6 +293,9 @@ pub(super) fn read(
             Ok(serde_json::json!({"conversations": client.conversation_list()?}))
         }
         "message.list" | "message.read" => {
+            if crate::client::target_selection::schema_v1_selected() {
+                return generated_page(client, &request.body);
+            }
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             message_page(client, &body.conversation_id)
         }
@@ -304,9 +307,41 @@ fn closed() -> SdkError {
     SdkError::LocalBus("account reader stopped".to_owned())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedPageRequest {
+    conversation_id: String,
+    #[serde(default)]
+    before_order_key: Option<ramflux_protocol::message::EventIdentity>,
+    #[serde(default = "default_generated_page_limit")]
+    limit: u32,
+}
+pub(super) fn generated_page(
+    client: &RamfluxClient,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, SdkError> {
+    let result = (|| {
+        let body: GeneratedPageRequest = serde_json::from_value(body.clone())?;
+        Ok(serde_json::to_value(client.generated_message_page(
+            &body.conversation_id,
+            body.before_order_key.as_ref(),
+            body.limit,
+        )?)?)
+    })();
+    result.map_err(|error| crate::bindings::AdapterError::from_sdk(&error).into())
+}
+
+fn default_generated_page_limit() -> u32 {
+    100
+}
+
 fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json::Value, SdkError> {
     if crate::client::target_selection::schema_v1_selected() {
-        return Ok(serde_json::json!({"messages":client.generated_message_page(conversation)?}));
+        return Ok(serde_json::to_value(client.generated_message_page(
+            conversation,
+            None,
+            100,
+        )?)?);
     }
     let db = client.account_db()?;
     let mut messages = Vec::new();
@@ -391,6 +426,32 @@ fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_page_reader_returns_bounds_and_shared_errors() -> Result<(), SdkError> {
+        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+            "generated-page-reader",
+            "principal_sync",
+            "local",
+        )?;
+        let page =
+            generated_page(&client, &serde_json::json!({"conversation_id":"empty","limit":3}))?;
+        assert_eq!(page["messages"], serde_json::json!([]));
+        assert_eq!(page["snapshot_sequence"], client.account_db()?.journal_bounds()?.head_seq);
+        assert!(page["next_before"].is_null());
+        for (request, code) in [
+            (serde_json::json!({"conversation_id":"empty","limit":0}), 1),
+            (serde_json::json!({"conversation_id":"empty","limit":101}), 1),
+            (serde_json::json!({"conversation_id":"empty","raw":true}), 2),
+        ] {
+            let error = generated_page(&client, &request).err().ok_or_else(closed)?;
+            let SdkError::GeneratedApi(error) = error else { return Err(closed()) };
+            assert_eq!(error.code, code);
+        }
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn message_rows_preserve_actor_kind_and_leave_legacy_metadata_unknown()
     -> Result<(), SdkError> {

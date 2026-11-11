@@ -3,6 +3,8 @@
 
 //! CLI adapter: construct generated `MessageRequest` / `MessageUpdate` from rf fields.
 
+pub use super::{AdapterError, ErrorDetails, GeneratedErrorCode};
+
 use super::{invalid, round_trip_request, round_trip_update};
 use crate::SdkError;
 use ramflux_protocol::message as g;

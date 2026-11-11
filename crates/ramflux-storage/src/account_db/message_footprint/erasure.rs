@@ -57,7 +57,19 @@ const BODY: &str = r"
     CAST(locator AS INTEGER) FROM message_footprint WHERE message_id=NEW.message_id);
  DELETE FROM runtime_outbox WHERE table_name='direct_message_projection' AND row_id=NEW.rowid;
  DELETE FROM runtime_receipt_retention WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor');
- DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id AND NOT EXISTS(SELECT 1 FROM message_footprint shared WHERE shared.kind='actor' AND shared.locator=runtime_actor_state.state_kind AND shared.message_id<>NEW.message_id AND shared.message_id NOT GLOB 'copy:*')
+ DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='actor') AND state_kind<>'directory/message/'||NEW.message_id AND coalesce(CASE WHEN state_kind='routed/generated-identity/'||NEW.message_id AND json_valid(CAST(state_json AS TEXT)) THEN
+  replace(replace(rtrim(json_extract(CAST(state_json AS TEXT),'$.id'),'='),'+','-'),'/','_')=NEW.message_id
+  AND json_extract(CAST(state_json AS TEXT),'$.conversationId')=NEW.conversation_id
+  AND NOT EXISTS(SELECT 1 FROM json_each(CAST(state_json AS TEXT)) WHERE key NOT IN ('id','conversationId','author','deviceSequence','hlc','groupId','groupEpoch'))
+  AND (json_type(CAST(state_json AS TEXT),'$.deviceSequence') IN ('text','integer') AND length(CAST(json_extract(CAST(state_json AS TEXT),'$.deviceSequence') AS TEXT)) BETWEEN 1 AND 20 AND CAST(json_extract(CAST(state_json AS TEXT),'$.deviceSequence') AS TEXT) NOT GLOB '*[^0-9]*' AND substr('00000000000000000000'||CAST(json_extract(CAST(state_json AS TEXT),'$.deviceSequence') AS TEXT),-20)<='18446744073709551615')
+  AND (json_type(CAST(state_json AS TEXT),'$.author.deviceEpoch') IN ('text','integer') AND length(CAST(json_extract(CAST(state_json AS TEXT),'$.author.deviceEpoch') AS TEXT)) BETWEEN 1 AND 20 AND CAST(json_extract(CAST(state_json AS TEXT),'$.author.deviceEpoch') AS TEXT) NOT GLOB '*[^0-9]*' AND substr('00000000000000000000'||CAST(json_extract(CAST(state_json AS TEXT),'$.author.deviceEpoch') AS TEXT),-20)<='18446744073709551615')
+  AND (json_type(CAST(state_json AS TEXT),'$.hlc') IS NULL OR (json_type(CAST(state_json AS TEXT),'$.hlc') IN ('text','integer') AND length(CAST(json_extract(CAST(state_json AS TEXT),'$.hlc') AS TEXT)) BETWEEN 1 AND 20 AND CAST(json_extract(CAST(state_json AS TEXT),'$.hlc') AS TEXT) NOT GLOB '*[^0-9]*' AND substr('00000000000000000000'||CAST(json_extract(CAST(state_json AS TEXT),'$.hlc') AS TEXT),-20)<='18446744073709551615'))
+  AND (json_type(CAST(state_json AS TEXT),'$.groupEpoch') IS NULL OR (json_type(CAST(state_json AS TEXT),'$.groupEpoch') IN ('text','integer') AND length(CAST(json_extract(CAST(state_json AS TEXT),'$.groupEpoch') AS TEXT)) BETWEEN 1 AND 20 AND CAST(json_extract(CAST(state_json AS TEXT),'$.groupEpoch') AS TEXT) NOT GLOB '*[^0-9]*' AND substr('00000000000000000000'||CAST(json_extract(CAST(state_json AS TEXT),'$.groupEpoch') AS TEXT),-20)<='18446744073709551615'))
+  AND json_type(CAST(state_json AS TEXT),'$.author.accountAnchor')='text'
+  AND json_type(CAST(state_json AS TEXT),'$.author.deviceId')='text'
+  AND (json_type(CAST(state_json AS TEXT),'$.groupId') IS NULL OR json_type(CAST(state_json AS TEXT),'$.groupId')='text')
+  AND CASE WHEN json_type(CAST(state_json AS TEXT),'$.author')='object' THEN NOT EXISTS(SELECT 1 FROM json_each(json_extract(CAST(state_json AS TEXT),'$.author')) WHERE key NOT IN ('accountAnchor','deviceId','deviceEpoch')) ELSE 0 END
+  ELSE 0 END,0)=0 AND NOT EXISTS(SELECT 1 FROM message_footprint shared WHERE shared.kind='actor' AND shared.locator=runtime_actor_state.state_kind AND shared.message_id<>NEW.message_id AND shared.message_id NOT GLOB 'copy:*')
   AND state_kind NOT IN (SELECT locator FROM message_footprint WHERE message_id=NEW.message_id AND kind='replay_actor');
  DELETE FROM runtime_outbox WHERE sequence IN (
   SELECT outbox.sequence FROM message_footprint footprint

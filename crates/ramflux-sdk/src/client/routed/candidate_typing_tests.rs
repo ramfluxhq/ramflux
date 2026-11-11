@@ -53,7 +53,10 @@ async fn typing_lifetime_at_most_five_seconds_and_ttl_is_bounded() -> Result<(),
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
     for ttl in [0, 1, 2, 3, 4, 6] {
-        assert!(typing_envelope(&a, &b, "refused", ttl).is_err());
+        let error = typing_envelope(&a, &b, "refused", ttl)
+            .err()
+            .ok_or_else(|| invalid("invalid typing TTL accepted"))?;
+        assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code, 1);
     }
     let ttl = 5;
     let envelope = typing_envelope(&a, &b, &format!("event-{ttl}"), ttl)?;
@@ -136,9 +139,15 @@ async fn typing_cannot_exhaust_skipped_keys_or_bootstrap() -> Result<(), SdkErro
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut a, mut b) = pair(181, 183)?;
     friend(&mut a, &b)?;
-    assert!(typing_envelope(&a, &b, "no-session", 5).is_err());
+    let error = typing_envelope(&a, &b, "no-session", 5)
+        .err()
+        .ok_or_else(|| invalid("typing bootstrapped"))?;
+    assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code, 13, "{error:?}");
     let bootstrap = seal(&a, &b, message("establish", "c"), b"establish")?;
-    assert!(typing_envelope(&a, &b, "unconfirmed", 5).is_err());
+    let error = typing_envelope(&a, &b, "unconfirmed", 5)
+        .err()
+        .ok_or_else(|| invalid("typing confirmed a session"))?;
+    assert_eq!(crate::bindings::AdapterError::from_sdk(&error).code, 13, "{error:?}");
     assert!(
         b.client.open_typing_delivery(&bootstrap.envelope, &b.id).is_err(),
         "ephemeral bootstrap refused before pair state changes"

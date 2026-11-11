@@ -190,7 +190,7 @@ async fn generated_edit_reaction_delete_preserves_exact_digest_and_erase_links()
     commit_content(&a, &mut b, "gap", edit(&target, 3, digest, "edited three")).await?;
     commit_content(&a, &mut b, "edit-two", edit(&target, 2, digest, "edited two")).await?;
     commit_content(&a, &mut b, "stale", edit(&target, 1, [0; 32], "stale must not apply")).await?;
-    let page = b.client.generated_message_page("c")?;
+    let page = b.client.generated_message_page("c", None, 100)?.messages;
     assert!(page.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content { value: Some(g::content::Value::Message(message)) })) if message.text == "edited three")));
     commit_content(
         &a,
@@ -257,7 +257,7 @@ async fn unknown_kind_is_acked_and_kept_with_raw_bytes() -> Result<(), SdkError>
             .iter()
             .any(|frame| frame["frame_type"] == "ack")
     );
-    let page = b.client.generated_message_page("c")?;
+    let page = b.client.generated_message_page("c", None, 100)?.messages;
     assert!(matches!(
         page.first().and_then(|update| update.state.as_ref()),
         Some(g::message_update::State::Unsupported(_))
@@ -325,7 +325,7 @@ async fn unknown_cannot_bypass_native_group_or_own_origin_authority() -> Result<
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn message_page_projects_generated_content_and_unsupported() -> Result<(), SdkError> {
+async fn message_page_preserves_unicode_and_unsupported_projection() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(223, 225)?;
     let known = RamfluxClient::encode_generated_inner(
@@ -342,7 +342,7 @@ async fn message_page_projects_generated_content_and_unsupported() -> Result<(),
     let unknown = unknown_inner(&a, "unknown-wire")?;
     let unknown_entry = seal(&a, &b, message("unknown-wire", "c"), &unknown)?;
     apply(&mut b, &unknown_entry).await?;
-    let page = b.client.generated_message_page("c")?;
+    let page = b.client.generated_message_page("c", None, 100)?.messages;
     assert!(page.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content { value: Some(g::content::Value::Message(message)) })) if message.text == "hello 😀")));
     assert!(page.iter().any(|update| matches!(
         update.state.as_ref(),
@@ -567,7 +567,7 @@ async fn group_authority_case(change: &str) -> Result<(), SdkError> {
     let result = apply(&mut b, &entry).await;
     if change == "valid" {
         result?;
-        let updates = b.client.generated_message_page("c")?;
+        let updates = b.client.generated_message_page("c", None, 100)?.messages;
         assert!(updates.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content { value: Some(g::content::Value::Message(message)) })) if message.text == "group content")));
     } else {
         assert!(result.is_err(), "{change} must be refused before retention");
@@ -606,14 +606,31 @@ async fn generated_group_decrypts_with_outer_authority() -> Result<(), SdkError>
 async fn generated_refusals_settle_and_never_stage_locally()
 -> Result<(), Box<dyn std::error::Error>> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
-    for kind in [3, 4, 5, 7] {
+    for kind in [3, 4, 5, 7, 108, 110] {
         let (a, mut b) = pair(201, 203)?;
         // A known malformed payload has no target/replacement/operation. This is peer input.
         let bad_bytes = g::Inner {
             layer: 2,
-            kind,
+            kind: if kind >= 100 { 8 } else { kind },
             identity: Some(generated_identity(&a, "bad")?),
-            body: Vec::new(),
+            body: match kind {
+                108 => g::Control {
+                    operation: 8,
+                    payload: Some(g::control::Payload::HomeMigration(g::HomeMigrationControl {
+                        proposal: Some(g::NativeHomeAuthorization { canonical: vec![1] }),
+                    })),
+                }
+                .encode_to_vec(),
+                110 => g::Control {
+                    operation: 10,
+                    payload: Some(g::control::Payload::LivePresence(g::LivePresence {
+                        epoch: 1,
+                        subjects: vec![generated_identity(&a, "bad")?.author.ok_or("author")?],
+                    })),
+                }
+                .encode_to_vec(),
+                _ => Vec::new(),
+            },
         }
         .encode_to_vec();
         let first = seal(&a, &b, message("bad", "c"), &bad_bytes)?;
@@ -713,7 +730,7 @@ async fn edit_before_target_is_committed_without_transport_retry_expiry() -> Res
         }),
     )
     .await?;
-    let page = b.client.generated_message_page("c")?;
+    let page = b.client.generated_message_page("c", None, 100)?.messages;
     assert!(page.iter().any(|update| matches!(update.state.as_ref(), Some(g::message_update::State::Content(g::Content { value: Some(g::content::Value::Message(message)) })) if message.text == "late edit wins")));
     assert_eq!(b.client.account_db()?.unsupported_raw_quota(None)?.owners, 0);
     Ok(())
@@ -1110,8 +1127,252 @@ async fn pending_moderator_delete_is_ignored_after_demotion_without_poisoning_ta
     apply(&mut b, &entry).await?;
     let id = ramflux_protocol::encode_base64url(&target.id);
     assert!(!b.client.account_db()?.message_is_deleted(&id)?);
-    assert!(b.client.generated_message_page("c")?.iter().any(|update| matches!(update.state.as_ref(),
+    assert!(b.client.generated_message_page("c", None, 100)?.messages.iter().any(|update| matches!(update.state.as_ref(),
         Some(g::message_update::State::Content(g::Content {value:Some(g::content::Value::Message(message))}))
         if message.text=="late target survives")));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn typed_tombstones_preserve_raw_identity_recorded_scope_and_invalidate_actual_cache()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(131, 133)?;
+    let mut cache = crate::typed_messages::MessageCache::default();
+    for (name, local) in [("everyone-reader", false), ("local-reader", true)] {
+        commit_content(
+            &a,
+            &mut b,
+            name,
+            g::content::Value::Message(g::Message {
+                text: "preview that must disappear".into(),
+                ..Default::default()
+            }),
+        )
+        .await?;
+        let original = generated_identity(&a, name)?;
+        let id = ramflux_protocol::encode_base64url(&original.id);
+        let page = b.client.generated_message_page("c", None, 100)?.messages;
+        let update = page
+            .into_iter()
+            .find(|update| {
+                update.identity.as_ref().is_some_and(|identity| identity.id == original.id)
+            })
+            .ok_or_else(|| invalid("live typed row missing"))?;
+        cache.apply(update);
+        if local {
+            let tombstone =
+                g::identity::delete_tombstone(&generated_identity(&b, "local-reader-delete")?.id)
+                    .map_err(|_| invalid("tombstone"))?;
+            b.client.delete_direct_message(
+                "c",
+                &id,
+                "local",
+                &ramflux_protocol::encode_base64url(tombstone),
+            )?;
+        } else {
+            commit_content(
+                &a,
+                &mut b,
+                "everyone-reader-delete",
+                g::content::Value::Delete(g::Delete {
+                    targets: vec![g::MessageRef {
+                        id: original.id.clone(),
+                        conversation_id: "c".into(),
+                        author_anchor: a.client.own_account_anchor()?,
+                    }],
+                    scope: g::DeleteScope::Everyone as i32,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        }
+        let page = b.client.generated_message_page("c", None, 100)?.messages;
+        let update = page
+            .into_iter()
+            .find(|update| {
+                update.identity.as_ref().is_some_and(|identity| identity.id == original.id)
+            })
+            .ok_or_else(|| invalid("typed tombstone identity changed"))?;
+        let Some(g::message_update::State::Tombstone(delete)) = update.state.as_ref() else {
+            return Err(invalid("typed tombstone missing"));
+        };
+        assert_eq!(update.identity.as_ref(), Some(&original));
+        assert_eq!(
+            delete.scope,
+            if local { g::DeleteScope::Local } else { g::DeleteScope::Everyone } as i32
+        );
+        assert_eq!(
+            delete.targets.first().ok_or_else(|| invalid("target"))?.author_anchor,
+            a.client.own_account_anchor()?
+        );
+        assert_eq!(delete.tombstone_id.len(), 32);
+        cache.apply(update);
+        let cached = cache.get("c", &original.id).ok_or_else(|| invalid("cache entry"))?;
+        assert!(matches!(cached.state, Some(g::message_update::State::Tombstone(_))));
+        assert!(!serde_json::to_string(cached)?.contains("preview that must disappear"));
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn typed_identity_retention_never_preserves_payload_shadows_or_unbound_headers()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(127, 129)?;
+    for case in 0..7 {
+        let name = format!("invalid-header-{case}");
+        commit_content(
+            &a,
+            &mut b,
+            &name,
+            g::content::Value::Message(g::Message {
+                text: "retired header canary".into(),
+                ..Default::default()
+            }),
+        )
+        .await?;
+        let original = generated_identity(&a, &name)?;
+        let id = ramflux_protocol::encode_base64url(&original.id);
+        let key = format!("routed/generated-identity/{id}");
+        let mut header = serde_json::to_value(&original)?;
+        match case {
+            0 => header["retired_body"] = serde_json::json!("retired header canary"),
+            1 => header["author"]["retired_body"] = serde_json::json!("retired header canary"),
+            2 => header["id"] = serde_json::json!("unbound"),
+            3 => header["conversationId"] = serde_json::json!("another-conversation"),
+            4 => header["author"] = serde_json::Value::Null,
+            5 => header["hlc"] = serde_json::json!({"retired_body":"retired header canary"}),
+            _ => header["deviceSequence"] = serde_json::json!("retired header canary"),
+        }
+        b.client.account_db()?.persist_message_actor_state(&id, &key, &header)?;
+        let tombstone =
+            g::identity::delete_tombstone(&[8; 32]).map_err(|_| invalid("tombstone"))?;
+        b.client.delete_direct_message(
+            "c",
+            &id,
+            "local",
+            &ramflux_protocol::encode_base64url(tombstone),
+        )?;
+        assert!(
+            !b.client.account_db()?.actor_state_exists(&key)?,
+            "invalid header {case} survived erasure"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn message_page_projects_generated_content_and_unsupported() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(151, 153)?;
+    let mut expected = Vec::new();
+    for index in 0..8 {
+        let name = format!("paged-{index}");
+        if index == 3 {
+            let raw = unknown_inner(&a, &name)?;
+            let entry = seal(&a, &b, message(&name, "c"), &raw)?;
+            apply(&mut b, &entry).await?;
+        } else {
+            commit_content(
+                &a,
+                &mut b,
+                &name,
+                g::content::Value::Message(g::Message {
+                    text: format!("page text {index}"),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+        }
+        let identity = generated_identity(&a, &name)?;
+        let event=b.client.account_db()?.append_journal(&format!("page-{index}"),"message.updated",&serde_json::json!({"message_id":ramflux_protocol::encode_base64url(&identity.id),"conversation_id":"c"}),100,None)?;
+        expected.push((
+            g::identity::order_key(&identity).map_err(|_| invalid("order"))?,
+            identity,
+            event.seq,
+        ));
+    }
+    let head = b
+        .client
+        .account_db()?
+        .append_journal("unrelated-head", "sync.status", &serde_json::json!({}), 100, None)?
+        .seq;
+    // Row sequences survive pruning; a new snapshot sequence must never replace them.
+    b.client.account_db()?.retain_journal(1000, 0, 0)?;
+    expected.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    let mut actual = Vec::new();
+    let mut before = None;
+    let mut pages = 0;
+    loop {
+        let page = b.client.generated_message_page("c", before.as_ref(), 3)?;
+        assert!(page.messages.len() <= 3);
+        assert_eq!(page.snapshot_sequence, head);
+        actual.extend(page.messages);
+        pages += 1;
+        before = page.next_before;
+        if before.is_none() {
+            break;
+        }
+        assert!(pages < 4, "cursor must make progress");
+    }
+    assert_eq!(pages, 3);
+    assert_eq!(actual.len(), 8);
+    for (row, (_, identity, seq)) in actual.iter().zip(&expected) {
+        assert_eq!(row.identity.as_ref(), Some(identity));
+        assert_eq!(row.journal_sequence, *seq);
+        assert!(row.journal_sequence < head);
+    }
+    assert!(
+        actual
+            .iter()
+            .any(|row| matches!(row.state, Some(g::message_update::State::Unsupported(_))))
+    );
+    let json = serde_json::to_string(&actual)?;
+    assert!(
+        !json.contains("exact_inner")
+            && !json.contains("report_opening")
+            && !json.contains("source_evidence")
+    );
+    assert!(b.client.generated_message_page("c", None, 0).is_err());
+    assert!(b.client.generated_message_page("c", None, 101).is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn message_page_respects_encoded_byte_cap_and_continuation() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(161, 163)?;
+    for index in 0..4 {
+        commit_content(
+            &a,
+            &mut b,
+            &format!("large-page-{index}"),
+            g::content::Value::Message(g::Message {
+                text: "x".repeat(256 * 1024),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    }
+    let first = b.client.generated_message_page("c", None, 100)?;
+    assert_eq!(first.messages.len(), 2);
+    assert!(serde_json::to_vec(&first)?.len() <= 768 * 1024);
+    let second = b.client.generated_message_page("c", first.next_before.as_ref(), 100)?;
+    assert_eq!(second.messages.len(), 2);
+    assert!(second.next_before.is_none());
+    let first_ids = first
+        .messages
+        .iter()
+        .filter_map(|row| row.identity.as_ref())
+        .map(|id| &id.id)
+        .collect::<Vec<_>>();
+    assert!(
+        second
+            .messages
+            .iter()
+            .filter_map(|row| row.identity.as_ref())
+            .all(|id| !first_ids.contains(&&id.id))
+    );
     Ok(())
 }
