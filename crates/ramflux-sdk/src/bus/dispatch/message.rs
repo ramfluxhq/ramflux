@@ -359,7 +359,7 @@ async fn federated_manifest_gate(
     Ok(ResolvedMessageRecipient { principal_id: Some(device.principal_id), principal_commitment })
 }
 
-/// Selects the cached delivery used for an ID-only `message.ack`.
+/// Selects the cached delivery used for an ID-only ACK request.
 ///
 /// Zero matches keep the legacy envelope-id ACK so the node still refuses
 /// ambiguity when its own pending set is incomplete. One match supplies that
