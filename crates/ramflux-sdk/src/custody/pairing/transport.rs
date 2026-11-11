@@ -41,13 +41,25 @@ pub struct PairingConfig {
 }
 
 impl PairingConfig {
-    /// Production reader: env once at process start. Tests construct this directly.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self {
-            enabled: matches!(std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED").as_deref(), Ok("1")),
-            extra_root_ca_pem: None,
+    /// Production reader: env once at process start. Pairing remains default-off.
+    /// # Errors
+    /// Refuses non-Unicode values and every value other than unset, `0` or `1`.
+    pub fn from_env() -> Result<Self, SdkError> {
+        match std::env::var("RAMFLUX_DEVICE_PAIRING_ENABLED") {
+            Ok(value) => Self::from_value(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::from_value(None),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(SdkError::PairingField("RAMFLUX_DEVICE_PAIRING_ENABLED"))
+            }
         }
+    }
+    fn from_value(value: Option<&str>) -> Result<Self, SdkError> {
+        let enabled = match value {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(_) => return Err(SdkError::PairingField("RAMFLUX_DEVICE_PAIRING_ENABLED")),
+        };
+        Ok(Self { enabled, extra_root_ca_pem: None })
     }
 }
 
@@ -663,3 +675,22 @@ fn http_error(error: reqwest::Error) -> SdkError {
 }
 
 const _: () = assert!(POLL_SECS >= 1);
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    #[test]
+    fn pairing_preview_capability_is_default_off_and_invalid_values_refuse() -> Result<(), SdkError>
+    {
+        for (value, expected) in [(None, false), (Some("0"), false), (Some("1"), true)] {
+            assert_eq!(PairingConfig::from_value(value)?.enabled, expected);
+        }
+        for value in ["", "true", "false", " 1", "1\n", "2", "on"] {
+            assert!(matches!(
+                PairingConfig::from_value(Some(value)),
+                Err(SdkError::PairingField("RAMFLUX_DEVICE_PAIRING_ENABLED"))
+            ));
+        }
+        Ok(())
+    }
+}

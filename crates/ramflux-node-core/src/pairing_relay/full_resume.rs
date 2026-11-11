@@ -235,7 +235,7 @@ pub(super) struct FullResumeServer {
     ready: Vec<Ready>,
     _metadata: FullMetadataPermit,
 }
-fn crypto(error: &CryptoError) -> PairingRelayError {
+pub(super) fn crypto(error: &CryptoError) -> PairingRelayError {
     match error {
         CryptoError::Pairing("HeadChanged") => PairingRelayError::HeadChanged,
         CryptoError::Pairing("LeaseExpired") => PairingRelayError::LeaseExpired,
@@ -606,6 +606,40 @@ impl FullResumeServer {
             role: if signer == 0 { "initiator" } else { "responder" }.into(),
             token: Zeroizing::new(*ready.tokens[signer]),
         }
+    }
+    pub(super) fn proof_grant(
+        &mut self,
+        proof: &Envelope<ResumeProof>,
+    ) -> Result<DataGrant, PairingRelayError> {
+        self.prune()?;
+        proof.body.validate().map_err(|error| wire(&error))?;
+        let signer = role(&proof.body.role)?;
+        let grant = if let Some(pending) =
+            self.pending.iter().find(|pending| pending.lease.body.lease_id == proof.body.lease_id)
+        {
+            &pending.lease.body.grant
+        } else {
+            &self
+                .ready
+                .iter()
+                .find(|ready| {
+                    ready.lease.body.lease_id == proof.body.lease_id
+                        && self.clock.monotonic_ms() < ready.retrieval_deadline
+                })
+                .ok_or(PairingRelayError::WrongContext)?
+                .lease
+                .body
+                .grant
+        };
+        let key =
+            if signer == 0 { &grant.branch_keys.source } else { &grant.branch_keys.destination };
+        verify_canonical_signature(
+            &proof.body.signing_bytes().map_err(|error| wire(&error))?,
+            &proof.signature,
+            key,
+        )
+        .map_err(|_| PairingRelayError::WrongContext)?;
+        Ok(grant.clone())
     }
     pub(super) fn authenticated_grant(
         &mut self,

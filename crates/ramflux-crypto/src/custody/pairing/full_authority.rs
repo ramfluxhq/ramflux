@@ -78,11 +78,13 @@ pub fn verify_full_tail_authority(grant: &DataGrant, current: &VerifiedRecord, n
 /// Both endpoints require a full day of remaining data lease before constructing J3.
 /// # Errors
 /// Refuses expired/short leases and malformed grants before candidate/signing-key creation.
-pub fn verify_full_j3_lease_margin(grant: &DataGrant, now: u64) -> Result {
-    grant.validate()?;
-    if grant.expires_at.checked_sub(now).is_none_or(|remaining| {
-        remaining < ramflux_protocol::custody::pairing::full_transfer::MIN_J3_LEASE_SECONDS
-    }) {
+pub fn verify_full_j3_lease_margin(lease: &DataLease, now: u64) -> Result {
+    lease.validate()?;
+    if now < lease.issued_at
+        || lease.expires_at.checked_sub(now).is_none_or(|remaining| {
+            remaining < ramflux_protocol::custody::pairing::full_transfer::MIN_J3_LEASE_SECONDS
+        })
+    {
         return Err(CryptoError::Pairing("LeaseExpired"));
     }
     Ok(())

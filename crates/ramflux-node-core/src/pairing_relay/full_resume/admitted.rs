@@ -37,7 +37,7 @@ impl FullSendPermit {
         }
         Ok(())
     }
-    fn route(&self) -> FullRoute<'_> {
+    pub(in crate::pairing_relay) fn route(&self) -> FullRoute<'_> {
         FullRoute {
             lease_id: &self.lease_id,
             epoch: &self.epoch,

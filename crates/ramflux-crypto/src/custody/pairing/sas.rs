@@ -522,6 +522,7 @@ impl EstablishedSas {
         lease: &ramflux_protocol::custody::Envelope<
             ramflux_protocol::custody::pairing::full_transfer::lease::DataLease,
         >,
+        start: &ramflux_protocol::custody::pairing::full_transfer::relay::StartFull,
     ) -> Result<super::FullResumeTrust, CryptoError> {
         self.require_channel()?;
         let preimage =
@@ -534,6 +535,7 @@ impl EstablishedSas {
             context,
             grant,
             lease,
+            start,
             self.transcript_hash,
         )
     }

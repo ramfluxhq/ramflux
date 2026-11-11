@@ -3691,6 +3691,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -3820,6 +3821,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x509-parser 0.17.0",
+ "zeroize",
 ]
 
 [[package]]

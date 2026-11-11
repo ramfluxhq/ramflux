@@ -14,7 +14,7 @@ use ramflux_protocol::custody::{
         full_transfer::{
             DataBinding,
             lease::{BranchKeys, DataGrant, DataLease, ResumeProof},
-            relay::{FullDiscovery, HpkeConfirmFull, ResumeTokenFull},
+            relay::{FullDiscovery, HpkeConfirmFull, ResumeTokenFull, StartFull},
         },
     },
 };
@@ -29,6 +29,7 @@ pub struct FullResumeTrust {
     context: TranscriptV3,
     grant: DataGrant,
     lease: Zeroizing<Vec<u8>>,
+    base_manifest_hash: String,
     th: [u8; 32],
 }
 impl FullResumeTrust {
@@ -37,13 +38,17 @@ impl FullResumeTrust {
         context: TranscriptV3,
         grant: DataGrant,
         lease: &Envelope<DataLease>,
+        start: &StartFull,
         th: [u8; 32],
     ) -> Result<Self> {
         context.validate()?;
+        start.validate()?;
         grant.validate()?;
         let a = &context.initiator;
         let b = &context.responder;
-        if lease.body.grant != grant
+        if start.transfer_id != grant.transfer_id
+            || start.opaque_commitment != grant.opaque_commitment
+            || lease.body.grant != grant
             || a.branch_key != grant.branch_keys.source
             || b.branch_key != grant.branch_keys.destination
             || a.device_ref != grant.source_ref
@@ -52,7 +57,14 @@ impl FullResumeTrust {
         {
             return Err(CryptoError::Pairing("WrongContext"));
         }
-        Ok(Self { role, context, grant, lease: Zeroizing::new(canonical_json_bytes(lease)?), th })
+        Ok(Self {
+            role,
+            context,
+            grant,
+            lease: Zeroizing::new(canonical_json_bytes(lease)?),
+            base_manifest_hash: start.manifest_hash.clone(),
+            th,
+        })
     }
     /// Select the still-unused SAS private half, or fresh keys after loss/restart.
     /// # Errors
@@ -101,6 +113,7 @@ impl FullResumeTrust {
             },
             checked: None,
             base_record_hash: self.context.initiator.common.record_hash.clone(),
+            base_manifest_hash: self.base_manifest_hash.clone(),
         };
         let same_lease = received_lease.body.grant == self.grant
             && Zeroizing::new(canonical_json_bytes(received_lease)?).as_slice()
@@ -130,6 +143,7 @@ pub struct FullResumeAttempt {
     peer_branch_key: String,
     checked: Option<ResumeProof>,
     base_record_hash: String,
+    base_manifest_hash: String,
 }
 impl Drop for FullResumeAttempt {
     fn drop(&mut self) {
@@ -223,6 +237,7 @@ impl FullResumeAttempt {
             epoch: self.epoch.clone(),
             lease_id: self.lease_id.clone(),
             base_record_hash: self.base_record_hash.clone(),
+            base_manifest_hash: self.base_manifest_hash.clone(),
             grant: self.grant.clone(),
             th: self.th,
         })
@@ -236,6 +251,7 @@ pub struct VerifiedFullResume {
     epoch: String,
     lease_id: String,
     base_record_hash: String,
+    base_manifest_hash: String,
     grant: DataGrant,
     th: [u8; 32],
 }
@@ -249,7 +265,8 @@ impl Drop for VerifiedFullResume {
 impl VerifiedFullResume {
     fn require_binding(&self, binding: &DataBinding) -> Result<()> {
         binding.validate()?;
-        if binding.base_record_hash != self.base_record_hash
+        if binding.manifest_hash != self.base_manifest_hash
+            || binding.base_record_hash != self.base_record_hash
             || binding.epoch != self.epoch
             || binding.transfer_id != self.grant.transfer_id
             || binding.source_ref != self.grant.source_ref

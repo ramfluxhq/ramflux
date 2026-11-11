@@ -385,20 +385,36 @@ fn tail_admission_predicate() -> TestResult {
 
 #[test]
 fn pairing_full_j3_lease_margin_is_checked_before_candidate() -> TestResult {
-    let (_, _, mut grant) = fixture()?;
+    let (_, _, grant) = fixture()?;
     let now = grant.expires_at - 604_800;
+    let mut lease = DataLease {
+        schema: "ramflux.pairing.full_transfer.data_lease.v1".into(),
+        version: 1,
+        lease_id: b(95),
+        issued_at: now,
+        expires_at: grant.expires_at,
+        grant,
+    };
     for hours in [23, 24, 25] {
-        grant.expires_at = now + hours * 3600;
-        let result = verify_full_j3_lease_margin(&grant, now);
+        lease.expires_at = now + hours * 3600;
+        let result = verify_full_j3_lease_margin(&lease, now);
         if hours < 24 {
             assert!(matches!(result, Err(CryptoError::Pairing("LeaseExpired"))));
         } else {
             result?;
         }
     }
+    // The actual lease can end before the grant. The node's longer grant must not
+    // strand publication when fewer than 24 hours remain on the signed lease.
+    lease.grant.expires_at = now + 25 * 3600;
+    lease.expires_at = now + 23 * 3600;
+    assert!(matches!(
+        verify_full_j3_lease_margin(&lease, now),
+        Err(CryptoError::Pairing("LeaseExpired"))
+    ));
     for expiry in [now - 1, now, u64::MAX] {
-        grant.expires_at = expiry;
-        assert!(verify_full_j3_lease_margin(&grant, now).is_err());
+        lease.expires_at = expiry;
+        assert!(verify_full_j3_lease_margin(&lease, now).is_err());
     }
     Ok(())
 }

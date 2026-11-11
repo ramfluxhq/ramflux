@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 mod bootstrap;
 pub use bootstrap::{FullSasControl, GrantOfferFull, GrantSignedFull, LeaseFull};
+mod claim;
+pub use claim::{FullClaim, FullProofReply};
 mod data;
 pub use data::PolledFull;
 mod discovery;
@@ -14,7 +16,7 @@ pub use discovery::{DiscoveryKeys, FullDiscovery, HelloFull, PollFullDiscovery};
 mod control;
 pub use control::{
     CloseFull, ClosedFull, HpkeConfirmFull, PollFull, PollFullControl, PolledFullControl,
-    ProveFull, ResumePendingFull, ResumeTokenFull, SendFullControl, SentFull,
+    ProveFull, ResumePendingFull, ResumeTokenFull, SendFullControl, SentFull, SentFullControl,
 };
 mod send;
 pub use send::{BorrowedPacket, BorrowedSendFull, SendFull};

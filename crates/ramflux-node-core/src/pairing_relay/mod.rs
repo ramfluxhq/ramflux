@@ -9,6 +9,10 @@ pub use allocations::{PairingAllocation, PairingAllocations};
 mod bytes;
 mod full_auth;
 pub use full_auth::FullAuthorization;
+mod full_native;
+pub use full_native::FullNativeRelay;
+mod full_claim;
+pub use full_claim::apply_full_claim;
 mod full_budget;
 pub use full_budget::{
     ChargedFullBody, FullBodyBudget, FullBodyBudgetStats, FullBodyPermit, FullBodySlot,

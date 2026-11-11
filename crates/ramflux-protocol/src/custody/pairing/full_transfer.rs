@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 mod binding;
 mod diff;
 mod integrity;
+mod keys;
+pub use keys::{MAX_STABLE_KEY_BYTES, encode_stable_key};
 pub mod lease;
 mod packet;
 mod preservation;
