@@ -129,9 +129,9 @@ pub(super) fn opened_inner_plaintext(
 pub(super) fn refuse_direct_candidate_opening(
     envelope: &ramflux_protocol::Envelope,
     session: &ramflux_crypto::DmSession,
-    kind: &super::Kind,
+    _kind: &super::Kind,
 ) -> Result<(), SdkError> {
-    if *kind != super::Kind::Direct || !crate::client::target_selection::schema_v1_selected() {
+    if !crate::client::target_selection::schema_v1_selected() {
         return Ok(());
     }
     if envelope.report_commitment.is_none() {

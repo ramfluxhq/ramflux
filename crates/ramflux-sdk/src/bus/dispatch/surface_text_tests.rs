@@ -12,6 +12,7 @@ pub(in crate::bus::dispatch) struct Delivery {
 }
 
 #[tokio::test]
+#[allow(clippy::large_futures)]
 async fn hundred_device_surface_uses_text_distribution_submit_and_measured_frame_budget()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = runtime_tests::root("surface-text-group");
