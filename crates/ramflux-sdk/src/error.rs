@@ -40,8 +40,21 @@ impl GroupOperation {
     }
 }
 
+/// Why a verified Push session could not reconcile its durable receive epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReceiveEpochReconcileFailure {
+    #[error("retired incarnation fence is full")]
+    PausedFence,
+    #[error("old incarnation loss publication is pending")]
+    PausedLoss,
+    #[error("receive generation, epoch, cursor or erasure fence changed")]
+    StaleFence,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SdkError {
+    #[error("receive epoch reconciliation refused: {0}")]
+    ReceiveEpochReconcile(#[from] ReceiveEpochReconcileFailure),
     #[error("offline retention {0} is outside 3600..=604800 seconds")]
     InvalidOfflineRetention(u64),
     #[error(transparent)]

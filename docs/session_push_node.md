@@ -7,6 +7,11 @@ by `gateway.session_push.v1`.
 
 ## Negotiation and compatibility
 
+SDK accounts advertise `gateway.session_push.v1` by default so the first
+handshake can bind the verified node incarnation, then first-activate the
+receive ledger to that incarnation. Already-activated accounts keep that
+discriminator if first-activation later reverts to off.
+
 The signed device proof must include `gateway.session_push.v1` in capability_scope.
 The gateway intersects this with authenticated router readiness and freezes the
 result for that session. SessionEstablished.session echoes capabilities and

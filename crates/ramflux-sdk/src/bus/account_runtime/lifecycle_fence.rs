@@ -5,7 +5,7 @@
 //!
 //! Live unactivated accounts have no epoch row and keep today's prepare/apply/ack
 //! bodies. Activated accounts persist `gateway_receive_activation` in receive metadata;
-//! first activation stays default-off until P25. Legacy receive-C writers refuse once
+//! first activation is default-on. Legacy receive-C writers refuse once
 //! Activated. After lock/unlock or restart the actor recovers solely from disk
 //! (W0/W1/work rows): `PrepareReceive` on a Connected pass feeds the open rows into the
 //! receive plan (`source::w0::prepare_receive_turn`). Shared-ledger routing is P24b2.

@@ -172,16 +172,26 @@ fn activation_child() -> Result<(), StorageError> {
     panic!("real COMMIT cut did not fire");
 }
 
-/// Activate, persist staged/held work and an uncertain ACK, reopen default-off: Activated, guards
+/// Activate, persist staged/held work and an uncertain ACK, reopen: Activated, guards
 /// refuse legacy writes, old writers still refuse. Negative: legacy receive must not succeed.
+/// First-activation is default-on; a later revert of the switch leaves this DB Activated.
 #[test]
 fn activation_revert_preserves_ledger() -> Result<(), StorageError> {
     let (root, db) = crate::tests::test_db("receive-activation-revert")?;
-    const { assert!(!FIRST_ACTIVATION_DEFAULT) };
     assert_eq!(db.receive_activation()?, ReceiveActivation::Inactive);
-    assert_eq!(db.first_activate_if_default(migrate())?, None);
-    assert_eq!(db.receive_activation()?, ReceiveActivation::Inactive);
-    assert_eq!(db.activate_receive_ledger(migrate())?, ReceiveMigrateResult::Migrated);
+    assert_eq!(
+        db.first_activate_if_default(migrate())?,
+        FIRST_ACTIVATION_DEFAULT.then_some(ReceiveMigrateResult::Migrated)
+    );
+    if !FIRST_ACTIVATION_DEFAULT {
+        assert_eq!(db.receive_activation()?, ReceiveActivation::Inactive);
+        let _ = db.activate_receive_ledger(migrate())?;
+    }
+    assert_eq!(db.receive_activation()?, ReceiveActivation::Activated);
+    assert_eq!(
+        db.first_activate_if_default(migrate())?,
+        FIRST_ACTIVATION_DEFAULT.then_some(ReceiveMigrateResult::Existing)
+    );
     persist_work(&db)?;
     db.checkpoint_retired_secrets()?;
     let path = db.path.clone();

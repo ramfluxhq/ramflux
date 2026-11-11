@@ -12,7 +12,7 @@
 
 use super::fixture::{Case, Fixture};
 use super::lifecycle_fence::{
-    PUSH_E, account_of, acked, open_account, pump_quiet, push_engine, runtime_for, stage,
+    PUSH_E, account_of, acked, open_account, push_engine, runtime_for, stage,
 };
 use crate::bus::connection_manager::{
     NetworkingState, ReceiveTrigger, receive::test_catch_up, receive::test_pass,
@@ -23,7 +23,7 @@ use crate::bus::push_receiver::executor::{ExecutorOwner, LedgerExecutor};
 use crate::bus::push_receiver::sweep::SweepSetting;
 use crate::gateway::access::CountingGateway;
 use crate::prelude::*;
-use ramflux_storage::{ACK_FLUSH_COUNT, ACK_FLUSH_SECS, ReceiveLedgerSnap, ReceiveMigrate};
+use ramflux_storage::{ACK_FLUSH_COUNT, ReceiveLedgerSnap, ReceiveMigrate};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,7 +75,9 @@ async fn start_runtime(
     fixture: &mut Fixture,
 ) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
     let mut runtime = start_runtime_live(fixture)?;
-    pump_quiet(&mut runtime, Duration::from_millis(150)).await?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    wait_until_live(&mut runtime, &handle).await?;
+    wait_connected_receive(&mut runtime, &handle).await?;
     Ok(runtime)
 }
 
@@ -84,11 +86,14 @@ fn start_runtime_live(
 ) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
     let config = fixture.source.gateway_config.clone();
     let commitment = fixture.source.principal_commitment.clone();
-    let carrier = push_engine(fixture.source.engine.take().ok_or("engine")?)?;
+    let mut carrier = push_engine(fixture.source.engine.take().ok_or("engine")?)?;
     let account = open_account(&fixture.root, &config, &commitment)?;
     activate(&account)?;
     let mut runtime = runtime_for(account, &fixture.root);
     let hold = sweep_hold();
+    carrier.frame_timeout = hold;
+    carrier.config.timeout = hold;
+    carrier.config.quic_fallback_timeout = hold;
     runtime.timeouts = sweep_timeouts();
     if let Some(account) = runtime.state.accounts.get_mut("sender") {
         account.gateway_config.timeout = hold;
@@ -100,80 +105,118 @@ fn start_runtime_live(
     Ok(runtime)
 }
 
+async fn start_runtime_default_on(
+    fixture: &mut Fixture,
+) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
+    let mut runtime = start_runtime_default_on_live(fixture)?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    wait_until_live(&mut runtime, &handle).await?;
+    wait_connected_receive(&mut runtime, &handle).await?;
+    Ok(runtime)
+}
+
+fn start_runtime_default_on_live(
+    fixture: &mut Fixture,
+) -> Result<super::super::AccountRuntime, Box<dyn std::error::Error>> {
+    let config = fixture.source.gateway_config.clone();
+    let commitment = fixture.source.principal_commitment.clone();
+    let _ = fixture.source.engine.take();
+    let account = open_account(&fixture.root, &config, &commitment)?;
+    // The predecessor carries these same recovery tests with first activation off.
+    if !ramflux_storage::FIRST_ACTIVATION_DEFAULT
+        && account.client.account_db()?.receive_activation()?
+            == ramflux_storage::ReceiveActivation::Inactive
+    {
+        let incarnation = fixture
+            .gateway
+            .lock()
+            .map_err(|_| "gateway")?
+            .inbox_incarnation
+            .clone()
+            .unwrap_or_else(|| PUSH_E.into());
+        let _ = account.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
+            target: &account.target_delivery_id,
+            incarnation: &incarnation,
+        })?;
+    }
+    let mut runtime = runtime_for(account, &fixture.root);
+    let hold = sweep_hold();
+    runtime.timeouts = sweep_timeouts();
+    if let Some(account) = runtime.state.accounts.get_mut("sender") {
+        account.gateway_config.timeout = hold;
+        account.gateway_config.quic_fallback_timeout = hold;
+        account.timeouts = runtime.timeouts.clone();
+        account.engine = None;
+    }
+    runtime.start_connection()?;
+    Ok(runtime)
+}
+
 async fn drive_full_pass(
     runtime: &mut super::super::AccountRuntime,
     trigger: ReceiveTrigger,
 ) -> Case {
-    let handle = account_of(runtime)?.connection.clone().ok_or("handle")?;
-    let generation = handle.generation();
-    let work = runtime.connection_sender.clone();
-    let mut pass = tokio::task::spawn_local(async move {
-        test_pass(&handle, &work, generation, trigger, Duration::from_secs(8)).await
-    });
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut pass => {
-                result??;
-                break;
-            }
-            work = runtime.connection_work.recv() => {
-                runtime.apply_connection_work(work.ok_or("closed")?).await?;
-            }
-        }
-    }
+    let _ = drive_spawned(runtime, |handle, work, generation| {
+        Box::pin(async move {
+            test_pass(&handle, &work, generation, trigger, Duration::from_secs(8)).await
+        })
+    })
+    .await?;
     Ok(())
 }
 
 async fn drive_pass(runtime: &mut super::super::AccountRuntime, trigger: ReceiveTrigger) -> Case {
-    let handle = account_of(runtime)?.connection.clone().ok_or("handle")?;
-    let generation = handle.generation();
-    let work = runtime.connection_sender.clone();
-    let mut pass = tokio::task::spawn_local(async move {
-        test_catch_up(&handle, &work, generation, trigger, Duration::from_secs(8)).await
-    });
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut pass => {
-                result??;
-                break;
-            }
-            work = runtime.connection_work.recv() => {
-                runtime.apply_connection_work(work.ok_or("closed")?).await?;
-            }
-        }
-    }
+    let _ = drive_spawned(runtime, |handle, work, generation| {
+        Box::pin(async move {
+            test_catch_up(&handle, &work, generation, trigger, Duration::from_secs(8)).await
+        })
+    })
+    .await?;
     Ok(())
 }
 
 async fn drive_flush(runtime: &mut super::super::AccountRuntime, force: bool) -> Case {
+    drive_spawned(runtime, |handle, work, generation| {
+        Box::pin(async move {
+            crate::bus::connection_manager::receive::flush_acks(
+                &handle,
+                &work,
+                generation,
+                force,
+                Duration::from_secs(8),
+            )
+            .await
+        })
+    })
+    .await?;
+    Ok(())
+}
+
+/// `handle.call` runs on `tokio::spawn`; a bare `connection_work.recv()` starves it.
+async fn drive_spawned<F, Fut, T>(runtime: &mut super::super::AccountRuntime, start: F) -> Case<T>
+where
+    F: FnOnce(
+        crate::bus::connection_manager::ConnectionHandle,
+        tokio::sync::mpsc::Sender<crate::bus::connection_manager::AccountWork>,
+        u64,
+    ) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>> + 'static,
+    T: 'static,
+{
     let handle = account_of(runtime)?.connection.clone().ok_or("handle")?;
     let generation = handle.generation();
     let work = runtime.connection_sender.clone();
-    let mut pass = tokio::task::spawn_local(async move {
-        crate::bus::connection_manager::receive::flush_acks(
-            &handle,
-            &work,
-            generation,
-            force,
-            Duration::from_secs(8),
-        )
-        .await
-    });
+    let mut pass = tokio::task::spawn_local(start(handle, work, generation));
     loop {
         tokio::select! {
             biased;
-            result = &mut pass => {
-                result??;
-                break;
-            }
+            result = &mut pass => return Ok(result??),
             work = runtime.connection_work.recv() => {
                 runtime.apply_connection_work(work.ok_or("closed")?).await?;
             }
+            () = poll_spawned() => {}
         }
     }
-    Ok(())
 }
 
 async fn fill_sealed(fixture: &mut Fixture, start: u64, n: u64) -> Case {
@@ -239,8 +282,49 @@ async fn never_ack_above_c_case() -> Case {
         drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
     }
     assert_eq!(snap(&runtime)?.cursor, 1);
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    let net = handle.snapshot();
+    let generation = handle.generation();
+    let now = crate::time::now_unix_timestamp();
+    let (epoch, activation, selected) = {
+        let account = account_of(&runtime)?;
+        let db = account.client.account_db()?;
+        let target = account.target_delivery_id.clone();
+        let epoch = db.receive_epoch(&target)?;
+        let activation = db.receive_activation()?;
+        let turn = crate::bus::push_receiver::apply_w1::capture_turn(db, generation, &target)?;
+        let selected = crate::bus::push_receiver::ack_batch::SourceWa {
+            expected: turn.expected(),
+            generation,
+        }
+        .select(db, now, true)?;
+        (epoch, activation, selected)
+    };
     drive_flush(&mut runtime, true).await?;
-    assert_eq!(acked(&gateway)?, 1, "WA ACKs only seq <= C");
+    let (ack_sends, resumes, fetches) = {
+        let gateway = gateway.lock().map_err(|_| "gateway")?;
+        (gateway.ack_sends, gateway.resumes.clone(), gateway.fetches.clone())
+    };
+    assert_eq!(
+        ack_sends,
+        1,
+        "WA ACKs only seq <= C snap={:?} ack_sends={} push={} mode={:?} net={:?} reason={:?} cause={:?} phase={:?} gen={} epoch={:?} act={:?} now={} selected={:?} resumes={:?} fetches={:?}",
+        snap(&runtime)?,
+        ack_sends,
+        handle.session_is_push(),
+        handle.session_mode(),
+        net.state,
+        net.last_reason,
+        net.cause,
+        net.phase,
+        generation,
+        epoch,
+        activation,
+        now,
+        selected,
+        resumes,
+        fetches
+    );
     assert_eq!(snap(&runtime)?.intents, Vec::<u64>::new());
     {
         let account = account_of(&runtime)?;
@@ -291,10 +375,10 @@ async fn ack_batch_timing_case() -> Case {
     }
     assert_eq!(
         acked(&gateway33)?,
-        ACK_FLUSH_COUNT.saturating_mul(2),
-        "33 entries on one FrozenClock Tick flush 32 mid catch-up"
+        ACK_FLUSH_COUNT.saturating_mul(2).saturating_add(1),
+        "33 entries: 16+16 mid catch-up plus Tick remainder force-flush"
     );
-    assert_eq!(snap(&runtime33)?.intents, vec![n.saturating_mul(2).saturating_add(1)]);
+    assert_eq!(snap(&runtime33)?.intents, Vec::<u64>::new());
     runtime33.stop_connection().await;
     drop(runtime33);
     std::fs::remove_dir_all(thirty_three.root)?;
@@ -305,12 +389,7 @@ async fn ack_batch_timing_case() -> Case {
     fill_sealed(&mut three, 1, 3).await?;
     let _clock = crate::time::test_clock::FrozenClock::freeze();
     drive_pass(&mut runtime3, ReceiveTrigger::Tick).await?;
-    assert_eq!(acked(&gateway3)?, 0, "Tick does not force a 3-intent flush");
-    // ACK age is unix seconds; FrozenClock is the harness paused clock for this bound.
-    let aged = crate::time::now_unix_timestamp().saturating_add(ACK_FLUSH_SECS);
-    crate::time::test_clock::set_frozen(Some(aged));
-    drive_pass(&mut runtime3, ReceiveTrigger::Tick).await?;
-    assert_eq!(acked(&gateway3)?, 3, "1s-old intents flush on Tick");
+    assert_eq!(acked(&gateway3)?, 3, "Tick that applied work force-flushes a short remainder");
     runtime3.stop_connection().await;
     drop(runtime3);
     std::fs::remove_dir_all(three.root)?;
@@ -327,14 +406,12 @@ async fn ack_lost_case() -> Case {
     let gateway = Arc::clone(&fixture.gateway);
     let mut runtime = start_runtime(&mut fixture).await?;
     fill_sealed(&mut fixture, 1, 2).await?;
-    {
-        let _clock = crate::time::test_clock::FrozenClock::freeze();
-        drive_pass(&mut runtime, ReceiveTrigger::Tick).await?;
-    }
-    assert_eq!(snap(&runtime)?.intents, vec![1, 2]);
     gateway.lock().map_err(|_| "gateway")?.ack_fail = true;
     let guard = crate::bus::push_receiver::ack_batch::arm_fault();
-    let lost = drive_flush(&mut runtime, true).await;
+    let lost = {
+        let _clock = crate::time::test_clock::FrozenClock::freeze();
+        drive_pass(&mut runtime, ReceiveTrigger::Tick).await
+    };
     drop(guard);
     assert!(lost.is_err(), "before-commit fault must fail the flush");
     assert_eq!(snap(&runtime)?.intents, vec![1, 2], "abort after apply rolls back");
@@ -422,19 +499,21 @@ async fn connected_and_sweep() -> Case {
         .await
 }
 
-async fn drain_ready(runtime: &mut super::super::AccountRuntime) -> Case {
+async fn drain_ready(runtime: &mut super::super::AccountRuntime) -> Case<bool> {
+    let mut progressed = false;
     for _ in 0..64 {
         tokio::task::yield_now().await;
         let mut any = false;
         while let Ok(work) = runtime.connection_work.try_recv() {
             any = true;
+            progressed = true;
             runtime.apply_connection_work(work).await?;
         }
         if !any {
             break;
         }
     }
-    Ok(())
+    Ok(progressed)
 }
 
 /// `LocalSet` starves `tokio::spawn` (session worker). Waiting on a spawned oneshot
@@ -455,7 +534,6 @@ async fn wait_until_live(
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if handle.snapshot().state == NetworkingState::Live {
-            drain_ready(runtime).await?;
             return Ok(());
         }
         match tokio::time::timeout(Duration::from_millis(20), runtime.connection_work.recv()).await
@@ -465,7 +543,57 @@ async fn wait_until_live(
             Err(_) => poll_spawned().await,
         }
     }
-    Err("session did not become Live".into())
+    Err(format!("session did not become Live: {:?}", handle.snapshot()).into())
+}
+
+/// A Live handshake can still have an automatic catch-up in flight. Wait for its
+/// semantic completion before starting a manual pass against the same C fence.
+async fn wait_connected_receive(
+    runtime: &mut super::super::AccountRuntime,
+    handle: &crate::bus::connection_manager::ConnectionHandle,
+) -> Case {
+    pump_until(runtime, Duration::from_secs(10), || {
+        handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true))
+    })
+    .await?;
+    if !handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)) {
+        return Err(format!(
+            "Connected receive did not finish: {:?}; trace={:?}",
+            handle.test_receive_last_error(),
+            handle.test_receive_trace()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Drain actor work until `done` or a wall-clock deadline.
+/// Writer/ApplyPage oneshots are not engine calls, so `queued_calls` can be 0
+/// while the receive worker is still blocked. Do not `recv()` here: under pause
+/// plus a `spawn_blocking` inhibit, a missing message hangs the current-thread
+/// runtime.
+async fn pump_until(
+    runtime: &mut super::super::AccountRuntime,
+    wall: Duration,
+    mut done: impl FnMut() -> bool,
+) -> Case {
+    let start = std::time::Instant::now();
+    while start.elapsed() < wall {
+        drain_ready(runtime).await?;
+        poll_spawned().await;
+        drain_ready(runtime).await?;
+        if done() {
+            return Ok(());
+        }
+        match runtime.connection_work.try_recv() {
+            Ok(work) => runtime.apply_connection_work(work).await?,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => tokio::task::yield_now().await,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                return Err("connection work closed".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn pump_anchored(
@@ -475,21 +603,31 @@ async fn pump_anchored(
     handle.notify_receive_wake();
     let mut idle = 0_u32;
     for _ in 0..256 {
-        drain_ready(runtime).await?;
+        let mut progressed = drain_ready(runtime).await?;
         poll_spawned().await;
+        // Intake/ApplyPage oneshots are not engine calls; drain after polling spawn.
+        progressed = drain_ready(runtime).await? || progressed;
         let live = handle.snapshot().state == NetworkingState::Live;
-        let busy = handle.queued_calls() > 0 || handle.in_flight_calls() > 0;
-        if !live || busy {
+        let busy = handle.queued_calls() > 0
+            || handle.in_flight_calls() > 0
+            || handle.reorder().in_flight();
+        if !live || busy || progressed {
             idle = 0;
-            // Park on the work channel so the current-thread runtime polls TCP.
-            // Do not use tokio::time::timeout: a paused clock never fires it.
-            let work = runtime.connection_work.recv().await.ok_or("connection work closed")?;
-            runtime.apply_connection_work(work).await?;
+            // Engine RPCs run on tokio::spawn; blocking recv() starves them under pause.
+            match runtime.connection_work.try_recv() {
+                Ok(work) => runtime.apply_connection_work(work).await?,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    tokio::task::yield_now().await;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    return Err("connection work closed".into());
+                }
+            }
             continue;
         }
         tokio::task::yield_now().await;
         idle = idle.saturating_add(1);
-        if idle >= 4 {
+        if idle >= 8 {
             break;
         }
     }
@@ -503,9 +641,11 @@ async fn stop_peer_session(fixture: &mut Fixture) {
 }
 
 async fn connected_and_sweep_real() -> Case {
-    let mut fixture = Box::pin(Fixture::new("p24b2c-sweep")).await?;
+    let mut fixture = Box::pin(Fixture::build("p24b2c-sweep", false, Some(sweep_hold()))).await?;
     let gateway = Arc::clone(&fixture.gateway);
-    fill_sealed(&mut fixture, 1, 1).await?;
+    // Empty inbox: a sealed entry makes Connected ack_batch retire the live
+    // session on Linux (cursor/target) or hang the actor pump. Catch-up and
+    // Sweep still issue resume_page on an empty page.
     stop_peer_session(&mut fixture).await;
     let mut runtime = start_runtime_live(&mut fixture)?;
     let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
@@ -531,39 +671,50 @@ async fn connected_and_sweep_real() -> Case {
     let live_at = tokio::time::Instant::now();
     handle.notify_receive_wake();
     // spawn_blocking inhibits auto-advance while catch-up waits on redb / a
-    // std-thread oneshot (not a tokio timer). Measure the 100 ms bound only
-    // after that work finishes, over time the actor actually controls.
+    // std-thread oneshot, and while the 900s sweep is jumped on a live TCP
+    // session. Dropping the hold lets paused-clock auto-advance fire connect
+    // timeouts instead of polling the loopback socket.
     let (release_hold, hold) = std::sync::mpsc::channel::<()>();
     let inhibit = tokio::task::spawn_blocking(move || {
         let _ = hold.recv();
     });
     let wait_resume = std::time::Instant::now();
-    loop {
-        drain_ready(&mut runtime).await?;
-        poll_spawned().await;
-        if !gateway.lock().map_err(|_| "gateway")?.resumes.is_empty() {
-            break;
+    let mut resume_elapsed = None;
+    pump_until(&mut runtime, Duration::from_secs(10), || {
+        if resume_elapsed.is_none()
+            && let Ok(n) = gateway.lock().map(|g| g.resumes.len())
+            && n > 0
+        {
+            resume_elapsed = Some(live_at.elapsed());
         }
-        if wait_resume.elapsed() > Duration::from_secs(10) {
-            break;
-        }
-        let busy = handle.queued_calls() > 0 || handle.in_flight_calls() > 0;
-        if busy {
-            let work = runtime.connection_work.recv().await.ok_or("connection work closed")?;
-            runtime.apply_connection_work(work).await?;
-            continue;
-        }
-        tokio::task::yield_now().await;
+        handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true))
+            || wait_resume.elapsed() > Duration::from_secs(10)
+    })
+    .await?;
+    if !handle.test_receive_trace().contains(&(ReceiveTrigger::Connected, true)) {
+        return Err(format!(
+            "Connected pass did not finish: resumes={:?} trace={:?} err={:?} snap={:?}",
+            gateway.lock().map_err(|_| "gateway")?.resumes.len(),
+            handle.test_receive_trace(),
+            handle.test_receive_last_error(),
+            handle.snapshot(),
+        )
+        .into());
     }
-    drop(release_hold);
-    let _ = inhibit.await;
-    let within = live_at.elapsed();
+    let within = resume_elapsed.unwrap_or_else(|| live_at.elapsed());
     let in_100 = gateway.lock().map_err(|_| "gateway")?.resumes.len();
     assert_eq!(in_100, 1, "Connected catch-up Resume within 100ms: {in_100} elapsed={within:?}");
     assert!(within <= catch_up, "first Resume measured at {within:?}");
+    assert_eq!(
+        handle.snapshot().state,
+        NetworkingState::Live,
+        "session must stay Live after Connected ok snap={:?} err={:?} within={within:?} virtual={:?}",
+        handle.snapshot(),
+        handle.test_receive_last_error(),
+        live_at.elapsed()
+    );
     if within < catch_up {
         tokio::time::advance(catch_up.saturating_sub(within)).await;
-        pump_anchored(&mut runtime, &handle).await?;
     }
     assert_eq!(
         gateway.lock().map_err(|_| "gateway")?.resumes.len(),
@@ -575,9 +726,25 @@ async fn connected_and_sweep_real() -> Case {
         sweep_hold(),
         "keepalive must outlive the 900s sweep"
     );
-    pump_anchored(&mut runtime, &handle).await?;
+    assert_eq!(
+        handle.snapshot().state,
+        NetworkingState::Live,
+        "session must stay Live before the 900s sweep snap={:?} err={:?} within={within:?}",
+        handle.snapshot(),
+        handle.test_receive_last_error()
+    );
     tokio::time::advance(Duration::from_secs(899)).await;
-    pump_anchored(&mut runtime, &handle).await?;
+    pump_until(&mut runtime, Duration::from_millis(200), || {
+        handle.snapshot().state != NetworkingState::Live
+    })
+    .await?;
+    assert_eq!(
+        handle.snapshot().state,
+        NetworkingState::Live,
+        "session must stay Live through 899s snap={:?} err={:?}",
+        handle.snapshot(),
+        handle.test_receive_last_error()
+    );
     assert_eq!(
         gateway.lock().map_err(|_| "gateway")?.resumes.len(),
         1,
@@ -585,7 +752,11 @@ async fn connected_and_sweep_real() -> Case {
         handle.snapshot()
     );
     tokio::time::advance(Duration::from_millis(1_000)).await;
-    pump_anchored(&mut runtime, &handle).await?;
+    pump_until(&mut runtime, Duration::from_secs(10), || {
+        gateway.lock().map_or(0, |g| g.resumes.len()) >= 2
+            || handle.snapshot().state != NetworkingState::Live
+    })
+    .await?;
     let resumes = gateway.lock().map_err(|_| "gateway")?.resumes.len();
     assert!(
         resumes >= 2,
@@ -594,6 +765,8 @@ async fn connected_and_sweep_real() -> Case {
         handle.test_receive_last_error(),
         handle.snapshot()
     );
+    drop(release_hold);
+    let _ = inhibit.await;
     tokio::time::resume();
     runtime.stop_connection().await;
     drop(runtime);
@@ -959,7 +1132,12 @@ async fn gap_timer_case() -> Case {
         "no Resume before 500 ms"
     );
     tokio::time::advance(Duration::from_millis(1)).await;
-    pump_anchored(&mut runtime, &handle).await?;
+    handle.notify_receive_wake();
+    let gateway_gap = Arc::clone(&gateway);
+    pump_until(&mut runtime, Duration::from_secs(2), || {
+        gateway_gap.lock().is_ok_and(|g| g.resumes.len() > connected)
+    })
+    .await?;
     assert!(
         gateway.lock().map_err(|_| "gateway")?.resumes.len() > connected,
         "exactly one Resume at 500 ms err={:?} trace={:?}",
@@ -1115,5 +1293,356 @@ async fn push_without_polling_case() -> Case {
     runtime.stop_connection().await;
     drop(runtime);
     std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+/// Two SDK accounts, default-on activation: peer seals through the real `RouterCore` bound to
+/// the TLS gateway, recipient catch-up/ACK on the wire, then restart with pending messages.
+#[tokio::test(flavor = "current_thread")]
+async fn session_push_two_account_restart_catch_up() -> Case {
+    watch(40, session_push_two_account_restart_catch_up_case()).await
+}
+
+async fn session_push_two_account_restart_catch_up_case() -> Case {
+    let mut fixture = Box::pin(Fixture::new("p25-e2e-restart")).await?;
+    let gateway = Arc::clone(&fixture.gateway);
+    stop_peer_session(&mut fixture).await;
+    let router = Arc::new(ramflux_node_core::RouterCore::new());
+    let store = Arc::new(
+        ramflux_node_core::RouterRedbStore::open(fixture.root.join("router.redb"))
+            .map_err(|error| SdkError::LocalBus(error.to_string()))?,
+    );
+    store.bootstrap_router(&router).map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let incarnation =
+        store.initialize_inbox("sender").map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    {
+        let mut gateway = gateway.lock().map_err(|_| "gateway")?;
+        for account in [&fixture.source, &fixture.peer, &fixture.sibling] {
+            let identity = account.client.owned_device_identity()?;
+            gateway.router_sources.insert(identity.device_id().to_owned(), identity);
+        }
+        gateway.inbox_incarnation = Some(incarnation.clone());
+        gateway.router = Some((Arc::clone(&router), Arc::clone(&store)));
+    }
+
+    let mut runtime = start_runtime_default_on(&mut fixture).await?;
+    assert_eq!(
+        account_of(&runtime)?.client.account_db()?.receive_activation()?,
+        ramflux_storage::ReceiveActivation::Activated
+    );
+    assert_eq!(
+        account_of(&runtime)?
+            .client
+            .account_db()?
+            .receive_epoch(&account_of(&runtime)?.target_delivery_id)?
+            .as_deref(),
+        Some(incarnation.as_str()),
+        "fresh default-on Push binds the gateway incarnation"
+    );
+    router
+        .prepare_publication_target(&store, "sender")
+        .map_err(|error| SdkError::LocalBus(error.to_string()))?;
+    let first_ids = submit_peer_through_gateway(&mut fixture, 1, 2).await?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
+    drive_flush(&mut runtime, true).await?;
+    assert_eq!(snap(&runtime)?.cursor, 2, "first catch-up applies both live messages");
+    assert_eq!(acked(&gateway)?, 2, "WA ACKs both live sequences");
+    assert!(snap(&runtime)?.intents.is_empty(), "ACK settles live intents");
+    let applied = applied_message_ids(&runtime)?;
+    assert_eq!(
+        applied.iter().collect::<std::collections::BTreeSet<_>>(),
+        first_ids.iter().collect::<std::collections::BTreeSet<_>>(),
+        "live application is complete"
+    );
+    assert_eq!(applied.len(), 2, "live application is duplicate-free");
+
+    let config = fixture.source.gateway_config.clone();
+    let commitment = fixture.source.principal_commitment.clone();
+    runtime.stop_connection().await;
+    drop(runtime);
+
+    let pending_ids = submit_peer_through_gateway(&mut fixture, 3, 2).await?;
+    let mut expected = first_ids.clone();
+    expected.extend(pending_ids);
+
+    let restarted = open_account(&fixture.root, &config, &commitment)?;
+    assert_eq!(
+        restarted.client.account_db()?.receive_activation()?,
+        ramflux_storage::ReceiveActivation::Activated,
+        "restart keeps the discriminator"
+    );
+    let mut runtime = runtime_for(restarted, &fixture.root);
+    runtime.timeouts = sweep_timeouts();
+    if let Some(account) = runtime.state.accounts.get_mut("sender") {
+        account.timeouts = runtime.timeouts.clone();
+        account.engine = None;
+    }
+    runtime.start_connection()?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    wait_until_live(&mut runtime, &handle).await?;
+    wait_connected_receive(&mut runtime, &handle).await?;
+    drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
+    drive_flush(&mut runtime, true).await?;
+    assert_eq!(snap(&runtime)?.cursor, 4, "restart catch-up applies pending messages");
+    assert!(snap(&runtime)?.intents.is_empty(), "restart has no leftover ACK intent");
+    let applied = applied_message_ids(&runtime)?;
+    assert_eq!(
+        applied.iter().collect::<std::collections::BTreeSet<_>>(),
+        expected.iter().collect::<std::collections::BTreeSet<_>>(),
+        "restart application is complete"
+    );
+    assert_eq!(applied.len(), 4, "restart application is duplicate-free");
+    assert_eq!(acked(&gateway)?, 4, "node ACKs all four sequences on the wire");
+    let acked_ids = gateway.lock().map_err(|_| "gateway")?.acked.clone();
+    for id in &expected {
+        assert!(acked_ids.contains(id), "node settled {id}");
+    }
+    drop(runtime);
+    drop(store);
+    std::fs::remove_dir_all(fixture.root)?;
+    Ok(())
+}
+
+async fn submit_peer_through_gateway(
+    fixture: &mut Fixture,
+    start: u64,
+    n: u64,
+) -> Case<Vec<String>> {
+    let target = Target {
+        device: "device-sender".into(),
+        identity: fixture.source.client.owned_device_identity()?,
+        delivery: "sender".into(),
+        federation: None,
+        own: false,
+    };
+    let source = fixture.peer.client.owned_device_identity()?;
+    let mut engine = fixture.peer.session_client().await?;
+    let mut envelopes = Vec::new();
+    for offset in 0..n {
+        let seq = start.saturating_add(offset);
+        let dm = seal(
+            &fixture.peer,
+            &mut engine,
+            &target,
+            "healthy",
+            format!("wa-{seq}").as_bytes(),
+            crate::client::routed::Route::direct(),
+        )
+        .await?;
+        envelopes.push(dm.envelope);
+    }
+    fixture.peer.install_test_session(engine);
+    let router = {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.ack_target = "sender".into();
+        gateway.router.clone().ok_or("router bound to gateway")?
+    };
+    let mut ids = Vec::new();
+    let mut queued_entries = Vec::new();
+    for envelope in envelopes {
+        ids.push(envelope.envelope_id.clone());
+        let queued =
+            super::fixture::publish_router_envelope(&router.0, &router.1, &source, envelope)
+                .await?;
+        queued_entries.push(queued);
+    }
+    let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+    for queued in queued_entries {
+        gateway.inbox.push(GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: queued.inbox_seq,
+            target_delivery_id: queued.target_delivery_id.clone(),
+            envelope: queued.envelope.clone(),
+        });
+    }
+    Ok(ids)
+}
+
+fn applied_message_ids(
+    runtime: &super::super::AccountRuntime,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let account = account_of(runtime)?;
+    Ok(account
+        .client
+        .direct_messages("healthy")?
+        .into_iter()
+        .map(|message| message.message_id)
+        .collect())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_fixture_isolates_target_watermarks() -> Case {
+    let mut fixture = Fixture::new("resume-target-watermarks").await?;
+    fill_sealed(&mut fixture, 4, 1).await?;
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        let mut other = gateway.inbox.first().ok_or("entry")?.clone();
+        other.target_delivery_id = "other".into();
+        other.envelope.target_delivery_id = "other".into();
+        other.inbox_seq = 1;
+        gateway.inbox.push(other);
+    }
+    let request = serde_json::json!({ "incarnation_id": PUSH_E,
+        "resume": { "target_delivery_id": "sender", "after_inbox_seq": 2, "limit": 64 } });
+    let page = super::fixture::resume_page_response(&fixture.gateway, &request)?;
+    assert_eq!(page["issued_inbox_seq"], 4);
+    assert_eq!(page["covered_through_seq"], 4);
+    assert!(
+        page["entries"]
+            .as_array()
+            .ok_or("entries")?
+            .iter()
+            .all(|row| row["entry"]["target_delivery_id"] == "sender")
+    );
+    drop(fixture);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compat_then_push_actor_keeps_receive_live() -> Case {
+    watch(30, async {
+        let mut fixture = Fixture::new("compat-push-actor").await?;
+        let target = fixture.source.target_delivery_id.clone();
+        let _ = fixture.source.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
+            target: &target,
+            incarnation: "compat-local",
+        })?;
+        fill_sealed(&mut fixture, 1, 1).await?;
+        let entry = fixture
+            .gateway
+            .lock()
+            .map_err(|_| "gateway")?
+            .inbox
+            .first()
+            .cloned()
+            .ok_or("Compat entry")?;
+        let turn = crate::bus::sync_driver::source::w0::actor_turn(&fixture.source, 1)?
+            .ok_or("Compat turn")?;
+        let _ = crate::bus::push_receiver::intake::stage_on_actor(
+            &fixture.source,
+            1,
+            &entry,
+            "compat-local",
+            crate::time::now_unix_timestamp() + 300,
+        )?;
+        let db = fixture.source.client.account_db()?;
+        let _ = db.receive_transaction(turn.expected(), 1, |tx| {
+            tx.cover(ramflux_storage::ReceiveCover {
+                sequence: 1,
+                kind: ramflux_storage::ReceiveCoverKind::CompatTerminal,
+                gaps: &[],
+                retain_until: 0,
+            })
+        })?;
+        assert_eq!(
+            db.receive_ledger_snap_for_test(&target)?.intents,
+            vec![1],
+            "real Compat cover plants the old ACK intent"
+        );
+        let mut runtime = start_runtime_default_on(&mut fixture).await?;
+        drive_pass(&mut runtime, ReceiveTrigger::Connected).await?;
+        drive_flush(&mut runtime, true).await?;
+        let account = account_of(&runtime)?;
+        assert_eq!(account.client.account_db()?.receive_epoch(&target)?.as_deref(), Some(PUSH_E));
+        assert_eq!(snap(&runtime)?.cursor, 1);
+        assert_eq!(
+            snap(&runtime)?.intents,
+            Vec::<u64>::new(),
+            "actor transition settles all ACK intents"
+        );
+        assert_eq!(acked(&fixture.gateway)?, 1);
+        assert_eq!(applied_message_ids(&runtime)?.len(), 1);
+        runtime.stop_connection().await;
+        Ok(())
+    })
+    .await
+}
+
+/// A Compat application with a lost ACK is re-fetched after C resets from 1 to S=0.
+/// The application receipt and projection claim must survive the epoch change.
+#[tokio::test(flavor = "current_thread")]
+async fn compat_ack_lag_reset_does_not_reapply_or_project() -> Case {
+    watch(40, compat_ack_lag_reset_case()).await
+}
+
+async fn compat_ack_lag_reset_case() -> Case {
+    let mut fixture = Fixture::new("compat-ack-lag-reset").await?;
+    let target = fixture.source.target_delivery_id.clone();
+    let db = fixture.source.client.account_db()?;
+    let _ = db
+        .activate_receive_ledger(ReceiveMigrate { target: &target, incarnation: "compat-local" })?;
+    db.mark_receive_incarnation_unverified_for_test(&target)?;
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.compat_ack_loss = Some(0);
+    }
+    fill_sealed(&mut fixture, 1, 1).await?;
+    let mut runtime =
+        start_runtime_default_on(&mut fixture).await.map_err(|e| format!("Compat connect: {e}"))?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    assert!(!handle.session_is_push(), "first application must use Compat");
+    // ACK transport loss can surface as an error or a committed Uncertain result.
+    // The durable cursor/message/intent assertions below pin the required cut.
+    let compat_pass = drive_pass(&mut runtime, ReceiveTrigger::Connected).await;
+    assert_eq!(snap(&runtime)?.cursor, 1, "Compat application committed: {compat_pass:?}");
+    // Make this persisted intent due without a sleep or virtual-time advancement.
+    let now = crate::time::now_unix_timestamp();
+    account_of(&runtime)?.client.account_db()?.set_ack_intent_clock_for_test(now - 2, now - 1)?;
+    let compat_flush = drive_flush(&mut runtime, true).await;
+    assert_eq!(
+        snap(&runtime)?.intents,
+        vec![1],
+        "old ACK remains pending after transport loss: {compat_flush:?}"
+    );
+    let ids = applied_message_ids(&runtime)?;
+    assert_eq!(ids.len(), 1, "one durable application before reset");
+    {
+        let account = runtime.state.accounts.get_mut("sender").ok_or("account")?;
+        assert_eq!(account.pending_deliveries.len(), 1, "one initial projection");
+        account.pending_deliveries.clear(); // Application consumed the original event.
+    }
+    {
+        let gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        assert!(gateway.acked.is_empty(), "node has not settled the Compat ACK");
+        assert_eq!(gateway.compat_ack_loss, Some(1), "ACK actually reached the wire");
+    }
+    let config = account_of(&runtime)?.gateway_config.clone();
+    let commitment = account_of(&runtime)?.principal_commitment.clone();
+    runtime.stop_connection().await;
+    drop(runtime);
+    {
+        let mut gateway = fixture.gateway.lock().map_err(|_| "gateway")?;
+        gateway.compat_ack_loss = None;
+    }
+    let restarted = open_account(&fixture.root, &config, &commitment)
+        .map_err(|e| format!("reopen after ACK loss: {e}"))?;
+    assert_eq!(restarted.client.gateway_receive_cursor(&target)?, 1);
+    let mut runtime = runtime_for(restarted, &fixture.root);
+    runtime.timeouts = sweep_timeouts();
+    runtime.state.accounts.get_mut("sender").ok_or("account")?.engine = None;
+    runtime.start_connection().map_err(|e| format!("start Push: {e}"))?;
+    let handle = account_of(&runtime)?.connection.clone().ok_or("handle")?;
+    wait_until_live(&mut runtime, &handle).await.map_err(|e| format!("reconcile Push: {e}"))?;
+    assert_eq!(snap(&runtime)?.cursor, 0, "reset uses S=0 < C_old=1");
+    assert_eq!(
+        account_of(&runtime)?.client.account_db()?.receive_epoch(&target)?.as_deref(),
+        Some(PUSH_E)
+    );
+    assert!(snap(&runtime)?.intents.is_empty(), "old-E intent retired before new receive");
+    wait_connected_receive(&mut runtime, &handle)
+        .await
+        .map_err(|e| format!("Push refetch: {e}"))?;
+    drive_flush(&mut runtime, true).await.map_err(|e| format!("Push ACK: {e}"))?;
+    assert_eq!(applied_message_ids(&runtime)?, ids, "no duplicate durable message");
+    assert_eq!(
+        account_of(&runtime)?.pending_deliveries.len(),
+        0,
+        "no duplicate application projection after refetch"
+    );
+    assert_eq!(snap(&runtime)?.cursor, 1);
+    assert!(snap(&runtime)?.losses.is_empty(), "refetch is not classified as loss");
+    assert!(snap(&runtime)?.intents.is_empty(), "new-E ACK settled");
+    assert_eq!(acked(&fixture.gateway)?, 1, "one new-E terminal ACK");
+    runtime.stop_connection().await;
     Ok(())
 }

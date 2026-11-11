@@ -148,7 +148,7 @@ pub use ephemeral::{
     decode_ephemeral_result, echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral,
     ttl_seconds,
 };
-pub use error::{GroupOperation, SdkError};
+pub use error::{GroupOperation, ReceiveEpochReconcileFailure, SdkError};
 mod surface_refusal;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,

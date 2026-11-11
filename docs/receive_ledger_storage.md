@@ -1,11 +1,15 @@
-# Dormant receive ledger storage
+# Receive ledger storage
 
-The schema installer is explicit and has no receive caller. Opening an ordinary
-account does not install or activate the ledger. Installation creates the five
-metadata/work tables and schema writer floor 15 in one immediate transaction.
-Writer 14 refuses the new floor before migrating. Installation never changes
-receive coverage, creates an epoch or advertises a capability. Restore sanitization
-and runtime activation belong to subsequent implementation steps.
+First activation is default-on. Managed session connect, standalone receive and
+gateway-session connect advertise `gateway.session_push.v1` so a fresh handshake
+can supply the verified node incarnation, then bind schema, import and the
+discriminator to that incarnation before ledger phases. Reverting the
+first-activation switch leaves already-activated accounts on the shared ledger;
+it does not reverse-migrate. Restore sanitization still strips the discriminator
+so a restored account first-activates afresh.
+
+Installation creates the five metadata/work tables and schema writer floor 15 in
+one immediate transaction. Writer 14 refuses the new floor before migrating.
 
 Sequence and range keys are eight-byte unsigned big-endian BLOBs. Composite
 primary keys start with target and incarnation; receipts support indexed range

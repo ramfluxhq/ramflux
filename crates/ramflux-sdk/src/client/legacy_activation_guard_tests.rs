@@ -318,23 +318,132 @@ async fn activated_ledger_prepare_receive_and_apply_page_are_not_refused() -> Te
     Ok(())
 }
 
-/// Inactive accounts never advertise session-push, even when the preset is true.
+/// Inactive accounts advertise session-push only when first-activation is on, so handshake
+/// can supply the verified node incarnation before ledger phases.
 #[tokio::test]
 async fn inactive_account_never_advertises_session_push() -> TestResult {
     let fixture = Fixture::new("p24b2a-inactive-advertise").await?;
     assert_eq!(fixture.client.account_db()?.receive_activation()?, ReceiveActivation::Inactive);
     let mut config = fixture.config.clone().with_session_push_advertise(true);
     config.capability_scope.push(PUSH.to_owned());
-    let account = LocalBusAccountState::disconnected(
+    crate::gateway::apply_session_push_advertise(&mut config, ReceiveActivation::Inactive);
+    assert_session_push_scope(&config, ramflux_storage::FIRST_ACTIVATION_DEFAULT);
+    Ok(())
+}
+
+/// New accounts first-activate in managed push, compat, and standalone; advertise only
+/// after the discriminator is Activated. The default-off predecessor explicitly activates
+/// the same ledger to keep the recovery fixtures executable.
+#[tokio::test]
+async fn default_activation_both_modes() -> TestResult {
+    let fixture = Fixture::new("p25-default-activation").await?;
+    assert_eq!(fixture.client.account_db()?.receive_activation()?, ReceiveActivation::Inactive);
+    let mut account = LocalBusAccountState::disconnected(
         fixture.client,
-        config.clone(),
+        fixture.config.clone(),
         fixture.manifest.principal_commitment.clone(),
     );
-    assert_session_push_scope(&account.connection_config()?, false);
-    let engine = connect_scripted(&account.client, config, legacy_established()).await?;
-    assert_session_push_scope(&engine.config, false);
-    assert_eq!(engine.mode, SessionMode::Legacy);
+    let advertised = account.connection_config()?;
+    assert_eq!(
+        account.client.account_db()?.receive_activation()?,
+        ReceiveActivation::Inactive,
+        "advertise-before-handshake must not bind a local incarnation"
+    );
+    assert_session_push_scope(&advertised, ramflux_storage::FIRST_ACTIVATION_DEFAULT);
+    if !ramflux_storage::FIRST_ACTIVATION_DEFAULT {
+        let _ = account.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
+            target: &account.target_delivery_id,
+            incarnation: INCARNATION,
+        })?;
+    }
+    let advertised = account.connection_config()?;
+
+    let push = connect_scripted(&account.client, advertised.clone(), push_established()).await?;
+    assert_eq!(
+        push.mode,
+        SessionMode::Push { incarnation: IncarnationId::try_from(INCARNATION.to_owned())? }
+    );
+    assert_eq!(account.client.account_db()?.receive_activation()?, ReceiveActivation::Activated);
+    let epoch = account
+        .client
+        .account_db()?
+        .receive_epoch(&account.target_delivery_id)?
+        .ok_or("first-activation writes an epoch")?;
+    assert_eq!(epoch, INCARNATION, "direct migration binds the verified node incarnation");
+
+    let compat =
+        connect_scripted(&account.client, advertised.clone(), legacy_established()).await?;
+    assert_eq!(compat.mode, SessionMode::Compat);
+    account.install_test_session(legacy_engine(advertised.clone()));
+    let turn = actor_turn(&account, 1)?;
+    assert!(
+        turn.as_ref().is_some_and(|turn| turn.compat),
+        "activated Legacy session is a compat ledger turn"
+    );
+    refuse_legacy_receive_unless_ledger_turn(&account, turn.as_ref())
+        .expect("compat ApplyPage (turn: Some) must not be refused");
+    prepare_receive_turn(&account, 1, 1, crate::bus::connection_manager::ReceiveTrigger::Tick)
+        .expect("compat PrepareReceive (turn: Some) must not be refused");
+
+    account.engine = None;
+    let mut counting = CountingGateway::new(advertised);
+    counting.page_losses.push(crate::gateway::session_push::KnownLoss {
+        from_seq: 1,
+        to_seq: 1,
+        reason: crate::gateway::session_push::PageReason::Expired,
+    });
+    crate::bus::sync_driver::receive(&mut account, &mut counting, 1).await?;
+    assert_eq!(
+        crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
+        Some(crate::bus::push_receiver::executor::ExecutorOwner::Standalone)
+    );
+    assert!(counting.resumes >= 1, "standalone row issues resume_page");
     Ok(())
+}
+
+/// Fresh default-on Push activation preserves the gateway's independently negotiated
+/// incarnation through `intake::stage_on_actor`. Binding a local random E fails this row.
+#[tokio::test]
+async fn fresh_push_activation_binds_gateway_incarnation() -> TestResult {
+    let fixture = Fixture::new("p25-h1-gateway-e").await?;
+    let target = fixture.config.target_delivery_id.clone();
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    let advertised = account.connection_config()?;
+    assert_eq!(account.client.account_db()?.receive_activation()?, ReceiveActivation::Inactive);
+    assert_session_push_scope(&advertised, ramflux_storage::FIRST_ACTIVATION_DEFAULT);
+    if !ramflux_storage::FIRST_ACTIVATION_DEFAULT {
+        let _ = account.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
+            target: &target,
+            incarnation: INCARNATION,
+        })?;
+    }
+    let push =
+        connect_scripted(&account.client, account.connection_config()?, push_established()).await?;
+    assert_eq!(
+        push.mode,
+        SessionMode::Push { incarnation: IncarnationId::try_from(INCARNATION.to_owned())? }
+    );
+    assert_eq!(account.client.account_db()?.receive_epoch(&target)?.as_deref(), Some(INCARNATION));
+    account.install_test_session(push);
+    let turn = actor_turn(&account, 1)?.ok_or("push turn")?;
+    assert_eq!(turn.incarnation, INCARNATION);
+    match crate::bus::push_receiver::intake::stage_on_actor(
+        &account,
+        1,
+        &entry(&target),
+        INCARNATION,
+        1_700_000_000,
+    ) {
+        Ok(_) => Ok(()),
+        Err(SdkError::Storage(StorageError::AuthorizationRejected)) => {
+            Err("fresh Push activation rejected the gateway incarnation".into())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Activated DB negotiates Push and never reaches a legacy receive writer.
@@ -572,5 +681,50 @@ fn seed_compat_pending(account: &LocalBusAccountState, target: &str, old: &str) 
     )?;
     assert_eq!(account.client.gateway_receive_cursor(target)?, 1);
     assert_eq!(db.receive_ledger_snap_for_test(target)?.intents, vec![1]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn receive_epoch_reconcile_reports_typed_fences() -> TestResult {
+    let fixture = Fixture::new("receive-epoch-typed-fences").await?;
+    let client = &fixture.client;
+    let target = &fixture.config.target_delivery_id;
+    let _ = client
+        .account_db()?
+        .activate_receive_ledger(ReceiveMigrate { target, incarnation: "old" })?;
+    let page = crate::gateway::push_resume::ResumePage {
+        after_inbox_seq: 0,
+        covered_through_seq: 0,
+        issued_inbox_seq: 0,
+        settled_through_seq: 0,
+        entries: Vec::new(),
+        known_losses: Vec::new(),
+        oversize_next: None,
+        more: false,
+    };
+    for i in 1..=ramflux_storage::RETIRED_FENCE_CAP {
+        let next = format!("{i:032x}");
+        let turn = client.prepare_receive_epoch(target, &next, 1)?.ok_or("reset turn")?;
+        client.reset_receive_epoch(&turn, &next, &page, 1)?;
+    }
+    let next = "ffffffffffffffffffffffffffffffff";
+    let turn = client.prepare_receive_epoch(target, next, 1)?.ok_or("fenced turn")?;
+    let old = client.account_db()?.receive_epoch(target)?;
+    assert!(
+        matches!(
+            client.reset_receive_epoch(&turn, next, &page, 2),
+            Err(SdkError::ReceiveEpochReconcile(crate::ReceiveEpochReconcileFailure::StaleFence))
+        ),
+        "stale generation has a typed diagnostic"
+    );
+    assert!(
+        matches!(
+            client.reset_receive_epoch(&turn, next, &page, 1),
+            Err(SdkError::ReceiveEpochReconcile(crate::ReceiveEpochReconcileFailure::PausedFence))
+        ),
+        "full retired fence has a typed diagnostic"
+    );
+    assert_eq!(client.account_db()?.receive_epoch(target)?, old, "refusals preserve E");
+    assert_eq!(client.gateway_receive_cursor(target)?, 0);
     Ok(())
 }

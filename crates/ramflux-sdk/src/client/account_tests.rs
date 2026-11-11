@@ -258,7 +258,6 @@ fn persist_gateway_receive_cursor_refuses_activated_ledger() -> Result<(), SdkEr
     client.open_account_index(&root)?;
     client.create_account("acct", "principal")?;
     client.unlock_account("acct", b"secret")?;
-    const { assert!(!ramflux_storage::FIRST_ACTIVATION_DEFAULT) };
     client.persist_gateway_receive_cursor("t", 1)?;
     assert_eq!(
         client.account_db()?.activate_receive_ledger(ramflux_storage::ReceiveMigrate {

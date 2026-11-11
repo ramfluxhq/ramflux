@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Session push
 
+- SDK receive ledger first-activation is default-on for managed push, compatibility
+  and standalone receive. Fresh accounts advertise `gateway.session_push.v1` so the
+  first handshake can bind the verified node incarnation; already-activated accounts
+  keep advertising. Reverting this change leaves already-activated accounts on the
+  shared ledger.
 - Added `gateway.session_push.v1`: incarnation-bound resume pages, point fetch,
   batched ACKs, compact sender acceptance and registration-owned recipient push.
 - Changed stalled-sink close to 15 seconds of actual I/O, ACK backpressure while

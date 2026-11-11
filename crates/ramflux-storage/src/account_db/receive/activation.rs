@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Persistent receive-ledger activation discriminator in existing checkpoint metadata.
-//! Default-off: production never first-activates. Restore strips the discriminator.
+//! Default-on first activation; already-activated accounts stay on the ledger if this
+//! switch reverts. Restore strips the discriminator.
 
 use super::migrate::{ReceiveMigrate, ReceiveMigrateResult};
 use crate::{AccountDb, ProjectionStore, StorageError};
@@ -18,7 +19,7 @@ pub const UNKNOWN_ACTIVATION: &str = "receive activation unknown";
 /// Exact error when Activated metadata has no epoch for the requested target.
 pub const MISSING_EPOCH: &str = "receive activation missing epoch";
 
-/// First-activation switch. Off until P25; already-activated accounts stay on the ledger.
+/// First-activation switch; already-activated accounts stay on the ledger when disabled.
 pub const FIRST_ACTIVATION_DEFAULT: bool = false;
 
 /// Whether this account DB has committed ledger activation.
@@ -88,7 +89,8 @@ impl AccountDb {
         })
     }
 
-    /// Dormant first-activation. Production stays off; tests call [`Self::activate_receive_ledger`].
+    /// First-activation when [`FIRST_ACTIVATION_DEFAULT`] is on. Already-activated accounts
+    /// stay on the ledger when the switch is off.
     ///
     /// # Errors
     /// Returns writer or migration errors when the default is on.

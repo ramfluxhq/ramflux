@@ -388,19 +388,30 @@ impl RamfluxClient {
             &turn.incarnation,
             crate::time::now_unix_timestamp(),
         )?;
-        let result = db.receive_transaction(turn.expected(), generation, |tx| {
-            tx.reset(ramflux_storage::ReceiveReset {
-                new_incarnation: incarnation,
-                settled: page.settled_through_seq,
-                issued: page.issued_inbox_seq,
-                after: page.after_inbox_seq,
-                reason: ramflux_storage::ReceiveResetReason::RouterReset,
+        let result = db
+            .receive_transaction(turn.expected(), generation, |tx| {
+                tx.reset(ramflux_storage::ReceiveReset {
+                    new_incarnation: incarnation,
+                    settled: page.settled_through_seq,
+                    issued: page.issued_inbox_seq,
+                    after: page.after_inbox_seq,
+                    reason: ramflux_storage::ReceiveResetReason::RouterReset,
+                })
             })
-        })?;
-        if result != ramflux_storage::ReceiveResetResult::Reset {
-            return Err(SdkError::InboundRejected(format!(
-                "receive epoch reset paused: {result:?}"
-            )));
+            .map_err(|error| match error {
+                ramflux_storage::StorageError::AuthorizationRejected => {
+                    SdkError::ReceiveEpochReconcile(crate::ReceiveEpochReconcileFailure::StaleFence)
+                }
+                other => other.into(),
+            })?;
+        match result {
+            ramflux_storage::ReceiveResetResult::Reset => {}
+            ramflux_storage::ReceiveResetResult::PausedFence => {
+                return Err(crate::ReceiveEpochReconcileFailure::PausedFence.into());
+            }
+            ramflux_storage::ReceiveResetResult::PausedLoss => {
+                return Err(crate::ReceiveEpochReconcileFailure::PausedLoss.into());
+            }
         }
         Ok(())
     }

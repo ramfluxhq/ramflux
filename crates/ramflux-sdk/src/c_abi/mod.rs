@@ -839,6 +839,7 @@ fn map_sdk_error(error: &SdkError) -> CAbiError {
 
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
+        SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),
         SdkError::DirectoryAuthorityUnavailable { source, .. } => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
@@ -936,6 +937,14 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::PairRecoveryRequired
         | SdkError::PairingField(_)
         | SdkError::PairingCode(_) => RamfluxErrorCode::InvalidArgument,
+    }
+}
+
+fn receive_reconcile_code(reason: crate::ReceiveEpochReconcileFailure) -> RamfluxErrorCode {
+    use crate::ReceiveEpochReconcileFailure::{PausedFence, PausedLoss, StaleFence};
+    match reason {
+        StaleFence => RamfluxErrorCode::PermissionDenied,
+        PausedFence | PausedLoss => RamfluxErrorCode::InvalidArgument,
     }
 }
 
@@ -1110,4 +1119,17 @@ fn schema_reset_required_maps_to_c_abi_code_23() {
     assert_eq!(error.code, RamfluxErrorCode::SchemaResetRequired);
     assert_eq!(error.code.name(), "SchemaResetRequired");
     assert_eq!(error.code as i32, 23);
+}
+
+#[cfg(test)]
+#[test]
+fn receive_reconcile_keeps_existing_abi_classes() {
+    use crate::ReceiveEpochReconcileFailure::{PausedFence, PausedLoss, StaleFence};
+    for (reason, old) in [
+        (PausedFence, SdkError::InboundRejected("paused fence".into())),
+        (PausedLoss, SdkError::InboundRejected("paused loss".into())),
+        (StaleFence, SdkError::Storage(ramflux_storage::StorageError::AuthorizationRejected)),
+    ] {
+        assert_eq!(sdk_error_code(&SdkError::ReceiveEpochReconcile(reason)), sdk_error_code(&old));
+    }
 }

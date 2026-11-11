@@ -44,6 +44,8 @@ pub(super) struct Gateway {
     pub ack_target: String,
     /// When set, `ack_batch` fails so the actor records Uncertain.
     pub ack_fail: bool,
+    /// Some(count) forces Compat and drops legacy ACKs; count advances before wire close.
+    pub compat_ack_loss: Option<usize>,
     pub resumes: Vec<u64>,
     /// Caps `resume_page` entries so tests can observe page-sized catch-up (yield every 16).
     pub resume_page_size: Option<usize>,
@@ -65,6 +67,12 @@ pub(super) struct Gateway {
     pub resume_hold: Option<Hold>,
     pub manifest_requests: Vec<String>,
     pub manifest_hold: Option<(String, Arc<GatewayHold>)>,
+    /// Node incarnation echoed on Push `session_established`. Default is the scripted E.
+    pub inbox_incarnation: Option<String>,
+    /// When set, Submit/ACK/resume bind the real router store.
+    pub router_sources: BTreeMap<String, ramflux_crypto::RootQualifiedDeviceRef>,
+    pub router:
+        Option<(Arc<ramflux_node_core::RouterCore>, Arc<ramflux_node_core::RouterRedbStore>)>,
 }
 
 impl Gateway {
@@ -229,8 +237,9 @@ impl Fixture {
             prekey_http_url: None,
         })
         .with_account_identity(&source.client)?;
-        config.timeout = Duration::from_secs(600);
-        config.quic_fallback_timeout = Duration::from_secs(600);
+        let session_hold = frame_timeout.unwrap_or(Duration::from_secs(600));
+        config.timeout = session_hold;
+        config.quic_fallback_timeout = session_hold;
         source.engine = None;
         let mut engine = GatewaySessionEngine::connect(config).await?;
         if let Some(frame_timeout) = frame_timeout {
@@ -300,6 +309,9 @@ async fn serve(
     stream: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     shared: &Arc<Mutex<Gateway>>,
 ) -> Case {
+    let mut push = false;
+    let mut session_target = String::new();
+    let mut session_incarnation = String::new();
     loop {
         let size = stream.read_u32().await?;
         if size > 4 * 1024 * 1024 {
@@ -317,7 +329,7 @@ async fn serve(
                 hold.entered.notify_one();
                 hold.release.notified().await;
             }
-            ack_batch_response(shared, &value)?
+            ack_batch_response(shared, &value, &session_target)?
         } else if value["frame_type"].as_str() == Some("resume")
             && value.get("incarnation_id").is_some()
         {
@@ -328,6 +340,7 @@ async fn serve(
             let frame: GatewayClientFrame = serde_json::from_value(value)?;
             let response = match frame {
                 GatewayClientFrame::Open { open } => {
+                    session_target = open.target_delivery_id.clone();
                     *shared
                         .lock()
                         .map_err(|_| "gateway")?
@@ -340,7 +353,25 @@ async fn serve(
                     let advertised = auth.device_proof.capability_scope.iter().any(|capability| {
                         capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
                     });
-                    let bytes = serde_json::to_vec(&established_session(advertised))?;
+                    let advertised = advertised
+                        && shared.lock().map_err(|_| "gateway")?.compat_ack_loss.is_none();
+                    push = advertised;
+                    let incarnation = {
+                        let gateway = shared.lock().map_err(|_| "gateway")?;
+                        if let Some((router, store)) = &gateway.router {
+                            router.prepare_publication_target(store, &session_target)?;
+                            Some(store.initialize_inbox(&session_target)?)
+                        } else {
+                            gateway.inbox_incarnation.clone()
+                        }
+                    };
+                    session_incarnation = incarnation
+                        .clone()
+                        .unwrap_or_else(|| "0123456789abcdef0123456789abcdef".into());
+                    let bytes = serde_json::to_vec(&established_session(
+                        advertised,
+                        incarnation.as_deref(),
+                    ))?;
                     stream.write_u32(u32::try_from(bytes.len())?).await?;
                     stream.write_all(&bytes).await?;
                     stream.flush().await?;
@@ -411,6 +442,23 @@ async fn serve(
                         GatewayServerFrame::Nack { reason }
                     } else {
                         shared.lock().map_err(|_| "gateway")?.sent.push(submit.envelope.clone());
+                        let routed = record_router_submit(shared, &submit.envelope).await?;
+                        if push {
+                            let (_, inbox_seq) = routed.unwrap_or((session_incarnation.clone(), 1));
+                            let incarnation_id = &session_incarnation;
+                            let accepted = json!({
+                                "frame_type": "submit_accepted",
+                                "incarnation_id": incarnation_id,
+                                "envelope_id": submit.envelope.envelope_id,
+                                "target_delivery_id": submit.envelope.target_delivery_id,
+                                "inbox_seq": inbox_seq,
+                            });
+                            let bytes = serde_json::to_vec(&accepted)?;
+                            stream.write_u32(u32::try_from(bytes.len())?).await?;
+                            stream.write_all(&bytes).await?;
+                            stream.flush().await?;
+                            continue;
+                        }
                         GatewayServerFrame::Deliver {
                             entry: GatewayInboxEntry {
                                 forwarded: false,
@@ -424,6 +472,18 @@ async fn serve(
                 GatewayClientFrame::OwnDeviceFanout { fanout } => own_copy_response(fanout)?,
                 GatewayClientFrame::Close { .. } => return Ok(()),
                 GatewayClientFrame::Ack { ack } => {
+                    let lose = {
+                        let mut gateway = shared.lock().map_err(|_| "gateway")?;
+                        if let Some(count) = &mut gateway.compat_ack_loss {
+                            *count += 1;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if lose {
+                        return Err("injected legacy ACK loss".into());
+                    }
                     let hold = { shared.lock().map_err(|_| "gateway")?.ack_hold.take() };
                     if let Some(hold) = hold {
                         hold.seen.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -526,7 +586,7 @@ pub(super) fn own_copy_response(
     })
 }
 
-fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value> {
+pub(super) fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value> {
     let incarnation_id = value["incarnation_id"].as_str().ok_or("resume incarnation")?.to_owned();
     let after = value["resume"]["after_inbox_seq"].as_u64().ok_or("resume after")?;
     let limit = usize::try_from(value["resume"]["limit"].as_u64().ok_or("resume limit")?)?;
@@ -535,16 +595,28 @@ fn resume_page_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
     let mut gateway = shared.lock().map_err(|_| "gateway")?;
     gateway.resumes.push(after);
     let take = gateway.resume_page_size.unwrap_or(limit);
+    if let Some((router, _store)) = &gateway.router {
+        let page = router.resume_page(&target, after, take, now_unix_timestamp())?;
+        return Ok(serde_json::to_value(page)?);
+    }
     let issued = gateway
         .resume_issued
-        .or_else(|| gateway.inbox.last().map(|entry| entry.inbox_seq))
+        .or_else(|| {
+            gateway
+                .inbox
+                .iter()
+                .filter(|entry| entry.target_delivery_id == target)
+                .map(|entry| entry.inbox_seq)
+                .max()
+        })
         .unwrap_or(after);
     let oversize_next = gateway.oversize_next.filter(|seq| *seq > after);
     let entries: Vec<Value> = gateway
         .inbox
         .iter()
         .filter(|entry| {
-            entry.inbox_seq > after
+            entry.target_delivery_id == target
+                && entry.inbox_seq > after
                 && !gateway.acked.contains(&entry.envelope.envelope_id)
                 && oversize_next != Some(entry.inbox_seq)
         })
@@ -595,7 +667,25 @@ fn fetch_entry_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Val
     }))
 }
 
-fn ack_batch_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value> {
+fn record_acked_seqs(gateway: &mut Gateway, seqs: &[u64], target: &str) {
+    gateway.ack_sends = gateway.ack_sends.saturating_add(seqs.len());
+    for seq in seqs {
+        if let Some(id) = gateway
+            .inbox
+            .iter()
+            .find(|entry| entry.inbox_seq == *seq && entry.target_delivery_id == target)
+            .map(|entry| entry.envelope.envelope_id.clone())
+        {
+            gateway.acked.insert(id);
+        }
+    }
+}
+
+fn ack_batch_response(
+    shared: &Arc<Mutex<Gateway>>,
+    value: &Value,
+    session_target: &str,
+) -> Case<Value> {
     let incarnation_id =
         value["incarnation_id"].as_str().ok_or("ack_batch incarnation")?.to_owned();
     let seqs: Vec<u64> = value["inbox_seqs"]
@@ -607,6 +697,37 @@ fn ack_batch_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value
     let mut gateway = shared.lock().map_err(|_| "gateway")?;
     if gateway.ack_fail {
         return Err("ack_batch failed".into());
+    }
+    if let Some((router, store)) = gateway.router.clone() {
+        let target = session_target.to_owned();
+        drop(gateway);
+        let response = router.session_ack_batch(
+            &store,
+            &ramflux_node_core::SessionAckBatchRequest {
+                target_delivery_id: target.clone(),
+                incarnation_id: incarnation_id.clone(),
+                inbox_seqs: seqs.clone(),
+            },
+        )?;
+        let mut gateway = shared.lock().map_err(|_| "gateway")?;
+        record_acked_seqs(&mut gateway, &seqs, &target);
+        let results: Vec<Value> = response
+            .results
+            .iter()
+            .map(|result| {
+                json!({
+                    "inbox_seq": result.inbox_seq,
+                    "outcome": result.outcome,
+                    "reason": result.reason,
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "frame_type": "ack_batch",
+            "incarnation_id": response.incarnation_id,
+            "cursor": serde_json::to_value(&response.cursor)?,
+            "results": results,
+        }));
     }
     gateway.ack_sends = gateway.ack_sends.saturating_add(seqs.len());
     if gateway.ack_target.is_empty() {
@@ -647,7 +768,7 @@ fn ack_batch_response(shared: &Arc<Mutex<Gateway>>, value: &Value) -> Case<Value
 }
 
 /// Echo session-push on `session_established` only when Auth advertised the capability.
-fn established_session(advertised: bool) -> Value {
+fn established_session(advertised: bool, incarnation: Option<&str>) -> Value {
     let mut session = json!({
         "session_id": "courier-session",
         "gateway_id": "test-gateway",
@@ -657,9 +778,78 @@ fn established_session(advertised: bool) -> Value {
     });
     if advertised {
         session["capabilities"] = json!([ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY]);
-        session["inbox_incarnation_id"] = json!("0123456789abcdef0123456789abcdef");
+        session["inbox_incarnation_id"] =
+            json!(incarnation.unwrap_or("0123456789abcdef0123456789abcdef"));
     }
     json!({ "frame_type": "session_established", "session": session })
+}
+
+pub(super) async fn publish_router_envelope(
+    router: &ramflux_node_core::RouterCore,
+    store: &ramflux_node_core::RouterRedbStore,
+    source: &ramflux_crypto::RootQualifiedDeviceRef,
+    envelope: ramflux_protocol::Envelope,
+) -> Result<ramflux_node_core::InboxEntry, ramflux_node_core::NodeCoreError> {
+    router.prepare_publication_target(store, &envelope.target_delivery_id)?;
+    let replay = ramflux_node_core::envelope_replay_tuple_key(source, &envelope);
+    let expiry = envelope.created_at.checked_add(i64::from(envelope.ttl)).ok_or_else(|| {
+        ramflux_node_core::NodeCoreError::Redb("fixture replay expiry overflow".into())
+    })?;
+    let operation = ramflux_node_core::publication::capture(|| {
+        let entry = match router.submit_envelope(source, envelope) {
+            ramflux_node_core::RouterSubmitOutcome::OfflineQueued(queued) => queued.entry,
+            ramflux_node_core::RouterSubmitOutcome::Online(online) => {
+                ramflux_node_core::InboxEntry {
+                    inbox_seq: online.inbox_seq,
+                    target_delivery_id: online.target_delivery_id,
+                    envelope: online.envelope,
+                }
+            }
+            other => {
+                return Err(ramflux_node_core::NodeCoreError::Redb(format!(
+                    "fixture router submit {other:?}"
+                )));
+            }
+        };
+        store.record_submission_increment_for_sender(
+            &replay,
+            expiry,
+            Some(&entry),
+            Some(source.root_commitment()),
+        )?;
+        Ok(entry)
+    })?;
+    operation.published().await
+}
+
+async fn record_router_submit(
+    shared: &Arc<Mutex<Gateway>>,
+    envelope: &ramflux_protocol::Envelope,
+) -> Case<Option<(String, u64)>> {
+    let (router, store, source) = {
+        let gateway = shared.lock().map_err(|_| "gateway")?;
+        let Some((router, store)) = gateway.router.clone() else {
+            return Ok(None);
+        };
+        let source = gateway
+            .router_sources
+            .get(&envelope.source_device_id)
+            .ok_or("router source identity")?
+            .clone();
+        (router, store, source)
+    };
+    router.prepare_publication_target(&store, &envelope.target_delivery_id)?;
+    let incarnation = store.initialize_inbox(&envelope.target_delivery_id)?;
+    let entry = publish_router_envelope(&router, &store, &source, envelope.clone()).await?;
+    let sequence = entry.inbox_seq;
+    let mut gateway = shared.lock().map_err(|_| "gateway")?;
+    gateway.inbox.push(GatewayInboxEntry {
+        forwarded: false,
+        inbox_seq: sequence,
+        target_delivery_id: entry.target_delivery_id,
+        envelope: entry.envelope,
+    });
+    Ok(Some((incarnation, sequence)))
 }
 
 fn acknowledged_cursor(
