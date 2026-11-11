@@ -4,6 +4,7 @@
 //! Outgoing timeline replicas inside authenticated, pair-encrypted own-device controls.
 use super::surface::OwnContext;
 use crate::prelude::*;
+use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -51,6 +52,109 @@ impl SentMessage {
         Ok(())
     }
 }
+
+fn generated_context(context: &OwnContext) -> g::OwnContext {
+    g::OwnContext {
+        conversation_id: context.conversation_id.clone(),
+        participants: context.participants.clone(),
+        group: context.group.as_ref().and_then(|group| {
+            serde_json::to_value(group).ok().and_then(|value| serde_json::from_value(value).ok())
+        }),
+        friend: context.friend.as_ref().map(|friend| g::FriendLinkRecord {
+            link_id: friend.link_id.clone(),
+            requester_id: friend.requester_id.clone(),
+            target_id: friend.target_id.clone(),
+            state: friend.state.clone(),
+            remove_scope: friend.remove_scope.clone(),
+            blocked: friend.blocked,
+            capability_revoked_at: friend.capability_revoked_at,
+        }),
+    }
+}
+
+fn surface_context(context: &g::OwnContext) -> OwnContext {
+    OwnContext {
+        conversation_id: context.conversation_id.clone(),
+        participants: context.participants.clone(),
+        group: context.group.as_ref().and_then(|group| {
+            serde_json::to_value(group).ok().and_then(|value| serde_json::from_value(value).ok())
+        }),
+        friend: context.friend.as_ref().map(|friend| ramflux_storage::FriendLinkRecord {
+            link_id: friend.link_id.clone(),
+            requester_id: friend.requester_id.clone(),
+            target_id: friend.target_id.clone(),
+            state: friend.state.clone(),
+            remove_scope: friend.remove_scope.clone(),
+            blocked: friend.blocked,
+            capability_revoked_at: friend.capability_revoked_at,
+        }),
+    }
+}
+
+impl SentMessage {
+    fn to_generated(&self) -> Result<g::OwnSentMessage, SdkError> {
+        let body = ramflux_protocol::decode_base64url(&self.body_base64)
+            .map_err(|_| invalid("invalid own sent message body encoding"))?;
+        let ciphertext_digest = self
+            .ciphertext_hash
+            .as_deref()
+            .map(|hash| {
+                let raw = ramflux_protocol::decode_base64url(hash)
+                    .map_err(|_| invalid("invalid own sent ciphertext digest"))?;
+                if raw.len() != 32 {
+                    return Err(invalid("invalid own sent ciphertext digest"));
+                }
+                Ok(raw)
+            })
+            .transpose()?;
+        Ok(g::OwnSentMessage {
+            envelope_id: self.envelope_id.clone(),
+            message_id: self.message_id.clone(),
+            sender_id: self.sender_id.clone(),
+            original_recipients: self.original_recipients.clone(),
+            ciphertext_digest,
+            context: Some(generated_context(&self.context)),
+            authored_at: self.authored_at,
+            exact_inner: body,
+        })
+    }
+
+    fn from_generated(sent: &g::OwnSentMessage) -> Result<Self, SdkError> {
+        if sent.ciphertext_digest.as_ref().is_some_and(|digest| digest.len() != 32) {
+            return Err(invalid("invalid own sent ciphertext digest"));
+        }
+        Ok(Self {
+            envelope_id: sent.envelope_id.clone(),
+            message_id: sent.message_id.clone(),
+            sender_id: sent.sender_id.clone(),
+            original_recipients: sent.original_recipients.clone(),
+            ciphertext_hash: sent
+                .ciphertext_digest
+                .as_deref()
+                .map(ramflux_protocol::encode_base64url),
+            context: sent
+                .context
+                .as_ref()
+                .map(surface_context)
+                .ok_or_else(|| invalid("own sent message context mismatch"))?,
+            authored_at: sent.authored_at,
+            body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(
+                &sent.exact_inner,
+            )),
+        })
+    }
+}
+
+pub(super) fn generated_own_sent_from_prefix(
+    bytes: &[u8],
+) -> Result<Option<g::OwnSentMessage>, SdkError> {
+    let Some(json) = bytes.strip_prefix(PREFIX) else {
+        return Ok(None);
+    };
+    let packet: SentMessage = ramflux_protocol::parse_i_json(json)?;
+    Ok(Some(packet.to_generated()?))
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct OwnSentInput<'a> {
     pub envelope: &'a str,
@@ -362,8 +466,33 @@ impl RamfluxClient {
             created_at: at,
             body: bytes,
         } = input;
-        let Some(bytes) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
-        let packet: SentMessage = ramflux_protocol::parse_i_json(bytes)?;
+        let Some(json) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
+        let packet: SentMessage = ramflux_protocol::parse_i_json(json)?;
+        self.apply_own_sent_packet(source, envelope, conversation, group, at, &packet)
+    }
+
+    pub(super) fn receive_generated_own_sent(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        conversation: &str,
+        group: Option<&str>,
+        at: i64,
+        sent: &g::OwnSentMessage,
+    ) -> Result<bool, SdkError> {
+        let packet = SentMessage::from_generated(sent)?;
+        self.apply_own_sent_packet(source, &packet.envelope_id, conversation, group, at, &packet)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_own_sent_packet(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        envelope: &str,
+        conversation: &str,
+        group: Option<&str>,
+        at: i64,
+        packet: &SentMessage,
+    ) -> Result<bool, SdkError> {
         packet.validate_route(envelope, conversation, group)?;
         let body = zeroize::Zeroizing::new(
             ramflux_protocol::decode_base64url(&packet.body_base64)
@@ -386,25 +515,46 @@ impl RamfluxClient {
         }
         let db = self.account_db()?;
         let ciphertext_hash = packet.ciphertext_hash.as_deref();
-        let history = self.own_sent_history_row(source, &packet, envelope, conversation, &body)?;
+        let alias = db.load_actor_state::<ramflux_storage::MessageReplayReference>(&alias_key(
+            db,
+            &own_row_id(source, envelope)?,
+        )?)?;
+        let alias_deleted = matches!(
+            alias,
+            Some(ramflux_storage::MessageReplayReference::Target { deleted: true, .. })
+        );
+        let history = self.own_sent_history_row(source, packet, envelope, conversation, &body)?;
         // Authenticated source/envelope aliases remain authoritative after attribution erasure.
         let id = if let Some(row) = &history {
             row.message_id.clone()
+        } else if let Some(id) =
+            alias.as_ref().and_then(ramflux_storage::MessageReplayReference::message_id)
+        {
+            id.to_owned()
         } else {
             own_row_id(source, envelope)?
         };
         if history.is_none() {
-            db.import_direct_message_projection(DirectMessageWrite {
-                conversation_id: conversation,
-                message_id: &id,
-                sender_id: source.device_id(),
-                encrypted_body: &[],
-                metadata: &MessageMetadata::default(),
-                created_at: packet.authored_at.unwrap_or(at),
-            })?;
+            if alias_deleted {
+                db.import_deleted_message_projection(
+                    conversation,
+                    &id,
+                    true,
+                    packet.authored_at.unwrap_or(at),
+                )?;
+            } else {
+                db.import_direct_message_projection(DirectMessageWrite {
+                    conversation_id: conversation,
+                    message_id: &id,
+                    sender_id: source.device_id(),
+                    encrypted_body: &[],
+                    metadata: &MessageMetadata::default(),
+                    created_at: packet.authored_at.unwrap_or(at),
+                })?;
+            }
         }
         self.index_own_sent_original(conversation, &packet.message_id, &id)?;
-        if history.as_ref().is_some_and(|row| row.deleted) {
+        if history.as_ref().is_some_and(|row| row.deleted) || alias_deleted {
             // Keep authenticated replay aliases without restoring deleted content or attribution.
             self.index_own_sent_projection(source, envelope, &id, ciphertext_hash)?;
             return Ok(true);
@@ -551,3 +701,7 @@ fn original_index_prefix(
     let selector = serde_json::to_string(&(conversation, original))?;
     Ok(format!("own-device/sent-original/{}/", db.own_sent_index_digest("original", &selector)?))
 }
+
+#[cfg(test)]
+#[path = "own_sent_history_tests.rs"]
+mod history_tests;
