@@ -717,7 +717,7 @@ impl RamfluxClient {
         Ok(())
     }
 
-    fn import_own_device_history_bundle(
+    pub(super) fn import_own_device_history_bundle(
         &self,
         envelope: &SdkOwnDeviceSyncEnvelope,
         bundle: &SdkOwnDeviceHistoryBundle,
@@ -1475,7 +1475,7 @@ pub(crate) mod tests {
         std::env::temp_dir().join(format!("ramflux-sdk-own-device-sync-{test_name}-{nanos}"))
     }
 
-    pub(super) fn client_with_account(
+    pub(crate) fn client_with_account(
         test_name: &str,
         principal: &str,
         device_id: &str,
@@ -1552,7 +1552,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(super) fn bundle(
+    pub(crate) fn bundle(
         source_device_id: &str,
         target_device_id: &str,
         messages: Vec<DirectMessageRecord>,
