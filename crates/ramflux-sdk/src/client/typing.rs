@@ -58,6 +58,7 @@ struct Indicator {
 pub struct TypingReceiver {
     indicators: BTreeMap<(String, String, String), Indicator>,
     seen: BTreeMap<(String, String), (u64, Instant, String)>,
+    pending_clears: BTreeMap<(String, String, String), Indicator>,
     newest: BTreeMap<(String, String, String), (i64, Instant)>,
     updates: Vec<TypingUpdate>,
     rates: rate::ReceiverRates,
@@ -116,6 +117,7 @@ impl TypingReceiver {
             || self
                 .indicators
                 .values()
+                .chain(self.pending_clears.values())
                 .map(|state| state.bytes)
                 .sum::<usize>()
                 .saturating_add(wire_bytes)
@@ -159,14 +161,19 @@ impl TypingReceiver {
         }) {
             return Ok(TypingOutcome::Dropped(EphemeralDropReason::Invalid));
         }
-        if typing.active && !self.indicators.contains_key(&key) && self.indicators.len() >= MAX_ROWS
-        {
-            return Ok(TypingOutcome::Dropped(EphemeralDropReason::QueueFull));
-        }
         let starts = u64::try_from(envelope.created_at)
             .ok()
             .and_then(|value| value.checked_mul(1000))
             .ok_or_else(|| SdkError::InboundRejected("typing start overflow".into()))?;
+        let future_clear = !typing.active && now_ms < starts;
+        let allocates = if future_clear {
+            !self.pending_clears.contains_key(&key)
+        } else {
+            !self.indicators.contains_key(&key)
+        };
+        if allocates && self.indicators.len() + self.pending_clears.len() >= MAX_ROWS {
+            return Ok(TypingOutcome::Dropped(EphemeralDropReason::QueueFull));
+        }
         let expires_at_ms = typing
             .expires_at
             .checked_mul(1000)
@@ -186,6 +193,22 @@ impl TypingReceiver {
             .ok_or_else(|| {
                 SdkError::InboundRejected("typing supersede deadline overflow".into())
             })?;
+        if future_clear {
+            self.seen.insert(source_key, (deadline, expires, envelope.payload_hash.clone()));
+            self.pending_clears.insert(
+                key,
+                Indicator {
+                    update: TypingUpdate { identity, typing, expires_at_ms },
+                    starts_at_ms: starts,
+                    hold_until,
+                    expires,
+                    visible: false,
+                    bytes: wire_bytes,
+                },
+            );
+            return Ok(TypingOutcome::Held);
+        }
+        self.pending_clears.remove(&key);
         self.newest.insert(key.clone(), (envelope.created_at, supersede_until));
         self.seen.insert(source_key, (deadline, expires, envelope.payload_hash.clone()));
         let visible = now_ms >= starts;
@@ -217,6 +240,30 @@ impl TypingReceiver {
         self.seen.retain(|_, (deadline, until, _)| now_ms < *deadline && monotonic < *until);
         self.newest.retain(|_, (_, until)| monotonic < *until);
         let mut updates = Vec::new();
+        let mut clears = Vec::new();
+        self.pending_clears.retain(|key, pending| {
+            if now_ms >= pending.update.expires_at_ms
+                || monotonic >= pending.expires
+                || (now_ms < pending.starts_at_ms && monotonic >= pending.hold_until)
+            {
+                return false;
+            }
+            if now_ms >= pending.starts_at_ms {
+                clears.push((key.clone(), pending.update.clone(), pending.starts_at_ms));
+                return false;
+            }
+            true
+        });
+        for (key, update, starts) in clears {
+            let created = i64::try_from(starts / 1000).unwrap_or(i64::MAX);
+            if self.newest.get(&key).is_none_or(|(newest, _)| created >= *newest) {
+                self.indicators.remove(&key);
+                if let Some(until) = monotonic.checked_add(Duration::from_secs(5)) {
+                    self.newest.insert(key, (created, until));
+                }
+                updates.push(update);
+            }
+        }
         self.indicators.retain(|_, indicator| {
             let expired =
                 now_ms >= indicator.update.expires_at_ms || monotonic >= indicator.expires;
@@ -248,6 +295,7 @@ impl TypingReceiver {
 
     /// Clear this author's indicators when its durable Message is projected.
     pub fn clear_author(&mut self, root: &str, conversation: &str) {
+        self.pending_clears.retain(|(author, _, scope), _| author != root || scope != conversation);
         let keys: Vec<_> = self
             .indicators
             .keys()

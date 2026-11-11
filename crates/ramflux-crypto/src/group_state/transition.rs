@@ -47,6 +47,8 @@ pub(super) fn initial(
     genesis: &GroupStateGenesis,
     name: Option<String>,
 ) -> Result<SharedGroupState, CryptoError> {
+    ramflux_protocol::message::dm_scope::validate_group(&genesis.conversation_id)
+        .map_err(|_| invalid("reserved DM conversation namespace"))?;
     let max_members = genesis.max_members;
     if max_members == 0
         || usize::try_from(max_members).map_err(|_| invalid("member limit"))?

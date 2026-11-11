@@ -266,6 +266,8 @@ fn capture_group(account: &LocalBusAccountState, request: &LocalBusFrame) -> Res
         "group.send" | "group.receive" | "group.read" | "group.create"
     ) && body.get("conversation_id").is_some()
     {
+        ramflux_protocol::message::dm_scope::validate_group(required(body, "conversation_id")?)
+            .map_err(|_| SdkError::InboundRejected("reserved DM conversation namespace".into()))?;
         let group = required(body, "group_id")?;
         let resolved = super::super::group_conversation::resolve(
             &account.client,

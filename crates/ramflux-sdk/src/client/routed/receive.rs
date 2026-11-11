@@ -640,6 +640,18 @@ impl RamfluxClient {
         route: &Routing,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
+        if matches!(route.kind, Kind::GroupMessage | Kind::GroupControl) {
+            ramflux_protocol::message::dm_scope::validate_group(&route.conversation_id)
+                .map_err(|_| invalid("group uses reserved DM namespace"))?;
+        } else if route.kind == Kind::Direct && route.conversation_id.starts_with("dm:") {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            ramflux_protocol::message::dm_scope::validate_direct(
+                &route.conversation_id,
+                &self.own_account_anchor()?,
+                source.root_commitment(),
+            )
+            .map_err(|_| invalid("reserved DM root pair mismatch"))?;
+        }
         let context = self.account_db()?.client_record("conversation", &route.conversation_id)?;
         if route.kind == Kind::Direct
             && context.is_none()

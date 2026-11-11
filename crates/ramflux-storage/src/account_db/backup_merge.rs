@@ -105,6 +105,68 @@ impl BackupDatabase {
     pub fn check_backup_pins(&self, path: &Path, key: &AccountDbKey) -> Result<(), StorageError> {
         self.attach(path, key)?;
         let result = (|| {
+            let own_root: String = self.db.query_row(
+                "SELECT principal_commitment FROM runtime_account_identity WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )?;
+            // Both branches must already respect the reserved namespace before merge effects.
+            for database in ["main", "incoming"] {
+                let sql = format!(
+                    "SELECT substr(state_kind,length('directory/conversation/')+1),state_json FROM {database}.runtime_actor_state WHERE state_kind LIKE 'directory/conversation/dm:%'"
+                );
+                let mut statement = self.db.prepare(&sql)?;
+                let records = statement.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?;
+                for record in records {
+                    let (conversation, bytes) = record?;
+                    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+                    let roots = value["participant_roots"]
+                        .as_array()
+                        .ok_or(StorageError::AuthorizationRejected)?;
+                    if value["kind"] != "direct" || !value["group_id"].is_null() || roots.len() != 2
+                    {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    let first = roots[0].as_str().ok_or(StorageError::AuthorizationRejected)?;
+                    let second = roots[1].as_str().ok_or(StorageError::AuthorizationRejected)?;
+                    if first != own_root && second != own_root {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    ramflux_protocol::message::dm_scope::validate_direct(
+                        &conversation,
+                        first,
+                        second,
+                    )
+                    .map_err(|_| StorageError::AuthorizationRejected)?;
+                    let existing: Option<Vec<u8>> = self
+                        .db
+                        .query_row(
+                            "SELECT state_json FROM main.runtime_actor_state WHERE state_kind=?1",
+                            [format!("directory/conversation/{conversation}")],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if let Some(existing) = existing {
+                        let old: serde_json::Value = serde_json::from_slice(&existing)?;
+                        let old_roots = old["participant_roots"]
+                            .as_array()
+                            .ok_or(StorageError::AuthorizationRejected)?;
+                        if old["kind"] != "direct"
+                            || !old["group_id"].is_null()
+                            || old_roots.len() != 2
+                            || old_roots
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<std::collections::BTreeSet<_>>()
+                                != std::collections::BTreeSet::from([first, second])
+                        {
+                            return Err(StorageError::AuthorizationRejected);
+                        }
+                    }
+                }
+            }
             let roots:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_actor_state l JOIN incoming.runtime_actor_state r USING(state_kind) WHERE l.state_kind LIKE 'directory/identity/%' AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment') IS NOT NULL AND json_extract(CAST(l.state_json AS TEXT),'$.contact_identity_commitment')<>json_extract(CAST(r.state_json AS TEXT),'$.contact_identity_commitment'))",[],|row|row.get(0))?;
             let pins:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM group_member_device_key l JOIN incoming.group_member_device_key r USING(group_id,member_id) WHERE l.device_signing_public_key<>r.device_signing_public_key)",[],|row|row.get(0))?;
             let links:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM friend_link_projection l JOIN incoming.friend_link_projection r USING(link_id) WHERE l.requester_id<>r.requester_id OR l.target_id<>r.target_id)",[],|row|row.get(0))?;

@@ -36,11 +36,21 @@ fn typing_envelope_active(
     ttl: u32,
     active: bool,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    typing_envelope_at(a, b, id, ttl, active, 100)
+}
+fn typing_envelope_at(
+    a: &Fixture,
+    b: &Fixture,
+    id: &str,
+    ttl: u32,
+    active: bool,
+    created: i64,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
     let mut config = a.config()?;
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
     let mut draft = message(id, "c");
-    draft.created_at = 100;
+    draft.created_at = created;
     draft.ttl = ttl;
     draft.recipient_device_id = Some(b.id.clone());
     draft.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
@@ -135,7 +145,7 @@ async fn typing_is_generated_transient_content_not_plaintext_kind() -> Result<()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn typing_cannot_exhaust_skipped_keys_or_bootstrap() -> Result<(), SdkError> {
+async fn typing_budget_survives_interleaved_durable_sends_and_restart() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (mut a, mut b) = pair(181, 183)?;
     friend(&mut a, &b)?;
@@ -196,5 +206,58 @@ async fn typing_cannot_exhaust_skipped_keys_or_bootstrap() -> Result<(), SdkErro
         seal(&a, &b, message("latest-durable", "c"), b"latest durable still decrypts")?;
     apply(&mut b, &final_message).await?;
     assert_eq!(a.client.account_db()?.load_actor_state::<u16>(&budget_key)?, Some(256));
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn future_typing_clear_cannot_remove_visible_indicator_before_signed_start()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = Box::pin(prepared_pair()).await?;
+    let active = typing_envelope_at(&a, &b, "visible", 5, true, 100)?;
+    let clear = typing_envelope_at(&a, &b, "future-clear", 1, false, 101)?;
+    let mut receiver = TypingReceiver::default();
+    let start = Instant::now();
+    assert_eq!(
+        receiver.receive(&b.client, &active, &b.id, 100_000, start)?,
+        TypingOutcome::Visible
+    );
+    assert!(receiver.drain_updates().first().is_some_and(|u| u.typing.active));
+    assert_eq!(receiver.receive(&b.client, &clear, &b.id, 100_001, start)?, TypingOutcome::Held);
+    assert!(receiver.drain_updates().is_empty());
+    receiver.poll(100_999, start + Duration::from_millis(998));
+    assert!(receiver.drain_updates().is_empty());
+    receiver.poll(101_000, start + Duration::from_millis(999));
+    let updates = receiver.drain_updates();
+    assert_eq!(updates.len(), 1);
+    assert!(!updates[0].typing.active);
+    receiver.poll(105_000, start + Duration::from_secs(5));
+    assert!(receiver.drain_updates().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn typing_failed_commit_exposes_no_ciphertext_and_rolls_back_ratchet_and_allowance()
+-> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = Box::pin(prepared_pair()).await?;
+    let source = a.client.owned_device_identity()?;
+    let remote = b.client.owned_device_identity()?;
+    let (session, _, _) =
+        a.client.sendable_pair(&source, &remote)?.ok_or_else(|| invalid("pair"))?;
+    let key = format!("dm-pair/ephemeral-seals/{}", session.session_id);
+    let db = a.client.account_db()?;
+    let before = a.client.persisted_pair_snapshot(&source, &remote)?;
+    let count = db.load_actor_state::<u16>(&key)?;
+    let (result, commits) =
+        db.reject_next_sqlite_commit(|| typing_envelope(&a, &b, "commit-refused", 5))?;
+    assert_eq!(commits, 1, "must reach real SQLite commit");
+    assert!(result.is_err(), "ciphertext escaped failed commit");
+    assert_eq!(a.client.persisted_pair_snapshot(&source, &remote)?, before);
+    assert_eq!(db.load_actor_state::<u16>(&key)?, count);
+    let envelope = typing_envelope(&a, &b, "after-rollback", 5)?;
+    let (_, typing) = b.client.open_typing_delivery(&envelope, &b.id)?;
+    assert!(typing.active);
+    assert_eq!(db.load_actor_state::<u16>(&key)?, Some(count.unwrap_or(0) + 1));
     Ok(())
 }

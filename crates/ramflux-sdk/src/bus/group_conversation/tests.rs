@@ -257,3 +257,65 @@ async fn native_group_link_open_isolates_corrupt_groups_and_keeps_command_errors
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn group_scope_reservation_precedes_repair_and_context_import() -> TestResult {
+    let owner = Fixture::new("dm-group-reservation").await?;
+    let db = owner.client.account_db()?;
+    let marker = json!({"conversation_id":"original", "custom":"preserve"});
+    db.persist_client_record("group", "group", &marker)?;
+    for reserved in ["dm:", "dm:malformed"] {
+        assert!(repair_link(db, "group", reserved).is_err());
+        assert!(resolve(&owner.client, "group", reserved).is_err());
+        assert!(owner.client.merge_routed_group_link("group", reserved).is_err());
+        assert_eq!(db.client_record("group", "group")?, Some(marker.clone()));
+        assert!(db.client_record("conversation", reserved)?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn own_context_import_cannot_rebind_reserved_dm_or_install_reserved_group() -> TestResult {
+    let owner = Fixture::new("dm-own-import").await?;
+    let own = owner.client.own_account_anchor()?;
+    let peer = ramflux_protocol::encode_base64url([99; 32]);
+    let scope = ramflux_protocol::message::dm_scope::derive(&own, &peer)?;
+    let principal = owner.client.device_branch.as_ref().ok_or("branch")?.principal_id.clone();
+    let context = crate::client::surface::OwnContext {
+        conversation_id: scope.clone(),
+        participants: vec![principal.clone(), "peer".into()],
+        group: None,
+        friend: None,
+    };
+    let db = owner.client.account_db()?;
+    for roots in [
+        Value::Null,
+        json!("malformed"),
+        json!([own, ramflux_protocol::encode_base64url([100; 32])]),
+    ] {
+        let record = json!({"kind":"direct","group_id":null,"participants":context.participants,"participant_roots":roots});
+        db.persist_client_record("conversation", &scope, &record)?;
+        assert!(owner.client.import_surface_context(&context, &owner.config.device_id).is_err());
+        assert_eq!(db.client_record("conversation", &scope)?, Some(record));
+    }
+    let bound = json!({"kind":"direct","group_id":null,"participants":context.participants,"participant_roots":[own,peer]});
+    db.persist_client_record("conversation", &scope, &bound)?;
+    owner.client.import_surface_context(&context, &owner.config.device_id)?;
+    assert_eq!(db.client_record("conversation", &scope)?, Some(bound));
+    create_group(&owner, "source-group", "source-thread")?;
+    let mut group = owner
+        .client
+        .own_device_group_snapshot("source-group", &owner.config.device_id)?
+        .ok_or("snapshot")?;
+    group.group_id = "must-not-install".into();
+    let group_context = crate::client::surface::OwnContext {
+        conversation_id: "dm:malformed".into(),
+        participants: Vec::new(),
+        group: Some(group),
+        friend: None,
+    };
+    assert!(owner.client.import_surface_context(&group_context, &owner.config.device_id).is_err());
+    assert!(db.group_snapshot_epoch("must-not-install")?.is_none());
+    assert!(db.client_record("conversation", "dm:malformed")?.is_none());
+    Ok(())
+}

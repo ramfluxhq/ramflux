@@ -40,6 +40,8 @@ impl RamfluxClient {
         group: &str,
         conversation: &str,
     ) -> Result<(), SdkError> {
+        ramflux_protocol::message::dm_scope::validate_group(conversation)
+            .map_err(|_| invalid("reserved DM conversation namespace"))?;
         let db = self.account_db()?;
         let mut record = db.client_record("group", group)?.unwrap_or_else(|| json!({}));
         let mut links = record
