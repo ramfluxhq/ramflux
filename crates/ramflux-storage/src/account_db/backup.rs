@@ -33,6 +33,7 @@ pub struct AccountBackupSnapshot {
 /// Neither its source key nor the eventual database file belongs on the pairing wire.
 pub struct FullTransferCut {
     reader: AccountDb,
+    unlocked_owner: crate::database::WeakConnection,
 }
 impl FullTransferCut {
     /// Copy the previously pinned view to A-private encrypted storage in bounded page batches.
@@ -44,17 +45,28 @@ impl FullTransferCut {
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<AccountBackupSnapshot, StorageError> {
         self.reader.require_selected_transfer_source()?;
-        let copied =
-            self.reader.write_snapshot(destination, cancel, SnapshotPolicy::NativeFullTransfer)?;
+        self.require_unlocked_owner()?;
+        let copied = self.reader.write_snapshot(
+            destination,
+            cancel,
+            SnapshotPolicy::NativeFullTransfer(self.unlocked_owner.clone()),
+        )?;
         self.reader.require_selected_transfer_source()?;
+        self.require_unlocked_owner()?;
         Ok(copied)
+    }
+    fn require_unlocked_owner(&self) -> Result<(), StorageError> {
+        if self.unlocked_owner.upgrade_account_writer().is_none() {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        Ok(())
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 enum SnapshotPolicy {
     Backup,
-    NativeFullTransfer,
+    NativeFullTransfer(crate::database::WeakConnection),
 }
 
 impl AccountDb {
@@ -134,12 +146,16 @@ impl AccountDb {
     /// Refuses stale account generations and encrypted read transaction failures.
     pub fn pin_full_transfer_cut(&self) -> Result<FullTransferCut, StorageError> {
         self.require_selected_transfer_source()?;
-        let cut = FullTransferCut { reader: self.open_backup_reader()? };
+        let unlocked_owner = self.connection.downgrade();
+        if unlocked_owner.upgrade_account_writer().is_none() {
+            return Err(StorageError::AuthorizationRejected);
+        }
+        let cut = FullTransferCut { reader: self.open_backup_reader()?, unlocked_owner };
         cut.reader.require_selected_transfer_source()?;
         Ok(cut)
     }
 
-    fn require_selected_transfer_source(&self) -> Result<(), StorageError> {
+    pub(super) fn require_selected_transfer_source(&self) -> Result<(), StorageError> {
         let selected = match self.account_index.account(&self.local_account_id) {
             Err(StorageError::AccountNotFound(_)) => {
                 return Err(StorageError::PairingField("SnapshotInvalidated"));
@@ -191,7 +207,8 @@ impl AccountDb {
             {
                 let snapshot = rusqlite::backup::Backup::new(source, &mut target)?;
                 loop {
-                    if cancel.load(std::sync::atomic::Ordering::Acquire){return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),None));}
+                    if cancel.load(std::sync::atomic::Ordering::Acquire)
+                        || matches!(&policy, SnapshotPolicy::NativeFullTransfer(owner) if owner.upgrade_account_writer().is_none()) {return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),None));}
                     match snapshot.step(128)? {
                         rusqlite::backup::StepResult::Done => break,
                         rusqlite::backup::StepResult::More => {
@@ -207,7 +224,7 @@ impl AccountDb {
                 }
             }
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
-            if policy == SnapshotPolicy::NativeFullTransfer {
+            if matches!(policy, SnapshotPolicy::NativeFullTransfer(_)) {
                 if let Err(error) = super::backup_native::full_transfer_snapshot_preflight(&target) {
                     return Ok(Err(error));
                 }

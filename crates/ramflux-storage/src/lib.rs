@@ -82,6 +82,9 @@ mod schema_receipt_identity;
 mod sqlite_work;
 
 pub use account_db::AccountDb;
+pub use account_db::full_transfer::{
+    EncryptedStageChunk, FullStageKey, FullTransferStage, StageDirection, WrappedFullStageKey,
+};
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{
     InboxFailurePolicy, InboxFailureSource, JournalBounds, JournalEvent,
@@ -95,6 +98,7 @@ pub use account_db::object_retention::{
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
 };
 pub use account_db::pairing::admission::PairingAdmissionReader;
+pub use account_db::pairing::full_reference::{FULL_STAGE_REFERENCE_KIND, FullStageReference};
 pub use account_db::pairing::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 pub use account_db::raw_inner::{
     KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,

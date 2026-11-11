@@ -225,7 +225,9 @@ impl Connection {
     }
 
     pub(crate) fn execute_batch(&self, sql: &str) -> Result<()> {
-        let sql = sql.to_owned();
+        // PRAGMA key/rekey statements contain key material. The queued worker copy
+        // must erase it too, rather than outliving the caller's Zeroizing buffer.
+        let sql = zeroize::Zeroizing::new(sql.to_owned());
         #[cfg(any(test, feature = "durability-test-hooks"))]
         let path = self.inner.path.clone();
         self.call(move |db| {

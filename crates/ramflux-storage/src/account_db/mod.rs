@@ -43,6 +43,7 @@ pub mod device_directory;
 mod device_metadata;
 mod event_counter;
 pub mod friend;
+pub(crate) mod full_transfer;
 mod group_device_address;
 mod group_key_safety;
 pub mod group_pending;

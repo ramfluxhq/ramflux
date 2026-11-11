@@ -15,6 +15,7 @@ use ramflux_protocol::{
 };
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 
 const PHASES: [&str; 14] = [
     "invited",
@@ -235,7 +236,26 @@ impl LiveRow {
         require(envelope.body.invitation_id == self.invitation_id, "invitation_id")?;
         require(envelope.body.issuer_seq == self.issuer_seq, "issuer_seq")?;
         if let Some(bytes) = &self.context {
-            decode_context(bytes)?;
+            if let Some(reference) = super::full_reference::decode_reference(bytes)? {
+                require(
+                    envelope.body.purpose == "primary_transfer"
+                        && envelope.body.data_selection.is_empty()
+                        && envelope.body.transfer_id.as_deref()
+                            == Some(reference.stage_id.as_str())
+                        && reference.lease_expires_at.0 == self.expires_at
+                        && !matches!(
+                            self.phase.as_str(),
+                            "invited" | "commitments" | "revealed" | "sas_pending"
+                        ),
+                    "full_stage_ref",
+                )?;
+            } else {
+                decode_context(
+                    bytes,
+                    &envelope.body,
+                    self.transcript_hash.as_deref().ok_or(field("transcript_hash"))?,
+                )?;
+            }
         }
         if let Some(bytes) = &self.result {
             decode_failure(bytes)?;
@@ -532,8 +552,66 @@ fn decode_descriptor(bytes: &[u8]) -> Result<Envelope<Invitation>, StorageError>
     Ok(envelope)
 }
 
-fn decode_context(bytes: &[u8]) -> Result<LiveContext, StorageError> {
+fn decode_context(
+    bytes: &[u8],
+    invitation: &Invitation,
+    expected_th: &str,
+) -> Result<(), StorageError> {
+    #[derive(Deserialize)]
+    struct RoleHeader {
+        schema: String,
+    }
+    #[derive(Deserialize)]
+    struct Header {
+        initiator: RoleHeader,
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FullContext {
+        initiator: ramflux_protocol::custody::pairing::context_v3::RoleContextV3,
+        responder: ramflux_protocol::custody::pairing::context_v3::RoleContextV3,
+    }
     bounded(bytes, 57_344, "context")?;
+    let header: Header = parse_i_json(bytes).map_err(|_| field("context"))?;
+    if header.initiator.schema == "ramflux.pairing.RoleContext.v3" {
+        let context: FullContext = parse_i_json(bytes).map_err(|_| field("context"))?;
+        let canonical = canonical_json_bytes(&context).map_err(|_| field("json"))?;
+        let transcript = ramflux_protocol::custody::pairing::context_v3::TranscriptV3 {
+            schema: "ramflux.pairing.Transcript.v3".into(),
+            version: 3,
+            initiator: context.initiator,
+            responder: context.responder,
+        };
+        transcript.validate().map_err(|error| map_wire(&error))?;
+        let common = &transcript.initiator.common;
+        require(
+            invitation.purpose == "primary_transfer"
+                && invitation.data_selection.is_empty()
+                && common.invitation_id == invitation.invitation_id
+                && common.issuer_seq == invitation.issuer_seq
+                && common.account_anchor == invitation.account_anchor
+                && common.record_hash == invitation.base_record_hash
+                && common.device_set_epoch == invitation.base_epoch
+                && common.recipient_mode == invitation.recipient_mode
+                && common.destination_ref == invitation.destination_ref
+                && common.capabilities == invitation.capabilities
+                && common.lease_not_before == invitation.lease_not_before
+                && common.lease_expires_at == invitation.lease_expires_at
+                && common.expires_at == invitation.expires_at
+                && common.transfer_id == invitation.transfer_id
+                && transcript.initiator.device_ref == invitation.primary_ref,
+            "context",
+        )?;
+        let preimage =
+            ramflux_protocol::custody::pairing::context_v3::transcript_preimage(&transcript)
+                .map_err(|error| map_wire(&error))?;
+        require(
+            encode_base64url(sha2::Sha256::digest(&preimage)) == expected_th,
+            "transcript_hash",
+        )?;
+        require(canonical == bytes, "noncanonical")?;
+        return Ok(());
+    }
     let context: LiveContext = parse_i_json(bytes).map_err(|_| field("context"))?;
     context.initiator.validate().map_err(|error| map_wire(&error))?;
     context.responder.validate().map_err(|error| map_wire(&error))?;
@@ -542,7 +620,7 @@ fn decode_context(bytes: &[u8]) -> Result<LiveContext, StorageError> {
     if canonical_json_bytes(&context).map_err(|_| field("json"))? != bytes {
         return Err(field("noncanonical"));
     }
-    Ok(context)
+    Ok(())
 }
 
 fn decode_failure(bytes: &[u8]) -> Result<Failure, StorageError> {

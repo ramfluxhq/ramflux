@@ -5,7 +5,9 @@
 mod cleanup;
 mod full_authority;
 mod full_resume;
-pub use full_resume::{FullResumeAttempt, FullResumeKeyOwner, FullResumeTrust, VerifiedFullResume};
+pub use full_resume::{
+    FullResumeAttempt, FullResumeKeyOwner, FullResumeRecord, FullResumeTrust, VerifiedFullResume,
+};
 mod full_channel;
 pub use full_authority::{
     verify_full_data_lease, verify_full_grant_offer, verify_full_j3_lease_margin,

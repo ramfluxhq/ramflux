@@ -191,6 +191,28 @@ mod tests {
     }
 
     #[test]
+    fn full_transfer_cut_cannot_copy_after_original_unlock_owner_closes() -> TestResult {
+        let (root, source) = crate::tests::test_db("full-transfer-locked-cut")?;
+        let cut = source.pin_full_transfer_cut()?;
+        let historical = source.open_reader()?;
+        drop(source);
+        assert!(matches!(
+            historical.pin_full_transfer_cut(),
+            Err(StorageError::AuthorizationRejected)
+        ));
+        let destination = root.join("refused-locked-cut.db");
+        assert!(matches!(
+            cut.write_private_snapshot(
+                &destination,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+            ),
+            Err(StorageError::AuthorizationRejected)
+        ));
+        assert!(!destination.exists(), "lock must refuse before creating a new snapshot");
+        Ok(())
+    }
+
+    #[test]
     fn full_transfer_cut_account_erase_invalidates_without_copying_old_generation() -> TestResult {
         let (root, source) = crate::tests::test_db("full-transfer-erased-cut")?;
         let cut = source.pin_full_transfer_cut()?;
