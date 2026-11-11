@@ -427,7 +427,8 @@ async fn connect_attempt(
         result=timeout_at(deadline,async {
             prepared?;
             let prepared_config=prepare(handle,config.clone(),deadline).await?;
-            let connected=connector.connect(prepared_config,deadline).await?;
+            let mut connected=connector.connect(prepared_config,deadline).await?;
+            reconcile_receive_epoch(handle, &mut connected).await?;
             install(handle,SessionMetadata {config:connected.config.clone(),session:connected.session().clone(),mode:connected.mode.clone(),generation:handle.generation()}).await?;
             Ok(connected)
         })=>match result {
@@ -477,6 +478,49 @@ fn announce_live(
     });
     handle.shared.receive_wake.notify_one();
     session
+}
+
+// Before announcing Live, reconcile the durable epoch through the actor. The worker
+// owns wire I/O; only the account actor reads and resets the account DB.
+async fn reconcile_receive_epoch(
+    handle: &ConnectionHandle,
+    engine: &mut GatewaySessionEngine,
+) -> Result<(), SdkError> {
+    let Some(incarnation) = engine.mode.push_incarnation().map(str::to_owned) else {
+        return Ok(());
+    };
+    let Some(work) = &handle.shared.account_work else {
+        return Ok(());
+    };
+    let generation = handle.generation();
+    let (reply, response) = tokio::sync::oneshot::channel();
+    work.send(super::AccountWork::PrepareReceiveEpoch {
+        generation,
+        incarnation: incarnation.clone(),
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
+    let Some(turn) = response.await.map_err(|_| handle.pending())?? else {
+        return Ok(());
+    };
+    let page = match engine.resume_page(0, 64).await? {
+        crate::gateway::push_resume::PageReply::Page(page) => page,
+        crate::gateway::push_resume::PageReply::Refused(reason) => {
+            return Err(SdkError::GatewaySessionRejected(reason.as_str().into()));
+        }
+    };
+    let (reply, response) = tokio::sync::oneshot::channel();
+    work.send(super::AccountWork::ResetReceiveEpoch {
+        generation,
+        turn: Box::new(turn),
+        incarnation,
+        page,
+        reply,
+    })
+    .await
+    .map_err(|_| handle.pending())?;
+    response.await.map_err(|_| handle.pending())?
 }
 
 #[cfg(test)]

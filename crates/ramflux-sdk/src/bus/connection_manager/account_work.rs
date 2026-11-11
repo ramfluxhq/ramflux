@@ -80,6 +80,18 @@ pub(crate) enum AccountWork {
     OwnCopy(Box<crate::bus::own_device_copy::OwnCopyWork>),
     Receipts(Box<crate::bus::delivery_receipts::ReceiptWork>),
     Directory(Box<crate::bus::couriers::directory::DirectoryWork>),
+    PrepareReceiveEpoch {
+        generation: u64,
+        incarnation: String,
+        reply: oneshot::Sender<Result<Option<ReceiveTurn>, SdkError>>,
+    },
+    ResetReceiveEpoch {
+        generation: u64,
+        turn: Box<ReceiveTurn>,
+        incarnation: String,
+        page: Box<crate::gateway::push_resume::ResumePage>,
+        reply: oneshot::Sender<Result<(), SdkError>>,
+    },
     PrepareReceive {
         generation: u64,
         trigger: super::ReceiveTrigger,

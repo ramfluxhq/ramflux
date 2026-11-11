@@ -102,6 +102,31 @@ impl AccountDb {
         self.activate_receive_ledger(input).map(Some)
     }
 
+    /// First activation into a proofless Compat namespace. The verification bit shares
+    /// the activation commit; an existing epoch is never relabeled.
+    ///
+    /// # Errors
+    /// Returns activation or SQL errors.
+    pub fn first_activate_unverified_if_default(
+        &self,
+        input: ReceiveMigrate<'_>,
+    ) -> Result<Option<ReceiveMigrateResult>, StorageError> {
+        if !FIRST_ACTIVATION_DEFAULT {
+            return Ok(None);
+        }
+        self.write_transaction(|| {
+            let inactive = self.receive_activation()? == ReceiveActivation::Inactive;
+            let result = self.activate_receive_ledger_in(input)?;
+            if inactive {
+                self.connection.execute(
+                    "UPDATE gateway_receive_epoch SET incarnation_verified=0 WHERE target_delivery_id=?1",
+                    rusqlite::params![input.target],
+                )?;
+            }
+            Ok(Some(result))
+        })
+    }
+
     /// Atomically commits schema/migration/import and the discriminator in one outer transaction.
     ///
     /// # Errors

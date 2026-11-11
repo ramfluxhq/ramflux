@@ -299,12 +299,110 @@ impl RamfluxClient {
             &mut config,
             self.account_db()?.receive_activation()?,
         );
-        let engine = GatewaySessionEngine::connect(config).await?;
+        let mut engine = GatewaySessionEngine::connect(config).await?;
         self.first_activate_receive_ledger(
             &engine.config.target_delivery_id,
             engine.mode.push_incarnation(),
         )?;
+        if let Some(incarnation) = engine.mode.push_incarnation().map(str::to_owned)
+            && let Some(turn) =
+                self.prepare_receive_epoch(&engine.config.target_delivery_id, &incarnation, 0)?
+        {
+            let page = match engine.resume_page(0, 64).await? {
+                crate::gateway::push_resume::PageReply::Page(page) => page,
+                crate::gateway::push_resume::PageReply::Refused(reason) => {
+                    return Err(SdkError::GatewaySessionRejected(reason.as_str().into()));
+                }
+            };
+            self.reset_receive_epoch(&turn, &incarnation, &page, 0)?;
+        }
         Ok(engine)
+    }
+
+    /// Snapshot the old namespace before fetching the new epoch's first page.
+    pub(crate) fn prepare_receive_epoch(
+        &self,
+        target: &str,
+        incarnation: &str,
+        generation: u64,
+    ) -> Result<Option<crate::bus::connection_manager::ReceiveTurn>, SdkError> {
+        let db = self.account_db()?;
+        if db.receive_activation()? != ramflux_storage::ReceiveActivation::Activated {
+            return Ok(None);
+        }
+        let old = db
+            .receive_epoch(target)?
+            .ok_or(ramflux_storage::StorageError::Integrity(ramflux_storage::MISSING_EPOCH))?;
+        if old == incarnation {
+            return Ok(None);
+        }
+        Ok(Some(crate::bus::connection_manager::ReceiveTurn {
+            target: target.into(),
+            incarnation: old,
+            cursor: self.gateway_receive_cursor(target)?,
+            generation,
+            erasure_generation: db.privacy_erasure_generation()?,
+            compat: false,
+        }))
+    }
+
+    /// Settle the new namespace through its validated first-page S. Old work remains
+    /// local-only; storage retires old E and removes its ACK intents atomically.
+    pub(crate) fn reset_receive_epoch(
+        &self,
+        turn: &crate::bus::connection_manager::ReceiveTurn,
+        incarnation: &str,
+        page: &crate::gateway::push_resume::ResumePage,
+        generation: u64,
+    ) -> Result<(), SdkError> {
+        use crate::bus::push_receiver::apply::{self, ApplyLoss, ApplyPage};
+        let seqs: Vec<_> = page.entries.iter().map(|row| row.entry.inbox_seq).collect();
+        let losses: Vec<_> = page
+            .known_losses
+            .iter()
+            .map(|loss| ApplyLoss {
+                from_seq: loss.from_seq,
+                to_seq: loss.to_seq,
+                reason: loss.reason.as_str(),
+            })
+            .collect();
+        apply::validate_page(&ApplyPage {
+            target: &turn.target,
+            incarnation,
+            after: page.after_inbox_seq,
+            covered: page.covered_through_seq,
+            issued: page.issued_inbox_seq,
+            settled: page.settled_through_seq,
+            entries: &seqs,
+            known_losses: &losses,
+            oversize_next: page.oversize_next,
+            more: page.more,
+        })
+        .map_err(|error| match error {
+            apply::ApplyError::Protocol(text) => SdkError::InboundRejected(text.into()),
+            apply::ApplyError::Storage(error) => error.into(),
+        })?;
+        let db = self.account_db()?;
+        db.publish_pending_receive_loss(
+            &turn.target,
+            &turn.incarnation,
+            crate::time::now_unix_timestamp(),
+        )?;
+        let result = db.receive_transaction(turn.expected(), generation, |tx| {
+            tx.reset(ramflux_storage::ReceiveReset {
+                new_incarnation: incarnation,
+                settled: page.settled_through_seq,
+                issued: page.issued_inbox_seq,
+                after: page.after_inbox_seq,
+                reason: ramflux_storage::ReceiveResetReason::RouterReset,
+            })
+        })?;
+        if result != ramflux_storage::ReceiveResetResult::Reset {
+            return Err(SdkError::InboundRejected(format!(
+                "receive epoch reset paused: {result:?}"
+            )));
+        }
+        Ok(())
     }
 
     /// Bind schema, import and the discriminator to the first verified node incarnation
@@ -335,8 +433,12 @@ impl RamfluxClient {
             };
             owned.as_str()
         };
-        let _ =
-            db.first_activate_if_default(ramflux_storage::ReceiveMigrate { target, incarnation })?;
+        let input = ramflux_storage::ReceiveMigrate { target, incarnation };
+        let _ = if verified_incarnation.is_some() {
+            db.first_activate_if_default(input)?
+        } else {
+            db.first_activate_unverified_if_default(input)?
+        };
         Ok(())
     }
 

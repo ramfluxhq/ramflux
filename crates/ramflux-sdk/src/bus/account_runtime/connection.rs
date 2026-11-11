@@ -178,7 +178,9 @@ impl AccountRuntime {
                 }
             }
             AccountWork::Directory(work) => self.apply_directory_work(*work)?,
-            AccountWork::PrepareReceive { .. }
+            AccountWork::PrepareReceiveEpoch { .. }
+            | AccountWork::ResetReceiveEpoch { .. }
+            | AccountWork::PrepareReceive { .. }
             | AccountWork::ApplyPage { .. }
             | AccountWork::SettleRetained { .. }
             | AccountWork::ReceiveObservation { .. }
@@ -282,6 +284,27 @@ impl AccountRuntime {
             return Ok(false);
         };
         match work {
+            AccountWork::PrepareReceiveEpoch { generation, incarnation, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return Ok(false);
+                }
+                let _ = reply.send(account.client.prepare_receive_epoch(
+                    &account.target_delivery_id,
+                    &incarnation,
+                    generation,
+                ));
+            }
+            AccountWork::ResetReceiveEpoch { generation, turn, incarnation, page, reply } => {
+                if generation != handle.generation() || reply.is_closed() {
+                    return Ok(false);
+                }
+                let _ = reply.send(account.client.reset_receive_epoch(
+                    &turn,
+                    &incarnation,
+                    &page,
+                    handle.generation(),
+                ));
+            }
             AccountWork::PrepareReceive { generation, trigger, reply } => {
                 if generation != handle.generation() || reply.is_closed() {
                     return Ok(false);

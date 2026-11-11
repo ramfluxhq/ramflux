@@ -107,6 +107,7 @@ fn push_established() -> Vec<u8> {
 }
 
 struct Scripted {
+    settled: u64,
     establishment: Mutex<Option<Vec<u8>>>,
 }
 
@@ -115,7 +116,7 @@ impl TransportOpener for Scripted {
         let establishment = self.establishment.lock().expect("script").take();
         Box::pin(async move {
             let gateway: Box<dyn ramflux_transport::GatewaySessionTransport + Send> =
-                Box::new(Established { establishment });
+                Box::new(Established { establishment, settled: self.settled });
             Ok((
                 crate::gateway::engine::GatewaySessionClientTransport::Injected,
                 gateway,
@@ -126,11 +127,22 @@ impl TransportOpener for Scripted {
 }
 
 struct Established {
+    settled: u64,
     establishment: Option<Vec<u8>>,
 }
 
 impl GatewaySessionFrameSink for Established {
-    fn send_frame<'a>(&'a mut self, _: &'a [u8]) -> FrameFuture<'a, ()> {
+    fn send_frame<'a>(&'a mut self, bytes: &'a [u8]) -> FrameFuture<'a, ()> {
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes)
+            && value["frame_type"] == "resume"
+        {
+            self.establishment = Some(serde_json::to_vec(&serde_json::json!({
+                "frame_type": "resume_page", "target_delivery_id": value["resume"]["target_delivery_id"],
+                "incarnation_id": INCARNATION, "after_inbox_seq": 0,
+                "covered_through_seq": self.settled, "issued_inbox_seq": self.settled, "settled_through_seq": self.settled,
+                "entries": [], "known_losses": [], "oversize_next": null, "more": false,
+            })).expect("first page"));
+        }
         Box::pin(async { Ok(()) })
     }
     fn finish(&mut self) -> Result<(), TransportError> {
@@ -149,12 +161,21 @@ impl GatewaySessionFrameSource for Established {
 
 async fn connect_scripted(
     client: &RamfluxClient,
+    config: GatewaySessionConfig,
+    established: Vec<u8>,
+) -> Result<GatewaySessionEngine, SdkError> {
+    connect_scripted_settled(client, config, established, 0).await
+}
+
+async fn connect_scripted_settled(
+    client: &RamfluxClient,
     mut config: GatewaySessionConfig,
     established: Vec<u8>,
+    settled: u64,
 ) -> Result<GatewaySessionEngine, SdkError> {
     config.custody = None;
     let opener: Arc<dyn TransportOpener> =
-        Arc::new(Scripted { establishment: Mutex::new(Some(established)) });
+        Arc::new(Scripted { settled, establishment: Mutex::new(Some(established)) });
     TEST_CONNECT_OPENER.scope(opener, client.connect_gateway_session(config)).await
 }
 
@@ -434,5 +455,122 @@ async fn standalone_receive_refuses_while_actor_bound() -> TestResult {
         crate::bus::push_receiver::executor::LedgerExecutor::last_bound_owner(),
         Some(crate::bus::push_receiver::executor::ExecutorOwner::Actor)
     );
+    Ok(())
+}
+
+/// Compat cursor/work/intents survive a Push bind through the fenced reset rules.
+#[tokio::test]
+async fn compat_then_push_keeps_receive_live() -> TestResult {
+    use ramflux_storage::ReceiveExpectation;
+    let fixture = Fixture::new("compat-then-push").await?;
+    let target = fixture.config.target_delivery_id.clone();
+    let mut account = LocalBusAccountState::disconnected(
+        fixture.client,
+        fixture.config.clone(),
+        fixture.manifest.principal_commitment.clone(),
+    );
+    let compat =
+        connect_scripted(&account.client, account.connection_config()?, legacy_established())
+            .await?;
+    // Explicit activation also exercises this row on the default-off predecessor.
+    if account.client.account_db()?.receive_activation()? == ReceiveActivation::Inactive {
+        let _ = account.client.account_db()?.activate_receive_ledger(ReceiveMigrate {
+            target: &target,
+            incarnation: "local-compat",
+        })?;
+    }
+    account.install_test_session(compat);
+    let old = account.client.account_db()?.receive_epoch(&target)?.ok_or("old epoch")?;
+    let db = account.client.account_db()?;
+    let erasure = db.privacy_erasure_generation()?;
+    seed_compat_pending(&account, &target, &old)?;
+    let push = connect_scripted_settled(
+        &account.client,
+        account.connection_config()?,
+        push_established(),
+        2,
+    )
+    .await?;
+    assert_eq!(account.client.account_db()?.receive_epoch(&target)?.as_deref(), Some(INCARNATION));
+    assert_eq!(
+        account.client.gateway_receive_cursor(&target)?,
+        2,
+        "first-page settled prefix owns C"
+    );
+    account.install_test_session(push);
+    let db = account.client.account_db()?;
+    let snap = db.receive_ledger_snap_for_test(&target)?;
+    assert!(snap.intents.is_empty(), "old ACK intents cannot cross epochs");
+    assert_eq!(snap.work, 1, "held old work remains available for local recovery");
+    assert_eq!(db.receive_state_for_test(1)?.0, None, "terminal Compat work is released");
+    let mut next = entry(&target);
+    next.inbox_seq = 3;
+    next.envelope.envelope_id = "next-env".into();
+    let _ = crate::bus::push_receiver::intake::stage_on_actor(
+        &account,
+        1,
+        &next,
+        INCARNATION,
+        1_700_000_000,
+    )?;
+    assert!(
+        crate::bus::push_receiver::intake::stage_on_actor(&account, 1, &next, &old, 1_700_000_000)
+            .is_err(),
+        "old E cannot accept new intake"
+    );
+    assert!(
+        db.receive_transaction(
+            ReceiveExpectation {
+                target: &target,
+                incarnation: &old,
+                cursor: 2,
+                generation: 1,
+                erasure_generation: erasure
+            },
+            1,
+            |tx| tx.require_open_input(2)
+        )
+        .is_ok(),
+        "retired E permits local recovery"
+    );
+    Ok(())
+}
+
+fn seed_compat_pending(account: &LocalBusAccountState, target: &str, old: &str) -> TestResult {
+    use ramflux_storage::{ReceiveCover, ReceiveCoverKind, ReceiveExpectation};
+    let db = account.client.account_db()?;
+    let erasure = db.privacy_erasure_generation()?;
+    let _ = crate::bus::push_receiver::intake::stage_on_actor(
+        account,
+        1,
+        &entry(target),
+        old,
+        1_900_000_000,
+    )?;
+    let mut held = entry(target);
+    held.inbox_seq = 2;
+    held.envelope.envelope_id = "held-env".into();
+    db.seed_held_receive_for_test(target, old, 2, &serde_json::to_vec(&held)?)?;
+    db.receive_transaction(
+        ReceiveExpectation {
+            target,
+            incarnation: old,
+            cursor: 0,
+            generation: 1,
+            erasure_generation: erasure,
+        },
+        1,
+        |tx| {
+            let _ = tx.cover(ReceiveCover {
+                sequence: 1,
+                kind: ReceiveCoverKind::CompatTerminal,
+                gaps: &[],
+                retain_until: 1_900_000_000,
+            })?;
+            Ok(())
+        },
+    )?;
+    assert_eq!(account.client.gateway_receive_cursor(target)?, 1);
+    assert_eq!(db.receive_ledger_snap_for_test(target)?.intents, vec![1]);
     Ok(())
 }
