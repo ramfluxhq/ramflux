@@ -74,14 +74,15 @@ impl RamfluxClient {
         .await
     }
 
-    pub(crate) async fn forward_federated_gateway_message_async(
+    pub(crate) async fn forward_federated_sealed_async(
         &self,
         engine: &impl GatewaySessionAccess,
-        message: &GatewayDirectMessage,
+        message: &mut GatewayDirectMessage,
+        sealed: crate::client::routed::SealedRouted,
         federation: &LocalBusFederationRoute,
         timeout: Duration,
     ) -> Result<SdkFederatedEnvelopeForwardResponse, SdkError> {
-        let envelope = gateway_direct_message_envelope(engine.config(), message, None)?;
+        let envelope = gateway_envelope_from_sealed(engine.config(), message, sealed, None)?;
         trace_forward(federation, &envelope);
         post(federation, envelope, timeout).await
     }

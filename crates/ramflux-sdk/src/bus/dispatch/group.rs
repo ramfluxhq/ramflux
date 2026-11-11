@@ -993,26 +993,25 @@ pub(crate) async fn dispatch_group_send_request(
             };
             if let Some(federation) = body.federation.as_ref() {
                 let engine = account.session_client().await?;
-                message.encrypted_body = serde_json::to_vec(
-                    &account
-                        .client
-                        .seal_federated_message_async(
-                            &engine,
-                            crate::client::federation::SealForward {
-                                message: &message,
-                                plaintext: &encrypted_body,
-                                federation,
-                                route: crate::client::routed::Route::group_message(&body.group_id),
-                                timeout: account.timeouts.http,
-                            },
-                        )
-                        .await?,
-                )?;
+                let sealed = account
+                    .client
+                    .seal_federated_message_async(
+                        &engine,
+                        crate::client::federation::SealForward {
+                            message: &message,
+                            plaintext: &encrypted_body,
+                            federation,
+                            route: crate::client::routed::Route::group_message(&body.group_id),
+                            timeout: account.timeouts.http,
+                        },
+                    )
+                    .await;
                 let forwarded = account
                     .client
-                    .forward_federated_gateway_message_async(
+                    .forward_federated_sealed_async(
                         &engine,
-                        &message,
+                        &mut message,
+                        sealed?,
                         federation,
                         account.timeouts.http,
                     )
@@ -1098,13 +1097,13 @@ pub(crate) async fn dispatch_group_send_request(
                         )
                         .await;
                     account.apply_session_metadata(engine);
-                    message.encrypted_body = serde_json::to_vec(&sealed?)?;
                     let engine = account.session_client().await?;
                     let forwarded = account
                         .client
-                        .forward_federated_gateway_message_async(
+                        .forward_federated_sealed_async(
                             &engine,
-                            &message,
+                            &mut message,
+                            sealed?,
                             federation,
                             account.timeouts.http,
                         )
@@ -1124,7 +1123,6 @@ pub(crate) async fn dispatch_group_send_request(
                         .await;
                     let entry = match sealed {
                         Ok(sealed) => {
-                            // GroupMessage has no Direct report payload; into_parts still carries committed_a0 (None).
                             engine
                                 .submit_envelope(gateway_envelope_from_sealed(
                                     engine.config(),

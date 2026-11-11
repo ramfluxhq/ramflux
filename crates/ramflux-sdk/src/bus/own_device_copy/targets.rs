@@ -16,6 +16,9 @@ impl Target {
     pub(super) fn new(device: String, attempts: u32, next_at: i64) -> Self {
         Self { device, attempts, next_at, acknowledged: false }
     }
+    pub(super) fn device(&self) -> &str {
+        &self.device
+    }
     pub(super) fn due(&self, now: i64) -> bool {
         !self.finished() && self.next_at <= now
     }
