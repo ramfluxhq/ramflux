@@ -86,12 +86,11 @@ impl RamfluxClient {
                     ramflux_protocol::encode_base64url(snapshot.copy.digest),
                     decoder
                 );
-                db.append_journal(
+                db.append_message_update(
                     &marker,
                     "message.schema.updated",
-                    &serde_json::json!({"message_id":provenance.message,"update":update}),
+                    &update,
                     crate::time::now_unix_timestamp(),
-                    Some(&provenance.conversation),
                 )?;
                 db.finish_raw_inner_reparse(&snapshot.copy.copy_id)?;
                 Ok(true)
