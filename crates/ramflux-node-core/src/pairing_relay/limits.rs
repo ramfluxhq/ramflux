@@ -218,6 +218,7 @@ pub fn claim_source_prefixes(source: IpAddr) -> Vec<String> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AllocatorStats {
     pub slots: usize,
+    pub full: usize,
     pub issued: usize,
     pub live: usize,
     pub backing: usize,
