@@ -540,6 +540,39 @@ impl crate::AccountDb {
             Some(_) => Err(StorageError::Integrity("compat work encoding")),
         }
     }
+
+    /// Envelope id for a standalone ACK retry after terminal cleanup deleted work.
+    /// Prefers the registered work copy, then a dead-lettered entry at this sequence.
+    ///
+    /// # Errors
+    /// Returns SQL errors.
+    pub fn ack_envelope_id(
+        &self,
+        target: &str,
+        incarnation: &str,
+        sequence: u64,
+    ) -> Result<Option<String>, StorageError> {
+        if let Some((envelope_id, _)) =
+            self.receive_work_content_proof(target, incarnation, sequence)?
+        {
+            return Ok(Some(envelope_id));
+        }
+        let Ok(seq) = i64::try_from(sequence) else {
+            return Ok(None);
+        };
+        let found = self
+            .connection
+            .query_row(
+                "SELECT json_extract(CAST(entry_json AS TEXT),'$.envelope.envelope_id')
+                 FROM runtime_inbox_dead_letter
+                 WHERE CAST(json_extract(CAST(entry_json AS TEXT),'$.inbox_seq') AS INTEGER)=?1
+                 LIMIT 1",
+                params![seq],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(found.flatten().filter(|id| !id.is_empty()))
+    }
 }
 
 fn before_commit() -> Result<(), StorageError> {

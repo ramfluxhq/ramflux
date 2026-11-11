@@ -175,7 +175,8 @@ async fn apply_once(
     }
     let local_device = account.gateway_config.device_id.clone();
     let own_copy = source.as_mut().and_then(|prepared| prepared.own_copy_manifest.take());
-    let (kind, classified_pending) = classified_kind(account, entry, own_copy).await?;
+    let (kind, classified_pending) =
+        classified_kind(account, entry, own_copy, prepared.retry_key.as_deref()).await?;
     #[cfg(test)]
     after_classify(account.client.account_db()?);
     match kind {
@@ -253,7 +254,7 @@ async fn apply_once(
             Ok(None)
         }
         Kind::Projection => {
-            project_application(account, turn, handle_generation, entry, sequence)?;
+            project_committed(account, turn, handle_generation, prepared, cover)?;
             Ok(None)
         }
         Kind::TerminalReply => {
@@ -267,8 +268,9 @@ async fn classified_kind(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
     own_copy: Option<crate::SdkDeviceManifestResponse>,
+    retry_key: Option<&str>,
 ) -> Result<(Kind, Option<SdkError>), SdkError> {
-    match classify(account, entry, own_copy).await {
+    match classify(account, entry, own_copy, retry_key).await {
         Ok(kind) => Ok((kind, None)),
         Err(error) => {
             if crate::client::routed::decode(&entry.envelope).is_ok() && directory_pending(&error) {
@@ -737,6 +739,7 @@ async fn classify(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
     own_copy: Option<crate::SdkDeviceManifestResponse>,
+    retry_key: Option<&str>,
 ) -> Result<Kind, SdkError> {
     if let Some(manifest) = own_copy {
         return Ok(Kind::OwnCopy(Box::new(manifest)));
@@ -779,7 +782,7 @@ async fn classify(
     if take_terminal_reply() {
         return Ok(Kind::TerminalReply);
     }
-    if let Some(kind) = settled_routed_kind(account, entry)? {
+    if let Some(kind) = settled_routed_kind(account, entry, retry_key)? {
         return Ok(kind);
     }
     if crate::client::routed::decode(&entry.envelope).is_ok() {
@@ -821,21 +824,36 @@ async fn classify(
 fn settled_routed_kind(
     account: &LocalBusAccountState,
     entry: &GatewayInboxEntry,
+    retry_key: Option<&str>,
 ) -> Result<Option<Kind>, SdkError> {
-    let auth_key = match projection_key(&account.client, entry) {
-        Ok(key) => key,
-        Err(error) if identity_absence(&error) => return Ok(None),
-        // Incomplete cache / stale head: nothing is settled yet. Fall through to
-        // decode (routed W1) or sender-key hold. DirectoryAuthorityUnavailable
-        // still propagates so the settled-key probe stays a typed miss.
-        Err(
-            SdkError::InboundPending(_)
-            | SdkError::FreshHeadRequired { .. }
-            | SdkError::SenderManifestRequired { .. },
-        ) => {
-            return Ok(None);
+    let auth_key = match account.client.retained_committed_receipt_key(entry) {
+        Ok(Some(key)) => key,
+        Err(SdkError::InboundRejected(reason))
+            if reason.starts_with("envelope id reused with a different authenticated payload") =>
+        {
+            return Err(SdkError::InboundRejected(reason));
         }
-        Err(error) => return Err(error),
+        Ok(None) | Err(_) => {
+            if let Some(key) = retry_key {
+                key.to_owned()
+            } else {
+                match projection_key(&account.client, entry) {
+                    Ok(key) => key,
+                    Err(error) if identity_absence(&error) => return Ok(None),
+                    // Incomplete cache / stale head: nothing is settled yet. Fall through to
+                    // decode (routed W1) or sender-key hold. DirectoryAuthorityUnavailable
+                    // still propagates so the settled-key probe stays a typed miss.
+                    Err(
+                        SdkError::InboundPending(_)
+                        | SdkError::FreshHeadRequired { .. }
+                        | SdkError::SenderManifestRequired { .. },
+                    ) => {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
     };
     let db = account.client.account_db()?;
     if db.actor_state_exists(&format!("{MARKER}{auth_key}"))? {
@@ -1003,20 +1021,66 @@ async fn fetch_entry_reply(
     Err(SdkError::NetworkingPending)
 }
 
-fn project_application(
+/// Drop a leftover inbox retry whose sequence is already on C. The planted key
+/// is required: `work_admission_key` is gone after the first terminal cleanup.
+fn retire_retry_in(tx: &ReceiveTransaction<'_>, prepared: &ReceiveEntry) -> Result<(), SdkError> {
+    if let Some(key) = &prepared.retry_key {
+        tx.account().remove_inbox_retry(key)?;
+    }
+    if let Some(key) = tx.work_admission_key(prepared.entry.inbox_seq)? {
+        tx.account().remove_inbox_retry(&key)?;
+    }
+    Ok(())
+}
+
+fn projection_auth_key(
+    client: &RamfluxClient,
+    entry: &GatewayInboxEntry,
+) -> Result<String, SdkError> {
+    match client.retained_committed_receipt_key(entry) {
+        Ok(Some(key)) => Ok(key),
+        Err(SdkError::InboundRejected(reason))
+            if reason.starts_with("envelope id reused with a different authenticated payload") =>
+        {
+            Err(SdkError::InboundRejected(reason))
+        }
+        Ok(None) | Err(_) => projection_key(client, entry),
+    }
+}
+
+/// Application projection for a committed receipt. A leftover of already-applied
+/// W0 ciphertext has no open W1 receipt (C may already include the seq, or
+/// migration imported nothing); skip Terminal cover in that case and retire
+/// the planted retry so standalone can ACK.
+fn project_committed(
     account: &LocalBusAccountState,
     turn: &ReceiveTurn,
     handle_generation: &dyn Fn() -> u64,
-    entry: &GatewayInboxEntry,
-    sequence: u64,
+    prepared: &ReceiveEntry,
+    cover: bool,
 ) -> Result<(), SdkError> {
+    let entry = &prepared.entry;
+    let sequence = entry.inbox_seq;
     let client = &account.client;
-    // Only an authenticated admission key may key the outbox: an unverified-hash key never
-    // reaches `ApplicationOutbox` (and a derivation failure is an error, not a skip).
-    let key = projection_key(client, entry)?;
+    let key = projection_auth_key(client, entry)?;
     run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
-        project_with_key(tx, client, entry, sequence, expected, &key)?;
-        cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
+        let open = match tx.require_open_input(sequence) {
+            Ok(()) => true,
+            Err(StorageError::Integrity("source effect requires staged receive work")) => false,
+            Err(error) => return Err(error.into()),
+        };
+        if open {
+            project_with_key(tx, client, entry, sequence, expected, &key)?;
+            if cover {
+                match cover_w1_outcome(tx, sequence, false, &[], turn.compat) {
+                    Err(SdkError::Storage(StorageError::Integrity(
+                        "receive cover requires a receipt" | "receive cover interval outside page",
+                    ))) => {}
+                    other => other?,
+                }
+            }
+        }
+        retire_retry_in(tx, prepared)?;
         Ok(false)
     })?;
     Ok(())
@@ -1115,7 +1179,10 @@ fn stage_open(
     prepared: &ReceiveEntry,
 ) -> Result<bool, SdkError> {
     let json = serde_json::to_vec(&prepared.entry)?;
-    let key = account.client.inbox_admission_key(&prepared.entry)?;
+    let key = match &prepared.retry_key {
+        Some(key) => key.clone(),
+        None => account.client.inbox_admission_key(&prepared.entry)?,
+    };
     let retain_until = now_unix_timestamp() + 300;
     let first_seen = now_unix_timestamp();
     run_fenced(account.client.account_db()?, generation, turn, |tx, expected| {

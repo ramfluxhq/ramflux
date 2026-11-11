@@ -146,6 +146,32 @@ pub(crate) async fn apply_prepared_receive(
     mut backpressure: Box<super::contact_backpressure::Backpressure>,
 ) -> Result<super::connection_manager::ReceiveApplied, SdkError> {
     let mut engine = account.live_session_client()?;
+    if crate::bus::push_receiver::apply_w1::is_active(
+        account.client.account_db()?,
+        &account.target_delivery_id,
+    )? {
+        let generation = account
+            .connection
+            .as_ref()
+            .map_or(1, super::connection_manager::ConnectionHandle::generation);
+        let turn = crate::bus::push_receiver::apply_w1::capture_turn(
+            account.client.account_db()?,
+            generation,
+            &account.target_delivery_id,
+        )?;
+        let result = Box::pin(crate::bus::push_receiver::apply_w1::apply_page(
+            account,
+            &turn,
+            &|| generation,
+            prepared,
+            prepared_source,
+            backpressure,
+        ))
+        .await?;
+        crate::bus::push_receiver::apply_w1::replay_projected(account)?;
+        account.apply_session_metadata(engine);
+        return Ok(result);
+    }
     let now = now_unix_timestamp();
     let mut retry_keys = BTreeMap::new();
     if let Some(key) = prepared.retry_key {

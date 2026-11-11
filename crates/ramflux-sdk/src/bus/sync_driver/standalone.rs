@@ -65,6 +65,7 @@ async fn receive_inner(
     let recovered = super::source::w0::recover_standalone_retries(account, &turn, generation)?;
     let mut retries: BTreeMap<_, _> =
         recovered.into_iter().map(|prepared| (entry_id(&prepared.entry), prepared)).collect();
+    merge_disk_retries(account, &mut retries, now)?;
     let mut backpressure = Box::new(Backpressure::load(&account.client, now)?);
     let mut applied = 0_usize;
     let mut pages = 0_u32;
@@ -92,6 +93,7 @@ async fn receive_inner(
         {
             PageDrive::Paused { applied } => {
                 flush_live_acks(account, engine, generation, &envelope_ids).await?;
+                account.client.retry_pair_resets(engine, now).await?;
                 return Ok((applied, Vec::new()));
             }
             PageDrive::Continue { backpressure: next, applied: next_applied } => {
@@ -126,7 +128,70 @@ async fn receive_inner(
     )
     .await?;
     flush_live_acks(account, engine, generation, &envelope_ids).await?;
+    // W0 `receive` flushes due pair-reset work after the page. The actor has a
+    // pair-reset courier; standalone `run` is the one-shot driver tests use.
+    account.client.retry_pair_resets(engine, now).await?;
     Ok((applied, Vec::new()))
+}
+
+/// W0 `append_pending_entries` rows that are not yet open ledger recovery inputs.
+/// A planted inbox retry keeps its durable key so a stripped call payload cannot
+/// recompute a different admission key at `stage_open`.
+fn merge_disk_retries(
+    account: &LocalBusAccountState,
+    retries: &mut BTreeMap<(String, u64, String), ReceiveEntry>,
+    now: i64,
+) -> Result<(), SdkError> {
+    use std::collections::btree_map::Entry;
+    let db = account.client.account_db()?;
+    for (key, bytes) in db.due_inbox_retry_rows(now)? {
+        let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+        match retries.entry(entry_id(&entry)) {
+            Entry::Vacant(slot) => {
+                slot.insert(ReceiveEntry {
+                    entry,
+                    retry_key: Some(key),
+                    replay: false,
+                    turn: None,
+                });
+            }
+            Entry::Occupied(mut slot) => {
+                if slot.get().retry_key.is_none() {
+                    slot.get_mut().retry_key = Some(key);
+                }
+            }
+        }
+    }
+    for bytes in db.unrouted_entries()? {
+        let entry: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+        retries.entry(entry_id(&entry)).or_insert_with(|| ReceiveEntry {
+            entry,
+            retry_key: None,
+            replay: false,
+            turn: None,
+        });
+    }
+    for (key, entry) in crate::bus::couriers::head_refresh::inbound::entries(account) {
+        if !db.has_inbox_retry(key)? {
+            continue;
+        }
+        match retries.entry(entry_id(entry)) {
+            Entry::Vacant(slot) => {
+                slot.insert(ReceiveEntry {
+                    entry: entry.clone(),
+                    retry_key: Some(key.clone()),
+                    replay: false,
+                    turn: None,
+                });
+            }
+            Entry::Occupied(mut slot) => {
+                if slot.get().retry_key.is_none() {
+                    slot.get_mut().retry_key = Some(key.clone());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn resume_one(
@@ -235,8 +300,10 @@ async fn redrive_held_floor(
         ack_if_terminal(
             account,
             engine,
+            generation,
             &record.entry,
             record.entry.inbox_seq,
+            None,
             &backpressure,
             envelope_ids,
         )
@@ -289,7 +356,7 @@ async fn drive_page(
                 let retry_key = take_page_retry(retries, &record.entry);
                 let entry = ReceiveEntry {
                     entry: record.entry.clone(),
-                    retry_key,
+                    retry_key: retry_key.clone(),
                     replay: false,
                     turn: Some(turn.clone()),
                 };
@@ -313,8 +380,10 @@ async fn drive_page(
                 ack_if_terminal(
                     account,
                     engine,
+                    generation,
                     &record.entry,
                     sequence,
+                    retry_key.as_deref(),
                     &backpressure,
                     envelope_ids,
                 )
@@ -368,6 +437,7 @@ async fn apply_leftover(
             .entry(prepared.entry.inbox_seq)
             .or_insert_with(|| prepared.entry.envelope.envelope_id.clone());
         let entry = prepared.entry.clone();
+        let retry_key = prepared.retry_key.clone();
         prepared.turn = Some(turn.clone());
         let handle_generation = || generation;
         let (_, next) =
@@ -377,38 +447,58 @@ async fn apply_leftover(
         backpressure = next;
         applied = applied.saturating_add(1);
         apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
-        ack_if_terminal(account, engine, &entry, entry.inbox_seq, &backpressure, envelope_ids)
-            .await?;
+        ack_if_terminal(
+            account,
+            engine,
+            generation,
+            &entry,
+            entry.inbox_seq,
+            retry_key.as_deref(),
+            &backpressure,
+            envelope_ids,
+        )
+        .await?;
     }
     Ok(applied)
 }
 
 /// Gateway ACK only after a terminal cover: contact floors and inbox retries
-/// keep the ciphertext (W0 ACK-after-commit).
+/// keep the ciphertext (W0 ACK-after-commit). A stripped leftover payload hashes
+/// to a different admission key, so the planted retry key is checked first.
+#[allow(clippy::too_many_arguments, reason = "standalone ACK shares the live page handles")]
 async fn ack_if_terminal(
     account: &LocalBusAccountState,
     engine: &mut impl GatewayPushAccess,
+    generation: u64,
     entry: &GatewayInboxEntry,
     sequence: u64,
+    retry_key: Option<&str>,
     backpressure: &Backpressure,
     envelope_ids: &BTreeMap<u64, String>,
 ) -> Result<(), SdkError> {
     if backpressure.holds(entry) {
         return Ok(());
     }
-    let key = account.client.inbox_admission_key(entry)?;
-    if account.client.account_db()?.has_inbox_retry(&key)? {
+    let db = account.client.account_db()?;
+    if let Some(key) = retry_key
+        && db.has_inbox_retry(key)?
+    {
         return Ok(());
     }
-    emit_engine_ack(account, engine, sequence, envelope_ids).await
+    let key = account.client.inbox_admission_key(entry)?;
+    if db.has_inbox_retry(&key)? {
+        return Ok(());
+    }
+    emit_engine_ack(account, engine, generation, sequence, envelope_ids).await
 }
 
-/// Emit one gateway ACK without settling WA. Held contact floors skip this so
-/// the ciphertext stays on the wire; WA still settles terminal intents at the
+/// Emit one gateway ACK and settle the WA intent. Held contact floors skip this
+/// so the ciphertext stays on the wire; remaining intents still flush at the
 /// end of the pass.
 async fn emit_engine_ack(
     account: &LocalBusAccountState,
     engine: &mut impl GatewayPushAccess,
+    generation: u64,
     sequence: u64,
     envelope_ids: &BTreeMap<u64, String>,
 ) -> Result<(), SdkError> {
@@ -419,7 +509,28 @@ async fn emit_engine_ack(
     let now = now_unix_timestamp();
     let mut ack = crate::dm::gateway_ack(envelope_id, &receiver, now);
     ack.ext.ext.insert("inbox_seq".into(), json!(sequence));
-    let _ = engine.ack(ack).await;
+    let outcome = if engine.ack(ack).await.is_ok() {
+        ramflux_storage::ReceiveAckOutcome::Acked
+    } else {
+        ramflux_storage::ReceiveAckOutcome::Uncertain
+    };
+    let db = account.client.account_db()?;
+    let target = account.target_delivery_id.as_str();
+    if !apply_w1::is_active(db, target)? {
+        return Ok(());
+    }
+    let turn = apply_w1::capture_turn(db, generation, target)?;
+    let wa =
+        crate::bus::push_receiver::ack_batch::SourceWa { expected: turn.expected(), generation };
+    let input = ramflux_storage::ReceiveAckApply {
+        incarnation: &turn.incarnation,
+        sequences: &[sequence],
+        results: &[ramflux_storage::ReceiveAckResult { sequence, outcome }],
+        now,
+    };
+    if let Err(error) = wa.apply(db, input) {
+        tracing::debug!(sequence, %error, "standalone ACK settle deferred");
+    }
     Ok(())
 }
 
@@ -466,13 +577,17 @@ async fn flush_engine_acks(
     let mut sent = Vec::new();
     let mut results = Vec::new();
     for seq in sequences {
-        let envelope_id = envelope_ids.get(&seq).cloned().or_else(|| {
-            account
-                .pending_deliveries
-                .iter()
-                .find(|entry| entry.inbox_seq == seq)
-                .map(|entry| entry.envelope.envelope_id.clone())
-        });
+        let envelope_id = envelope_ids
+            .get(&seq)
+            .cloned()
+            .or_else(|| {
+                account
+                    .pending_deliveries
+                    .iter()
+                    .find(|entry| entry.inbox_seq == seq)
+                    .map(|entry| entry.envelope.envelope_id.clone())
+            })
+            .or_else(|| db.ack_envelope_id(target, &turn.incarnation, seq).ok().flatten());
         let Some(envelope_id) = envelope_id else {
             continue;
         };
