@@ -1,0 +1,6 @@
+{
+  "oracle": "Python blake3 and independently encoded protobuf and framing",
+  "identity_b64": "CiATtyit-OAPTiGKk73h1R2iilolRCS3RbMLSOUdJ6qTXBIMY29udmVyc2F0aW9uGhAKBHJvb3QSBmRldmljZRgHIAMoCQ",
+  "transcript_b64": "AAAAInJhbWZsdXgubWVzc2FnZS5vcmlnaW5hbF9oZWFkZXIudjEAAAAEAAAAAgAAAAQAAAABAAAARgogE7corfjgD04hipO94dUdoopaJUQkt0WzC0jlHSeqk1wSDGNvbnZlcnNhdGlvbhoQCgRyb290EgZkZXZpY2UYByADKAkAAAAIAAAAAAAAAGQAAAAIAAAAAAAAAZAAAAAA",
+  "commitment": "EKRbkXW3szLf0-oN5RV7rffttDxIiygGgxWfAMchEhA"
+}

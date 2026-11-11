@@ -131,7 +131,7 @@ impl RamfluxClient {
             && serde_json::from_slice::<serde_json::Value>(plaintext)
                 .is_ok_and(|value| value["schema"] == "ramflux.sdk.own_device_sync.v1");
         let sealed = self.seal_routed_as(engine, &message, plaintext, route).await?;
-        let (packet, committed_a0) = sealed.into_parts();
+        let (packet, committed_a0, metadata_commitment) = sealed.into_parts();
         let franking = include_franking_ext
             .then(|| SdkDmFrankingMetadata::from_ciphertext(&packet.ciphertext));
         message.encrypted_body = serde_json::to_vec(&packet)?;
@@ -166,11 +166,16 @@ impl RamfluxClient {
             }
         }
         let result = async {
-            let envelope = gateway_direct_message_envelope_sealed(
+            let mut envelope = gateway_direct_message_envelope_sealed(
                 engine.config(),
                 &message,
                 franking.as_ref(),
                 committed_a0.as_deref(),
+            )?;
+            crate::dm::add_message_metadata_commitment(
+                engine.config(),
+                &mut envelope,
+                metadata_commitment,
             )?;
             // Persist the advanced send ratchet before the remote submit. A process death after the
             // gateway accepts the envelope must never reopen the pre-send chain state and reuse the
@@ -508,6 +513,16 @@ impl RamfluxClient {
         conversation_id: &str,
         message_id: &str,
     ) -> Result<SdkSelectedFrankingEvidence, SdkError> {
+        if self
+            .account_db()?
+            .load_actor_state::<bool>(&format!("routed/report-opening-retired/{message_id}"))?
+            .unwrap_or(false)
+        {
+            return Err(
+                ramflux_protocol::message::original_header::EvidenceError::ReportOpeningRetired
+                    .into(),
+            );
+        }
         let message = self
             .direct_message_by_id(message_id)?
             .ok_or_else(|| SdkError::LocalBus(format!("message not found: {message_id}")))?;

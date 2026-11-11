@@ -53,15 +53,31 @@ pub enum ReceiveEpochReconcileFailure {
 
 /// Stable durable generated-message refusal class, shared with receive admission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GeneratedRefusalCode { Identity, Authority, Content, TypingDurable }
+pub enum GeneratedRefusalCode {
+    Identity,
+    Authority,
+    Content,
+    TypingDurable,
+    OriginEvidenceMissing,
+    OriginCommitmentMismatch,
+}
 impl GeneratedRefusalCode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self { Self::Identity => "generated_identity", Self::Authority => "generated_authority", Self::Content => "generated_content", Self::TypingDurable => "typing_durable" }
+        match self {
+            Self::Identity => "generated_identity",
+            Self::Authority => "generated_authority",
+            Self::Content => "generated_content",
+            Self::TypingDurable => "typing_durable",
+            Self::OriginEvidenceMissing => "generated_origin_evidence_missing",
+            Self::OriginCommitmentMismatch => "generated_origin_commitment_mismatch",
+        }
     }
 }
 impl std::fmt::Display for GeneratedRefusalCode {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(self.as_str()) }
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +88,8 @@ pub enum SdkError {
     GatewayWriterBusy,
     #[error("receive epoch reconciliation refused: {0}")]
     ReceiveEpochReconcile(#[from] ReceiveEpochReconcileFailure),
+    #[error(transparent)]
+    HistoryEvidence(#[from] ramflux_protocol::message::original_header::EvidenceError),
     #[error("raw storage capacity for {source_anchor} ({scope:?})")]
     StorageCapacity { source_anchor: String, scope: ramflux_storage::RawInnerQuotaScope },
     #[error("{code}: {reason}")]

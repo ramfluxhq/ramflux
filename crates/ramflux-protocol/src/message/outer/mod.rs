@@ -93,6 +93,7 @@ pub enum CandidateDeliveryClass {
 pub struct CandidateOuterEnvelope {
     #[serde(flatten)]
     pub ext: crate::Ext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_set_id: Option<String>,
     pub schema: String,
     pub version: u32,

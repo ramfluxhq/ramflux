@@ -52,10 +52,11 @@ impl AccountDb {
     /// # Errors
     /// Returns SQLite errors.
     pub fn prune_pair_metadata(&self) -> Result<(), StorageError> {
-        for kind in ["local", "confirmed", "settled", "reset"] {
+        for kind in ["local", "confirmed", "settled", "reset", "ephemeral-seals"] {
             let prefix = format!("dm-pair/{kind}/");
             self.connection.execute("DELETE FROM runtime_actor_state WHERE substr(state_kind,1,length(?1))=?1 AND NOT EXISTS(SELECT 1 FROM runtime_actor_state live WHERE live.state_kind='dm-pair/session/'||substr(runtime_actor_state.state_kind,length(?1)+1))",params![prefix])?;
         }
+        self.connection.execute_batch("DELETE FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/collapse-scope/%' AND NOT EXISTS(SELECT 1 FROM runtime_actor_state live WHERE live.state_kind='dm-pair/session/'||substr(substr(runtime_actor_state.state_kind,length('dm-pair/collapse-scope/')+1),1,instr(substr(runtime_actor_state.state_kind,length('dm-pair/collapse-scope/')+1),'/')-1));")?;
         self.connection.execute_batch("DELETE FROM runtime_actor_state WHERE state_kind IN (SELECT state_kind FROM (SELECT state_kind,row_number() OVER(PARTITION BY coalesce(json_extract(CAST(state_json AS TEXT),'$.pair'),'legacy') ORDER BY coalesce(json_extract(CAST(state_json AS TEXT),'$.retired_at'),0) DESC,state_kind DESC) AS position FROM runtime_actor_state WHERE state_kind LIKE 'dm-pair/retired/%') WHERE position>8);")?;
         Ok(())
     }

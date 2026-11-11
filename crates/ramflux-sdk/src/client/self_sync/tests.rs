@@ -40,9 +40,25 @@ fn install_read_messages(client: &RamfluxClient) -> TestResult {
             metadata: &MessageMetadata::default(),
             created_at: at,
         })?;
-        db.persist_message_actor_state(&ramflux_protocol::encode_base64url(reference(id).id),
-            &format!("routed/generated-identity/{}", ramflux_protocol::encode_base64url(reference(id).id)),
-            &g::EventIdentity { id: reference(id).id, conversation_id: "c".into(), author: Some(g::QualifiedDevice { account_anchor: "peer".into(), device_id: "peer-device".into(), device_epoch: 1 }), hlc: u64::try_from(at)?, device_sequence: u64::try_from(at)?, ..Default::default() })?;
+        db.persist_message_actor_state(
+            &ramflux_protocol::encode_base64url(reference(id).id),
+            &format!(
+                "routed/generated-identity/{}",
+                ramflux_protocol::encode_base64url(reference(id).id)
+            ),
+            &g::EventIdentity {
+                id: reference(id).id,
+                conversation_id: "c".into(),
+                author: Some(g::QualifiedDevice {
+                    account_anchor: "peer".into(),
+                    device_id: "peer-device".into(),
+                    device_epoch: 1,
+                }),
+                hlc: u64::try_from(at)?,
+                device_sequence: u64::try_from(at)?,
+                ..Default::default()
+            },
+        )?;
     }
     Ok(())
 }
@@ -62,10 +78,20 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
         ..value(2, 1)
     };
     assert!(apply(&client, &draft)?);
-    let competing = g::SelfSync { draft: Some(g::Message { text: "equal revision".into(), ..Default::default() }), ..draft.clone() };
-    let expected = if body_hash(&draft.encode_to_vec())? > body_hash(&competing.encode_to_vec())? { &draft } else { &competing };
+    let competing = g::SelfSync {
+        draft: Some(g::Message { text: "equal revision".into(), ..Default::default() }),
+        ..draft.clone()
+    };
+    let expected = if body_hash(&draft.encode_to_vec())? > body_hash(&competing.encode_to_vec())? {
+        &draft
+    } else {
+        &competing
+    };
     apply(&client, &competing)?;
-    assert_eq!(client.self_sync_state("c", &draft)?.ok_or("draft")?.exact_body, expected.encode_to_vec());
+    assert_eq!(
+        client.self_sync_state("c", &draft)?.ok_or("draft")?.exact_body,
+        expected.encode_to_vec()
+    );
     let cleared = client.change_self_sync("c", value(3, 0))?;
     assert_eq!(cleared.revision, 2);
     assert!(client.self_sync_state("c", &draft)?.ok_or("clear")?.value.draft.is_none());
@@ -107,9 +133,28 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
     client.active_account_db = None;
     client.unlock_account("acct", b"own-device-sync-test")?;
     assert_eq!(client.self_sync_state("c", &draft)?.ok_or("reopened")?.value.revision, 2);
-    client.delete_direct_message("c", &ramflux_protocol::encode_base64url(reference("m1").id), "local", "self-sync-delete")?;
+    client.delete_direct_message(
+        "c",
+        &ramflux_protocol::encode_base64url(reference("m1").id),
+        "local",
+        "self-sync-delete",
+    )?;
     assert!(!apply(&client, &g::SelfSync { revision: 10, ..draft.clone() })?);
     assert!(apply(&client, &value(3, 11))?);
+    let live_draft = g::SelfSync {
+        draft: Some(g::Message { text: "erased draft".into(), ..Default::default() }),
+        ..value(2, 12)
+    };
+    assert!(apply(&client, &live_draft)?);
+    client.erase_self_sync_conversation("c")?;
+    assert!(client.self_sync_state("c", &live_draft)?.is_none());
+    assert!(!apply(&client, &g::SelfSync { revision: 99, ..live_draft.clone() })?);
+    client.active_account_db = None;
+    client.unlock_account("acct", b"own-device-sync-test")?;
+    assert!(!apply(&client, &g::SelfSync { revision: 100, ..live_draft.clone() })?);
+    client.recreate_self_sync_conversation("c")?;
+    assert!(!apply(&client, &live_draft)?);
+    assert_eq!(client.change_self_sync("c", value(3, 0))?.revision, 13);
     for operation in [0, 8, u32::MAX] {
         assert!(self_sync::validate(&value(operation, 1)).is_err());
     }
@@ -119,33 +164,158 @@ fn self_sync_read_draft_pin_mute_revision_authority_and_erasure() -> TestResult 
     Ok(())
 }
 
-
 #[test]
 fn self_sync_converges_under_reorder_duplicate_and_equal_revision() -> TestResult {
     let a = g::SelfSync { mute: true, ..value(6, 6) };
     let b = value(7, 6);
     let c = value(7, 7);
     let updates = [a, b, c];
-    let orders = [[0,1,2], [0,2,1], [1,0,2], [1,2,0], [2,0,1], [2,1,0]];
+    let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
     let mut winner = None;
     for order in orders {
         let (client, root) = client_with_account("self-sync-converges", "principal_sync", "local")?;
-        client.account_db()?.persist_client_record("conversation", "c", &json!({"kind":"direct"}))?;
-        for index in order { apply(&client, &updates[index])?; apply(&client, &updates[index])?; }
+        client.account_db()?.persist_client_record(
+            "conversation",
+            "c",
+            &json!({"kind":"direct"}),
+        )?;
+        for index in order {
+            apply(&client, &updates[index])?;
+            apply(&client, &updates[index])?;
+        }
         let state = client.self_sync_state("c", &updates[0])?.ok_or("state")?;
         let bytes = serde_json::to_vec(&state)?;
-        if let Some(winner) = &winner { assert_eq!(&bytes, winner); } else { winner = Some(bytes); }
-        drop(client); std::fs::remove_dir_all(root)?;
+        if let Some(winner) = &winner {
+            assert_eq!(&bytes, winner);
+        } else {
+            winner = Some(bytes);
+        }
+        drop(client);
+        std::fs::remove_dir_all(root)?;
     }
     // The equal-revision prefix itself converges too, before revision seven arrives.
     let mut pairs = Vec::new();
-    for order in [[0,1], [1,0]] {
+    for order in [[0, 1], [1, 0]] {
         let (client, root) = client_with_account("self-sync-equal", "principal_sync", "local")?;
-        client.account_db()?.persist_client_record("conversation", "c", &json!({"kind":"direct"}))?;
-        for index in order { apply(&client, &updates[index])?; }
+        client.account_db()?.persist_client_record(
+            "conversation",
+            "c",
+            &json!({"kind":"direct"}),
+        )?;
+        for index in order {
+            apply(&client, &updates[index])?;
+        }
         pairs.push(client.self_sync_state("c", &updates[0])?.ok_or("state")?.exact_body);
-        drop(client); std::fs::remove_dir_all(root)?;
+        drop(client);
+        std::fs::remove_dir_all(root)?;
     }
     assert_eq!(pairs[0], pairs[1]);
+    Ok(())
+}
+
+#[test]
+fn self_sync_bootstrap_preserves_read_max_beyond_winning_revision() -> TestResult {
+    let mut states = Vec::new();
+    for order in [[read("m2", 1), read("m1", 2)], [read("m1", 2), read("m2", 1)]] {
+        let (client, root) =
+            client_with_account("self-sync-read-bootstrap", "principal_sync", "local")?;
+        install_read_messages(&client)?;
+        for update in order {
+            apply(&client, &update)?;
+        }
+        let state = client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?;
+        assert_eq!(state.value.revision, 2);
+        assert_eq!(state.read_marker.as_ref(), Some(&reference("m2")));
+        assert_eq!(
+            state.read_marker_body.as_ref().ok_or("max read body")?.exact_body,
+            read("m2", 1).encode_to_vec()
+        );
+        let own = client.owned_device_identity()?;
+        client.bootstrap_self_sync(&own)?;
+        let repair_keys = client.account_db()?.actor_state_keys("self-sync/repair/")?;
+        assert_eq!(repair_keys.len(), 1);
+        let repair: serde_json::Value =
+            client.account_db()?.load_actor_state(&repair_keys[0])?.ok_or("repair")?;
+        assert_eq!(
+            serde_json::from_value::<Vec<u8>>(repair["read_marker_body"].clone())?,
+            read("m2", 1).encode_to_vec()
+        );
+        states.push(serde_json::to_vec(&state)?);
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+    }
+    assert_eq!(states[0], states[1]);
+    Ok(())
+}
+
+#[test]
+fn self_sync_unknown_conversation_limit_is_bounded_and_known_scopes_still_apply() -> TestResult {
+    let (client, root) = client_with_account("self-sync-unseen-limit", "principal_sync", "local")?;
+    let own = client.owned_device_identity()?;
+    client
+        .account_db()?
+        .write_transaction(|| client.apply_self_sync_in(&own, "unseen-0", &value(7, 1)))?;
+    let prototype = client.self_sync_state("unseen-0", &value(7, 1))?.ok_or("prototype")?;
+    client.account_db()?.write_transaction(|| -> TestResult {
+        for index in 1..SELF_SYNC_MAX_UNSEEN_CONVERSATIONS {
+            let conversation = format!("unseen-{index}");
+            let mut state = prototype.clone();
+            state.conversation_id.clone_from(&conversation);
+            client.account_db()?.persist_actor_state(
+                &key(own.root_commitment(), &conversation, &value(7, 1))?,
+                &state,
+            )?;
+        }
+        Ok(())
+    })?;
+    assert!(
+        client
+            .account_db()?
+            .write_transaction(|| client.apply_self_sync_in(&own, "over-limit", &value(7, 1)))
+            .is_err()
+    );
+    assert!(client.self_sync_state("over-limit", &value(7, 1))?.is_none());
+    assert!(client.account_db()?.write_transaction(|| client.apply_self_sync_in(
+        &own,
+        "unseen-0",
+        &value(7, 2)
+    ))?);
+    client.account_db()?.persist_client_record(
+        "conversation",
+        "known",
+        &json!({"kind":"direct"}),
+    )?;
+    assert!(client.account_db()?.write_transaction(|| client.apply_self_sync_in(
+        &own,
+        "known",
+        &value(7, 1)
+    ))?);
+    drop(client);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() -> TestResult {
+    let (client, root) = client_with_account("self-sync-read-order", "principal_sync", "local")?;
+    install_read_messages(&client)?;
+    let db = client.account_db()?;
+    let first_id = ramflux_protocol::encode_base64url(reference("m1").id);
+    let key = format!("routed/generated-identity/{first_id}");
+    let mut identity: g::EventIdentity = db.load_actor_state(&key)?.ok_or("identity")?;
+    identity.hlc = 9;
+    db.persist_message_actor_state(&first_id, &key, &identity)?;
+    apply(&client, &read("m2", 1))?;
+    apply(&client, &read("m1", 2))?;
+    let projection = db.conversation_projection("c", Some(&client.owned_device_identity()?))?;
+    assert_eq!(projection.read_through_message_id, Some(first_id));
+    assert!(!projection.is_unread);
+    assert!(!apply(&client, &read("m2", 1))?);
+    assert_eq!(
+        client.self_sync_state("c", &read("m1", 1))?.ok_or("state")?.read_marker,
+        Some(reference("m1"))
+    );
+    drop(client);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

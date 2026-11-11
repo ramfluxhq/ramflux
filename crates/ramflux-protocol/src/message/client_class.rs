@@ -28,10 +28,12 @@ pub fn client_class_from_delivery(
     class: &DeliveryClass,
 ) -> Result<ClientDeliveryClass, ProtocolError> {
     match class {
-        DeliveryClass::OpaqueEvent | DeliveryClass::SelfDeviceControl => {
+        DeliveryClass::Message | DeliveryClass::OpaqueEvent | DeliveryClass::SelfDeviceControl => {
             Ok(ClientDeliveryClass::Message)
         }
-        DeliveryClass::NotificationWake => Ok(ClientDeliveryClass::CallWake),
+        DeliveryClass::CallWake | DeliveryClass::NotificationWake => {
+            Ok(ClientDeliveryClass::CallWake)
+        }
         DeliveryClass::ObjectManifest
         | DeliveryClass::ObjectChunk
         | DeliveryClass::FederationControl => Err(ProtocolError::InvalidDomain {

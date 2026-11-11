@@ -264,11 +264,7 @@ pub(crate) fn verify_sender_record(
         .get("signing_public_key")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("sender signing key missing"))?;
-    ramflux_crypto::verify_canonical_signature(
-        &ramflux_protocol::envelope_sender_signed_bytes(envelope)?,
-        &envelope.signed.signature,
-        key,
-    )?;
+    ramflux_protocol::verify_envelope_sender_signature(envelope, key)?;
     let hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,
         envelope.encrypted_payload.as_bytes(),

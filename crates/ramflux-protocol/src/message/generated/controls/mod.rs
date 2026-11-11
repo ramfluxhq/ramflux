@@ -77,6 +77,9 @@ pub use history_item_types::*;
 #[path = "history_origin_evidence.rs"]
 mod history_origin_evidence_types;
 pub use history_origin_evidence_types::*;
+#[path = "history_original_metadata_evidence.rs"]
+mod history_original_metadata_evidence_types;
+pub use history_original_metadata_evidence_types::*;
 #[path = "history_page.rs"]
 mod history_page_types;
 pub use history_page_types::*;

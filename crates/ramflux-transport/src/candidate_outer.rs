@@ -68,7 +68,8 @@ mod tests {
 
     fn candidate() -> CandidateOuterEnvelope {
         CandidateOuterEnvelope {
-            ext: Default::default(), routing_set_id: None,
+            ext: ramflux_protocol::Ext::default(),
+            routing_set_id: None,
             schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
             version: 2,
             domain: "ramflux.envelope.v2".to_owned(),

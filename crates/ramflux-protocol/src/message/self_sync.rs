@@ -76,3 +76,32 @@ pub fn validate(value: &SelfSync) -> Result<Operation, ValidationError> {
     }
     Ok(operation)
 }
+
+/// Hash the exact stored body for the `SelfSync` max-register tie break.
+/// # Errors
+/// Refuses a body outside the framing/Inner limits.
+pub fn body_hash(body: &[u8]) -> Result<[u8; 32], ValidationError> {
+    if body.len() > validation::MAX_INNER_BYTES {
+        return Err(ValidationError::Content);
+    }
+    let mut transcript = Vec::new();
+    for field in [b"ramflux.message.self_sync.tiebreak.v1".as_slice(), body] {
+        transcript.extend_from_slice(
+            &u32::try_from(field.len()).map_err(|_| ValidationError::Content)?.to_be_bytes(),
+        );
+        transcript.extend_from_slice(field);
+    }
+    Ok(*blake3::hash(&transcript).as_bytes())
+}
+
+/// Decode a stored exact register body through the same operation policy as receive.
+/// # Errors
+/// Refuses malformed or invalid operation payloads.
+pub fn decode_stored_body(body: &[u8]) -> Result<SelfSync, ValidationError> {
+    body_hash(body)?;
+    let content = super::registry::decode_body(12, body, super::registry::COMPILED_LAYER)?;
+    match content.value {
+        Some(super::content::Value::SelfSync(value)) => Ok(value),
+        _ => Err(ValidationError::Content),
+    }
+}

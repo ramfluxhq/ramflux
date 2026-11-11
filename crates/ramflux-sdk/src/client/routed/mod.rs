@@ -21,8 +21,8 @@ mod native_contact_tests;
 mod object_slot;
 mod own_history;
 pub(crate) use object_slot::PairObjectSlotRequest;
-mod project;
 pub(crate) mod generated_receive;
+mod project;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
 pub(crate) mod group_directory;
 mod legacy;
@@ -42,8 +42,8 @@ mod reset_work;
 pub(crate) use reset_prepare::with_fixed_pair_control_id;
 pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
 mod send_candidate;
-mod typing;
 mod session;
+mod typing;
 pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -411,8 +411,11 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| {
             self.authorize_self_sync(&local, &message.conversation_id)?;
             g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
-            let identity = self.allocate_generated_identity(&message.conversation_id,
-                crate::client::generated_identity::now_ms(), true)?;
+            let identity = self.allocate_generated_identity(
+                &message.conversation_id,
+                crate::client::generated_identity::now_ms(),
+                true,
+            )?;
             let inner = Self::encode_generated_inner(
                 identity,
                 &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) },
@@ -532,14 +535,7 @@ impl RamfluxClient {
         {
             conversation.clone_into(&mut route.conversation_id);
         }
-        if crate::client::target_selection::schema_v1_selected() {
-            use prost::Message as _;
-            if let Ok(inner) = ramflux_protocol::message::Inner::decode(body)
-                && let Some(identity) = inner.identity {
-                route.message_id = ramflux_protocol::encode_base64url(identity.id);
-                if route.kind == Kind::GroupMessage { route.group_message_id = Some(route.message_id.clone()); }
-            }
-        }
+        bind_generated_route_identity(&mut route, body);
         let inner = zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
             routing: route.clone(),
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
@@ -608,6 +604,11 @@ impl RamfluxClient {
                 report_commitment,
             },
             committed_a0: report.map(|sealed| sealed.a0_bytes),
+            metadata_commitment: report::message_metadata_commitment(
+                body,
+                message.created_at,
+                message.ttl,
+            )?,
         })
     }
 
@@ -651,11 +652,16 @@ impl RamfluxClient {
             .map_err(|_| invalid("invalid routed body"))?;
         let logical_id = if crate::client::target_selection::schema_v1_selected() {
             use prost::Message as _;
-            ramflux_protocol::message::Inner::decode(body.as_slice()).ok().and_then(|inner| inner.identity)
+            ramflux_protocol::message::Inner::decode(body.as_slice())
+                .ok()
+                .and_then(|inner| inner.identity)
                 .map(|identity| ramflux_protocol::encode_base64url(identity.id))
-        } else { None };
+        } else {
+            None
+        };
         if plaintext.routing.conversation_id.is_empty()
-            || plaintext.routing.message_id != logical_id.as_deref().unwrap_or(&entry.envelope.envelope_id)
+            || plaintext.routing.message_id
+                != logical_id.as_deref().unwrap_or(&entry.envelope.envelope_id)
         {
             return Err(invalid("invalid authenticated routing header"));
         }
@@ -721,6 +727,20 @@ pub(crate) fn decode(
     }
     Ok(decoded)
 }
+fn bind_generated_route_identity(route: &mut Routing, body: &[u8]) {
+    if crate::client::target_selection::schema_v1_selected() {
+        use prost::Message as _;
+        if let Ok(inner) = ramflux_protocol::message::Inner::decode(body)
+            && let Some(identity) = inner.identity
+        {
+            route.message_id = ramflux_protocol::encode_base64url(identity.id);
+            if route.kind == Kind::GroupMessage {
+                route.group_message_id = Some(route.message_id.clone());
+            }
+        }
+    }
+}
+
 fn invalid(message: &str) -> SdkError {
     SdkError::InboundRejected(message.to_owned())
 }
@@ -733,3 +753,16 @@ pub(in crate::client) use tests::legacy_selector::import_entry as observe_legacy
 
 #[cfg(test)]
 pub(in crate::client) use tests::legacy_selector::registered as observe_legacy_registration;
+
+/// Validate ciphertext binding before any incoming v2 cache or replay shortcut.
+pub(crate) fn validate_routed_ciphertext(entry: &GatewayInboxEntry) -> Result<(), SdkError> {
+    if entry.envelope.schema == "ramflux.envelope.v2"
+        || ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION == 1
+    {
+        ramflux_protocol::sender_signed_transcript(
+            &entry.envelope,
+            ramflux_protocol::SenderTranscriptMode::WithCiphertext,
+        )?;
+    }
+    Ok(())
+}

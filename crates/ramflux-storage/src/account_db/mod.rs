@@ -30,6 +30,9 @@ mod backup_object_erasure_tests;
 mod backup_object_metadata;
 mod backup_retirement;
 mod backup_selector_admission;
+mod backup_self_sync;
+#[cfg(test)]
+mod backup_self_sync_tests;
 mod backup_shared_groups;
 pub mod bot;
 mod contact_consent;
@@ -59,6 +62,7 @@ pub mod journal;
 pub mod large_segments;
 pub(crate) mod mac_subkeys;
 pub mod mcp;
+mod message_edit_retirement;
 pub(crate) mod message_footprint;
 pub mod messages;
 pub mod object;

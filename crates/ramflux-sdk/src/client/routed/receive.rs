@@ -24,9 +24,9 @@ impl Delivery {
         Self { routing: Some(receipt.routing), plaintext, call_control, pair_reply: None }
     }
     fn opened(opened: Opened, plaintext: Option<GatewayPlaintextDelivery>, body: &[u8]) -> Self {
-        let call_control =
-            (opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body))
-                || super::generated_receive::mutation_erasure_targets(body).0;
+        let call_control = (opened.routing.kind == Kind::Control
+            && crate::client::call::is_call_body(body))
+            || super::generated_receive::mutation_erasure_targets(body).0;
         Self { routing: Some(opened.routing), plaintext, call_control, pair_reply: None }
     }
 }
@@ -194,11 +194,20 @@ impl RamfluxClient {
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
         let generated_id = if crate::client::target_selection::schema_v1_selected() {
             use prost::Message as _;
-            ramflux_protocol::message::Inner::decode(opened.body.as_slice()).ok()
-                .and_then(|inner| inner.identity).map(|identity| ramflux_protocol::encode_base64url(identity.id))
-        } else { None };
+            ramflux_protocol::message::Inner::decode(opened.body.as_slice())
+                .ok()
+                .and_then(|inner| inner.identity)
+                .map(|identity| ramflux_protocol::encode_base64url(identity.id))
+        } else {
+            None
+        };
         if let Some(id) = generated_id {
-            if opened.routing.message_id != id { return Err(SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Identity, reason: "route and generated id disagree".into() }); }
+            if opened.routing.message_id != id {
+                return Err(SdkError::GeneratedRefused {
+                    code: crate::GeneratedRefusalCode::Identity,
+                    reason: "route and generated id disagree".into(),
+                });
+            }
         } else if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
         }
@@ -210,6 +219,7 @@ impl RamfluxClient {
         &self,
         entry: &GatewayInboxEntry,
     ) -> Result<Option<Delivery>, SdkError> {
+        super::validate_routed_ciphertext(entry)?;
         let Some((_, payload_hash)) = self.routed_seen_marker(entry)? else { return Ok(None) };
         if payload_hash != entry.envelope.payload_hash {
             return Err(SdkError::ReplayMismatch);
@@ -850,6 +860,25 @@ impl RamfluxClient {
             pair_reply: None,
         })
     }
+    /// A content refusal still consumes its authenticated pair ciphertext. This joins the
+    /// terminal receive transaction so a refused first packet cannot strand its successor.
+    pub(crate) fn commit_generated_refusal_pair(
+        &self,
+        entry: &GatewayInboxEntry,
+        local: &str,
+        code: &str,
+    ) -> Result<(), SdkError> {
+        if !code.starts_with("generated_") && code != "typing_durable" {
+            return Ok(());
+        }
+        let opened = match self.open_routed(entry, local) {
+            Ok(opened) => opened,
+            Err(error @ SdkError::Storage(_)) => return Err(error),
+            Err(_) => return Ok(()), // No authenticated, C-checked transport state to commit.
+        };
+        self.commit_routed_pair_context(&opened, entry, &opened.body)
+    }
+
     fn commit_routed_pair_context(
         &self,
         opened: &Opened,
@@ -884,6 +913,22 @@ impl RamfluxClient {
                 &opened.session,
                 reset,
                 decode(&entry.envelope)?.x3dh.is_some(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn remember_typing_conversation(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        if opened.routing.kind == Kind::Direct
+            && let Some(tag) = &entry.envelope.collapse_tag
+        {
+            self.account_db()?.persist_actor_state(
+                &format!("dm-pair/collapse-scope/{}/{tag}", opened.session.session_id),
+                &opened.routing.conversation_id,
             )?;
         }
         Ok(())
@@ -990,6 +1035,8 @@ impl RamfluxClient {
         };
         self.finish_generated_projection(opened, entry)?;
         self.commit_routed_pair_context(opened, entry, body)?;
+        self.remember_typing_conversation(opened, entry)?;
+
         for slot in slots {
             self.persist_message_slot_receipt(&opened.routing.message_id, slot)?;
         }
@@ -1025,9 +1072,13 @@ impl RamfluxClient {
             &receipt,
         )?;
         let mut retained = entry.clone();
-        let (delete_control, mut erasure_targets) = super::generated_receive::mutation_erasure_targets(body);
+        let (delete_control, mut erasure_targets) =
+            super::generated_receive::mutation_erasure_targets(body);
         let erased_reference = erasure_targets.iter().try_fold(false, |erased, target| {
-            self.account_db()?.message_is_deleted(&target.message_id).map(|deleted| erased || deleted).map_err(SdkError::from)
+            self.account_db()?
+                .message_is_deleted(&target.message_id)
+                .map(|deleted| erased || deleted)
+                .map_err(SdkError::from)
         })?;
         let call = opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
         if call || delete_control || erased_reference {
@@ -1040,14 +1091,20 @@ impl RamfluxClient {
             self.append_gateway_delivery(entry)?;
             for target in &erasure_targets {
                 self.account_db()?.bind_message_event_reference(
-                    &target.message_id, &format!("gateway/delivery/v2/{receipt}"),
+                    &target.message_id,
+                    &format!("gateway/delivery/v2/{receipt}"),
                 )?;
                 self.account_db()?.bind_message_container_reference(&target.message_id, receipt)?;
             }
         }
         self.account_db()?.persist_actor_state(
             receipt,
-            &Committed { routing: opened.routing.clone(), entry: retained, projected: false, erasure_targets },
+            &Committed {
+                routing: opened.routing.clone(),
+                entry: retained,
+                projected: false,
+                erasure_targets,
+            },
         )?;
         self.persist_routed_seen(entry)
     }

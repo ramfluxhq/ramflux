@@ -48,6 +48,16 @@ impl OwnDeviceMessage {
         if !manifest.devices.iter().any(|d| d.device_id == recipient) {
             return Err(invalid("own-device recipient is not active"));
         }
+        if entry.envelope.source_principal_id != manifest.principal_id
+            || entry.envelope.ext.ext.get("source_root_commitment").and_then(Value::as_str)
+                != Some(manifest.principal_commitment.as_str())
+        {
+            return Err(invalid("own-device outer authority mismatch"));
+        }
+        ramflux_protocol::verify_envelope_sender_signature(
+            &entry.envelope,
+            &source.branch_public_key,
+        )?;
         ramflux_crypto::verify_device_branch_signature(
             &source.branch_public_key,
             &self.signing()?,
