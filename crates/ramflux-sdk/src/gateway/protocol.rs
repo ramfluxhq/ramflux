@@ -107,7 +107,11 @@ pub struct GatewaySessionConfig {
     pub resume_token: Option<String>,
     pub last_seen_inbox_seq: u64,
     pub pre_auth_cookie: Option<String>,
+    /// Deprecated and ignored by the gateway; retained for wire compatibility.
+    /// Admission time comes from the server clock.
     pub pre_auth_now: Option<u64>,
+    /// Deprecated and ignored by the gateway; retained for wire compatibility.
+    /// Admission source comes from the observed transport peer.
     pub source_ip_hash: Option<String>,
     pub max_inflight_downstream: u32,
     pub max_inflight_upstream: u32,
@@ -336,7 +340,11 @@ pub struct GatewayOpenFrame {
     pub max_inflight_downstream: u32,
     pub max_inflight_upstream: u32,
     pub pre_auth_cookie: Option<String>,
+    /// Deprecated and ignored by the gateway; retained for wire compatibility.
+    /// Admission time comes from the server clock.
     pub pre_auth_now: Option<u64>,
+    /// Deprecated and ignored by the gateway; retained for wire compatibility.
+    /// Admission source comes from the observed transport peer.
     pub source_ip_hash: Option<String>,
 }
 

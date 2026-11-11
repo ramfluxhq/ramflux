@@ -38,6 +38,15 @@ Rules:
 The gateway session starts with `GatewayClientFrame::Open` and
 `GatewayClientFrame::Auth`.
 
+`GatewayOpenFrame.source_ip_hash` and `GatewayOpenFrame.pre_auth_now` are
+deprecated and ignored for admission. The gateway derives the source from the
+observed transport peer and time from its own clock, never from these fields
+or forwarded headers. Older clients may still send either field; both remain
+accepted for wire compatibility. Their original values remain part of the
+signed Open hash and must not be overwritten before Auth validation.
+`pre_auth_cookie` remains active and is checked against the server-derived
+source and time. New clients should leave the deprecated fields unset.
+
 Current client-to-server frame types:
 
 - `open`

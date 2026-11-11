@@ -22,6 +22,10 @@ pub(crate) fn handle_itest_identity_authority(
 ) -> anyhow::Result<bool> {
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", "/mvp1/identity/register") => {
+            // HTTP admission reads this request through read_itest_http_request, whose
+            // finish_http_request derives source_ip_hash from TcpStream::peer_addr().
+            // Headers cannot set it; handle_mvp1_identity_register overwrites the
+            // body's source claim with this value (or the shared fallback on error).
             let response = crate::handlers::handle_mvp1_identity_register(
                 &request.body,
                 router.state(),

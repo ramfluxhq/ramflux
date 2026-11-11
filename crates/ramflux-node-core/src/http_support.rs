@@ -692,6 +692,29 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn http_source_hash_comes_from_peer_not_registration_claims()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut client = TcpStream::connect(listener.local_addr()?)?;
+        let (mut server, peer) = listener.accept()?;
+        let expected = source_ip_hash(&peer.ip().to_string());
+        for claim in ["forged-source-a", "forged-source-b"] {
+            let body = format!(r#"{{"source_ip_hash":"{claim}"}}"#);
+            write!(
+                client,
+                "POST /mvp1/identity/register HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nX-Ramflux-Source-Ip-Hash: {claim}\r\nX-Forwarded-For: 192.0.2.1\r\nConnection: keep-alive\r\n\r\n{body}",
+                body.len()
+            )?;
+            let request =
+                read_itest_http_request(&mut server)?.ok_or("missing registration request")?;
+            assert_eq!(request.path, "/mvp1/identity/register");
+            assert_eq!(request.source_ip_hash.as_deref(), Some(expected.as_str()));
+            assert_eq!(request.body, body.as_bytes());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn itest_http_client_reads_content_length_without_waiting_for_eof()
     -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;

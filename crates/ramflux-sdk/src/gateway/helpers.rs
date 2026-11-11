@@ -53,6 +53,7 @@ fn gateway_open_frame_with_nonce(
         max_inflight_downstream: config.max_inflight_downstream,
         max_inflight_upstream: config.max_inflight_upstream,
         pre_auth_cookie: config.pre_auth_cookie.clone(),
+        // Preserve legacy signed bytes; the gateway ignores these deprecated hints.
         pre_auth_now: config.pre_auth_now,
         source_ip_hash: config.source_ip_hash.clone(),
     }

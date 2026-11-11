@@ -158,7 +158,14 @@ impl GatewayState {
         let entries =
             self.pre_auth_handshakes_by_source_ip.entry(source_ip_hash.to_owned()).or_default();
         entries.retain(|timestamp| *timestamp >= window_start);
-        if entries.len() < self.pre_auth_policy.per_source_ip_handshake_rate as usize {
+        let rate = self.pre_auth_policy.per_source_ip_handshake_rate as usize;
+        // Only the newest `rate` events affect the sliding-window threshold.
+        // Also bound buckets restored from snapshots written before this cap.
+        if entries.len() > rate {
+            entries.drain(..entries.len() - rate);
+            entries.shrink_to_fit();
+        }
+        if entries.len() < rate {
             entries.push(now);
             return Ok(GatewayPreAuthDecision::Accepted);
         }
@@ -173,7 +180,12 @@ impl GatewayState {
                     &self.pre_auth_policy.cookie_secret,
                 ) =>
             {
-                entries.push(now);
+                // A valid cookie permits admission, not unbounded history growth.
+                // Refresh the oldest slot so recent retries still fill the window.
+                if !entries.is_empty() {
+                    entries.remove(0);
+                    entries.push(now);
+                }
                 Ok(GatewayPreAuthDecision::Accepted)
             }
             Some(_cookie) => {
@@ -646,6 +658,73 @@ impl GatewayRedbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_retries_bound_bucket_and_preserve_sliding_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = GatewayState::new();
+        state.set_pre_auth_policy(GatewayPreAuthPolicy {
+            enabled: true,
+            per_source_ip_handshake_rate: 3,
+            window_seconds: 60,
+            cookie_ttl_seconds: 60,
+            ..GatewayPreAuthPolicy::default()
+        });
+        for _ in 0..3 {
+            assert_eq!(state.check_pre_auth("peer", None, 100)?, GatewayPreAuthDecision::Accepted);
+        }
+        let GatewayPreAuthDecision::Challenge(challenge) =
+            state.check_pre_auth("peer", None, 100)?
+        else {
+            return Err("expected cookie challenge at the threshold".into());
+        };
+        for now in 101..=108 {
+            assert_eq!(
+                state.check_pre_auth("peer", Some(&challenge.pre_auth_cookie), now)?,
+                GatewayPreAuthDecision::Accepted
+            );
+            assert_eq!(state.pre_auth_handshakes_by_source_ip["peer"].len(), 3);
+        }
+        assert_eq!(state.pre_auth_handshakes_by_source_ip["peer"], [106, 107, 108]);
+        assert!(matches!(
+            state.check_pre_auth("peer", None, 162)?,
+            GatewayPreAuthDecision::Challenge(_)
+        ));
+        assert!(state.check_pre_auth("peer", Some("invalid"), 162).is_err());
+        assert_eq!(state.check_pre_auth("peer", None, 169)?, GatewayPreAuthDecision::Accepted);
+        assert_eq!(state.pre_auth_handshakes_by_source_ip["peer"], [169]);
+        Ok(())
+    }
+
+    #[test]
+    fn cookie_retries_bound_restored_and_zero_rate_buckets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for rate in [0, 3] {
+            let mut state = GatewayState::new();
+            state.set_pre_auth_policy(GatewayPreAuthPolicy {
+                enabled: true,
+                per_source_ip_handshake_rate: rate,
+                ..GatewayPreAuthPolicy::default()
+            });
+            state.pre_auth_handshakes_by_source_ip.insert("peer".into(), vec![100; 12]);
+            let cookie = sign_pre_auth_cookie(
+                "peer",
+                PRE_AUTH_PROTOCOL_VERSION,
+                100,
+                &state.pre_auth_policy.cookie_secret,
+            );
+            assert_eq!(
+                state.check_pre_auth("peer", Some(&cookie), 100)?,
+                GatewayPreAuthDecision::Accepted
+            );
+            assert_eq!(state.pre_auth_handshakes_by_source_ip["peer"].len(), rate as usize);
+            assert!(matches!(
+                state.check_pre_auth("peer", None, 100)?,
+                GatewayPreAuthDecision::Challenge(_)
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     fn gateway_resume_token_mac_golden_preserves_persisted_bytes() {
