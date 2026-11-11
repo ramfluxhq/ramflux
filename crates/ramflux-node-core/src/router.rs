@@ -72,6 +72,10 @@ pub struct RouterCore {
     pub(crate) ephemeral_replay: Mutex<crate::ephemeral::EphemeralReplaySet>,
     pub(crate) router_boot_id: String,
     ephemeral_route_calls: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    ephemeral_durable_enqueues: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    ephemeral_forward_dispatches: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -1033,6 +1037,8 @@ impl RouterCore {
                         target_delivery_id: reservation.target_delivery_id().to_owned(),
                     };
                 };
+                #[cfg(any(test, feature = "test-support"))]
+                self.ephemeral_forward_dispatches.fetch_add(1, Ordering::SeqCst);
                 let response = forward(plan);
                 self.complete_home_node_forward(reservation, response)
             }
@@ -1248,6 +1254,8 @@ impl RouterCore {
         match shard.registry.route_envelope(&envelope) {
             DeliveryDecision::Online { gateway_id, session_id, target_delivery_id } => {
                 crate::record_router_envelope_accepted();
+                #[cfg(any(test, feature = "test-support"))]
+                self.ephemeral_durable_enqueues.fetch_add(1, Ordering::SeqCst);
                 let entry = match shard.inbox.append_published(envelope.clone(), now_unix_seconds) {
                     Ok(entry) => entry,
                     Err(error) => {
@@ -1269,6 +1277,8 @@ impl RouterCore {
             DeliveryDecision::OfflineWake(wake_hint) => {
                 crate::record_router_envelope_accepted();
                 let target = envelope.target_delivery_id.clone();
+                #[cfg(any(test, feature = "test-support"))]
+                self.ephemeral_durable_enqueues.fetch_add(1, Ordering::SeqCst);
                 let entry = match shard.inbox.append_published(envelope, now_unix_seconds) {
                     Ok(entry) => entry,
                     Err(error) => {
@@ -1470,6 +1480,10 @@ impl RouterCore {
             ephemeral_replay: Mutex::new(crate::ephemeral::EphemeralReplaySet::default()),
             router_boot_id: crate::ephemeral::new_router_boot_id(),
             ephemeral_route_calls: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            ephemeral_durable_enqueues: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            ephemeral_forward_dispatches: AtomicU64::new(0),
         };
         for (key, expires_at) in snapshot.replay_guard_state.accepted_entries() {
             let index = replay_guard_shard_index(key);
@@ -1951,6 +1965,16 @@ impl Clone for RouterCore {
         cloned
             .ephemeral_route_calls
             .store(self.ephemeral_route_calls.load(Ordering::Relaxed), Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            cloned
+                .ephemeral_durable_enqueues
+                .store(self.ephemeral_durable_enqueues.load(Ordering::Relaxed), Ordering::Relaxed);
+            cloned.ephemeral_forward_dispatches.store(
+                self.ephemeral_forward_dispatches.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+        }
         cloned
     }
 }

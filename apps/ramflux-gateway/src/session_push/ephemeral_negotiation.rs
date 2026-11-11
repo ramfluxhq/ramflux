@@ -26,7 +26,7 @@ async fn guard_10s<F: std::future::Future>(event: &str, future: F) -> F::Output 
 }
 
 fn session_push_auth() -> anyhow::Result<ramflux_node_core::GatewayAuthFrame> {
-    super::negotiation::auth(true)
+    super::negotiation::auth_claiming_ephemeral(true)
 }
 
 fn device_key() -> ramflux_node_core::DeviceAuthKeyResponse {
@@ -234,7 +234,10 @@ async fn client_ephemeral_claim_without_router_advertisement_stays_false() -> Te
     let task = tokio::spawn(async move { negotiate(&context, &auth, &session).await });
     let request = fixture.next().await?;
     assert_eq!(request.path, "/s1/session");
-    assert_eq!(request.body["ephemeral"], false);
+    assert_eq!(
+        request.body["ephemeral"], false,
+        "router advertisement must gate the signed client claim"
+    );
     request.respond.send((200, capable_reply(&request.body))).map_err(|_| Retired)?;
     let binding = guard_10s("untrusted ephemeral claim negotiation", task).await??;
     assert!(!binding.ephemeral);
@@ -737,6 +740,30 @@ async fn partial_reassertion_retries_skipped_registrations_in_same_boot() -> Tes
     seed_live(&router, TARGET, "late")?;
     drive_reassert(&mut fixture, &router, &boot).await?;
     assert_online(&router, "late");
-    assert!(fixture.context.hub.ephemeral_registrations(GATEWAY, &boot).await.is_empty());
+    assert_eq!(fixture.context.hub.ephemeral_registrations(GATEWAY, &boot).await.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_push_client_without_ephemeral_claim_stays_unsupported() -> TestResult {
+    let mut fixture = Fixture::new("ephemeral-old-sdk")?;
+    seed_echo(&fixture, true, true);
+    let context = fixture.context.clone();
+    let auth = super::negotiation::auth(true)?;
+    let mut session = super::negotiation::descriptor();
+    session.gateway_id = context.gateway_id.clone();
+    let task = tokio::spawn(async move { negotiate(&context, &auth, &session).await });
+    let request = fixture.next().await?;
+    assert_eq!(request.path, "/s1/session");
+    assert_eq!(
+        request.body["ephemeral"], false,
+        "client ephemeral capability must not be inferred"
+    );
+    request.respond.send((200, capable_reply(&request.body))).map_err(|_| Retired)?;
+    let binding = guard_10s("push-only client negotiation", task).await??;
+    assert!(!binding.ephemeral);
+    assert!(binding.incarnation_id.is_some());
+    let echoed = echo_caps(binding.incarnation_id.as_deref(), binding.ephemeral).await?;
+    assert_eq!(capabilities_of(&echoed), Some(&json!([SESSION_PUSH])));
     Ok(())
 }

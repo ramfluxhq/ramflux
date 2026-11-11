@@ -141,13 +141,13 @@ pub use dm::{
     SdkSelectedFrankingEvidence,
 };
 pub use ephemeral::{
-    AuthenticatedCiphertext, EphemeralReceiver, EphemeralSendError, EphemeralSendOutcome,
-    EphemeralWire, HoldLease, LedgerProbe, RECEIVER_CHANNEL_BYTES, RECEIVER_CHANNEL_FRAMES,
-    RECEIVER_DEDUP_BOUND, RECEIVER_DEDUP_BUDGET_BYTES, RECEIVER_DEDUP_ENTRY_BYTES,
-    RECEIVER_MAX_FRAME_BYTES, ReceiverAdmit, ReceiverClock, ReceiverDequeue, ReceiverDropReason,
-    ReceiverHandoff, ReceiverLifetime, admit_authenticated_ciphertext, authenticate,
-    decode_ephemeral_result, echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral,
-    ttl_seconds,
+    AuthenticatedCiphertext, EphemeralConsumer, EphemeralReceiver, EphemeralSendError,
+    EphemeralSendOutcome, EphemeralSource, EphemeralWire, HoldLease, LedgerProbe,
+    RECEIVER_CHANNEL_BYTES, RECEIVER_CHANNEL_FRAMES, RECEIVER_DEDUP_BOUND,
+    RECEIVER_DEDUP_BUDGET_BYTES, RECEIVER_DEDUP_ENTRY_BYTES, RECEIVER_MAX_FRAME_BYTES,
+    ReceiverAdmit, ReceiverClock, ReceiverDequeue, ReceiverDropReason, ReceiverHandoff,
+    ReceiverLifetime, admit_authenticated_ciphertext, authenticate, decode_ephemeral_result,
+    echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral, ttl_seconds,
 };
 pub use error::{GroupOperation, ReceiveEpochReconcileFailure, SdkError};
 mod surface_refusal;

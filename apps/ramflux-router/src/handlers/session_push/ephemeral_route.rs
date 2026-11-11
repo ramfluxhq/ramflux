@@ -147,7 +147,12 @@ fn now_ms() -> u64 {
 }
 
 fn zero_dispatch() -> EphemeralDispatchObservation {
-    EphemeralDispatchObservation { pending_inbox: 0, forwarding_reservations: 0 }
+    EphemeralDispatchObservation {
+        pending_inbox: 0,
+        forwarding_reservations: 0,
+        durable_enqueues: 0,
+        forward_dispatches: 0,
+    }
 }
 
 fn dispatch_of(router: &RouterHandle, target: &str) -> EphemeralDispatchObservation {
@@ -155,6 +160,11 @@ fn dispatch_of(router: &RouterHandle, target: &str) -> EphemeralDispatchObservat
 }
 
 fn assert_no_dispatch(router: &RouterHandle, target: &str, response: &EphemeralRouteResponse) {
+    assert_eq!(
+        router.ingress_probe(),
+        (0, 0),
+        "ephemeral must not enter the durable router engine"
+    );
     assert!(
         !matches!(response, EphemeralRouteResponse::Online { .. }),
         "zero forwards and enqueues, got {response:?}"
@@ -169,8 +179,8 @@ impl Drop for NowMsGuard {
     }
 }
 
-fn store_bytes(path: &std::path::Path) -> Vec<u8> {
-    std::fs::read(path).unwrap_or_default()
+fn store_bytes(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    Ok(std::fs::read(path)?)
 }
 
 fn observe_post(
@@ -180,15 +190,18 @@ fn observe_post(
     body: &Value,
 ) -> anyhow::Result<EphemeralRouteResponse> {
     let before = router.state().ephemeral_durable_snapshot()?;
-    let before_store = store_bytes(path);
+    let before_store = store_bytes(path)?;
     let before_dispatch = dispatch_of(router, target);
+    let before_ingress = router.ingress_probe();
     let response = post_route(router, body)?;
     anyhow::ensure!(
         router.state().ephemeral_durable_snapshot()? == before,
         "durable snapshot changed"
     );
-    anyhow::ensure!(store_bytes(path) == before_store, "redb mutated");
+    anyhow::ensure!(store_bytes(path)? == before_store, "redb mutated");
     anyhow::ensure!(dispatch_of(router, target) == before_dispatch, "forward/enqueue mutated");
+    assert_eq!(router.ingress_probe(), before_ingress, "actual router engine dispatch changed");
+    assert_eq!(before_ingress, (0, 0));
     Ok(response)
 }
 
@@ -198,16 +211,18 @@ fn row_accepted_and_read_only() -> TestResult {
     let envelope = signed_ephemeral("ok", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
     let before = router.state().ephemeral_durable_snapshot()?;
-    let before_store = store_bytes(&path);
+    let before_store = store_bytes(&path)?;
     let before_dispatch = dispatch_of(&router, TARGET);
+    assert_eq!(router.ingress_probe(), (0, 0));
     let response = post_route(&router, &request_body(&envelope, expires)?)?;
     assert_eq!(
         response,
         EphemeralRouteResponse::Online { gateway_id: GATEWAY.into(), session_id: SESSION.into() }
     );
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
-    anyhow::ensure!(store_bytes(&path) == before_store);
+    anyhow::ensure!(store_bytes(&path)? == before_store);
     anyhow::ensure!(dispatch_of(&router, TARGET) == before_dispatch);
+    assert_eq!(router.ingress_probe(), (0, 0), "HTTP row dispatched a durable router operation");
     anyhow::ensure!(before_dispatch == zero_dispatch());
     drop(router);
     std::fs::remove_file(path)?;
@@ -220,9 +235,10 @@ fn row_non_gateway_peer() -> TestResult {
     let envelope = signed_ephemeral("peer", TARGET)?;
     let expires = computed_expires(&envelope, now_ms())?;
     let before = router.state().ephemeral_durable_snapshot()?;
-    let before_store = store_bytes(&path);
+    let before_store = store_bytes(&path)?;
     let before_calls = router.state().route_ephemeral_call_count();
     let before_dispatch = dispatch_of(&router, TARGET);
+    assert_eq!(router.ingress_probe(), (0, 0));
     let response = mesh(
         &router,
         "POST",
@@ -236,9 +252,10 @@ fn row_non_gateway_peer() -> TestResult {
         "session push requires authenticated gateway"
     );
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
-    anyhow::ensure!(store_bytes(&path) == before_store);
+    anyhow::ensure!(store_bytes(&path)? == before_store);
     anyhow::ensure!(router.state().route_ephemeral_call_count() == before_calls);
     anyhow::ensure!(dispatch_of(&router, TARGET) == before_dispatch);
+    assert_eq!(router.ingress_probe(), (0, 0), "HTTP row dispatched a durable router operation");
     anyhow::ensure!(before_dispatch == zero_dispatch());
     drop(router);
     std::fs::remove_file(path)?;
@@ -411,9 +428,10 @@ fn row_decode_invalid() -> TestResult {
     let (router, path) = fresh("p06-decode")?;
     establish_capable(&router, TARGET)?;
     let before = router.state().ephemeral_durable_snapshot()?;
-    let before_store = store_bytes(&path);
+    let before_store = store_bytes(&path)?;
     let before_calls = router.state().route_ephemeral_call_count();
     let before_dispatch = dispatch_of(&router, TARGET);
+    assert_eq!(router.ingress_probe(), (0, 0));
     // A malformed body is refused by the strict I-JSON ingress (P03), which the serve layer
     // maps to the exact D3 400 body; it no longer reaches the route as a "dropped/invalid" row.
     let Err(error) = super::super::handle_mesh_request_value(
@@ -434,9 +452,10 @@ fn row_decode_invalid() -> TestResult {
         br#"{"error":"i_json_rejected","reason_code":"i_json_rejected"}"#
     );
     anyhow::ensure!(router.state().ephemeral_durable_snapshot()? == before);
-    anyhow::ensure!(store_bytes(&path) == before_store);
+    anyhow::ensure!(store_bytes(&path)? == before_store);
     anyhow::ensure!(router.state().route_ephemeral_call_count() == before_calls);
     anyhow::ensure!(dispatch_of(&router, TARGET) == before_dispatch);
+    assert_eq!(router.ingress_probe(), (0, 0), "HTTP row dispatched a durable router operation");
     drop(router);
     std::fs::remove_file(path)?;
     Ok(())
@@ -549,5 +568,25 @@ fn ephemeral_now_ms_is_per_router_handle() -> TestResult {
     drop(expired_router);
     std::fs::remove_file(live_path)?;
     std::fs::remove_file(expired_path)?;
+    Ok(())
+}
+
+#[test]
+fn ephemeral_dispatch_observer_calibrates_durable_enqueue() -> TestResult {
+    let (router, path) = fresh("p16-dispatch-control")?;
+    let mut envelope = signed_ephemeral("dispatch-control", TARGET)?;
+    envelope.ext.ext.remove("delivery_mode");
+    envelope.signed.signature =
+        ramflux_crypto::sign_protocol_object_with_seed(&envelope, sign_seed())?;
+    let before = dispatch_of(&router, TARGET);
+    let outcome = call(&router, "POST", "/mvp0/envelope", &serde_json::to_value(envelope)?)?;
+    assert_eq!(router.ingress_probe(), (1, 1), "real HTTP control must enter the router engine");
+    assert_eq!(
+        dispatch_of(&router, TARGET).durable_enqueues,
+        before.durable_enqueues + 1,
+        "the observer must see the actual durable inbox enqueue: {outcome:?}"
+    );
+    drop(router);
+    std::fs::remove_file(path)?;
     Ok(())
 }

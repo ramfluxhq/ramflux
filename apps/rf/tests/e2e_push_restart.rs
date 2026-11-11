@@ -8,9 +8,9 @@
 mod e2e;
 
 use e2e::{
-    assert_texts_once_in_order, boot_stack, configure_node, crash_daemon, create_account, dm_send,
-    dump_logs, exchange_contacts, start_daemon, start_daemon_at, unique, unlock_account,
-    wait_dm_texts, wait_node_observed_ack,
+    boot_stack, configure_node, crash_daemon, create_account, dm_send, dump_logs,
+    exchange_contacts, mesh_cursor, message_texts, rf_json, start_daemon, start_daemon_at, unique,
+    unlock_account, wait_dm_texts, wait_node_observed_ack, wait_node_pending,
 };
 
 #[ignore = "real-process CLI e2e: run explicitly on QA and in the CLI e2e CI job"]
@@ -37,16 +37,23 @@ fn e2e_push_restart() -> e2e::Result<()> {
         wait_node_observed_ack(&stack, &bob, id)?;
     }
     let live = wait_dm_texts(&bob_d, &bob, &conversation, &bodies[..3])?;
-    assert_texts_once_in_order(&live, &bodies[..3])?;
+    assert_eq!(message_texts(&live), bodies[..3], "live push must contain exactly the sent set");
     let (socket, root) = crash_daemon(bob_d)?;
     for (id, body) in ids.iter().zip(&bodies).skip(3) {
         dm_send(&alice_d, &alice, &bob, &conversation, id, body)?;
     }
+    wait_node_pending(&stack, &bob, &ids[3..])?;
     let bob_d = start_daemon_at(socket, root)?;
     unlock_account(&bob_d, &bob)?;
-    let received = wait_dm_texts(&bob_d, &bob, &conversation, &bodies)
-        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
-    assert_texts_once_in_order(&received, &bodies)?;
+    let received = wait_dm_texts(&bob_d, &bob, &conversation, &bodies).map_err(|error| {
+        format!(
+            "{error}; node_cursor={:?}; recipient_status={:?}; logs={}",
+            mesh_cursor(&stack, &bob.target_delivery_id),
+            rf_json(&bob_d.socket, &["account", "status", "--account", &bob.id]),
+            dump_logs(&stack, &[&alice_d, &bob_d])
+        )
+    })?;
+    assert_eq!(message_texts(&received), bodies, "restart must contain exactly the full sent set");
     for id in &ids {
         wait_node_observed_ack(&stack, &bob, id).map_err(|error| {
             format!(

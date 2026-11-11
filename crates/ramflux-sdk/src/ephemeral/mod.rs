@@ -6,6 +6,8 @@
 mod lifetime;
 mod receiver;
 mod send;
+pub(crate) mod session;
+pub use session::{EphemeralConsumer, EphemeralSource};
 
 pub use lifetime::{
     AuthenticatedCiphertext, HoldLease, ReceiverClock, ReceiverDropReason, ReceiverHandoff,

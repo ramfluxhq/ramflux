@@ -187,6 +187,14 @@ impl EphemeralReceiver {
         self.locked = true;
     }
 
+    /// Clear pending delivery on disconnect while retaining same-generation live dedup.
+    pub(crate) fn disconnect(&mut self) {
+        self.channel.clear();
+        self.inflight = None;
+        self.holds.clear();
+        self.channel_bytes = 0;
+    }
+
     /// Clear the lock flag. Held and queued frames are not replayed.
     pub fn unlock(&mut self) {
         self.locked = false;
@@ -719,8 +727,11 @@ mod tests {
                 e.envelope_id = id.to_owned();
                 e.encrypted_payload = "x".repeat(mid);
             });
-            let encoded = frame_builds(&envelope, EXPIRES_AT_MS)
-                .unwrap_or_else(|error| panic!("padding frame must encode: {error}"));
+            let encoded = complete_frame_bytes(&envelope, EXPIRES_AT_MS);
+            assert!(encoded.is_some(), "padding frame must encode before its length is checked");
+            let Some(encoded) = encoded else {
+                break;
+            };
             match encoded.len().cmp(&frame_len) {
                 std::cmp::Ordering::Equal => {
                     found = Some(envelope);
@@ -1238,6 +1249,14 @@ mod tests {
         assert_eq!(
             admit_bytes(&mut rx, &bytes, 1_000_000, 50_000),
             ReceiverAdmit::Drop(ReceiverDropReason::InvalidDeliveryMode)
+        );
+        assert_eq!(rx.occupancy(), (0, 0));
+        assert_eq!(rx.hold_len(), 0);
+        assert_eq!(rx.dedup_len(), 0);
+        let safe_max = frame_builds(&envelope, ramflux_protocol::MAX_SAFE_JSON_INTEGER)?;
+        assert_eq!(
+            admit_bytes(&mut rx, &safe_max, 1_000_000, 50_000),
+            ReceiverAdmit::Drop(ReceiverDropReason::ReceivedDeadlineMismatch)
         );
         assert_eq!(rx.occupancy(), (0, 0));
         assert_eq!(rx.hold_len(), 0);

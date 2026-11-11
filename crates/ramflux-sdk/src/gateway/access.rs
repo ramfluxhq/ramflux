@@ -63,6 +63,18 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     ) -> GatewayCallFuture<'_, GatewayInboxEntry>;
     /// # Errors
     /// Returns an error if the session exchange is refused, cancelled, or expires.
+    fn submit_ephemeral(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, crate::ephemeral::EphemeralSendOutcome>;
+    /// Take the generation-owned transient consumer once.
+    /// # Errors
+    /// Returns an error if the generation retired before admission.
+    fn take_ephemeral_consumer(
+        &mut self,
+    ) -> GatewayCallFuture<'_, Option<crate::ephemeral::EphemeralConsumer>>;
+    /// # Errors
+    /// Returns an error if the session exchange is refused, cancelled, or expires.
     fn own_device_fanout(
         &mut self,
         principal_id: impl Into<String>,
@@ -173,6 +185,17 @@ impl GatewaySessionAccess for GatewaySessionEngine {
         envelope: ramflux_protocol::Envelope,
     ) -> GatewayCallFuture<'_, GatewayInboxEntry> {
         Box::pin(GatewaySessionEngine::submit_envelope(self, envelope))
+    }
+    fn submit_ephemeral(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, crate::ephemeral::EphemeralSendOutcome> {
+        Box::pin(GatewaySessionEngine::submit_ephemeral(self, envelope))
+    }
+    fn take_ephemeral_consumer(
+        &mut self,
+    ) -> GatewayCallFuture<'_, Option<crate::ephemeral::EphemeralConsumer>> {
+        Box::pin(async move { Ok(GatewaySessionEngine::take_ephemeral_consumer(self)) })
     }
     fn own_device_fanout(
         &mut self,
@@ -340,6 +363,17 @@ impl GatewaySessionAccess for CountingGateway {
         _envelope: ramflux_protocol::Envelope,
     ) -> GatewayCallFuture<'_, GatewayInboxEntry> {
         unused("submit_envelope")
+    }
+    fn submit_ephemeral(
+        &mut self,
+        _envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, crate::ephemeral::EphemeralSendOutcome> {
+        unused("submit_ephemeral")
+    }
+    fn take_ephemeral_consumer(
+        &mut self,
+    ) -> GatewayCallFuture<'_, Option<crate::ephemeral::EphemeralConsumer>> {
+        unused("take_ephemeral_consumer")
     }
     fn own_device_fanout(
         &mut self,

@@ -517,7 +517,12 @@ mod tests {
         );
         assert_eq!(
             router.ephemeral_dispatch_observation(target),
-            crate::EphemeralDispatchObservation { pending_inbox: 0, forwarding_reservations: 0 },
+            crate::EphemeralDispatchObservation {
+                pending_inbox: 0,
+                forwarding_reservations: 0,
+                durable_enqueues: 0,
+                forward_dispatches: 0
+            },
             "inbox and home-node forwards stay empty"
         );
     }

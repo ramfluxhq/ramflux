@@ -118,6 +118,7 @@ impl FrameKind {
 pub(crate) enum ExpectedReply {
     Heartbeat,
     Submit,
+    EphemeralSubmit,
     Fanout,
     Ack,
     Cursor,
@@ -141,6 +142,7 @@ impl ExpectedReply {
         match self {
             Self::Heartbeat => matches!(kind, FrameKind::Heartbeat),
             Self::Submit => matches!(kind, FrameKind::ForwardAck),
+            Self::EphemeralSubmit => matches!(kind, FrameKind::EphemeralResult),
             Self::Fanout => matches!(kind, FrameKind::OwnDeviceFanout),
             Self::Ack => matches!(kind, FrameKind::Ack),
             Self::Cursor => matches!(kind, FrameKind::Cursor),

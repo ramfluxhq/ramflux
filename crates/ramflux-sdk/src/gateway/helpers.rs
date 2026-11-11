@@ -69,14 +69,15 @@ pub(crate) fn apply_session_push_advertise(
         || ramflux_storage::FIRST_ACTIVATION_DEFAULT;
 }
 
-/// The scope the device proof signs. The session-push capability is present exactly when the
-/// config advertises it, whatever the caller's scope held (stripped, then appended once).
+/// The scope the device proof signs. Session-push and ephemeral capabilities are advertised
+/// together, exactly once, when session-push is enabled; caller-supplied duplicates are stripped.
 pub(crate) fn signed_capability_scope(config: &GatewaySessionConfig) -> Vec<String> {
     let mut scope: Vec<String> = config
         .capability_scope
         .iter()
         .filter(|capability| {
             capability.as_str() != ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
+                && capability.as_str() != ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY
         })
         .cloned()
         .collect();

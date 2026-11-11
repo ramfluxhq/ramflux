@@ -318,3 +318,38 @@ async fn priority_call_cannot_await_writer_apply() -> Result<(), Box<dyn std::er
     handle.stop().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn ephemeral_session_client_generation_owns_exchange_and_consumer() -> Case {
+    use crate::gateway::access::GatewaySessionAccess;
+    super::watchdog(async {
+        let (handle, mut io) = fixture().await?;
+        let deadline = Instant::now() + Duration::from_secs(600);
+        handle.call(|engine| Box::pin(async move {
+            engine.ephemeral_negotiated = true;
+            Ok(())
+        }), deadline).await?;
+        let metadata = handle.metadata().ok_or("metadata missing")?;
+        let mut stale = crate::bus::connection_manager::SessionClient::new(handle.clone(), metadata.clone(), deadline);
+        let mut client = crate::bus::connection_manager::SessionClient::new(handle.clone(), metadata, deadline);
+        let mut consumer = client.take_ephemeral_consumer().await?.ok_or("consumer missing")?;
+        assert!(client.take_ephemeral_consumer().await?.is_none());
+        let mut envelope = entry("host-ephemeral", 1)?.envelope;
+        envelope.envelope_id = "host-ephemeral".into();
+        envelope.created_at = crate::time::now_unix_timestamp();
+        envelope.ttl = 5;
+        envelope.priority = ramflux_protocol::Priority::Low;
+        envelope.ext.ext.insert("delivery_mode".into(), serde_json::json!("ephemeral"));
+        let call = tokio::spawn(async move { client.submit_ephemeral(envelope).await });
+        let submitted = io.output.recv().await.ok_or("submit missing")?;
+        assert!(matches!(submitted, GatewayClientFrame::Submit { submit } if submit.envelope.envelope_id == "host-ephemeral"));
+        send(&io, &GatewayServerFrame::EphemeralResult {
+            envelope_id: "host-ephemeral".into(), result: ramflux_protocol::ephemeral::EphemeralSubmitResult::accepted(),
+        })?;
+        assert_eq!(call.await??, crate::EphemeralSendOutcome::Delivered);
+        handle.stop().await;
+        assert!(stale.take_ephemeral_consumer().await.is_err(), "retired generation cannot obtain an adapter");
+        assert!(consumer.next(|_| None).await.is_none(), "account stop closes the transient consumer");
+        Ok(())
+    }).await
+}

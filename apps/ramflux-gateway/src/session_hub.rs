@@ -46,6 +46,8 @@ pub(crate) struct GatewaySessionHub {
     /// Per-hub C4 clock override; production builds always use wall clock.
     #[cfg(test)]
     ephemeral_clock_ms: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    refuse_ephemeral_enqueue: std::sync::atomic::AtomicBool,
     /// Per-hub enqueue barrier; tests park one forward without a process-global hold.
     #[cfg(test)]
     enqueue_hold: std::sync::Mutex<
@@ -435,6 +437,11 @@ impl GatewaySessionHub {
         expires_at_ms: u64,
     ) -> crate::ephemeral_forward::EphemeralEnqueueOutcome {
         use crate::ephemeral_forward::EphemeralEnqueueOutcome as Outcome;
+        #[cfg(test)]
+        assert!(
+            !self.refuse_ephemeral_enqueue.load(std::sync::atomic::Ordering::Acquire),
+            "invalid forward reached the actual enqueue boundary"
+        );
         self.await_enqueue_hold().await;
         let Some(entry) = self.snapshot().await.get(registration_target).cloned() else {
             return crate::ephemeral_forward::finish_without_wake(Outcome::Offline);
@@ -461,6 +468,11 @@ impl GatewaySessionHub {
         };
         crate::ephemeral_forward::finish_without_wake(outcome)
     }
+    #[cfg(test)]
+    pub(crate) fn refuse_ephemeral_enqueue(&self) {
+        self.refuse_ephemeral_enqueue.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     #[cfg(test)]
     pub(crate) fn park_next_enqueue(
         &self,

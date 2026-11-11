@@ -631,12 +631,40 @@ fn cursor_has_ack(cursor: &Value, envelope_id: &str) -> bool {
         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(envelope_id)))
 }
 
-fn mesh_cursor(stack: &Stack, target: &str) -> Result<Value> {
+pub fn mesh_cursor(stack: &Stack, target: &str) -> Result<Value> {
+    mesh_get(stack, &format!("/mvp0/cursor/{target}"))
+}
+
+pub fn wait_node_pending(stack: &Stack, account: &Account, envelopes: &[String]) -> Result<()> {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let path = format!("/mvp1/inbox/{}?after=0&limit=1000", account.target_delivery_id);
+    loop {
+        let value = mesh_get(stack, &path)?;
+        let ids: Vec<&str> = value
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row.get("envelope")?.get("envelope_id")?.as_str())
+            .collect();
+        if envelopes.iter().all(|id| ids.contains(&id.as_str())) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "offline envelopes missing from node: expected={envelopes:?}, pending={ids:?}"
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn mesh_get(stack: &Stack, path: &str) -> Result<Value> {
     let certs = stack.root.join("certs");
     let ca = certs.join("ca.pem");
     let cert = certs.join("ramflux-gateway.pem");
     let key = certs.join("ramflux-gateway.key");
-    let path = format!("/mvp0/cursor/{target}");
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
         stack.router_mesh

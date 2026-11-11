@@ -18,6 +18,8 @@ mod carrier_tests;
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]
+mod ephemeral_tests;
+#[cfg(test)]
 mod negotiation_tests;
 #[cfg(test)]
 mod outcome_tests;
@@ -387,6 +389,10 @@ pub(crate) struct EstablishmentEcho {
 }
 
 impl EstablishmentEcho {
+    pub(crate) fn supports_ephemeral(&self) -> bool {
+        crate::ephemeral::echo_holds_ephemeral_send(self.capabilities.as_deref().unwrap_or(&[]))
+    }
+
     /// # Errors
     /// Refuses establishment bytes whose echo fields have the wrong JSON types.
     pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, crate::SdkError> {
@@ -413,8 +419,14 @@ pub(crate) fn negotiate(
     echo: &EstablishmentEcho,
 ) -> Result<SessionMode, crate::SdkError> {
     let capabilities = echo.capabilities.as_deref().unwrap_or(&[]);
+    let push_echoed = capabilities
+        .iter()
+        .any(|capability| capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY);
     if capabilities.iter().any(|capability| {
-        !(advertised && capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY)
+        !(advertised
+            && (capability == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY
+                || (push_echoed
+                    && capability == ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY)))
     }) {
         return Err(refused("echo names a capability that was not advertised"));
     }

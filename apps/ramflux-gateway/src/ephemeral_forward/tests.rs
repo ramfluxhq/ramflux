@@ -631,6 +631,7 @@ async fn assert_forward_invalid(
     envelope_id: &str,
 ) -> TestResult {
     let hub = capable_hub(TARGET).await?;
+    hub.refuse_ephemeral_enqueue();
     let mut req = request(TARGET, TARGET, envelope_id);
     change(&mut req);
     let reply = handle_at(&hub, decode_request(&req)?, NOW_LIVE_MS).await?;
@@ -751,5 +752,17 @@ async fn final_registration_capability() -> TestResult {
     row_marker_required_exact_error().await?;
     row_id_bounds_exact_errors_and_inclusive_positives().await?;
     row_isolated_p01_predicates().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ephemeral_enqueue_trap_calibrates_actual_boundary() -> TestResult {
+    let hub = GatewaySessionHub::default();
+    hub.refuse_ephemeral_enqueue();
+    let result = tokio::spawn(async move {
+        hub.try_enqueue_ephemeral(TARGET, TARGET, TARGET, Vec::new(), EXPIRES_AT_MS).await
+    })
+    .await;
+    assert!(result.is_err_and(|error| error.is_panic()), "actual enqueue must trigger the trap");
     Ok(())
 }

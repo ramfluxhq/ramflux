@@ -94,6 +94,7 @@ pub(crate) struct SessionMetadata {
 
 struct Shared {
     timeouts: RuntimeTimeouts,
+    ephemeral_inbox: std::sync::Mutex<crate::ephemeral::session::SessionInbox>,
     session_push_advertise: bool,
     session_mode: std::sync::Mutex<crate::gateway::session_push::SessionMode>,
     compat_session: std::sync::Mutex<crate::bus::push_receiver::compat::CompatSession>,
@@ -156,6 +157,7 @@ fn new_shared(
     let (events, _) = broadcast::channel(64);
     Arc::new(Shared {
         timeouts: timeouts.clone(),
+        ephemeral_inbox: std::sync::Mutex::new(crate::ephemeral::session::SessionInbox::new()),
         session_push_advertise: config.session_push_advertise,
         session_mode: std::sync::Mutex::new(crate::gateway::session_push::SessionMode::Legacy),
         compat_session: std::sync::Mutex::new(crate::bus::push_receiver::compat::start_session()),

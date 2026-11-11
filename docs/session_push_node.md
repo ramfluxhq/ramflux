@@ -20,11 +20,12 @@ including its single self-target Deliver submit reply. A capable sender receives
 submit_accepted separately from recipient Deliver, including self-target.
 
 The router readiness endpoint is GET `/mvp1/session-push-capabilities`, returning
-`{capabilities:["gateway.session_push.v1"]}`. Discovery has a two-second deadline
+`{capabilities:["gateway.session_push.v1","gateway.ephemeral.v1"],router_boot_id:...}`. Discovery has a two-second deadline
 and retries every 60 seconds without blocking legacy service. Missing, malformed
 or failed discovery selects legacy. A disappearing capable route retires the
 session; reconnect negotiates again. Incarnation mismatch retires the bound
-registration, including pending pushes and hints. No ephemeral capability is listed.
+registration, including pending pushes and hints. Ephemeral support additionally requires
+`gateway.ephemeral.v1` in the authenticated router advertisement.
 
 E is a persisted 128-bit random inbox incarnation, encoded as 32 lowercase hex
 digits. Sequences are positive u64; unknown targets have issued=0 and no E. Reads
@@ -133,3 +134,21 @@ segment/directory syncs and an immediate redb commit before readiness.
 must restart router and gateway. Automatic supervisor restart is not tested here.
 Opening an upgraded store with a pre-session-push writer is unsupported.
 Physical-media correctness after an earlier EIO or a false sync is not promised.
+
+## Ephemeral delivery
+
+The SDK advertises `gateway.ephemeral.v1` together with session push in the signed
+scope. The gateway echoes it only when the client signed that claim and authenticated
+router discovery advertises support; a client claim alone cannot enable it. The negotiated flag is frozen in the session runtime.
+Missing echo makes the SDK return local unsupported without sending. A router
+registration lacking ephemeral support returns `recipient_unsupported`. Neither
+case retries on the durable route.
+
+The signed `ext.delivery_mode="ephemeral"` bridge requires low priority, TTL 1–5
+seconds, at most 32 KiB per complete frame, and the exclusive sender deadline
+`(created_at + ttl) * 1000`. Admission and the live writer enforce that same deadline.
+`ephemeral_result: accepted` means final volatile enqueue, with no durable ACK.
+Offline, unsupported, expired, rate-limited or full recipients drop the envelope.
+No inbox sequence, client journal, router replay-store record or offline wake is
+created. Restart loses pending transients and volatile replay markers; Resume
+contains no ephemeral history. See [Ephemeral delivery](ephemeral_delivery.md).

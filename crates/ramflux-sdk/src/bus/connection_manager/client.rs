@@ -109,6 +109,25 @@ impl GatewaySessionAccess for SessionClient {
             self.generation,
         ))
     }
+    fn submit_ephemeral(
+        &mut self,
+        envelope: ramflux_protocol::Envelope,
+    ) -> GatewayCallFuture<'_, crate::ephemeral::EphemeralSendOutcome> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { engine.submit_ephemeral(envelope).await }),
+            self.deadline,
+            self.generation,
+        ))
+    }
+    fn take_ephemeral_consumer(
+        &mut self,
+    ) -> GatewayCallFuture<'_, Option<crate::ephemeral::EphemeralConsumer>> {
+        Box::pin(self.handle.call_generation(
+            move |engine| Box::pin(async move { Ok(engine.take_ephemeral_consumer()) }),
+            self.deadline,
+            self.generation,
+        ))
+    }
     fn own_device_fanout(
         &mut self,
         principal_id: impl Into<String>,

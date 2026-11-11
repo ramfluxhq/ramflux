@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// starts with one of these prefixes, on whole segments. Each entry records why
 /// the prefix is safe. Filesystem, network, process, environment and storage
 /// paths (`std::fs`, `std::io`, `std::net`, `std::process`, `std::env`,
-/// `std::path`, `tokio`, `redb`, `rusqlite`, ...) must never appear here; the
+/// `std::path`, `tokio::fs/io/net/process`, `redb`, `rusqlite`, ...) must never appear here; the
 /// `allow_list_excludes_persistence_prefixes` test enforces it.
 const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("crate::ephemeral::capability", "this module family's capability state (same crate)"),
@@ -131,6 +131,22 @@ const ALLOWED_IMPORT_PREFIXES: &[(&str, &str)] = &[
     ("crate::ephemeral::lifetime", "same-crate lifetime types and helpers (no I/O)"),
     ("crate::ephemeral::receiver", "same-crate receiver types and bounds (no I/O)"),
     ("crate::ephemeral::send", "same-crate submit codec and D5 local unsupported (no I/O)"),
+    ("crate::ephemeral::session", "bounded volatile SDK consumer and clock; no storage"),
+    ("crate::ephemeral::decode_ephemeral_result", "in-memory correlated result decoder"),
+    (
+        "crate::GatewaySessionEngine",
+        "SDK stream owner type; durable submit remains a forbidden symbol",
+    ),
+    ("crate::EphemeralConsumer", "volatile consumer capability type"),
+    ("crate::EphemeralSendOutcome", "ephemeral result enum"),
+    ("crate::SdkError", "SDK error enum; no storage operation"),
+    ("crate::gateway::frame_dispatch::ExpectedReply", "typed session reply classifier; no I/O"),
+    ("ramflux_crypto::RootQualifiedDeviceRef", "authenticated root/device reference value"),
+    ("tokio::sync::Notify", "in-memory consumer notification; no I/O"),
+    ("tokio::time::Duration", "timer duration value"),
+    ("tokio::time::Instant", "monotonic timer clock"),
+    ("tokio::time::sleep", "idle Hold promotion timer; no I/O"),
+    ("tokio::select", "polls consumer wake and timer futures; no I/O"),
     ("ramflux_protocol::parse_i_json", "strict I-JSON decode from memory (no I/O)"),
     (
         "ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY",
@@ -249,6 +265,8 @@ const REQUIRED_MODULES: &[&str] = &[
     "crates/ramflux-node-core/src/ephemeral/mod.rs",
     "crates/ramflux-node-core/src/ephemeral/capability.rs",
     "crates/ramflux-protocol/src/ephemeral.rs",
+    "crates/ramflux-sdk/src/ephemeral/session.rs",
+    "crates/ramflux-sdk/src/gateway/ephemeral.rs",
 ];
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;

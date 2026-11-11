@@ -22,6 +22,8 @@ use std::sync::atomic::Ordering;
 pub struct EphemeralDispatchObservation {
     pub pending_inbox: usize,
     pub forwarding_reservations: usize,
+    pub durable_enqueues: u64,
+    pub forward_dispatches: u64,
 }
 
 /// Accessors ephemeral modules are allowed to call. Durable persistence
@@ -233,6 +235,8 @@ impl RouterCore {
     #[must_use]
     pub fn ephemeral_dispatch_observation(&self, target: &str) -> EphemeralDispatchObservation {
         EphemeralDispatchObservation {
+            durable_enqueues: self.ephemeral_durable_enqueues.load(Ordering::SeqCst),
+            forward_dispatches: self.ephemeral_forward_dispatches.load(Ordering::SeqCst),
             pending_inbox: self.pending_entries_for_target(target).len(),
             forwarding_reservations: self
                 .forwarding_reservations

@@ -278,7 +278,14 @@ impl GatewaySessionEngine {
                 }
                 Ok(false)
             }
-            FrameClass::Reply if expected.is_some_and(|set| set.accepts(kind)) => Ok(true),
+            FrameClass::Reply if expected.is_some_and(|set| set.accepts(kind)) => {
+                if let GatewayServerFrame::EphemeralResult { envelope_id, .. } = frame
+                    && request_id != Some(envelope_id.as_str())
+                {
+                    return Err(self.retire("ephemeral result envelope_id mismatch"));
+                }
+                Ok(true)
+            }
             FrameClass::Terminal => {
                 self.terminal_reason = Some(if matches!(kind, FrameKind::Drain) {
                     DisconnectReason::Drain
@@ -362,7 +369,17 @@ impl GatewaySessionEngine {
     ) -> Result<Option<Step>, SdkError> {
         use super::session_push::{CapableServerFrame, RouteError, Routed, route};
         match route(bytes, &self.mode) {
-            Ok(Routed::Legacy(frame)) => Ok(Some(Step::Legacy(frame))),
+            Ok(Routed::Legacy(frame)) => {
+                if let GatewayServerFrame::Ephemeral { expires_at_ms, .. } = &*frame {
+                    if !self.ephemeral_negotiated {
+                        return Err(self.retire("ephemeral on unsupported session"));
+                    }
+                    self.ephemeral_inbox.push(bytes, *expires_at_ms);
+                    Ok(None)
+                } else {
+                    Ok(Some(Step::Legacy(frame)))
+                }
+            }
             Ok(Routed::Capable(frame)) => match CapableEvent::try_from(*frame) {
                 Ok(event) => {
                     self.check_event(&event)?;

@@ -188,7 +188,7 @@ async fn establish_echoed(
         fixture,
         session_push,
         ephemeral,
-        crate::session_push::tests::negotiation::auth(session_push)?,
+        crate::session_push::tests::negotiation::auth_claiming_ephemeral(session_push)?,
     )
     .await
 }

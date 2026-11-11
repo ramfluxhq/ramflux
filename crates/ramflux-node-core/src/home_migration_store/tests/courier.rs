@@ -72,7 +72,16 @@ fn sealed_courier_survives_crash_and_lost_commit_reply_then_activates_once() -> 
     assert!(!s.b.store()?.home_migration_target_active(&s.target)?);
     s.b.restart()?;
     mesh.lose.store(false, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(service.courier_tick(s.b.store()?, NOW + 3, 128)?, 1);
+    let retry_at =
+        s.b.store()?
+            .migration_operation(
+                &s.anchor,
+                &s.authorization.body.migration_id,
+                MigrationRole::Destination,
+            )?
+            .ok_or("missing courier retry operation after restart")?
+            .next_due;
+    assert_eq!(service.courier_tick(s.b.store()?, retry_at, 128)?, 1);
     assert!(s.b.store()?.home_migration_target_active(&s.target)?);
     assert_eq!(service.courier_tick(s.b.store()?, NOW + 100, 128)?, 0);
     let op =

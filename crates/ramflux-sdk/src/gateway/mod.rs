@@ -3,6 +3,7 @@
 
 pub mod access;
 pub mod engine;
+mod ephemeral;
 pub(crate) mod transport_opener;
 pub(crate) use access::GatewayPushAccess;
 pub use access::{GatewayCallFuture, GatewaySessionAccess};

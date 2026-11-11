@@ -12,6 +12,9 @@ pub struct GatewaySessionEngine {
     pub(crate) stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     pub(crate) session: GatewaySessionState,
     request_counter: u64,
+    pub(crate) ephemeral_negotiated: bool,
+    pub(crate) ephemeral_inbox: crate::ephemeral::session::SessionInbox,
+    pub(crate) ephemeral_owner: Option<crate::ephemeral::session::SessionInboxOwner>,
     pub(crate) pending_deliveries: VecDeque<PendingDelivery>,
     pub(crate) buffered_bytes: usize,
     pub(crate) deferred_frames: VecDeque<GatewayServerFrame>,
@@ -260,11 +263,15 @@ impl GatewaySessionEngine {
                 read_gateway_server_frame_bytes(&mut *stream).await
             })
             .await?;
-        let (session, mode) = match established {
+        let (session, mode, ephemeral_negotiated) = match established {
             GatewayServerFrame::SessionEstablished { session } => {
                 let echo = super::session_push::EstablishmentEcho::from_bytes(&established_bytes)?;
                 let mode = super::session_push::negotiate(config.session_push_advertise, &echo)?;
-                (gateway_session_state(&session, config.last_seen_inbox_seq), mode)
+                (
+                    gateway_session_state(&session, config.last_seen_inbox_seq),
+                    mode,
+                    echo.supports_ephemeral(),
+                )
             }
             GatewayServerFrame::Nack { reason } => {
                 return Err(SdkError::GatewaySessionRejected(reason));
@@ -275,12 +282,16 @@ impl GatewaySessionEngine {
                 )));
             }
         };
+        let ephemeral_inbox = crate::ephemeral::session::SessionInbox::new();
         let mut engine = Self {
             config,
             _transport: transport,
             stream,
             session,
             request_counter: 1,
+            ephemeral_negotiated,
+            ephemeral_owner: Some(ephemeral_inbox.owner()),
+            ephemeral_inbox,
             pending_deliveries: VecDeque::new(),
             buffered_bytes: 0,
             deferred_frames: VecDeque::new(),
@@ -305,6 +316,7 @@ impl GatewaySessionEngine {
         config: GatewaySessionConfig,
         stream: Box<dyn ramflux_transport::GatewaySessionTransport + Send>,
     ) -> Self {
+        let ephemeral_inbox = crate::ephemeral::session::SessionInbox::new();
         Self {
             config,
             stream,
@@ -317,6 +329,9 @@ impl GatewaySessionEngine {
                 accepted_inbox_seq: 0,
             },
             request_counter: 0,
+            ephemeral_negotiated: false,
+            ephemeral_owner: Some(ephemeral_inbox.owner()),
+            ephemeral_inbox,
             pending_deliveries: VecDeque::new(),
             buffered_bytes: 0,
             deferred_frames: VecDeque::new(),

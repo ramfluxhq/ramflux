@@ -735,6 +735,7 @@ crates/ramflux-sdk/src/dm.rs | nested_report_fields | 1 | E | excluded=target ty
 crates/ramflux-sdk/src/dm.rs | sidecar_report_fields | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/ephemeral/receiver.rs | admit | 1 | A | strict=parse_i_json; admission=A ingress boundary
 crates/ramflux-sdk/src/ephemeral/send.rs | decode_ephemeral_result | 1 | A | strict=parse_i_json; admission=A ingress boundary
+crates/ramflux-sdk/src/ephemeral/session.rs | next | 1 | A | strict=parse_i_json; admission=A transient host ingress boundary
 crates/ramflux-sdk/src/gateway/engine.rs | fetch_principal_manifest | 1 | E | excluded=manifest response field; enclosing gateway frame is already strictly decoded
 crates/ramflux-sdk/src/gateway/engine.rs | read_gateway_server_frame_bytes | 1 | C | admission=crates/ramflux-sdk/src/gateway/engine.rs#read_gateway_server_frame_bytes#1
 crates/ramflux-sdk/src/gateway/session_push.rs | decode_server_frame | 1 | A | strict=parse_i_json; admission=A ingress boundary

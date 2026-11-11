@@ -1,5 +1,9 @@
 # Changelog
 
+- Activate negotiated ephemeral delivery with volatile same-node routing, bounded queues,
+  exclusive signed deadlines and no durable fallback, client journal writes or offline wakes.
+  Add real-process CLI push/restart coverage and retry partially applied capability reassertions.
+
 - Task courier rows and group-sync couriers stop on a gateway idempotency conflict instead of
   resubmitting: task rows are retired with a `submit_conflict` record, and a conflicted
   approval decision becomes `failed / submit_conflict` (calling `grant.approve` again re-enqueues

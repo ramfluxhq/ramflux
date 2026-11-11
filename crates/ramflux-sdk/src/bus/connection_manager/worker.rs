@@ -127,6 +127,14 @@ pub(super) async fn run(bootstrap: Bootstrap) {
         children.stop().await;
         handle
             .shared
+            .ephemeral_inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .disconnect(true);
+        *handle.shared.ephemeral_inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            crate::ephemeral::session::SessionInbox::new();
+        handle
+            .shared
             .hub
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -146,6 +154,12 @@ pub(super) async fn run(bootstrap: Bootstrap) {
         failed(&handle, &retry, &error);
     }
     children.stop().await;
+    handle
+        .shared
+        .ephemeral_inbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .disconnect(true);
     while let Ok(call) = calls.try_recv() {
         let _ = call.reply.send(Err(handle.pending()));
     }
@@ -268,6 +282,15 @@ async fn run_account(
                 .unwrap_or(DisconnectReason::Stop),
             super::session_host::HostExit::Retired(reason) => reason,
         };
+        handle
+            .shared
+            .ephemeral_inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .disconnect(matches!(
+                reason,
+                DisconnectReason::Stop | DisconnectReason::Lock | DisconnectReason::Restart
+            ));
         if let Some(host) = &resident.host {
             host.hub.disconnect(reason);
         }
@@ -450,6 +473,14 @@ fn announce_live(
         Arc::clone(&hub);
     handle.shared.read_clock.reset_to_now();
     handle.set_session_mode(resident.mode.clone());
+    resident.ephemeral_owner.take();
+    resident.ephemeral_inbox = handle
+        .shared
+        .ephemeral_inbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    resident.ephemeral_inbox.reconnect();
     resident.host = Some(HostFrames {
         hub,
         resync_needed: Arc::clone(&handle.shared.resync_needed),

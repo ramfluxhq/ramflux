@@ -253,7 +253,6 @@ async fn reassert_if_boot_changed(
     if items.is_empty() {
         return;
     }
-    let mut posted = 0_usize;
     for chunk in items.chunks(ramflux_node_core::EPHEMERAL_REASSERTION_ITEM_BOUND) {
         let body = json!({"router_boot_id": boot, "items": chunk});
         let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
@@ -269,7 +268,11 @@ async fn reassert_if_boot_changed(
         .await;
         match result {
             Ok(Ok(response)) if response["applied"].as_u64() == u64::try_from(chunk.len()).ok() => {
+                hub.stamp_ephemeral_boot(boot, chunk).await;
             }
+            // A count cannot identify which items were skipped. Retry this chunk, while
+            // allowing independent later chunks to be restored in the current round.
+            Ok(Ok(_)) => {}
             Ok(Err(error)) if crate::registration::gateway_instance_rejection(&error) => {
                 crate::registration::log_gateway_identity_rejection(&error);
                 if let Ok(mut refused_boot) = state.refused_boot.lock() {
@@ -279,10 +282,6 @@ async fn reassert_if_boot_changed(
             }
             _ => break,
         }
-        posted = posted.saturating_add(chunk.len());
-    }
-    if posted > 0 {
-        hub.stamp_ephemeral_boot(boot, &items[..posted]).await;
     }
 }
 #[derive(Debug)]
@@ -732,7 +731,12 @@ pub(crate) async fn negotiate(
             .capability_scope
             .iter()
             .any(|s| s == ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY);
-    let ephemeral = capable && context.hub.readiness.supports_ephemeral();
+    let client_requested_ephemeral =
+        auth.device_proof.capability_scope.iter().any(|capability| {
+            capability == ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY
+        });
+    let ephemeral =
+        capable && context.hub.readiness.supports_ephemeral() && client_requested_ephemeral;
     if capable {
         match capable_registration(context, descriptor, ephemeral).await {
             Ok(id) => {
