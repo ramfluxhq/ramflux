@@ -42,6 +42,10 @@ const SCALAR_RULE: super::FamilyRule = super::FamilyRule {
 fn pairing_full_source_manifest_preflight_cannot_hide_unknown_owners_with_peer_zero_counts()
 -> TestResult {
     let (root, db) = crate::tests::test_db("source-compiled-preflight")?;
+    db.connection.execute(
+        "INSERT INTO runtime_actor_state(state_kind,state_json) VALUES(?1,?2)",
+        rusqlite::params!["full-transfer-unimplemented-owner", "{}"],
+    )?;
     let (mut record, mut manifest, _) = fixture()?;
     record.role = PairingRole::Initiator;
     let private = root.join("source-preflight-private.db");
