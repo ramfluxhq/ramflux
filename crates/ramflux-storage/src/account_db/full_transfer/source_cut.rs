@@ -89,6 +89,18 @@ impl FullTransferStage<'_> {
             )?)
         })
     }
+    /// Inspect the exact saved immutable source view against compiled declarations.
+    /// This checks schema/counts only; typed logical encoding must still complete before Issue.
+    /// # Errors
+    /// Refuses a missing/stale cut, an incomplete catalog or changed schema.
+    pub fn source_cut_schema(
+        &self,
+        cut: u64,
+        snapshot_id: &str,
+        rules: &'static [super::catalog::FamilyRule],
+    ) -> Result<super::inventory::FullTransferSchema, StorageError> {
+        self.with_source_cut(cut, snapshot_id, |input| super::inventory::inspect(input, rules))
+    }
     pub(super) fn with_source_cut<T>(
         &self,
         cut: u64,
