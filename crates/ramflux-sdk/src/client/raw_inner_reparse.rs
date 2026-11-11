@@ -36,8 +36,10 @@ impl RamfluxClient {
             let Ok((identity, content)) = Self::decode_generated_inner(&snapshot.copy.bytes) else { continue };
             let Some(g::content::Value::Message(message)) = content.value.as_ref() else { continue };
             if message.sealed_group.is_some() { continue; }
-            let provenance: Provenance = serde_json::from_slice(&snapshot.metadata)?;
-            let source = self.device_identity(&provenance.source)?;
+            let Ok(provenance) = serde_json::from_slice::<Provenance>(&snapshot.metadata) else { continue; };
+            // Channel policy is immutable receive provenance, never inferred from the new decoder.
+            if provenance.original_mode != "durable" { continue; }
+            let Ok(source) = self.device_identity(&provenance.source) else { continue; };
             if source.root_commitment() != snapshot.source_anchor
                 || identity.conversation_id != provenance.conversation
                 || provenance.message != snapshot.copy.owner_id
@@ -45,9 +47,9 @@ impl RamfluxClient {
                     author.account_anchor != source.root_commitment() || author.device_id != source.device_id()
                 })
             {
-                return Err(SdkError::InboundRejected("reparse provenance mismatch".into()));
+                continue;
             }
-            self.require_cached_root_authority(HeadUse::HistoricalRead, &source)?;
+            if self.require_cached_root_authority(HeadUse::HistoricalRead, &source).is_err() { continue; }
             let account_id = self.account_db()?.local_account_id.clone();
             let db = self.account_db()?;
             let projected = db.write_transaction(|| -> Result<bool, SdkError> {

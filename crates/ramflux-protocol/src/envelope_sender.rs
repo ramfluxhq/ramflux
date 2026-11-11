@@ -7,6 +7,9 @@ use crate::{Envelope, ProtocolError};
 /// # Errors
 /// Returns canonical JSON errors.
 pub fn envelope_sender_signed_bytes(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
+    if envelope.schema == "ramflux.envelope.v2" || crate::schema_profile::ACTIVE_STORAGE_GENERATION == 1 {
+        return Ok(crate::sender_signed_transcript(envelope, crate::SenderTranscriptMode::WithCiphertext)?.bytes);
+    }
     let mut sender = envelope.clone();
     // Forwarders attach existing root-signed device-set evidence. Its independent signatures
     // authenticate the same root and branch; this never removes the sender's signed root claim.

@@ -331,6 +331,9 @@ message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
   NativeCustodyManifest source_authority = 2;
   optional NativeGroupSnapshot group_membership = 3;
+  bytes report_opening = 4;
+  bytes group_plaintext = 5;
+  bytes group_opening = 6;
 }
 message HistoryPage {
   bytes transfer_id = 1;

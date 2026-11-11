@@ -147,7 +147,8 @@ fn service_pin_changed_number_is_reserved() -> TestResult {
 
 #[test]
 fn service_pin_kinds_require_target_and_round_trip() -> TestResult {
-    let target = MessageRef { id: vec![7], conversation_id: "c".into(), author_anchor: "a".into() };
+    let target =
+        MessageRef { id: vec![7; 32], conversation_id: "c".into(), author_anchor: "a".into() };
     for action in [6, 7] {
         let service = Service { action, target: Some(target.clone()), ..Default::default() };
         let content = Content { value: Some(content::Value::Service(service.clone())) };
@@ -171,7 +172,7 @@ fn service_pin_kinds_require_target_and_round_trip() -> TestResult {
 #[test]
 fn all_kind_binding_round_trip() -> TestResult {
     let reference =
-        MessageRef { id: vec![1], conversation_id: "c".into(), author_anchor: "a".into() };
+        MessageRef { id: vec![1; 32], conversation_id: "c".into(), author_anchor: "a".into() };
     let mut values = vec![
         content::Value::Message(Message { text: "hello 😀".into(), ..Default::default() }),
         content::Value::Service(Service { action: 1, ..Default::default() }),
@@ -184,14 +185,21 @@ fn all_kind_binding_round_trip() -> TestResult {
         content::Value::Delete(Delete {
             targets: vec![reference.clone()],
             scope: 1,
+            tombstone_id: vec![2; 32],
             ..Default::default()
         }),
         content::Value::Reaction(Reaction {
-            target: Some(reference),
+            target: Some(reference.clone()),
+            operation_id: vec![3; 32],
             token: "👩🏽‍💻".into(),
             ..Default::default()
         }),
-        content::Value::Receipt(Receipt { state: 1, ..Default::default() }),
+        content::Value::Receipt(Receipt {
+            state: 1,
+            targets: vec![reference],
+            receiver: Some(QualifiedDevice::default()),
+            ..Default::default()
+        }),
         content::Value::Typing(Typing { active: true, expires_at: 1 }),
         content::Value::Control(Control {
             operation: 1,

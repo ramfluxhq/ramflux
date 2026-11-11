@@ -68,9 +68,10 @@ mod tests {
 
     fn candidate() -> CandidateOuterEnvelope {
         CandidateOuterEnvelope {
+            ext: Default::default(), routing_set_id: None,
             schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
             version: 2,
-            domain: domain::ENVELOPE.to_owned(),
+            domain: "ramflux.envelope.v2".to_owned(),
             envelope_id: "envelope".to_owned(),
             source_principal_id: "principal".to_owned(),
             source_device_id: "device".to_owned(),

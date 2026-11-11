@@ -48,6 +48,7 @@ pub fn validate(value: &SelfSync) -> Result<Operation, ValidationError> {
         _ => return Err(ValidationError::Content),
     };
     if value.revision == 0
+        || value.revision == u64::MAX
         || value.read_through.is_some() != (operation == Operation::ReadThrough)
         || value.draft.is_some() != (operation == Operation::DraftSet)
         || value.pin.is_some() != matches!(operation, Operation::PinSet | Operation::PinClear)
@@ -56,7 +57,7 @@ pub fn validate(value: &SelfSync) -> Result<Operation, ValidationError> {
         return Err(ValidationError::Content);
     }
     for reference in [value.read_through.as_ref(), value.pin.as_ref()].into_iter().flatten() {
-        if reference.id.is_empty()
+        if reference.id.len() != 32
             || reference.conversation_id.is_empty()
             || reference.author_anchor.is_empty()
         {
@@ -64,6 +65,13 @@ pub fn validate(value: &SelfSync) -> Result<Operation, ValidationError> {
         }
     }
     if let Some(draft) = &value.draft {
+        if draft.sealed_group.is_some()
+            || !draft.media.is_empty()
+            || draft.forward.is_some()
+            || draft.text.len() > 65_536
+        {
+            return Err(ValidationError::Content);
+        }
         validation::validate_message(draft)?;
     }
     Ok(operation)

@@ -88,6 +88,9 @@ impl RamfluxClient {
                 identity = db.load_actor_state::<g::EventIdentity>(
                     &format!("routed/generated-identity/{}", message.message_id),
                 )?.unwrap_or(original);
+                if let Some(message) = db.load_actor_state::<g::Message>(
+                    &format!("routed/group-projection/{}", message.message_id),
+                )? { content.value = Some(g::content::Value::Message(message)); }
                 if let Some(g::content::Value::Edit(edit)) = content.value.as_ref() {
                     content.value = edit.replacement.clone().map(g::content::Value::Message);
                 }

@@ -15,7 +15,7 @@ fn author() -> QualifiedDevice {
 
 fn named_ref() -> MessageRef {
     MessageRef {
-        id: b"msg-target".to_vec(),
+        id: vec![7; 32],
         conversation_id: "c".into(),
         author_anchor: "a".into(),
     }
@@ -49,8 +49,8 @@ fn message_service_share_sequence_and_order() -> TestResult {
     assert_eq!(message_id.device_sequence, 1);
     assert_eq!(service_id.device_sequence, 2);
     assert_eq!(message_id.hlc + 1, service_id.hlc);
-    assert_eq!(message_id.id, b"msg-1");
-    assert_eq!(service_id.id, b"svc-1");
+    assert_eq!(message_id.id, g::identity::derive(&author(), "c1", 1)?);
+    assert_eq!(service_id.id, g::identity::derive(&author(), "c1", 2)?);
     assert_ne!(message_id.id, service_id.id);
     let (decoded_message_id, decoded_message) = RamfluxClient::decode_generated_inner(&message)?;
     let (decoded_service_id, decoded_service) = RamfluxClient::decode_generated_inner(&service)?;

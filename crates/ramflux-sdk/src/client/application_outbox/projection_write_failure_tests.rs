@@ -196,6 +196,7 @@ pub(super) fn persist_receipt(
         },
         entry: entry.clone(),
         projected: false,
+        erasure_targets: Vec::new(),
     };
     client.account_db()?.persist_actor_state(&key, &receipt)?;
     Ok(key)
