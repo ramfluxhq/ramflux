@@ -241,6 +241,9 @@ async fn drive_page(
                 backpressure = next;
                 applied = applied.saturating_add(1);
                 apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
+                if !backpressure.holds(&record.entry) {
+                    emit_engine_ack(account, engine, sequence, envelope_ids).await?;
+                }
             }
             ApplyOutcome::NeedFetch { after } => {
                 turn.cursor = after;
@@ -300,6 +303,26 @@ async fn apply_leftover(
     }
     let _ = backpressure;
     Ok(applied)
+}
+
+/// Emit one gateway ACK without settling WA. Held contact floors skip this so
+/// the ciphertext stays on the wire; WA still settles terminal intents at the
+/// end of the pass.
+async fn emit_engine_ack(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    sequence: u64,
+    envelope_ids: &BTreeMap<u64, String>,
+) -> Result<(), SdkError> {
+    let Some(envelope_id) = envelope_ids.get(&sequence) else {
+        return Ok(());
+    };
+    let receiver = account.client.owned_device_identity()?;
+    let now = now_unix_timestamp();
+    let mut ack = crate::dm::gateway_ack(envelope_id, &receiver, now);
+    ack.ext.ext.insert("inbox_seq".into(), json!(sequence));
+    let _ = engine.ack(ack).await;
+    Ok(())
 }
 
 async fn flush_live_acks(

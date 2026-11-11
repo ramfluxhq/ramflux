@@ -7,6 +7,7 @@
 use super::apply::{self, ApplyOutcome, ApplyPoint, cover_held_in, cover_terminal_in};
 use crate::bus::account_runtime::lifecycle_fence;
 use crate::bus::connection_manager::{ReceiveApplied, ReceiveEntry, ReceiveTurn};
+use crate::bus::contact_backpressure::Backpressure;
 use crate::bus::state::LocalBusAccountState;
 use crate::bus::sync_driver::source::PreparedSource;
 use crate::bus::sync_driver::source::failure::SourceFailure;
@@ -95,18 +96,42 @@ pub(crate) async fn apply_page(
     handle_generation: &dyn Fn() -> u64,
     prepared: ReceiveEntry,
     source: PreparedSource,
-    backpressure: Box<crate::bus::contact_backpressure::Backpressure>,
+    mut backpressure: Box<Backpressure>,
 ) -> Result<ReceiveApplied, SdkError> {
-    let mut source = source.map(|prepared| *prepared).transpose()?;
     let mut turn = turn.clone();
     turn.compat = account.bound_session_mode().is_some_and(|mode| !mode.is_push());
     refresh_cursor(account.client.account_db()?, &mut turn)?;
+    let mut source = match source.map(|prepared| *prepared).transpose() {
+        Ok(source) => source,
+        Err(error) if crate::bus::contact_backpressure::deferred(&prepared.entry, &error) => {
+            hold_contact_capacity(account, &turn, handle_generation, &prepared, &mut backpressure)?;
+            return Ok((None, backpressure));
+        }
+        Err(SdkError::ContactRequestCapacity(_)) => {
+            admit_mapped(
+                account,
+                &turn,
+                handle_generation,
+                &prepared,
+                SdkError::InboundRejected("deferred contact root capacity exhausted".into()),
+            )?;
+            return Ok((None, backpressure));
+        }
+        Err(error) => return Err(error),
+    };
     let mut attempts = 0;
     #[cfg(test)]
     BINDING_TRIES.with(|cell| cell.set(0));
     loop {
-        match Box::pin(apply_once(account, &mut turn, handle_generation, &prepared, &mut source))
-            .await
+        match Box::pin(apply_once(
+            account,
+            &mut turn,
+            handle_generation,
+            &prepared,
+            &mut source,
+            &mut backpressure,
+        ))
+        .await
         {
             Err(SdkError::LegacyBindingChanged) => note_binding_changed(&mut attempts)?,
             Err(SdkError::PairRecoveryRequired) => {
@@ -138,6 +163,7 @@ async fn apply_once(
     handle_generation: &dyn Fn() -> u64,
     prepared: &ReceiveEntry,
     source: &mut Option<crate::client::routed::PreparedInbound>,
+    backpressure: &mut Backpressure,
 ) -> Result<Option<Envelope>, SdkError> {
     #[cfg(test)]
     cross_await().await;
@@ -162,6 +188,7 @@ async fn apply_once(
                 source.take(),
                 cover,
                 classified_pending,
+                backpressure,
             ))
             .await
         }
@@ -270,7 +297,31 @@ async fn apply_routed_or_defer(
     source: Option<crate::client::routed::PreparedInbound>,
     cover: bool,
     classified_pending: Option<SdkError>,
+    backpressure: &mut Backpressure,
 ) -> Result<Option<Envelope>, SdkError> {
+    // W0 `source::request` skips a duplicate contact root before any manifest fetch.
+    // Standalone W1 has no Writer prepare, so the same cut lives here.
+    if backpressure.duplicate(&prepared.entry) {
+        return admit_mapped(
+            account,
+            turn,
+            handle_generation,
+            prepared,
+            SdkError::InboundRejected("deferred contact root capacity exhausted".into()),
+        );
+    }
+    if crate::client::routed::decode(&prepared.entry.envelope)
+        .is_ok_and(|packet| packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
+    {
+        if !account.client.contact_admission_capacity(None, now_unix_timestamp())? {
+            return hold_contact_capacity(account, turn, handle_generation, prepared, backpressure);
+        }
+        // W0 `source::request` quarantines `contact_candidate_manifest_request`
+        // errors (sender rate-limit, closed root, malformed) before any fetch.
+        if let Err(error) = account.client.contact_candidate_manifest_request(&prepared.entry) {
+            return admit_mapped(account, turn, handle_generation, prepared, error);
+        }
+    }
     match Box::pin(apply_routed_w1(account, turn, handle_generation, prepared, source, cover)).await
     {
         Ok(reply) => Ok(reply),
@@ -284,7 +335,76 @@ async fn apply_routed_or_defer(
             )?;
             Ok(None)
         }
-        Err(error) => Err(error),
+        Err(error) if crate::bus::contact_backpressure::deferred(&prepared.entry, &error) => {
+            hold_contact_capacity(account, turn, handle_generation, prepared, backpressure)
+        }
+        Err(SdkError::ContactRequestCapacity(_)) => admit_mapped(
+            account,
+            turn,
+            handle_generation,
+            prepared,
+            SdkError::InboundRejected("deferred contact root capacity exhausted".into()),
+        ),
+        Err(error) => admit_mapped(account, turn, handle_generation, prepared, error),
+    }
+}
+
+/// First envelope of a deferred contact root: record the durable floor and held-cover
+/// without ACK so the gateway keeps the ciphertext. Duplicate seqs of the same root
+/// dead-letter as `routing_rejected` (W0 `quarantine_failure` after `record` returns
+/// false). Replay skips a second cover: C already advanced on the live pass.
+fn hold_contact_capacity(
+    account: &mut LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    prepared: &ReceiveEntry,
+    backpressure: &mut Backpressure,
+) -> Result<Option<Envelope>, SdkError> {
+    if backpressure.record(&account.client, &prepared.entry, now_unix_timestamp())? {
+        if !prepared.replay {
+            run_fenced(
+                account.client.account_db()?,
+                handle_generation(),
+                turn,
+                |tx, _expected| {
+                    cover_w1_outcome(tx, prepared.entry.inbox_seq, true, &[], turn.compat)?;
+                    Ok(())
+                },
+            )?;
+        }
+        return Ok(None);
+    }
+    admit_mapped(
+        account,
+        turn,
+        handle_generation,
+        prepared,
+        SdkError::InboundRejected("deferred contact root capacity exhausted".into()),
+    )
+}
+
+fn admit_mapped(
+    account: &mut LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    prepared: &ReceiveEntry,
+    error: SdkError,
+) -> Result<Option<Envelope>, SdkError> {
+    match failure_of(&error, &prepared.entry)? {
+        Some(pair) => {
+            let key = account.client.inbox_admission_key(&prepared.entry)?;
+            admit_failure(
+                account,
+                turn,
+                handle_generation,
+                &prepared.entry,
+                prepared.entry.inbox_seq,
+                &key,
+                pair,
+            )?;
+            Ok(None)
+        }
+        None => Err(error),
     }
 }
 
@@ -700,16 +820,16 @@ fn settled_routed_kind(
 
 /// Maps a classification or W1-apply error to a failure-policy admission. Shares live
 /// `quarantine_failure`'s wire-signature, `deterministic()` and oversized-retry
-/// mapping, and differs in two ways: this adapter propagates `InboundRejected`
-/// (live dead-letters it as `routing_rejected`); it has no `routed_seen_marker`
-/// short-circuit. Directory lookup and `InboundPending` stay retryable so a
-/// missing peer manifest or stale head cannot abort the receive pass. Local
-/// state refusals and everything else keep W0 staged and propagate.
+/// mapping. Identity-absence stays a typed miss. Other `InboundRejected` admits as
+/// `routing_rejected` so one bad envelope cannot abort the receive pass. Directory
+/// lookup and `InboundPending` stay retryable. Session, storage, contact-capacity
+/// and every other local refusal keep W0 staged and propagate — a dummy signature
+/// must not rewrite `GatewaySessionNotEstablished`.
 fn failure_of(
     error: &SdkError,
     entry: &GatewayInboxEntry,
 ) -> Result<Option<(ReceiveFailureKind, &'static str)>, SdkError> {
-    if matches!(error, SdkError::InboundRejected(_)) {
+    if identity_absence(error) || local_refusal(error) {
         return Ok(None);
     }
     // Immutable malformed signature bytes cannot become valid after a directory refresh.
@@ -915,6 +1035,22 @@ fn projection_key(client: &RamfluxClient, entry: &GatewayInboxEntry) -> Result<S
 fn identity_absence(error: &SdkError) -> bool {
     matches!(error, SdkError::IdentityRootMissing)
         || matches!(error, SdkError::InboundRejected(reason) if reason.starts_with("identity authority:"))
+}
+
+/// Session, storage, and contact-capacity refusals stay typed. Wire-signature
+/// classification must not turn them into `routing_rejected` / `schema_invalid`.
+fn local_refusal(error: &SdkError) -> bool {
+    matches!(
+        error,
+        SdkError::GatewaySessionNotEstablished
+            | SdkError::ContactRequestCapacity(_)
+            | SdkError::Storage(_)
+            | SdkError::LocalBus(_)
+            | SdkError::Transport(_)
+            | SdkError::LegacyBindingChanged
+            | SdkError::PairRecoveryRequired
+            | SdkError::AccountDbNotUnlocked
+    )
 }
 
 fn project_with_key(

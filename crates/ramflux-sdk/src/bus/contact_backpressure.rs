@@ -130,6 +130,16 @@ impl Backpressure {
                 .is_some_and(|sequence| sequence != entry.inbox_seq)
         })
     }
+    /// The durable floor still owns this sequence: the gateway must keep the ciphertext.
+    pub fn holds(&self, entry: &GatewayInboxEntry) -> bool {
+        requester(entry).is_some_and(|root| {
+            self.roots
+                .get(&root)
+                .map(|held| held.sequence)
+                .or_else(|| self.overflow.get(&root).copied())
+                .is_some_and(|sequence| sequence == entry.inbox_seq)
+        })
+    }
     pub fn completed(
         &mut self,
         client: &RamfluxClient,
