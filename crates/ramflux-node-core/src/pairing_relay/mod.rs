@@ -16,9 +16,10 @@ pub use full_budget::{
 };
 mod full_resume;
 pub use full_resume::{
-    FullControlFrame, FullDataAccepted, FullDataFrame, FullNativeAdmission, FullResumeChallenge,
-    FullResumeOffer, FullResumeProgress, FullResumeStats, FullResumeToken, FullRoute,
-    FullSendPermit,
+    FULL_MESH_ADMIT_PATH, FULL_MESH_FRAME_BYTES, FullAdmittedReply, FullArm, FullControlFrame,
+    FullDataAccepted, FullDataFrame, FullForwardClaim, FullMeshAdmit, FullMeshPermit,
+    FullNativeAdmission, FullResumeChallenge, FullResumeOffer, FullResumeProgress, FullResumeStats,
+    FullResumeToken, FullRoute, FullSendPermit, SecretAuthorization,
 };
 mod http;
 mod limits;

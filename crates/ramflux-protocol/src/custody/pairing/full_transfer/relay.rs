@@ -5,8 +5,17 @@
 use super::{PairingWire, Result, U64, WireError, b32, budget, require};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
+mod bootstrap;
+pub use bootstrap::{FullSasControl, GrantOfferFull, GrantSignedFull, LeaseFull};
+mod data;
+pub use data::PolledFull;
+mod discovery;
+pub use discovery::{DiscoveryKeys, FullDiscovery, HelloFull, PollFullDiscovery};
 mod control;
-pub use control::{HpkeConfirmFull, PollFullControl, PolledFullControl, SendFullControl};
+pub use control::{
+    CloseFull, ClosedFull, HpkeConfirmFull, PollFull, PollFullControl, PolledFullControl,
+    ProveFull, ResumePendingFull, ResumeTokenFull, SendFullControl, SentFull,
+};
 mod send;
 pub use send::{BorrowedPacket, BorrowedSendFull, SendFull};
 

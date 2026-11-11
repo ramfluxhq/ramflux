@@ -220,6 +220,60 @@ impl LocalPairingParticipant {
         ))
     }
 
+    /// Sign the one exact data grant authorized by the mutually confirmed full bootstrap.
+    /// No arbitrary caller can construct this authorization or supply a replacement peer key.
+    /// # Errors
+    /// Refuses a locked account, foreign local branch or altered transcript/grant.
+    pub fn sign_full_grant(
+        &self,
+        authorization: &super::FullGrantSigningRequest<'_>,
+    ) -> Result<String, SdkError> {
+        let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
+        let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
+        if db.local_account_id != self.account_id {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        let request = authorization.request();
+        let context = authorization.context();
+        request
+            .bind_transcript(context, &request.transcript_hash)
+            .map_err(|error| super::transport::wire(&error))?;
+        let local = match authorization.role() {
+            "initiator" => &context.initiator,
+            "responder" => &context.responder,
+            _ => return Err(SdkError::PairingCode("WrongRole")),
+        };
+        let pending = super::install_store::list_pending(&self.root, &self.account_id)?
+            .into_iter()
+            .find(|row| row.recipient_ref == local.device_ref);
+        let vault_ref = if let Some(row) = pending {
+            row.branch_vault_ref
+        } else {
+            let account =
+                custody::load_data_account(&self.root, &self.account_id, custody::network_now()?)?;
+            if account.local_device_id()? != local.device_ref.device_id
+                || account.record().body.account_anchor != local.device_ref.account_anchor
+            {
+                return Err(SdkError::PairingCode("WrongContext"));
+            }
+            account.branch_vault_ref().into()
+        };
+        let branch = self.vault.load_branch(
+            &vault_ref,
+            &local.device_ref.account_anchor,
+            &local.device_ref,
+        )?;
+        if ramflux_protocol::encode_base64url(branch.signing.signing_key.verifying_key().to_bytes())
+            != local.branch_key
+        {
+            return Err(SdkError::PairingCode("WrongContext"));
+        }
+        let bytes = request
+            .signing_bytes(authorization.role())
+            .map_err(|error| super::transport::wire(&error))?;
+        Ok(ramflux_protocol::encode_base64url(branch.signing.signing_key.sign(&bytes).to_bytes()))
+    }
+
     pub(crate) fn record_invitation(
         &self,
         invitation: &Envelope<Invitation>,

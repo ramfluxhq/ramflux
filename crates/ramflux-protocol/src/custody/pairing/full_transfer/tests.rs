@@ -331,3 +331,42 @@ fn full_transfer_packet_canonical_secret_encoding_and_actual_bounds() -> TestRes
     );
     Ok(())
 }
+
+#[test]
+fn pairing_full_tail_endpoint_size_cap_refused_before_staging() -> TestResult {
+    for total in [MAX_TAIL_BYTES, MAX_TAIL_BYTES + 1] {
+        let mut tail = manifest();
+        tail.manifest.kind = ManifestKind::Tail;
+        tail.manifest.previous_cut = Some(U64(1));
+        tail.manifest.snapshot_cut = U64(2);
+        tail.manifest.parent_manifest_hash = Some(encode_base64url([7; 32]));
+        tail.manifest.total_bytes = U64(total);
+        tail.manifest.families[0].encoded_bytes = U64(total);
+        tail.manifest.chunk_count = U64(chunk_layout(total)?.0);
+        if total == MAX_TAIL_BYTES {
+            tail.validate()?;
+        } else {
+            assert_eq!(tail.validate(), Err(WireError::Field("NoSpace")));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pairing_full_stop_requires_explicit_nullable_retry() -> TestResult {
+    let bytes = br#"{"code":"ResumeRequired","kind":"stop","retry_after_ms":null}"#;
+    assert_eq!(DataPacket::from_wire_bytes(bytes)?.encode_secret()?.as_slice(), bytes);
+    assert!(DataPacket::from_wire_bytes(br#"{"code":"ResumeRequired","kind":"stop"}"#).is_err());
+    assert!(
+        DataPacket::from_wire_bytes(
+            br#"{"code":"ResumeRequired","kind":"stop","retry_after_ms":1000}"#
+        )
+        .is_err()
+    );
+    assert!(
+        DataPacket::from_wire_bytes(br#"{"code":"Busy","kind":"stop","retry_after_ms":null}"#)
+            .is_err()
+    );
+    DataPacket::from_wire_bytes(br#"{"code":"Busy","kind":"stop","retry_after_ms":1000}"#)?;
+    Ok(())
+}

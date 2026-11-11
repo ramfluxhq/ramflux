@@ -344,6 +344,21 @@ impl IdentityRegistry {
 }
 
 impl RouterCore {
+    /// Loan the node's own verified, durably pinned current native head for one bounded
+    /// data-relay decision. Authenticate the role token before this call. The callback
+    /// must not perform network or bulk disk I/O while holding the native authority owner.
+    /// # Errors
+    /// Refuses absent, stale, forked or unavailable native authority with `HeadChanged`.
+    pub fn with_current_pairing_authority<T>(
+        &self,
+        anchor: &str,
+        now: u64,
+        work: impl FnOnce(&VerifiedRecord) -> Result<T, crate::pairing_relay::PairingRelayError>,
+    ) -> Result<T, crate::pairing_relay::PairingRelayError> {
+        self.with_migration_authority(anchor, now, |verified, _| Ok(work(verified)))
+            .map_err(|_| crate::pairing_relay::PairingRelayError::HeadChanged)?
+    }
+
     pub(crate) fn with_migration_authority<T>(
         &self,
         anchor: &str,

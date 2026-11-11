@@ -60,13 +60,18 @@ fn full_channel_rejects_counter_epoch_reflection_and_altered_duplicate() -> Test
 #[test]
 fn full_channel_key_limit_and_maximum_packet_are_checked_before_effect() -> TestResult {
     let (mut a, mut b) = pair();
-    a.sent = PACKETS_PER_KEY - 1;
-    b.received = PACKETS_PER_KEY - 1;
-    assert_eq!(a.remaining_send_packets(), 1);
+    a.sent = PACKETS_PER_KEY - 2;
+    b.received = PACKETS_PER_KEY - 2;
+    assert_eq!(a.remaining_send_packets(), 2);
     let (counter, bytes) = a.seal(&vec![3; FULL_PACKET_PLAINTEXT_BYTES])?;
     assert!(matches!(b.open(counter, &bytes)?, FullOpened::New(_)));
-    assert_eq!(a.remaining_send_packets(), 0);
+    assert_eq!(a.remaining_send_packets(), 1);
     assert!(matches!(a.seal(b"rekey"), Err(CryptoError::Pairing("ResumeRequired"))));
+    let (counter, stop) = a.seal(RESUME_STOP)?;
+    assert_eq!(counter, 65_535);
+    assert!(matches!(b.open(counter, &stop)?, FullOpened::New(_)));
+    assert!(matches!(a.seal(b"closed"), Err(CryptoError::Pairing("Retired"))));
+    assert!(matches!(b.seal(b"other direction closed"), Err(CryptoError::Pairing("Retired"))));
     let (mut a, _) = pair();
     assert!(a.seal(&vec![3; FULL_PACKET_PLAINTEXT_BYTES + 1]).is_err());
     Ok(())
@@ -149,5 +154,70 @@ fn full_ready_requires_closed_zero_credit_null_receipt_at_counter_zero() -> Test
         let (counter, bytes) = b.seal(&packet.encode_secret()?)?;
         assert!(matches!(a.open_ready(counter, &bytes), Err(CryptoError::Pairing("WrongContext"))));
     }
+    Ok(())
+}
+
+#[test]
+fn full_channel_resume_allows_current_manifest_hash_and_keeps_ready_base() -> TestResult {
+    use ramflux_protocol::custody::pairing::full_transfer::{DataPacket, U64};
+    for current in [3, 21, 22, 23] {
+        let base = ramflux_protocol::encode_base64url([3; 32]);
+        let mut a = FullConfirmedChannel::resume(PairingRole::Initiator, keys(4), base.clone())?;
+        let mut b = FullConfirmedChannel::resume(PairingRole::Responder, keys(4), base)?;
+        let (counter, ready) = b.seal_ready()?;
+        a.open_ready(counter, &ready)?;
+        let mut part = manifest();
+        if let DataPacket::Manifest { manifest_hash, .. } = &mut part {
+            *manifest_hash = ramflux_protocol::encode_base64url([current; 32]);
+        }
+        let (counter, bytes) = a.seal_packet(&part)?;
+        assert_eq!(counter, 0);
+        assert!(matches!(
+            b.open_packet(counter, &bytes)?,
+            Some(DataPacket::Manifest { offset: U64(0), .. })
+        ));
+    }
+    Ok(())
+}
+#[test]
+fn full_channel_second_ready_shape_cannot_rearm_before_manifest_and_is_noop_after() -> TestResult {
+    use ramflux_protocol::custody::pairing::full_transfer::DataPacket;
+    for after_manifest in [false, true] {
+        let hash = ramflux_protocol::encode_base64url([3; 32]);
+        let mut a = FullConfirmedChannel::new(PairingRole::Initiator, keys(4), hash.clone())?;
+        let (_, mut b) = pair();
+        let ready = DataPacket::Receipt { manifest_hash: hash, durable_through: None, credit: 0 };
+        let (zero, bytes) = b.seal(&ready.encode_secret()?)?;
+        a.open_ready(zero, &bytes)?;
+        if after_manifest {
+            a.seal_packet(&manifest())?;
+        }
+        let (one, bytes) = b.seal(&ready.encode_secret()?)?;
+        assert_eq!(one, 1);
+        if after_manifest {
+            assert!(a.open_packet(one, &bytes)?.is_none());
+        } else {
+            assert!(matches!(
+                a.open_packet(one, &bytes),
+                Err(CryptoError::Pairing("WrongContext"))
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn full_channel_data_at_65535_refused_even_with_valid_aead() -> TestResult {
+    let (a, mut b) = pair();
+    let counter = 65_535;
+    b.received = counter;
+    let mut packet = b"ordinary data at the reserved Stop counter".to_vec();
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(a.send.as_ref()));
+    let tag = cipher
+        .encrypt_in_place_detached(&nonce(counter), &a.aad(0, counter), &mut packet)
+        .map_err(|_| "fixture AEAD failed")?;
+    packet.extend_from_slice(&tag);
+    assert!(matches!(b.open(counter, &packet), Err(CryptoError::Pairing("ResumeRequired"))));
+    assert!(matches!(b.seal(b"retired"), Err(CryptoError::Pairing("Retired"))));
     Ok(())
 }

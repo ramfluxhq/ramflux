@@ -6,7 +6,7 @@ use ramflux_protocol::custody::pairing::full_transfer::{
     PROFILE, SecretBase64, U64,
     relay::{EncryptedPacket, SendFull},
 };
-fn send(token: &FullResumeToken, counter: u64, size: usize) -> SendFull {
+pub(super) fn send(token: &FullResumeToken, counter: u64, size: usize) -> SendFull {
     SendFull {
         kind: "send_full".into(),
         profile: PROFILE.into(),

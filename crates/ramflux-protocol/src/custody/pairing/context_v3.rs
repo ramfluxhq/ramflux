@@ -162,9 +162,12 @@ impl PairingWire for CommonV3 {
         require(self.schema == "ramflux.pairing.Common.v3", "schema")?;
         require(self.version == 3, "version")?;
         self.scalar_context().validate()?;
-        if matches!(&self.data_selection, DataSelectionV3::FullAccountDataV1(_)) {
-            require(self.purpose == "primary_transfer", "transfer_context")?;
-        }
+        require(
+            self.purpose == "primary_transfer"
+                && self.requested_role == "primary"
+                && matches!(&self.data_selection, DataSelectionV3::FullAccountDataV1(_)),
+            "UpdateRequired",
+        )?;
         budget(self, Self::LIMIT)
     }
 }
@@ -193,11 +196,7 @@ pub struct RoleContextV3 {
     #[serde(deserialize_with = "super::required_nullable")]
     pub hpke_key: Option<String>,
     pub display_name: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_profile"
-    )]
+    #[serde(deserialize_with = "present_profile")]
     pub transfer_profile: Option<TransferProfile>,
 }
 impl PairingWire for RoleContextV3 {

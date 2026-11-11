@@ -4,10 +4,13 @@
 //! Dormant committed SAS adapter. Unwired: grants no authority and does not change live behaviour.
 mod cleanup;
 mod full_authority;
+mod full_resume;
+pub use full_resume::{FullResumeAttempt, FullResumeKeyOwner, FullResumeTrust, VerifiedFullResume};
 mod full_channel;
 pub use full_authority::{
-    verify_full_data_lease, verify_full_lease_request, verify_full_prepublication_authority,
-    verify_full_resume_pair, verify_full_tail_authority,
+    verify_full_data_lease, verify_full_grant_offer, verify_full_j3_lease_margin,
+    verify_full_lease_request, verify_full_prepublication_authority, verify_full_resume_pair,
+    verify_full_tail_authority,
 };
 mod hpke;
 mod sas;

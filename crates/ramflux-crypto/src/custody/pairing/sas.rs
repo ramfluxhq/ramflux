@@ -183,6 +183,10 @@ pub fn commit<C: SasContext>(
     sas_secret: &[u8; 32],
     salt: &[u8; 32],
 ) -> Result<PendingSas<C>, CryptoError> {
+    // A node's discovery record cannot select the retired partial-transfer SAS profile.
+    if C::VERSION == 2 && context.purpose() == "primary_transfer" {
+        return Err(CryptoError::Pairing("UpdateRequired"));
+    }
     if context.role() != role.as_str() {
         return Err(CryptoError::Pairing("role_mismatch"));
     }
@@ -488,6 +492,50 @@ impl EstablishedSas {
         };
         self.recv_counter = next;
         Ok(Zeroizing::new(plaintext))
+    }
+
+    /// Verify the live, mutually confirmed v3 transcript before a bootstrap signer is used.
+    /// # Errors
+    /// Refuses another role/profile/transcript or a missing human confirmation.
+    pub fn require_full_transcript(
+        &mut self,
+        role: PairingRole,
+        context: &ramflux_protocol::custody::pairing::context_v3::TranscriptV3,
+    ) -> Result<(), CryptoError> {
+        self.require_channel()?;
+        let preimage =
+            ramflux_protocol::custody::pairing::context_v3::transcript_preimage(context)?;
+        if self.role != role || sha256(&preimage) != self.transcript_hash {
+            return self.fail("WrongContext");
+        }
+        Ok(())
+    }
+
+    /// Capture local resume trust only after BOTH human-confirmed v3 SAS confirmations.
+    /// The returned owner is persisted only by the local encrypted full-transfer stage.
+    /// # Errors
+    /// Refuses an unconfirmed/different transcript, grant or node-replaced lease.
+    pub fn full_resume_trust(
+        &mut self,
+        context: ramflux_protocol::custody::pairing::context_v3::TranscriptV3,
+        grant: ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        lease: &ramflux_protocol::custody::Envelope<
+            ramflux_protocol::custody::pairing::full_transfer::lease::DataLease,
+        >,
+    ) -> Result<super::FullResumeTrust, CryptoError> {
+        self.require_channel()?;
+        let preimage =
+            ramflux_protocol::custody::pairing::context_v3::transcript_preimage(&context)?;
+        if sha256(&preimage) != self.transcript_hash {
+            return self.fail("WrongContext");
+        }
+        super::FullResumeTrust::from_confirmed(
+            self.role,
+            context,
+            grant,
+            lease,
+            self.transcript_hash,
+        )
     }
 
     /// Wipe remaining keys after success, cancel, expiry or caller-driven abort.
