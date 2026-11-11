@@ -354,6 +354,15 @@ impl SessionMode {
             Self::Legacy => "legacy",
         }
     }
+
+    /// Verified node incarnation from a Push handshake. Compat/Legacy bind a local epoch.
+    #[must_use]
+    pub(crate) fn push_incarnation(&self) -> Option<&str> {
+        match self {
+            Self::Push { incarnation } => Some(incarnation.as_str()),
+            Self::Legacy | Self::Compat => None,
+        }
+    }
 }
 
 /// The second decode of the establishment frame bytes.

@@ -88,6 +88,7 @@ impl SessionConnector for GatewayConnector {
 pub(crate) struct SessionMetadata {
     pub config: GatewaySessionConfig,
     pub session: GatewaySessionState,
+    pub mode: crate::gateway::session_push::SessionMode,
     pub generation: u64,
 }
 

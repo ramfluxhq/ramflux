@@ -68,7 +68,11 @@ async fn run_with_receive_clock(
     let now = receive_now();
     #[cfg(test)]
     let _pinned = crate::time::FixedClock::set(now);
-    account.client.first_activate_receive_ledger(&account.target_delivery_id)?;
+    let session_mode = account.bound_session_mode();
+    account.client.first_activate_receive_ledger(
+        &account.target_delivery_id,
+        session_mode.as_ref().and_then(crate::gateway::session_push::SessionMode::push_incarnation),
+    )?;
     let active = crate::bus::push_receiver::apply_w1::is_active(
         account.client.account_db()?,
         &account.target_delivery_id,
@@ -278,6 +282,11 @@ pub(crate) async fn receive(
     engine: &mut impl GatewayPushAccess,
     now: i64,
 ) -> Result<(usize, Vec<crate::client::surface::ResyncReply>), SdkError> {
+    let session_mode = account.bound_session_mode();
+    account.client.first_activate_receive_ledger(
+        &account.target_delivery_id,
+        session_mode.as_ref().and_then(crate::gateway::session_push::SessionMode::push_incarnation),
+    )?;
     if crate::bus::push_receiver::apply_w1::is_active(
         account.client.account_db()?,
         &account.target_delivery_id,

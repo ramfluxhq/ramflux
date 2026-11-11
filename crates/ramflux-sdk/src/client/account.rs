@@ -299,7 +299,45 @@ impl RamfluxClient {
             &mut config,
             self.account_db()?.receive_activation()?,
         );
-        GatewaySessionEngine::connect(config).await
+        let engine = GatewaySessionEngine::connect(config).await?;
+        self.first_activate_receive_ledger(
+            &engine.config.target_delivery_id,
+            engine.mode.push_incarnation(),
+        )?;
+        Ok(engine)
+    }
+
+    /// Bind schema, import and the discriminator to the first verified node incarnation
+    /// (Push handshake) or a retained local epoch (Compat/Legacy) before ledger phases.
+    /// Already-activated accounts are left unchanged. No-op while first-activation is off.
+    ///
+    /// # Errors
+    /// Returns storage or entropy errors from first-activation.
+    pub(crate) fn first_activate_receive_ledger(
+        &self,
+        target: &str,
+        verified_incarnation: Option<&str>,
+    ) -> Result<(), SdkError> {
+        if target.is_empty() {
+            return Ok(());
+        }
+        let db = self.account_db()?;
+        if db.receive_activation()? == ramflux_storage::ReceiveActivation::Activated {
+            return Ok(());
+        }
+        let owned;
+        let incarnation = if let Some(verified) = verified_incarnation {
+            verified
+        } else {
+            owned = match db.receive_epoch(target)? {
+                Some(existing) => existing,
+                None => fresh_receive_incarnation()?,
+            };
+            owned.as_str()
+        };
+        let _ =
+            db.first_activate_if_default(ramflux_storage::ReceiveMigrate { target, incarnation })?;
+        Ok(())
     }
 
     /// # Errors
@@ -317,6 +355,12 @@ impl RamfluxClient {
     pub fn import_history_bundle(&self, bundle: &HistoryBundle) -> Result<(), SdkError> {
         Ok(self.account_db()?.import_history_bundle(bundle)?)
     }
+}
+
+fn fresh_receive_incarnation() -> Result<String, SdkError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| SdkError::CustodyRandomUnavailable)?;
+    Ok(super::contact::bytes_to_hex(&bytes))
 }
 
 pub(crate) fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {

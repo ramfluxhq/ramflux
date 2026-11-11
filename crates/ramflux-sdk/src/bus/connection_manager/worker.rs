@@ -321,6 +321,7 @@ pub(super) fn publish_metadata(handle: &ConnectionHandle, engine: &GatewaySessio
         Some(SessionMetadata {
             config: engine.config.clone(),
             session: engine.session().clone(),
+            mode: engine.mode.clone(),
             generation: handle.generation(),
         });
 }
@@ -427,7 +428,7 @@ async fn connect_attempt(
             prepared?;
             let prepared_config=prepare(handle,config.clone(),deadline).await?;
             let connected=connector.connect(prepared_config,deadline).await?;
-            install(handle,SessionMetadata {config:connected.config.clone(),session:connected.session().clone(),generation:handle.generation()}).await?;
+            install(handle,SessionMetadata {config:connected.config.clone(),session:connected.session().clone(),mode:connected.mode.clone(),generation:handle.generation()}).await?;
             Ok(connected)
         })=>match result {
             Ok(result)=>result,

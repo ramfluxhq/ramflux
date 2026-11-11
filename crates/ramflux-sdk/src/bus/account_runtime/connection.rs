@@ -505,8 +505,12 @@ impl AccountRuntime {
         let Some(account) = self.state.accounts.get_mut(&self.id) else {
             return Err(SdkError::NetworkingPending);
         };
+        let verified = metadata.mode.push_incarnation().map(str::to_owned);
         account.gateway_config = metadata.config;
         account.target_delivery_id.clone_from(&account.gateway_config.target_delivery_id);
+        account
+            .client
+            .first_activate_receive_ledger(&account.target_delivery_id, verified.as_deref())?;
         if account.client.born_v3_account.is_some() {
             short_step(
                 account.timeouts.network_wait,

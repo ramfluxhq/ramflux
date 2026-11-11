@@ -59,12 +59,14 @@ fn gateway_open_frame_with_nonce(
     }
 }
 
-/// Advertise session-push in the signed device-proof scope iff the receive ledger is Activated.
+/// Advertise session-push when the ledger is Activated, or when first-activation is on so a
+/// fresh account can bind the verified node incarnation from handshake before ledger phases.
 pub(crate) fn apply_session_push_advertise(
     config: &mut GatewaySessionConfig,
     activation: ramflux_storage::ReceiveActivation,
 ) {
-    config.session_push_advertise = activation == ramflux_storage::ReceiveActivation::Activated;
+    config.session_push_advertise = activation == ramflux_storage::ReceiveActivation::Activated
+        || ramflux_storage::FIRST_ACTIVATION_DEFAULT;
 }
 
 /// The scope the device proof signs. The session-push capability is present exactly when the
