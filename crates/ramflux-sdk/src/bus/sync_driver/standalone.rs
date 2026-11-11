@@ -68,6 +68,7 @@ async fn receive_inner(
     let mut backpressure = Box::new(Backpressure::load(&account.client, now)?);
     let mut applied = 0_usize;
     let mut pages = 0_u32;
+    let mut envelope_ids = BTreeMap::new();
     loop {
         let page = resume_one(account, engine, turn.cursor, PAGE_LIMIT).await?;
         pages = pages.saturating_add(1);
@@ -85,11 +86,12 @@ async fn receive_inner(
             &mut retries,
             backpressure,
             applied,
+            &mut envelope_ids,
         )
         .await?
         {
             PageDrive::Paused { applied } => {
-                flush_live_acks(account, engine, generation).await?;
+                flush_live_acks(account, engine, generation, &envelope_ids).await?;
                 return Ok((applied, Vec::new()));
             }
             PageDrive::Continue { backpressure: next, applied: next_applied } => {
@@ -101,10 +103,18 @@ async fn receive_inner(
             break;
         }
     }
-    applied =
-        apply_leftover(account, &mut turn, generation, retries, backpressure, applied).await?;
+    applied = apply_leftover(
+        account,
+        &mut turn,
+        generation,
+        retries,
+        backpressure,
+        applied,
+        &mut envelope_ids,
+    )
+    .await?;
     let _ = now;
-    flush_live_acks(account, engine, generation).await?;
+    flush_live_acks(account, engine, generation, &envelope_ids).await?;
     Ok((applied, Vec::new()))
 }
 
@@ -177,12 +187,18 @@ async fn drive_page(
     retries: &mut BTreeMap<(String, u64, String), ReceiveEntry>,
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
+    envelope_ids: &mut BTreeMap<u64, String>,
 ) -> Result<PageDrive, SdkError> {
     let records = page.entries.clone();
     loop {
         let outcome = apply_owned(account, turn, generation, page)?;
         match outcome {
             ApplyOutcome::Covered { cursor } | ApplyOutcome::AlreadyCovered { cursor } => {
+                for row in &records {
+                    envelope_ids
+                        .entry(row.entry.inbox_seq)
+                        .or_insert_with(|| row.entry.envelope.envelope_id.clone());
+                }
                 let high = records
                     .iter()
                     .map(|row| row.entry.inbox_seq)
@@ -209,6 +225,9 @@ async fn drive_page(
                     turn: Some(turn.clone()),
                 };
                 let handle_generation = || generation;
+                envelope_ids
+                    .entry(sequence)
+                    .or_insert_with(|| record.entry.envelope.envelope_id.clone());
                 let (_, next) = apply_w1::apply_page(
                     account,
                     turn,
@@ -252,6 +271,7 @@ fn take_page_retry(
     retries.remove(&entry_id(entry)).and_then(|prepared| prepared.retry_key)
 }
 
+#[allow(clippy::too_many_arguments, reason = "standalone leftover apply shares the live handles")]
 async fn apply_leftover(
     account: &mut LocalBusAccountState,
     turn: &mut ReceiveTurn,
@@ -259,11 +279,15 @@ async fn apply_leftover(
     retries: BTreeMap<(String, u64, String), ReceiveEntry>,
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
+    envelope_ids: &mut BTreeMap<u64, String>,
 ) -> Result<usize, SdkError> {
     let mut leftover: Vec<_> = retries.into_values().collect();
     leftover.sort_by_key(|entry| entry.entry.inbox_seq);
     crate::bus::connection_manager::receive::bind_retry_turns(&mut leftover, Some(turn));
     for mut prepared in leftover {
+        envelope_ids
+            .entry(prepared.entry.inbox_seq)
+            .or_insert_with(|| prepared.entry.envelope.envelope_id.clone());
         prepared.turn = Some(turn.clone());
         let handle_generation = || generation;
         let (_, next) =
@@ -282,6 +306,7 @@ async fn flush_live_acks(
     account: &LocalBusAccountState,
     engine: &mut impl GatewayPushAccess,
     generation: u64,
+    envelope_ids: &BTreeMap<u64, String>,
 ) -> Result<(), SdkError> {
     if let Some((handle, work)) = (account.connection.clone()).zip(account.connection_work.clone())
     {
@@ -294,13 +319,14 @@ async fn flush_live_acks(
         )
         .await;
     }
-    flush_engine_acks(account, engine, generation).await
+    flush_engine_acks(account, engine, generation, envelope_ids).await
 }
 
 async fn flush_engine_acks(
     account: &LocalBusAccountState,
     engine: &mut impl GatewayPushAccess,
     generation: u64,
+    envelope_ids: &BTreeMap<u64, String>,
 ) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
     let target = account.target_delivery_id.as_str();
@@ -308,29 +334,48 @@ async fn flush_engine_acks(
         return Ok(());
     }
     let turn = apply_w1::capture_turn(db, generation, target)?;
-    let sequences =
-        crate::bus::push_receiver::ack_batch::SourceWa { expected: turn.expected(), generation }
-            .select(db, now_unix_timestamp(), true)?;
+    let wa =
+        crate::bus::push_receiver::ack_batch::SourceWa { expected: turn.expected(), generation };
+    let now = now_unix_timestamp();
+    let sequences = wa.select(db, now, true)?;
     if sequences.is_empty() {
         return Ok(());
     }
     let receiver = account.client.owned_device_identity()?;
-    let now = now_unix_timestamp();
+    let mut sent = Vec::new();
+    let mut results = Vec::new();
     for seq in sequences {
-        let Some(envelope_id) = account
-            .pending_deliveries
-            .iter()
-            .find(|entry| entry.inbox_seq == seq)
-            .map(|entry| entry.envelope.envelope_id.clone())
-        else {
+        let envelope_id = envelope_ids.get(&seq).cloned().or_else(|| {
+            account
+                .pending_deliveries
+                .iter()
+                .find(|entry| entry.inbox_seq == seq)
+                .map(|entry| entry.envelope.envelope_id.clone())
+        });
+        let Some(envelope_id) = envelope_id else {
             continue;
         };
         let mut ack = crate::dm::gateway_ack(&envelope_id, &receiver, now);
         ack.ext.ext.insert("inbox_seq".into(), json!(seq));
-        if engine.ack(ack).await.is_err() {
+        let outcome = if engine.ack(ack).await.is_ok() {
+            ramflux_storage::ReceiveAckOutcome::Acked
+        } else {
             tracing::debug!(seq, "standalone ACK remains pending after transport failure");
-        }
+            ramflux_storage::ReceiveAckOutcome::Uncertain
+        };
+        sent.push(seq);
+        results.push(ramflux_storage::ReceiveAckResult { sequence: seq, outcome });
     }
+    if sent.is_empty() {
+        return Ok(());
+    }
+    let input = ramflux_storage::ReceiveAckApply {
+        incarnation: &turn.incarnation,
+        sequences: &sent,
+        results: &results,
+        now,
+    };
+    let _ = wa.apply(db, input)?;
     Ok(())
 }
 
