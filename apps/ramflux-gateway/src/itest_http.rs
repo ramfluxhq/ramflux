@@ -99,7 +99,7 @@ pub(crate) fn handle_itest_request(
     if handle_preauth_control_request(stream, &request, state, store)? {
         return Ok(());
     }
-    if let Some(challenge) = pre_auth_gate(&request, state, store)? {
+    if let Some(challenge) = pre_auth_gate(&request, stream.peer_addr()?.ip(), state, store)? {
         ramflux_node_core::write_itest_json_response(stream, "401 Unauthorized", &challenge)?;
         return Ok(());
     }

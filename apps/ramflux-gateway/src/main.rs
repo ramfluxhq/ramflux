@@ -20,6 +20,7 @@ mod issued_probe;
 mod itest_http;
 mod mesh_delivery;
 mod object_issue;
+mod pre_auth;
 mod principal_directory;
 mod push_queue;
 mod push_registration;

@@ -168,12 +168,12 @@ fn router_async_peer_ca_pems(
 #[cfg(feature = "itest-http")]
 pub(crate) fn pre_auth_gate(
     request: &ramflux_node_core::NodeHttpRequest,
+    peer: std::net::IpAddr,
     state: &Arc<Mutex<ramflux_node_core::GatewayState>>,
     store: &ramflux_node_core::GatewayRedbStore,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
-    let source_ip_hash =
-        request.source_ip_hash.as_deref().unwrap_or("unknown-source-ip").to_owned();
-    let now = request.pre_auth_now.unwrap_or_else(ramflux_node_core::now_unix_seconds);
+    let source_ip_hash = crate::pre_auth::source_key(peer);
+    let now = ramflux_node_core::now_unix_seconds();
     let mut gateway = gateway_state(state)?;
     let decision =
         match gateway.check_pre_auth(&source_ip_hash, request.pre_auth_cookie.as_deref(), now) {

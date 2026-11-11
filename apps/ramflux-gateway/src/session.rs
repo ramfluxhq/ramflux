@@ -2049,9 +2049,10 @@ pub(crate) fn pre_auth_gate_for_gateway_open(
     open: &ramflux_node_core::GatewayOpenFrame,
     context: &GatewayQuicContext,
 ) -> anyhow::Result<Option<ramflux_node_core::GatewayPreAuthChallengeResponse>> {
-    let source_ip_hash =
-        open.source_ip_hash.clone().unwrap_or_else(|| context.remote_addr.ip().to_string());
-    let now = open.pre_auth_now.unwrap_or_else(ramflux_node_core::now_unix_seconds);
+    // Legacy wire hints remain accepted, but only the transport and server clock
+    // can identify a pre-authentication source and its admission window.
+    let source_ip_hash = crate::pre_auth::source_key(context.remote_addr.ip());
+    let now = ramflux_node_core::now_unix_seconds();
     let mut gateway = gateway_state(&context.state)?;
     let decision =
         match gateway.check_pre_auth(&source_ip_hash, open.pre_auth_cookie.as_deref(), now) {
