@@ -359,19 +359,40 @@ async fn federated_manifest_gate(
     Ok(ResolvedMessageRecipient { principal_id: Some(device.principal_id), principal_commitment })
 }
 
-/// Selects the cached delivery used for an ID-only ACK request.
+/// Selects the cached delivery used for an ACK request.
 ///
-/// Zero matches keep the legacy envelope-id ACK so the node still refuses
-/// ambiguity when its own pending set is incomplete. One match supplies that
-/// exact `inbox_seq`. Two or more matches reject before any session/ACK effect.
+/// ID-only requests (`inbox_seq` absent) never infer a sequence from a unique
+/// RAM-cache hit: local uniqueness cannot establish node uniqueness, and the
+/// node still refuses incomplete-cache collisions. Two or more cached matches
+/// reject before any session/ACK effect. Sequence retries must pass an explicit
+/// `inbox_seq` that names one cached row.
 fn pending_ack_entry<'a>(
     pending: &'a [GatewayInboxEntry],
     envelope_id: &str,
+    inbox_seq: Option<u64>,
 ) -> Result<Option<&'a GatewayInboxEntry>, SdkError> {
+    if let Some(seq) = inbox_seq {
+        if seq == 0 {
+            return Err(SdkError::InboundRejected(
+                "ACK inbox sequence must be greater than zero".into(),
+            ));
+        }
+        let mut matches = pending
+            .iter()
+            .filter(|entry| entry.envelope.envelope_id == envelope_id && entry.inbox_seq == seq);
+        return match (matches.next(), matches.next()) {
+            (None, _) => Err(SdkError::InboundRejected(format!(
+                "no pending delivery for envelope {envelope_id} at inbox sequence {seq}"
+            ))),
+            (Some(entry), None) => Ok(Some(entry)),
+            (Some(_), Some(_)) => Err(SdkError::InboundRejected(format!(
+                "ambiguous envelope id {envelope_id}; multiple pending deliveries share inbox sequence {seq}"
+            ))),
+        };
+    }
     let mut matches = pending.iter().filter(|entry| entry.envelope.envelope_id == envelope_id);
     match (matches.next(), matches.next()) {
-        (None, _) => Ok(None),
-        (Some(entry), None) => Ok(Some(entry)),
+        (None, _) | (Some(_), None) => Ok(None),
         (Some(_), Some(_)) => {
             let extra = matches.count();
             Err(SdkError::InboundRejected(format!(
@@ -401,11 +422,11 @@ async fn dispatch_message_ack_request(
     if receiver.device_id() != body.receiver_device_id {
         return Err(SdkError::InboundRejected("ACK receiver differs from owned account".into()));
     }
-    // Receive already ACKs with inbox_seq and keeps the delivery on the RAM page.
-    // A later `rf dm ack` must reuse that seq; envelope-id-only ACK misses retired rows.
-    // Multiple cached rows with the same sender-chosen id must not pick an arbitrary seq:
-    // reject before opening a session so the node ID-only ambiguity contract stays intact.
-    let pending = pending_ack_entry(&account.pending_deliveries, &body.envelope_id)?.cloned();
+    // ID-only ACK stays envelope-id-only so the node still refuses incomplete-cache
+    // collisions. Sequence retries must carry an explicit inbox sequence. Multiple
+    // cached rows for the same sender-chosen id still reject before any session/ACK.
+    let pending =
+        pending_ack_entry(&account.pending_deliveries, &body.envelope_id, body.inbox_seq)?.cloned();
     let mut engine = account.session_client().await?;
     let result = if let Some(entry) = pending.as_ref() {
         account.client.ack_gateway_entry(&mut engine, entry, body.received_at).await
@@ -1077,17 +1098,35 @@ mod pending_ack_entry_tests {
     #[test]
     fn zero_matches_keep_the_legacy_id_only_path() -> Result<(), SdkError> {
         let pending = [entry("other", 1, "t1")?];
-        assert!(pending_ack_entry(&pending, "wanted")?.is_none());
+        assert!(pending_ack_entry(&pending, "wanted", None)?.is_none());
         Ok(())
     }
 
     #[test]
-    fn unique_match_selects_that_inbox_seq_and_is_idempotent() -> Result<(), SdkError> {
+    fn unique_cache_match_stays_id_only() -> Result<(), SdkError> {
         let pending = [entry("wanted", 7, "t1")?, entry("other", 8, "t2")?];
-        let first =
-            pending_ack_entry(&pending, "wanted")?.ok_or(SdkError::LocalBus("unique".into()))?;
-        let again =
-            pending_ack_entry(&pending, "wanted")?.ok_or(SdkError::LocalBus("repeat".into()))?;
+        assert!(pending_ack_entry(&pending, "wanted", None)?.is_none());
+        assert!(pending_ack_entry(&pending, "wanted", None)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_cache_same_id_stays_id_only() -> Result<(), SdkError> {
+        // Local cache has one candidate. Another sender can submit the same id
+        // after this page was populated; manufacturing seq 7 would ACK that old
+        // row and leave the node's new pending delivery untouched.
+        let pending = [entry("wanted", 7, "t1")?];
+        assert!(pending_ack_entry(&pending, "wanted", None)?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_seq_selects_the_cached_row() -> Result<(), SdkError> {
+        let pending = [entry("wanted", 7, "t1")?, entry("other", 8, "t2")?];
+        let first = pending_ack_entry(&pending, "wanted", Some(7))?
+            .ok_or(SdkError::LocalBus("explicit".into()))?;
+        let again = pending_ack_entry(&pending, "wanted", Some(7))?
+            .ok_or(SdkError::LocalBus("repeat".into()))?;
         assert_eq!(first.inbox_seq, 7);
         assert_eq!(first.target_delivery_id, "t1");
         assert_eq!(again.inbox_seq, first.inbox_seq);
@@ -1098,10 +1137,20 @@ mod pending_ack_entry_tests {
     #[test]
     fn colliding_sender_ids_reject_before_any_ack_effect() -> Result<(), SdkError> {
         let pending = [entry("wanted", 3, "alice")?, entry("wanted", 9, "mallory")?];
-        match pending_ack_entry(&pending, "wanted") {
+        match pending_ack_entry(&pending, "wanted", None) {
             Err(error) => ambiguous(error, "wanted"),
             Ok(_) => Err(SdkError::LocalBus("collision must reject before ACK".into())),
         }
+    }
+
+    #[test]
+    fn colliding_ids_explicit_seq_selects_one_row() -> Result<(), SdkError> {
+        let pending = [entry("wanted", 3, "alice")?, entry("wanted", 9, "mallory")?];
+        let entry = pending_ack_entry(&pending, "wanted", Some(9))?
+            .ok_or(SdkError::LocalBus("exact mallory".into()))?;
+        assert_eq!(entry.inbox_seq, 9);
+        assert_eq!(entry.target_delivery_id, "mallory");
+        Ok(())
     }
 }
 

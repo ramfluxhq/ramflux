@@ -10,7 +10,8 @@ mod e2e;
 use e2e::{
     assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_ack,
     dm_receipt_delivered, dm_send, dump_logs, envelope_id_from_read, exchange_contacts,
-    start_daemon, unique, wait_dm_receipt, wait_dm_texts, wait_node_observed_ack,
+    inbox_seq_from_read, start_daemon, unique, wait_dm_receipt, wait_dm_texts,
+    wait_node_observed_ack,
 };
 
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
@@ -40,7 +41,10 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
             dump_logs(&stack, &[&alice_d, &bob_d])
         )
     })?;
-    if let Err(error) = dm_ack(&bob_d, &bob, &conversation, &envelope) {
+    let inbox_seq = inbox_seq_from_read(&received, &envelope).ok_or_else(|| {
+        format!("receive JSON missing inbox_seq for {envelope}; received={received}")
+    })?;
+    if let Err(error) = dm_ack(&bob_d, &bob, &conversation, &envelope, Some(inbox_seq)) {
         return Err(format!(
             "dm_ack envelope={envelope} message={message} received={received} error={error} logs={}",
             dump_logs(&stack, &[&alice_d, &bob_d])

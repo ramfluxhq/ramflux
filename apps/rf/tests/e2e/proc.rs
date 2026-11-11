@@ -13,10 +13,12 @@ use std::{
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Kills the child's whole process group and reaps the leader on every exit path.
+/// Kills the child's whole process group, remembered descendants, and reaps the leader
+/// on every exit path, including after the leader has already exited.
 pub(crate) struct ProcessGroup {
     child: Option<Child>,
     pid: u32,
+    tracked: Vec<u32>,
 }
 
 impl ProcessGroup {
@@ -25,7 +27,7 @@ impl ProcessGroup {
         command.process_group(0);
         let child = command.spawn()?;
         let pid = child.id();
-        Ok(Self { child: Some(child), pid })
+        Ok(Self { child: Some(child), pid, tracked: Vec::new() })
     }
 
     pub(crate) fn id(&self) -> u32 {
@@ -43,9 +45,23 @@ impl ProcessGroup {
         }
     }
 
+    pub(crate) fn track_descendants(&mut self) {
+        for pid in descendant_pids(self.pid) {
+            if pid != self.pid && !self.tracked.contains(&pid) {
+                self.tracked.push(pid);
+            }
+        }
+    }
+
+    pub(crate) fn tracked_pids(&self) -> &[u32] {
+        &self.tracked
+    }
+
     pub(crate) fn kill_group(&mut self) {
-        if let Some(pid) = rustix::process::Pid::from_raw(self.pid.cast_signed()) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        self.track_descendants();
+        signal_tree(self.pid);
+        for i in 0..self.tracked.len() {
+            signal_tree(self.tracked[i]);
         }
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -62,13 +78,68 @@ impl ProcessGroup {
 
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        if self.try_wait().ok().flatten().is_none() {
-            self.kill_group();
-        }
+        self.kill_group();
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
         }
     }
+}
+
+fn signal_tree(pid: u32) {
+    let Some(raw) = rustix::process::Pid::from_raw(pid.cast_signed()) else {
+        return;
+    };
+    let _ = rustix::process::kill_process_group(raw, rustix::process::Signal::KILL);
+    let _ = rustix::process::kill_process(raw, rustix::process::Signal::KILL);
+}
+
+/// Direct children plus nested descendants of `leader`.
+pub(crate) fn descendant_pids(leader: u32) -> Vec<u32> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = direct_children(leader);
+    let mut out = Vec::new();
+    while let Some(pid) = stack.pop() {
+        if pid == leader || !seen.insert(pid) {
+            continue;
+        }
+        out.push(pid);
+        stack.extend(direct_children(pid));
+    }
+    out
+}
+
+fn direct_children(pid: u32) -> Vec<u32> {
+    proc_children(pid).unwrap_or_else(|| pgrep_children(pid))
+}
+
+fn proc_children(pid: u32) -> Option<Vec<u32>> {
+    let mut kids = Vec::new();
+    let entries = std::fs::read_dir(format!("/proc/{pid}/task")).ok()?;
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path().join("children")) else {
+            continue;
+        };
+        for word in text.split_whitespace() {
+            if let Ok(child) = word.parse::<u32>()
+                && child != pid
+                && !kids.contains(&child)
+            {
+                kids.push(child);
+            }
+        }
+    }
+    Some(kids)
+}
+
+fn pgrep_children(pid: u32) -> Vec<u32> {
+    let Ok(output) = Command::new("pgrep").arg("-P").arg(pid.to_string()).output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .filter(|&child| child != pid)
+        .collect()
 }
 
 /// Runs `command` in its own process group under `deadline`. Stdout and stderr go to private
@@ -120,6 +191,14 @@ pub(crate) fn process_group_alive(pid: u32) -> bool {
     !matches!(rustix::process::test_kill_process_group(group), Err(rustix::io::Errno::SRCH))
 }
 
+/// True when `kill(pid, 0)` still finds that process.
+pub(crate) fn process_alive(pid: u32) -> bool {
+    let Some(raw) = rustix::process::Pid::from_raw(pid.cast_signed()) else {
+        return false;
+    };
+    !matches!(rustix::process::test_kill_process(raw), Err(rustix::io::Errno::SRCH))
+}
+
 /// Poll until the group is gone or `deadline` elapses.
 pub(crate) fn wait_process_group_gone(
     pid: u32,
@@ -132,6 +211,23 @@ pub(crate) fn wait_process_group_gone(
         }
         if Instant::now() >= end {
             return Err(format!("process group {pid} still alive after {deadline:?}").into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Poll until `pid` is gone or `deadline` elapses.
+pub(crate) fn wait_process_gone(
+    pid: u32,
+    deadline: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let end = Instant::now() + deadline;
+    loop {
+        if !process_alive(pid) {
+            return Ok(());
+        }
+        if Instant::now() >= end {
+            return Err(format!("process {pid} still alive after {deadline:?}").into());
         }
         std::thread::sleep(Duration::from_millis(10));
     }

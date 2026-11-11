@@ -25,3 +25,8 @@ fn failed_ceremony_returns_within_budget_and_reaps() -> e2e::Result<()> {
 fn unresponsive_daemon_drop_returns_within_budget_and_reaps() -> e2e::Result<()> {
     e2e::prove_unresponsive_daemon_drop_within(BUDGET)
 }
+
+#[test]
+fn orphaned_group_members_reaped_after_leader_exit() -> e2e::Result<()> {
+    e2e::prove_orphaned_group_members_reaped_within(BUDGET)
+}

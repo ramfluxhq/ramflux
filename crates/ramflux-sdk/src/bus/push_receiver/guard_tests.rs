@@ -276,6 +276,7 @@ fn assert_exclusive_and_managed_ack() -> Result<(), SdkError> {
         envelope_id: "env-1".to_owned(),
         receiver_device_id: "dev-1".to_owned(),
         received_at: 42,
+        inbox_seq: None,
     };
     assert_eq!(
         serde_json::to_value(&request).expect("ack request shape"),

@@ -107,6 +107,9 @@ pub(crate) struct DmAck {
     pub(crate) receiver_device: String,
     #[arg(long)]
     pub(crate) received_at: Option<i64>,
+    /// Exact inbox sequence for a retry. Absent keeps the ID-only ACK path.
+    #[arg(long)]
+    pub(crate) inbox_seq: Option<u64>,
 }
 
 #[derive(Args)]

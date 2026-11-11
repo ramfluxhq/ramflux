@@ -490,6 +490,10 @@ pub struct LocalBusMessageAckRequest {
     pub envelope_id: String,
     pub receiver_device_id: String,
     pub received_at: i64,
+    /// Exact inbox sequence for a retry. Absent means ID-only ACK; the node
+    /// remains authoritative for incomplete caches and colliding sender ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]

@@ -699,25 +699,28 @@ pub fn dm_ack(
     account: &Account,
     conversation: &str,
     message: &str,
+    inbox_seq: Option<u64>,
 ) -> Result<Value> {
-    rf_json(
-        &daemon.socket,
-        &[
-            "dm",
-            "ack",
-            "--account",
-            &account.id,
-            "--conversation",
-            conversation,
-            "--message",
-            message,
-            "--envelope",
-            message,
-            "--receiver-device",
-            &account.device_id,
-        ],
-    )
-    .map_err(|error| {
+    let seq_text = inbox_seq.map(|seq| seq.to_string());
+    let mut args = vec![
+        "dm",
+        "ack",
+        "--account",
+        account.id.as_str(),
+        "--conversation",
+        conversation,
+        "--message",
+        message,
+        "--envelope",
+        message,
+        "--receiver-device",
+        account.device_id.as_str(),
+    ];
+    if let Some(seq) = seq_text.as_deref() {
+        args.push("--inbox-seq");
+        args.push(seq);
+    }
+    rf_json(&daemon.socket, &args).map_err(|error| {
         let log = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
         format!("{error}; daemon_log={log}").into()
     })
@@ -730,6 +733,32 @@ pub fn envelope_id_from_read(value: &Value) -> Option<String> {
         }
     }
     nested_envelope_id(value)
+}
+
+pub fn inbox_seq_from_read(value: &Value, envelope_id: &str) -> Option<u64> {
+    nested_inbox_seq(value, envelope_id)
+}
+
+fn nested_inbox_seq(value: &Value, envelope_id: &str) -> Option<u64> {
+    match value {
+        Value::Object(map) => {
+            let id_match = map.get("envelope_id").and_then(Value::as_str) == Some(envelope_id)
+                || map
+                    .get("envelope")
+                    .and_then(|envelope| envelope.get("envelope_id"))
+                    .and_then(Value::as_str)
+                    == Some(envelope_id);
+            if id_match
+                && let Some(seq) =
+                    map.get("inbox_seq").and_then(Value::as_u64).filter(|seq| *seq > 0)
+            {
+                return Some(seq);
+            }
+            map.values().find_map(|child| nested_inbox_seq(child, envelope_id))
+        }
+        Value::Array(rows) => rows.iter().find_map(|row| nested_inbox_seq(row, envelope_id)),
+        _ => None,
+    }
 }
 
 fn nested_envelope_id(value: &Value) -> Option<String> {
@@ -1147,6 +1176,7 @@ impl PtySession {
 
     fn wait_exit(&mut self, deadline: Instant) -> Result<std::process::ExitStatus> {
         loop {
+            self.group.track_descendants();
             if let Some(status) = self.group.try_wait()? {
                 return Ok(status);
             }
@@ -1530,17 +1560,26 @@ pub fn prove_hung_command_reaped_within(budget: Duration) -> Result<()> {
 }
 
 /// Harness proof: a PTY ceremony that never answers returns inside `budget` with no leftovers.
+///
+/// Linux `script -c` puts the command in a new session. Cleanup must reap that
+/// descendant, including a child that ignores SIGHUP.
 pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
+    let inner = r#"trap "" HUP; sleep 60"#;
     let mut command = Command::new("script");
     if cfg!(target_os = "linux") {
-        command.args(["-q", "-e", "-f", "-c", "sleep 60", "/dev/null"]);
+        command.args(["-q", "-e", "-f", "-c", inner, "/dev/null"]);
     } else {
-        command.arg("-q").arg("/dev/null").arg("sleep").arg("60");
+        command.arg("-q").arg("/dev/null").arg("sh").arg("-c").arg(inner);
     }
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let session = PtySession::spawn(&mut command)?;
+    let mut session = PtySession::spawn(&mut command)?;
     let pid = session.group.id();
     let started = Instant::now();
+    let descendants_deadline = Instant::now() + Duration::from_millis(800);
+    while session.group.tracked_pids().is_empty() && Instant::now() < descendants_deadline {
+        session.group.track_descendants();
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let timed_out = wait_buffer_until(
         &session.output,
         "this prompt never appears",
@@ -1548,13 +1587,63 @@ pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
         Instant::now() + Duration::from_millis(400),
     )
     .is_err();
+    session.group.track_descendants();
+    let descendants: Vec<u32> = session.group.tracked_pids().to_vec();
+    if cfg!(target_os = "linux") && descendants.is_empty() {
+        drop(session);
+        return Err("PTY command produced no descendants to reap".into());
+    }
     drop(session);
     proc::wait_process_group_gone(pid, budget)?;
+    for descendant in descendants {
+        proc::wait_process_gone(descendant, budget)?;
+    }
     if !timed_out {
         return Err("failed ceremony produced a prompt".into());
     }
     if started.elapsed() > budget {
         return Err("failed ceremony cleanup exceeded budget".into());
+    }
+    Ok(())
+}
+
+/// Harness proof: Drop still kills remaining group members after the leader exits.
+pub fn prove_orphaned_group_members_reaped_within(budget: Duration) -> Result<()> {
+    let mut command = Command::new("sh");
+    command.args(["-c", r#"trap "" HUP; sleep 60"#]);
+    let mut group = proc::ProcessGroup::spawn(&mut command)?;
+    let leader = group.id();
+    let started = Instant::now();
+    let descendants_deadline = Instant::now() + Duration::from_millis(800);
+    while group.tracked_pids().is_empty() && Instant::now() < descendants_deadline {
+        group.track_descendants();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let descendants: Vec<u32> = group.tracked_pids().to_vec();
+    if descendants.is_empty() {
+        drop(group);
+        return Err("orphaned-member fixture produced no descendants".into());
+    }
+    if let Some(pid) = rustix::process::Pid::from_raw(leader.cast_signed()) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    let leader_deadline = Instant::now() + budget;
+    loop {
+        if group.try_wait()?.is_some() {
+            break;
+        }
+        if Instant::now() >= leader_deadline {
+            drop(group);
+            return Err("orphaned-member leader did not exit".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(group);
+    for descendant in descendants {
+        proc::wait_process_gone(descendant, budget)?;
+    }
+    if started.elapsed() > budget {
+        return Err("orphaned group member cleanup exceeded budget".into());
     }
     Ok(())
 }

@@ -278,6 +278,7 @@ fn rf_dm_ack_request(ack: &DmAck) -> Result<LocalBusMessageAckRequest, RfError> 
         envelope_id: rf_dm_ack_envelope_id(ack)?,
         receiver_device_id: ack.receiver_device.clone(),
         received_at: ack.received_at.unwrap_or_else(rf_now_unix_timestamp),
+        inbox_seq: ack.inbox_seq,
     })
 }
 
