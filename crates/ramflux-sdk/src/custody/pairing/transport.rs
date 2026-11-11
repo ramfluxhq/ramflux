@@ -508,6 +508,9 @@ pub fn assemble_chunks(chunks: &[(u64, String, u64, u64, String)]) -> Result<Vec
 
 pub(super) fn wire(error: &ramflux_protocol::custody::pairing::WireError) -> SdkError {
     match error {
+        ramflux_protocol::custody::pairing::WireError::Field("TransferFloorsTooLarge") => {
+            SdkError::PairingCode("TransferFloorsTooLarge")
+        }
         ramflux_protocol::custody::pairing::WireError::Field(name) => SdkError::PairingField(name),
         ramflux_protocol::custody::pairing::WireError::Size
         | ramflux_protocol::custody::pairing::WireError::Json
@@ -530,6 +533,7 @@ fn failure_error(failure: &Failure) -> SdkError {
         "PrimaryRequired" => SdkError::PairingCode("PrimaryRequired"),
         "SasMismatch" => SdkError::PairingCode("SasMismatch"),
         "PublicationPending" => SdkError::PairingCode("PublicationPending"),
+        "TransferFloorsTooLarge" => SdkError::PairingCode("TransferFloorsTooLarge"),
         "TransferCapacity" => SdkError::PairingCode("TransferCapacity"),
         "UpdateRequired" => SdkError::PairingCode("UpdateRequired"),
         "VaultUnavailable" => SdkError::PairingCode("VaultUnavailable"),
