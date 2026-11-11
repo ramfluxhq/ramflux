@@ -59,7 +59,7 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
     let mut pages = 0_u32;
     let mut applied = 0_usize;
     let writer = Writer::new(work.clone(), generation);
-    let probed_high_water = cursor > turn.cursor;
+    let probed_high_water = backpressure.resume_high_water(turn.cursor) > 0 && cursor > turn.cursor;
     if probed_high_water {
         // High-water Resume records last_seen. W1 cannot cover that page while C is
         // the clamped floor; the contact rescan pulls (floor, high-water].

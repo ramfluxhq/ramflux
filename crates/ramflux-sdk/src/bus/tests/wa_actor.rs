@@ -215,12 +215,13 @@ async fn watch<F>(secs: u64, fut: F) -> Case
 where
     F: Future<Output = Case>,
 {
-    LocalSet::new()
-        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
-            Duration::from_secs(secs),
-            Box::pin(fut),
-        )))
-        .await
+    tokio::time::timeout(
+        Duration::from_secs(secs),
+        LocalSet::new()
+            .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(fut)))),
+    )
+    .await
+    .expect("hang")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -347,7 +348,12 @@ async fn ack_lost_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn catch_up_yields_real_pass() -> Case {
-    watch(90, catch_up_yields_real_pass_case()).await
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            Duration::from_secs(90),
+            Box::pin(catch_up_yields_real_pass_case()),
+        )))
+        .await
 }
 
 async fn catch_up_yields_real_pass_case() -> Case {
@@ -960,6 +966,7 @@ async fn gap_timer_case() -> Case {
         handle.test_receive_last_error(),
         handle.test_receive_trace()
     );
+    pump_anchored(&mut runtime, &handle).await?;
     assert_eq!(snap(&runtime)?.cursor, 2, "gap catch-up covers the hole");
     runtime.stop_connection().await;
     drop(runtime);

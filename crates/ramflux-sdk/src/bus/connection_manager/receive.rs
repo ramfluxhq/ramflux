@@ -414,18 +414,17 @@ async fn pass_anchored(
 ) -> Result<(bool, bool), SdkError> {
     let (active, paused, backpressure) =
         Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
-    if paused {
-        return Ok((active, paused));
-    }
     let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
-    flush_acks(
-        handle,
-        work,
-        generation,
-        trigger != ReceiveTrigger::Tick || active || more,
-        call_timeout,
-    )
-    .await?;
+    if !paused {
+        flush_acks(
+            handle,
+            work,
+            generation,
+            trigger != ReceiveTrigger::Tick || active || more,
+            call_timeout,
+        )
+        .await?;
+    }
     Ok((active || more, paused))
 }
 

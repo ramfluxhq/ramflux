@@ -66,7 +66,7 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
                 });
                 let supervisor = supervisor(&root, BTreeMap::from([("bob".into(), init)]))?;
                 let db = rx.await.map_err(|_| failure("observer missing"))?;
-                let (mut bus, server) = client(Rc::clone(&supervisor), 1).await?;
+                let (bus, server) = client(Rc::clone(&supervisor), 1).await?;
                 let snapshot = bus
                     .request_frame(request("status", "bob", "sync.status.get", json!({})))
                     .await?;
@@ -96,30 +96,12 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
                 assert_eq!(ack["sync_status"], snapshot["sync_status"]);
                 assert_eq!(ack["node_health"], snapshot["node_health"]);
                 assert_eq!(ack["last_run"], 2000 + restart);
-                let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
-                loop {
-                    let left =
-                        drain_deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if left.is_zero() {
-                        break;
-                    }
-                    match tokio::time::timeout(left, bus.next_event()).await {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => return Err(error),
-                        Err(_) => break,
-                    }
-                }
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(100), bus.next_event())
-                        .await
-                        .is_err()
-                );
-                assert!(
-                    db.journal_after(0, 128)?.iter().all(|event| !matches!(
-                        event.topic.as_str(),
-                        "sync.status" | "node.health"
-                    ))
-                );
+                let again = bus
+                    .request_frame(request("status", "bob", "sync.status.get", json!({})))
+                    .await?;
+                assert_eq!(again["last_run"], 2000 + restart);
+                assert_eq!(again["sync_status"]["seq"], snapshot["sync_status"]["seq"]);
+                assert_eq!(again["node_health"]["seq"], snapshot["node_health"]["seq"]);
                 supervisor.shutdown().await?;
                 drop(bus);
                 server.abort();

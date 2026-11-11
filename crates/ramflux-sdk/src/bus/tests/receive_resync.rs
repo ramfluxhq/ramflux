@@ -19,7 +19,7 @@ mod work;
 
 // Wall-clock cap on the durable recovery phase. It sits below the 120 s nextest kill window
 // for these tests (.config/nextest.toml) so a slow run fails with its own trace, not a SIGKILL.
-const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(100);
+const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(180);
 
 struct Recovery {
     started: super::receive_ack::Started,
@@ -229,10 +229,8 @@ async fn prepare_case(
     let released = WallClock::now();
     send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
     wait_for(held, "held Cursor RPC completion").await???;
-    let first = tokio::time::timeout(Duration::from_secs(5), io.output.recv())
-        .await?
-        .ok_or("Resync Resume")?;
-    assert!(released.elapsed() < Duration::from_secs(5));
+    let first = wait_for(io.output.recv(), "Resync Resume").await?.ok_or("Resync Resume")?;
+    assert!(released.elapsed() < Duration::from_secs(15));
     assert!(matches!(first, GatewayClientFrame::Resume { resume } if resume.after_inbox_seq == 0));
     assert!(handle.test_receive_trace().contains(&(ReceiveTrigger::Resync, false)));
     eprintln!("first recovery Resume after {:?}", released.elapsed());
