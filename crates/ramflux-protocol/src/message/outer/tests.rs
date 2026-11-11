@@ -207,6 +207,15 @@ fn named_delivery_mode_replaces_signed_ext_bridge_at_reset()
         OuterProfileError::UnknownMode.to_string(),
         "new profile rejects unknown delivery_mode"
     );
+    let _gate = crate::schema_profile::SchemaV1LiveGuard::enter();
+    let mut live = live_envelope(None);
+    live.delivery_mode = Some("ephemeral".into());
+    assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Ephemeral);
+    assert!(ephemeral::require_durable(&live).is_err());
+    live.ext.ext.insert("delivery_mode".into(), json!("durable"));
+    assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Invalid);
+    live.delivery_mode = None;
+    assert_eq!(ephemeral::classify_delivery_mode(&live), ephemeral::DeliveryMode::Invalid);
     Ok(())
 }
 

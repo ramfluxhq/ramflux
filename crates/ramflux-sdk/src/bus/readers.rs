@@ -305,6 +305,9 @@ fn closed() -> SdkError {
 }
 
 fn message_page(client: &RamfluxClient, conversation: &str) -> Result<serde_json::Value, SdkError> {
+    if crate::client::target_selection::schema_v1_selected() {
+        return Ok(serde_json::json!({"messages":client.generated_message_page(conversation)?}));
+    }
     let db = client.account_db()?;
     let mut messages = Vec::new();
     for message in client.direct_messages(conversation)? {

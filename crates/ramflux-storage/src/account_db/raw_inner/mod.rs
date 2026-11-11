@@ -5,6 +5,8 @@
 
 pub mod evidence;
 pub mod quota;
+mod reparse;
+pub use reparse::RawInnerReparseRow;
 pub mod schema;
 mod writer;
 

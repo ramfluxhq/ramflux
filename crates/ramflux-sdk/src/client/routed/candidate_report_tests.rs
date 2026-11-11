@@ -8,6 +8,11 @@ use ramflux_protocol::message::outer::{
     CandidateDeliveryClass, candidate_report_a0_from_envelope, encode_candidate_report_a0,
 };
 
+#[path = "candidate_generated_tests.rs"]
+mod generated;
+#[path = "candidate_typing_tests.rs"]
+mod typing;
+
 struct OmitDirectReport;
 impl Drop for OmitDirectReport {
     fn drop(&mut self) {

@@ -129,6 +129,7 @@ pub use bus::{
 #[doc(hidden)]
 pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
+pub use client::{ReparseProgress, self_sync, typed_messages, typing};
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
 #[cfg(feature = "itest-fingerprint")]

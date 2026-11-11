@@ -25,7 +25,7 @@ impl Delivery {
     }
     fn opened(opened: Opened, plaintext: Option<GatewayPlaintextDelivery>, body: &[u8]) -> Self {
         let call_control =
-            opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX);
+            opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
         Self { routing: Some(opened.routing), plaintext, call_control, pair_reply: None }
     }
 }
@@ -1016,7 +1016,7 @@ impl RamfluxClient {
             &receipt,
         )?;
         let mut retained = entry.clone();
-        if opened.routing.kind == Kind::Control && body.starts_with(crate::client::call::PREFIX) {
+        if opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body) {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
             // call ciphertext alongside them: committed replay needs only attribution/hash.
             retained.envelope.encrypted_payload.clear();

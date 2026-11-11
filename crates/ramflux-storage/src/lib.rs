@@ -97,7 +97,7 @@ pub use account_db::object_retention::{
 pub use account_db::pairing::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 pub use account_db::raw_inner::{
     KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,
-    RawInnerQuotaScope,
+    RawInnerQuotaScope, RawInnerReparseRow,
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;

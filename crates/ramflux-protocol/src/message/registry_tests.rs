@@ -178,8 +178,8 @@ fn all_kind_binding_round_trip() -> TestResult {
         content::Value::Edit(Edit {
             target: Some(reference.clone()),
             revision: 1,
+            previous_content_digest: vec![0x31; 32],
             replacement: Some(Message { text: "edit".into(), ..Default::default() }),
-            ..Default::default()
         }),
         content::Value::Delete(Delete {
             targets: vec![reference.clone()],
@@ -211,7 +211,7 @@ fn all_kind_binding_round_trip() -> TestResult {
                 ..Default::default()
             }),
         }),
-        content::Value::SelfSync(SelfSync { revision: 1, ..Default::default() }),
+        content::Value::SelfSync(SelfSync { operation: 3, revision: 1, ..Default::default() }),
     ];
     for value in values.drain(..) {
         let content = Content { value: Some(value) };

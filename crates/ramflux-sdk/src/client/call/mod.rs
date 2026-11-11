@@ -38,6 +38,12 @@ pub(crate) fn bytes(c: &CallControl) -> Result<zeroize::Zeroizing<Vec<u8>>, SdkE
     Ok(bytes)
 }
 fn decode(body: &[u8]) -> Result<Option<CallControl>, SdkError> {
+    if crate::client::target_selection::schema_v1_selected()
+        && let Ok((_, content)) = RamfluxClient::decode_generated_inner(body)
+        && let Some(ramflux_protocol::message::content::Value::Call(call)) = content.value
+    {
+        return crate::client::generated_call::native::to_native(call).map(Some);
+    }
     let Some(body) = body.strip_prefix(PREFIX) else {
         return Ok(None);
     };
@@ -51,6 +57,13 @@ fn decode(body: &[u8]) -> Result<Option<CallControl>, SdkError> {
         return Err(invalid("control schema or id"));
     }
     Ok(Some(control))
+}
+
+pub(crate) fn is_call_body(body: &[u8]) -> bool {
+    body.starts_with(PREFIX) || (crate::client::target_selection::schema_v1_selected()
+        && RamfluxClient::decode_generated_inner(body).is_ok_and(|(_, content)| {
+            matches!(content.value, Some(ramflux_protocol::message::content::Value::Call(_)))
+        }))
 }
 impl RamfluxClient {
     pub(crate) fn call_device_identity(
@@ -229,11 +242,26 @@ impl RamfluxClient {
         let Some(c) = decode(body)? else {
             return Ok(false);
         };
+        self.project_native_call_control(entry, conversation, group, &c, body)
+    }
+
+    pub(crate) fn project_native_call_control(
+        &self,
+        entry: &GatewayInboxEntry,
+        conversation: &str,
+        group: Option<&str>,
+        c: &CallControl,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
         self.voice_transition.borrow_mut().take();
+        let id = ramflux_protocol::decode_base64url(&c.call_id).map_err(|_| invalid("call id"))?;
+        if c.schema != "ramflux.call.control.v1" || id.len() != 16 {
+            return Err(invalid("control schema or id"));
+        }
         if group.is_some() {
             return Err(invalid("group calls are unsupported"));
         }
-        self.verify_call(&c, entry, conversation)?;
+        self.verify_call(c, entry, conversation)?;
         if self
             .account_db()?
             .load_actor_state::<CallRow>(&format!("voice/public/{}", c.call_id))?
@@ -250,7 +278,7 @@ impl RamfluxClient {
             )
         );
         let hash =
-            ramflux_protocol::hash_base64url("ramflux.call.signed-control.v1", &signing_bytes(&c)?);
+            ramflux_protocol::hash_base64url("ramflux.call.signed-control.v1", &signing_bytes(c)?);
         if let Some(old) = self.account_db()?.load_actor_state::<String>(&receipt)? {
             if old != hash {
                 return Err(invalid("signed sequence equivocation"));
@@ -264,7 +292,7 @@ impl RamfluxClient {
                 limit: MAX_CONTROL_RECEIPTS_PER_CALL,
             });
         }
-        let next = self.plan_call(&c, crate::time::now_unix_timestamp())?;
+        let next = self.plan_call(c, crate::time::now_unix_timestamp())?;
         let db = self.account_db()?;
         if db.client_record("conversation", conversation)?.is_none() {
             db.persist_client_record("conversation", conversation, &json!({"kind":"direct","group_id":null,"participants":[c.caller.principal_id,c.callee.principal_id]}))?;

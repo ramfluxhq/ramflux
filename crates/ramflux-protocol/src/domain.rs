@@ -67,6 +67,7 @@ pub const COMMITTING_AEAD_AD: &str = "ramflux.committing_aead.ad.v1";
 pub const FRANKING_OPENING: &str = "ramflux.franking_opening.v1";
 pub const FRANKING_NODE_TAG: &str = "ramflux.franking.node_tag.v1";
 pub const FRANKING_NODE_TAG_V2: &str = "ramflux.franking.node_tag.v2";
+pub const EDIT_PREVIOUS_CONTENT: &str = "ramflux.message.edit.previous_content.v1";
 pub const REPORT_OPENING: &str = "ramflux.message.report_opening.v1";
 pub const COLLAPSE_KEY: &str = "ramflux.message.collapse_key.v1";
 pub const KEY_VERIFICATION_SAFETY_NUMBER: &str = "ramflux.safety_number.v1";
@@ -185,7 +186,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 158] = [
+pub const ALL: [&str; 159] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -344,6 +345,7 @@ pub const ALL: [&str; 158] = [
     REPORT_OPENING,
     COLLAPSE_KEY,
     FRANKING_NODE_TAG_V2,
+    EDIT_PREVIOUS_CONTENT,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
@@ -401,7 +403,7 @@ mod tests {
         for label in &super::ALL[140..155] {
             assert!(label.starts_with("ramflux.identity."));
         }
-        assert_eq!(super::ALL[155..].len(), 3);
+        assert_eq!(super::ALL[155..].len(), 4);
         assert!(super::ALL[155..].contains(&super::REPORT_OPENING));
         assert!(super::ALL[155..].contains(&super::COLLAPSE_KEY));
         assert!(super::ALL[155..].contains(&super::FRANKING_NODE_TAG_V2));
