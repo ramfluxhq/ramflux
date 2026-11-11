@@ -48,6 +48,67 @@ pub struct CommonV3 {
     pub data_selection: DataSelectionV3,
 }
 impl CommonV3 {
+    /// Project a verified native invitation into the explicit full-data committed profile.
+    /// Signature, current-head pins and attended intent remain with the coordinator.
+    /// # Errors
+    /// Refuses an add-device/selected-key descriptor and malformed public bindings.
+    pub fn from_full_invitation(
+        invitation: &super::native::Invitation,
+        master_public_key: String,
+    ) -> Result<Self> {
+        require(
+            invitation.purpose == "primary_transfer" && invitation.data_selection.is_empty(),
+            "UpdateRequired",
+        )?;
+        let Common {
+            schema: _,
+            version: _,
+            invitation_id,
+            issuer_seq,
+            account_anchor,
+            master_public_key,
+            record_hash,
+            device_set_epoch,
+            principal_kind,
+            sas_suite,
+            hpke_suite,
+            purpose,
+            requested_role,
+            recipient_mode,
+            destination_ref,
+            capabilities,
+            lease_not_before,
+            lease_expires_at,
+            expires_at,
+            transfer_id,
+            data_selection: _,
+        } = invitation.project_common(master_public_key)?;
+        let common = Self {
+            schema: "ramflux.pairing.Common.v3".into(),
+            version: 3,
+            invitation_id,
+            issuer_seq,
+            account_anchor,
+            master_public_key,
+            record_hash,
+            device_set_epoch,
+            principal_kind,
+            sas_suite,
+            hpke_suite,
+            purpose,
+            requested_role,
+            recipient_mode,
+            destination_ref,
+            capabilities,
+            lease_not_before,
+            lease_expires_at,
+            expires_at,
+            transfer_id,
+            data_selection: DataSelectionV3::FullAccountDataV1(FullAccountData {}),
+        };
+        common.validate()?;
+        Ok(common)
+    }
     // Validation view only: never serialized into a commitment or sent as a fallback.
     fn scalar_context(&self) -> Common {
         Common {

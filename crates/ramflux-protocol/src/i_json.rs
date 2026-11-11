@@ -47,12 +47,13 @@ pub fn validate_i_json_bytes(bytes: &[u8]) -> Result<(), ProtocolError> {
     validated.map_err(ProtocolError::IJson)
 }
 
-/// Decode owned secret-bearing DTOs without creating a `Value` tree containing secret copies.
+/// Decode secret-bearing DTOs without creating a `Value` tree containing secret copies.
+/// Targets may borrow original input, allowing charged relay bodies to remain single-owner.
 /// The original bytes satisfy exactly the same I-JSON predicate as `parse_i_json`.
 ///
 /// # Errors
 /// Rejects invalid I-JSON, trailing input or a value that does not match the target schema.
-pub fn parse_i_json_secret<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ProtocolError> {
+pub fn parse_i_json_secret<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, ProtocolError> {
     validate_i_json_bytes(bytes)?;
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let value = T::deserialize(&mut decoder).map_err(ProtocolError::IJson)?;

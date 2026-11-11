@@ -12,7 +12,8 @@ use ramflux_protocol::custody::pairing::full_transfer::PACKETS_PER_KEY;
 use std::collections::VecDeque;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const FULL_PACKET_PLAINTEXT_BYTES: usize = 349_528 + 1024;
+pub const FULL_PACKET_PLAINTEXT_BYTES: usize =
+    ramflux_protocol::custody::pairing::full_transfer::PACKET_PLAINTEXT_BYTES;
 pub enum FullOpened {
     New(Zeroizing<Vec<u8>>),
     Duplicate,
@@ -21,7 +22,7 @@ pub struct FullDataCipher {
     role: PairingRole,
     send: Zeroizing<[u8; 32]>,
     receive: Zeroizing<[u8; 32]>,
-    context: Vec<u8>,
+    context: Zeroizing<Vec<u8>>,
     sent: u64,
     received: u64,
     dead: bool,
@@ -151,8 +152,9 @@ impl FullDataCipher {
         self.received += 1;
         Ok(FullOpened::New(plaintext))
     }
-    fn aad(&self, role: u8, counter: u64) -> Vec<u8> {
-        let mut aad = self.context.clone();
+    fn aad(&self, role: u8, counter: u64) -> Zeroizing<Vec<u8>> {
+        let mut aad = Zeroizing::new(Vec::with_capacity(self.context.len() + 9));
+        aad.extend_from_slice(&self.context);
         aad.push(role);
         aad.extend_from_slice(&counter.to_be_bytes());
         aad
@@ -163,6 +165,7 @@ impl FullDataCipher {
     fn fail<T>(&mut self, code: &'static str) -> Result<T, CryptoError> {
         self.send.zeroize();
         self.receive.zeroize();
+        self.context.zeroize();
         self.dead = true;
         self.outgoing.clear();
         self.incoming.clear();

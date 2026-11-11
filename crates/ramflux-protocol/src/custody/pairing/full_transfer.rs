@@ -28,6 +28,9 @@ pub const SELECTION: &str = "full_account_data_v1";
 pub const CHUNK_BYTES: u32 = 262_144;
 pub const MANIFEST_BYTES: usize = 1_048_576;
 pub const PACKET_BYTES: usize = 524_288;
+/// Conservative inner base64 chunk plus the approved 1-KiB plaintext framing reserve.
+pub const PACKET_PLAINTEXT_BYTES: usize = 349_528 + 1024;
+pub const PACKET_CIPHERTEXT_BYTES: usize = PACKET_PLAINTEXT_BYTES + 16;
 pub const LEASE_SECONDS: u64 = 604_800;
 pub const PACKETS_PER_KEY: u64 = 65_536;
 
@@ -44,15 +47,24 @@ impl Serialize for U64 {
 }
 impl<'de> Deserialize<'de> for U64 {
     fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> std::result::Result<Self, D::Error> {
-        let value = String::deserialize(decoder)?;
-        if value.is_empty()
-            || value.len() > 20
-            || (value.len() > 1 && value.starts_with('0'))
-            || !value.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(serde::de::Error::custom("invalid unsigned decimal"));
+        struct Decimal;
+        impl serde::de::Visitor<'_> for Decimal {
+            type Value = U64;
+            fn expecting(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                output.write_str("canonical unsigned decimal string")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<U64, E> {
+                if value.is_empty()
+                    || value.len() > 20
+                    || (value.len() > 1 && value.starts_with('0'))
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(E::custom("invalid unsigned decimal"));
+                }
+                value.parse().map(U64).map_err(|_| E::custom("unsigned decimal overflow"))
+            }
         }
-        value.parse().map(Self).map_err(|_| serde::de::Error::custom("unsigned decimal overflow"))
+        decoder.deserialize_str(Decimal)
     }
 }
 
