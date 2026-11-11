@@ -131,13 +131,7 @@ impl RamfluxClient {
         }
         self.capture_generated_original_header(entry, bytes)?;
         if opened.routing.kind == Kind::GroupMessage && scanned.kind == 1 {
-            return self.project_generated_group(
-                opened,
-                entry,
-                &scanned,
-                metadata,
-                inner.and_then(|inner| inner.identity),
-            );
+            return self.project_generated_group(opened, entry, &scanned, metadata);
         }
         if scanned.outcome == ScanOutcome::Unsupported
             || inner.as_ref().is_none_or(|inner| inner.identity.is_none())
@@ -232,6 +226,11 @@ impl RamfluxClient {
         }
         let now_ms = crate::client::generated_identity::now_ms();
         self.merge_generated_clock(identity.hlc, now_ms)?;
+        self.account_db()?.persist_message_actor_state(
+            &opened.routing.message_id,
+            &format!("routed/generated-identity/{}", opened.routing.message_id),
+            identity,
+        )?;
         let order = crate::client::generated_identity::order_hlc(identity.hlc, now_ms);
         self.account_db()?.persist_message_actor_state(
             &opened.routing.message_id,
@@ -273,7 +272,6 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         scanned: &validation::ScannedInner<'_>,
         metadata: Option<&MessageMetadata>,
-        identity: Option<g::EventIdentity>,
     ) -> Result<GeneratedProjection, SdkError> {
         let wrapper =
             g::Message::decode(scanned.body).map_err(|_| invalid("group Message missing"))?;
@@ -325,13 +323,6 @@ impl RamfluxClient {
             &format!("routed/group-content/{}", opened.routing.message_id),
             &*plaintext,
         )?;
-        if let Some(identity) = identity {
-            db.persist_message_actor_state(
-                &opened.routing.message_id,
-                &format!("routed/generated-identity/{}", opened.routing.message_id),
-                &identity,
-            )?;
-        }
         Ok(GeneratedProjection::Handled(Some(message.text.into_bytes())))
     }
 
@@ -351,13 +342,6 @@ impl RamfluxClient {
                     bytes,
                     metadata,
                 )?;
-                if let Some(identity) = identity {
-                    self.account_db()?.persist_message_actor_state(
-                        &opened.routing.message_id,
-                        &format!("routed/generated-identity/{}", opened.routing.message_id),
-                        &identity,
-                    )?;
-                }
                 Some(message.text.into_bytes())
             }
             g::content::Value::Edit(_) => {
@@ -444,6 +428,16 @@ impl RamfluxClient {
         scanned: &validation::ScannedInner<'_>,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if scanned.kind == 8 {
+            let control = g::Control::decode(scanned.body)
+                .map_err(|_| invalid("generated Control missing"))?;
+            if matches!(control.operation, 8 | 10) {
+                return Err(SdkError::GeneratedRefused {
+                    code: crate::error::GeneratedRefusalCode::Content,
+                    reason: "HomeMigration and LivePresence are unavailable in v1".into(),
+                });
+            }
+        }
         if (scanned.kind == 1 && !matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage))
             || (scanned.kind == 6 && opened.routing.kind != Kind::Receipt)
             || (scanned.kind == 12 && opened.routing.kind != Kind::Control)

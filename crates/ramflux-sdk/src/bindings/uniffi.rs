@@ -7,8 +7,8 @@ use super::{AdapterSurface, adapter_binding_vector};
 use crate::SdkError;
 
 pub use super::{
-    AdapterError, decode_message_request, decode_message_update, encode_message_request,
-    encode_message_update, round_trip_request, round_trip_update,
+    AdapterError, ErrorDetails, GeneratedErrorCode, decode_message_request, decode_message_update,
+    encode_message_request, encode_message_update, round_trip_request, round_trip_update,
 };
 
 /// JSON names exported by the `UniFFI` adapter, derived from the descriptor.

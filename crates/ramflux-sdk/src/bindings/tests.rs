@@ -121,8 +121,8 @@ fn assert_hand_maintained_name_fails() -> TestResult {
     ]);
     assert_ne!(handwritten, core, "hand-maintained adapter field name");
     match bind_adapter_field("MessageRequest", "messageBody") {
-        Err(SdkError::LocalBus(message)) => {
-            assert!(message.contains("unknown adapter field MessageRequest.messageBody"));
+        Err(SdkError::GeneratedApi(error)) => {
+            assert!(error.message.contains("unknown adapter field MessageRequest.messageBody"));
         }
         other => return Err(format!("expected unknown field, got {other:?}").into()),
     }
@@ -136,7 +136,7 @@ fn assert_hand_maintained_name_fails() -> TestResult {
         Err(error) => {
             let mapped = AdapterError::from_sdk(&error);
             assert_eq!(mapped.code, AdapterError::INVALID_JSON);
-            assert_eq!(mapped.name, "InvalidCanonicalJson");
+            assert_eq!(mapped.name, "invalid_json");
         }
         Ok(_) => return Err("hand-maintained field must fail decode".into()),
     }
@@ -219,6 +219,7 @@ fn assert_updates_and_optional_presence() -> TestResult {
 
 #[test]
 fn generated_requests_updates_share_core_across_product_adapters() -> TestResult {
+    assert_generated_error_vectors()?;
     assert_shared_vectors()?;
     assert_request_actions_round_trip()?;
     assert_updates_and_optional_presence()?;
@@ -292,6 +293,123 @@ fn send_content_allowlist_and_operation_id_bounds_are_shared() -> TestResult {
     ] {
         send.content = Some(g::Content { value: Some(value) });
         assert!(encode_send_message(&send).is_err());
+    }
+    Ok(())
+}
+
+fn assert_generated_error_vectors() -> TestResult {
+    use GeneratedErrorCode as C;
+    let codes = [
+        C::InvalidArgument,
+        C::InvalidJson,
+        C::PeerUpgradeRequired,
+        C::StorageCapacity,
+        C::SchemaResetRequired,
+        C::ResyncRequired,
+        C::EditConflict,
+        C::NotAuthorized,
+        C::TargetNotFound,
+        C::TargetDeleted,
+        C::PayloadTooLarge,
+        C::RateLimited,
+        C::EphemeralUnavailable,
+        C::CryptoFailure,
+        C::NotConnected,
+        C::Internal,
+    ];
+    let names = [
+        "invalid_argument",
+        "invalid_json",
+        "peer_upgrade_required",
+        "storage_capacity",
+        "schema_reset_required",
+        "resync_required",
+        "edit_conflict",
+        "not_authorized",
+        "target_not_found",
+        "target_deleted",
+        "payload_too_large",
+        "rate_limited",
+        "ephemeral_unavailable",
+        "crypto_failure",
+        "not_connected",
+        "internal",
+    ];
+    for (index, code) in codes.into_iter().enumerate() {
+        let expected = test_error_vector(code);
+        let error = SdkError::from(expected.clone());
+        let values = [
+            AdapterError::from_sdk(&error),
+            cli::AdapterError::from_sdk(&error),
+            uniffi::AdapterError::from_sdk(&error),
+            wasm::AdapterError::from_sdk(&error),
+        ];
+        for mapped in values {
+            assert_eq!(mapped.code, i32::try_from(index + 1)?);
+            assert_eq!(mapped.name, names[index]);
+            let details = match index + 1 {
+                4 => json!({"scope":"source","source":"peer"}),
+                6 => json!({"cursor":2,"floor":4,"head":8}),
+                7 => json!({"target":"m","expected":2,"received":3}),
+                _ => json!({}),
+            };
+            let encoded = serde_json::to_value(&mapped)?;
+            assert_eq!(
+                encoded,
+                json!({"code":index+1,"name":names[index],"message":"vector","details":details})
+            );
+            assert_eq!(serde_json::from_value::<AdapterError>(encoded.clone())?, mapped);
+            let remote = SdkError::LocalBusRefused {
+                code: mapped.name.into(),
+                message: mapped.message.clone(),
+                body: Box::new(encoded),
+            };
+            assert_eq!(AdapterError::from_sdk(&remote), mapped);
+        }
+    }
+    assert_error_details()
+}
+
+fn assert_error_details() -> TestResult {
+    let edit = AdapterError::from_sdk(&SdkError::EditConflict {
+        target: "m".into(),
+        expected: 2,
+        received: 3,
+    });
+    assert_eq!(
+        serde_json::to_value(edit)?.get("details"),
+        Some(&json!({"target":"m","expected":2,"received":3}))
+    );
+    let resync = AdapterError::resync(7, 9, 12);
+    assert_eq!(
+        serde_json::to_value(resync)?.get("details"),
+        Some(&json!({"cursor":7,"floor":9,"head":12}))
+    );
+    let storage = AdapterError::from_sdk(&SdkError::StorageCapacity {
+        source_anchor: "peer".into(),
+        scope: ramflux_storage::RawInnerQuotaScope::Source,
+    });
+    assert_eq!(storage.code, 4);
+    assert_eq!(serde_json::to_value(storage)?["details"]["source"], "peer");
+    Ok(())
+}
+
+#[test]
+fn generated_error_decode_refuses_code_name_and_detail_mismatches() -> TestResult {
+    let valid = serde_json::to_value(AdapterError::resync(2, 4, 8))?;
+    for patch in [
+        json!({"code":17}),
+        json!({"name":"ResyncRequired"}),
+        json!({"details":{}}),
+        json!({"details":{"cursor":2,"floor":4,"head":8,"body":"payload"}}),
+        json!({"details":{"scope":"source","source":"peer"}}),
+        json!({"extra":"payload"}),
+    ] {
+        let mut forged = valid.clone();
+        for (key, value) in patch.as_object().ok_or("object patch")? {
+            forged[key] = value.clone();
+        }
+        assert!(serde_json::from_value::<AdapterError>(forged).is_err());
     }
     Ok(())
 }

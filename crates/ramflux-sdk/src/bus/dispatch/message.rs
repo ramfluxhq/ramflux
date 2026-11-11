@@ -36,6 +36,13 @@ pub(crate) async fn dispatch_message_bus_request(
         }
         "message.list" | "message.read" => {
             let account_id = request_account_id(request)?;
+            if crate::client::target_selection::schema_v1_selected() {
+                let account = local_bus_account(state, account_id)?;
+                return Ok(local_bus_ok(super::super::readers::generated_page(
+                    &account.client,
+                    &request.body,
+                )?));
+            }
             let body: LocalBusConversationRequest = serde_json::from_value(request.body.clone())?;
             let account = local_bus_account(state, account_id)?;
             let messages = account

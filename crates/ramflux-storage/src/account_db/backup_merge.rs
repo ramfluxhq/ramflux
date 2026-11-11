@@ -87,7 +87,11 @@ fn skip_merge_table(table: &str, native_data_only: bool) -> bool {
         || table.starts_with("schema_")
         || matches!(
             table,
-            "runtime_outbox" | "runtime_operation" | "runtime_journal" | "runtime_journal_bounds"
+            "runtime_outbox"
+                | "runtime_operation"
+                | "runtime_journal"
+                | "runtime_journal_bounds"
+                | "runtime_message_sequence"
         )
         || matches!(
             table,
