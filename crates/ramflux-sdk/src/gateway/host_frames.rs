@@ -289,8 +289,8 @@ impl GatewaySessionEngine {
             }
             FrameClass::Reply | FrameClass::Unexpected => {
                 self.terminal_reason = Some(DisconnectReason::UnexpectedReply);
-                let why = format!("unexpected gateway reply: {kind:?} expected={expected:?}");
-                self.terminal_why = Some(why.clone());
+                let why = format!("unexpected gateway reply: {kind:?}");
+                self.terminal_why = Some(format!("{why} expected={expected:?}"));
                 tracing::warn!(?kind, ?expected, "unexpected gateway reply; retiring session");
                 Err(SdkError::GatewaySessionRejected(why))
             }
