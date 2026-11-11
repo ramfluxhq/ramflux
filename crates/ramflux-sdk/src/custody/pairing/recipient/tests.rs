@@ -28,10 +28,8 @@ use ramflux_storage::FileVaultSecretSource;
 use ramflux_transport::{GatewaySessionFrameSink, GatewaySessionFrameSource, TransportError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -180,11 +178,7 @@ impl DiskVault {
     }
 
     fn put(&self, reference: &str, bytes: &[u8]) -> Result<(), SdkError> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        match options.open(self.slot(reference)) {
+        match crate::platform::fs::create_new_owner_only_io(&self.slot(reference)) {
             Ok(mut file) => {
                 file.write_all(bytes)?;
                 file.sync_all()?;
