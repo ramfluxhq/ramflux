@@ -107,6 +107,7 @@ pub(super) struct ClaimEntry {
 
 /// Process-local issued+live pairing relay. Restored from nothing on restart.
 pub struct PairingRelayStore {
+    full_resume: Option<Box<super::full_resume::FullResumeServer>>,
     allocations: super::PairingAllocations,
     clock: Arc<dyn PairingClock>,
     seed: Zeroizing<[u8; 32]>,
@@ -136,6 +137,7 @@ impl PairingRelayStore {
             return Err(PairingRelayError::invalid("public_origin"));
         }
         let mut store = Self {
+            full_resume: None,
             allocations: super::PairingAllocations::default(),
             clock: config.clock,
             node_key: public_key_base64url_from_seed(config.node_seed),
@@ -163,6 +165,147 @@ impl PairingRelayStore {
     #[must_use]
     pub fn full_allocations(&self) -> super::PairingAllocations {
         self.allocations.clone()
+    }
+
+    /// Start a data-only reconnect after trusted-node lease/current-native admission.
+    /// Both original branches still have to prove this boot's fresh nonce before any role token.
+    /// # Errors
+    /// Refuses expiry/revocation, source-prefix or nonce bounds, and changed frozen operands.
+    pub fn begin_full_resume(
+        &mut self,
+        source: IpAddr,
+        offer: &super::FullResumeOffer,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullResumeChallenge, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        let now = self.now()?;
+        super::full_resume::FullResumeServer::verify_offer(
+            offer,
+            admission,
+            &self.node_key,
+            now.wall,
+        )?;
+        let lease_id = parse_id(&offer.lease.body.lease_id, "lease_id")?;
+        self.admit_claim_budget(source, lease_id, now.mono)?;
+        if self.full_resume.is_none() {
+            let server =
+                super::full_resume::FullResumeServer::new(super::full_resume::FullResumeConfig {
+                    clock: Arc::clone(&self.clock),
+                    node_id: admission.node().envelope().body.node_id.clone(),
+                    node_key: self.node_key.clone(),
+                    boot_id: self.boot_id_b64.clone(),
+                    allocations: self.allocations.clone(),
+                })?;
+            self.full_resume = Some(Box::new(server));
+        }
+        self.full_resume.as_mut().ok_or(PairingRelayError::Retired)?.begin(offer, admission)
+    }
+
+    /// Complete the reconnect only with both original branches' matching fresh signatures.
+    /// # Errors
+    /// Refuses old/nonmatching boot/nonce/keys, changed native authority and slot/byte metadata Busy.
+    pub fn submit_full_resume(
+        &mut self,
+        proof: &Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::ResumeProof>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullResumeProgress, PairingRelayError> {
+        let _guard = admit()?;
+        self.prune()?;
+        self.full_resume.as_mut().ok_or(PairingRelayError::Retired)?.submit(proof, admission)
+    }
+
+    /// Accept exactly one A1 control per fresh epoch, with the actual initiator token.
+    /// # Errors
+    /// Refuses replay, reflected tokens, stale native admission or bounded-resource Busy.
+    pub fn send_full_control(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::full_transfer::relay::SendFullControl,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<(), PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .send_control(request, admission)
+    }
+    /// Poll the same retained inner control without forwarding the sender's bearer token.
+    /// # Errors
+    /// Refuses wrong roles/tokens, retired native authority and control-poll rate Busy.
+    pub fn poll_full_control(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::full_transfer::relay::PollFullControl,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<Option<super::FullControlFrame>, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .poll_control(request, admission)
+    }
+
+    /// Role authentication and whole-body reservation precede extending HTTP buffering.
+    /// # Errors
+    /// Refuses stale epochs/tokens/authority, idle/expired slots and resource/rate Busy.
+    pub fn reserve_full_body(
+        &mut self,
+        route: &super::FullRoute<'_>,
+        bytes: usize,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullSendPermit, PairingRelayError> {
+        self.prune()?;
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .reserve_body(route, bytes, admission)
+    }
+
+    /// A2 admission for the HTTP reader callback, before any large body allocation/read.
+    /// TLS is established by the trusted listener/proxy owner, never by an arbitrary header.
+    /// # Errors
+    /// Refuses missing/duplicate credentials, wrong route/role/epoch/token or resource Busy.
+    pub fn reserve_full_http_body(
+        &mut self,
+        auth: &super::FullAuthorization<'_>,
+        bytes: usize,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullSendPermit, PairingRelayError> {
+        self.reserve_full_body(&auth.route(), bytes, admission)
+    }
+
+    /// Consume one A2 body permit into the bounded shared queue after current-native recheck.
+    /// # Errors
+    /// Refuses header/body mismatch, replay, stale admission or resource Busy.
+    pub fn accept_full_send(
+        &mut self,
+        permit: super::FullSendPermit,
+        body: Vec<u8>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<super::FullDataAccepted, PairingRelayError> {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .accept_send(permit, body, admission)
+    }
+    /// Poll a shared packet slice, acknowledging only transport delivery, never durable data.
+    /// # Errors
+    /// Refuses wrong role scope, stale native authority, unsent acknowledgements or rate Busy.
+    pub fn poll_full_data(
+        &mut self,
+        route: &super::FullRoute<'_>,
+        acknowledged: Option<u64>,
+        admission: &super::FullNativeAdmission<'_>,
+    ) -> Result<Option<super::FullDataFrame>, PairingRelayError> {
+        self.full_resume.as_mut().ok_or(PairingRelayError::WrongContext)?.poll_data(
+            route,
+            acknowledged,
+            admission,
+        )
+    }
+
+    /// Data-resource observations are separate from the ordinary relay's byte walker.
+    /// # Errors
+    /// Refuses unavailable accounting state.
+    pub fn full_resume_stats(&self) -> Result<Option<super::FullResumeStats>, PairingRelayError> {
+        self.full_resume.as_ref().map(|server| server.stats()).transpose()
     }
 
     #[must_use]
@@ -922,6 +1065,9 @@ impl PairingRelayStore {
 
     fn prune(&mut self) -> Result<(), PairingRelayError> {
         let now = self.now()?;
+        if let Some(server) = &mut self.full_resume {
+            server.prune()?;
+        }
         let expired: Vec<[u8; 32]> = self
             .slots
             .iter()

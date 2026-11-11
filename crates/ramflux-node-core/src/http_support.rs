@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 pub struct NodeHttpRequest {
     pub method: String,
@@ -138,6 +139,7 @@ fn classify_request_line(
     else {
         return Ok(None);
     };
+    let raw = Zeroizing::new(raw);
     let (method, path) = parse_http_request_line(&raw)?;
     let pairing_route = is_pairing(&method, &path);
     let limits = if pairing_route { pairing } else { ordinary };
@@ -145,14 +147,14 @@ fn classify_request_line(
 }
 
 struct RequestLine {
-    raw: Vec<u8>,
+    raw: Zeroizing<Vec<u8>>,
     method: String,
     path: String,
     pairing_route: bool,
 }
 
 struct ClassifiedHttp {
-    raw: Vec<u8>,
+    raw: Zeroizing<Vec<u8>>,
     header_end: usize,
     method: String,
     path: String,
@@ -163,14 +165,14 @@ fn read_classified_headers(
     stream: &mut TcpStream,
     limits: HttpRequestLimits,
     accepted_at: std::time::Instant,
-    line: RequestLine,
+    mut line: RequestLine,
 ) -> Result<Option<ClassifiedHttp>, NodeCoreError> {
     let deadline = accepted_at
         .checked_add(limits.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
     let Some((raw, header_end)) = read_http_headers_capped(
         stream,
-        line.raw,
+        std::mem::take(&mut *line.raw),
         limits.max_header_bytes,
         limits.read_timeout,
         deadline,
@@ -178,6 +180,7 @@ fn read_classified_headers(
     else {
         return Ok(None);
     };
+    let raw = Zeroizing::new(raw);
     if header_end + http_header_separator_len(&raw, header_end) > limits.max_header_bytes {
         return Err(rejected("413 Payload Too Large"));
     }
@@ -219,24 +222,26 @@ fn read_http_headers_capped(
     else {
         return Ok(None);
     };
+    let mut raw = Zeroizing::new(raw);
     if end + http_header_separator_len(&raw, end) > header_cap {
         return Err(rejected("413 Payload Too Large"));
     }
-    Ok(Some((raw, end)))
+    Ok(Some((std::mem::take(&mut *raw), end)))
 }
 
 fn read_until_marker(
     stream: &mut TcpStream,
-    mut raw: Vec<u8>,
+    raw: Vec<u8>,
     cap: usize,
     read_timeout: Duration,
     deadline: std::time::Instant,
     marker: impl Fn(&[u8]) -> Option<usize>,
 ) -> Result<Option<(Vec<u8>, usize)>, NodeCoreError> {
-    let mut chunk = [0u8; 512];
+    let mut raw = Zeroizing::new(raw);
+    let mut chunk = Zeroizing::new([0u8; 512]);
     loop {
         if let Some(end) = marker(&raw) {
-            return Ok(Some((raw, end)));
+            return Ok(Some((std::mem::take(&mut *raw), end)));
         }
         let space = cap.saturating_sub(raw.len()).min(chunk.len());
         if space == 0 {
@@ -276,14 +281,14 @@ fn finish_http_request_with_capacity(
     let body_start =
         classified.header_end + http_header_separator_len(&classified.raw, classified.header_end);
     let initial = &classified.raw[body_start..];
-    let mut body = if reserve_body {
+    let mut body = Zeroizing::new(if reserve_body {
         let mut charged = Vec::with_capacity(parsed.length);
         charged.extend_from_slice(&initial[..initial.len().min(parsed.length)]);
         charged
     } else {
         initial.iter().take(parsed.length).copied().collect::<Vec<_>>()
-    };
-    let mut chunk = [0u8; 512];
+    });
+    let mut chunk = Zeroizing::new([0u8; 512]);
     while body.len() < parsed.length {
         let remaining = (parsed.length - body.len()).min(chunk.len());
         let bytes = request_read(stream, &mut chunk[..remaining], limits.read_timeout, deadline)?;
@@ -298,7 +303,7 @@ fn finish_http_request_with_capacity(
     Ok(Some(NodeHttpRequest {
         method: classified.method,
         path: classified.path,
-        body,
+        body: std::mem::take(&mut *body),
         keep_alive: parsed.keep_alive,
         source_ip_hash: stream.peer_addr().ok().map(|addr| source_ip_hash(&addr.ip().to_string())),
         pre_auth_cookie: parsed.pre_auth_cookie,

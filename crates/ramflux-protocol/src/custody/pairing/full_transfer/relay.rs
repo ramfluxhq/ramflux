@@ -5,6 +5,8 @@
 use super::{PairingWire, Result, U64, WireError, b32, budget, require};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
+mod control;
+pub use control::{HpkeConfirmFull, PollFullControl, PolledFullControl, SendFullControl};
 mod send;
 pub use send::{BorrowedPacket, BorrowedSendFull, SendFull};
 

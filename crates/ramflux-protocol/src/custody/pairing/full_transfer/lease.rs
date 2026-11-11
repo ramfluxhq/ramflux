@@ -27,7 +27,10 @@ pub struct BranchKeys {
     pub destination: String,
 }
 impl BranchKeys {
-    fn validate(&self) -> Result<()> {
+    /// Validate two distinct canonical public keys without granting possession or authority.
+    /// # Errors
+    /// Refuses malformed or reflected source/destination keys.
+    pub fn validate(&self) -> Result<()> {
         b32(&self.source, "branch_key")?;
         b32(&self.destination, "branch_key")?;
         require(self.source != self.destination, "distinct_branch_keys")

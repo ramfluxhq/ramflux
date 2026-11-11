@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::*;
+mod resume;
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::full_transfer::lease::{
     BranchKeys, DataGrant, LeaseRequest,
@@ -61,6 +62,25 @@ fn action(request: &LeaseRequest) -> CustodyProofAction {
 #[test]
 fn pairing_full_data_lease_native_proof_requires_live_invitation_both_branches_and_idempotent_scope()
 -> TestResult {
+    run_native_lease(None)
+}
+#[test]
+fn pairing_full_control_replayed_arm_refused() -> TestResult {
+    run_native_lease(Some(resume::ControlCase::Replay))
+}
+#[test]
+fn pairing_full_control_wrong_role_token_refused() -> TestResult {
+    run_native_lease(Some(resume::ControlCase::WrongRoleToken))
+}
+#[test]
+fn pairing_full_auth_prebody_header_scope_epoch_and_no_oracle() -> TestResult {
+    run_native_lease(Some(resume::ControlCase::Header))
+}
+#[test]
+fn pairing_full_shared_queue_retries_ready_control_release_and_retired_buffers() -> TestResult {
+    run_native_lease(Some(resume::ControlCase::Queue))
+}
+fn run_native_lease(control_case: Option<resume::ControlCase>) -> TestResult {
     let path = temp_store_path("pairing-full-data-lease")?;
     let store = RouterRedbStore::open_without_wal(&path)?;
     let router = RouterCore::new();
@@ -142,6 +162,7 @@ fn pairing_full_data_lease_native_proof_requires_live_invitation_both_branches_a
     let measured = locked(&relay)?;
     assert_eq!(measured.accounted_bytes(), measured.measured_bytes());
     drop(measured);
+    resume::prove_resume(&relay, &lease, &driver, &router, &clock, control_case)?;
     clock.advance_secs(301);
     assert_eq!(failure_code(driver.run(&service, &router, &store, action(&request))?)?, "Retired");
     assert_eq!(locked(&relay)?.stats().slots, 0);
