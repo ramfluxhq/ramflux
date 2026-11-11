@@ -856,6 +856,7 @@ crates/ramflux-storage/src/account_db/bot.rs | installed_bots | 1 | E | excluded
 crates/ramflux-storage/src/account_db/bot.rs | installed_bots | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/device_metadata.rs | client_device_record_by_name | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/full_transfer/keys.rs | from_file_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded closed canonical local stage-key ciphertext wrapper before guarded DB-key AEAD open
+crates/ramflux-storage/src/account_db/full_transfer/native_floor.rs | native_floor | 1 | A | strict=parse_i_json; admission=encrypted device-local native pins after guarded stage-key and account-reference authentication; only verified records enter through observe_full_native_head; never peer pin state or native authority
 crates/ramflux-storage/src/account_db/home_migration.rs | home_migration_transition | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/home_migration.rs | row | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-storage/src/account_db/home_migration.rs | valid_progress | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

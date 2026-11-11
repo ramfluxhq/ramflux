@@ -48,14 +48,20 @@ impl AccountDb {
     ) -> Result<FullTransferStage<'_>, StorageError> {
         self.create_full_stage_record(record, expires_at)
     }
-    /// Durably create encrypted stage metadata before linking it in `pairing_live`.
+    /// Durably create encrypted stage metadata and the exact SAS-base native floor
+    /// before linking it in `pairing_live`.
     /// # Errors
     /// Refuses stale unlocks, reused paths, unsafe files, or any failed durable write.
     pub fn create_full_transfer_stage(
         &self,
         trust: &FullResumeTrust,
+        sas_base: &ramflux_crypto::custody::VerifiedRecord,
     ) -> Result<FullTransferStage<'_>, StorageError> {
-        self.create_full_stage_record(trust.local_stage_record()?, trust.lease_expires_at())
+        let record = trust.local_stage_record()?;
+        super::native_floor::validate_sas_base(&record, sas_base)?;
+        let mut stage = self.create_full_stage_record(record, trust.lease_expires_at())?;
+        stage.observe_full_native_head(sas_base)?;
+        Ok(stage)
     }
     fn create_full_stage_record(
         &self,
@@ -86,6 +92,7 @@ impl AccountDb {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(super::source_receipt::SCHEMA)?;
+            tx.execute_batch(super::native_floor::SCHEMA)?;
             tx.execute(
                 "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
                 params![local, role, expires_at, digest.as_slice()],
@@ -160,6 +167,7 @@ impl AccountDb {
             return Err(context());
         }
         connection.execute_batch(super::source_receipt::SCHEMA)?;
+        connection.execute_batch(super::native_floor::SCHEMA)?;
         let stage = FullTransferStage {
             connection,
             _lock: lock,
