@@ -17,9 +17,10 @@ use std::time::Instant as WallClock;
 #[path = "receive_resync/work.rs"]
 mod work;
 
-// Wall-clock cap on the durable recovery phase. It sits below the 120 s nextest kill window
-// for these tests (.config/nextest.toml) so a slow run fails with its own trace, not a SIGKILL.
-const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(180);
+// Isolated recovery of 266 entries is ~24 s. A loaded `cargo test --lib bus` pool
+// stretches that past 180 s without tripping recover()'s 10 s silence guard.
+const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(240);
+const DURABLE_RECOVERY_WATCHDOG: Duration = Duration::from_secs(300);
 
 struct Recovery {
     started: super::receive_ack::Started,
@@ -106,34 +107,48 @@ async fn run_mode(
                 }))
                 .await;
             }
-            let mut state = liveness(Box::pin(prepare_case(
-                fixture,
-                entries,
-                receipts,
-                frame_bytes,
-                subscribers,
-                completion,
-            )))
-            .await?;
-            let acked = tokio::time::timeout(
-                DURABLE_RECOVERY_COMPLETION_LIMIT,
-                recover(
-                    &state.handle,
-                    &mut state.io,
-                    &state.entries,
-                    &state.reader,
-                    &state.receipts,
-                    state.probe.as_ref(),
-                ),
+            crate::bus::connection_manager::tests::watchdog_for(
+                DURABLE_RECOVERY_WATCHDOG,
+                Box::pin(async {
+                    let mut state = Box::pin(prepare_case(
+                        fixture,
+                        entries,
+                        receipts,
+                        frame_bytes,
+                        subscribers,
+                        completion,
+                    ))
+                    .await?;
+                    let acked = tokio::time::timeout(
+                        DURABLE_RECOVERY_COMPLETION_LIMIT,
+                        recover(
+                            &state.handle,
+                            &mut state.io,
+                            &state.entries,
+                            &state.reader,
+                            &state.receipts,
+                            state.probe.as_ref(),
+                        ),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "durable recovery exceeded {:?}; trace={:?} profile={:?}",
+                            DURABLE_RECOVERY_COMPLETION_LIMIT,
+                            state.handle.test_receive_trace(),
+                            state.handle.test_receive_profile()
+                        )
+                    })?;
+                    eprintln!(
+                        "durable recovery completed after {:?}: {} ACKs; phases: {:?}",
+                        state.released.elapsed(),
+                        acked.len(),
+                        state.handle.test_receive_profile()
+                    );
+                    Box::pin(finish_case(state, acked)).await
+                }),
             )
-            .await??;
-            eprintln!(
-                "durable recovery completed after {:?}: {} ACKs; phases: {:?}",
-                state.released.elapsed(),
-                acked.len(),
-                state.handle.test_receive_profile()
-            );
-            liveness(Box::pin(finish_case(state, acked))).await
+            .await
         }))
         .await
 }
@@ -261,15 +276,6 @@ async fn finish_case(state: Recovery, acked: BTreeSet<String>) -> Case {
     }
     assert_control_effects(&reader, count - 1)?;
     Box::pin(cleanup(started, reader, slow, draining)).await
-}
-async fn liveness<T>(future: impl std::future::Future<Output = Case<T>>) -> Case<T> {
-    let mut value = None;
-    crate::bus::connection_manager::tests::watchdog(Box::pin(async {
-        value = Some(future.await?);
-        Ok(())
-    }))
-    .await?;
-    value.ok_or_else(|| "liveness phase produced no result".into())
 }
 
 async fn cleanup(
