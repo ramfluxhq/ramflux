@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! A's signed-receipt ledger. Peer receipts never authorize publication or cut deletion.
-use super::{FullTransferStage, stage::raw32};
+use super::{FamilyRule, FullTransferStage, stage::raw32};
 use crate::StorageError;
 use ramflux_crypto::custody::pairing::PairingRole;
 use ramflux_protocol::custody::pairing::{
     PairingWire,
-    full_transfer::{ChainHasher, DataPacket, Family, SourceManifest, manifest_hash},
+    full_transfer::{ChainHasher, DataPacket, ManifestKind, SourceManifest, manifest_hash},
 };
 use rusqlite::{OptionalExtension as _, params};
 use zeroize::Zeroizing;
@@ -26,9 +26,26 @@ impl FullTransferStage<'_> {
     pub fn retain_source_manifest(
         &mut self,
         manifest: &SourceManifest,
-        catalog: &[Family],
+        rules: &'static [FamilyRule],
     ) -> Result<(), StorageError> {
+        manifest.validate().map_err(|_| mismatch())?;
         let body = &manifest.manifest;
+        let own = self.source_cut_schema(body.snapshot_cut.0, &body.snapshot_id, rules)?;
+        own.require_typed_owners(rules)?;
+        body.validate_catalog(&own.families, false)
+            .map_err(|_| StorageError::PairingField("SchemaMismatch"))?;
+        if body.census_hash != ramflux_protocol::encode_base64url(own.census_hash) {
+            return Err(StorageError::PairingField("SchemaMismatch"));
+        }
+        if body.kind == ManifestKind::Base
+            && body
+                .families
+                .iter()
+                .zip(&own.families)
+                .any(|(actual, expected)| actual.source_rows != expected.source_rows)
+        {
+            return Err(mismatch());
+        }
         let (schema, erasure): (u64, u64) =
             self.with_source_cut(body.snapshot_cut.0, &body.snapshot_id, |input| {
                 Ok((
@@ -47,7 +64,7 @@ impl FullTransferStage<'_> {
         if schema != body.storage_generation.0 || erasure != body.source_erasure_generation.0 {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
-        self.retain_manifest_for_role(manifest, catalog, PairingRole::Initiator)
+        self.retain_manifest_for_role(manifest, &own.families, PairingRole::Initiator)
     }
 
     /// Verify B's receipt against A's OWN retained chain and original SAS branch key,
