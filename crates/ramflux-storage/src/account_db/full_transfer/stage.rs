@@ -92,6 +92,7 @@ impl AccountDb {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(super::source_receipt::SCHEMA)?;
+            tx.execute_batch(super::source_scalar::SCHEMA)?;
             tx.execute_batch(super::native_floor::SCHEMA)?;
             tx.execute(
                 "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
@@ -167,6 +168,7 @@ impl AccountDb {
             return Err(context());
         }
         connection.execute_batch(super::source_receipt::SCHEMA)?;
+        connection.execute_batch(super::source_scalar::SCHEMA)?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
         let stage = FullTransferStage {
             connection,

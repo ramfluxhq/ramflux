@@ -7,13 +7,16 @@ mod inventory;
 mod keys;
 mod native_floor;
 mod scalar;
+mod scalar_sql;
 mod source_cut;
 mod source_receipt;
+mod source_scalar;
 mod stage;
 mod stage_chunks;
 mod stage_reader;
 mod stage_validation;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
+pub use source_scalar::FullScalarSourceCounts;
 pub use stage::FullTransferStage;
 pub use stage_reader::FullForwardReader;
 
@@ -31,6 +34,10 @@ mod catalog_tests;
 pub use inventory::FullTransferSchema;
 
 pub use scalar::copy_full_scalar_record;
+pub use scalar_sql::write_full_scalar_sql_row;
 
 #[cfg(test)]
 mod scalar_tests;
+
+#[cfg(test)]
+mod source_scalar_tests;

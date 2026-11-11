@@ -297,3 +297,68 @@ fn pairing_full_scalar_requires_owner_refuses_before_reading_any_value_including
     );
     Ok(())
 }
+
+#[test]
+fn pairing_full_sql_source_rows_use_actual_types_and_refuse_before_output() -> TestResult {
+    let db = rusqlite::Connection::open_in_memory()?;
+    let commitment = ramflux_crypto::object_erasure_commitment("root", "wire", "manifest");
+    for (table, declaration, value) in [
+        ("object_erasure_fence", "TEXT", rusqlite::types::Value::Text(commitment.clone())),
+        ("object_identity_replacement", "TEXT", rusqlite::types::Value::Text(commitment.clone())),
+        ("object_segment_reference_veto", "BLOB", rusqlite::types::Value::Blob(vec![3; 32])),
+    ] {
+        let rule = super::full_transfer_catalog()
+            .iter()
+            .find(|rule| matches!(rule.selector, FamilySelector::Table(name) if name == table))
+            .ok_or("rule")?;
+        let column = rule.cells[0].name;
+        db.execute_batch(&format!("CREATE TABLE {table}({column} {declaration})"))?;
+        db.execute(&format!("INSERT INTO {table} VALUES(?1)"), [&value])?;
+        let mut query = db.prepare(&format!("SELECT {column} FROM {table}"))?;
+        let mut rows = query.query([])?;
+        let mut output = Zeroizing::new(Vec::new());
+        let count =
+            super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("row")?, &mut *output)?;
+        assert_eq!(count, output.len() as u64);
+        let mut input = output.as_slice();
+        let header = read_record_header(&mut input)?.ok_or("header")?;
+        assert_eq!(header.family, rule.id);
+        copy_full_scalar_record(rule, &header, &mut input, &mut std::io::sink())?;
+        assert_eq!(input, b"");
+        drop(rows);
+        // SQLite affinity does not make a TEXT/BLOB owner interchangeable.
+        db.execute(
+            &format!("UPDATE {table} SET {column}=?1"),
+            [rusqlite::types::Value::Integer(7)],
+        )?;
+        let mut rows = query.query([])?;
+        output.clear();
+        assert!(
+            super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("bad row")?, &mut *output)
+                .is_err()
+        );
+        assert!(output.is_empty());
+    }
+    let rule = super::full_transfer_catalog()
+        .iter()
+        .find(|rule| rule.id == "sql/account_erasure_generation")
+        .ok_or("generation")?;
+    db.execute_batch("CREATE TABLE account_erasure_generation(singleton INTEGER,generation INTEGER); INSERT INTO account_erasure_generation VALUES(1,8)")?;
+    for (sql, valid) in [
+        ("SELECT singleton,generation FROM account_erasure_generation", true),
+        ("SELECT generation,singleton FROM account_erasure_generation", false),
+        ("SELECT 2 AS singleton,8 AS generation", false),
+        ("SELECT 1 AS singleton,-1 AS generation", false),
+        ("SELECT 1 AS singleton,NULL AS generation", false),
+        ("SELECT 1 AS singleton,1.0 AS generation", false),
+    ] {
+        let mut query = db.prepare(sql)?;
+        let mut rows = query.query([])?;
+        let mut output = Zeroizing::new(Vec::new());
+        let result =
+            super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("row")?, &mut *output);
+        assert_eq!(result.is_ok(), valid, "{sql}");
+        assert_eq!(output.is_empty(), !valid);
+    }
+    Ok(())
+}

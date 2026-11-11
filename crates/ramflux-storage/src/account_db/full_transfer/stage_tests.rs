@@ -353,7 +353,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 fn h(value: u8) -> String {
     encode_base64url([value; 32])
 }
-fn fixture() -> TestResult<(FullResumeRecord, SourceManifest, Zeroizing<Vec<u8>>)> {
+pub(super) fn fixture() -> TestResult<(FullResumeRecord, SourceManifest, Zeroizing<Vec<u8>>)> {
     let vectors: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../ramflux-protocol/fixtures/pairing_v3/vectors.json"
     ))?;
