@@ -315,11 +315,10 @@ async fn apply_routed_or_defer(
     if crate::client::routed::decode(&prepared.entry.envelope)
         .is_ok_and(|packet| packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
     {
-        if !account.client.contact_admission_capacity(None, now_unix_timestamp())? {
-            return hold_contact_capacity(account, turn, handle_generation, prepared, backpressure);
-        }
         // W0 `source::request` quarantines `contact_candidate_manifest_request`
         // errors (sender rate-limit, closed root, malformed) before any fetch.
+        // Global/account pressure still identifies the requester (one fetch) so
+        // overflow roots can be recorded; rescans skip W1 via `saturated()`.
         if let Err(error) = account.client.contact_candidate_manifest_request(&prepared.entry) {
             return admit_mapped(account, turn, handle_generation, prepared, error);
         }

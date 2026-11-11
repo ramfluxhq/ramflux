@@ -491,6 +491,9 @@ async fn ack_if_terminal(
         return Ok(());
     }
     let db = account.client.account_db()?;
+    if unrouted_contains(db, entry)? {
+        return Ok(());
+    }
     if let Some(key) = retry_key
         && db.has_inbox_retry(key)?
     {
@@ -501,6 +504,20 @@ async fn ack_if_terminal(
         return Ok(());
     }
     emit_engine_ack(account, engine, generation, sequence, envelope_ids, attempted).await
+}
+
+fn unrouted_contains(
+    db: &ramflux_storage::AccountDb,
+    entry: &GatewayInboxEntry,
+) -> Result<bool, SdkError> {
+    for bytes in db.unrouted_entries()? {
+        let held: GatewayInboxEntry = serde_json::from_slice(&bytes)?;
+        if held.inbox_seq == entry.inbox_seq && held.target_delivery_id == entry.target_delivery_id
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Emit one gateway ACK and settle the WA intent. Held contact floors skip this
