@@ -7,7 +7,7 @@ use crate::client::identity_authority::HeadUse;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 impl RamfluxClient {
-    pub(super) fn require_routed_group_member(
+    pub(crate) fn require_routed_group_member(
         &self,
         group: &str,
         entry: &GatewayInboxEntry,

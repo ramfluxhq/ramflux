@@ -905,6 +905,7 @@ fn persist_projection_receipt_at(
         },
         entry: entry.clone(),
         projected: false,
+        erasure_targets: Vec::new(),
     };
     account.client.account_db()?.persist_actor_state(key, &receipt)?;
     Ok(())

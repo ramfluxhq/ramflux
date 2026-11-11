@@ -388,7 +388,8 @@ fn cryptobox_sender_envelope(
 
 impl RamfluxClient {
     /// Prepare a durable same-root `SelfSync` delivery. Submit the returned envelope unchanged.
-    /// Revision, accepted local state, final envelope and advanced pair state commit together.
+    /// Allocate once with `change_self_sync`, then pass that same value to every sibling.
+    /// This transport preparation never increments the revision or consumes the message stream.
     /// # Errors
     /// Refuses a foreign or unauthorized device, invalid update, or persistence failure.
     pub async fn prepare_self_sync_delivery(
@@ -397,7 +398,6 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         value: ramflux_protocol::message::SelfSync,
     ) -> Result<ramflux_protocol::Envelope, SdkError> {
-        use crate::client::generated_content::GeneratedEventStream;
         use crate::client::identity_authority::NativeOperation;
         use ramflux_protocol::message as g;
         let recipient = Self::qualified_recipient(message)?;
@@ -409,20 +409,10 @@ impl RamfluxClient {
         self.require_native_operation(&remote, NativeOperation::Sync)?;
         let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
         self.account_db()?.write_transaction(|| {
-            let value = self.change_self_sync(&message.conversation_id, value)?;
-            let mut stream = GeneratedEventStream::new(
-                message.conversation_id.clone(),
-                g::QualifiedDevice {
-                    account_anchor: local.root_commitment().to_owned(),
-                    device_id: local.device_id().to_owned(),
-                    device_epoch: self
-                        .device_branch
-                        .as_ref()
-                        .ok_or(SdkError::IdentityRootMissing)?
-                        .device_epoch,
-                },
-            );
-            let identity = stream.next(message.message_id.as_bytes().to_vec())?;
+            self.authorize_self_sync(&local, &message.conversation_id)?;
+            g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
+            let identity = self.allocate_generated_identity(&message.conversation_id,
+                crate::client::generated_identity::now_ms(), true)?;
             let inner = Self::encode_generated_inner(
                 identity,
                 &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) },
@@ -542,6 +532,14 @@ impl RamfluxClient {
         {
             conversation.clone_into(&mut route.conversation_id);
         }
+        if crate::client::target_selection::schema_v1_selected() {
+            use prost::Message as _;
+            if let Ok(inner) = ramflux_protocol::message::Inner::decode(body)
+                && let Some(identity) = inner.identity {
+                route.message_id = ramflux_protocol::encode_base64url(identity.id);
+                if route.kind == Kind::GroupMessage { route.group_message_id = Some(route.message_id.clone()); }
+            }
+        }
         let inner = zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
             routing: route.clone(),
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
@@ -649,8 +647,15 @@ impl RamfluxClient {
         if plaintext.routing.attachments && plaintext.routing.kind != Kind::Direct {
             return Err(invalid("attachment flag requires a direct route"));
         }
+        let body = ramflux_protocol::decode_base64url(&plaintext.body_base64)
+            .map_err(|_| invalid("invalid routed body"))?;
+        let logical_id = if crate::client::target_selection::schema_v1_selected() {
+            use prost::Message as _;
+            ramflux_protocol::message::Inner::decode(body.as_slice()).ok().and_then(|inner| inner.identity)
+                .map(|identity| ramflux_protocol::encode_base64url(identity.id))
+        } else { None };
         if plaintext.routing.conversation_id.is_empty()
-            || plaintext.routing.message_id != entry.envelope.envelope_id
+            || plaintext.routing.message_id != logical_id.as_deref().unwrap_or(&entry.envelope.envelope_id)
         {
             return Err(invalid("invalid authenticated routing header"));
         }
@@ -667,8 +672,6 @@ impl RamfluxClient {
         {
             return Err(invalid("invalid authenticated group message id"));
         }
-        let body = ramflux_protocol::decode_base64url(&plaintext.body_base64)
-            .map_err(|_| invalid("invalid routed body"))?;
         Ok(Opened {
             routing: plaintext.routing,
             body: zeroize::Zeroizing::new(body),

@@ -25,7 +25,8 @@ impl Delivery {
     }
     fn opened(opened: Opened, plaintext: Option<GatewayPlaintextDelivery>, body: &[u8]) -> Self {
         let call_control =
-            opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
+            (opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body))
+                || super::generated_receive::mutation_erasure_targets(body).0;
         Self { routing: Some(opened.routing), plaintext, call_control, pair_reply: None }
     }
 }
@@ -191,7 +192,14 @@ impl RamfluxClient {
             .await?;
         }
         self.contact_route_gate(entry, &opened.routing, &opened.body)?;
-        if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
+        let generated_id = if crate::client::target_selection::schema_v1_selected() {
+            use prost::Message as _;
+            ramflux_protocol::message::Inner::decode(opened.body.as_slice()).ok()
+                .and_then(|inner| inner.identity).map(|identity| ramflux_protocol::encode_base64url(identity.id))
+        } else { None };
+        if let Some(id) = generated_id {
+            if opened.routing.message_id != id { return Err(SdkError::GeneratedRefused { code: crate::GeneratedRefusalCode::Identity, reason: "route and generated id disagree".into() }); }
+        } else if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             opened.routing.message_id = self.projection_id(entry, &opened.routing)?;
         }
         self.confirm_routed_context(&opened.routing, entry)?;
@@ -980,6 +988,7 @@ impl RamfluxClient {
             }
             self.project_routed(opened, entry, body, metadata)?
         };
+        self.finish_generated_projection(opened, entry)?;
         self.commit_routed_pair_context(opened, entry, body)?;
         for slot in slots {
             self.persist_message_slot_receipt(&opened.routing.message_id, slot)?;
@@ -1016,17 +1025,29 @@ impl RamfluxClient {
             &receipt,
         )?;
         let mut retained = entry.clone();
-        if opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body) {
+        let (delete_control, mut erasure_targets) = super::generated_receive::mutation_erasure_targets(body);
+        let erased_reference = erasure_targets.iter().try_fold(false, |erased, target| {
+            self.account_db()?.message_is_deleted(&target.message_id).map(|deleted| erased || deleted).map_err(SdkError::from)
+        })?;
+        let call = opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
+        if call || delete_control || erased_reference {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
             // call ciphertext alongside them: committed replay needs only attribution/hash.
             retained.envelope.encrypted_payload.clear();
-            self.append_event(&entry.envelope.envelope_id, "call.control.committed", &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
+            erasure_targets.clear();
+            self.append_event(&entry.envelope.envelope_id, if call { "call.control.committed" } else { "message.control.committed" }, &ramflux_protocol::canonical_json_bytes(&serde_json::json!({"envelope_id":entry.envelope.envelope_id,"source_device_id":entry.envelope.source_device_id,"payload_hash":entry.envelope.payload_hash}))?)?;
         } else {
             self.append_gateway_delivery(entry)?;
+            for target in &erasure_targets {
+                self.account_db()?.bind_message_event_reference(
+                    &target.message_id, &format!("gateway/delivery/v2/{receipt}"),
+                )?;
+                self.account_db()?.bind_message_container_reference(&target.message_id, receipt)?;
+            }
         }
         self.account_db()?.persist_actor_state(
             receipt,
-            &Committed { routing: opened.routing.clone(), entry: retained, projected: false },
+            &Committed { routing: opened.routing.clone(), entry: retained, projected: false, erasure_targets },
         )?;
         self.persist_routed_seen(entry)
     }

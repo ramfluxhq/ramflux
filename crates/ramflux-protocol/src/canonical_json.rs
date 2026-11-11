@@ -153,7 +153,7 @@ fn remove_signature_fields(object: &mut Map<String, Value>) {
     object.remove("signature");
 }
 
-fn reject_unknown_critical_ext(object: &Map<String, Value>) -> Result<(), ProtocolError> {
+pub(crate) fn reject_unknown_critical_ext(object: &Map<String, Value>) -> Result<(), ProtocolError> {
     if let Some(Value::Object(ext)) = object.get("ext") {
         for key in ext.keys() {
             if key.starts_with("critical.") {

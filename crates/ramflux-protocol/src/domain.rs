@@ -67,6 +67,9 @@ pub const COMMITTING_AEAD_AD: &str = "ramflux.committing_aead.ad.v1";
 pub const FRANKING_OPENING: &str = "ramflux.franking_opening.v1";
 pub const FRANKING_NODE_TAG: &str = "ramflux.franking.node_tag.v1";
 pub const FRANKING_NODE_TAG_V2: &str = "ramflux.franking.node_tag.v2";
+pub const MESSAGE_DELETE_TOMBSTONE: &str = "ramflux.message.delete.tombstone.v1";
+pub const MESSAGE_HISTORY_PAGE: &str = "ramflux.message.history_page.v1";
+pub const MESSAGE_ID: &str = "ramflux.message.id.v1";
 pub const EDIT_PREVIOUS_CONTENT: &str = "ramflux.message.edit.previous_content.v1";
 pub const REPORT_OPENING: &str = "ramflux.message.report_opening.v1";
 pub const COLLAPSE_KEY: &str = "ramflux.message.collapse_key.v1";
@@ -186,7 +189,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 159] = [
+pub const ALL: [&str; 162] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -346,6 +349,9 @@ pub const ALL: [&str; 159] = [
     COLLAPSE_KEY,
     FRANKING_NODE_TAG_V2,
     EDIT_PREVIOUS_CONTENT,
+    MESSAGE_ID,
+    MESSAGE_HISTORY_PAGE,
+    MESSAGE_DELETE_TOMBSTONE,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";

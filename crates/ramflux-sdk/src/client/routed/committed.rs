@@ -12,6 +12,13 @@ pub(crate) struct Committed {
     pub entry: GatewayInboxEntry,
     #[serde(default = "already_projected")]
     pub projected: bool,
+    #[serde(default)]
+    pub erasure_targets: Vec<ErasureTarget>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ErasureTarget {
+    pub message_id: String,
 }
 fn already_projected() -> bool {
     true

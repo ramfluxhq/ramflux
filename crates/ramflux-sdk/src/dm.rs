@@ -666,9 +666,10 @@ pub(crate) fn candidate_direct_message_envelope(
         .as_ref()
         .map_or_else(|| message.source_principal_id.clone(), |branch| branch.principal_id.clone());
     let outer = ramflux_protocol::message::outer::CandidateOuterEnvelope {
+        ext: Default::default(), routing_set_id: None,
         schema: ramflux_protocol::message::outer::CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         version: 2,
-        domain: ramflux_protocol::domain::ENVELOPE.to_owned(),
+        domain: "ramflux.envelope.v2".to_owned(),
         envelope_id: message.envelope_id.clone(),
         source_principal_id,
         source_device_id: config.device_id.clone(),

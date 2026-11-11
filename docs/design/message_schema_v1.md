@@ -850,6 +850,9 @@ message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
   NativeCustodyManifest source_authority = 2;
   optional NativeGroupSnapshot group_membership = 3;
+  bytes report_opening = 4;
+  bytes group_plaintext = 5;
+  bytes group_opening = 6;
 }
 message HistoryPage {
   bytes transfer_id = 1;
@@ -4748,3 +4751,89 @@ form/action authority, atomic updates and safe consumer delivery are required
 subsequent work. Renderer capability remains disabled until activation following
 consumer, bundle and platform admission. This amendment grants no execution,
 signing, attachment access or network authority.
+
+
+### S10a origin-evidence amendment (controller adoption of decisions audit r2, 2026-11-11)
+
+`HistoryOriginEvidence` retains its existing tags 1–3 and adds `bytes report_opening = 4`,
+`bytes group_plaintext = 5`, and `bytes group_opening = 6`. The first field carries kf;
+the latter two carry the exact verified nested Message and its native per-message opening.
+These are private evidence registered to the message erase lifetime. Every peer-authored
+HistoryItem requires verified origin evidence: sender envelope signature, device custody,
+group membership where applicable, C over exact Inner and A0, and group opening. Failed
+or absent evidence is refused before retention. OwnSentMessage alone uses sibling attestation.
+No HistoryItem or report may fall back to an attestation by a forwarding device.
+
+Live group admission requires the author's current pinned role even for an old verified epoch;
+late pre-removal messages are deliberately refused. Per-recipient signed envelopes prove
+authority; the symmetric sender key alone does not. Pairwise author equivocation is not
+automatically detected: recipients can demonstrate it by comparing valid openings.
+A later fan-out architecture requires new recipient-independent author proof. A future nonempty
+Message or Service native authority proof requires a new schema layer; v1 refuses it.
+
+Edit digests assume one plaintext representation per logical event (S10a compiled layer/floor 2).
+Before S10b introduces another representation, re-decide the digest rule.
+
+
+### S10a sweep-2 numeric decisions (controller adoption, 2026-11-11)
+
+The following are design choices, not measured limits. Sweep audit r1 replacement texts supersede the sweep where they differ.
+
+| Sweep item | Normative values |
+|---|---|
+| 3 ID restore | fresh natively authorized device epoch after rollback; no fixed jump |
+| 4 HLC | 48-bit physical milliseconds + 16-bit logical; 120,000 ms receive skew clamp |
+| 5 Pending Delete | 4,096 unmatched fences per source root |
+| 6 Unseen SelfSync conversations | 4,096 per account |
+| 7 SelfSync restore/draft | 30 s refresh fallback; draft text 65,536 UTF-8 bytes |
+| 9 Delete target set | 1–256 targets |
+| 11 Moderator epoch | current owner/admin and permission at the named verified epoch |
+| 13 Edit revision | maximum 1,000,000 |
+| 14 Reactions | 8 present tokens per root/target; 2,048 total keys per target |
+| 17 Capacity diagnostics | at most 64 content-free rows |
+| 26 Typed history pages | at most 100 rows and 768 KiB encoded |
+| 27 Adapter errors | permanent codes 1–16, per adopted OV2-RD-ERR |
+| 30 Typing cadence/rates | 4,000 ms cadence; 20/conversation/60 s sender; receiver burst 6, refill 1/2 s; 30/root/60 s |
+| 32 Typing ratchet | 256 ephemeral seals per pair-session incarnation; dropped/offline suppression 60 s |
+| 33 Typing memory | 64 indicators and 256 dedup entries per account |
+| 36 History pages | 32-byte transfer id; at most 32 items and 4 MiB, also Inner/frame cap |
+| 37 Receipt target set | 1–256 targets |
+| 51 Cosmetic Service | at most 64 subjects and 1,024 UTF-8 text bytes |
+
+OV-P19-PINCAP additionally fixes `SELF_SYNC_MAX_PINS_PER_CONVERSATION = 100` active pin
+scopes per own root/conversation; clear registers and erased revision floors do not count.
+
+
+The sole new hash grammar is raw BLAKE3(LP(domain) || transcript); never pass these
+transcripts through the historical unframed-domain helper. Event-id transcript is
+LP(account_anchor) || LP(device_id) || u64_be(device_epoch) || LP(conversation_id) ||
+u64_be(device_sequence). Tombstone transcript is LP(Delete event id). History page
+transcript is LP(transfer_id) || u64_be(page) || LP(previous_page_digest) ||
+u32_be(item_count) || concatenation of LP(each exact encoded HistoryItem).
+Durable peer sequence numbers occupy 1..2^63-1; independently durable own-only counters
+occupy 2^63 | private_counter, private_counter in 1..2^63-1. Native re-enrollment and
+fresh authorized device epoch are mandatory after rollback; exact retransmits retain identities.
+Replicated registers use immutable signed HLC/qualified author including epoch/sequence/id;
+receive-time clipping is display-only. Typing's 256-seal allowance lasts for the entire
+pair-session incarnation and never resets on durable sealing, ACK, elapsed time or incoming traffic.
+History transfers expire after 60 seconds without a newly accepted page; retries do not renew them.
+Capacity lookahead stays within native ACK-window/ratchet bounds, and a local clock deadline
+is labeled local_retention_deadline_elapsed, never proof of node loss.
+
+
+### OV-ORIGIN-SIG amendment (controller adoption of origin-signature audit r1)
+
+The v2 sender transcript is `UTF8("ramflux.envelope.sig.v2") || 0x00 || JCS(object)`.
+Schema and domain are `ramflux.envelope.v2`, version is 2. One protocol implementation
+serves every live/evidence verifier and both outer representations. It excludes ciphertext,
+signature, node_report_receipt, ext.source_device_authority, ext.home_node_migration_forward_count,
+and ext.franking.{franking_tag,node_id,accepted_at}; all other sender fields remain signed,
+including signing_key_id, signature_alg, routing_set_id and ext.source_root_commitment.
+The existing payload_hash is deliberately unchanged: base64url(BLAKE3(UTF8("ramflux.envelope.v1")
+|| ASCII(strict canonical base64url encrypted_payload))). This legacy hash domain is unframed;
+the new LP-domain grammar for event/edit/tombstone/history hashes does not change it.
+WithCiphertext checks canonical ciphertext encoding and hash BEFORE producing transcript bytes
+or accepting a signature. Evidence requires the ciphertext key absent, never empty, and records
+ciphertext_bound=false. Evidence binds exact Inner to the signer through C/kf and native proofs;
+it proves no property about absent ciphertext. Keep AEAD A and C/A0 unchanged. The actual
+activation reset drops or re-signs in-flight old signed rows and admits no legacy signature fallback.

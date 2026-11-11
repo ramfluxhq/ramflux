@@ -154,7 +154,7 @@ pub use ephemeral::{
     ReceiverLifetime, admit_authenticated_ciphertext, authenticate, decode_ephemeral_result,
     echo_holds_ephemeral_send, encode_ephemeral_submit, send_ephemeral, ttl_seconds,
 };
-pub use error::{GroupOperation, ReceiveEpochReconcileFailure, SdkError};
+pub use error::{GeneratedRefusalCode, GroupOperation, ReceiveEpochReconcileFailure, SdkError};
 mod surface_refusal;
 pub use federation::{
     SdkFederatedEnvelopeForwardRequest, SdkFederatedEnvelopeForwardResponse,
