@@ -39,7 +39,7 @@ pub(crate) async fn dispatch_device_bus_request(
         | "device.pair.confirm"
         | "device.pair.approve"
         | "device.pair.cancel"
-        | "device.pair.status" => dispatch_device_pair(request).await,
+        | "device.pair.status" => dispatch_device_pair(request, state).await,
         other => Err(SdkError::LocalBus(format!("unsupported local bus method: {other}"))),
     }
 }
@@ -121,10 +121,18 @@ async fn dispatch_push_route_set(
     })))
 }
 
-async fn dispatch_device_pair(request: &LocalBusFrame) -> Result<LocalBusDispatchResult, SdkError> {
+async fn dispatch_device_pair(
+    request: &LocalBusFrame,
+    state: &LocalBusDaemonState,
+) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?;
-    match crate::custody::pairing::handle_bus(account_id, &request.method, request.body.clone())
-        .await
+    match crate::custody::pairing::handle_bus(
+        &state.config.data_root,
+        account_id,
+        &request.method,
+        request.body.clone(),
+    )
+    .await
     {
         Ok(result) => Ok(local_bus_ok(serde_json::to_value(result)?)),
         Err(SdkError::PairingCode("NotFound")) => {
@@ -253,6 +261,13 @@ async fn dispatch_device_revoke(
 ) -> Result<LocalBusDispatchResult, SdkError> {
     let account_id = request_account_id(request)?.to_owned();
     let data_root = state.config.data_root.clone();
+    if local_bus_account_mut(state, &account_id)?.client.born_v3_account.is_some() {
+        return Box::pin(native_revoke::dispatch(
+            local_bus_account_mut(state, &account_id)?,
+            &body.device_id,
+        ))
+        .await;
+    }
     let manifest_path = local_bus_account_manifest_path(&data_root, &account_id);
     let mut manifest = read_local_bus_account_manifest(&manifest_path)?;
     let account = local_bus_account_mut(state, &account_id)?;
@@ -507,3 +522,5 @@ fn merge_manifest_device(
 #[cfg(test)]
 #[path = "tests/native_device.rs"]
 mod native_tests;
+
+mod native_revoke;

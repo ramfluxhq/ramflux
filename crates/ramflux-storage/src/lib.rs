@@ -94,6 +94,7 @@ pub use account_db::object_retention::{
     ObjectReferenceAdmission, ObjectReferenceOwner, ObjectResourceRetirement, ObjectRetention,
     ObjectRetirementObserver, PreSendObjectHold, PrivacyResourceRegistration,
 };
+pub use account_db::pairing::admission::PairingAdmissionReader;
 pub use account_db::pairing::journal::{AdoptionRow, FloorRow, HeadRow, LiveRow, TerminalRow};
 pub use account_db::raw_inner::{
     KnownContentEvidence, RawInnerCopy, RawInnerCopyKind, RawInnerCopyWrite, RawInnerQuota,

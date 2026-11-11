@@ -70,6 +70,7 @@ use crate::prelude::*;
 pub struct RamfluxClient {
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
+    pub(crate) born_v3_vault: Option<std::sync::Arc<dyn crate::custody::PrimaryVault>>,
     pub(crate) voice_calls: BTreeMap<String, call::state::LiveCall>,
     // One account-owned plan crosses the synchronous receive transaction's commit boundary.
     // It is never shared across accounts, held over an await, or serialized with media secrets.
@@ -96,6 +97,7 @@ impl Default for RamfluxClient {
         Self {
             native_head_freshness: std::cell::RefCell::default(),
             born_v3_account: None,
+            born_v3_vault: None,
             voice_calls: BTreeMap::new(),
             voice_transition: std::cell::RefCell::new(None),
             node_relay_options: None,

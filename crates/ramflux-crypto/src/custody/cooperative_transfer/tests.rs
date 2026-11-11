@@ -196,8 +196,67 @@ fn assert_exact_preservation_signature(
     assert!(
         replacement.sign_cooperative_preservation(previous, candidate, body.clone(), now).is_err()
     );
+    assert_full_preservation_signature(previous, candidate, signers, &body, now)?;
     let mut changed = body;
     changed.new_record_hash = encode_base64url([93; 32]);
     assert!(old.sign_cooperative_preservation(previous, candidate, changed, now).is_err());
+    Ok(())
+}
+
+fn assert_full_preservation_signature(
+    previous: &VerifiedRecord,
+    candidate: &VerifiedRecord,
+    signers: (&SelfSigningKey, &SelfSigningKey),
+    context: &ramflux_protocol::custody::pairing::channel::PreservationBody,
+    now: u64,
+) -> TestResult {
+    let (old, replacement) = signers;
+    let full = ramflux_protocol::custody::pairing::full_transfer::PreservationFull {
+        schema: "ramflux.identity.transfer.preserve.full.v1".into(),
+        version: 1,
+        transfer_id: context.transfer_id.clone(),
+        transcript_hash: context.transcript_hash.clone(),
+        old_record_hash: context.old_record_hash.clone(),
+        new_record_hash: context.new_record_hash.clone(),
+        destination_ref: context.destination_ref.clone(),
+        recipient_mode: context.recipient_mode.clone(),
+        policy: context.policy.clone(),
+        expires_at: context.expires_at,
+        manifest_chain_hash: encode_base64url([94; 32]),
+        data_verified_hash: encode_base64url([95; 32]),
+        target_restrictions_root: encode_base64url([96; 32]),
+    };
+    let signed = old.sign_cooperative_full_preservation(previous, candidate, full.clone(), now)?;
+    crate::verify_canonical_signature(
+        &ramflux_protocol::custody::signing_bytes(&signed.body.schema, &signed.body)?,
+        &signed.signature,
+        &old.public_key(),
+    )?;
+    assert!(
+        replacement
+            .sign_cooperative_full_preservation(previous, candidate, full.clone(), now)
+            .is_err()
+    );
+    for field in 0..3 {
+        let mut altered = full.clone();
+        let hash = encode_base64url([97; 32]);
+        match field {
+            0 => altered.manifest_chain_hash = hash,
+            1 => altered.data_verified_hash = hash,
+            _ => altered.target_restrictions_root = hash,
+        }
+        assert!(
+            crate::verify_canonical_signature(
+                &ramflux_protocol::custody::signing_bytes(&altered.schema, &altered)?,
+                &signed.signature,
+                &old.public_key(),
+            )
+            .is_err(),
+            "every data/restriction commitment must be signed"
+        );
+    }
+    let mut old_domain = full;
+    old_domain.schema = context.schema.clone();
+    assert!(old.sign_cooperative_full_preservation(previous, candidate, old_domain, now).is_err());
     Ok(())
 }

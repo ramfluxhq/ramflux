@@ -108,6 +108,7 @@ impl Fixture {
             }
         });
         let config = CustodyNetworkConfig {
+            pairing_admission: None,
             account_root: root.path().into(),
             account_id: "alice".into(),
             device_id: "primary".into(),

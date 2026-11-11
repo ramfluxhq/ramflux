@@ -6,6 +6,45 @@ use super::{backup_database::BackupDatabase, backup_merge::BackupMergeMode};
 use crate::{AccountDbKey, BackupMergeReport, StorageError};
 use std::path::Path;
 
+/// A full-transfer cut cannot discard a transaction's unresolved normalization scratch.
+/// Empty scratch is harmless and is classified E by the logical encoder.
+pub(super) fn full_transfer_snapshot_preflight(
+    db: &rusqlite::Connection,
+) -> Result<(), StorageError> {
+    let mut tables = db.prepare("SELECT name FROM sqlite_schema WHERE type='table'")?;
+    for table in tables.query_map([], |row| row.get::<_, String>(0))? {
+        let table = table?;
+        let scratch = super::backup_selector_admission::is_scratch(&table)
+            || matches!(
+                table.as_str(),
+                "backup_changed_conversation"
+                    | "backup_erased_capture"
+                    | "backup_erased_capture_message"
+                    | "backup_erased_copy"
+                    | "backup_local_consent"
+                    | "backup_local_conversation"
+                    | "backup_local_link_consent"
+                    | "backup_local_message_own"
+                    | "backup_local_pair"
+                    | "backup_source_consent"
+                    | "backup_source_conversation"
+                    | "backup_source_link_consent"
+                    | "footprint_merge_imported"
+            );
+        if scratch {
+            let quoted = table.replace('"', "\"\"");
+            let nonempty =
+                db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM \"{quoted}\")"), [], |row| {
+                    row.get::<_, bool>(0)
+                })?;
+            if nonempty {
+                return Err(StorageError::PairingField("SnapshotBusy"));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) const DATA_STATE_FILTER: &str = "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'identity/%' AND r.state_kind NOT LIKE 'account/%' AND r.state_kind NOT LIKE 'sync/%' AND r.state_kind NOT LIKE 'gateway/%' AND (r.state_kind NOT LIKE 'directory/%' OR r.state_kind LIKE 'directory/conversation/%') AND (r.state_kind NOT LIKE 'dm-pair/%' OR r.state_kind LIKE 'dm-pair/session/%' OR r.state_kind LIKE 'dm-pair/retired/%') AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'";
 
 pub(super) fn authority_table(table: &str) -> bool {
@@ -81,6 +120,42 @@ mod tests {
     use crate::{AccountDb, AccountIndex};
     use serde_json::json;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn full_transfer_private_cut_preserves_input_and_refuses_unresolved_scratch() -> TestResult {
+        let (root, source) = crate::tests::test_db("full-transfer-private-cut")?;
+        source.persist_actor_state("own-device/sequence-locator/source", &"source-only-canary")?;
+        let path = root.join("full-cut.db");
+        let cut = source.write_full_transfer_snapshot_cancellable(
+            &path,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        // Open raw only inside A's private owner: archive normalization would alter the input.
+        let private = rusqlite::Connection::open(&path)?;
+        private.execute_batch(&format!("PRAGMA key=\"x'{}'\";", cut.key.sqlcipher_hex()))?;
+        let retained: Vec<u8> = private.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind='own-device/sequence-locator/source'", [], |row| row.get(0),
+        )?;
+        assert_eq!(retained, b"\"source-only-canary\"");
+        private.close().map_err(|(_, error)| error)?;
+        source.connection.execute_batch("CREATE TABLE backup_local_consent(value TEXT); INSERT INTO backup_local_consent VALUES('unresolved');")?;
+        assert!(matches!(
+            source.write_full_transfer_snapshot_cancellable(
+                &root.join("busy-cut.db"),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ),
+            Err(StorageError::PairingField("SnapshotBusy"))
+        ));
+        assert_eq!(
+            source.connection.query_row(
+                "SELECT count(*) FROM backup_local_consent",
+                [],
+                |row| row.get::<_, u64>(0)
+            )?,
+            1
+        );
+        Ok(())
+    }
 
     fn add_raw_fixture(source: &AccountDb) -> TestResult {
         source.write_transaction(|| {

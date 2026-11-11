@@ -912,12 +912,18 @@ impl AccountDb {
     /// # Errors
     /// Returns SQLite errors or a malformed stored row.
     pub fn pairing_adoption(&self) -> Result<Option<AdoptionRow>, StorageError> {
-        let row = self
-            .connection
+        read_adoption(&self.connection, &self.local_account_id)
+    }
+}
+pub(super) fn read_adoption(
+    connection: &crate::database::Connection,
+    account_id: &str,
+) -> Result<Option<AdoptionRow>, StorageError> {
+    let row = connection
             .query_row(
                 "SELECT account_id,operation_id,record_hash,local_ref,local_role,branch_vault_ref,data_vault_ref,primary_vault_ref
                  FROM pairing_adoption WHERE account_id=?1",
-                params![self.local_account_id],
+                params![account_id],
                 |r| {
                     Ok(AdoptionRow {
                         account_id: r.get(0)?,
@@ -932,9 +938,8 @@ impl AccountDb {
                 },
             )
             .optional()?;
-        if let Some(row) = &row {
-            row.validate()?;
-        }
-        Ok(row)
+    if let Some(row) = &row {
+        row.validate()?;
     }
+    Ok(row)
 }

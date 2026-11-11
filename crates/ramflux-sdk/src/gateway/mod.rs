@@ -27,3 +27,4 @@ mod custody;
 #[path = "submit_tests.rs"]
 mod submit_tests;
 pub use custody::GatewayCustodyConfig;
+pub(crate) use custody::proof_network_config;

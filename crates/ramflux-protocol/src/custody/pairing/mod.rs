@@ -13,6 +13,7 @@ pub const MAX_COMMON_BYTES: usize = 15_872;
 pub const MAX_ROLE_BYTES: usize = 20_480;
 pub const MAX_TRANSCRIPT_BYTES: usize = 2 * MAX_ROLE_BYTES + 512;
 pub mod channel;
+pub mod full_transfer;
 pub mod local_dto;
 pub mod native;
 pub mod relay;

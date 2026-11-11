@@ -147,6 +147,43 @@ fn publish_inside_fence(
     persist: &dyn NodeHeadPersist,
     retire: bool,
 ) -> Result<PublishedHead, SdkError> {
+    let head = prepare_candidate(db, root, vault, write)?;
+    let published = submit_and_ack(db, root, vault, write, persist, head)?;
+    if retire {
+        retire_prepared_head(db, write, &published.record_hash, write.now)?;
+    }
+    Ok(published)
+}
+
+/// Prepare and durably mark the exact candidate submitted before an asynchronous native send.
+/// The frontend keeps its actual DB throughout the await; retry resumes this same journal.
+pub(crate) fn prepare_head_submission(
+    db: &Mutex<AccountDb>,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+) -> Result<Publication, SdkError> {
+    with_pending_head_fence(db, &write.account_id, &write.operation_id, || {
+        let mut head = prepare_candidate(db, root, vault, write)?;
+        let _lock = super::activate::authority_lock(root, &write.account_id)?;
+        if head.state == "prepared" {
+            validate_head_advance("prepared", "submitted", &write.publisher_ref, &write.local_ref)?;
+            head.state = "submitted".into();
+            journal(db, |db| {
+                db.commit_pairing_head(&head)?;
+                Ok(())
+            })?;
+        }
+        decode_candidate(&head.candidate)
+    })
+}
+
+fn prepare_candidate(
+    db: &Mutex<AccountDb>,
+    root: &Path,
+    vault: &dyn PrimaryVault,
+    write: &HeadWrite,
+) -> Result<HeadRow, SdkError> {
     let head = {
         let _lock = super::activate::authority_lock(root, &write.account_id)?;
         refuse_foreign_head(db, &write.operation_id)?;
@@ -189,11 +226,7 @@ fn publish_inside_fence(
             head
         }
     };
-    let published = submit_and_ack(db, root, vault, write, persist, head)?;
-    if retire {
-        retire_prepared_head(db, write, &published.record_hash, write.now)?;
-    }
-    Ok(published)
+    Ok(head)
 }
 
 fn require_resume_primary(

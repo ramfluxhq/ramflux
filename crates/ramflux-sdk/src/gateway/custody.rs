@@ -40,7 +40,16 @@ pub(super) async fn prepare(
 ) -> Result<Option<Box<Prepared>>, SdkError> {
     let Some(custody) = &config.custody else { return Ok(None) };
     refresh_local_publication(config, custody).await?;
-    let network = CustodyNetworkConfig {
+    let network = proof_network_config(config)?;
+    Ok(Some(Box::new(Prepared { network, vault: Arc::clone(&custody.vault) })))
+}
+/// Build a separate proof connection without sharing the ordinary session transport.
+pub(crate) fn proof_network_config(
+    config: &GatewaySessionConfig,
+) -> Result<CustodyNetworkConfig, SdkError> {
+    let custody = config.custody.as_ref().ok_or(SdkError::NetworkingPending)?;
+    Ok(CustodyNetworkConfig {
+        pairing_admission: config.pairing_admission.clone(),
         account_root: custody.account_root.clone(),
         account_id: custody.account_id.clone(),
         device_id: config.device_id.clone(),
@@ -53,9 +62,9 @@ pub(super) async fn prepare(
         binding_mode: BindingMode::HomeRelayReceipt,
         allow_no_channel_binding: false,
         timeout: config.timeout,
-    };
-    Ok(Some(Box::new(Prepared { network, vault: Arc::clone(&custody.vault) })))
+    })
 }
+
 async fn refresh_local_publication(
     config: &GatewaySessionConfig,
     custody: &GatewayCustodyConfig,
@@ -104,6 +113,12 @@ async fn refresh_local_publication(
             && verified.envelope().body.device_set_epoch < local.record().body.device_set_epoch
         {
             return Ok(ramflux_crypto::custody::PinOutcome::Unchanged);
+        }
+        if local.pairing_adoption_required()
+            && ramflux_protocol::custody::object_hash(local.record())?
+                != ramflux_protocol::custody::object_hash(&authority.publication.record)?
+        {
+            return Err(SdkError::PairingCode("PublicationPending"));
         }
         crate::custody::accept_publication(&root, &id, &authority, now)
     })
