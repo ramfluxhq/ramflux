@@ -6,6 +6,7 @@ use super::super::AccountDb;
 use crate::StorageError;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+mod generated;
 mod inbox_failure;
 mod inbox_legacy;
 mod inbox_policy;
