@@ -109,6 +109,8 @@ impl RamfluxClient {
         if opened.routing.kind != crate::client::routed::Kind::GroupControl {
             return Ok(None);
         }
+        ramflux_protocol::message::dm_scope::validate_group(&opened.routing.conversation_id)
+            .map_err(|_| invalid("reserved DM conversation namespace"))?;
         if serde_json::from_slice::<PacketHeader<'_>>(body)
             .is_ok_and(|header| header.schema == Some(super::controls::CONTROL_SCHEMA))
         {
@@ -176,6 +178,8 @@ impl RamfluxClient {
         state: VerifiedGroupState,
         body: &[u8],
     ) -> Result<PreparedSharedGroup, SdkError> {
+        ramflux_protocol::message::dm_scope::validate_group(&state.view().conversation_id)
+            .map_err(|_| invalid("reserved DM conversation namespace"))?;
         let packet: SharedGroupPacket = ramflux_protocol::parse_i_json(body)?;
         let distribution = packet
             .distribution_base64

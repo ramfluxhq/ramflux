@@ -203,6 +203,9 @@ impl RamfluxClient {
         if principal != entry.envelope.source_principal_id {
             return Err(invalid("surface control source principal mismatch"));
         }
+        if let Some(context) = &control.context {
+            self.validate_own_context_namespace(context)?;
+        }
         if control.kind == ControlKind::Own {
             self.authorize_owned_surface_source(&source)?;
             for manifest in &control.manifests {

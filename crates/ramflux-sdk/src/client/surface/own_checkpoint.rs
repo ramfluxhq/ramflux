@@ -106,10 +106,59 @@ impl RamfluxClient {
         }
         Ok(())
     }
+    fn validate_owned_checkpoint_namespace(
+        &self,
+        owned: &OwnedSurfaceCheckpoint,
+    ) -> Result<(), SdkError> {
+        if owned.group_epoch.is_some()
+            || owned.conversation["kind"] == "group"
+            || owned.conversation["group_id"].is_string()
+        {
+            ramflux_protocol::message::dm_scope::validate_group(&owned.record.conversation_id)
+                .map_err(|_| invalid("reserved DM conversation namespace"))?;
+        }
+        if owned.record.conversation_id.starts_with("dm:") {
+            let roots = owned.conversation["participant_roots"]
+                .as_array()
+                .ok_or_else(|| invalid("reserved checkpoint lacks root binding"))?;
+            let own = self.own_account_anchor()?;
+            if roots.len() != 2 || !roots.iter().any(|root| root.as_str() == Some(&own)) {
+                return Err(invalid("reserved checkpoint root mismatch"));
+            }
+            let peer = roots
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .find(|root| *root != own)
+                .ok_or_else(|| invalid("reserved checkpoint peer missing"))?;
+            ramflux_protocol::message::dm_scope::validate_direct(
+                &owned.record.conversation_id,
+                &own,
+                peer,
+            )
+            .map_err(|_| invalid("reserved checkpoint pair mismatch"))?;
+            if let Some(old) =
+                self.account_db()?.client_record("conversation", &owned.record.conversation_id)?
+                && (old["kind"] != "direct"
+                    || !old["group_id"].is_null()
+                    || old["participant_roots"].as_array().is_none_or(|bound| {
+                        bound.len() != 2
+                            || bound
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<std::collections::BTreeSet<_>>()
+                                != std::collections::BTreeSet::from([own.as_str(), peer])
+                    }))
+            {
+                return Err(invalid("reserved checkpoint conflicts with immutable binding"));
+            }
+        }
+        Ok(())
+    }
     fn import_owned_surface_checkpoint(
         &self,
         owned: &OwnedSurfaceCheckpoint,
     ) -> Result<(), SdkError> {
+        self.validate_owned_checkpoint_namespace(owned)?;
         self.check_owned_surface_floor(&owned.conversation, owned.group_epoch)?;
         let record = &owned.record;
         let reference = super::scope::surface_reference(

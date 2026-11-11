@@ -105,6 +105,8 @@ impl AccountDb {
     }
     fn project_shared_group_link(&self, verified: &VerifiedGroupState) -> Result<(), StorageError> {
         let state = verified.view();
+        ramflux_protocol::message::dm_scope::validate_group(&state.conversation_id)
+            .map_err(|_| StorageError::GroupPermissionDenied)?;
         let mut conversation = self
             .client_record("conversation", &state.conversation_id)?
             .unwrap_or_else(|| json!({"participants":[],"direct_route":null}));

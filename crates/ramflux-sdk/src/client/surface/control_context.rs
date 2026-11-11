@@ -6,6 +6,57 @@ use super::{control::OwnContext, invalid};
 use crate::{RamfluxClient, SdkError};
 use serde_json::{Value, json};
 impl RamfluxClient {
+    /// Validate namespace before friend, group, checkpoint or conversation writes.
+    pub(crate) fn validate_own_context_namespace(
+        &self,
+        context: &OwnContext,
+    ) -> Result<(), SdkError> {
+        use ramflux_protocol::message::dm_scope;
+        if context.group.is_some() {
+            return dm_scope::validate_group(&context.conversation_id)
+                .map_err(|_| invalid("group uses reserved DM namespace"));
+        }
+        if !context.conversation_id.starts_with(dm_scope::PREFIX) {
+            return Ok(());
+        }
+        let own = self.own_account_anchor()?;
+        let old = self.account_db()?.client_record("conversation", &context.conversation_id)?;
+        let peer = if let Some(friend) = &context.friend {
+            if friend.requester_id == own {
+                friend.target_id.clone()
+            } else if friend.target_id == own {
+                friend.requester_id.clone()
+            } else {
+                return Err(invalid("own DM roots omit local root"));
+            }
+        } else {
+            old.as_ref()
+                .and_then(|v| v["participant_roots"].as_array())
+                .and_then(|roots| roots.iter().filter_map(Value::as_str).find(|root| *root != own))
+                .ok_or_else(|| invalid("reserved own DM lacks root binding"))?
+                .to_owned()
+        };
+        dm_scope::validate_direct(&context.conversation_id, &own, &peer)
+            .map_err(|_| invalid("own DM root pair mismatch"))?;
+        if let Some(old) =
+            self.account_db()?.client_record("conversation", &context.conversation_id)?
+        {
+            if old["kind"] != "direct" || !old["group_id"].is_null() {
+                return Err(invalid("reserved own DM conflicts with existing kind"));
+            }
+            let roots = old["participant_roots"]
+                .as_array()
+                .ok_or_else(|| invalid("reserved own DM lacks immutable roots"))?;
+            let expected = std::collections::BTreeSet::from([own.as_str(), peer.as_str()]);
+            if roots.len() != 2
+                || roots.iter().filter_map(Value::as_str).collect::<std::collections::BTreeSet<_>>()
+                    != expected
+            {
+                return Err(invalid("reserved own DM conflicts with bound roots"));
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn surface_local_root_commitment(&self) -> Result<String, SdkError> {
         self.own_account_anchor()
     }
@@ -117,6 +168,15 @@ impl RamfluxClient {
         context: &OwnContext,
         source_device: &str,
     ) -> Result<(), SdkError> {
+        self.account_db()?
+            .write_transaction(|| self.import_surface_context_inner(context, source_device))
+    }
+    fn import_surface_context_inner(
+        &self,
+        context: &OwnContext,
+        source_device: &str,
+    ) -> Result<(), SdkError> {
+        self.validate_own_context_namespace(context)?;
         let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
         let db = self.account_db()?;
         if let Some(group) = &context.group {
@@ -184,6 +244,23 @@ impl RamfluxClient {
                 }
             } else {
                 db.persist_client_record("conversation",&context.conversation_id,&json!({"id":context.conversation_id,"kind":"direct","group_id":null,"title":null,"participants":context.participants}))?;
+            }
+        }
+        if context.conversation_id.starts_with("dm:") {
+            let mut record = db
+                .client_record("conversation", &context.conversation_id)?
+                .ok_or_else(|| invalid("own DM binding absent"))?;
+            if record["participant_roots"].is_null() {
+                let own = self.own_account_anchor()?;
+                let friend =
+                    context.friend.as_ref().ok_or_else(|| invalid("own DM roots absent"))?;
+                let peer = if friend.requester_id == own {
+                    &friend.target_id
+                } else {
+                    &friend.requester_id
+                };
+                record["participant_roots"] = json!([own, peer]);
+                db.persist_client_record("conversation", &context.conversation_id, &record)?;
             }
         }
         Ok(())

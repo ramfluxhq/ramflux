@@ -507,7 +507,38 @@ impl RamfluxClient {
                 )?;
             }
         }
+        self.authorize_generated_scope(opened, entry, scanned)?;
         self.authorize_generated_native_fields(opened, entry, scanned)
+    }
+
+    fn authorize_generated_scope(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        scanned: &validation::ScannedInner<'_>,
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        if !matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl)
+            && source.root_commitment() != self.own_account_anchor()?
+            && opened.routing.conversation_id.starts_with(g::dm_scope::PREFIX)
+        {
+            g::dm_scope::validate_direct(
+                &opened.routing.conversation_id,
+                &self.own_account_anchor()?,
+                source.root_commitment(),
+            )
+            .map_err(|_| invalid("reserved DM root pair mismatch"))?;
+        }
+        if matches!(opened.routing.kind, Kind::GroupMessage | Kind::GroupControl) {
+            g::dm_scope::validate_group(&opened.routing.conversation_id)
+                .map_err(|_| invalid("group uses reserved DM namespace"))?;
+        } else if source.root_commitment() != self.own_account_anchor()?
+            && !(scanned.kind == 8
+                && g::Control::decode(scanned.body).is_ok_and(|c| matches!(c.operation, 3 | 4)))
+        {
+            self.validate_generated_direct_scope(opened, entry)?;
+        }
+        Ok(())
     }
 
     fn authorize_generated_native_fields(
@@ -672,18 +703,77 @@ impl RamfluxClient {
         Ok(())
     }
 
+    fn validate_generated_direct_scope(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+    ) -> Result<(), SdkError> {
+        let own = self.own_account_anchor()?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        let peer = source.root_commitment();
+        let conversation = &opened.routing.conversation_id;
+        g::dm_scope::validate_direct(conversation, &own, peer)
+            .map_err(|_| invalid("reserved DM root pair mismatch"))?;
+        if let Some(old) = self.account_db()?.client_record("conversation", conversation)? {
+            if old["kind"] != "direct"
+                || !old["group_id"].is_null()
+                || !self.authenticated_direct_participant(&old, entry)?
+            {
+                return Err(invalid("DM conversation binding conflict"));
+            }
+            let roots = old["participant_roots"]
+                .as_array()
+                .ok_or_else(|| invalid("DM participant roots absent or malformed"))?;
+            if roots.len() != 2
+                || roots
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != std::collections::BTreeSet::from([own.as_str(), peer])
+            {
+                return Err(invalid("DM participant roots conflict"));
+            }
+        } else if conversation
+            != &g::dm_scope::derive(&own, peer).map_err(|_| invalid("invalid DM roots"))?
+        {
+            return Err(invalid("unknown DM requires canonical root pair id"));
+        }
+        Ok(())
+    }
+
     fn ensure_generated_direct_conversation(
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
     ) -> Result<(), SdkError> {
         let db = self.account_db()?;
-        if db.client_record("conversation", &opened.routing.conversation_id)?.is_none() {
-            let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
-            db.persist_client_record("conversation", &opened.routing.conversation_id, &serde_json::json!({
-                "kind": "direct", "participants": [local.principal_id, entry.envelope.source_principal_id],
-            }))?;
-        }
+        let local = self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?;
+        let own = self.own_account_anchor()?;
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        let peer = source.root_commitment();
+        let conversation = &opened.routing.conversation_id;
+        let canonical =
+            g::dm_scope::derive(&own, peer).map_err(|_| invalid("invalid DM root pair"))?;
+        g::dm_scope::validate_direct(conversation, &own, peer)
+            .map_err(|_| invalid("reserved DM root pair mismatch"))?;
+        db.write_transaction(|| -> Result<(), SdkError> {
+            self.validate_generated_direct_scope(opened, entry)?;
+            if db.client_record("conversation", conversation)?.is_none() {
+                if conversation != &canonical {
+                    return Err(invalid("unknown DM requires canonical root pair id"));
+                }
+                db.persist_client_record(
+                    "conversation",
+                    conversation,
+                    &serde_json::json!({
+                        "id": conversation, "kind": "direct", "group_id": null,
+                        "participants": [local.principal_id, entry.envelope.source_principal_id],
+                        "participant_roots": [own, peer],
+                    }),
+                )?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 }

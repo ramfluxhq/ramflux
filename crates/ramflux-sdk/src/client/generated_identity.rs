@@ -32,6 +32,18 @@ fn tick(physical: u64, logical: u64) -> Result<u64, SdkError> {
 }
 
 impl RamfluxClient {
+    /// Derive an ordinary DM scope from this account and a verified peer device root.
+    /// Names, device rotations, primary transfer and home location do not enter the id.
+    /// # Errors
+    /// Refuses unavailable/revoked peer authority, malformed anchors and the same root.
+    pub fn generated_direct_conversation_id(
+        &self,
+        peer: &ramflux_crypto::RootQualifiedDeviceRef,
+    ) -> Result<String, SdkError> {
+        self.trusted_device(crate::client::identity_authority::HeadUse::NewAuthorization, peer)?;
+        g::dm_scope::derive(&self.own_account_anchor()?, peer.root_commitment())
+            .map_err(|_| refused("invalid ordinary DM root pair"))
+    }
     fn generated_hlc_key(&self) -> Result<String, SdkError> {
         Ok(format!("message-identity/hlc/{}", self.owned_device_identity()?.storage_key()))
     }

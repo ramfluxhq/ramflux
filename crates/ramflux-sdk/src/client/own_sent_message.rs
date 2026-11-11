@@ -32,6 +32,10 @@ impl SentMessage {
         conversation: &str,
         group: Option<&str>,
     ) -> Result<(), SdkError> {
+        if self.context.group.is_some() {
+            ramflux_protocol::message::dm_scope::validate_group(&self.context.conversation_id)
+                .map_err(|_| invalid("reserved DM conversation namespace"))?;
+        }
         if self.envelope_id != envelope
             || self.context.conversation_id != conversation
             || self.context.group.as_ref().map(|g| g.group_id.as_str()) != group

@@ -40,6 +40,8 @@ pub(crate) fn resolve(
     group: &str,
     requested: &str,
 ) -> Result<String, SdkError> {
+    ramflux_protocol::message::dm_scope::validate_group(requested)
+        .map_err(|_| SdkError::InboundRejected("reserved DM conversation namespace".into()))?;
     if client.born_v3_account.is_some()
         && let Some(state) = client.account_db()?.shared_group_state(group)?
     {
@@ -51,6 +53,8 @@ pub(crate) fn resolve(
 }
 
 fn repair_link(db: &AccountDb, group: &str, conversation: &str) -> Result<(), SdkError> {
+    ramflux_protocol::message::dm_scope::validate_group(conversation)
+        .map_err(|_| SdkError::InboundRejected("reserved DM conversation namespace".into()))?;
     let mut link = db.client_record("group", group)?.unwrap_or_else(|| serde_json::json!({}));
     // Earlier CLI reads could leave aliases that disable the single-thread binding. Repair
     // only this derived link, retaining unrelated metadata and all conversation/history rows.

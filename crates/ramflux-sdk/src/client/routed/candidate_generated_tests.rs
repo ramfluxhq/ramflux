@@ -45,6 +45,17 @@ fn seal_as(
     if let Ok(inner) = g::Inner::decode(body)
         && let Some(identity) = inner.identity
     {
+        if identity.conversation_id == "c"
+            && identity.group_id.is_none()
+            && b.client.account_db()?.client_record("conversation", "c")?.is_none()
+            && route.kind == Kind::Direct
+        {
+            b.client.account_db()?.persist_client_record("conversation", "c", &serde_json::json!({
+                "kind":"direct", "group_id":null,
+                "participants":[a.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id, b.client.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.principal_id],
+                "participant_roots":[a.client.own_account_anchor()?, b.client.own_account_anchor()?],
+            }))?;
+        }
         message.message_id = ramflux_protocol::encode_base64url(identity.id);
     }
     super::super::seal_as(a, b, message, body, route)
@@ -1374,5 +1385,97 @@ async fn message_page_respects_encoded_byte_cap_and_continuation() -> Result<(),
             .filter_map(|row| row.identity.as_ref())
             .all(|id| !first_ids.contains(&&id.id))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_dm_binds_verified_roots_and_refuses_conflicting_scope() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    for ordinal in 0..7 {
+        // Each refusal is independent; the receive-pass settlement regression covers
+        // ratchet progress after refused peer input on the same pair.
+        let (a, mut b) = pair(201, 203)?;
+        let scope =
+            g::dm_scope::derive(&a.client.own_account_anchor()?, &b.client.own_account_anchor()?)
+                .map_err(|_| invalid("fixture DM roots"))?;
+        let conversation = if ordinal == 0 { "unbound-arbitrary" } else { scope.as_str() };
+        let fence_key = format!(
+            "self-sync/erase/{}",
+            ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&(
+                b.client.own_account_anchor()?,
+                &scope
+            ))?)
+        );
+        let fence = serde_json::json!({"conversation_id":scope,"erased":true});
+        b.client.account_db()?.persist_actor_state(&fence_key, &fence)?;
+        let mut identity = generated_identity(&a, &format!("dm-{ordinal}"))?;
+        identity.conversation_id = conversation.into();
+        identity.id = g::identity::derive(
+            identity.author.as_ref().ok_or_else(|| invalid("author"))?,
+            conversation,
+            identity.device_sequence,
+        )
+        .map_err(|_| invalid("fixture id"))?
+        .to_vec();
+        let id = ramflux_protocol::encode_base64url(&identity.id);
+        let raw = RamfluxClient::encode_generated_inner(
+            identity,
+            &g::Content {
+                value: Some(g::content::Value::Message(g::Message {
+                    text: "DM".into(),
+                    ..Default::default()
+                })),
+            },
+        )?;
+        if ordinal == 2 {
+            let bound = serde_json::json!({"kind":"direct","group_id":null,"participants":["alice","bob"],"participant_roots":[b.client.own_account_anchor()?,ramflux_protocol::encode_base64url([99;32])]});
+            b.client.account_db()?.persist_client_record("conversation", &scope, &bound)?;
+        } else if ordinal == 3 {
+            b.client.account_db()?.persist_client_record(
+                "conversation",
+                &scope,
+                &serde_json::json!({"kind":"group", "group_id":"squat"}),
+            )?;
+        }
+        if ordinal == 4 {
+            b.client.account_db()?.persist_client_record("conversation", &scope, &serde_json::json!({"kind":"direct","group_id":null,"participants":["alice","mallory"]}))?;
+        }
+        if ordinal >= 5 {
+            let mut bound =
+                serde_json::json!({"kind":"direct","group_id":null,"participants":["alice","bob"]});
+            bound["participant_roots"] = if ordinal == 5 {
+                serde_json::json!("not-a-root-array")
+            } else {
+                serde_json::json!([b.client.own_account_anchor()?, null])
+            };
+            b.client.account_db()?.persist_client_record("conversation", &scope, &bound)?;
+        }
+        let entry = seal(&a, &b, message(&format!("dm-{ordinal}"), conversation), &raw)?;
+        let result = apply(&mut b, &entry).await;
+        if ordinal == 1 {
+            result?;
+            let bound = b
+                .client
+                .account_db()?
+                .client_record("conversation", &scope)?
+                .ok_or_else(|| invalid("binding"))?;
+            assert_eq!(bound["participant_roots"].as_array().map(Vec::len), Some(2));
+            assert!(b.client.account_db()?.message_content(&id)?.is_some());
+            assert_eq!(
+                b.client.generated_direct_conversation_id(&a.client.owned_device_identity()?)?,
+                scope
+            );
+        } else {
+            assert!(result.is_err(), "accepted conflicting scope {ordinal}");
+            assert!(b.client.account_db()?.message_content(&id)?.is_none());
+        }
+        assert_eq!(
+            b.client.account_db()?.load_actor_state::<serde_json::Value>(&fence_key)?,
+            Some(fence)
+        );
+        assert!(
+            b.client.account_db()?.client_record("conversation", "unbound-arbitrary")?.is_none()
+        );
+    }
     Ok(())
 }

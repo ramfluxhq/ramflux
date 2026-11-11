@@ -179,6 +179,7 @@ impl RamfluxClient {
         packet: &TaskOwnPacket,
         source_device: &str,
     ) -> Result<(), SdkError> {
+        self.validate_own_context_namespace(&packet.context)?;
         let conversation = &packet.context.conversation_id;
         self.account_db()?.write_transaction(|| {
             self.check_task_own_group_fence(&packet.context)?;

@@ -57,7 +57,7 @@ needle='let sizes = measure_wire_sealed_send(client, persist)?;'
 assert s.count(needle)==1
 path.write_text(s.replace(needle, 'client.account_db()?.persist_actor_state(&format!("dm-pair/ephemeral-seals/{}", persist.session.session_id), &0_u16)?;\n    '+needle))
 PY
-expect_assertion_failure typing_cannot_exhaust_skipped_keys_or_bootstrap
+expect_assertion_failure typing_budget_survives_interleaved_durable_sends_and_restart
 cp "$saved_send" "$send"
 python3 - "$reaction" <<'PY'
 from pathlib import Path
