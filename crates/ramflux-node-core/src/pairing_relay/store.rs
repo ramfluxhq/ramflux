@@ -65,7 +65,13 @@ pub(super) enum SlotBody {
     Live(Box<LiveSlot>),
 }
 
+pub(super) struct LeaseCache {
+    pub(super) request_hash: [u8; 32],
+    pub(super) lease: Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::DataLease>,
+}
+
 pub(super) struct LiveSlot {
+    pub(super) data_lease: Option<Box<LeaseCache>>,
     pub(super) ticket: Envelope<CreateTicket>,
     pub(super) descriptor: Envelope<Invitation>,
     pub(super) primary_token: Zeroizing<[u8; 32]>,
@@ -205,6 +211,116 @@ impl PairingRelayStore {
             }),
             _ => Err(PairingRelayError::Retired),
         }
+    }
+
+    /// Issue a data-only lease once from a saved live primary-transfer invitation.
+    /// The native proof owner supplies fresh verified account and node authority.
+    /// # Errors
+    /// Refuses absent/expired invitations, changed original bindings, missing branch proofs,
+    /// conflicting retries and the bounded two-lease/per-account allocation budget.
+    pub fn issue_data_lease(
+        &mut self,
+        request: &ramflux_protocol::custody::pairing::full_transfer::lease::LeaseRequest,
+        authority: &ramflux_crypto::custody::VerifiedRecord,
+        node: &ramflux_crypto::custody::VerifiedNodeRecord,
+    ) -> Result<
+        Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::DataLease>,
+        PairingRelayError,
+    > {
+        let _guard = admit()?;
+        self.prune()?;
+        request.validate().map_err(|error| wire(&error))?;
+        let now = self.now()?;
+        if request.grant.node_id != node.envelope().body.node_id
+            || self.node_key != node.envelope().body.node_signing_public_key
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        let invitation = parse_id(&request.invitation_id, "invitation_id")?;
+        let live = self.live(invitation)?;
+        let original = &live.descriptor.body;
+        if live.closed_reason.is_some()
+            || original.purpose != "primary_transfer"
+            || original.issuer_seq != request.issuer_seq
+            || original.transfer_id.as_ref() != Some(&request.grant.transfer_id)
+            || original.primary_ref != request.grant.source_ref
+            || original
+                .destination_ref
+                .as_ref()
+                .is_some_and(|reference| reference != &request.grant.destination_ref)
+        {
+            return Err(PairingRelayError::WrongContext);
+        }
+        ramflux_crypto::custody::pairing::verify_full_lease_request(request, authority, now.wall)
+            .map_err(|error| match error {
+            ramflux_crypto::CryptoError::Pairing("HeadChanged") => PairingRelayError::HeadChanged,
+            ramflux_crypto::CryptoError::Pairing("LeaseExpired") => PairingRelayError::LeaseExpired,
+            _ => PairingRelayError::WrongContext,
+        })?;
+        let request_hash = ramflux_crypto::blake3_256(
+            "ramflux.pairing.full.lease_request_cache.v1",
+            &request.to_wire_bytes().map_err(|error| wire(&error))?,
+        );
+        if let Some(saved) = &live.data_lease {
+            return if saved.request_hash == request_hash {
+                Ok(saved.lease.clone())
+            } else {
+                Err(PairingRelayError::Replay)
+            };
+        }
+        let mut count = 0;
+        for slot in self.slots.values() {
+            if let SlotBody::Live(other) = &slot.body
+                && other.data_lease.is_some()
+            {
+                count += 1;
+                if other.descriptor.body.account_anchor == request.grant.source_ref.account_anchor {
+                    return Err(self.busy());
+                }
+            }
+        }
+        if count >= 2 {
+            return Err(self.busy());
+        }
+        let lease = self.sign_data_lease(request.grant.clone(), now.wall)?;
+        let cached = Box::new(LeaseCache { request_hash, lease: lease.clone() });
+        let bytes = super::bytes::lease_cache_heap(&cached);
+        if bytes > 8192 {
+            return Err(PairingRelayError::invalid("lease_size"));
+        }
+        self.charge(bytes)?;
+        self.live_mut(invitation)?.data_lease = Some(cached);
+        Ok(lease)
+    }
+
+    fn sign_data_lease(
+        &self,
+        grant: ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        now: u64,
+    ) -> Result<
+        Envelope<ramflux_protocol::custody::pairing::full_transfer::lease::DataLease>,
+        PairingRelayError,
+    > {
+        let body =
+            ramflux_protocol::custody::pairing::full_transfer::lease::DataLease {
+                schema: "ramflux.pairing.full_transfer.data_lease.v1".into(),
+                version: 1,
+                lease_id: encode_base64url(
+                    random_32().map_err(|_| PairingRelayError::invalid("entropy"))?,
+                ),
+                expires_at: grant.expires_at.min(now.saturating_add(
+                    ramflux_protocol::custody::pairing::full_transfer::LEASE_SECONDS,
+                )),
+                grant,
+                issued_at: now,
+            };
+        Ok(Envelope {
+            signature: sign_canonical_bytes_with_seed(
+                &body.signing_bytes().map_err(|error| wire(&error))?,
+                *self.seed,
+            ),
+            body,
+        })
     }
 
     /// # Errors
@@ -603,6 +719,7 @@ impl PairingRelayStore {
             expires_at,
             monotonic_deadline,
             body: SlotBody::Live(Box::new(LiveSlot {
+                data_lease: None,
                 ticket: create.ticket,
                 descriptor,
                 primary_token: Zeroizing::new(primary),

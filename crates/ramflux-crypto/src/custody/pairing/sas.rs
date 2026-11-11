@@ -7,9 +7,7 @@ use crate::{CryptoError, hkdf_sha256};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hmac::{Hmac, Mac};
-use ramflux_protocol::custody::pairing::{
-    RoleContext, Transcript, context_commitment_preimage, transcript_preimage,
-};
+use ramflux_protocol::custody::pairing::{RoleContext, SasContext, require_context_version};
 use ramflux_protocol::{decode_base64url, domain, encode_base64url};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -139,13 +137,13 @@ enum Phase {
 
 /// Local commitment waiting for the peer reveal. Secrets are memory-only.
 #[derive(ZeroizeOnDrop)]
-pub struct PendingSas {
+pub struct PendingSas<C: SasContext = RoleContext> {
     #[zeroize(skip)]
     role: PairingRole,
     #[zeroize(skip)]
     phase: Phase,
     #[zeroize(skip)]
-    context: RoleContext,
+    context: C,
     #[zeroize(skip)]
     commitment: [u8; 32],
     #[zeroize(skip)]
@@ -175,37 +173,37 @@ pub struct EstablishedSas {
     secrets: PairingSecrets,
 }
 
-/// Freeze a complete role context and return its v2 commitment.
+/// Freeze a complete role context and return its selected v2/v3 profile commitment.
 ///
 /// # Errors
 /// Rejects a role/sas-key mismatch, an all-zero SAS public key, or an invalid context.
-pub fn commit(
+pub fn commit<C: SasContext>(
     role: PairingRole,
-    context: &RoleContext,
+    context: &C,
     sas_secret: &[u8; 32],
     salt: &[u8; 32],
-) -> Result<PendingSas, CryptoError> {
-    if context.role != role.as_str() {
+) -> Result<PendingSas<C>, CryptoError> {
+    if context.role() != role.as_str() {
         return Err(CryptoError::Pairing("role_mismatch"));
     }
     let public = PublicKey::from(&StaticSecret::from(*sas_secret)).to_bytes();
     if public.iter().all(|byte| *byte == 0) {
         return Err(CryptoError::Pairing("all_zero_sas_key"));
     }
-    if encode_base64url(public) != context.sas_key {
+    if encode_base64url(public) != context.sas_key() {
         return Err(CryptoError::Pairing("sas_key_mismatch"));
     }
     Ok(PendingSas {
         role,
         phase: Phase::Committed,
         context: context.clone(),
-        commitment: sha256(&context_commitment_preimage(context, salt)?),
+        commitment: sha256(&context.commitment_preimage(salt)?),
         peer_commitment: None,
         secrets: PairingSecrets::pending(*sas_secret, *salt),
     })
 }
 
-impl PendingSas {
+impl<C: SasContext> PendingSas<C> {
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         self.commitment
@@ -224,7 +222,7 @@ impl PendingSas {
     ///
     /// # Errors
     /// Rejects a cleaned session or a missing peer commitment.
-    pub fn context(&self) -> Result<&RoleContext, CryptoError> {
+    pub fn context(&self) -> Result<&C, CryptoError> {
         self.require_ready()?;
         Ok(&self.context)
     }
@@ -233,7 +231,7 @@ impl PendingSas {
     ///
     /// # Errors
     /// Rejects a cleaned session or a missing peer commitment.
-    pub fn reveal(&self) -> Result<([u8; 32], &RoleContext), CryptoError> {
+    pub fn reveal(&self) -> Result<([u8; 32], &C), CryptoError> {
         Ok((self.salt()?, self.context()?))
     }
 
@@ -268,7 +266,7 @@ impl PendingSas {
     /// Rejects a cleaned session, a missing/mismatched commitment, non-contributory DH, or an invalid transcript.
     pub fn establish(
         mut self,
-        peer: &RoleContext,
+        peer: &C,
         peer_salt: &[u8; 32],
     ) -> Result<EstablishedSas, CryptoError> {
         if self.phase == Phase::Dead {
@@ -284,6 +282,18 @@ impl PendingSas {
                 Err(error)
             }
         }
+    }
+
+    /// Decode the peer's original bytes under this ceremony's frozen profile.
+    /// # Errors
+    /// A different context version returns `UpdateRequired`, without any v2/v3 fallback.
+    pub fn establish_wire(
+        self,
+        peer: &[u8],
+        salt: &[u8; 32],
+    ) -> Result<EstablishedSas, CryptoError> {
+        require_context_version(peer, C::VERSION)?;
+        self.establish(&C::from_wire_bytes(peer)?, salt)
     }
 
     /// Cancel or expire a pending ceremony and wipe the SAS secret.
@@ -318,7 +328,7 @@ impl PendingSas {
 
     fn require_local_sas_key(&self) -> Result<(), CryptoError> {
         let local_public = PublicKey::from(&StaticSecret::from(self.secrets.sas_secret)).to_bytes();
-        if encode_base64url(local_public) == self.context.sas_key {
+        if encode_base64url(local_public) == self.context.sas_key() {
             Ok(())
         } else {
             Err(CryptoError::Pairing("sas_key_mismatch"))
@@ -327,16 +337,16 @@ impl PendingSas {
 
     fn establish_inner(
         &mut self,
-        peer: &RoleContext,
+        peer: &C,
         peer_salt: &[u8; 32],
     ) -> Result<EstablishedSas, CryptoError> {
         self.require_ready()?;
         self.require_local_sas_key()?;
         let expected = self.peer_commitment.ok_or(CryptoError::Pairing("peer_commit_missing"))?;
-        if PairingRole::parse(&peer.role)? != self.role.peer() {
+        if PairingRole::parse(peer.role())? != self.role.peer() {
             return Err(CryptoError::Pairing("role_mismatch"));
         }
-        let computed = sha256(&context_commitment_preimage(peer, peer_salt)?);
+        let computed = sha256(&peer.commitment_preimage(peer_salt)?);
         if computed != expected {
             return Err(CryptoError::Pairing("commitment_mismatch"));
         }
@@ -345,8 +355,8 @@ impl PendingSas {
         derived_session(self.role, transcript_hash, ikm, Zeroizing::new(self.secrets.salt))
     }
 
-    fn diffie_hellman_ikm(&self, peer: &RoleContext) -> Result<[u8; 32], CryptoError> {
-        let peer_public = x25519_public(&peer.sas_key)?;
+    fn diffie_hellman_ikm(&self, peer: &C) -> Result<[u8; 32], CryptoError> {
+        let peer_public = x25519_public(peer.sas_key())?;
         let local_public = PublicKey::from(&StaticSecret::from(self.secrets.sas_secret)).to_bytes();
         if peer_public == local_public {
             return Err(CryptoError::Pairing("reflection"));
@@ -360,18 +370,8 @@ impl PendingSas {
         Ok(ikm)
     }
 
-    fn transcript_hash_for(&self, peer: &RoleContext) -> Result<[u8; 32], CryptoError> {
-        let (initiator, responder) = match self.role {
-            PairingRole::Initiator => (self.context.clone(), peer.clone()),
-            PairingRole::Responder => (peer.clone(), self.context.clone()),
-        };
-        let transcript = Transcript {
-            schema: "ramflux.pairing.Transcript.v2".into(),
-            version: 2,
-            initiator,
-            responder,
-        };
-        Ok(sha256(&transcript_preimage(&transcript)?))
+    fn transcript_hash_for(&self, peer: &C) -> Result<[u8; 32], CryptoError> {
+        Ok(sha256(&self.context.paired_preimage(peer, self.role == PairingRole::Initiator)?))
     }
 
     #[cfg(test)]

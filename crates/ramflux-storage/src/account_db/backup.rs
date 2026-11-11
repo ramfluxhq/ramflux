@@ -28,6 +28,29 @@ pub struct AccountBackupSnapshot {
     pub counts: BackupCounts,
 }
 
+/// A-only pinned encrypted read view. Pinning and copying are separate operations so
+/// the generation/writer owner releases queued writes before any bulk disk work.
+/// Neither its source key nor the eventual database file belongs on the pairing wire.
+pub struct FullTransferCut {
+    reader: AccountDb,
+}
+impl FullTransferCut {
+    /// Copy the previously pinned view to A-private encrypted storage in bounded page batches.
+    /// # Errors
+    /// Refuses unresolved scratch, cancellation, low space and snapshot I/O errors.
+    pub fn write_private_snapshot(
+        self,
+        destination: &Path,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<AccountBackupSnapshot, StorageError> {
+        self.reader.require_selected_transfer_source()?;
+        let copied =
+            self.reader.write_snapshot(destination, cancel, SnapshotPolicy::NativeFullTransfer)?;
+        self.reader.require_selected_transfer_source()?;
+        Ok(copied)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SnapshotPolicy {
     Backup,
@@ -101,7 +124,35 @@ impl AccountDb {
         destination: &Path,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<AccountBackupSnapshot, StorageError> {
-        self.write_snapshot(destination, cancel, SnapshotPolicy::NativeFullTransfer)
+        self.pin_full_transfer_cut()?.write_private_snapshot(destination, cancel)
+    }
+
+    /// Pin an independent read-only cut under the caller's generation/writer owner.
+    /// Callers must commit the exact J6 acknowledgement before taking a tail cut,
+    /// then release that owner before calling `write_private_snapshot`.
+    /// # Errors
+    /// Refuses stale account generations and encrypted read transaction failures.
+    pub fn pin_full_transfer_cut(&self) -> Result<FullTransferCut, StorageError> {
+        self.require_selected_transfer_source()?;
+        let cut = FullTransferCut { reader: self.open_backup_reader()? };
+        cut.reader.require_selected_transfer_source()?;
+        Ok(cut)
+    }
+
+    fn require_selected_transfer_source(&self) -> Result<(), StorageError> {
+        let selected = match self.account_index.account(&self.local_account_id) {
+            Err(StorageError::AccountNotFound(_)) => {
+                return Err(StorageError::PairingField("SnapshotInvalidated"));
+            }
+            value => value?,
+        };
+        if selected.account_state == "removed"
+            || self.account_index.root().join(&selected.db_relative_path) != self.path
+            || selected.principal_commitment != self.principal_commitment
+        {
+            return Err(StorageError::PairingField("SnapshotInvalidated"));
+        }
+        Ok(())
     }
 
     fn write_snapshot(
@@ -128,7 +179,7 @@ impl AccountDb {
         }
         drop(file);
         let key = AccountDbKey::generate()?;
-        let key_hex = key.sqlcipher_hex();
+        let key_hex = zeroize::Zeroizing::new(key.sqlcipher_hex());
         let fingerprint = key.fingerprint();
         let path = destination.to_owned();
         let counts = self.connection.call(move |source| {
@@ -136,7 +187,7 @@ impl AccountDb {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             let mut target = rusqlite::Connection::open(path)?;
-            target.execute_batch(&format!("PRAGMA key = \"x'{key_hex}'\"; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; PRAGMA secure_delete=ON;"))?;
+            target.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = \"x'{}'\"; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-2048; PRAGMA secure_delete=ON;", key_hex.as_str())))?;
             {
                 let snapshot = rusqlite::backup::Backup::new(source, &mut target)?;
                 loop {

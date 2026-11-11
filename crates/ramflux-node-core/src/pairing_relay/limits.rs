@@ -152,6 +152,10 @@ pub enum PairingRelayError {
     Replay,
     #[error("NotFound")]
     NotFound,
+    #[error("HeadChanged")]
+    HeadChanged,
+    #[error("LeaseExpired")]
+    LeaseExpired,
     #[error("PublicationPending")]
     PublicationPending,
 }
@@ -177,6 +181,8 @@ impl PairingRelayError {
             Self::Replay => "Replay",
             Self::NotFound => "NotFound",
             Self::PublicationPending => "PublicationPending",
+            Self::HeadChanged => "HeadChanged",
+            Self::LeaseExpired => "LeaseExpired",
         }
     }
 }

@@ -5,7 +5,9 @@
 //! Dormant: talks only to pairing routes; grants no account session.
 use crate::SdkError;
 use crate::custody::CustodyConnection;
+use ramflux_protocol::custody::Envelope;
 use ramflux_protocol::custody::pairing::PairingWire;
+use ramflux_protocol::custody::pairing::full_transfer::lease::{DataLease, LeaseRequest};
 use ramflux_protocol::custody::pairing::native::{
     Create, CreateSpec, Created, Failure, Issue, Issued, NativeReply,
 };
@@ -57,6 +59,10 @@ pub trait PairingNative: std::marker::Send + std::marker::Sync {
     /// # Errors
     /// Native Create refusal, `Busy`, `Expired`, or `Retired`.
     fn create(&self, create: Create) -> BoxFut<Result<Created, SdkError>>;
+    /// A data lease uses this ceremony's separate proof connection and grants no session.
+    fn data_lease(&self, _request: LeaseRequest) -> BoxFut<Result<Envelope<DataLease>, SdkError>> {
+        Box::pin(async { Err(SdkError::PairingCode("UpdateRequired")) })
+    }
     /// Publish a user-approved exact candidate on this ceremony's authenticated connection.
     fn publish(
         &self,
@@ -113,6 +119,21 @@ impl<S> FreshPairingNative<S> {
 impl<S: ramflux_transport::GatewaySessionTransport + std::marker::Send + 'static> PairingNative
     for FreshPairingNative<S>
 {
+    fn data_lease(&self, request: LeaseRequest) -> BoxFut<Result<Envelope<DataLease>, SdkError>> {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .connection
+            .clone();
+        Box::pin(async move {
+            ProofPairingNative::from_connection(
+                connection.ok_or(SdkError::PairingCode("WrongContext"))?,
+            )
+            .data_lease(request)
+            .await
+        })
+    }
     fn publish(
         &self,
         publication: ramflux_protocol::custody::Publication,
@@ -226,6 +247,30 @@ impl ProofPairingNative {
 }
 
 impl PairingNative for ProofPairingNative {
+    fn data_lease(&self, request: LeaseRequest) -> BoxFut<Result<Envelope<DataLease>, SdkError>> {
+        let prove = Arc::clone(&self.prove);
+        Box::pin(async move {
+            request.validate().map_err(|error| wire(&error))?;
+            let expected = request.grant.clone();
+            match prove(CustodyProofAction::PairingDataLease { request: Box::new(request) }).await?
+            {
+                CustodyServerFrame::PairingDataLease { lease } => {
+                    lease.body.validate().map_err(|error| wire(&error))?;
+                    if lease.body.grant != expected {
+                        return Err(SdkError::PairingCode("WrongContext"));
+                    }
+                    Ok(*lease)
+                }
+                CustodyServerFrame::Pairing { reply } => match reply.reply {
+                    NativeReply::Failure(failure) => Err(failure_error(&failure)),
+                    _ => Err(SdkError::PairingCode("InvalidInput")),
+                },
+                CustodyServerFrame::Refused { code, .. } => Err(code.into()),
+                _ => Err(SdkError::PairingCode("InvalidInput")),
+            }
+        })
+    }
+
     fn publish(
         &self,
         publication: ramflux_protocol::custody::Publication,
@@ -508,9 +553,14 @@ pub fn assemble_chunks(chunks: &[(u64, String, u64, u64, String)]) -> Result<Vec
 
 pub(super) fn wire(error: &ramflux_protocol::custody::pairing::WireError) -> SdkError {
     match error {
-        ramflux_protocol::custody::pairing::WireError::Field("TransferFloorsTooLarge") => {
-            SdkError::PairingCode("TransferFloorsTooLarge")
-        }
+        ramflux_protocol::custody::pairing::WireError::Field(
+            code @ ("TransferFloorsTooLarge"
+            | "UpdateRequired"
+            | "LeaseExpired"
+            | "ChunkMismatch"
+            | "SchemaMismatch"
+            | "ManifestMismatch"),
+        ) => SdkError::PairingCode(code),
         ramflux_protocol::custody::pairing::WireError::Field(name) => SdkError::PairingField(name),
         ramflux_protocol::custody::pairing::WireError::Size
         | ramflux_protocol::custody::pairing::WireError::Json

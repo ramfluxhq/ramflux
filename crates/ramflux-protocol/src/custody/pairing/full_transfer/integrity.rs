@@ -4,8 +4,8 @@
 //! Constant-memory chunk/root and chain commitments; no hash-list collection.
 use super::{CHUNK_BYTES, PairingWire, Result, SourceManifest, WireError, require};
 
-fn framed(tag: &str) -> blake3::Hasher {
-    let mut hasher = blake3::Hasher::new();
+pub(super) fn framed(tag: &str) -> zeroize::Zeroizing<blake3::Hasher> {
+    let mut hasher = zeroize::Zeroizing::new(blake3::Hasher::new());
     // All full-profile tags are fixed ASCII strings, well within a u32 frame.
     hasher.update(&u32::try_from(tag.len()).unwrap_or(u32::MAX).to_be_bytes());
     hasher.update(tag.as_bytes());
@@ -33,7 +33,7 @@ pub fn chunk_digest(index: u64, plaintext: &[u8]) -> Result<[u8; 32]> {
 }
 /// Exact ordered root, including the empty stream. Only one chunk is borrowed at a time.
 pub struct RootHasher {
-    hasher: blake3::Hasher,
+    hasher: zeroize::Zeroizing<blake3::Hasher>,
     count: u64,
     final_length: u32,
     next: u64,
@@ -77,7 +77,7 @@ pub fn manifest_hash(manifest: &SourceManifest) -> Result<[u8; 32]> {
 /// Replays disk-backed ordered manifest metadata into the length-prefixed chain commitment.
 /// A new instance is required for each chain length because the count precedes its members.
 pub struct ChainHasher {
-    hasher: blake3::Hasher,
+    hasher: zeroize::Zeroizing<blake3::Hasher>,
     count: u64,
     next: u64,
 }
