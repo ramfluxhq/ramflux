@@ -419,6 +419,7 @@ impl PairingWire for Failure {
                     | "SasMismatch"
                     | "PublicationPending"
                     | "TransferCapacity"
+                    | "TransferFloorsTooLarge"
                     | "UpdateRequired"
                     | "VaultUnavailable"
                     | "NotFound"

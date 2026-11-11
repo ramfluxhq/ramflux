@@ -7,7 +7,8 @@ use crate::SdkError;
 use ramflux_crypto::custody::pairing::{HpkeReceiver, HpkeSender, MAX_HPKE_PLAINTEXT};
 use ramflux_protocol::custody::DeviceRef;
 use ramflux_protocol::custody::pairing::channel::{
-    DataKey, GroupRestriction, JournalEntry, PendingInvitation, TransferPayload,
+    AttestingHead, DataKey, GroupRestriction, JournalEntry, PendingInvitation, RetainedFloor,
+    RetainedFloorsRef, TransferPayload,
 };
 use ramflux_protocol::custody::pairing::{PairingWire, Transcript};
 use serde::{Serialize, Serializer, ser::SerializeMap};
@@ -28,6 +29,8 @@ macro_rules! canonical {
 }
 
 canonical!(DataKey, key, key_id, purpose);
+canonical!(AttestingHead, epoch, hash);
+canonical!(RetainedFloorsRef, count, object_hash, total_len);
 canonical!(DeviceRef, account_anchor, device_epoch, device_id);
 canonical!(PendingInvitation, expires_at, invitation_id, proposal_hash);
 canonical!(JournalEntry, acknowledgement_hash, intent_hash, operation_id, state);
@@ -54,10 +57,33 @@ where
     }
 }
 
+impl Serialize for Canonical<'_, RetainedFloor> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (root, epoch, head, device) = match self.0 {
+            RetainedFloor::Root { root, epoch, attesting_head } => {
+                (root, epoch, attesting_head, None)
+            }
+            RetainedFloor::Device { root, device, epoch, attesting_head } => {
+                (root, epoch, attesting_head, Some(device))
+            }
+        };
+        let mut map = serializer.serialize_map(Some(if device.is_some() { 5 } else { 4 }))?;
+        map.serialize_entry("attesting_head", &Canonical(head))?;
+        if let Some(device) = device {
+            map.serialize_entry("device", device)?;
+        }
+        map.serialize_entry("epoch", epoch)?;
+        map.serialize_entry("kind", if device.is_some() { "device_floor" } else { "root_floor" })?;
+        map.serialize_entry("root", root)?;
+        map.end()
+    }
+}
+
 impl Serialize for Canonical<'_, TransferPayload> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let value = self.0;
-        let mut map = serializer.serialize_map(Some(12))?;
+        let mut map =
+            serializer.serialize_map(Some(12 + usize::from(value.retained_floors.is_some())))?;
         map.serialize_entry("current_record_hash", &value.current_record_hash)?;
         map.serialize_entry("delegation_state", &value.delegation_state)?;
         map.serialize_entry("device_set_epoch", &value.device_set_epoch)?;
@@ -72,6 +98,9 @@ impl Serialize for Canonical<'_, TransferPayload> {
             "pending_invitations",
             &Canonical(value.pending_invitations.as_slice()),
         )?;
+        if let Some(reference) = &value.retained_floors {
+            map.serialize_entry("retained_floors", &Canonical(reference))?;
+        }
         map.serialize_entry("schema", &value.schema)?;
         map.serialize_entry("transcript_hash", &value.transcript_hash)?;
         map.serialize_entry("transfer_id", &value.transfer_id)?;
@@ -174,3 +203,53 @@ pub fn merge_denials(
     }
     Ok(merged.into_values().collect())
 }
+
+/// Encode the complete collection before any artifact is queued. Never truncate it.
+/// # Errors
+/// Over-count or over-size collections return `TransferFloorsTooLarge`.
+pub fn encode_retained_floors(
+    floors: &[RetainedFloor],
+) -> Result<(RetainedFloorsRef, Zeroizing<Vec<u8>>), SdkError> {
+    if floors.len() > 8192 {
+        return Err(SdkError::PairingCode("TransferFloorsTooLarge"));
+    }
+    for floor in floors {
+        floor.validate().map_err(|error| super::transport::wire(&error))?;
+    }
+    let bytes = crate::custody::serialize_secret(&Canonical(floors), 1_048_576)
+        .map_err(|_| SdkError::PairingCode("TransferFloorsTooLarge"))?;
+    let reference = RetainedFloorsRef {
+        count: u64::try_from(floors.len())
+            .map_err(|_| SdkError::PairingCode("TransferFloorsTooLarge"))?,
+        total_len: u64::try_from(bytes.len())
+            .map_err(|_| SdkError::PairingCode("TransferFloorsTooLarge"))?,
+        object_hash: ramflux_protocol::custody::object_hash(&floors)?,
+    };
+    Ok((reference, bytes))
+}
+
+/// Verify the commitment and exact canonical collection before exposing any floor.
+/// # Errors
+/// Wrong count, length, hash, noncanonical JSON or an invalid entry refuses the artifact.
+pub fn decode_retained_floors(
+    reference: &RetainedFloorsRef,
+    bytes: &[u8],
+) -> Result<Vec<RetainedFloor>, SdkError> {
+    reference.validate().map_err(|error| super::transport::wire(&error))?;
+    if bytes.len() > 1_048_576 {
+        return Err(SdkError::PairingCode("TransferFloorsTooLarge"));
+    }
+    if u64::try_from(bytes.len()).ok() != Some(reference.total_len) {
+        return Err(SdkError::PairingCode("WrongContext"));
+    }
+    let floors: Vec<RetainedFloor> = ramflux_protocol::parse_i_json_secret(bytes)
+        .map_err(|_| SdkError::PairingCode("InvalidInput"))?;
+    let (actual, canonical) = encode_retained_floors(&floors)?;
+    if actual != *reference || canonical.as_slice() != bytes {
+        return Err(SdkError::PairingCode("WrongContext"));
+    }
+    Ok(floors)
+}
+
+#[cfg(test)]
+mod tests;

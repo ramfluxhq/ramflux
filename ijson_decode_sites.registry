@@ -730,6 +730,7 @@ crates/ramflux-sdk/src/custody/pairing/install_store.rs | decode | 1 | E | exclu
 crates/ramflux-sdk/src/custody/pairing/local_credential.rs | load_reservation | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/pairing/publication.rs | decode_candidate | 1 | E | excluded=local own-db pairing head (Publication wrapping an Envelope); not network ingress
 crates/ramflux-sdk/src/custody/pairing/publication.rs | decode_ref | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/custody/pairing/transfer_payload.rs | decode_retained_floors | 1 | A | strict=parse_i_json_secret; admission=assembled SAS-channel floor artifact then exact count length hash and canonical validation
 crates/ramflux-sdk/src/custody/pairing/transfer_payload.rs | open_payload | 1 | A | strict=parse_i_json_secret; admission=decrypted Auth HPKE original-byte strict payload then transcript/selection validation
 crates/ramflux-sdk/src/custody/vault/linux/init.rs | parse | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/custody/vault/presence.rs | approved_primary_inner | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
