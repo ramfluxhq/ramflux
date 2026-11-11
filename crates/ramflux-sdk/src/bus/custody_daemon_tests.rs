@@ -3,6 +3,7 @@
 
 //! Startup isolation for active and inconsistent custody accounts.
 use super::custody_setup_tests::{Shutdown, connect};
+use crate::platform::listener::BusListener;
 use crate::{
     custody::tests::{Root, TestVault, input},
     *,
@@ -111,16 +112,12 @@ async fn daemon_status_reports_schema_generation() -> Result {
     let root = Root::new()?;
     let socket = root.0.join("bus.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;
-    let uid = std::fs::metadata(&socket)?.uid();
+    let listener = crate::platform::listener::UnixBusListener::from_bound(listener, &socket);
+    let peer = listener.owner()?;
     let supervisor =
         crate::bus::supervisor::Supervisor::new(LocalBusConfig::new(&socket, &root.0))?;
     let (stop, receiver) = watch::channel(false);
-    let accept_loop = super::connection::accept(
-        crate::platform::listener::UnixBusListener::from_bound(listener, &socket),
-        uid,
-        supervisor,
-        receiver,
-    );
+    let accept_loop = super::connection::accept(listener, peer, supervisor, receiver);
     let flow = async {
         let mut bus = LocalBusClient::connect(&socket).await?;
         let status = tokio::time::timeout(

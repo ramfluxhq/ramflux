@@ -725,15 +725,10 @@ fn require_account_binding(root: &Path, id: &str, anchor: &str) -> Result<(), Sd
     Ok(())
 }
 fn private_directory(path: &Path) -> Result<(), SdkError> {
-    use std::os::unix::fs::DirBuilderExt;
-    let mut builder = fs::DirBuilder::new();
-    builder.mode(0o700);
-    builder.create(path)?;
-    Ok(())
+    crate::platform::fs::create_owner_only_dir(path)
 }
 fn create_private_temp(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut file = crate::platform::fs::create_new_owner_only(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())

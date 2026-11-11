@@ -23,7 +23,23 @@ pub(crate) fn set_owner_only_file(path: &Path) -> Result<(), SdkError> {
 }
 
 pub(crate) fn create_new_owner_only(path: &Path) -> Result<File, SdkError> {
-    Ok(OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?)
+    Ok(create_new_owner_only_io(path)?)
+}
+
+pub(crate) fn create_new_owner_only_io(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+pub(crate) fn open_owner_only_truncate(path: &Path) -> Result<File, SdkError> {
+    Ok(OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?)
+}
+
+pub(crate) fn create_owner_only_dir(path: &Path) -> Result<(), SdkError> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(path)?;
+    Ok(())
 }
 
 pub(crate) fn open_owner_only_read_write(path: &Path) -> Result<File, SdkError> {

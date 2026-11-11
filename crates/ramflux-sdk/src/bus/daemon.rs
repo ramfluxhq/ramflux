@@ -240,13 +240,6 @@ async fn restore_local_bus_account_impl(
     Ok(local_bus_account_response(manifest, account))
 }
 
-pub(crate) fn verify_local_bus_peer(
-    stream: &crate::platform::fs::LocalSocketStream,
-    expected_uid: u32,
-) -> Result<(), SdkError> {
-    crate::platform::fs::verify_peer_uid(stream, expected_uid)
-}
-
 pub(crate) struct LocalBusDispatchResult {
     pub(crate) response_body: serde_json::Value,
     pub(crate) event: Option<LocalBusFrame>,
@@ -342,6 +335,8 @@ pub(crate) async fn dispatch_local_bus_request(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::platform::listener::BusListener;
+    use std::os::unix::fs::PermissionsExt;
 
     use crate::bus::connection::{
         accept as serve_local_bus_accept_loop, handle as handle_local_bus_connection,
@@ -512,12 +507,14 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).expect("bind test local bus socket");
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .expect("set socket permissions");
-        let socket_uid = std::fs::metadata(&socket_path).expect("socket metadata").uid();
+        let listener =
+            crate::platform::listener::UnixBusListener::from_bound(listener, &socket_path);
+        let peer = listener.owner().expect("socket owner");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let local_set = LocalSet::new();
         let server = local_set.run_until(serve_local_bus_accept_loop(
-            crate::platform::listener::UnixBusListener::from_bound(listener, &socket_path),
-            socket_uid,
+            listener,
+            peer,
             test_state(),
             shutdown_rx,
         ));

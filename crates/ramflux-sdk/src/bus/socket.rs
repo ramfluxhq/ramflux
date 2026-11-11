@@ -1,30 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Remove only the Unix socket inode owned by this listener.
+//! Remove only the socket inode owned by this listener.
 
-use crate::platform::listener::BusListener;
+use crate::platform::listener::{BusListener, EndpointId};
 use crate::prelude::*;
 
 pub(super) struct SocketFile {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
+    endpoint: EndpointId,
 }
 impl SocketFile {
-    pub(super) fn new(
-        listener: &crate::platform::listener::UnixBusListener,
-    ) -> Result<Option<Self>, SdkError> {
-        let Some((path, device, inode)) = listener.pathname_identity()? else {
-            return Ok(None);
-        };
-        Ok(Some(Self { path, device, inode }))
+    pub(super) fn new<L: BusListener>(listener: &L) -> Result<Option<Self>, SdkError> {
+        Ok(listener.endpoint()?.map(|endpoint| Self { endpoint }))
     }
     pub(super) fn remove(&self) -> Result<(), SdkError> {
-        if crate::platform::fs::same_device_inode(&self.path, self.device, self.inode)? {
-            std::fs::remove_file(&self.path)?;
-        }
-        Ok(())
+        self.endpoint.remove_if_unchanged()
     }
 }
 impl Drop for SocketFile {

@@ -165,16 +165,16 @@ async fn daemon_stop_aborts_a_stuck_lifecycle_task_within_five_seconds() -> Case
                     let mut config = LocalBusConfig::new(root.join("bus.sock"), &root);
                     config.lifecycle_gate = Some(gate.clone());
                     let listener = UnixListener::bind(&config.socket_path)?;
-                    let uid = std::fs::metadata(&config.socket_path)?.uid();
                     let listener = crate::platform::listener::UnixBusListener::from_bound(
                         listener,
                         &config.socket_path,
                     );
+                    let peer = listener.owner()?;
                     let supervisor = Supervisor::new(config)?;
                     let (shutdown, receiver) = watch::channel(false);
                     let owner = supervisor.clone();
                     let daemon = tokio::task::spawn_local(async move {
-                        crate::bus::connection::accept(listener, uid, owner, receiver).await
+                        crate::bus::connection::accept(listener, peer, owner, receiver).await
                     });
                     let mut unlock = request(
                         "stop-unlock",
@@ -265,16 +265,16 @@ async fn completed_lifecycle_tasks_are_reaped_while_daemon_is_idle() -> Case {
             drop(account(&root, "alice", None, Arc::new(AtomicBool::new(false)))?);
             let config = LocalBusConfig::new(root.join("bus.sock"), &root);
             let listener = UnixListener::bind(&config.socket_path)?;
-            let uid = std::fs::metadata(&config.socket_path)?.uid();
             let listener = crate::platform::listener::UnixBusListener::from_bound(
                 listener,
                 &config.socket_path,
             );
+            let peer = listener.owner()?;
             let supervisor = Supervisor::new(config)?;
             let (shutdown, receiver) = watch::channel(false);
             let owner = supervisor.clone();
             let daemon = tokio::task::spawn_local(async move {
-                crate::bus::connection::accept(listener, uid, owner, receiver).await
+                crate::bus::connection::accept(listener, peer, owner, receiver).await
             });
             let mut unlock = request(
                 "reap",

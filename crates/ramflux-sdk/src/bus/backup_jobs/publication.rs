@@ -8,7 +8,6 @@ use super::io::PartialFile;
 mod crash_tests;
 use std::{
     io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -81,8 +80,7 @@ fn copy_exclusive(
     stage: Option<&Path>,
 ) -> io::Result<()> {
     let mut source = std::fs::File::open(temporary)?;
-    let mut destination =
-        std::fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(output)?;
+    let mut destination = crate::platform::fs::create_new_owner_only_io(output)?;
     let mut guard = PartialFile { path: output.to_owned(), published: false };
     if let Some(stage) = stage {
         super::output_ownership::remember(stage, output, &destination)?;

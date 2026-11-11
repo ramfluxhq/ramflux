@@ -3,9 +3,10 @@
 
 //! Durable daemon-level pins, defaults, and local enabled settings.
 use super::{
-    BTreeMap, Deserialize, NodePinSource, NodeProfile, OpenOptionsExt, Path, SdkError, Serialize,
+    BTreeMap, Deserialize, NodePinSource, NodeProfile, Path, SdkError, Serialize,
     WellKnownClientRecord, Write, node_error, verify_client_discovery_record,
 };
+use std::os::unix::fs::OpenOptionsExt;
 #[derive(Clone)]
 pub(crate) struct PendingNode {
     pub record: WellKnownClientRecord,

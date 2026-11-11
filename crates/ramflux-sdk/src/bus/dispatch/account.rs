@@ -240,8 +240,7 @@ fn local_bus_account_backup_export(
         std::fs::remove_file(&tmp_path)?;
     }
     let bytes = serde_json::to_vec_pretty(&backup)?;
-    let mut tmp_file =
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp_path)?;
+    let mut tmp_file = crate::platform::fs::create_new_owner_only(&tmp_path)?;
     tmp_file.write_all(&bytes)?;
     tmp_file.sync_all()?;
     drop(tmp_file);

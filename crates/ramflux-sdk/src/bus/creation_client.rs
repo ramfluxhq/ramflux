@@ -7,16 +7,13 @@ use crate::{
 };
 use ramflux_protocol::PrincipalKind;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 /// Creation remains bound to this dedicated same-user connection until confirm or cancel.
 /// Dropping the client cancels pending setup; secret bodies never enter `LocalBusFrame`.
 pub struct LocalBusCreationClient {
-    stream: UnixStream,
+    stream: crate::platform::fs::LocalSocketStream,
     sequence: u64,
 }
 

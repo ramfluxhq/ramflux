@@ -5,15 +5,12 @@
 use super::{CreateInput, CreationState};
 use crate::SdkError;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 /// Owns a dedicated connection; dropping it cancels and erases the server ceremony.
 pub struct CustodyBusClient {
-    stream: UnixStream,
+    stream: crate::platform::fs::LocalSocketStream,
     sequence: u64,
 }
 #[derive(Deserialize)]

@@ -4,7 +4,7 @@
 //! Socket framing, request multiplexing and connection-scoped cancellation.
 
 use super::supervisor::Supervisor;
-use crate::platform::listener::BusListener;
+use crate::platform::listener::{BusListener, BusStream};
 use crate::prelude::*;
 use tokio::task::JoinSet;
 
@@ -23,22 +23,22 @@ pub(super) async fn serve(
     if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)?;
     }
-    let listener = crate::platform::listener::UnixBusListener::bind(&config.socket_path)?;
-    let uid = listener.owner_uid()?;
+    let listener = crate::platform::listener::bind(&config.socket_path)?;
+    let owner = listener.owner()?;
     let supervisor = Supervisor::new(config)?;
     *supervisor.root_lease.borrow_mut() = Some(root_lease);
     let mut background = JoinSet::new();
     supervisor.hydrate(&mut background)?;
     tracing::info!(socket = %supervisor.config.socket_path.display(), "local bus daemon ready");
-    let result = accept(listener, uid, supervisor, shutdown).await;
+    let result = accept(listener, owner, supervisor, shutdown).await;
     background.abort_all();
     while background.join_next().await.is_some() {}
     result
 }
 
-pub(super) async fn accept(
-    listener: crate::platform::listener::UnixBusListener,
-    uid: u32,
+pub(super) async fn accept<L: BusListener>(
+    listener: L,
+    owner: crate::platform::listener::PeerCred,
     supervisor: Rc<Supervisor>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), SdkError> {
@@ -56,7 +56,7 @@ pub(super) async fn accept(
             }
             accepted = listener.accept() => {
                 let stream = accepted?;
-                if let Err(error) = verify_local_bus_peer(&stream, uid) {
+                if let Err(error) = stream.matches_peer(owner) {
                     let now = std::time::Instant::now();
                     if last_peer_warning.is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(60)) {
                         tracing::warn!(%error, "local bus peer verification failed; connection rejected");
@@ -93,12 +93,12 @@ pub(super) async fn accept(
     supervisor.shutdown().await
 }
 
-pub(super) async fn handle(
-    stream: crate::platform::fs::LocalSocketStream,
+pub(super) async fn handle<S: crate::platform::listener::BusStream>(
+    stream: S,
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
-    let (mut reader, writer) = stream.into_split();
+    let (mut reader, writer) = stream.into_halves();
     let (incoming, mut frames) = mpsc::channel(64);
     let (disconnect, mut disconnected) = watch::channel(false);
     let reader_task = tokio::task::spawn_local(async move {
@@ -273,8 +273,8 @@ impl Drop for WriterStopped {
     }
 }
 
-async fn write_responses(
-    mut writer: tokio::net::unix::OwnedWriteHalf,
+async fn write_responses<W: AsyncWrite + Unpin>(
+    mut writer: W,
     mut receiver: mpsc::Receiver<LocalBusFrame>,
     mut secret_receiver: mpsc::Receiver<zeroize::Zeroizing<Vec<u8>>>,
     supervisor: Rc<Supervisor>,
@@ -299,4 +299,30 @@ async fn write_responses(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod non_unix_seam {
+    use super::accept;
+    use crate::platform::listener::{BusListener, StubListener};
+    use crate::prelude::*;
+
+    #[test]
+    fn core_compiles_against_a_non_unix_listener() {
+        fn core_accept<L: BusListener>(
+            listener: L,
+            owner: crate::platform::listener::PeerCred,
+            supervisor: Rc<crate::bus::supervisor::Supervisor>,
+            shutdown: watch::Receiver<bool>,
+        ) -> impl Future<Output = Result<(), SdkError>> {
+            accept(listener, owner, supervisor, shutdown)
+        }
+        fn core_socket<L: BusListener>(
+            listener: &L,
+        ) -> Result<Option<super::super::socket::SocketFile>, SdkError> {
+            super::super::socket::SocketFile::new(listener)
+        }
+        let _ = core_accept::<StubListener>;
+        let _ = core_socket::<StubListener>;
+    }
 }

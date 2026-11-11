@@ -38,8 +38,6 @@ pub(crate) use std::collections::{BTreeMap, BTreeSet, VecDeque};
 pub(crate) use std::future::Future;
 pub(crate) use std::io::{Read, Write};
 pub(crate) use std::net::SocketAddr;
-#[cfg(unix)]
-pub(crate) use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::rc::Rc;
 pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,7 +51,7 @@ pub(crate) use crate::bus::daemon::{
     LocalBusDispatchResult, dispatch_local_bus_request, local_bus_account_manifest_path,
     read_local_bus_account_manifest, restore_local_bus_account_offline,
     restore_local_bus_account_with_passphrase, set_owner_only_dir_permissions,
-    set_owner_only_file_permissions, verify_local_bus_peer, write_local_bus_account_manifest,
+    set_owner_only_file_permissions, write_local_bus_account_manifest,
 };
 pub(crate) use crate::bus::dispatch::*;
 pub(crate) use crate::bus::io::{

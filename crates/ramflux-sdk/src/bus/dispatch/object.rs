@@ -855,13 +855,7 @@ fn write_object_put_journal_atomic(
     let tmp_path = journal_path.with_extension("journal.tmp");
     let bytes = serde_json::to_vec(journal)?;
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut tmp = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)?;
+        let mut tmp = crate::platform::fs::open_owner_only_truncate(&tmp_path)?;
         tmp.write_all(&bytes)?;
         tmp.sync_all()?;
     }

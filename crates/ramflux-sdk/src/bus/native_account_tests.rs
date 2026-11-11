@@ -3,6 +3,7 @@
 
 //! Ordinary account actor lifecycle without access to the primary credential provider.
 use crate::custody::tests::{Root, TestVault, input, words};
+use crate::platform::listener::BusListener;
 use crate::{LocalBusClient, LocalBusConfig, LocalBusFrame, custody::CreationCeremony};
 use ramflux_protocol::custody::CustodyRefusal;
 use serde_json::json;
@@ -288,7 +289,8 @@ async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
     let root = Root::new()?;
     let socket = root.0.join("disconnected-peer.sock");
     let listener = tokio::net::UnixListener::bind(&socket)?;
-    let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&socket)?);
+    let listener = crate::platform::listener::UnixBusListener::from_bound(listener, &socket);
+    let peer = listener.owner()?;
     // Queue a closed peer before accept can query its credentials. On macOS this
     // makes peer_cred return NotConnected; Linux may retain the credentials.
     drop(std::os::unix::net::UnixStream::connect(&socket)?);
@@ -302,15 +304,7 @@ async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = Box::pin(tokio::task::LocalSet::new().run_until(async {
-        tokio::join!(
-            super::connection::accept(
-                crate::platform::listener::UnixBusListener::from_bound(listener, &socket),
-                uid,
-                supervisor,
-                receiver,
-            ),
-            flow,
-        )
+        tokio::join!(super::connection::accept(listener, peer, supervisor, receiver), flow,)
     }))
     .await;
     server?;
