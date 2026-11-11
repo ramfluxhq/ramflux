@@ -825,6 +825,13 @@ pub(crate) fn maintain_local(account: &mut LocalBusAccountState) -> Result<usize
         tracing::warn!(%error, "receipt retention failed; continuing sync");
     }
     account.client.finish_pair_retirement()?;
+    // The account actor is the sole worker; restore installation owns an exclusive writer
+    // lease and cannot overlap this client. Local decoder failure never stalls receive.
+    if !account.activation_pending
+        && let Err(error) = account.client.maintain_raw_inner_reparse()
+    {
+        tracing::warn!(%error,"retained-content reparse page failed; continuing receive");
+    }
     super::dispatch::call::expire_due(account)?;
     account.client.retry_pending_tasks(now_unix_timestamp())
 }

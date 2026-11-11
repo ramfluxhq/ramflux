@@ -24,9 +24,9 @@ fn unsupported_quota_is_atomic_and_preserves_existing_rows() -> TestResult {
         })?;
     }
 
-    // 16 valid outer copies leave 576 bytes in the source budget. The nested
-    // copy is charged at its actual size and crosses that boundary by one byte.
-    let nested = vec![0x72; 577];
+    // Each copy also charges its two-byte provenance. Exactly 544 bytes remain;
+    // 543 raw bytes plus two provenance bytes cross that boundary by one byte.
+    let nested = vec![0x72; 543];
     let failed = db.write_transaction(|| {
         db.persist_actor_state("test/ratchet", &serde_json::json!({"counter":9}))?;
         db.put_unsupported_raw_copy(RawInnerCopyWrite {
@@ -53,7 +53,7 @@ fn unsupported_quota_is_atomic_and_preserves_existing_rows() -> TestResult {
     assert!(db.load_actor_state::<serde_json::Value>("test/ratchet")?.is_none());
     let usage = db.unsupported_raw_quota(Some("verified-root"))?;
     assert_eq!(usage.owners, 1);
-    assert_eq!(usage.raw_bytes, (16 * super::writer::MAX_INNER_BYTES) as u64);
+    assert_eq!(usage.raw_bytes, (16 * (super::writer::MAX_INNER_BYTES + 2)) as u64);
     Ok(())
 }
 
@@ -100,7 +100,10 @@ fn raw_copy_write_requires_transaction_and_charges_duplicate_copies() -> TestRes
     })?;
     let usage = db.unsupported_raw_quota(Some("root"))?;
     assert_eq!(usage.owners, 1);
-    assert_eq!(usage.raw_bytes, (bytes.len() * 2 + b"serialized history container".len()) as u64);
+    assert_eq!(
+        usage.raw_bytes,
+        (bytes.len() * 2 + b"serialized history container".len() + 6) as u64
+    );
     Ok(())
 }
 

@@ -20,6 +20,7 @@ pub enum RawInnerQuotaScope {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RawInnerQuota {
     pub owners: u64,
+    /// All retained copy bytes, including each copy's immutable provenance.
     pub raw_bytes: u64,
 }
 
@@ -65,7 +66,7 @@ fn exceeds(current: RawInnerQuota, new_owner: bool, added: u64, owners: u64, byt
 fn measure(db: &Connection, source: Option<&str>) -> Result<RawInnerQuota, StorageError> {
     let (owners, raw_bytes): (i64, i64) = if let Some(source) = source {
         db.query_row(
-            "SELECT count(DISTINCT o.owner_id),coalesce(sum(length(c.raw_bytes)),0)
+            "SELECT count(DISTINCT o.owner_id),coalesce(sum(length(c.raw_bytes)+length(c.copy_metadata)),0)
              FROM raw_inner_owner o LEFT JOIN raw_inner_copy c USING(owner_id)
              WHERE o.source_anchor=?1",
             params![source],
@@ -73,7 +74,7 @@ fn measure(db: &Connection, source: Option<&str>) -> Result<RawInnerQuota, Stora
         )?
     } else {
         db.query_row(
-            "SELECT count(DISTINCT o.owner_id),coalesce(sum(length(c.raw_bytes)),0)
+            "SELECT count(DISTINCT o.owner_id),coalesce(sum(length(c.raw_bytes)+length(c.copy_metadata)),0)
              FROM raw_inner_owner o LEFT JOIN raw_inner_copy c USING(owner_id)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
