@@ -245,7 +245,7 @@ impl RamfluxClient {
         Ok(false)
     }
 
-    fn verify_generated_message_header(
+    pub(crate) fn verify_generated_message_header(
         entry: &GatewayInboxEntry,
         bytes: &[u8],
     ) -> Result<(), SdkError> {
