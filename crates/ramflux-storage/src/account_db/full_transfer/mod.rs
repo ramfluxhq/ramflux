@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Device-local full-transfer staging owners. They grant no native authority.
+mod catalog;
 mod keys;
 mod source_cut;
 mod stage;
@@ -11,3 +12,11 @@ pub use stage::FullTransferStage;
 
 #[cfg(test)]
 mod stage_tests;
+
+pub use catalog::{
+    CellRule, CodecRule, FamilyRule, FamilySelector, FieldRule, MergeRule, VariantRule,
+    full_census_hash,
+};
+
+#[cfg(test)]
+mod catalog_tests;
