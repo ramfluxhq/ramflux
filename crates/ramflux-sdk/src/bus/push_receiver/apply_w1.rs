@@ -170,7 +170,7 @@ async fn apply_once(
     let entry = &prepared.entry;
     let sequence = entry.inbox_seq;
     let cover = admit_open(account, turn, handle_generation(), prepared)?;
-    if !cover && !held_retry_open(account, turn, handle_generation(), sequence, prepared)? {
+    if !cover && !open_already_covered(account, turn, handle_generation, prepared, backpressure)? {
         return Ok(None);
     }
     let local_device = account.gateway_config.device_id.clone();
@@ -324,7 +324,10 @@ async fn apply_routed_or_defer(
     }
     match Box::pin(apply_routed_w1(account, turn, handle_generation, prepared, source, cover)).await
     {
-        Ok(reply) => Ok(reply),
+        Ok(reply) => {
+            backpressure.completed(&account.client, &prepared.entry)?;
+            Ok(reply)
+        }
         Err(error) if directory_pending(&error) => {
             defer_routed_pending(
                 account,
@@ -578,6 +581,32 @@ fn cover_or_retire_retry(
         tx.account().remove_inbox_retry(&key)?;
     }
     Ok(())
+}
+
+/// `AlreadyCovered` of a held contact floor still runs W1 once admission is
+/// open: C advanced on the live hold, and the durable floor owns redrive.
+/// W0 `saturated` on replay skips W1 while capacity is still closed (a second
+/// Held/Terminal cover of seq <= C is Integrity).
+fn open_already_covered(
+    account: &LocalBusAccountState,
+    turn: &ReceiveTurn,
+    handle_generation: &dyn Fn() -> u64,
+    prepared: &ReceiveEntry,
+    backpressure: &mut Backpressure,
+) -> Result<bool, SdkError> {
+    let entry = &prepared.entry;
+    if held_retry_open(account, turn, handle_generation(), entry.inbox_seq, prepared)? {
+        return Ok(true);
+    }
+    if !backpressure.holds(entry) {
+        return Ok(false);
+    }
+    let now = now_unix_timestamp();
+    if !account.client.contact_admission_capacity(None, now)? {
+        let _ = backpressure.saturated(&account.client, entry, now)?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn held_retry_open(

@@ -103,6 +103,17 @@ async fn receive_inner(
             break;
         }
     }
+    (backpressure, applied) = redrive_held_floor(
+        account,
+        engine,
+        &mut turn,
+        generation,
+        backpressure,
+        applied,
+        &mut envelope_ids,
+        now,
+    )
+    .await?;
     applied = apply_leftover(
         account,
         &mut turn,
@@ -113,7 +124,6 @@ async fn receive_inner(
         &mut envelope_ids,
     )
     .await?;
-    let _ = now;
     flush_live_acks(account, engine, generation, &envelope_ids).await?;
     Ok((applied, Vec::new()))
 }
@@ -175,6 +185,56 @@ fn legacy_page(after: u64, limit: usize, entries: Vec<GatewayInboxEntry>) -> Res
 enum PageDrive {
     Paused { applied: usize },
     Continue { backpressure: Box<Backpressure>, applied: usize },
+}
+
+/// W0 `scan_cursor` redrive of a held contact floor behind C. `replay: true`
+/// bypasses `apply_owned` `AlreadyCovered` of the live page.
+#[allow(clippy::too_many_arguments, reason = "standalone floor redrive shares the live handles")]
+async fn redrive_held_floor(
+    account: &mut LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    turn: &mut ReceiveTurn,
+    generation: u64,
+    mut backpressure: Box<Backpressure>,
+    mut applied: usize,
+    envelope_ids: &mut BTreeMap<u64, String>,
+    now: i64,
+) -> Result<(Box<Backpressure>, usize), SdkError> {
+    let walk = account.client.gateway_receive_cursor(&account.target_delivery_id)?;
+    let Some((cursor, until)) = backpressure.scan_cursor(&account.client, walk, now)? else {
+        return Ok((backpressure, applied));
+    };
+    let mut page = resume_one(account, engine, cursor, PAGE_LIMIT).await?;
+    let count = page.entries.len();
+    page.entries.retain(|record| record.entry.inbox_seq <= until);
+    let last = page.entries.iter().map(|record| record.entry.inbox_seq).max();
+    for record in &page.entries {
+        if backpressure.saturated(&account.client, &record.entry, now)? {
+            continue;
+        }
+        envelope_ids
+            .entry(record.entry.inbox_seq)
+            .or_insert_with(|| record.entry.envelope.envelope_id.clone());
+        let prepared = ReceiveEntry {
+            entry: record.entry.clone(),
+            retry_key: None,
+            replay: true,
+            turn: Some(turn.clone()),
+        };
+        let handle_generation = || generation;
+        let (_, next) =
+            apply_w1::apply_page(account, turn, &handle_generation, prepared, None, backpressure)
+                .await?;
+        apply_w1::replay_projected(account)?;
+        backpressure = next;
+        applied = applied.saturating_add(1);
+        apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
+        if !backpressure.holds(&record.entry) {
+            emit_engine_ack(account, engine, record.entry.inbox_seq, envelope_ids).await?;
+        }
+    }
+    backpressure.scanned(&account.client, last, count, now)?;
+    Ok((backpressure, applied))
 }
 
 #[allow(clippy::too_many_arguments, reason = "standalone page drive shares the live handles")]
