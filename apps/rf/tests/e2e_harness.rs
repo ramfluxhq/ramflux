@@ -30,3 +30,8 @@ fn unresponsive_daemon_drop_returns_within_budget_and_reaps() -> e2e::Result<()>
 fn orphaned_group_members_reaped_after_leader_exit() -> e2e::Result<()> {
     e2e::prove_orphaned_group_members_reaped_within(BUDGET)
 }
+
+#[test]
+fn pty_leader_exit_before_prompt_reaps_descendants() -> e2e::Result<()> {
+    e2e::prove_pty_leader_exit_before_prompt_reaps_within(BUDGET)
+}

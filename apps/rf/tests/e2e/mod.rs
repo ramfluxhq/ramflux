@@ -1126,37 +1126,23 @@ impl PtySession {
     fn drive_account_create(&mut self, passphrase: &str, budget: Duration) -> Result<Value> {
         let deadline = Instant::now() + budget;
         let mut cursor = 0;
-        cursor = wait_buffer_until(
-            &self.output,
-            "Press Enter after saving the words to hide them:",
-            cursor,
-            deadline,
-        )?;
+        cursor =
+            self.wait_until("Press Enter after saving the words to hide them:", cursor, deadline)?;
         let phrase = recovery_phrase(&lock_buf(&self.output))?;
         self.write_line("")?;
         for _ in 0..3 {
-            cursor = wait_buffer_until(&self.output, "Recovery word ", cursor, deadline)?;
+            cursor = self.wait_until("Recovery word ", cursor, deadline)?;
             let prompt =
                 lock_buf(&self.output)[cursor.saturating_sub("Recovery word ".len())..].to_owned();
             let position = recovery_position(&prompt)?;
             let word = phrase.get(position.wrapping_sub(1)).ok_or("challenge position")?;
             self.write_line(word)?;
         }
-        cursor = wait_buffer_until(
-            &self.output,
-            "New local data passphrase (hidden):",
-            cursor,
-            deadline,
-        )?;
+        cursor = self.wait_until("New local data passphrase (hidden):", cursor, deadline)?;
         self.write_line(passphrase)?;
-        cursor = wait_buffer_until(
-            &self.output,
-            "Repeat local data passphrase (hidden):",
-            cursor,
-            deadline,
-        )?;
+        cursor = self.wait_until("Repeat local data passphrase (hidden):", cursor, deadline)?;
         self.write_line(passphrase)?;
-        let _ = wait_buffer_until(&self.output, "\"account_id\"", cursor, deadline)?;
+        let _ = self.wait_until("\"account_id\"", cursor, deadline)?;
         drop(self.stdin.take());
         let status = self.wait_exit(deadline)?;
         let buffer = lock_buf(&self.output).clone();
@@ -1164,6 +1150,27 @@ impl PtySession {
             return Err(format!("account create exited {status}: {buffer}").into());
         }
         parse_json_object(&buffer)
+    }
+
+    /// Prompt wait used by the born-v3 ceremony. Tracks PTY descendants on every
+    /// poll so Drop can still reap a reparented `script` child after the leader exits.
+    fn wait_until(&mut self, needle: &str, from: usize, deadline: Instant) -> Result<usize> {
+        loop {
+            self.group.track_descendants();
+            {
+                let buffer = lock_buf(&self.output);
+                if let Some(index) = buffer.get(from..).and_then(|slice| slice.find(needle)) {
+                    return Ok(from + index + needle.len());
+                }
+            }
+            if Instant::now() >= deadline {
+                let buffer = lock_buf(&self.output);
+                return Err(
+                    format!("timeout waiting for {needle:?} in ceremony output: {buffer}").into()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn write_line(&mut self, line: &str) -> Result<()> {
@@ -1559,11 +1566,7 @@ pub fn prove_hung_command_reaped_within(budget: Duration) -> Result<()> {
     Ok(())
 }
 
-/// Harness proof: a PTY ceremony that never answers returns inside `budget` with no leftovers.
-///
-/// Linux `script -c` puts the command in a new session. Cleanup must reap that
-/// descendant, including a child that ignores SIGHUP.
-pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
+fn hung_script_command() -> Command {
     let inner = r#"trap "" HUP; sleep 60"#;
     let mut command = Command::new("script");
     if cfg!(target_os = "linux") {
@@ -1572,23 +1575,23 @@ pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
         command.arg("-q").arg("/dev/null").arg("sh").arg("-c").arg(inner);
     }
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+}
+
+/// Harness proof: a PTY ceremony that never answers returns inside `budget` with no leftovers.
+///
+/// Linux `script -c` puts the command in a new session. Cleanup must reap that
+/// descendant, including a child that ignores SIGHUP. Descendants are owned by
+/// the production prompt-wait path, not by test-only pretracking.
+pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
+    let mut command = hung_script_command();
     let mut session = PtySession::spawn(&mut command)?;
     let pid = session.group.id();
     let started = Instant::now();
-    let descendants_deadline = Instant::now() + Duration::from_millis(800);
-    while session.group.tracked_pids().is_empty() && Instant::now() < descendants_deadline {
-        session.group.track_descendants();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let timed_out = wait_buffer_until(
-        &session.output,
-        "this prompt never appears",
-        0,
-        Instant::now() + Duration::from_millis(400),
-    )
-    .is_err();
-    session.group.track_descendants();
-    let descendants: Vec<u32> = session.group.tracked_pids().to_vec();
+    let timed_out = session
+        .wait_until("this prompt never appears", 0, Instant::now() + Duration::from_millis(400))
+        .is_err();
+    let descendants = session.group.tracked_pids();
     if cfg!(target_os = "linux") && descendants.is_empty() {
         drop(session);
         return Err("PTY command produced no descendants to reap".into());
@@ -1614,30 +1617,11 @@ pub fn prove_orphaned_group_members_reaped_within(budget: Duration) -> Result<()
     let mut group = proc::ProcessGroup::spawn(&mut command)?;
     let leader = group.id();
     let started = Instant::now();
-    let descendants_deadline = Instant::now() + Duration::from_millis(800);
-    while group.tracked_pids().is_empty() && Instant::now() < descendants_deadline {
-        group.track_descendants();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let descendants: Vec<u32> = group.tracked_pids().to_vec();
-    if descendants.is_empty() {
-        drop(group);
-        return Err("orphaned-member fixture produced no descendants".into());
-    }
+    let descendants = wait_tracked_descendants(&group, Duration::from_millis(800))?;
     if let Some(pid) = rustix::process::Pid::from_raw(leader.cast_signed()) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
-    let leader_deadline = Instant::now() + budget;
-    loop {
-        if group.try_wait()?.is_some() {
-            break;
-        }
-        if Instant::now() >= leader_deadline {
-            drop(group);
-            return Err("orphaned-member leader did not exit".into());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_leader_reaped(&mut group, budget)?;
     drop(group);
     for descendant in descendants {
         proc::wait_process_gone(descendant, budget)?;
@@ -1646,6 +1630,64 @@ pub fn prove_orphaned_group_members_reaped_within(budget: Duration) -> Result<()
         return Err("orphaned group member cleanup exceeded budget".into());
     }
     Ok(())
+}
+
+/// Leader exits during a production prompt wait, before Drop. Descendants were
+/// recorded by that wait, so cleanup still reaches the reparented PTY child.
+pub fn prove_pty_leader_exit_before_prompt_reaps_within(budget: Duration) -> Result<()> {
+    let mut command = hung_script_command();
+    let mut session = PtySession::spawn(&mut command)?;
+    let leader = session.group.id();
+    let started = Instant::now();
+    let _ = session.wait_until(
+        "this prompt never appears",
+        0,
+        Instant::now() + Duration::from_millis(400),
+    );
+    let descendants = session.group.tracked_pids();
+    if descendants.is_empty() {
+        drop(session);
+        return Err("PTY leader-exit fixture produced no descendants".into());
+    }
+    if let Some(pid) = rustix::process::Pid::from_raw(leader.cast_signed()) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    wait_leader_reaped(&mut session.group, budget)?;
+    drop(session);
+    for descendant in descendants {
+        proc::wait_process_gone(descendant, budget)?;
+    }
+    if started.elapsed() > budget {
+        return Err("PTY leader-exit cleanup exceeded budget".into());
+    }
+    Ok(())
+}
+
+fn wait_tracked_descendants(group: &proc::ProcessGroup, budget: Duration) -> Result<Vec<u32>> {
+    let end = Instant::now() + budget;
+    loop {
+        let descendants = group.tracked_pids();
+        if !descendants.is_empty() {
+            return Ok(descendants);
+        }
+        if Instant::now() >= end {
+            return Err("process group produced no descendants".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_leader_reaped(group: &mut proc::ProcessGroup, budget: Duration) -> Result<()> {
+    let end = Instant::now() + budget;
+    loop {
+        if group.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= end {
+            return Err("orphaned-member leader did not exit".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Harness proof: Drop of an unresponsive daemon returns inside `budget` with no leftovers.

@@ -7,7 +7,11 @@ use std::{
     io::{Read, Write as _},
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -18,7 +22,9 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) struct ProcessGroup {
     child: Option<Child>,
     pid: u32,
-    tracked: Vec<u32>,
+    tracked: Arc<Mutex<Vec<u32>>>,
+    stop: Arc<AtomicBool>,
+    poller: Option<JoinHandle<()>>,
 }
 
 impl ProcessGroup {
@@ -27,7 +33,10 @@ impl ProcessGroup {
         command.process_group(0);
         let child = command.spawn()?;
         let pid = child.id();
-        Ok(Self { child: Some(child), pid, tracked: Vec::new() })
+        let tracked = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let poller = Some(spawn_descendant_tracker(pid, Arc::clone(&tracked), Arc::clone(&stop)));
+        Ok(Self { child: Some(child), pid, tracked, stop, poller })
     }
 
     pub(crate) fn id(&self) -> u32 {
@@ -45,23 +54,19 @@ impl ProcessGroup {
         }
     }
 
-    pub(crate) fn track_descendants(&mut self) {
-        for pid in descendant_pids(self.pid) {
-            if pid != self.pid && !self.tracked.contains(&pid) {
-                self.tracked.push(pid);
-            }
-        }
+    pub(crate) fn track_descendants(&self) {
+        remember_descendants(self.pid, &self.tracked);
     }
 
-    pub(crate) fn tracked_pids(&self) -> &[u32] {
-        &self.tracked
+    pub(crate) fn tracked_pids(&self) -> Vec<u32> {
+        self.tracked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     pub(crate) fn kill_group(&mut self) {
         self.track_descendants();
         signal_tree(self.pid);
-        for i in 0..self.tracked.len() {
-            signal_tree(self.tracked[i]);
+        for pid in self.tracked_pids() {
+            signal_tree(pid);
         }
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
@@ -74,13 +79,44 @@ impl ProcessGroup {
             None => Err(std::io::Error::other("process group already reaped")),
         }
     }
+
+    fn stop_tracker(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.poller.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
+        self.stop_tracker();
         self.kill_group();
         if let Some(mut child) = self.child.take() {
             let _ = child.wait();
+        }
+    }
+}
+
+fn spawn_descendant_tracker(
+    leader: u32,
+    tracked: Arc<Mutex<Vec<u32>>>,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            remember_descendants(leader, &tracked);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })
+}
+
+fn remember_descendants(leader: u32, tracked: &Mutex<Vec<u32>>) {
+    let kids = descendant_pids(leader);
+    let mut guard = tracked.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for pid in kids {
+        if pid != leader && !guard.contains(&pid) {
+            guard.push(pid);
         }
     }
 }
