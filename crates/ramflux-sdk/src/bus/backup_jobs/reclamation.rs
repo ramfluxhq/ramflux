@@ -4,18 +4,14 @@
 //! Durable post-commit reclamation of exactly the replaced account generation.
 use crate::SdkError;
 use ramflux_storage::{AccountIndex, LocalAccountRecord};
-use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{io::Write, path::Path};
 const MARKER: &str = ".backup-replaced.json";
 pub(super) fn remember(
     generation: &Path,
     previous: Option<&LocalAccountRecord>,
 ) -> Result<(), SdkError> {
     let Some(previous) = previous else { return Ok(()) };
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(generation.join(MARKER))?;
+    let mut file = crate::platform::fs::create_new_owner_only(&generation.join(MARKER))?;
     file.write_all(&serde_json::to_vec(&previous.db_relative_path)?)?;
     file.sync_all()?;
     std::fs::File::open(generation)?.sync_all()?;

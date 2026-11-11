@@ -4,7 +4,6 @@
 //! Crash ownership of an exclusive final file while the fallback copy is incomplete.
 use std::{
     io::{self, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 const MARKER: &str = "output-owned.json";
@@ -15,13 +14,9 @@ struct Ownership {
     inode: u64,
 }
 pub(super) fn remember(stage: &Path, path: &Path, file: &std::fs::File) -> io::Result<()> {
-    let metadata = file.metadata()?;
-    let owner = Ownership { path: path.to_owned(), device: metadata.dev(), inode: metadata.ino() };
-    let mut marker = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(stage.join(MARKER))?;
+    let (device, inode) = crate::platform::fs::file_device_inode(file)?;
+    let owner = Ownership { path: path.to_owned(), device, inode };
+    let mut marker = crate::platform::fs::create_new_owner_only_io(&stage.join(MARKER))?;
     marker.write_all(&serde_json::to_vec(&owner)?)?;
     marker.sync_all()?;
     std::fs::File::open(stage)?.sync_all()
@@ -44,7 +39,10 @@ pub(super) fn recover(stage: &Path) -> io::Result<()> {
         return Ok(());
     };
     match std::fs::symlink_metadata(&owner.path) {
-        Ok(m) if m.is_file() && m.dev() == owner.device && m.ino() == owner.inode => {
+        Ok(m)
+            if m.is_file()
+                && crate::platform::fs::same_metadata_identity(&m, owner.device, owner.inode) =>
+        {
             std::fs::remove_file(&owner.path)?;
             let parent =
                 owner.path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));

@@ -29,8 +29,7 @@ fn read<T: for<'de> serde::Deserialize<'de> + serde::Serialize>(
     Ok(ramflux_protocol::custody::decode(&bytes, limit)?)
 }
 fn create(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path) {
+    match crate::platform::fs::create_new_owner_only_io(path) {
         Ok(mut file) => {
             file.write_all(bytes)?;
             file.sync_all()?;
@@ -122,15 +121,8 @@ impl NodePins {
         Ok(record)
     }
     fn lock(&self) -> Result<fs::File, SdkError> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(self.root.join(".pins.lock"))?;
-        fs2::FileExt::lock_exclusive(&lock)?;
+        let lock = crate::platform::fs::open_owner_only_read_write(&self.root.join(".pins.lock"))?;
+        crate::platform::fs::lock_exclusive(&lock)?;
         Ok(lock)
     }
 }
@@ -253,9 +245,8 @@ pub(crate) fn verify_authority(
 }
 
 pub(super) fn log_unbound(root: &Path) -> Result<(), SdkError> {
-    use std::os::unix::fs::OpenOptionsExt;
     let path = root.join("custody_network").join("unbound-connections.log");
-    let mut file = fs::OpenOptions::new().append(true).create(true).mode(0o600).open(path)?;
+    let mut file = crate::platform::fs::open_owner_only_append(&path)?;
     writeln!(file, "{} no_channel_binding explicit_client_opt_in", super::network::now()?)?;
     file.sync_all()?;
     Ok(())

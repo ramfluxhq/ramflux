@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -877,8 +876,7 @@ pub(crate) fn export_agent_credentials(
     let bytes = BundleBytes::serialize(&bundle)?;
     let mut created = false;
     let result = (|| {
-        let mut file =
-            fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        let mut file = crate::platform::fs::create_new_owner_only(path)?;
         created = true;
         file.write_all(&bytes.0)?;
         file.sync_all()?;
@@ -974,19 +972,12 @@ impl BornAccount {
         Ok((reference, credentials))
     }
     pub(super) fn mark_live(&mut self, root: &Path) -> Result<(), SdkError> {
-        use std::os::unix::fs::OpenOptionsExt;
         if self.branch_pending() {
             return Err(SdkError::NetworkingPending);
         }
         let dir = directory(root, self.local_account_id())?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(dir.join(".authority.lock"))?;
-        fs2::FileExt::lock_exclusive(&lock)?;
+        let lock = crate::platform::fs::open_owner_only_read_write(&dir.join(".authority.lock"))?;
+        crate::platform::fs::lock_exclusive(&lock)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| invalid())?

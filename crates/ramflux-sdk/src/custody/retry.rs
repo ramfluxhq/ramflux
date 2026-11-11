@@ -204,7 +204,7 @@ fn jitter(backoff: Duration, random: u64) -> Duration {
 pub(crate) struct AccountLease(File);
 impl Drop for AccountLease {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
+        let _ = crate::platform::fs::unlock(&self.0);
     }
 }
 pub(crate) async fn single_flight(
@@ -217,17 +217,7 @@ pub(crate) async fn single_flight(
     let file = budget
         .attempt(async move {
             tokio::task::spawn_blocking(move || {
-                let mut options = std::fs::OpenOptions::new();
-                options.read(true).write(true).create(true).truncate(false);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600).custom_flags(
-                        i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
-                            .map_err(std::io::Error::other)?,
-                    );
-                }
-                options.open(path)
+                crate::platform::fs::open_owner_only_no_follow(&path)
             })
             .await
             .map_err(|_| SdkError::CustodySetupInvalid)?
@@ -236,7 +226,7 @@ pub(crate) async fn single_flight(
         .await?;
     budget
         .until_ready(|| async {
-            match fs2::FileExt::try_lock_exclusive(&file) {
+            match crate::platform::fs::try_lock_exclusive(&file) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(busy()),
                 Err(error) => Err(error.into()),

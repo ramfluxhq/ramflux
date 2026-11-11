@@ -5,9 +5,8 @@
 use super::{directory, private_directory};
 use crate::SdkError;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Write,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
@@ -71,7 +70,7 @@ pub(super) fn write_public(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
         ".authority-{}.tmp",
         ramflux_protocol::encode_base64url(*super::super::random()?)
     ));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+    let mut file = crate::platform::fs::create_new_owner_only(&temporary)?;
     let mut cleanup = TemporaryPublication(Some(temporary.clone()));
     #[cfg(test)]
     checkpoints::run(checkpoints::Stage::TemporaryCreated)?;

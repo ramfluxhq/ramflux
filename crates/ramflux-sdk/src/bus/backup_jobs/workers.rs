@@ -19,7 +19,6 @@ use ramflux_crypto::backup_stream::{
 use ramflux_storage::{AccountDbKey, BackupCounts, BackupDatabase};
 use std::{
     io::BufReader,
-    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
 };
@@ -266,11 +265,7 @@ impl BackupJobs {
         super::recovery::remember_partial_output(&directory, &temporary)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let mut guard = PartialFile { path: temporary.clone(), published: false };
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
+        let file = crate::platform::fs::create_new_owner_only_io(&temporary)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let service = self.clone();
         let id = job.job_id.clone();
@@ -429,11 +424,7 @@ impl BackupJobs {
             self.directory(&job.job_id).map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let mut guard = PrivateDirectory { path: directory.clone(), transferred: false };
         let path = directory.join("account.db");
-        let output = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
+        let output = crate::platform::fs::create_new_owner_only_io(&path)
             .map_err(|_| failure(BackupFailureCode::NotWritable))?;
         let service = self.clone();
         let id = job.job_id.clone();

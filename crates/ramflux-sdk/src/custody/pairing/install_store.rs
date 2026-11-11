@@ -9,9 +9,8 @@ use ramflux_protocol::{
     MAX_SAFE_JSON_INTEGER, canonical_json_bytes, decode_base64url, encode_base64url, parse_i_json,
 };
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub(crate) const LIMIT: usize = 4096;
@@ -368,7 +367,7 @@ fn read_install(path: &Path) -> Result<Option<Install>, SdkError> {
 
 fn ensure_dir(dir: &Path) -> Result<(), SdkError> {
     fs::create_dir_all(dir).map_err(SdkError::from)?;
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(SdkError::from)
+    crate::platform::fs::set_owner_only_dir(dir)
 }
 
 fn count_pending(dir: &Path) -> Result<usize, SdkError> {
@@ -394,7 +393,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     getrandom::fill(&mut seed).map_err(|_| SdkError::CustodyRandomUnavailable)?;
     let temporary = parent.join(format!(".install-{}.tmp", encode_base64url(seed)));
     seed.fill(0);
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+    let mut file = crate::platform::fs::create_new_owner_only(&temporary)?;
     let result: Result<(), SdkError> = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;

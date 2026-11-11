@@ -10,9 +10,8 @@ use ramflux_protocol::custody::pairing::{PairingWire, WireError};
 use ramflux_protocol::parse_i_json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use zeroize::{Zeroize, Zeroizing};
@@ -326,9 +325,7 @@ fn reservation_path(root: &Path, account_id: &str) -> PathBuf {
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
     let parent = path.parent().ok_or(SdkError::PairingField("path"))?;
     std::fs::create_dir_all(parent)?;
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = options.open(path)?;
+    let mut file = crate::platform::fs::open_owner_only_truncate(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())

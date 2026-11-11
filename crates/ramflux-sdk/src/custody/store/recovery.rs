@@ -14,7 +14,6 @@ use ramflux_protocol::custody::{CustodyAuthority, DeviceRef};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -93,14 +92,9 @@ fn replace_public(path: &Path, value: &impl Serialize) -> Result<(), SdkError> {
     Ok(())
 }
 fn lock(root: &Path, id: &str) -> Result<fs::File, SdkError> {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(directory(root, id)?.join(".authority.lock"))?;
-    fs2::FileExt::lock_exclusive(&file)?;
+    let path = directory(root, id)?.join(".authority.lock");
+    let file = crate::platform::fs::open_owner_only_read_write(&path)?;
+    crate::platform::fs::lock_exclusive(&file)?;
     Ok(file)
 }
 

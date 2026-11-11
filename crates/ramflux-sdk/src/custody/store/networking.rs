@@ -8,7 +8,7 @@ use super::{
 };
 use crate::custody::{CAPACITY_RETRY_AFTER_MS, CAPACITY_RETRY_AFTER_SECS, capacity_hint};
 use crate::{AccountNetworkingReason, SdkError};
-use std::{fs, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{fs, path::Path};
 mod clock;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -194,14 +194,8 @@ impl BornAccount {
             return Ok(());
         }
         let dir = directory(root, self.local_account_id())?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(dir.join(".authority.lock"))?;
-        fs2::FileExt::lock_exclusive(&lock)?;
+        let lock = crate::platform::fs::open_owner_only_read_write(&dir.join(".authority.lock"))?;
+        crate::platform::fs::lock_exclusive(&lock)?;
         let mut current = load_account(root, self.local_account_id(), now)?;
         if current.record() != self.record() || current.state() == CreationState::Live {
             return Ok(());

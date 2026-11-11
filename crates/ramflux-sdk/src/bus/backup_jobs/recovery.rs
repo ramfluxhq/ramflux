@@ -4,26 +4,18 @@
 //! Crash cleanup uses only secret-free ownership markers and the committed generation pointer.
 use crate::SdkError;
 use ramflux_storage::AccountIndex;
-use std::{io::Write, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{io::Write, path::Path};
 pub(super) const INSTALL_MARKER: &str = ".backup-installing";
 const OUTPUT_MARKER: &str = "output-partial.json";
 pub(super) fn remember_partial_output(stage: &Path, path: &Path) -> Result<(), SdkError> {
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(stage.join(OUTPUT_MARKER))?;
+    let mut file = crate::platform::fs::create_new_owner_only(&stage.join(OUTPUT_MARKER))?;
     file.write_all(&serde_json::to_vec(path)?)?;
     file.sync_all()?;
     std::fs::File::open(stage)?.sync_all()?;
     Ok(())
 }
 pub(super) fn mark_install(generation: &Path) -> Result<(), SdkError> {
-    let file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(generation.join(INSTALL_MARKER))?;
+    let file = crate::platform::fs::create_new_owner_only(&generation.join(INSTALL_MARKER))?;
     file.sync_all()?;
     std::fs::File::open(generation)?.sync_all()?;
     Ok(())

@@ -56,6 +56,45 @@ pub(crate) fn try_lock_exclusive(file: &File) -> Result<(), std::io::Error> {
     fs2::FileExt::try_lock_exclusive(file)
 }
 
+pub(crate) fn lock_exclusive(file: &File) -> Result<(), std::io::Error> {
+    fs2::FileExt::lock_exclusive(file)
+}
+
+pub(crate) fn unlock(file: &File) -> Result<(), std::io::Error> {
+    fs2::FileExt::unlock(file)
+}
+
+pub(crate) fn open_owner_only_append(path: &Path) -> Result<File, SdkError> {
+    Ok(OpenOptions::new().append(true).create(true).mode(0o600).open(path)?)
+}
+
+/// Read/write create without truncate, mode 0o600, refusing to follow a final symlink.
+///
+/// # Errors
+/// Returns an error when the flags cannot be applied or the file cannot be opened.
+pub(crate) fn open_owner_only_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false).mode(0o600);
+    options.custom_flags(
+        i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).map_err(std::io::Error::other)?,
+    );
+    options.open(path)
+}
+
+pub(crate) fn file_device_inode(file: &File) -> std::io::Result<(u64, u64)> {
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[must_use]
+pub(crate) fn same_metadata_identity(
+    metadata: &std::fs::Metadata,
+    device: u64,
+    inode: u64,
+) -> bool {
+    metadata.dev() == device && metadata.ino() == inode
+}
+
 pub(crate) fn file_owner_uid(path: &Path) -> Result<u32, SdkError> {
     Ok(std::fs::metadata(path)?.uid())
 }

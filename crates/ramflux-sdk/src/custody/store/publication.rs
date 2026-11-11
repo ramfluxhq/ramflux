@@ -8,7 +8,7 @@ use super::{
 use crate::SdkError;
 use ramflux_crypto::custody::PinOutcome;
 use ramflux_protocol::custody::CustodyAuthority;
-use std::{fs, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{fs, path::Path};
 
 /// Durable `pairing_head` is a fence: another operation must not mint a second candidate.
 #[must_use]
@@ -27,14 +27,8 @@ pub(crate) fn accept_publication(
 ) -> Result<PinOutcome, SdkError> {
     let verified = ramflux_crypto::custody::verify_publication(authority, now)?;
     let dir = directory(root, id)?;
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(dir.join(".authority.lock"))?;
-    fs2::FileExt::lock_exclusive(&lock)?;
+    let lock = crate::platform::fs::open_owner_only_read_write(&dir.join(".authority.lock"))?;
+    crate::platform::fs::lock_exclusive(&lock)?;
     let mut account = load_data_account(root, id, now)?;
     if verified.envelope().body.account_anchor != account.record().body.account_anchor {
         return Err(invalid());

@@ -6,7 +6,6 @@ use super::{
     BTreeMap, Deserialize, NodePinSource, NodeProfile, Path, SdkError, Serialize,
     WellKnownClientRecord, Write, node_error, verify_client_discovery_record,
 };
-use std::os::unix::fs::OpenOptionsExt;
 #[derive(Clone)]
 pub(crate) struct PendingNode {
     pub record: WellKnownClientRecord,
@@ -65,12 +64,7 @@ impl NodeStore {
         std::fs::create_dir_all(root)?;
         let path = root.join("nodes.json");
         let temporary = root.join("nodes.json.tmp");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)?;
+        let mut file = crate::platform::fs::open_owner_only_truncate(&temporary)?;
         file.write_all(&serde_json::to_vec_pretty(self)?)?;
         file.sync_all()?;
         std::fs::rename(temporary, path)?;
