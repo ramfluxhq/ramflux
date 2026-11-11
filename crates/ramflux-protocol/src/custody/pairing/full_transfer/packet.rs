@@ -75,6 +75,12 @@ pub enum FullError {
 #[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DataPacket {
+    Idle {
+        last_verified: String,
+    },
+    Control {
+        payload: super::FullControlPayload,
+    },
     Manifest {
         manifest_hash: String,
         offset: U64,
@@ -117,6 +123,8 @@ pub enum DataPacket {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PacketKind {
+    Idle,
+    Control,
     Manifest,
     Chunk,
     Receipt,
@@ -129,14 +137,20 @@ struct KindHeader {
     kind: PacketKind,
 }
 
-fn signature(value: &str) -> Result<()> {
+pub(super) fn signature(value: &str) -> Result<()> {
     let bytes = crate::decode_base64url(value).map_err(|_| WireError::Field("signature"))?;
     require(bytes.len() == 64 && crate::encode_base64url(bytes) == value, "signature")
 }
 impl PairingWire for DataPacket {
     const LIMIT: usize = 349_528 + 1024;
     fn received_limit(&self) -> usize {
-        if matches!(self, Self::Manifest { .. } | Self::Chunk { .. }) { Self::LIMIT } else { 8192 }
+        if matches!(self, Self::Manifest { .. } | Self::Chunk { .. }) {
+            Self::LIMIT
+        } else if matches!(self, Self::Control { .. }) {
+            super::CONTROL_PACKET_BYTES
+        } else {
+            8192
+        }
     }
     fn to_wire_bytes(&self) -> Result<Vec<u8>> {
         let mut encoded = self.encode_secret()?;
@@ -149,6 +163,8 @@ impl PairingWire for DataPacket {
         let header: KindHeader = crate::parse_i_json_secret(input).map_err(|_| WireError::Shape)?;
         let limit = if matches!(header.kind, PacketKind::Manifest | PacketKind::Chunk) {
             Self::LIMIT
+        } else if matches!(header.kind, PacketKind::Control) {
+            super::CONTROL_PACKET_BYTES
         } else {
             8192
         };
@@ -164,6 +180,8 @@ impl PairingWire for DataPacket {
     }
     fn validate(&self) -> Result<()> {
         match self {
+            Self::Idle { last_verified } => b32(last_verified, "last_verified")?,
+            Self::Control { payload } => payload.validate()?,
             Self::Manifest { manifest_hash, offset, total, bytes } => {
                 b32(manifest_hash, "manifest_hash")?;
                 let bytes = bytes.decode(super::CHUNK_BYTES as usize)?;
@@ -240,6 +258,12 @@ impl Serialize for DataPacket {
         }
         let mut map = serializer.serialize_map(None)?;
         match self {
+            Self::Idle { last_verified } => {
+                fields!(map, "kind" => "idle", "last_verified" => last_verified);
+            }
+            Self::Control { payload } => {
+                fields!(map, "kind" => "control", "payload" => payload);
+            }
             Self::Manifest { manifest_hash, offset, total, bytes } => {
                 fields!(map, "bytes" => bytes, "kind" => "manifest", "manifest_hash" => manifest_hash, "offset" => offset, "total" => total);
             }
@@ -271,7 +295,7 @@ impl Serialize for DataPacket {
         map.end()
     }
 }
-struct CanonicalRef<'a>(&'a DeviceRef);
+pub(super) struct CanonicalRef<'a>(pub(super) &'a DeviceRef);
 impl Serialize for CanonicalRef<'_> {
     fn serialize<S: serde::Serializer>(
         &self,

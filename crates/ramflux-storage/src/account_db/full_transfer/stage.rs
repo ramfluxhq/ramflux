@@ -10,8 +10,10 @@ use ramflux_crypto::custody::pairing::{FullResumeRecord, FullResumeTrust, Pairin
 use ramflux_protocol::custody::pairing::{PairingWire, full_transfer::U64};
 use rusqlite::params;
 use std::{
+    cell::Cell,
     fs,
     io::Write,
+    marker::PhantomData,
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
@@ -33,6 +35,9 @@ pub struct FullTransferStage<'db> {
     pub(super) db: &'db AccountDb,
     pub(super) directory: PathBuf,
     reference: FullStageReference,
+    // One coordinator owns the local file/SQL commit order. A shared reference cannot
+    // concurrently replace a manifest while another thread reads or receipts its slots.
+    _serial: PhantomData<Cell<()>>,
 }
 impl AccountDb {
     #[cfg(test)]
@@ -80,6 +85,7 @@ impl AccountDb {
         connection.call(move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA)?;
+            tx.execute_batch(super::source_receipt::SCHEMA)?;
             tx.execute(
                 "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
                 params![local, role, expires_at, digest.as_slice()],
@@ -101,7 +107,15 @@ impl AccountDb {
         })?;
         sync_stage(&directory)?;
         self.require_full_stage_unlock()?;
-        Ok(FullTransferStage { connection, _lock: lock, key, db: self, directory, reference })
+        Ok(FullTransferStage {
+            connection,
+            _lock: lock,
+            key,
+            db: self,
+            directory,
+            reference,
+            _serial: PhantomData,
+        })
     }
     /// Open only from this account's actual durable live row; caller-supplied references
     /// and orphan stage directories cannot restore a data session.
@@ -145,8 +159,16 @@ impl AccountDb {
         if !valid {
             return Err(context());
         }
-        let stage =
-            FullTransferStage { connection, _lock: lock, key, db: self, directory, reference };
+        connection.execute_batch(super::source_receipt::SCHEMA)?;
+        let stage = FullTransferStage {
+            connection,
+            _lock: lock,
+            key,
+            db: self,
+            directory,
+            reference,
+            _serial: PhantomData,
+        };
         let record = stage.resume_record()?;
         if record.role != role {
             return Err(context());

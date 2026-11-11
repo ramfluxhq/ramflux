@@ -47,16 +47,28 @@ impl FullTransferStage<'_> {
     /// # Errors
     /// Refuses wrong source/scope/catalog/signature, skipped/unverified predecessors or disk bounds.
     pub fn retain_forward_manifest(
-        &self,
+        &mut self,
         manifest: &SourceManifest,
         catalog: &[Family],
     ) -> Result<(), StorageError> {
+        self.retain_manifest_for_role(manifest, catalog, PairingRole::Responder)
+    }
+
+    pub(super) fn retain_manifest_for_role(
+        &mut self,
+        manifest: &SourceManifest,
+        catalog: &[Family],
+        role: PairingRole,
+    ) -> Result<(), StorageError> {
         self.db.require_full_stage_unlock()?;
-        manifest.validate().map_err(|_| manifest_error())?;
+        manifest.validate().map_err(|error| match error {
+            ramflux_protocol::custody::pairing::WireError::Field("NoSpace") => no_space(),
+            _ => manifest_error(),
+        })?;
         manifest.manifest.validate_catalog(catalog, false).map_err(|_| manifest_error())?;
         let record = self.resume_record()?;
         let body = &manifest.manifest;
-        if record.role != PairingRole::Responder
+        if record.role != role
             || body.kind == ManifestKind::Tail
             || body.transfer_id != record.transfer_id
             || body.source_ref != record.grant.source_ref
@@ -81,24 +93,25 @@ impl FullTransferStage<'_> {
         let existing = self
             .connection
             .query_row(
-                "SELECT bytes FROM manifest WHERE direction=0 AND cut=?1",
+                "SELECT bytes,verified FROM manifest WHERE direction=0 AND cut=?1",
                 params![body.snapshot_cut.0],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()?;
-        if let Some(existing) = existing {
-            return if existing.as_slice() == bytes.as_slice() {
-                Ok(())
-            } else {
-                Err(manifest_error())
-            };
+        if let Some((existing, verified)) = existing {
+            if existing.as_slice() == bytes.as_slice() {
+                return Ok(());
+            }
+            if verified {
+                return Err(manifest_error());
+            }
         }
         if body.kind != ManifestKind::Base {
             let parent = self.connection.query_row(
-                "SELECT bytes FROM manifest WHERE direction=0 AND cut=?1 AND verified=1",
-                params![body.previous_cut.ok_or_else(manifest_error)?.0],
+                "SELECT bytes FROM manifest WHERE direction=0 AND verified=1 ORDER BY cut DESC LIMIT 1",
+                [],
                 |row| row.get::<_, Vec<u8>>(0),
-            )?;
+            ).optional()?.ok_or_else(manifest_error)?;
             let previous =
                 SourceManifest::from_wire_bytes(&parent).map_err(|_| manifest_error())?;
             manifest.verify_predecessor(&previous).map_err(|_| manifest_error())?;
@@ -113,10 +126,52 @@ impl FullTransferStage<'_> {
         if fs2::available_space(&self.directory)? < required {
             return Err(no_space());
         }
-        self.connection.execute(
-            "INSERT INTO manifest(direction,cut,manifest_hash,kind,bytes,chunks_root,verified) VALUES(0,?1,?2,?3,?4,?5,0)",
-            params![body.snapshot_cut.0,hash,if body.kind == ManifestKind::Base { "base" } else { "delta" },bytes.as_slice(),body.chunks_root],
-        )?;
+        let obsolete: Vec<u64> = self.connection.call(|db| {
+            db.prepare("SELECT cut FROM manifest WHERE direction=0 AND verified=0")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })?;
+        // Destroy old unverified ciphertext before committing its replacement. A crash
+        // here leaves old metadata whose receipt prefix is repaired on reopen; it cannot
+        // advertise removed slots. No verified metadata or source snapshots are removed.
+        for cut in obsolete {
+            self.discard_unverified_forward_files(cut)?;
+        }
+        let cut = body.snapshot_cut.0;
+        let kind = if body.kind == ManifestKind::Base { "base" } else { "delta" };
+        let root = body.chunks_root.clone();
+        self.db.require_full_stage_unlock()?;
+        self.connection.call(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute("DELETE FROM chunk WHERE direction=0 AND manifest_hash IN(SELECT manifest_hash FROM manifest WHERE direction=0 AND verified=0)", [])?;
+            tx.execute("DELETE FROM manifest WHERE direction=0 AND verified=0", [])?;
+            tx.execute(
+                "INSERT INTO manifest(direction,cut,manifest_hash,kind,bytes,chunks_root,verified) VALUES(0,?1,?2,?3,?4,?5,0)",
+                params![cut,hash,kind,bytes.as_slice(),root],
+            )?;
+            tx.commit()
+        })?;
+        Ok(())
+    }
+
+    fn discard_unverified_forward_files(&self, cut: u64) -> Result<(), StorageError> {
+        let prefix = format!("seg-f-{cut}-");
+        for entry in std::fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(group) = name.strip_prefix(&prefix).and_then(|v| v.strip_suffix(".bin"))
+            else {
+                continue;
+            };
+            let number = group.parse::<u64>().map_err(|_| manifest_error())?;
+            if number.to_string() != group {
+                return Err(manifest_error());
+            }
+            drop(open_regular(&entry.path(), true)?);
+            std::fs::remove_file(entry.path())?;
+        }
+        std::fs::File::open(&self.directory)?.sync_all()?;
         Ok(())
     }
 
@@ -261,19 +316,24 @@ impl FullTransferStage<'_> {
         )?;
         Ok(())
     }
-    fn forward_manifest(&self, hash: &str) -> Result<SourceManifest, StorageError> {
+    pub(super) fn forward_manifest(&self, hash: &str) -> Result<SourceManifest, StorageError> {
         raw32(hash)?;
-        let bytes = Zeroizing::new(self.connection.query_row(
-            "SELECT bytes FROM manifest WHERE direction=0 AND manifest_hash=?1",
-            params![hash],
-            |row| row.get::<_, Vec<u8>>(0),
-        )?);
+        let bytes = Zeroizing::new(
+            self.connection
+                .query_row(
+                    "SELECT bytes FROM manifest WHERE direction=0 AND manifest_hash=?1",
+                    params![hash],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?
+                .ok_or_else(manifest_error)?,
+        );
         SourceManifest::from_wire_bytes(&bytes).map_err(|_| manifest_error())
     }
     fn segment_path(&self, cut: u64, index: u64) -> std::path::PathBuf {
         self.directory.join(format!("seg-f-{cut}-{}.bin", index / SLOTS_PER_FILE))
     }
-    fn read_forward_chunk(
+    pub(super) fn read_forward_chunk(
         &self,
         manifest: &SourceManifest,
         hash: &str,

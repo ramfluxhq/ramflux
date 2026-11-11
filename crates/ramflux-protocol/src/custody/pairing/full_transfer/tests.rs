@@ -97,6 +97,25 @@ fn full_transfer_manifest_rejects_shape_context_and_chain_changes() -> TestResul
     changed.manifest.parent_manifest_hash = Some(encode_base64url(manifest_hash(&source)?));
     changed.validate()?;
     changed.verify_predecessor(&source)?;
+    for (kind, cut, accepted) in [
+        (ManifestKind::Delta, 8, true),
+        (ManifestKind::Delta, 9, false),
+        (ManifestKind::Tail, 1, true),
+        (ManifestKind::Tail, 9, true),
+        (ManifestKind::Tail, 10, false),
+    ] {
+        let mut bounded = changed.clone();
+        bounded.manifest.kind = kind;
+        bounded.manifest.previous_cut = Some(U64(cut - 1));
+        bounded.manifest.snapshot_cut = U64(cut);
+        assert_eq!(bounded.validate().is_ok(), accepted, "{kind:?} cut{cut}");
+    }
+    let mut stale_privacy = changed.clone();
+    stale_privacy.manifest.source_erasure_generation = U64(0);
+    assert!(stale_privacy.verify_predecessor(&source).is_err());
+    let mut newer_privacy = changed.clone();
+    newer_privacy.manifest.source_erasure_generation = U64(2);
+    newer_privacy.verify_predecessor(&source)?;
     let mut rebound = changed.clone();
     rebound.manifest.base_record_hash = encode_base64url([10; 32]);
     assert!(rebound.verify_predecessor(&source).is_err());
