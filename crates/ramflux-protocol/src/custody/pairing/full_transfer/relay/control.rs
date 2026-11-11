@@ -42,6 +42,12 @@ pub struct PolledFullControl {
     pub kind: String,
     pub profile: String,
 }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SentFullControl {
+    pub kind: String,
+    pub profile: String,
+}
 /// Exact H1 token reply; the other role's token is never included.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +192,9 @@ macro_rules! canonical_control {
         }
     };
 }
+canonical_control!(SentFullControl, value, {
+    require(value.kind == "sent_full_control" && value.profile == PROFILE, "profile")
+});
 canonical_control!(HpkeConfirmFull, value, {
     require(value.kind == "hpke_confirm" && value.role == "initiator", "role")?;
     for item in [&value.enc, &value.epoch, &value.lease_id] {

@@ -11,8 +11,8 @@ use ramflux_protocol::custody::pairing::{
     full_transfer::{
         PACKET_BYTES, SecretBase64,
         relay::{
-            CloseFull, HelloFull, PollFull, PollFullControl, PollFullDiscovery, ProveFull,
-            SendFull, SendFullControl,
+            CloseFull, FullProofReply, HelloFull, PollFull, PollFullControl, PollFullDiscovery,
+            ProveFull, SendFull, SendFullControl,
         },
     },
 };
@@ -131,6 +131,26 @@ impl HttpRelay {
         request: &impl FullClaimRequest,
     ) -> Result<R, SdkError> {
         self.round(origin, "claim", request).await
+    }
+    /// Submit the exact original-branch proof; an identical retry may change Pending to Ready.
+    /// # Errors
+    /// Refuses TLS/deadline/framing errors, malformed proof replies and typed relay refusal.
+    pub async fn full_prove(
+        &self,
+        origin: &str,
+        request: &ProveFull,
+    ) -> Result<FullProofReply, SdkError> {
+        require_https_origin(origin)?;
+        let body = request.encode_secret().map_err(|error| wire(&error))?;
+        let (status, reply) =
+            super::post(&self.client, origin, "/client/pairing/v1/claim", body).await?;
+        if status != reqwest::StatusCode::OK {
+            return Err(status_error(status, &reply));
+        }
+        FullProofReply::from_wire_bytes(&reply).map_err(|_| {
+            super::Failure::from_wire_bytes(&reply)
+                .map_or(SdkError::PairingCode("InvalidInput"), |failure| failure_error(&failure))
+        })
     }
     /// Full-role HTTP exchange. Closed request codecs bind A2 to the exact serialized body.
     /// Existing add-device relay limits and decoding remain unchanged.

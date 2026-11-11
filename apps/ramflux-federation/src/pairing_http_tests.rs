@@ -97,6 +97,7 @@ pub(crate) struct NodeMesh {
     pub(crate) router: Arc<ramflux_node_core::RouterCore>,
     pub(crate) redb: Arc<ramflux_node_core::RouterRedbStore>,
     pub(crate) node: ramflux_crypto::custody::VerifiedNodeRecord,
+    pub(crate) full_admit_calls: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) proxy_branch: ramflux_crypto::DeviceBranch,
     _root: crate::test_directories::TestDirectory,
 }
@@ -181,6 +182,10 @@ pub(crate) fn spawn_node_mesh_at(
     let server_tls = router.tls.clone();
     let client_tls = federation.tls.clone();
     let dispatch = Arc::clone(&relay);
+    let full_admit_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::clone(&full_admit_calls);
+    let native_node = node.clone();
+    let native_router = Arc::clone(&router_core);
     std::thread::spawn(move || {
         loop {
             let Ok(accepted) = server
@@ -188,8 +193,27 @@ pub(crate) fn spawn_node_mesh_at(
             else {
                 continue;
             };
+            let peer = accepted
+                .peer_spiffe_uri
+                .as_deref()
+                .and_then(|uri| ramflux_node_core::parse_mesh_spiffe_uri(uri).ok());
             let mut stream = accepted.stream;
             while let Ok(Some(request)) = ramflux_transport::read_mesh_http_request(&mut stream) {
+                if request.path == ramflux_node_core::pairing_relay::FULL_MESH_ADMIT_PATH {
+                    let native = ramflux_node_core::pairing_relay::FullNativeRelay::new(
+                        &native_node,
+                        &native_router,
+                        Arc::clone(&dispatch),
+                    );
+                    let _ = serve_full_admit(
+                        &mut stream,
+                        peer.as_ref(),
+                        &native,
+                        &request.body,
+                        &calls,
+                    );
+                    break;
+                }
                 let reply = match serde_json::from_slice::<PairingMeshForward>(&request.body) {
                     Ok(forward) => handle_pairing_mesh(&dispatch, &request.path, &forward),
                     Err(_) => ramflux_node_core::pairing_relay::PairingMeshReply {
@@ -216,9 +240,49 @@ pub(crate) fn spawn_node_mesh_at(
         router: router_core,
         redb,
         node,
+        full_admit_calls,
         proxy_branch,
         _root: root,
     })
+}
+
+fn serve_full_admit(
+    stream: &mut ramflux_transport::MeshTlsServerStream,
+    peer: Option<&ramflux_node_core::MeshPeerIdentity>,
+    native: &ramflux_node_core::pairing_relay::FullNativeRelay<'_>,
+    body: &[u8],
+    calls: &std::sync::atomic::AtomicUsize,
+) -> TestResult {
+    use ramflux_node_core::pairing_relay::{FullMeshAdmit, PairingRelayError};
+    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let reply = (|| {
+        let request =
+            FullMeshAdmit::from_wire_bytes(body).map_err(|_| PairingRelayError::WrongContext)?;
+        native
+            .admit(peer.ok_or(PairingRelayError::WrongContext)?, &request)?
+            .encode_secret()
+            .map_err(|_| PairingRelayError::WrongContext)
+    })();
+    let bytes = match reply {
+        Ok(bytes) => bytes,
+        Err(error) => zeroize::Zeroizing::new(
+            Failure {
+                schema: "ramflux.pairing.Failure.v2".into(),
+                version: 2,
+                code: error.code().into(),
+                retry_after_ms: None,
+            }
+            .to_wire_bytes()?,
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        bytes.len()
+    )?;
+    stream.write_all(&bytes)?;
+    stream.flush()?;
+    Ok(())
 }
 
 fn public_context(
@@ -278,9 +342,12 @@ fn exchange_at(
     let addr = listener.local_addr()?;
     let mut client = TcpStream::connect(addr)?;
     client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let worker = std::thread::spawn(move || -> std::io::Result<()> {
         let (mut stream, _) = listener.accept()?;
-        handle_public_connection_with_limits(&mut stream, &context, limits, accepted_at);
+        tracing::dispatcher::with_default(&dispatch, || {
+            handle_public_connection_with_limits(&mut stream, &context, limits, accepted_at);
+        });
         Ok(())
     });
     client.write_all(raw)?;
@@ -716,5 +783,91 @@ fn pairing_unparsable_forwarded_client_is_refused() -> TestResult {
     assert!(port.starts_with("HTTP/1.1 400"), "{port}");
     assert!(port.contains("forwarded client invalid"), "{port}");
     drop(root);
+    Ok(())
+}
+
+struct CapturedPairingLogs(Arc<Mutex<Vec<u8>>>);
+impl Write for CapturedPairingLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().map_err(|_| std::io::Error::other("capture lock"))?.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Sends headers only: a successful response proves no declared bulk body was read.
+#[test]
+fn pairing_full_public_prebody_refusals_do_not_read_body_or_echo_capabilities() -> TestResult {
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&logs);
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || CapturedPairingLogs(Arc::clone(&writer)))
+        .finish();
+    let _capture = tracing::subscriber::set_default(subscriber);
+    let dummy = crate::test_certificates::temp_cert_root("pairing-full-prebody")?;
+    let admin = crate::http_listener_tests::context(&dummy)?;
+    let surface =
+        Arc::new(PairingHttpSurface::with_proxies(admin.router.clone(), vec![localhost()]));
+    let (context, _root) = public_context(Some(surface))?;
+    let token = id(73);
+    let auth = format!("Authorization: PairingFull {}.{}.initiator.{token}\r\n", id(71), id(72));
+    let proxy = proxy_headers("203.0.113.9");
+    let arm = "X-Ramflux-Pairing-Arm: send\r\n";
+    let cases = [
+        format!("{proxy}{arm}"),
+        format!("{proxy}{arm}{auth}{auth}"),
+        format!("{proxy}{arm}Authorization: Bearer {token}\r\n"),
+        format!("{proxy}X-Ramflux-Pairing-Arm: poll\r\n{auth}"),
+        format!("{arm}{auth}"),
+    ];
+    for headers in cases {
+        let raw = format!(
+            "POST {PAIRING_SEND_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 524288\r\n{headers}\r\n"
+        );
+        let response =
+            exchange(raw.as_bytes(), context.clone(), crate::http_limits::defaults(true))?;
+        assert_eq!(decode_http::<Failure>(&response)?.code, "WrongContext");
+        assert!(!response.contains(&token), "capability leaked in public refusal");
+        assert!(!response.contains("PairingFull"), "authorization leaked in public refusal");
+    }
+    // A full small control with the carrier stripped must not enter the legacy v2 wrapper.
+    let response = exchange(
+        &post(PAIRING_SEND_PATH, br#"{"kind":"send_full_control"}"#, &proxy),
+        context,
+        crate::http_limits::defaults(true),
+    )?;
+    assert_eq!(decode_http::<Failure>(&response)?.code, "WrongContext");
+    let captured = logs.lock().map_err(|_| "capture lock")?;
+    let captured = std::str::from_utf8(&captured)?;
+    assert!(!captured.contains(&token), "capability leaked in listener logs");
+    assert!(!captured.contains("PairingFull"), "authorization leaked in listener logs");
+    Ok(())
+}
+
+#[test]
+fn pairing_full_unknown_token_reaches_real_native_admit_over_mesh_before_public_body() -> TestResult
+{
+    let _env = enable_pairing();
+    let node = spawn_node_mesh()?;
+    let (context, _root) = live_context(&node, vec![localhost()])?;
+    let token = id(87);
+    let headers = format!(
+        "{}X-Ramflux-Pairing-Arm: send\r\nAuthorization: PairingFull {}.{}.initiator.{token}\r\n",
+        proxy_headers("203.0.113.10"),
+        id(85),
+        id(86)
+    );
+    let raw =
+        format!("POST {PAIRING_SEND_PATH} HTTP/1.1\r\nContent-Length: 524288\r\n{headers}\r\n");
+    // There is no body to read. The TLS node hop must return the closed token refusal.
+    let response = exchange(raw.as_bytes(), context, crate::http_limits::defaults(true))?;
+    assert_eq!(decode_http::<Failure>(&response)?.code, "WrongContext");
+    assert!(!response.contains(&token));
+    assert_eq!(node.full_admit_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(node.store.lock().map_err(|_| "store lock")?.stats().full, 0);
     Ok(())
 }

@@ -362,6 +362,44 @@ impl PairingRelayStore {
         self.reserve_full_body(&auth.route(), bytes, admission)
     }
 
+    /// Authenticate a claimed body guard before taking a fresh native loan for enqueue.
+    /// # Errors
+    /// Refuses an epoch/token retired while the raw body was in flight.
+    pub fn full_permit_grant(
+        &mut self,
+        permit: &super::FullSendPermit,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        PairingRelayError,
+    > {
+        self.full_resume
+            .as_mut()
+            .ok_or(PairingRelayError::WrongContext)?
+            .authenticated_grant(&permit.route())
+    }
+    /// Trusted node wall time for the native owner and the data lease use the same injected clock.
+    /// # Errors
+    /// Refuses an unavailable trusted clock.
+    pub fn full_relay_now(&self) -> Result<u64, PairingRelayError> {
+        self.clock.wall_unix_secs()
+    }
+
+    /// Resolve a proof's locally held grant only after verifying its original-branch signature.
+    /// This supplies native lookup scope, never a token or authority. Submit still checks
+    /// the exact frozen template, retry identity, current native state and both proofs.
+    /// # Errors
+    /// Refuses unknown/expired challenges, invalid roles or signatures without a native lookup.
+    pub fn full_proof_grant(
+        &mut self,
+        proof: &ramflux_protocol::custody::pairing::full_transfer::relay::ProveFull,
+    ) -> Result<
+        ramflux_protocol::custody::pairing::full_transfer::lease::DataGrant,
+        PairingRelayError,
+    > {
+        proof.validate().map_err(|error| wire(&error))?;
+        self.full_resume.as_mut().ok_or(PairingRelayError::WrongContext)?.proof_grant(&proof.proof)
+    }
+
     /// Authenticate A2 before looking up native account/head state, preserving its no-oracle rule.
     /// Release this store lock before loaning the current native owner, then reauthenticate
     /// on admission/claim/enqueue so an intervening epoch retirement cannot race through.

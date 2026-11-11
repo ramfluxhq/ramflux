@@ -7,7 +7,7 @@ use ramflux_protocol::custody::{
     pairing::full_transfer::{
         DataBinding, DataPacket, SecretBase64, U64,
         lease::{BranchKeys, DataGrant, DataLease, ResumeProof},
-        relay::ResumeTokenFull,
+        relay::{ResumeTokenFull, StartFull},
     },
 };
 use ramflux_protocol::decode_base64url;
@@ -34,6 +34,19 @@ fn fixture() -> TestResult<Fixture> {
     context.initiator.hpke_key = Some(encode_base64url(public(21)));
     context.responder.hpke_key = Some(encode_base64url(public(22)));
     let start = context.initiator.common.lease_not_before;
+    let start_full = StartFull {
+        commitment_opening: SecretBase64::from_bytes(&[9; 32]),
+        kind: "start_full".into(),
+        manifest_hash: b(15),
+        opaque_commitment: encode_base64url(
+            ramflux_protocol::custody::pairing::full_transfer::lease::opaque_commitment(
+                &[15; 32], &[9; 32],
+            ),
+        ),
+        profile: "primary_transfer_full_v1".into(),
+        snapshot_id: b(16),
+        transfer_id: context.initiator.common.transfer_id.clone().ok_or("transfer_id")?,
+    };
     let grant = DataGrant {
         schema: "ramflux.pairing.full_transfer.data_grant.v1".into(),
         version: 1,
@@ -45,7 +58,7 @@ fn fixture() -> TestResult<Fixture> {
             source: context.initiator.branch_key.clone(),
             destination: context.responder.branch_key.clone(),
         },
-        opaque_commitment: b(9),
+        opaque_commitment: start_full.opaque_commitment.clone(),
         expires_at: start + 604_800,
     };
     let body = DataLease {
@@ -71,8 +84,8 @@ fn fixture() -> TestResult<Fixture> {
     a.accept_peer_mac(&bm)?;
     bb.accept_peer_mac(&am)?;
     Ok(Fixture {
-        a: a.full_resume_trust(context.clone(), grant.clone(), &lease)?,
-        b: bb.full_resume_trust(context.clone(), grant, &lease)?,
+        a: a.full_resume_trust(context.clone(), grant.clone(), &lease, &start_full)?,
+        b: bb.full_resume_trust(context.clone(), grant, &lease, &start_full)?,
         lease,
         context,
     })
@@ -266,6 +279,18 @@ fn pairing_full_control_foreign_scope_preserves_receiver_key() -> TestResult {
         }
         assert!(matches!(
             receiver.open_control(&foreign, &local),
+            Err(CryptoError::Pairing("WrongContext"))
+        ));
+    }
+    for field in 0..3 {
+        let mut foreign = local.clone();
+        match field {
+            0 => foreign.manifest_hash = b(94),
+            1 => foreign.base_record_hash = b(95),
+            _ => foreign.destination_ref.device_id = "node-chosen-destination".into(),
+        }
+        assert!(matches!(
+            receiver.open_control(&control, &foreign),
             Err(CryptoError::Pairing("WrongContext"))
         ));
     }

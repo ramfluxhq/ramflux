@@ -38,11 +38,12 @@ const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
 const SYNC_STEPS: u32 = 64;
 
-/// True when the default-off pairing opt-in is set on the process env.
+/// Read the strict default-off pairing opt-in from the process env.
 /// Production builds [`PairingConfig::from_env`] once at startup; tests inject config.
-#[must_use]
-pub fn pairing_enabled() -> bool {
-    PairingConfig::from_env().enabled
+/// # Errors
+/// Refuses an invalid opt-in value before startup.
+pub fn pairing_enabled() -> Result<bool, SdkError> {
+    Ok(PairingConfig::from_env()?.enabled)
 }
 
 /// Responder-only prepared→acknowledged. The publisher (local primary) must submit first.

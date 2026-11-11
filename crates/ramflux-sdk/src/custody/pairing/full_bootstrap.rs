@@ -282,7 +282,12 @@ impl FullBootstrap {
         let after = crate::custody::network_now()?;
         self.live(after)?;
         verify_full_data_lease(&lease, &request.grant, &self.node, after)?;
-        let trust = self.channel.full_resume_trust(self.context.clone(), request.grant, &lease)?;
+        let trust = self.channel.full_resume_trust(
+            self.context.clone(),
+            request.grant,
+            &lease,
+            self.start.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?,
+        )?;
         let frame = self.seal(&FullSasControl::Lease(LeaseFull {
             kind: "lease_full".into(),
             lease: lease.clone(),
@@ -312,8 +317,12 @@ impl FullBootstrap {
         };
         let grant = &self.request.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?.grant;
         verify_full_data_lease(&lease.lease, grant, &self.node, now)?;
-        let trust =
-            self.channel.full_resume_trust(self.context.clone(), grant.clone(), &lease.lease)?;
+        let trust = self.channel.full_resume_trust(
+            self.context.clone(),
+            grant.clone(),
+            &lease.lease,
+            self.start.as_ref().ok_or(SdkError::PairingCode("WrongContext"))?,
+        )?;
         self.channel.cleanup();
         self.phase = Phase::Done;
         Ok((lease.lease, trust))

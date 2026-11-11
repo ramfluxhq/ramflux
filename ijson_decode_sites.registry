@@ -31,6 +31,7 @@ apps/ramflux-federation/src/mesh.rs | handle_mesh_request | 1 | E | excluded=tar
 apps/ramflux-federation/src/mesh.rs | handle_s8_inbound_envelope_request | 1 | A | strict=parse_i_json; admission=A ingress boundary
 apps/ramflux-federation/src/mesh.rs | load_signed_trust_snapshot_from_file | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-federation/src/mesh.rs | serve_attachment_peer | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+apps/ramflux-federation/src/pairing_full.rs | full_body_without_permit | 1 | A | strict=parse_i_json_secret; admission=old-window full-kind refusal before any legacy route can accept an unauthenticated full request
 apps/ramflux-gateway/src/clients.rs | router_get_json_blocking_async | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/clients.rs | router_post_json_until | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 apps/ramflux-gateway/src/custody.rs | is_open | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
@@ -356,6 +357,7 @@ crates/ramflux-protocol/src/custody/pairing/full_transfer/packet.rs | from_wire_
 crates/ramflux-protocol/src/custody/pairing/full_transfer/packet.rs | from_wire_bytes | 2 | A | strict=parse_i_json_secret; admission=selected bounded full-data packet after original-byte kind and control limit check
 crates/ramflux-protocol/src/custody/pairing/full_transfer/relay.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded secret v3 StartFull control before HPKE setup and lease-opening validation
 crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/bootstrap.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded original v3-only bootstrap kind before closed control decoder and private opening use
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/claim.rs | kind | 1 | A | strict=parse_i_json_secret; admission=bounded original full claim/proof kind before the closed typed decoder and role admission
 crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/control.rs | decode_control | 1 | A | strict=parse_i_json_secret; admission=bounded original-byte A1 control before authenticated lease role admission
 crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/send.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=owned endpoint full-data Send after bounded strict borrowed preflight
 crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/send.rs | from_wire_bytes | 2 | A | strict=parse_i_json_secret; admission=borrowed original full-data Send bytes within charged node body budget
