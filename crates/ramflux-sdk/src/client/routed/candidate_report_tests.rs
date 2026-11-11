@@ -232,7 +232,7 @@ async fn missing_direct_commitment_refused_under_gate() -> Result<(), SdkError> 
     let _omit = omit_direct_report();
     let entry = seal(&a, &b, message("report-omit", "c"), b"evade")?;
     assert!(entry.envelope.report_commitment.is_none());
-    crypto(apply(&mut b, &entry).await, "report commitment is required")?;
+    rejected(apply(&mut b, &entry).await, "report_commitment must be 32 bytes")?;
     assert_eq!(projected(&b, "c")?, 0);
     Ok(())
 }
@@ -563,6 +563,149 @@ async fn task_transport_prepared_a0_drift_is_a_send_error() -> Result<(), SdkErr
         Err(SdkError::InboundRejected(text)) if text.contains("report a0 drifted") => Ok(()),
         Err(error) => Err(invalid(&format!("exact prepared a0 drift, got {error}"))),
         Ok(_) => Err(invalid("exact prepared a0 drift, got Ok")),
+    }
+}
+
+fn uniform_tag_and_commitment(envelope: &ramflux_protocol::Envelope) -> Result<(), SdkError> {
+    let tag = ramflux_protocol::decode_base64url(
+        envelope.collapse_tag.as_deref().ok_or_else(|| invalid("collapse_tag"))?,
+    )
+    .map_err(|_| invalid("collapse_tag"))?;
+    let commitment = ramflux_protocol::decode_base64url(
+        envelope.report_commitment.as_deref().ok_or_else(|| invalid("report_commitment"))?,
+    )
+    .map_err(|_| invalid("report_commitment"))?;
+    if tag.len() != 32 || commitment.len() != 32 {
+        return Err(invalid("tag and commitment must be 32 bytes"));
+    }
+    ramflux_node_core::check_entry_bound(envelope).map_err(|error| invalid(&error.to_string()))?;
+    Ok(())
+}
+
+fn own_message_copy_inner(sender: &Fixture, receiver: &Fixture) -> Result<Vec<u8>, SdkError> {
+    let source = ramflux_protocol::message::QualifiedDevice {
+        account_anchor: sender.client.own_account_anchor()?,
+        device_id: sender.id.clone(),
+        device_epoch: 1,
+    };
+    let target = ramflux_protocol::message::QualifiedDevice {
+        account_anchor: sender.client.own_account_anchor()?,
+        device_id: receiver.id.clone(),
+        device_epoch: 1,
+    };
+    let control = crate::client::generated_control::control_from_payload(
+        ramflux_protocol::message::control::Payload::OwnMessageCopy(
+            ramflux_protocol::message::OwnMessageCopy {
+                source: Some(source.clone()),
+                target: Some(target),
+                created_at: 1,
+                expires_at: 2,
+                payload: Some(ramflux_protocol::message::own_message_copy::Payload::Sent(
+                    ramflux_protocol::message::OwnSentMessage {
+                        envelope_id: "own-env".into(),
+                        message_id: "own-msg".into(),
+                        sender_id: sender.id.clone(),
+                        original_recipients: Vec::new(),
+                        ciphertext_digest: Some(vec![1; 32]),
+                        authored_at: Some(1),
+                        exact_inner: vec![7; 8],
+                        ..Default::default()
+                    },
+                )),
+            },
+        ),
+    )?;
+    let mut stream = crate::client::generated_content::GeneratedEventStream::new("c", source);
+    RamfluxClient::encode_generated_control(&mut stream, b"own-copy".to_vec(), control)
+}
+
+fn receipt_body(id: &str, message_id: &str) -> Result<Vec<u8>, SdkError> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema":"ramflux.sdk.receipt_event.v1","version":1,"receipt_id":id,
+        "event_seq":1,"nonce":"nonce","reader_device_id":"bob",
+        "event":{"type":"ReceiptDelivered","conversation_id":"c","message_id":message_id,
+            "delivered_at":1,"receiver_device_id":"bob","scope":"device","ttl_seconds":3600}
+    }))
+    .map_err(SdkError::from)
+}
+
+fn receipt_message(id: &str) -> GatewayDirectMessage {
+    let mut receipt = reply_to("alice");
+    receipt.envelope_id = id.into();
+    receipt.message_id = id.into();
+    receipt.conversation_id = "c".into();
+    receipt
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_envelope_has_uniform_tag_and_commitment() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = pair(189, 190)?;
+    uniform_tag_and_commitment(&seal(&a, &b, message("t07-direct", "c"), b"direct")?.envelope)?;
+    let (a, b) = pair(191, 192)?;
+    uniform_tag_and_commitment(
+        &seal_as(
+            &a,
+            &b,
+            message("t07-control", "c"),
+            br#"{"type":"pair.session.reset.v1"}"#,
+            Route::control(),
+        )?
+        .envelope,
+    )?;
+    let (a, b) = pair(193, 194)?;
+    super::fixture_group(&a.client, "t07-group", &a)?;
+    super::fixture_group(&b.client, "t07-group", &a)?;
+    super::fixture_member(&a.client, "t07-group", &b)?;
+    super::fixture_member(&b.client, "t07-group", &b)?;
+    b.client.import_group_sender_key_distribution(
+        &a.client.export_group_sender_key_distribution("t07-group", "alice")?,
+    )?;
+    let group_body = a.client.encrypt_group_message("t07-group", "alice", b"group-body")?;
+    uniform_tag_and_commitment(
+        &seal_as(
+            &a,
+            &b,
+            message("t07-group-msg", "c"),
+            &group_body,
+            Route::group_message("t07-group"),
+        )?
+        .envelope,
+    )?;
+    let (a, b) = pair(195, 196)?;
+    uniform_tag_and_commitment(
+        &seal_as(
+            &b,
+            &a,
+            receipt_message("t07-receipt"),
+            &receipt_body("t07-receipt", "t07-outgoing")?,
+            Route::receipt(),
+        )?
+        .envelope,
+    )?;
+    let (a, b) = pair(197, 198)?;
+    uniform_tag_and_commitment(
+        &seal_as(
+            &a,
+            &b,
+            message("t07-own", "c"),
+            &own_message_copy_inner(&a, &b)?,
+            Route::control(),
+        )?
+        .envelope,
+    )?;
+    let _omit = omit_direct_report();
+    let (a, b) = pair(199, 200)?;
+    let omitted = seal_as(
+        &b,
+        &a,
+        receipt_message("t07-omit"),
+        &receipt_body("t07-omit", "t07-outgoing")?,
+        Route::receipt(),
+    )?;
+    match uniform_tag_and_commitment(&omitted.envelope) {
+        Err(_) => Ok(()),
+        Ok(()) => Err(invalid("omit Receipt commitment must fail the T07 assertion")),
     }
 }
 

@@ -480,8 +480,7 @@ impl RamfluxClient {
             routing: route.clone(),
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
         })?);
-        let report = if route.kind == Kind::Direct
-            && crate::client::target_selection::schema_v1_selected()
+        let report = if crate::client::target_selection::schema_v1_selected()
             && !report::omit_direct_report()
         {
             let recipient = self.device_identity(&remote)?;

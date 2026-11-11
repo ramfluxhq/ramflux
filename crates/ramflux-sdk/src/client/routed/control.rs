@@ -15,12 +15,37 @@ fn revocation_error(error: ramflux_storage::StorageError) -> SdkError {
 }
 
 impl RamfluxClient {
+    fn project_generated_own_message_copy(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<bool, SdkError> {
+        let Ok((_, content)) = Self::decode_generated_inner(body) else {
+            return Ok(false);
+        };
+        let Some(ramflux_protocol::message::content::Value::Control(control)) = content.value
+        else {
+            return Ok(false);
+        };
+        let Some(ramflux_protocol::message::control::Payload::OwnMessageCopy(copy)) =
+            control.payload
+        else {
+            return Ok(false);
+        };
+        self.receive_generated_own_message_copy(opened, entry, &copy)?;
+        Ok(true)
+    }
+
     pub(super) fn project_routed_control(
         &self,
         opened: &Opened,
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<Option<Vec<u8>>, SdkError> {
+        if self.project_generated_own_message_copy(opened, entry, body)? {
+            return Ok(None);
+        }
         if self.receive_contact_control(entry, &opened.routing, body)? {
             return Ok(None);
         }
@@ -59,6 +84,15 @@ impl RamfluxClient {
         )? {
             return Ok(None);
         }
+        self.project_json_control(opened, entry, body)
+    }
+
+    fn project_json_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>, SdkError> {
         let value: Value = serde_json::from_slice(body)?;
         if value["schema"] == "ramflux.sdk.own_device_sync.v1" {
             let sync: crate::own_device_sync::SdkOwnDeviceSyncEnvelope =
@@ -97,29 +131,50 @@ impl RamfluxClient {
             )?;
             self.account_db()?.persist_actor_state(&a2i_key(&source, &event.event_id)?, &event)?;
         } else {
-            let event: Value = serde_json::from_slice(body)?;
-            if matches!(
-                event["type"].as_str(),
-                Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
-            ) {
-                if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {
-                    return Err(invalid("pair recovery forbidden for removed or blocked contact"));
-                }
-                if event["type"] == "pair.session.reset.v1"
-                    && let Some(floor) = event["rejected_bootstrap_floor"].as_u64()
-                {
-                    self.abandon_unconfirmed_candidate(
-                        &opened.local_device,
-                        &opened.remote_device,
-                        floor,
-                    )?;
-                }
-                self.account_db()?.append_journal(&format!("pair-reset:{}", self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?), "session.reset", &serde_json::json!({"device_id":opened.remote_device.storage_key(),"reason":"authenticated_reset_request"}), super::now_unix_timestamp(), None)?;
-            } else {
-                self.project_contact_control(entry, &event)?;
-            }
+            self.project_pair_or_contact_control(opened, entry, body)?;
         }
         Ok(None)
+    }
+
+    fn project_pair_or_contact_control(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        body: &[u8],
+    ) -> Result<(), SdkError> {
+        let event: Value = serde_json::from_slice(body)?;
+        if matches!(
+            event["type"].as_str(),
+            Some("pair.session.reset.v1" | "pair.session.reset.ack.v1")
+        ) {
+            if self.friend_rejection_reason(&entry.envelope.source_principal_id)?.is_some() {
+                return Err(invalid("pair recovery forbidden for removed or blocked contact"));
+            }
+            if event["type"] == "pair.session.reset.v1"
+                && let Some(floor) = event["rejected_bootstrap_floor"].as_u64()
+            {
+                self.abandon_unconfirmed_candidate(
+                    &opened.local_device,
+                    &opened.remote_device,
+                    floor,
+                )?;
+            }
+            self.account_db()?.append_journal(
+                &format!(
+                    "pair-reset:{}",
+                    self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?
+                ),
+                "session.reset",
+                &serde_json::json!({
+                    "device_id": opened.remote_device.storage_key(),
+                    "reason": "authenticated_reset_request"
+                }),
+                super::now_unix_timestamp(),
+                None,
+            )?;
+            return Ok(());
+        }
+        self.project_contact_control(entry, &event)
     }
     pub(crate) fn project_legacy_contact_control(
         &self,

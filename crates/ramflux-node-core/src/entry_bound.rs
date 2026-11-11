@@ -80,7 +80,7 @@ fn check_candidate_entry_bound(envelope: &ramflux_protocol::Envelope) -> Result<
             ramflux_protocol::message::outer::OuterProfileError::CollapseTag,
         ));
     }
-    ramflux_protocol::message::outer::live_report_commitment_bytes(envelope)
+    ramflux_protocol::message::outer::require_live_report_commitment(envelope)
         .map_err(map_outer_profile)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
         ramflux_protocol::domain::ENVELOPE,

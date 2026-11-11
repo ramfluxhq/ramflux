@@ -4,7 +4,8 @@
 //! Ordered own-copy network work with local ratchet and unchanged-row checkpoints.
 
 use super::{
-    Target, Work, copy_id, finish_attempt, message_owner, pending_ordered, persist_work, state,
+    GeneratedCopy, Target, Work, copy_id, finish_attempt, message_owner, pending_ordered,
+    persist_work, sealed, state,
 };
 use crate::bus::connection_manager::{AccountWork, SessionContext};
 use crate::client::{
@@ -32,8 +33,9 @@ pub(crate) struct DraftPlan {
 }
 pub(crate) struct SendPlan {
     plan: Plan,
-    packet: OwnDeviceMessage,
-    envelope: Envelope,
+    packet: Option<OwnDeviceMessage>,
+    envelope: Option<Envelope>,
+    generated: Vec<(String, Envelope)>,
 }
 pub(crate) enum Prepared {
     Draft(Box<DraftPlan>),
@@ -106,7 +108,7 @@ async fn deliver_plan(
     mut plan: Plan,
 ) -> Result<bool, SdkError> {
     let generation = context.generation;
-    let manifest = if plan.work.packet.is_some() {
+    let manifest = if sealed(&plan.work) {
         Ok(None)
     } else if let Some(manifest) = plan.manifest.take() {
         Ok(Some(manifest))
@@ -226,7 +228,7 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
     for (key, mut work) in pending_ordered(&account.client, now)? {
         if (!work.local_manifest && message_owner(&work).is_some())
             || work.intent.expiry() <= now
-            || (work.packet.is_none() && work.attempts >= 10)
+            || (!sealed(&work) && work.attempts >= 10)
             || copy_id(&account.client, &work.intent.id)? != work.intent.copy_id
         {
             finish(account, &key, &work, "failed")?;
@@ -258,21 +260,18 @@ fn prepare(account: &LocalBusAccountState) -> Result<Option<Plan>, SdkError> {
         if work.next_at > now {
             continue;
         }
-        if work.packet.is_none() {
+        if sealed(&work) {
+            work.next_at = now.saturating_add(2);
+        } else {
             work.attempts += 1;
             work.next_at = now.saturating_add((1_i64 << work.attempts.min(6)).min(60));
-        } else {
-            work.next_at = now.saturating_add(2);
         }
         account.client.account_db()?.persist_actor_state(&key, &work)?;
-        if work.packet.is_none()
-            && work.local_manifest
-            && !account.client.own_sent_has_siblings()?
-        {
+        if !sealed(&work) && work.local_manifest && !account.client.own_sent_has_siblings()? {
             finish(account, &key, &work, "not_needed")?;
             continue;
         }
-        let manifest = if work.packet.is_none() && work.local_manifest {
+        let manifest = if !sealed(&work) && work.local_manifest {
             account.client.prepare_own_copy_manifest_refresh()?
         } else {
             None
@@ -303,6 +302,10 @@ fn draft(
 ) -> Result<Option<Prepared>, SdkError> {
     if !current(account, &plan)? {
         return Ok(None);
+    }
+    if let Some(generated) = plan.work.generated.clone() {
+        return resume_generated(account, plan, generated)
+            .map(|plan| plan.map(|plan| Prepared::Send(Box::new(plan))));
     }
     if let Some(packet) = &plan.work.packet {
         let Ok(packet) = serde_json::from_value::<OwnDeviceMessage>(packet.clone()) else {
@@ -380,6 +383,9 @@ fn seal(
     if !current(account, &plan)? {
         return Ok(None);
     }
+    if crate::client::target_selection::schema_v1_selected() {
+        return seal_generated(account, plan, draft, materials);
+    }
     let result = account.client.seal_own_copy_prepared(&plan.config, draft, materials?);
     let packet = match result {
         Err(SdkError::InboundRejected(reason))
@@ -404,6 +410,106 @@ fn seal(
     }
     plan.fingerprint = serde_json::to_value(&plan.work)?;
     envelope(account, plan, packet).map(Some)
+}
+
+fn seal_generated(
+    account: &LocalBusAccountState,
+    mut plan: Plan,
+    draft: crate::client::own_device_copy::OwnCopyDraft,
+    materials: Result<Vec<SendMaterial>, SdkError>,
+) -> Result<Option<SendPlan>, SdkError> {
+    let context_delivery = draft.packet.context_delivery.clone();
+    let result = account.client.seal_own_copy_generated(&plan.config, draft, materials?);
+    let generated = match result {
+        Err(SdkError::InboundRejected(reason))
+            if reason == crate::client::own_device_copy::TOO_LARGE =>
+        {
+            finish(account, &plan.key, &plan.work, "failed")?;
+            return Ok(None);
+        }
+        result => result?,
+    };
+    plan.work.context_delivery = context_delivery;
+    plan.work.targets = generated
+        .iter()
+        .map(|(device, _)| Target::new(device.clone(), 0, now_unix_timestamp()))
+        .collect();
+    plan.work.generated = Some(
+        generated
+            .iter()
+            .map(|(device, envelope)| GeneratedCopy {
+                device: device.clone(),
+                envelope: envelope.clone(),
+            })
+            .collect(),
+    );
+    plan.work.intent.body.zeroize();
+    if !persist_work(&account.client, &plan.key, &plan.work)? {
+        finish(account, &plan.key, &plan.work, "failed")?;
+        return Ok(None);
+    }
+    plan.fingerprint = serde_json::to_value(&plan.work)?;
+    persist_generated(account, plan, generated).map(Some)
+}
+
+fn resume_generated(
+    account: &LocalBusAccountState,
+    mut plan: Plan,
+    generated: Vec<GeneratedCopy>,
+) -> Result<Option<SendPlan>, SdkError> {
+    let now = now_unix_timestamp();
+    if plan.work.targets.is_empty() {
+        plan.work.targets = generated
+            .iter()
+            .map(|copy| Target::new(copy.device.clone(), plan.work.attempts, 0))
+            .collect();
+    }
+    if plan.work.targets.iter().all(Target::finished) {
+        let status =
+            if plan.work.targets.iter().all(Target::acknowledged) { "submitted" } else { "failed" };
+        finish(account, &plan.key, &plan.work, status)?;
+        return Ok(None);
+    }
+    if !plan.work.targets.iter().any(|target| target.due(now)) {
+        return Ok(None);
+    }
+    persist_generated(
+        account,
+        plan,
+        generated.into_iter().map(|copy| (copy.device, copy.envelope)).collect(),
+    )
+    .map(Some)
+}
+
+fn persist_generated(
+    account: &LocalBusAccountState,
+    mut plan: Plan,
+    generated: Vec<(String, Envelope)>,
+) -> Result<SendPlan, SdkError> {
+    let now = now_unix_timestamp();
+    let due: Vec<String> = plan
+        .work
+        .targets
+        .iter()
+        .filter(|target| target.due(now))
+        .map(|target| target.device().to_owned())
+        .collect();
+    for target in &mut plan.work.targets {
+        target.charge(now);
+    }
+    if !persist_work(&account.client, &plan.key, &plan.work)? {
+        return Err(SdkError::LocalBus("own-device retry capacity exceeded".into()));
+    }
+    plan.fingerprint = serde_json::to_value(&plan.work)?;
+    Ok(SendPlan {
+        plan,
+        packet: None,
+        envelope: None,
+        generated: generated
+            .into_iter()
+            .filter(|(device, _)| due.iter().any(|id| id == device))
+            .collect(),
+    })
 }
 fn envelope(
     account: &LocalBusAccountState,
@@ -440,7 +546,7 @@ fn envelope(
         return Err(SdkError::LocalBus("own-device retry capacity exceeded".into()));
     }
     plan.fingerprint = serde_json::to_value(&plan.work)?;
-    Ok(SendPlan { plan, packet, envelope })
+    Ok(SendPlan { plan, packet: Some(packet), envelope: Some(envelope), generated: Vec::new() })
 }
 fn complete(
     account: &LocalBusAccountState,
@@ -484,10 +590,19 @@ pub(crate) async fn drive_once(account: &mut LocalBusAccountState) -> Result<boo
 }
 
 async fn fanout(context: &SessionContext, plan: &SendPlan) -> Result<Vec<String>, SdkError> {
+    if !plan.generated.is_empty() {
+        return fanout_generated(context, plan).await;
+    }
     let principal = plan.plan.config.principal_id.clone();
     let source = plan.plan.config.device_id.clone();
-    let packet = plan.packet.clone();
-    let envelope = plan.envelope.clone();
+    let packet = plan
+        .packet
+        .clone()
+        .ok_or_else(|| SdkError::LocalBus("own-device packet missing".into()))?;
+    let envelope = plan
+        .envelope
+        .clone()
+        .ok_or_else(|| SdkError::LocalBus("own-device envelope missing".into()))?;
     context
         .call(
             move |engine| {
@@ -517,6 +632,30 @@ async fn fanout(context: &SessionContext, plan: &SendPlan) -> Result<Vec<String>
             context.call_deadline(),
         )
         .await
+}
+
+async fn fanout_generated(
+    context: &SessionContext,
+    plan: &SendPlan,
+) -> Result<Vec<String>, SdkError> {
+    let mut delivered = Vec::new();
+    for (device, envelope) in &plan.generated {
+        let envelope = envelope.clone();
+        let device = device.clone();
+        let submitted = context
+            .call(
+                move |engine| {
+                    Box::pin(async move {
+                        engine.submit_envelope(envelope).await?;
+                        Ok(device)
+                    })
+                },
+                context.call_deadline(),
+            )
+            .await?;
+        delivered.push(submitted);
+    }
+    Ok(delivered)
 }
 
 #[cfg(test)]
