@@ -409,7 +409,9 @@ impl CustodyService {
             grant.as_ref().map(|grant| grant.purpose),
             now,
         )?;
-        if object_hash(&publication.record).map_err(invalid)? != session.record_hash {
+        let head_changed =
+            object_hash(&publication.record).map_err(invalid)? != session.record_hash;
+        if grant.is_some() && head_changed {
             return Err(CustodyRefusal::UpdateRequired);
         }
         let cert = authority
@@ -418,7 +420,9 @@ impl CustodyService {
                 grant.as_ref().map_or("message", |grant| grant.purpose.capability()),
                 now,
             )
-            .map_err(invalid)?;
+            .map_err(
+                |error| if head_changed { CustodyRefusal::UpdateRequired } else { invalid(error) },
+            )?;
         let source =
             RootQualifiedDeviceRef::from_custody_record(&authority, &session.device_ref.device_id)
                 .map_err(invalid)?;

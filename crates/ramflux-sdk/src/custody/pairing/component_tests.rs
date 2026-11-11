@@ -271,7 +271,7 @@ async fn pairing_recipient_activates_only_exact_durable_publication() -> TestRes
     participant_b.return_client(&mut target)?;
     let admitted = crate::custody::load_account(recipient_root.path(), "component-recipient", now)?;
     assert_retained_roster(&admitted, original_devices, participant_b.vault.as_ref());
-    assert_adoption_refs(&target)?;
+    assert_adoption_refs(&target, participant_b.vault.as_ref())?;
     assert_missing_marker_refuses(recipient_root.path(), now)?;
     Ok(())
 }
@@ -290,14 +290,40 @@ fn ordinary_session_admitted_for_participant(
     Ok(super::activate::adoption(&installed)? == adopted)
 }
 
-fn assert_adoption_refs(target: &crate::RamfluxClient) -> TestResult {
+fn assert_adoption_refs(
+    target: &crate::RamfluxClient,
+    vault: &dyn crate::custody::PrimaryVault,
+) -> TestResult {
+    let root = target.account_index()?.root();
+    let now = crate::custody::network_now()?;
+    let account = crate::custody::load_account(root, "component-recipient", now)?;
+    let mut network = crate::custody::CustodyNetworkConfig {
+        pairing_admission: Some(Arc::new(target.account_db()?.pairing_admission_reader())),
+        account_root: root.into(),
+        account_id: "component-recipient".into(),
+        device_id: account.local_device_id()?.into(),
+        gateway_address: "127.0.0.1:1".parse()?,
+        server_name: "localhost".into(),
+        ca_certificate: root.join("unused.pem"),
+        node_id: "fixture".into(),
+        node_public_key: ramflux_protocol::encode_base64url([1; 32]),
+        audience: "fixture".into(),
+        binding_mode: ramflux_protocol::custody::BindingMode::DirectExporter,
+        allow_no_channel_binding: false,
+        timeout: std::time::Duration::from_secs(5),
+    };
+    super::admission::require_network_admission(&network, &account, vault, now)?;
     let adopted = target.account_db()?.pairing_adoption()?.ok_or("adoption")?;
     let mut corrupt = adopted.clone();
     corrupt.data_vault_ref = "foreign-data-owner".into();
     target.account_db()?.put_pairing_adoption(&corrupt)?;
     assert!(!ordinary_session_admitted(target, "component-recipient")?);
+    assert!(super::admission::require_network_admission(&network, &account, vault, now).is_err());
     target.account_db()?.put_pairing_adoption(&adopted)?;
     assert!(ordinary_session_admitted(target, "component-recipient")?);
+    super::admission::require_network_admission(&network, &account, vault, now)?;
+    network.pairing_admission = None;
+    assert!(super::admission::require_network_admission(&network, &account, vault, now).is_err());
     Ok(())
 }
 

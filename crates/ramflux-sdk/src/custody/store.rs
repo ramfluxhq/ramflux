@@ -232,6 +232,9 @@ pub(super) fn require_current_authority(
     })
 }
 impl BornAccount {
+    pub(crate) fn pairing_adoption_required(&self) -> bool {
+        self.stored.pairing_adoption_required
+    }
     fn require_current_snapshot(&self) -> Result<(), SdkError> {
         let root = self.networking_path.parent().and_then(Path::parent).ok_or_else(invalid)?;
         let current = load_data_account(root, self.local_account_id(), super::network_now()?)?;

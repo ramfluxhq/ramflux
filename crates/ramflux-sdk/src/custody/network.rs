@@ -29,6 +29,8 @@ struct OpenTransport<S = GatewayTcpTlsStream> {
 }
 #[derive(Clone)]
 pub struct CustodyNetworkConfig {
+    /// Weak access to the unlocked DB adoption owner; mandatory after pairing installation.
+    pub pairing_admission: Option<Arc<ramflux_storage::PairingAdmissionReader>>,
     pub account_root: PathBuf,
     pub account_id: String,
     pub device_id: String,
@@ -46,6 +48,7 @@ pub struct CustodyNetworkConfig {
 /// Owns a live TLS connection and its session; neither is serializable or backed up.
 pub struct CustodyConnection<S = GatewayTcpTlsStream> {
     pub(super) account: BornAccount,
+    pairing_admission: Option<Arc<ramflux_storage::PairingAdmissionReader>>,
     pub(super) device: DeviceRef,
     pub(super) credentials: BranchCredentials,
     pub(super) stream: S,
@@ -194,10 +197,17 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         let device_id = config.device_id.clone();
         let node_id = config.node_id.clone();
         let node_public_key = config.node_public_key.clone();
+        let admission_config = config.clone();
         let authority = budget
             .attempt(async move {
                 tokio::task::spawn_blocking(move || {
                     let mut account = super::load_account(&root, &account_id, now()?)?;
+                    super::pairing::admission::require_network_admission(
+                        &admission_config,
+                        &account,
+                        vault.as_ref(),
+                        now()?,
+                    )?;
                     account.bind_capacity_node(&root, &node_id, &node_public_key, now()?)?;
                     let (device, credentials) =
                         account.credentials(vault.as_ref(), &device_id, now()?)?;
@@ -300,6 +310,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     ) -> Self {
         Self {
             account: authority.account,
+            pairing_admission: config.pairing_admission.clone(),
             device: authority.device,
             credentials: authority.credentials,
             stream: opened.stream,
@@ -395,10 +406,17 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
     pub(super) fn prekey_bundle(&self) -> Result<ramflux_crypto::PrekeyBundle, SdkError> {
         self.credentials.prekey_bundle()
     }
+    fn require_open_data_owner(&self) -> Result<(), SdkError> {
+        if self.pairing_admission.as_ref().is_some_and(|reader| !reader.is_open()) {
+            return Err(SdkError::PairingCode("PublicationPending"));
+        }
+        Ok(())
+    }
     pub(crate) async fn prove(
         &mut self,
         action: CustodyProofAction,
     ) -> Result<CustodyServerFrame, SdkError> {
+        self.require_open_data_owner()?;
         let response = exchange(
             &mut self.stream,
             &CustodyClientFrame::Challenge {
@@ -463,6 +481,7 @@ impl<S: ramflux_transport::GatewaySessionTransport + Send> CustodyConnection<S> 
         &mut self,
         action: CustodySessionAction,
     ) -> Result<CustodyServerFrame, SdkError> {
+        self.require_open_data_owner()?;
         super::capacity_backoff::check(&self.capacity_key)?;
         let session = self.session.as_ref().ok_or(CustodyRefusal::SessionRequired)?;
         let clock = now()?;

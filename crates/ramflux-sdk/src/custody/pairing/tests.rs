@@ -525,3 +525,45 @@ async fn pairing_staging_failure_queues_no_commit() -> TestResult {
     assert!(fx.recipient.commitment_device_id().is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn pairing_bus_actor_ownership_is_root_scoped_and_lock_retires_it() -> TestResult {
+    let fx = Fixture::open()?;
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    super::install_actor(first.path(), "primary".into(), fx.primary)?;
+    let result = super::handle_bus(
+        first.path(),
+        "primary",
+        "device.pair.begin",
+        serde_json::to_value(begin_body())?,
+    )
+    .await?;
+    let begun = begin_result(result)?;
+    let request = serde_json::to_value(status_req(&begun.operation_id, begun.generation))?;
+    assert!(matches!(
+        super::handle_bus(second.path(), "primary", "device.pair.status", request.clone()).await,
+        Err(SdkError::PairingCode("NotFound"))
+    ));
+    let aliased = first.path().join(".");
+    assert_no_token(
+        &super::handle_bus(&aliased, "primary", "device.pair.status", request.clone()).await?,
+        &begun.invite_token.recipient_token,
+    )?;
+    let duplicate = PairingActor::new(
+        identity("primary", true, true),
+        None,
+        Arc::new(MemoryRelay { store: fx.store.clone() }),
+        PairingConfig { enabled: true, extra_root_ca_pem: None },
+    );
+    assert!(matches!(
+        super::install_actor(&aliased, "primary".into(), duplicate),
+        Err(SdkError::PairingCode("Busy"))
+    ));
+    super::remove_actor(&aliased, "primary")?;
+    assert!(matches!(
+        super::handle_bus(first.path(), "primary", "device.pair.status", request).await,
+        Err(SdkError::PairingCode("NotFound"))
+    ));
+    Ok(())
+}

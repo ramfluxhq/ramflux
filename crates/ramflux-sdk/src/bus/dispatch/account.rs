@@ -187,6 +187,7 @@ fn local_bus_account_lock(
             None,
         )?;
     }
+    crate::custody::pairing::remove_actor(&state.config.data_root, account_id)?;
     let removed = state.accounts.remove(account_id);
     if removed.is_none() {
         return Err(SdkError::AccountNotOpen(account_id.to_owned()));

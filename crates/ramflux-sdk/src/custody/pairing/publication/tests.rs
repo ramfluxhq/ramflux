@@ -60,6 +60,70 @@ struct LossyPersist {
 }
 
 #[tokio::test]
+async fn pairing_async_submission_retains_exact_head_before_network_and_on_retry() -> TestResult {
+    let harness = Harness::open("async-head-submission").await?;
+    let now = Harness::now()?;
+    enroll_sibling(&harness, now)?;
+    let before = object_hash(harness.account(now)?.record())?;
+    let write = revoke_write(&harness, "sibling", now + 1)?;
+    let prepared = super::prepare_head_submission(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+    )?;
+    let durable = held_head(&harness)?;
+    assert_eq!(durable.state, "submitted", "cancellation cannot precede the submit fence");
+    assert_eq!(durable.candidate_hash, object_hash(&prepared.record)?);
+    assert_eq!(object_hash(harness.account(now + 1)?.record())?, before);
+    let node_before = harness
+        .persist
+        .router
+        .custody_record(&prepared.record.body.account_anchor, now + 1)?
+        .ok_or("node record")?;
+    assert_eq!(object_hash(&node_before.record)?, before, "preparation is not publication");
+    assert!(harness.db.try_lock().is_ok(), "no DB lock crosses the native send");
+    let lock = crate::custody::pairing::activate::authority_lock(harness.root(), &harness.id)?;
+    drop(lock);
+    // The asynchronous frontend may disappear here. Re-entry uses exactly the submitted row.
+    let retry = super::prepare_head_submission(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+    )?;
+    assert_eq!(object_hash(&retry.record)?, durable.candidate_hash);
+    assert_busy(&harness, &profile_write(&harness, "Cannot replace submitted revoke", now + 1)?)?;
+    let acknowledged = publish_head(
+        &harness.db,
+        harness.root(),
+        harness.fixture.vault.as_ref(),
+        &write,
+        harness.persist.as_ref(),
+    )?;
+    assert_eq!(acknowledged.record_hash, durable.candidate_hash);
+    assert!(harness.db.lock().map_err(|_| "db")?.pairing_head()?.is_none());
+    let node_after = harness
+        .persist
+        .router
+        .custody_record(&prepared.record.body.account_anchor, now + 1)?
+        .ok_or("published record")?;
+    assert_eq!(object_hash(&node_after.record)?, durable.candidate_hash);
+    assert_eq!(
+        node_after
+            .record
+            .body
+            .devices
+            .iter()
+            .find(|d| d.device_id == "sibling")
+            .ok_or("sibling")?
+            .status,
+        ramflux_protocol::DeviceSetStatus::Revoked
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn pairing_head_update_is_durable_before_network_and_reconciles_same_hash() -> TestResult {
     struct InspectingPersist<'a> {
         db: &'a Mutex<AccountDb>,

@@ -3,6 +3,7 @@
 
 //! Dormant pairing install-store and SDK coordinator. Default-off.
 mod activate;
+pub(crate) mod admission;
 mod coordinator;
 mod native_ports;
 mod participant;
@@ -17,7 +18,7 @@ pub(crate) mod recipient;
 pub mod transfer_payload;
 mod transport;
 pub use coordinator::{
-    PairingActor, PairingIdentity, handle_bus, install_actor, pairing_enabled,
+    PairingActor, PairingIdentity, handle_bus, install_actor, pairing_enabled, remove_actor,
     validate_head_advance,
 };
 pub use install_gate::{Admission, ReopenGate, reopen};

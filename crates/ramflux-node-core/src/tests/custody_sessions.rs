@@ -380,8 +380,15 @@ fn custody_session_requests_bind_connection_possession_nonce_and_current_head() 
             retry: None,
         }
     ));
-    let verified = verify_record(&driver.publication.record, NOW, None, None)?;
     let primary = SelfSigningKey::from_vault_seed(&zeroize::Zeroizing::new([11; 32]));
+    let renewed = publish_session_profile_update(&driver, &router, &store, &primary)?;
+    let after_update =
+        signed_request(&driver, &session, &action, &ramflux_protocol::encode_base64url([8; 32]))?;
+    assert!(
+        matches!(send(&driver.connection, after_update, NOW + 1), CustodyServerFrame::Inbox { .. }),
+        "unrelated head changes preserve a live authorized branch session"
+    );
+    let verified = verify_record(&renewed, NOW + 1, None, None)?;
     let revoked = primary.revoke_device(&verified, "primary", NOW + 1)?;
     router.publish_custody_record(
         &crate::CustodyPublication { record: revoked, compacted_ids: None },
@@ -837,3 +844,23 @@ mod sender_retry;
 
 #[path = "custody_entry_bound.rs"]
 mod entry_bound;
+
+fn publish_session_profile_update(
+    driver: &Driver,
+    router: &RouterCore,
+    store: &RouterRedbStore,
+    primary: &SelfSigningKey,
+) -> Result<ramflux_protocol::custody::Envelope<ramflux_protocol::custody::DeviceSet>> {
+    let mut body = driver.publication.record.body.clone();
+    body.device_set_epoch += 1;
+    body.previous_record_hash = Some(object_hash(&driver.publication.record)?);
+    body.issued_at = NOW + 1;
+    body.profile.display_name = "Current profile".into();
+    let record = primary.sign_record(body)?;
+    router.publish_custody_record(
+        &crate::CustodyPublication { record: record.clone(), compacted_ids: None },
+        NOW + 1,
+        store,
+    )?;
+    Ok(record)
+}

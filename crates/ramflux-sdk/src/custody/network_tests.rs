@@ -217,6 +217,7 @@ async fn custody_live_bus_creation_tls_registration_sessions_and_name_conflict()
         let _bob_anchor = create(&socket, "bob", "Bob").await?;
         create(&socket, "impostor", "Alice").await?;
         let network = |id: &str| CustodyNetworkConfig {
+            pairing_admission: None,
             account_root: root.0.clone(),
             account_id: id.into(),
             device_id: "primary".into(),

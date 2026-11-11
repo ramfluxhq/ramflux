@@ -20,11 +20,18 @@ pub struct BackupCounts {
     pub attachment_bytes: u64,
 }
 
-/// The snapshot database key is secret and must enter only the encrypted archive.
+/// The snapshot database key is secret and remains with its local snapshot/archive owner.
+/// Full pairing transfers encode logical records only; this key must never cross that channel.
 /// Deliberately does not implement Debug or Serialize.
 pub struct AccountBackupSnapshot {
     pub key: AccountDbKey,
     pub counts: BackupCounts,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotPolicy {
+    Backup,
+    NativeFullTransfer,
 }
 
 impl AccountDb {
@@ -81,6 +88,28 @@ impl AccountDb {
         destination: &Path,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<AccountBackupSnapshot, StorageError> {
+        self.write_snapshot(destination, cancel, SnapshotPolicy::Backup)
+    }
+
+    /// Take an A-private consistent cut for the full logical transfer encoder.
+    /// Unlike a backup, this cut preserves every source record for typed T/E/R projection.
+    /// It includes source-local secrets: neither its file nor its key may be transmitted.
+    /// # Errors
+    /// Refuses unresolved restore scratch, cancellation, a busy source or snapshot I/O errors.
+    pub fn write_full_transfer_snapshot_cancellable(
+        &self,
+        destination: &Path,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<AccountBackupSnapshot, StorageError> {
+        self.write_snapshot(destination, cancel, SnapshotPolicy::NativeFullTransfer)
+    }
+
+    fn write_snapshot(
+        &self,
+        destination: &Path,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        policy: SnapshotPolicy,
+    ) -> Result<AccountBackupSnapshot, StorageError> {
         let parent = destination
             .parent()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?
@@ -127,6 +156,14 @@ impl AccountDb {
                 }
             }
             target.execute("UPDATE account_key_check SET key_fingerprint=?1 WHERE singleton_id=1", rusqlite::params![fingerprint])?;
+            if policy == SnapshotPolicy::NativeFullTransfer {
+                if let Err(error) = super::backup_native::full_transfer_snapshot_preflight(&target) {
+                    return Ok(Err(error));
+                }
+                let counts = read_counts(&target)?;
+                target.close().map_err(|(_, error)| error)?;
+                return Ok(Ok(counts));
+            }
             super::backup_selector_admission::drop_scratch(&target)?;
             super::home_migration::strip_from_backup(&target)?;
             if let Err(error) = super::receive::ledger_backup::sanitize_backup(&target) {

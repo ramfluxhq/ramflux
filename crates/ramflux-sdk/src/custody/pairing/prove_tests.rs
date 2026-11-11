@@ -239,6 +239,7 @@ async fn connect_mock_mode(proof_only: bool) -> TestResult<Connected> {
         .map_err(|error| error.to_string())?;
     let sent = Arc::new(Mutex::new(Vec::new()));
     let config = CustodyNetworkConfig {
+        pairing_admission: None,
         account_root: root.0.clone(),
         account_id: "alice".into(),
         device_id: "primary".into(),

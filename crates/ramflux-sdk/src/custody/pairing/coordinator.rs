@@ -26,11 +26,13 @@ use ramflux_protocol::custody::pairing::{
     Commit, Common, ContextOffer, PairingWire, Reveal, RoleContext,
 };
 use ramflux_protocol::{decode_base64url, encode_base64url};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
+mod registry;
 mod workflow;
+pub use registry::{install_actor, remove_actor};
 
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
@@ -1320,32 +1322,19 @@ fn local_update(value: Update) -> LocalResult {
     }
 }
 
-fn actors() -> &'static Mutex<HashMap<String, Arc<tokio::sync::Mutex<PairingActor>>>> {
-    static ACTORS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<PairingActor>>>>> =
-        OnceLock::new();
-    ACTORS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Install an actor for bus dispatch. Tests and the dormant opt-in share this map.
-pub fn install_actor(account_id: String, actor: PairingActor) {
-    let mut map = actors().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    map.insert(account_id, Arc::new(tokio::sync::Mutex::new(actor)));
-}
-
 /// Dispatch a pairing bus method to the actor for `account_id`.
 /// # Errors
 /// `NotFound` when no actor is installed, or the method/ceremony error.
 pub async fn handle_bus(
+    root: &std::path::Path,
     account_id: &str,
     method: &str,
     body: serde_json::Value,
 ) -> Result<LocalResult, SdkError> {
-    let actor = {
-        let map = actors().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(map.get(account_id).ok_or(SdkError::PairingCode("NotFound"))?)
-    };
-    let mut actor = actor.lock().await;
-    match method {
+    let entry = registry::find(root, account_id)?;
+    let mut actor = entry.actor.lock().await;
+    entry.require_live()?;
+    let result = match method {
         "device.pair.begin" => actor.begin(bus_body(body)?).await,
         "device.pair.join" => actor.join(bus_body(body)?).await,
         "device.pair.confirm" => actor.confirm(&bus_body(body)?).await,
@@ -1353,7 +1342,12 @@ pub async fn handle_bus(
         "device.pair.cancel" => actor.cancel(&bus_body(body)?).await,
         "device.pair.status" => actor.status(&bus_body(body)?).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {method}"))),
+    };
+    if entry.require_live().is_err() {
+        let _ = actor.lock().await;
+        return Err(SdkError::PairingCode("Retired"));
     }
+    result
 }
 
 fn bus_body<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> Result<T, SdkError> {

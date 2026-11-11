@@ -463,7 +463,7 @@ where
     }
     let mut body = zeroize::Zeroizing::new(vec![0_u8; len]);
     reader.read_exact(&mut body).await?;
-    Ok(serde_json::from_slice(&body)?)
+    Ok(ramflux_protocol::parse_i_json_secret(&body)?)
 }
 
 #[cfg(test)]
@@ -488,6 +488,22 @@ mod tests {
             ok: None,
             error: None,
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_bus_rejects_duplicate_confirmation_fields_before_typed_dispatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let encoded =
+            serde_json::to_string(&test_frame(serde_json::json!({"operation_id":"one"})))?;
+        let needle = "\"body\":{\"operation_id\":\"one\"}";
+        assert!(encoded.contains(needle));
+        let duplicate =
+            encoded.replace(needle, "\"body\":{\"operation_id\":\"one\",\"operation_id\":\"two\"}");
+        let (mut input, mut output) = tokio::io::duplex(duplicate.len() + 4);
+        input.write_u32(u32::try_from(duplicate.len())?).await?;
+        input.write_all(duplicate.as_bytes()).await?;
+        assert!(read_local_bus_frame(&mut output).await.is_err());
+        Ok(())
     }
 
     // T25-A1: an oversized frame is rejected on the write path BEFORE any byte is emitted.

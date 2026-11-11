@@ -253,6 +253,45 @@ impl SelfSigningKey {
         now: u64,
     ) -> Result<Envelope<ramflux_protocol::custody::pairing::channel::PreservationBody>, CryptoError>
     {
+        self.check_preservation_candidate(previous, candidate, &body, now)?;
+        let signature = self.sign_group_state_bytes(&ramflux_protocol::custody::signing_bytes(
+            &body.schema,
+            &body,
+        )?);
+        Ok(Envelope { body, signature })
+    }
+
+    /// Bind full-data verification and reverse restrictions to the exact preserving candidate.
+    /// The coordinator supplies hashes only after the real storage owners verify their streams.
+    /// # Errors
+    /// Refuses a nonpreserving candidate, foreign signer, expired or malformed full context.
+    pub fn sign_cooperative_full_preservation(
+        &self,
+        previous: &VerifiedRecord,
+        candidate: &VerifiedRecord,
+        body: ramflux_protocol::custody::pairing::full_transfer::PreservationFull,
+        now: u64,
+    ) -> Result<
+        Envelope<ramflux_protocol::custody::pairing::full_transfer::PreservationFull>,
+        CryptoError,
+    > {
+        use ramflux_protocol::custody::pairing::PairingWire as _;
+        body.validate().map_err(|_| reject("full cooperative preservation body"))?;
+        self.check_preservation_candidate(previous, candidate, &body.candidate_context(), now)?;
+        let signature = self.sign_group_state_bytes(&ramflux_protocol::custody::signing_bytes(
+            &body.schema,
+            &body,
+        )?);
+        Ok(Envelope { body, signature })
+    }
+
+    fn check_preservation_candidate(
+        &self,
+        previous: &VerifiedRecord,
+        candidate: &VerifiedRecord,
+        body: &ramflux_protocol::custody::pairing::channel::PreservationBody,
+        now: u64,
+    ) -> Result<(), CryptoError> {
         use ramflux_protocol::custody::pairing::PairingWire as _;
         body.validate().map_err(|_| reject("cooperative preservation body"))?;
         if self.public_key()
@@ -269,12 +308,7 @@ impl SelfSigningKey {
             candidate,
             &body.destination_ref,
             body.recipient_mode == "new",
-        )?;
-        let signature = self.sign_group_state_bytes(&ramflux_protocol::custody::signing_bytes(
-            &body.schema,
-            &body,
-        )?);
-        Ok(Envelope { body, signature })
+        )
     }
 }
 

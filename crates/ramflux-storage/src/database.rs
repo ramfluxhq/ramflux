@@ -19,6 +19,19 @@ type Job = Box<dyn FnOnce(&mut rusqlite::Connection) + Send>;
 pub(crate) struct Connection {
     inner: std::sync::Arc<Worker>,
 }
+#[derive(Clone)]
+pub(crate) struct WeakConnection {
+    inner: std::sync::Weak<Worker>,
+}
+impl WeakConnection {
+    pub(crate) fn upgrade_account_writer(&self) -> Option<Connection> {
+        self.inner
+            .upgrade()
+            .filter(|inner| inner.account_writer.is_some())
+            .map(|inner| Connection { inner })
+    }
+}
+
 struct Worker {
     id: u64,
     path: PathBuf,
@@ -26,7 +39,7 @@ struct Worker {
     checkpoints: std::sync::Arc<BackgroundCheckpoint>,
     #[cfg(feature = "itest-work-budget")]
     work_probe: Mutex<Option<crate::SqlWorkProbe>>,
-    _account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
+    account_writer: Option<std::sync::Arc<crate::account_writer::AccountWriter>>,
     sender: Option<SyncSender<Job>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -57,6 +70,12 @@ fn active_writers() -> &'static Mutex<BTreeMap<PathBuf, WriterOwner>> {
 }
 
 impl Connection {
+    pub(crate) fn owned_path(&self) -> &Path {
+        &self.inner.path
+    }
+    pub(crate) fn downgrade(&self) -> WeakConnection {
+        WeakConnection { inner: std::sync::Arc::downgrade(&self.inner) }
+    }
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_flags(path, OpenFlags::default())
     }
@@ -148,7 +167,7 @@ impl Connection {
                 checkpoints,
                 #[cfg(feature = "itest-work-budget")]
                 work_probe: Mutex::new(None),
-                _account_writer: writer,
+                account_writer: writer,
                 sender: Some(sender),
                 handle: Some(worker),
             }),
