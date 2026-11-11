@@ -478,6 +478,7 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         row.state.as_ref(),
         Some(g::message_update::State::Content(_))
     )));
+    assert_schema_update_cursor(&b.client, &id)?;
     let head = b.client.account_db()?.journal_bounds()?.head_seq;
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
     assert_eq!(b.client.account_db()?.journal_bounds()?.head_seq, head);
@@ -495,6 +496,22 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         .is_err()
     );
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
+    Ok(())
+}
+
+fn assert_schema_update_cursor(client: &RamfluxClient, id: &str) -> Result<(), SdkError> {
+    let events = client.account_db()?.journal_after(0, 64)?;
+    let event = events
+        .iter()
+        .find(|event| event.topic == "message.schema.updated")
+        .ok_or_else(|| invalid("typed schema update absent"))?;
+    let update: g::MessageUpdate = serde_json::from_value(event.body["update"].clone())?;
+    assert!(update.journal_sequence > 0, "durable schema update used transient sequence zero");
+    assert_eq!(update.journal_sequence, event.seq);
+    assert_eq!(
+        update.identity.as_ref().map(|identity| ramflux_protocol::encode_base64url(&identity.id)),
+        Some(id.to_owned())
+    );
     Ok(())
 }
 
