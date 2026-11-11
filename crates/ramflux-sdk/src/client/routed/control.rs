@@ -21,9 +21,22 @@ impl RamfluxClient {
         entry: &GatewayInboxEntry,
         body: &[u8],
     ) -> Result<bool, SdkError> {
-        let Ok((_, content)) = Self::decode_generated_inner(body) else {
+        let Ok((identity, content)) = Self::decode_generated_inner(body) else {
             return Ok(false);
         };
+        if let Some(ramflux_protocol::message::content::Value::SelfSync(sync)) = &content.value {
+            let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+            if identity.conversation_id != opened.routing.conversation_id
+                || identity.author.as_ref().is_none_or(|author| {
+                    author.account_anchor != source.root_commitment()
+                        || author.device_id != source.device_id()
+                })
+            {
+                return Err(invalid("self sync identity differs from authenticated route"));
+            }
+            self.apply_self_sync_in(&source, &identity.conversation_id, sync)?;
+            return Ok(true);
+        }
         let Some(ramflux_protocol::message::content::Value::Control(control)) = content.value
         else {
             return Ok(false);

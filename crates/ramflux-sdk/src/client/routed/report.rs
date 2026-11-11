@@ -18,6 +18,12 @@ pub(super) struct DirectReport {
     pub a0_bytes: Vec<u8>,
 }
 
+pub(super) struct ReportPolicy<'a> {
+    pub local_device_id: &'a str,
+    pub mode: &'static str,
+    pub priority: ramflux_protocol::Priority,
+}
+
 /// Nested packet plus the A0 committed at seal. Not a wire struct.
 #[must_use]
 pub(crate) struct SealedRouted {
@@ -87,6 +93,18 @@ pub(super) fn assemble_direct_report(
     local_device_id: &str,
     recipient: &ramflux_crypto::RootQualifiedDeviceRef,
 ) -> Result<DirectReport, SdkError> {
+    assemble_report_with_policy(client, message, session, inner, recipient,
+        &ReportPolicy { local_device_id, mode: "durable", priority: ramflux_protocol::Priority::Normal })
+}
+
+pub(super) fn assemble_report_with_policy(
+    client: &RamfluxClient,
+    message: &GatewayDirectMessage,
+    session: &ramflux_crypto::DmSession,
+    inner: &[u8],
+    recipient: &ramflux_crypto::RootQualifiedDeviceRef,
+    policy: &ReportPolicy<'_>,
+) -> Result<DirectReport, SdkError> {
     let kcollapse =
         session.collapse_key().ok_or(ramflux_crypto::CryptoError::MissingCollapseKey)?;
     let collapse_tag = ramflux_crypto::collapse_tag(
@@ -98,8 +116,9 @@ pub(super) fn assemble_direct_report(
     let a0 = candidate_report_a0_from_envelope(&report_a0_envelope(
         client,
         message,
-        local_device_id,
+        policy.local_device_id,
         &ramflux_protocol::encode_base64url(collapse_tag),
+        policy,
     )?)?;
     let a0_bytes = encode_candidate_report_a0(&a0)?;
     let report_commitment = ramflux_crypto::report_commitment(&opening, inner, &a0_bytes)?;
@@ -166,6 +185,7 @@ fn report_a0_envelope(
     message: &GatewayDirectMessage,
     local_device_id: &str,
     collapse_tag: &str,
+    policy: &ReportPolicy<'_>,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     let source_principal_id = client
         .device_branch
@@ -183,12 +203,12 @@ fn report_a0_envelope(
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
         delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-        priority: ramflux_protocol::Priority::Normal,
+        priority: policy.priority.clone(),
         ttl: message.ttl,
         created_at: message.created_at,
         encrypted_payload: String::new(),
         payload_hash: String::new(),
-        delivery_mode: Some("durable".to_owned()),
+        delivery_mode: Some(policy.mode.to_owned()),
         collapse_tag: Some(collapse_tag.to_owned()),
         report_commitment: None,
     };

@@ -22,6 +22,7 @@ mod object_slot;
 mod own_history;
 pub(crate) use object_slot::PairObjectSlotRequest;
 mod project;
+pub(crate) mod generated_receive;
 pub(crate) use committed::{Committed, conversation_watermark, object_watermark};
 pub(crate) mod group_directory;
 mod legacy;
@@ -41,6 +42,7 @@ mod reset_work;
 pub(crate) use reset_prepare::with_fixed_pair_control_id;
 pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
 mod send_candidate;
+mod typing;
 mod session;
 pub(crate) use prepared::{SendMaterial, SendMaterialRequest};
 
@@ -385,6 +387,70 @@ fn cryptobox_sender_envelope(
 }
 
 impl RamfluxClient {
+    /// Prepare a durable same-root `SelfSync` delivery. Submit the returned envelope unchanged.
+    /// Revision, accepted local state, final envelope and advanced pair state commit together.
+    /// # Errors
+    /// Refuses a foreign or unauthorized device, invalid update, or persistence failure.
+    pub async fn prepare_self_sync_delivery(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: &GatewayDirectMessage,
+        value: ramflux_protocol::message::SelfSync,
+    ) -> Result<ramflux_protocol::Envelope, SdkError> {
+        use crate::client::generated_content::GeneratedEventStream;
+        use crate::client::identity_authority::NativeOperation;
+        use ramflux_protocol::message as g;
+        let recipient = Self::qualified_recipient(message)?;
+        let remote = self.device_identity(&recipient)?;
+        let local = self.owned_device_identity()?;
+        if remote.root_commitment() != local.root_commitment() {
+            return Err(SdkError::InboundRejected("self sync: foreign recipient root".into()));
+        }
+        self.require_native_operation(&remote, NativeOperation::Sync)?;
+        let (mut session, header, bundle) = self.send_pair_session(engine, message).await?;
+        self.account_db()?.write_transaction(|| {
+            let value = self.change_self_sync(&message.conversation_id, value)?;
+            let mut stream = GeneratedEventStream::new(
+                message.conversation_id.clone(),
+                g::QualifiedDevice {
+                    account_anchor: local.root_commitment().to_owned(),
+                    device_id: local.device_id().to_owned(),
+                    device_epoch: self
+                        .device_branch
+                        .as_ref()
+                        .ok_or(SdkError::IdentityRootMissing)?
+                        .device_epoch,
+                },
+            );
+            let identity = stream.next(message.message_id.as_bytes().to_vec())?;
+            let inner = Self::encode_generated_inner(
+                identity,
+                &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) },
+            )?;
+            let sealed = self.seal_routed_with_route(
+                message,
+                &inner,
+                Route::control(),
+                SealPair {
+                    local: &engine.config().device_id,
+                    remote: &recipient,
+                    session: &mut session,
+                    header,
+                    bundle,
+                },
+            )?;
+            let mut message = message.clone();
+            let envelope = crate::dm::gateway_envelope_from_sealed(
+                engine.config(),
+                &mut message,
+                sealed,
+                None,
+            )?;
+            self.persist_self_sync_delivery(&message.conversation_id, &value, &envelope)?;
+            Ok(envelope)
+        })
+    }
+
     pub(crate) async fn seal_routed_as(
         &self,
         engine: &mut impl GatewaySessionAccess,

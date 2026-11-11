@@ -60,6 +60,11 @@ impl AdapterError {
     #[must_use]
     pub fn from_sdk(error: &SdkError) -> Self {
         match error {
+            SdkError::EditConflict { .. } => Self {
+                code: Self::INVALID_ARGUMENT,
+                name: "EditConflict",
+                message: error.to_string(),
+            },
             SdkError::Json(_) => Self {
                 code: Self::INVALID_JSON,
                 name: "InvalidCanonicalJson",

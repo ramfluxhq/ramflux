@@ -143,6 +143,15 @@ impl EphemeralSubmitResult {
 /// unrecognized value is invalid rather than silently falling back to durable.
 #[must_use]
 pub fn classify_delivery_mode(envelope: &Envelope) -> DeliveryMode {
+    if crate::schema_profile::schema_v1_live() {
+        use crate::message::outer::{self, NamedDeliveryMode};
+        if outer::refuse_live_bridge(envelope).is_err() { return DeliveryMode::Invalid; }
+        return match outer::parse_live_named_delivery_mode(envelope) {
+            Ok(NamedDeliveryMode::Durable) => DeliveryMode::Durable,
+            Ok(NamedDeliveryMode::Ephemeral) => DeliveryMode::Ephemeral,
+            Err(_) => DeliveryMode::Invalid,
+        };
+    }
     match envelope.ext.ext.get(DELIVERY_MODE_EXTENSION) {
         None => DeliveryMode::Durable,
         Some(Value::String(mode)) if mode == "durable" => DeliveryMode::Durable,
