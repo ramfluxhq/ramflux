@@ -53,8 +53,12 @@ pub(super) fn closed_payload(closed: &ClosedSlot) -> usize {
 }
 
 pub(super) fn slot_payload(slot: &Slot) -> usize {
-    let Slot { account, expires_at, monotonic_deadline, body } = slot;
-    let _ = (account, expires_at, monotonic_deadline);
+    let Slot { allocation, account, expires_at, monotonic_deadline, body } = slot;
+    let _ = (allocation, account, expires_at, monotonic_deadline);
+    slot_body_payload(body)
+}
+
+pub(super) fn slot_body_payload(body: &SlotBody) -> usize {
     match body {
         SlotBody::Issued(issued) => size_of::<IssuedSlot>().saturating_add(issued_heap(issued)),
         SlotBody::Live(live) => size_of::<LiveSlot>().saturating_add(live_heap(live)),

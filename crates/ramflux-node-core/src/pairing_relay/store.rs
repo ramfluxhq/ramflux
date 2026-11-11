@@ -3,8 +3,8 @@
 
 //! Boot-scoped in-memory pairing relay allocator. Dormant: no HTTP or native route.
 use super::bytes::{
-    claim_payload, closed_payload, direction_payload, frame_list_heap, hour_payload, slot_payload,
-    table_bytes,
+    claim_payload, closed_payload, direction_payload, frame_list_heap, hour_payload,
+    slot_body_payload, slot_payload, table_bytes,
 };
 use super::limits::{
     AllocatorStats, CLAIM_GRACE_MS, HOUR_MS, INVITATION_LIFETIME_SECS, MAX_BACKING, MAX_CLAIMS,
@@ -84,6 +84,7 @@ pub(super) struct LiveSlot {
 }
 
 pub(super) struct Slot {
+    pub(super) allocation: super::PairingAllocation,
     pub(super) account: [u8; 32],
     pub(super) expires_at: u64,
     pub(super) monotonic_deadline: u64,
@@ -106,6 +107,7 @@ pub(super) struct ClaimEntry {
 
 /// Process-local issued+live pairing relay. Restored from nothing on restart.
 pub struct PairingRelayStore {
+    allocations: super::PairingAllocations,
     clock: Arc<dyn PairingClock>,
     seed: Zeroizing<[u8; 32]>,
     node_key: String,
@@ -134,6 +136,7 @@ impl PairingRelayStore {
             return Err(PairingRelayError::invalid("public_origin"));
         }
         let mut store = Self {
+            allocations: super::PairingAllocations::default(),
             clock: config.clock,
             node_key: public_key_base64url_from_seed(config.node_seed),
             seed: Zeroizing::new(config.node_seed),
@@ -155,6 +158,13 @@ impl PairingRelayStore {
         Ok(store)
     }
 
+    /// Shared resource counter for the node-owned full-data reconnect allocator.
+    /// A resource reservation does not authenticate a branch or admit a data lease.
+    #[must_use]
+    pub fn full_allocations(&self) -> super::PairingAllocations {
+        self.allocations.clone()
+    }
+
     #[must_use]
     pub fn boot_id(&self) -> &str {
         &self.boot_id_b64
@@ -166,8 +176,10 @@ impl PairingRelayStore {
     #[must_use]
     pub fn stats(&self) -> AllocatorStats {
         let (issued, live, queued_bytes, queued_frames) = slot_counts(&self.slots);
+        let total = self.allocations.counts(&[0; 32]).map_or(self.slots.len(), |(total, _)| total);
         AllocatorStats {
-            slots: self.slots.len(),
+            slots: total,
+            full: total.saturating_sub(self.slots.len()),
             issued,
             live,
             backing: self.accounted,
@@ -601,10 +613,10 @@ impl PairingRelayStore {
     }
 
     fn check_issue_quotas(&self, account: [u8; 32]) -> Result<(), PairingRelayError> {
-        if self.slots.len() >= MAX_SLOTS {
+        let (total, owned) = self.allocations.counts(&account)?;
+        if total >= MAX_SLOTS {
             return Err(self.busy());
         }
-        let owned = self.slots.values().filter(|slot| slot.account == account).count();
         if owned >= MAX_SLOTS_PER_ACCOUNT {
             return Err(self.busy());
         }
@@ -660,6 +672,7 @@ impl PairingRelayStore {
             return Err(self.busy());
         }
         let slot = Slot {
+            allocation: self.allocations.reserve(account, now.mono)?,
             account,
             expires_at: ticket.body.expires_at,
             monotonic_deadline: now
@@ -710,34 +723,26 @@ impl PairingRelayStore {
         }
         let descriptor = self.build_invitation(&create, invitation_id, transfer_id)?;
         let created = created_reply(&descriptor, primary, recipient)?;
-        let (account, expires_at, monotonic_deadline, before) = {
-            let slot = self.slots.get(&id).ok_or(PairingRelayError::Retired)?;
-            (slot.account, slot.expires_at, slot.monotonic_deadline, slot_payload(slot))
-        };
-        let live_slot = Slot {
-            account,
-            expires_at,
-            monotonic_deadline,
-            body: SlotBody::Live(Box::new(LiveSlot {
-                data_lease: None,
-                ticket: create.ticket,
-                descriptor,
-                primary_token: Zeroizing::new(primary),
-                recipient_token: Zeroizing::new(recipient),
-                claim_nonce: None,
-                initiator: Direction::default(),
-                responder: Direction::default(),
-                closed_reason: None,
-                last_activity_ms: now.mono,
-            })),
-        };
-        let after = slot_payload(&live_slot);
+        let before = slot_payload(self.slots.get(&id).ok_or(PairingRelayError::Retired)?);
+        let live_body = SlotBody::Live(Box::new(LiveSlot {
+            data_lease: None,
+            ticket: create.ticket,
+            descriptor,
+            primary_token: Zeroizing::new(primary),
+            recipient_token: Zeroizing::new(recipient),
+            claim_nonce: None,
+            initiator: Direction::default(),
+            responder: Direction::default(),
+            closed_reason: None,
+            last_activity_ms: now.mono,
+        }));
+        let after = slot_body_payload(&live_body);
         if after >= before {
             self.charge(after.saturating_sub(before))?;
         } else {
             self.refund(before.saturating_sub(after));
         }
-        self.slots.insert(id, live_slot);
+        self.slots.get_mut(&id).ok_or(PairingRelayError::Retired)?.body = live_body;
         self.invitations.insert(invitation_id, id);
         self.sync_registry()?;
         Ok(created)
@@ -953,6 +958,7 @@ impl PairingRelayStore {
 
     fn registry_bytes(&self) -> usize {
         table_bytes(&self.slots)
+            .saturating_add(super::PairingAllocations::fixed_bytes())
             .saturating_add(table_bytes(&self.invitations))
             .saturating_add(table_bytes(&self.hour))
             .saturating_add(table_bytes(&self.claims))

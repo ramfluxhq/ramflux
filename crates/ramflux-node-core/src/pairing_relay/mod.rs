@@ -4,7 +4,14 @@
 //! Dormant pairing relay allocator: caps, expiry, boot retirement and account isolation.
 //! HTTP dispatch and native Issue/Create stay behind the default-off pairing capability.
 
+mod allocations;
+pub use allocations::{PairingAllocation, PairingAllocations};
 mod bytes;
+mod full_budget;
+pub use full_budget::{
+    ChargedFullBody, FullBodyBudget, FullBodyBudgetStats, FullBodyPermit, FullBodySlot,
+    FullDirection, FullMetadataPermit,
+};
 mod http;
 mod limits;
 mod store;
