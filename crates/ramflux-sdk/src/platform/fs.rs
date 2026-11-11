@@ -22,6 +22,11 @@ pub(crate) fn set_owner_only_file(path: &Path) -> Result<(), SdkError> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn permission_bits(path: &Path) -> std::io::Result<u32> {
+    Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)
+}
+
 pub(crate) fn create_new_owner_only(path: &Path) -> Result<File, SdkError> {
     Ok(create_new_owner_only_io(path)?)
 }
