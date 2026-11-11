@@ -142,6 +142,23 @@ impl AccountDb {
         candidate_message_id: &str,
         floor_message_id: &str,
     ) -> Result<bool, StorageError> {
+        let candidate = self.load_actor_state::<ramflux_protocol::message::EventIdentity>(
+            &format!("routed/generated-identity/{candidate_message_id}"),
+        )?;
+        let floor = self.load_actor_state::<ramflux_protocol::message::EventIdentity>(&format!(
+            "routed/generated-identity/{floor_message_id}"
+        ))?;
+        match (candidate, floor) {
+            (Some(candidate), Some(floor)) => {
+                let order = |identity: &ramflux_protocol::message::EventIdentity| {
+                    ramflux_protocol::message::identity::order_key(identity)
+                        .map_err(|_| StorageError::AuthorizationRejected)
+                };
+                return Ok(order(&candidate)? >= order(&floor)?);
+            }
+            (None, None) => (),
+            _ => return Err(StorageError::AuthorizationRejected),
+        }
         let candidate_created_at =
             self.message_created_at(conversation_id, candidate_message_id)?;
         let floor_created_at = self.message_created_at(conversation_id, floor_message_id)?;

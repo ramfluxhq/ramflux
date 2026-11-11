@@ -43,6 +43,7 @@ pub(crate) fn install(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     )?;
     super::object_retention::install(db)?;
     schema::install(db)?;
+    super::backup_self_sync::install(db)?;
     erased_input_store(db)?;
     super::receive::erased_capture::sweep_open(db, crate::unix_now())?;
     Ok(())
@@ -78,41 +79,75 @@ impl AccountDb {
     /// Uses the same any-owner erasure class as history containers, not shared-object retention.
     /// # Errors
     /// Requires the caller's transaction and a live target.
-    pub fn bind_message_container_reference(&self, message: &str, actor_key: &str) -> Result<(), StorageError> {
+    pub fn bind_message_container_reference(
+        &self,
+        message: &str,
+        actor_key: &str,
+    ) -> Result<(), StorageError> {
         let message = message.to_owned();
         let actor = actor_key.to_owned();
-        self.connection.call(move |db| {
-            let write = || {
-                if db.is_autocommit() || super::deleted_messages::message_is_deleted_on(db, &message)? {
-                    return Err(StorageError::AuthorizationRejected);
-                }
-                db.execute("INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)", params![format!("history_container:{actor}"), message])?;
-                db.execute("INSERT OR IGNORE INTO message_footprint VALUES(?1,'history_container',?2)", params![message,actor])?;
-                Ok(())
-            };
-            Ok(write())
-        }).map_err(StorageError::from)?
+        self.connection
+            .call(move |db| {
+                let write = || {
+                    if db.is_autocommit()
+                        || super::deleted_messages::message_is_deleted_on(db, &message)?
+                    {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    db.execute(
+                        "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
+                        params![format!("history_container:{actor}"), message],
+                    )?;
+                    db.execute(
+                        "INSERT OR IGNORE INTO message_footprint VALUES(?1,'history_container',?2)",
+                        params![message, actor],
+                    )?;
+                    Ok(())
+                };
+                Ok(write())
+            })
+            .map_err(StorageError::from)?
     }
 
     /// Link a received event's exact stored copy to a verified mutation target.
     /// # Errors
     /// Requires the caller's receive transaction, a live target and an existing event.
-    pub fn bind_message_event_reference(&self, message: &str, event_id: &str) -> Result<(), StorageError> {
+    pub fn bind_message_event_reference(
+        &self,
+        message: &str,
+        event_id: &str,
+    ) -> Result<(), StorageError> {
         let message = message.to_owned();
         let event = event_id.to_owned();
-        self.connection.call(move |db| {
-            let write = || {
-                if db.is_autocommit() || super::deleted_messages::message_is_deleted_on(db, &message)? {
-                    return Err(StorageError::AuthorizationRejected);
-                }
-                let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM local_event_log WHERE event_id=?1)", [&event], |row| row.get(0))?;
-                if !exists { return Err(StorageError::AuthorizationRejected); }
-                db.execute("INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)", params![format!("event:{event}"), message])?;
-                db.execute("INSERT OR IGNORE INTO message_footprint VALUES(?1,'event',?2)", params![message,event])?;
-                Ok(())
-            };
-            Ok(write())
-        }).map_err(StorageError::from)?
+        self.connection
+            .call(move |db| {
+                let write = || {
+                    if db.is_autocommit()
+                        || super::deleted_messages::message_is_deleted_on(db, &message)?
+                    {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    let exists: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM local_event_log WHERE event_id=?1)",
+                        [&event],
+                        |row| row.get(0),
+                    )?;
+                    if !exists {
+                        return Err(StorageError::AuthorizationRejected);
+                    }
+                    db.execute(
+                        "INSERT OR IGNORE INTO message_copy_binding VALUES(?1,?2)",
+                        params![format!("event:{event}"), message],
+                    )?;
+                    db.execute(
+                        "INSERT OR IGNORE INTO message_footprint VALUES(?1,'event',?2)",
+                        params![message, event],
+                    )?;
+                    Ok(())
+                };
+                Ok(write())
+            })
+            .map_err(StorageError::from)?
     }
 
     pub(super) fn register_actor_message_footprint(
@@ -331,9 +366,14 @@ fn actor_registration(key: &str, value: &Value) -> ActorRegistration {
         }
         if let Some(targets) = value.get("erasure_targets").and_then(Value::as_array) {
             for target in targets.iter().filter_map(|target| target["message_id"].as_str()) {
-                for (prefix, pointer) in [("payload", "/entry/envelope/payload_hash"), ("envelope", "/entry/envelope/envelope_id")] {
+                for (prefix, pointer) in [
+                    ("payload", "/entry/envelope/payload_hash"),
+                    ("envelope", "/entry/envelope/envelope_id"),
+                ] {
                     if let Some(copy) = value.pointer(pointer).and_then(Value::as_str) {
-                        registration.bindings.insert((format!("{prefix}:{copy}"), target.to_owned()));
+                        registration
+                            .bindings
+                            .insert((format!("{prefix}:{copy}"), target.to_owned()));
                     }
                 }
             }

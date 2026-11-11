@@ -242,6 +242,7 @@ impl BackupDatabase {
             let preserved_actor = projected_actor(candidate);
             // A restored generation starts fresh handshakes, never archived reservations.
             self.archive_group_transfer(&preserved_actor)?;
+            let self_sync_floors = self.merge_self_sync_floors()?;
             self.preserve_imported_archives(key)?;
             #[cfg(test)]
             super::backup_selector_admission::preservation::checkpoint(&self.db)?;
@@ -307,11 +308,11 @@ impl BackupDatabase {
                 add_count(&mut report.kept_newer, &table, kept);
                 let _ = replacements;
             }
-            super::message_footprint::ensure_archive_actor_table(&self.db)?;
-            self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'dm-pair/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));"))?;
+            self.archive_imported_pair_sessions(&preserved_actor)?;
             if legacy_verifications {
                 self.finish_legacy_verification_import()?;
             }
+            self.merge_self_sync_values(&self_sync_floors)?;
             self.project_backup_shared_groups(&shared_groups, local)?;
             self.apply_merged_contact_fences()?;
             self.discard_retired_pair_secrets()?;
@@ -321,11 +322,20 @@ impl BackupDatabase {
             self.finish_merge()?;
             Ok(report)
         })();
-        if result.is_err() {
+        self.detach_merge_inputs(result.is_err())?;
+        result
+    }
+    fn detach_merge_inputs(&self, failed: bool) -> Result<(), StorageError> {
+        if failed {
             let _ = self.db.execute_batch("ROLLBACK");
         }
         self.db.execute_batch("DROP TABLE IF EXISTS main.backup_imported_verification; DROP TABLE IF EXISTS main.backup_local_message_own; DROP TABLE IF EXISTS main.backup_local_pair; DROP TABLE IF EXISTS main.backup_local_conversation; DROP TABLE IF EXISTS main.backup_source_conversation; DROP TABLE IF EXISTS main.backup_changed_conversation; DETACH DATABASE incoming")?;
-        result
+        Ok(())
+    }
+    fn archive_imported_pair_sessions(&self, preserved_actor: &str) -> Result<(), StorageError> {
+        super::message_footprint::ensure_archive_actor_table(&self.db)?;
+        self.db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS backup_archived_actor_state(source TEXT NOT NULL,state_kind TEXT NOT NULL,state_json BLOB NOT NULL,PRIMARY KEY(source,state_kind)); INSERT OR IGNORE INTO backup_archived_actor_state SELECT 'import',state_kind,{preserved_actor} FROM incoming.runtime_actor_state r WHERE state_kind LIKE 'dm-pair/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid); INSERT OR IGNORE INTO runtime_actor_state SELECT 'backup/inactive-pair/'||substr(state_kind,17),CAST(strftime('%s','now') AS BLOB) FROM incoming.runtime_actor_state WHERE state_kind LIKE 'dm-pair/session/%' AND NOT EXISTS(SELECT 1 FROM backup_local_pair l WHERE l.state_kind=incoming.runtime_actor_state.state_kind) AND NOT EXISTS(SELECT 1 FROM runtime_actor_state a WHERE a.state_kind LIKE 'dm-pair/active/%' AND json_extract(CAST(a.state_json AS TEXT),'$')=substr(incoming.runtime_actor_state.state_kind,17));"))?;
+        Ok(())
     }
     fn archive_group_transfer(&self, preserved_actor: &str) -> Result<(), StorageError> {
         super::message_footprint::ensure_archive_actor_table(&self.db)?;
@@ -495,7 +505,7 @@ impl BackupDatabase {
         } else {
             "r.state_json".into()
         };
-        self.db.execute(&format!("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,{actor_body} FROM incoming.runtime_actor_state r WHERE NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)"),params![source])?;
+        self.db.execute(&format!("INSERT OR IGNORE INTO backup_archived_actor_state SELECT ?1,state_kind,{actor_body} FROM incoming.runtime_actor_state r WHERE r.state_kind NOT LIKE 'self-sync/%' AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='runtime_actor_state' AND e.row_id=r.rowid)"),params![source])?;
         let event_values = columns(&self.db, "incoming", "local_event_log")?
             .iter()
             .map(|(name, _)| {
@@ -661,8 +671,13 @@ impl BackupDatabase {
 }
 fn merge_filter(table: &str, native_data_only: bool) -> String {
     format!(
-        "({}) AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
+        "({}){} AND NOT EXISTS(SELECT 1 FROM backup_erased_copy e WHERE e.database_name='incoming' AND e.table_name='{}' AND e.row_id=r.rowid)",
         base_merge_filter(table, native_data_only),
+        if table == "runtime_actor_state" {
+            " AND r.state_kind NOT LIKE 'self-sync/%'"
+        } else {
+            ""
+        },
         table.replace('\'', "''")
     )
 }
@@ -670,7 +685,7 @@ fn base_merge_filter(table: &str, native_data_only: bool) -> &'static str {
     if table == "runtime_actor_state" && native_data_only {
         super::backup_native::DATA_STATE_FILTER
     } else if table == "runtime_actor_state" {
-        "r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
+        "r.state_kind NOT LIKE 'self-sync/%' AND r.state_kind NOT LIKE 'backup/%' AND r.state_kind NOT LIKE 'dm-pair/active/%' AND r.state_kind NOT LIKE 'dm-pair/reset-work/%' AND r.state_kind NOT LIKE 'dm-pair/bootstrap/%' AND r.state_kind NOT LIKE 'own-copy/%' AND r.state_kind NOT LIKE 'own-device/%' AND r.state_kind NOT LIKE 'group-transfer/%'"
     } else if table == "friend_link_projection" {
         "NOT ((r.blocked=1 OR r.state='rejected') AND EXISTS(SELECT 1 FROM contact_link_decision d WHERE d.link_id=r.link_id AND d.state='lifted'))"
     } else if table == "contact_request_projection" {

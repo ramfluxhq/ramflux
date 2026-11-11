@@ -93,8 +93,12 @@ fn candidate_delivery_class(
     class: &crate::DeliveryClass,
 ) -> Result<CandidateDeliveryClass, ProtocolError> {
     match class {
-        crate::DeliveryClass::OpaqueEvent => Ok(CandidateDeliveryClass::Message),
-        crate::DeliveryClass::NotificationWake => Ok(CandidateDeliveryClass::CallWake),
+        crate::DeliveryClass::Message | crate::DeliveryClass::OpaqueEvent => {
+            Ok(CandidateDeliveryClass::Message)
+        }
+        crate::DeliveryClass::CallWake | crate::DeliveryClass::NotificationWake => {
+            Ok(CandidateDeliveryClass::CallWake)
+        }
         _ => {
             Err(ProtocolError::InvalidDomain { expected: "message", actual: format!("{class:?}") })
         }

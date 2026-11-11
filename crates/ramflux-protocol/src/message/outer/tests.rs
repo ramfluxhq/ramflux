@@ -99,7 +99,8 @@ const LIVE_ENVELOPE_GOLDEN: &[u8] = br#"{"created_at":1000,"delivery_class":"opa
 
 fn candidate_outer(mode: NamedDeliveryMode) -> CandidateOuterEnvelope {
     CandidateOuterEnvelope {
-        ext: Default::default(), routing_set_id: None,
+        ext: crate::Ext::default(),
+        routing_set_id: None,
         schema: CANDIDATE_ENVELOPE_SCHEMA.to_owned(),
         version: 2,
         domain: "ramflux.envelope.v2".to_owned(),
@@ -411,7 +412,8 @@ fn candidate_outer_round_trip_and_sender_excludes_receipt() -> Result<(), Box<dy
     assert_eq!(outer.delivery_class, CandidateDeliveryClass::Message);
     let signed = super::candidate_outer_sender_signed_bytes(&outer)?;
     assert!(signed.starts_with(crate::SENDER_TRANSCRIPT_PREFIX));
-    let signed_json: Value = serde_json::from_slice(&signed[crate::SENDER_TRANSCRIPT_PREFIX.len()..])?;
+    let signed_json: Value =
+        serde_json::from_slice(&signed[crate::SENDER_TRANSCRIPT_PREFIX.len()..])?;
     assert!(
         signed_json.get("node_report_receipt").is_none()
             || signed_json["node_report_receipt"].is_null()

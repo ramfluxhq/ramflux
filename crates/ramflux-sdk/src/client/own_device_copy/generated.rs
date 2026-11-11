@@ -9,6 +9,7 @@ use crate::client::generated_control::control_from_payload;
 use crate::client::identity_authority::NativeOperation;
 use crate::client::routed::{Route, SendMaterial};
 use crate::prelude::*;
+use prost::Message as _;
 use ramflux_protocol::message as g;
 use ramflux_protocol::message::own_message_copy;
 
@@ -70,6 +71,7 @@ impl RamfluxClient {
                 exact_inner: body.to_vec(),
                 tombstone: None,
                 source_evidence: None,
+                ..Default::default()
             })
         };
         let control =
@@ -158,6 +160,15 @@ impl RamfluxClient {
             if !applied {
                 return Err(invalid("own sent message context mismatch"));
             }
+            super::ReceiptScope::Private {
+                private_scope: db.own_sent_receipt_scope(&context.source, local.device_id())?,
+            }
+        } else if let Some(own_message_copy::Payload::Item(item)) = copy.payload.as_ref()
+            && (item.original_metadata_evidence.is_some()
+                || !item.exact_original_identity.is_empty()
+                || g::Inner::decode(item.exact_inner.as_slice()).is_ok_and(|inner| inner.kind == 3))
+        {
+            self.apply_generated_history_edit(entry, item)?;
             super::ReceiptScope::Private {
                 private_scope: db.own_sent_receipt_scope(&context.source, local.device_id())?,
             }

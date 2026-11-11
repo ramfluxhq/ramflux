@@ -147,18 +147,15 @@ fn verify_sender(
         || envelope.source_principal_id != authority.envelope().body.principal_id
         || envelope.ext.ext.get("source_root_commitment").and_then(serde_json::Value::as_str)
             != Some(source.root_commitment())
-        || envelope.schema != "ramflux.envelope.v1"
-        || envelope.domain != ramflux_protocol::domain::ENVELOPE
-        || envelope.version != 1
+        || (envelope.schema != "ramflux.envelope.v2"
+            && (envelope.schema != "ramflux.envelope.v1"
+                || envelope.domain != ramflux_protocol::domain::ENVELOPE
+                || envelope.version != 1))
     {
         return Err(CustodyRefusal::InvalidInput);
     }
-    ramflux_crypto::verify_canonical_signature(
-        &ramflux_protocol::envelope_sender_signed_bytes(envelope).map_err(invalid)?,
-        &envelope.signed.signature,
-        &cert.branch_signing_public_key,
-    )
-    .map_err(invalid)?;
+    ramflux_protocol::verify_envelope_sender_signature(envelope, &cert.branch_signing_public_key)
+        .map_err(invalid)?;
     Ok(())
 }
 

@@ -24,13 +24,20 @@ pub(crate) fn digest_exact_content(
     target: &ramflux_protocol::message::MessageRef,
     exact: &[u8],
 ) -> Result<[u8; 32], SdkError> {
-    if target.id.is_empty() || target.conversation_id.is_empty() || target.author_anchor.is_empty() {
+    if target.id.is_empty() || target.conversation_id.is_empty() || target.author_anchor.is_empty()
+    {
         return Err(refused("edit target is not source-qualified"));
     }
     let mut transcript = Vec::new();
-    for field in [ramflux_protocol::domain::EDIT_PREVIOUS_CONTENT.as_bytes(), target.id.as_slice(),
-        target.conversation_id.as_bytes(), target.author_anchor.as_bytes(), exact] {
-        let length = u32::try_from(field.len()).map_err(|_| refused("edit digest input too large"))?;
+    for field in [
+        ramflux_protocol::domain::EDIT_PREVIOUS_CONTENT.as_bytes(),
+        target.id.as_slice(),
+        target.conversation_id.as_bytes(),
+        target.author_anchor.as_bytes(),
+        exact,
+    ] {
+        let length =
+            u32::try_from(field.len()).map_err(|_| refused("edit digest input too large"))?;
         transcript.extend_from_slice(&length.to_be_bytes());
         transcript.extend_from_slice(field);
     }
@@ -38,7 +45,17 @@ pub(crate) fn digest_exact_content(
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct EditRegister { revision: u64, event_id: Vec<u8> }
+struct EditRegister {
+    revision: u64,
+    event_id: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct EditContext<'a> {
+    pub entry: &'a crate::GatewayInboxEntry,
+    pub source: &'a ramflux_crypto::RootQualifiedDeviceRef,
+    pub imported: Option<&'a ramflux_protocol::message::HistoryItem>,
+}
 
 impl RamfluxClient {
     /// Apply a generated Delete after transport/source authentication.
@@ -52,63 +69,111 @@ impl RamfluxClient {
         delete: &ramflux_protocol::message::Delete,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(
-            crate::client::identity_authority::HeadUse::NewAuthorization, entry,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            entry,
         )?;
-        let scope = DeleteScope::try_from(delete.scope).map_err(|_| refused("delete scope invalid"))?;
-        if delete.targets.is_empty() || delete.tombstone_id.is_empty() || scope == DeleteScope::Unspecified {
-            return Err(SdkError::InboundRejected("delete targets, scope and tombstone are required".into()));
+        let scope =
+            DeleteScope::try_from(delete.scope).map_err(|_| refused("delete scope invalid"))?;
+        if delete.targets.is_empty()
+            || delete.tombstone_id.is_empty()
+            || scope == DeleteScope::Unspecified
+        {
+            return Err(SdkError::InboundRejected(
+                "delete targets, scope and tombstone are required".into(),
+            ));
         }
         if scope == DeleteScope::Local {
-            self.require_native_operation(&source, crate::client::identity_authority::NativeOperation::Sync)?;
-            self.require_native_operation(&self.owned_device_identity()?, crate::client::identity_authority::NativeOperation::Sync)?;
+            self.require_native_operation(
+                &source,
+                crate::client::identity_authority::NativeOperation::Sync,
+            )?;
+            self.require_native_operation(
+                &self.owned_device_identity()?,
+                crate::client::identity_authority::NativeOperation::Sync,
+            )?;
         }
         let db = self.account_db()?;
         db.write_transaction(|| {
             for target in &delete.targets {
                 let id = ramflux_protocol::encode_base64url(&target.id);
-                if target.conversation_id != conversation { return Err(SdkError::InboundRejected("delete conversation mismatch".into())); }
-                if db.message_is_deleted(&id)? { continue; }
+                if target.conversation_id != conversation {
+                    return Err(SdkError::InboundRejected("delete conversation mismatch".into()));
+                }
+                if db.message_is_deleted(&id)? {
+                    continue;
+                }
                 let row = self.direct_message_by_id(&id)?;
                 let author = if let Some(row) = row.as_ref() {
                     let author = self.generated_target_author(conversation, &id, row.is_own)?;
                     if row.conversation_id != conversation || author != target.author_anchor {
-                        return Err(SdkError::InboundRejected("delete target author mismatch".into()));
+                        return Err(SdkError::InboundRejected(
+                            "delete target author mismatch".into(),
+                        ));
                     }
                     author
-                } else { target.author_anchor.clone() };
+                } else {
+                    target.author_anchor.clone()
+                };
                 let mut moderator = None;
                 let allowed = match scope {
                     DeleteScope::Local => source.root_commitment() == self.own_account_anchor()?,
                     DeleteScope::Everyone if source.root_commitment() == author => true,
                     DeleteScope::Everyone => {
-                        if let (Some(group), Some(epoch)) = (identity.group_id.as_ref(), identity.group_epoch) {
+                        if let (Some(group), Some(epoch)) =
+                            (identity.group_id.as_ref(), identity.group_epoch)
+                        {
                             self.require_generated_group_epoch(group, &source, epoch, true)?;
-                            moderator = Some(crate::client::generated_delete_fence::Moderator { group: group.clone(), epoch, device: source.storage_key().into() });
+                            moderator = Some(crate::client::generated_delete_fence::Moderator {
+                                group: group.clone(),
+                                epoch,
+                                device: source.storage_key().into(),
+                            });
                             true
-                        } else { false }
+                        } else {
+                            false
+                        }
                     }
                     DeleteScope::Unspecified => false,
                 };
-                if !allowed { return Err(SdkError::InboundRejected("delete sender has no target authority".into())); }
+                if !allowed {
+                    return Err(SdkError::InboundRejected(
+                        "delete sender has no target authority".into(),
+                    ));
+                }
                 let fence = crate::client::generated_delete_fence::Fence {
-                    conversation: conversation.into(), target: target.clone(), source_root: source.root_commitment().into(),
-                    scope: delete.scope, tombstone_id: delete.tombstone_id.clone(), matched: row.is_some(), moderator,
+                    conversation: conversation.into(),
+                    target: target.clone(),
+                    source_root: source.root_commitment().into(),
+                    source_device: source.storage_key().into(),
+                    scope: delete.scope,
+                    tombstone_id: delete.tombstone_id.clone(),
+                    matched: row.is_some(),
+                    moderator,
                     identity: db.load_actor_state(&format!("routed/generated-identity/{id}"))?,
                 };
                 self.install_generated_delete_fence(&fence)?;
                 if row.is_some() {
-                    db.delete_direct_message(conversation, &id,
+                    db.delete_direct_message(
+                        conversation,
+                        &id,
                         if scope == DeleteScope::Local { "local" } else { "everyone" },
-                        &ramflux_protocol::encode_base64url(&delete.tombstone_id))?;
+                        &ramflux_protocol::encode_base64url(&delete.tombstone_id),
+                    )?;
                 }
-
             }
             Ok(())
         })
     }
 
-    fn generated_target_author(&self, conversation: &str, id: &str, own: bool) -> Result<String, SdkError> {
-        if own { return self.own_account_anchor(); }
+    fn generated_target_author(
+        &self,
+        conversation: &str,
+        id: &str,
+        own: bool,
+    ) -> Result<String, SdkError> {
+        if own {
+            return self.own_account_anchor();
+        }
         self.message_origin(conversation, id)?
             .and_then(|origin| origin["sender_root_commitment"].as_str().map(str::to_owned))
             .ok_or_else(|| refused("mutation target has no authenticated origin"))
@@ -126,30 +191,56 @@ impl RamfluxClient {
         ramflux_protocol::message::validation::validate_reaction_token(&reaction.token)
             .map_err(|_| refused("invalid reaction token"))?;
         let source = self.authenticated_device_identity(
-            crate::client::identity_authority::HeadUse::NewAuthorization, entry,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            entry,
         )?;
         let target = reaction.target.as_ref().ok_or_else(|| refused("reaction target missing"))?;
         let id = ramflux_protocol::encode_base64url(&target.id);
         if target.conversation_id != conversation || reaction.operation_id.is_empty() {
-            return Err(SdkError::InboundRejected("reaction conversation or operation id missing".into()));
+            return Err(SdkError::InboundRejected(
+                "reaction conversation or operation id missing".into(),
+            ));
         }
         let db = self.account_db()?;
         db.write_transaction(|| {
-            if db.message_is_deleted(&id)? { return Ok(false); }
-            let row = self.direct_message_by_id(&id)?.ok_or_else(|| SdkError::InboundPending("message target missing".into()))?;
-            if row.conversation_id != conversation || target.author_anchor != self.generated_target_author(conversation, &id, row.is_own)? {
-                return Err(SdkError::InboundRejected("reaction target author mismatch".into()));
-            }
-            let operation = format!("routed/reaction-operation/{}/{}", source.root_commitment(), ramflux_protocol::encode_base64url(&reaction.operation_id));
-            if let Some(previous) = db.load_actor_state::<ramflux_protocol::message::Reaction>(&operation)? {
-                if previous != *reaction { return Err(SdkError::ReplayMismatch); }
+            if db.message_is_deleted(&id)? {
                 return Ok(false);
             }
-            let key = format!("routed/reaction/{}", ramflux_protocol::encode_base64url(
-                ramflux_protocol::canonical_json_bytes(&(target, source.root_commitment(), &reaction.token))?,
-            ));
-            if reaction.remove { db.remove_actor_state(&key)?; }
-            else { db.persist_message_actor_state(&id, &key, reaction)?; }
+            let row = self
+                .direct_message_by_id(&id)?
+                .ok_or_else(|| SdkError::InboundPending("message target missing".into()))?;
+            if row.conversation_id != conversation
+                || target.author_anchor
+                    != self.generated_target_author(conversation, &id, row.is_own)?
+            {
+                return Err(SdkError::InboundRejected("reaction target author mismatch".into()));
+            }
+            let operation = format!(
+                "routed/reaction-operation/{}/{}",
+                source.root_commitment(),
+                ramflux_protocol::encode_base64url(&reaction.operation_id)
+            );
+            if let Some(previous) =
+                db.load_actor_state::<ramflux_protocol::message::Reaction>(&operation)?
+            {
+                if previous != *reaction {
+                    return Err(SdkError::ReplayMismatch);
+                }
+                return Ok(false);
+            }
+            let key = format!(
+                "routed/reaction/{}",
+                ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&(
+                    target,
+                    source.root_commitment(),
+                    &reaction.token
+                ))?,)
+            );
+            if reaction.remove {
+                db.remove_actor_state(&key)?;
+            } else {
+                db.persist_message_actor_state(&id, &key, reaction)?;
+            }
             db.persist_message_actor_state(&id, &operation, reaction)?;
             Ok(true)
         })
@@ -157,17 +248,45 @@ impl RamfluxClient {
 
     /// Apply an authenticated edit using the exact received replacement bytes.
     /// # Errors
-    /// Refuses forged authors/targets; a gap or digest mismatch returns `EditConflict`.
+    /// Refuses forged authors/targets. Revisions converge by their event-id tie break;
+    /// the previous-content digest detects forks and does not reject a greater edit.
     pub fn apply_generated_edit_entry(
         &self,
         entry: &crate::GatewayInboxEntry,
         conversation: &str,
         exact_inner: &[u8],
     ) -> Result<bool, SdkError> {
-        use ramflux_protocol::message as g;
+        self.apply_generated_edit_with_metadata(entry, conversation, exact_inner, None)
+    }
+
+    pub(crate) fn apply_generated_edit_with_metadata(
+        &self,
+        entry: &crate::GatewayInboxEntry,
+        conversation: &str,
+        exact_inner: &[u8],
+        metadata: Option<&ramflux_storage::MessageMetadata>,
+    ) -> Result<bool, SdkError> {
         let source = self.authenticated_device_identity(
-            crate::client::identity_authority::HeadUse::NewAuthorization, entry,
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            entry,
         )?;
+        self.apply_generated_edit_authorized(
+            EditContext { entry, source: &source, imported: None },
+            conversation,
+            exact_inner,
+            metadata,
+        )
+    }
+
+    pub(crate) fn apply_generated_edit_authorized(
+        &self,
+        authorization: EditContext<'_>,
+        conversation: &str,
+        exact_inner: &[u8],
+        metadata: Option<&ramflux_storage::MessageMetadata>,
+    ) -> Result<bool, SdkError> {
+        use ramflux_protocol::message as g;
+        let EditContext { entry, source, imported } = authorization;
         let (identity, content) = Self::decode_generated_inner(exact_inner)?;
         let Some(g::content::Value::Edit(edit)) = content.value else {
             return Err(refused("expected generated Edit"));
@@ -175,8 +294,13 @@ impl RamfluxClient {
         if edit.replacement.as_ref().is_some_and(|message| message.sealed_group.is_some()) {
             return Err(SdkError::InboundRejected("edit replacement must be plain content".into()));
         }
-        let target = edit.target.as_ref().ok_or_else(|| SdkError::InboundPending("message target missing".into()))?;
-        if target.conversation_id != conversation || target.author_anchor != source.root_commitment() {
+        let target = edit
+            .target
+            .as_ref()
+            .ok_or_else(|| SdkError::InboundPending("message target missing".into()))?;
+        if target.conversation_id != conversation
+            || target.author_anchor != source.root_commitment()
+        {
             return Err(SdkError::InboundRejected("edit requires the original author".into()));
         }
         let target_id = ramflux_protocol::encode_base64url(&target.id);
@@ -184,7 +308,8 @@ impl RamfluxClient {
         db.write_transaction(|| {
             if db.message_is_deleted(&target_id)? { return Ok(false); }
             let Some(row) = self.direct_message_by_id(&target_id)? else {
-                self.park_generated_edit(entry, &identity, &edit, exact_inner)?;
+                if let Some(item) = imported { self.park_generated_history_edit(entry, item, &identity, &edit, source.root_commitment())?; }
+                else { self.park_generated_edit(entry, &identity, &edit, exact_inner)?; }
                 return Ok(false);
             };
             let author = if row.is_own {
@@ -201,22 +326,20 @@ impl RamfluxClient {
             let applied = db.load_actor_state::<EditRegister>(&state_key)?;
             let incoming = (edit.revision, identity.id.as_slice());
             let old_pair = applied.as_ref().map(|state| (state.revision, state.event_id.as_slice()));
+            if imported.is_some() && old_pair.is_some_and(|pair| incoming <= pair) { return Ok(false); }
             let stored = db.message_content(&target_id)?.ok_or_else(|| refused("edit target content missing"))?;
             let original_content = if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
                 nested
             } else { ramflux_protocol::message::exact_content::message_in_force(&stored)
                 .map_err(|_| refused("Edit target must be a Message"))?.to_vec() };
-            let original = g::Message::decode(original_content.as_slice()).map_err(|_| refused("Edit target has invalid Message content"))?;
-            let replacement = edit.replacement.as_ref().ok_or_else(|| refused("Edit replacement missing"))?;
-            if replacement.media != original.media || replacement.forward != original.forward || replacement.reply_to != original.reply_to {
-                return Err(refused("Edit may change only text and entities"));
-            }
-            let digest = if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
+            g::Message::decode(original_content.as_slice()).map_err(|_| refused("Edit target has invalid Message content"))?;
+            edit.replacement.as_ref().ok_or_else(|| refused("Edit replacement missing"))?;
+            let digest = if imported.is_some() { [0;32] } else if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
                 digest_exact_content(target, &nested)?
             } else { previous_content_digest(target, &stored)? };
             let old_revision = applied.as_ref().map_or(0, |state| state.revision);
-            let fork = (old_revision == edit.revision && old_pair != Some(incoming))
-                || (edit.revision == old_revision.saturating_add(1) && edit.previous_content_digest.as_slice() != digest);
+            let fork = imported.is_none() && ((old_revision == edit.revision && old_pair != Some(incoming))
+                || (edit.revision == old_revision.saturating_add(1) && edit.previous_content_digest.as_slice() != digest));
             if fork && source.root_commitment() == self.own_account_anchor()? {
                 let losing = if old_pair.is_some_and(|pair| pair < incoming) {
                     applied.as_ref().map_or_else(|| identity.id.clone(), |state| state.event_id.clone())
@@ -225,9 +348,21 @@ impl RamfluxClient {
                 db.append_journal(&format!("edit-conflict/{target_id}/{}", ramflux_protocol::encode_base64url(&losing)), "message.edit.conflict", &update, crate::time::now_unix_timestamp(), None)?;
             }
             if old_pair.is_some_and(|pair| incoming <= pair) { return Ok(false); }
+            if let Some(item) = imported {
+                let stored_identity = db.load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{target_id}"))?.ok_or(g::original_header::EvidenceError::OriginEvidenceMissing)?;
+                let original_identity = g::original_header::decode_identity(&item.exact_original_identity)?;
+                if stored_identity != original_identity { return Err(g::original_header::EvidenceError::EditTargetMismatch.into()); }
+            }
+            if edit.replacement.as_ref().is_some_and(|replacement| replacement.media.is_empty()) {
+                db.retire_message_attachment_references(&target_id)?;
+            }
+            self.retire_generated_edit_payloads(conversation, &target_id)?;
             db.remove_actor_state(&format!("routed/group-content/{target_id}"))?;
             db.remove_actor_state(&format!("routed/group-projection/{target_id}"))?;
-            db.replace_surface_message_content(conversation, &target_id, exact_inner)?;
+            let mut replacement_metadata = row.metadata;
+            replacement_metadata.franking_report = metadata.and_then(|metadata| metadata.franking_report.clone());
+            db.replace_generated_message_content(conversation, &target_id, exact_inner, &replacement_metadata)?;
+            if let Some(item) = imported { self.store_generated_edited_evidence(&target_id, item)?; }
             db.persist_message_actor_state(&target_id, &state_key, &EditRegister { revision: edit.revision, event_id: identity.id })?;
             Ok(true)
         })

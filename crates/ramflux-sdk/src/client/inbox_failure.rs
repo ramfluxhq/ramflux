@@ -40,6 +40,23 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
         SdkError::DirectoryAuthorityUnavailable { source, .. } => deterministic(source),
         SdkError::GeneratedRefused { code, .. } => Some(code.as_str()),
+        SdkError::HistoryEvidence(error) => Some(match error {
+            ramflux_protocol::message::original_header::EvidenceError::OriginEvidenceMissing => {
+                "generated_origin_evidence_missing"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::OriginCommitmentMismatch => {
+                "generated_origin_commitment_mismatch"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::EditTargetMismatch => {
+                "generated_edit_target_mismatch"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::EditAuthorMismatch => {
+                "generated_edit_author_mismatch"
+            }
+            ramflux_protocol::message::original_header::EvidenceError::ReportOpeningRetired => {
+                "generated_report_opening_retired"
+            }
+        }),
         SdkError::ReplayMismatch => Some("replay_mismatch"),
         SdkError::EditConflict { .. } => Some("edit_conflict"),
         SdkError::Crypto(
@@ -51,6 +68,10 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_crypto::CryptoError::ReportCommitmentMismatch
             | ramflux_crypto::CryptoError::ReportCommitmentMissing
             | ramflux_crypto::CryptoError::MissingCollapseKey,
+        )
+        | SdkError::Protocol(
+            ramflux_protocol::ProtocolError::PayloadHashMismatch
+            | ramflux_protocol::ProtocolError::SignatureVerificationFailed,
         ) => Some("authentication_failed"),
         SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)) => Some("i_json_rejected"),
         SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
@@ -130,7 +151,9 @@ pub(crate) fn verified_failure_policy(
         source_record.as_ref().is_none_or(|record| record.get("x25519_identity_public").is_none());
     let target_dependency = if let Some(opened) = opened.as_ref() {
         missing_generated_target(client, &opened.body)?
-    } else { None };
+    } else {
+        None
+    };
     let (class, subject) = if !authenticated || missing_manifest {
         (
             "manifest",
@@ -155,18 +178,27 @@ pub(crate) fn verified_failure_policy(
     })
 }
 
-fn missing_generated_target(client: &RamfluxClient, bytes: &[u8]) -> Result<Option<String>, SdkError> {
+fn missing_generated_target(
+    client: &RamfluxClient,
+    bytes: &[u8],
+) -> Result<Option<String>, SdkError> {
     use ramflux_protocol::message as g;
-    let Ok((_, content)) = RamfluxClient::decode_generated_inner(bytes) else { return Ok(None); };
+    let Ok((_, content)) = RamfluxClient::decode_generated_inner(bytes) else {
+        return Ok(None);
+    };
     let references = match content.value {
         Some(g::content::Value::Edit(value)) => value.target.into_iter().collect::<Vec<_>>(),
         Some(g::content::Value::Reaction(value)) => value.target.into_iter().collect(),
-        Some(g::content::Value::SelfSync(value)) => value.read_through.into_iter().chain(value.pin).collect(),
+        Some(g::content::Value::SelfSync(value)) => {
+            value.read_through.into_iter().chain(value.pin).collect()
+        }
         _ => Vec::new(),
     };
     for reference in references {
         let id = ramflux_protocol::encode_base64url(&reference.id);
-        if client.direct_message_by_id(&id)?.is_none() && !client.account_db()?.message_is_deleted(&id)? {
+        if client.direct_message_by_id(&id)?.is_none()
+            && !client.account_db()?.message_is_deleted(&id)?
+        {
             return Ok(Some(format!("{}/{id}", reference.conversation_id)));
         }
     }
@@ -214,6 +246,12 @@ mod tests {
             Some("authentication_failed")
         );
         assert_eq!(deterministic(&SdkError::InboundRejected("x".into())), Some("routing_rejected"));
+        for error in [
+            ramflux_protocol::ProtocolError::PayloadHashMismatch,
+            ramflux_protocol::ProtocolError::SignatureVerificationFailed,
+        ] {
+            assert_eq!(deterministic(&SdkError::Protocol(error)), Some("authentication_failed"));
+        }
         assert_eq!(deterministic(&SdkError::IdentityRootMissing), None);
     }
 }

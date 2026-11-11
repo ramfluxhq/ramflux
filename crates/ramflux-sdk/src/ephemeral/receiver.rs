@@ -1438,3 +1438,46 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sender_hash_audit_tests {
+    use super::*;
+    #[test]
+    fn sender_signature_requires_ciphertext_hash_on_sdk_ephemeral_verifier()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ramflux-protocol/src/sender_transcript_vectors.json"
+        ))?;
+        let mut envelope: Envelope = serde_json::from_value(fixture["envelope"].clone())?;
+        let seed = [19; 32];
+        let public = ramflux_crypto::public_key_base64url_from_seed(seed);
+        envelope.signed.signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+            &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
+            seed,
+        );
+        assert!(authenticate(&envelope, &envelope.source_principal_id, &public).is_ok());
+        let mut entry = crate::GatewayInboxEntry {
+            forwarded: false,
+            inbox_seq: 1,
+            target_delivery_id: envelope.target_delivery_id.clone(),
+            envelope: envelope.clone(),
+        };
+        let record = serde_json::json!({"principal_id": envelope.source_principal_id, "signing_public_key": public});
+        crate::client::routed::verify_sender_record(&entry, &record)?;
+        envelope.encrypted_payload = ramflux_protocol::encode_base64url(b"swapped ciphertext");
+        assert!(matches!(
+            authenticate(&envelope, &envelope.source_principal_id, &public),
+            Err(ReceiverDropReason::PayloadHashMismatch)
+        ));
+        entry.envelope = envelope;
+        assert!(matches!(
+            crate::client::routed::verify_sender_record(&entry, &record),
+            Err(crate::SdkError::Protocol(ramflux_protocol::ProtocolError::PayloadHashMismatch))
+        ));
+        assert!(matches!(
+            crate::RamfluxClient::new().own_device_receive_manifest_request(&entry),
+            Err(crate::SdkError::Protocol(ramflux_protocol::ProtocolError::PayloadHashMismatch))
+        ));
+        Ok(())
+    }
+}

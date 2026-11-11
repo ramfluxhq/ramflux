@@ -50,10 +50,26 @@ pub fn sign_canonical_bytes_with_device_branch(bytes: &[u8], branch: &DeviceBran
     encode_base64url(branch.signing_key.sign(bytes).to_bytes())
 }
 
+fn protocol_signing_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CryptoError> {
+    let object = serde_json::to_value(value).map_err(ramflux_protocol::ProtocolError::from)?;
+    let schema = object.get("schema").and_then(serde_json::Value::as_str);
+    if schema == Some("ramflux.envelope.v2")
+        || (ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION == 1
+            && schema == Some("ramflux.envelope.v1"))
+    {
+        return Ok(ramflux_protocol::sender_signed_transcript(
+            value,
+            ramflux_protocol::SenderTranscriptMode::WithCiphertext,
+        )?
+        .bytes);
+    }
+    Ok(signed_bytes(value)?)
+}
+
 /// # Errors
 /// Returns an error when validation, serialization, storage, or state checks fail.
 pub fn sign_protocol_object<T: Serialize>(value: &T) -> Result<String, CryptoError> {
-    let canonical = signed_bytes(value)?;
+    let canonical = protocol_signing_bytes(value)?;
     Ok(sign_canonical_bytes(&canonical))
 }
 
@@ -63,7 +79,7 @@ pub fn sign_protocol_object_with_seed<T: Serialize>(
     value: &T,
     seed: [u8; 32],
 ) -> Result<String, CryptoError> {
-    let canonical = signed_bytes(value)?;
+    let canonical = protocol_signing_bytes(value)?;
     Ok(sign_canonical_bytes_with_seed(&canonical, seed))
 }
 
@@ -73,7 +89,7 @@ pub fn sign_protocol_object_with_device_branch<T: Serialize>(
     device_branch: &DeviceBranch,
     value: &T,
 ) -> Result<String, CryptoError> {
-    let canonical = signed_bytes(value)?;
+    let canonical = protocol_signing_bytes(value)?;
     let signature = device_branch.signing_key.sign(&canonical);
     Ok(encode_base64url(signature.to_bytes()))
 }
@@ -225,3 +241,7 @@ pub fn verify_fixture_signature(
 ) -> Result<(), CryptoError> {
     verify_canonical_signature(canonical, signature_base64url, &fixture_public_key_base64url())
 }
+
+#[cfg(test)]
+#[path = "signing_sender_tests.rs"]
+mod sender_tests;

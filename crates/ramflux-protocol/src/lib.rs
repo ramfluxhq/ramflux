@@ -128,8 +128,14 @@ pub use principal_directory::{
 };
 mod envelope_sender;
 mod sender_transcript;
-pub use sender_transcript::{SENDER_TRANSCRIPT_PREFIX, SenderTranscript, SenderTranscriptMode, sender_origin_evidence, sender_signed_transcript, verify_sender_signature};
-pub use envelope_sender::{candidate_outer_sender_signed_bytes, envelope_sender_signed_bytes};
+pub use envelope_sender::{
+    candidate_outer_sender_signed_bytes, envelope_sender_signed_bytes,
+    verify_envelope_sender_signature,
+};
+pub use sender_transcript::{
+    SENDER_TRANSCRIPT_PREFIX, SenderTranscript, SenderTranscriptMode, sender_origin_evidence,
+    sender_signed_transcript, verify_sender_signature,
+};
 
 mod call;
 pub use call::*;

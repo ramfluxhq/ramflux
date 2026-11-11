@@ -13,6 +13,10 @@ pub struct HistoryItem {
     pub source_evidence: ::core::option::Option<HistoryOriginEvidence>,
     #[prost(message, optional, tag = "3")]
     pub tombstone: ::core::option::Option<Delete>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub exact_original_identity: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "5")]
+    pub original_metadata_evidence: ::core::option::Option<HistoryOriginalMetadataEvidence>,
 }
 impl serde::Serialize for HistoryItem {
     #[allow(deprecated)]
@@ -31,6 +35,12 @@ impl serde::Serialize for HistoryItem {
         if self.tombstone.is_some() {
             len += 1;
         }
+        if !self.exact_original_identity.is_empty() {
+            len += 1;
+        }
+        if self.original_metadata_evidence.is_some() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("ramflux.message.v1.HistoryItem", len)?;
         if !self.exact_inner.is_empty() {
             #[allow(clippy::needless_borrow)]
@@ -46,6 +56,17 @@ impl serde::Serialize for HistoryItem {
         if let Some(v) = self.tombstone.as_ref() {
             struct_ser.serialize_field("tombstone", v)?;
         }
+        if !self.exact_original_identity.is_empty() {
+            #[allow(clippy::needless_borrow)]
+            #[allow(clippy::needless_borrows_for_generic_args)]
+            struct_ser.serialize_field(
+                "exactOriginalIdentity",
+                pbjson::private::base64::encode(&self.exact_original_identity).as_str(),
+            )?;
+        }
+        if let Some(v) = self.original_metadata_evidence.as_ref() {
+            struct_ser.serialize_field("originalMetadataEvidence", v)?;
+        }
         struct_ser.end()
     }
 }
@@ -55,13 +76,24 @@ impl<'de> serde::Deserialize<'de> for HistoryItem {
     where
         D: serde::Deserializer<'de>,
     {
-        const FIELDS: &[&str] =
-            &["exact_inner", "exactInner", "source_evidence", "sourceEvidence", "tombstone"];
+        const FIELDS: &[&str] = &[
+            "exact_inner",
+            "exactInner",
+            "source_evidence",
+            "sourceEvidence",
+            "tombstone",
+            "exact_original_identity",
+            "exactOriginalIdentity",
+            "original_metadata_evidence",
+            "originalMetadataEvidence",
+        ];
         #[allow(clippy::enum_variant_names)]
         enum GeneratedField {
             ExactInner,
             SourceEvidence,
             Tombstone,
+            ExactOriginalIdentity,
+            OriginalMetadataEvidence,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -88,6 +120,12 @@ impl<'de> serde::Deserialize<'de> for HistoryItem {
                                 Ok(GeneratedField::SourceEvidence)
                             }
                             "tombstone" => Ok(GeneratedField::Tombstone),
+                            "exactOriginalIdentity" | "exact_original_identity" => {
+                                Ok(GeneratedField::ExactOriginalIdentity)
+                            }
+                            "originalMetadataEvidence" | "original_metadata_evidence" => {
+                                Ok(GeneratedField::OriginalMetadataEvidence)
+                            }
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -108,6 +146,8 @@ impl<'de> serde::Deserialize<'de> for HistoryItem {
                 let mut exact_inner__ = None;
                 let mut source_evidence__ = None;
                 let mut tombstone__ = None;
+                let mut exact_original_identity__ = None;
+                let mut original_metadata_evidence__ = None;
                 let mut seen_fields__ = std::collections::HashSet::new();
                 while let Some(k) = map_.next_key()? {
                     if !seen_fields__.insert(std::mem::discriminant(&k)) {
@@ -134,12 +174,32 @@ impl<'de> serde::Deserialize<'de> for HistoryItem {
                             }
                             tombstone__ = map_.next_value()?;
                         }
+                        GeneratedField::ExactOriginalIdentity => {
+                            if exact_original_identity__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "exactOriginalIdentity",
+                                ));
+                            }
+                            exact_original_identity__ = Some(
+                                map_.next_value::<::pbjson::private::BytesDeserialize<_>>()?.0,
+                            );
+                        }
+                        GeneratedField::OriginalMetadataEvidence => {
+                            if original_metadata_evidence__.is_some() {
+                                return Err(serde::de::Error::duplicate_field(
+                                    "originalMetadataEvidence",
+                                ));
+                            }
+                            original_metadata_evidence__ = map_.next_value()?;
+                        }
                     }
                 }
                 Ok(HistoryItem {
                     exact_inner: exact_inner__.unwrap_or_default(),
                     source_evidence: source_evidence__,
                     tombstone: tombstone__,
+                    exact_original_identity: exact_original_identity__.unwrap_or_default(),
+                    original_metadata_evidence: original_metadata_evidence__,
                 })
             }
         }

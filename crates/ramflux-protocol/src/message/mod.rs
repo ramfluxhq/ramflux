@@ -14,8 +14,9 @@ pub use generated::*;
 mod canonical;
 pub mod client_class;
 pub mod exact_content;
-pub mod identity;
 pub mod history_chain;
+pub mod identity;
+pub mod original_header;
 pub use client_class::{
     ClientDeliveryClass, ProviderPush, client_class_from_delivery, client_class_from_notification,
     provider_push,

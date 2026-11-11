@@ -326,6 +326,21 @@ message HistoryItem {
   reserved "origin_evidence";
   HistoryOriginEvidence source_evidence = 16;
   optional Delete tombstone = 3;
+  bytes exact_original_identity = 4;
+  HistoryOriginalMetadataEvidence original_metadata_evidence = 5;
+}
+message HistoryOriginalMetadataEvidence {
+  bytes canonical_sender_envelope = 1;
+  NativeCustodyManifest source_authority = 2;
+  optional NativeGroupSnapshot group_membership = 3;
+  optional OriginalGroupBinding group_binding = 4;
+  uint32 layer = 5; // Original Message layer preimage; never inferred from the Edit.
+}
+message OriginalGroupBinding {
+  string group_id = 1;
+  QualifiedDevice author = 2;
+  uint64 key_epoch = 3;
+  bytes group_state_hash = 4;
 }
 message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
