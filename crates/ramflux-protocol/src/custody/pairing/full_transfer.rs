@@ -7,6 +7,8 @@ use super::{DeviceRef, PairingWire, Result, WireError, b32, budget, reference, r
 use serde::{Deserialize, Serialize};
 
 mod binding;
+mod control;
+pub use control::{CONTROL_PACKET_BYTES, FullControlContext, FullControlPayload};
 mod diff;
 mod integrity;
 mod keys;
@@ -38,6 +40,8 @@ pub const LEASE_SECONDS: u64 = 604_800;
 pub const MIN_J3_LEASE_SECONDS: u64 = 86_400;
 /// Controller-confirmed endpoint tail limit; the relay cannot inspect encrypted manifests.
 pub const MAX_TAIL_BYTES: u64 = 1_073_741_824;
+/// Base cut0, at most eight pre-J3 deltas, then exactly one possible tail.
+pub const MAX_PREPUBLICATION_DELTAS: u64 = 8;
 pub const PACKETS_PER_KEY: u64 = 65_536;
 
 /// Full-profile counts are exact decimal strings, including values above JSON's safe integer.
@@ -185,6 +189,11 @@ impl PairingWire for Manifest {
             ManifestKind::Delta | ManifestKind::Tail => {
                 let previous = self.previous_cut.ok_or(WireError::Field("previous_cut"))?;
                 require(previous.0.checked_add(1) == Some(self.snapshot_cut.0), "snapshot_cut")?;
+                require(
+                    self.snapshot_cut.0
+                        <= MAX_PREPUBLICATION_DELTAS + u64::from(self.kind == ManifestKind::Tail),
+                    "snapshot_cut",
+                )?;
                 b32(
                     self.parent_manifest_hash
                         .as_deref()
@@ -290,6 +299,7 @@ impl SourceManifest {
                 && current.base_record_hash == parent.base_record_hash
                 && current.census_hash == parent.census_hash
                 && current.storage_generation == parent.storage_generation
+                && current.source_erasure_generation >= parent.source_erasure_generation
                 && current.families.len() == parent.families.len()
                 && current.families.iter().zip(&parent.families).all(|(a, b)| {
                     a.id == b.id

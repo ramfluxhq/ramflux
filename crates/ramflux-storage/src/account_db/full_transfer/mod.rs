@@ -7,10 +7,14 @@ mod inventory;
 mod keys;
 mod scalar;
 mod source_cut;
+mod source_receipt;
 mod stage;
 mod stage_chunks;
+mod stage_reader;
+mod stage_validation;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
 pub use stage::FullTransferStage;
+pub use stage_reader::FullForwardReader;
 
 #[cfg(test)]
 mod stage_tests;

@@ -113,8 +113,12 @@ fn full_ready_consumes_responder_zero_and_first_source_manifest_stays_zero() -> 
     assert_eq!(counter, 0);
     assert!(matches!(b.open_packet(counter, &data)?, Some(DataPacket::Manifest { .. })));
     assert!(b.open_packet(counter, &data)?.is_none());
+    b.acknowledge_packet(0)?;
+    let (reverse_counter, reverse) = b.seal_packet(&manifest())?;
+    assert_eq!(reverse_counter, 1);
+    assert!(matches!(a.open_packet(reverse_counter, &reverse)?, Some(DataPacket::Manifest { .. })));
     let (counter, receipt) = b.seal_packet(&receipt)?;
-    assert_eq!(counter, 1);
+    assert_eq!(counter, 2);
     assert!(matches!(
         a.open_packet(counter, &receipt)?,
         Some(DataPacket::Receipt { credit: 1, .. })
@@ -219,5 +223,110 @@ fn full_channel_data_at_65535_refused_even_with_valid_aead() -> TestResult {
     packet.extend_from_slice(&tag);
     assert!(matches!(b.open(counter, &packet), Err(CryptoError::Pairing("ResumeRequired"))));
     assert!(matches!(b.seal(b"retired"), Err(CryptoError::Pairing("Retired"))));
+    Ok(())
+}
+
+#[test]
+fn full_channel_idle_reverse_position_and_control_require_local_verified_state() -> TestResult {
+    use ramflux_protocol::custody::pairing::full_transfer::{DataPacket, FullControlPayload};
+    let base = ramflux_protocol::encode_base64url([3; 32]);
+    let last = ramflux_protocol::encode_base64url([9; 32]);
+    let mut a = FullConfirmedChannel::resume_with_idle(
+        PairingRole::Initiator,
+        keys(4),
+        base.clone(),
+        last.clone(),
+    )?;
+    let mut b = FullConfirmedChannel::resume_with_idle(
+        PairingRole::Responder,
+        keys(4),
+        base,
+        last.clone(),
+    )?;
+    let (counter, ready) = b.seal_ready()?;
+    a.open_ready(counter, &ready)?;
+    b.acknowledge_packet(0)?;
+    let idle = DataPacket::Idle { last_verified: last };
+    let (counter, bytes) = a.seal_packet(&idle)?;
+    assert!(matches!(b.open_packet(counter, &bytes)?, Some(DataPacket::Idle { .. })));
+    assert!(a.seal_packet(&idle).is_err(), "Idle repeated after the position packet");
+    let candidate = DataPacket::Control {
+        payload: FullControlPayload::CandidateReady {
+            transfer_id: ramflux_protocol::encode_base64url([11; 32]),
+            record_hash: ramflux_protocol::encode_base64url([12; 32]),
+            compacted_ids_hash: None,
+        },
+    };
+    assert!(b.seal_packet(&candidate).is_err(), "B skipped its reverse position packet");
+    let (counter, bytes) = b.seal_packet(&manifest())?;
+    a.open_packet(counter, &bytes)?;
+    assert!(
+        matches!(b.seal_packet(&candidate), Err(CryptoError::Pairing("PublicationPending"))),
+        "controls preceded durable duplex verification"
+    );
+    a.allow_controls_after_verified_duplex(false);
+    b.allow_controls_after_verified_duplex(false);
+    assert!(a.seal_packet(&candidate).is_err(), "initiator sent responder-only candidate_ready");
+    let (counter, bytes) = b.seal_packet(&candidate)?;
+    assert!(matches!(a.open_packet(counter, &bytes)?, Some(DataPacket::Control { .. })));
+    Ok(())
+}
+#[test]
+fn full_channel_idle_must_match_own_durable_hash_and_cannot_start_a_lease() -> TestResult {
+    use ramflux_protocol::custody::pairing::full_transfer::DataPacket;
+    let base = ramflux_protocol::encode_base64url([3; 32]);
+    let left = ramflux_protocol::encode_base64url([9; 32]);
+    let right = ramflux_protocol::encode_base64url([10; 32]);
+    let mut a = FullConfirmedChannel::resume_with_idle(
+        PairingRole::Initiator,
+        keys(4),
+        base.clone(),
+        left.clone(),
+    )?;
+    let mut b = FullConfirmedChannel::resume_with_idle(
+        PairingRole::Responder,
+        keys(4),
+        base.clone(),
+        right,
+    )?;
+    let (counter, ready) = b.seal_ready()?;
+    a.open_ready(counter, &ready)?;
+    let (counter, idle) = a.seal_packet(&DataPacket::Idle { last_verified: left.clone() })?;
+    assert!(matches!(b.open_packet(counter, &idle), Err(CryptoError::Pairing("ManifestMismatch"))));
+    let mut initial = FullConfirmedChannel::new(PairingRole::Initiator, keys(5), base.clone())?;
+    let mut peer = FullConfirmedChannel::new(PairingRole::Responder, keys(5), base)?;
+    let (counter, ready) = peer.seal_ready()?;
+    initial.open_ready(counter, &ready)?;
+    assert!(initial.seal_packet(&DataPacket::Idle { last_verified: left }).is_err());
+    Ok(())
+}
+
+#[test]
+fn full_channel_authenticated_peer_cannot_deliver_control_before_local_duplex_verification()
+-> TestResult {
+    use ramflux_protocol::custody::pairing::full_transfer::{DataPacket, FullControlPayload};
+    let base = ramflux_protocol::encode_base64url([3; 32]);
+    let mut a = FullConfirmedChannel::new(PairingRole::Initiator, keys(4), base.clone())?;
+    let (_, mut malicious_b) = pair();
+    let ready = DataPacket::Receipt { manifest_hash: base, durable_through: None, credit: 0 };
+    let (counter, bytes) = malicious_b.seal(&ready.encode_secret()?)?;
+    a.open_ready(counter, &bytes)?;
+    a.seal_packet(&manifest())?;
+    malicious_b.acknowledge_packet(0)?;
+    let (counter, reverse) = malicious_b.seal(&manifest().encode_secret()?)?;
+    a.open_packet(counter, &reverse)?;
+    let control = DataPacket::Control {
+        payload: FullControlPayload::CandidateReady {
+            transfer_id: ramflux_protocol::encode_base64url([11; 32]),
+            record_hash: ramflux_protocol::encode_base64url([12; 32]),
+            compacted_ids_hash: None,
+        },
+    };
+    let (counter, bytes) = malicious_b.seal(&control.encode_secret()?)?;
+    assert!(
+        matches!(a.open_packet(counter, &bytes), Err(CryptoError::Pairing("PublicationPending"))),
+        "authenticated premature control reached the coordinator"
+    );
+    assert!(matches!(a.seal_packet(&manifest()), Err(CryptoError::Pairing("Retired"))));
     Ok(())
 }
