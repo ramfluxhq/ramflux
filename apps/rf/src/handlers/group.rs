@@ -116,15 +116,22 @@ pub(crate) async fn handle_group(socket: PathBuf, command: GroupCommand) -> Resu
         GroupAction::Rename(rename) => handle_group_rename(&mut bus, rename).await,
         GroupAction::Send(send) => {
             let federation = rf_group_send_federation_route(&send)?;
+            let request_id = send.envelope.as_deref().unwrap_or(&send.message);
+            let generated = bindings::cli::send_text(
+                request_id,
+                &send.account,
+                &send.conversation,
+                &send.body,
+                send.message.as_bytes(),
+            )?;
+            let (conversation_id, text) = bindings::cli::send_payload(&generated)?;
             let request = LocalBusGroupSendRequest {
                 group_id: send.group,
-                conversation_id: send.conversation,
+                conversation_id,
                 message_id: send.message,
                 sender_id: send.sender,
                 encrypted_body_base64: String::new(),
-                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(
-                    send.body.as_bytes(),
-                )),
+                plaintext_body_base64: Some(ramflux_protocol::encode_base64url(text.as_bytes())),
                 envelope_id: send.envelope,
                 source_principal_id: send.source_principal,
                 target_delivery_id: send.target,
@@ -244,10 +251,21 @@ async fn handle_group_message(
 ) -> Result<(), RfError> {
     match message.action {
         GroupMessageAction::Delete(delete) => {
+            let everyone = matches!(delete.delete_scope.as_str(), "everyone" | "all");
+            let generated = bindings::cli::delete_message(
+                &delete.message,
+                &delete.account,
+                &delete.group,
+                delete.message.as_bytes(),
+                everyone,
+                None,
+            )?;
+            let (group_id, message_id) = bindings::cli::delete_payload(&generated)?;
             let request = LocalBusGroupMessageDeleteRequest {
-                group_id: delete.group,
+                group_id,
                 actor_id: delete.actor,
-                message_id: delete.message,
+                message_id: String::from_utf8(message_id)
+                    .map_err(|err| RfError::Message(err.to_string()))?,
                 delete_scope: delete.delete_scope,
                 reason: delete.reason,
             };

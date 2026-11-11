@@ -30,6 +30,7 @@ compile_error!("production builds must not enable itest-legacy-accounts");
 #[cfg(all(feature = "itest-legacy-accounts", ramflux_release_profile))]
 compile_error!("release profiles must not enable itest-legacy-accounts");
 
+pub mod bindings;
 mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;

@@ -30,6 +30,21 @@ pub(crate) async fn handle_surface(
             (account, "surface.request_resync", json!({"surface_ref":surface_ref}))
         }
         SurfaceAction::Resync { account, surface_ref, message } => {
+            let message = match message.as_deref() {
+                Some(message) => {
+                    let update = ramflux_sdk::bindings::cli::identity_update(
+                        &account,
+                        0,
+                        message.as_bytes(),
+                    )?;
+                    let event_id = ramflux_sdk::bindings::cli::identity_event_id(&update)?;
+                    Some(
+                        String::from_utf8(event_id)
+                            .map_err(|err| RfError::Message(err.to_string()))?,
+                    )
+                }
+                None => None,
+            };
             (account, "surface.resync", json!({"surface_ref":surface_ref,"message_id":message}))
         }
         action => {
