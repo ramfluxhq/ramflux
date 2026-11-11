@@ -65,6 +65,7 @@ pub(crate) use ramflux_sdk::{
     LocalBusObjectShareRequest, LocalBusObjectTransferResumeRequest,
     LocalBusObjectTransferStatusRequest, MAX_LOCAL_BUS_CHUNK_PAYLOAD_BYTES,
     MAX_LOCAL_BUS_OBJECT_BYTES, MAX_LOCAL_BUS_ONE_SHOT_OBJECT_BYTES, OBJECT_PUT_PROTOCOL_VERSION,
+    bindings,
 };
 pub(crate) use std::net::SocketAddr;
 pub(crate) use std::path::PathBuf;

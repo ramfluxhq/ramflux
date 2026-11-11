@@ -20,6 +20,8 @@ const ABI_VERSION_MAJOR: u32 = 1;
 const ABI_VERSION_MINOR: u32 = 0;
 const PROTOCOL_VERSION: u32 = 1;
 
+mod generated_message;
+
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RamfluxErrorCode {

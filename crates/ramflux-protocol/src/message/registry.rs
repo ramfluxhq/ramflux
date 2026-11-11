@@ -158,5 +158,37 @@ pub fn field_layer(message: &str, tag: u32) -> Option<u32> {
         .copied()
 }
 
+/// One descriptor field exported by product adapters. Names come from the descriptor only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BindingField {
+    /// Proto field name (`snake_case`).
+    pub name: String,
+    /// `ProtoJSON` field name (`camelCase`).
+    pub json_name: String,
+    /// Field number.
+    pub tag: u32,
+    /// True when JSON may omit the field.
+    pub optional: bool,
+    /// Closed choice name when this field is a oneof arm.
+    pub oneof: Option<String>,
+}
+
+/// Descriptor-derived field vector for one generated message.
+///
+/// # Errors
+/// Returns [`ValidationError::Descriptor`] when the type is absent.
+pub fn binding_fields(message: &str) -> Result<Vec<BindingField>, ValidationError> {
+    Ok(descriptor(message)?
+        .fields()
+        .map(|field| BindingField {
+            name: field.name().to_string(),
+            json_name: field.json_name().to_string(),
+            tag: field.number(),
+            optional: field.supports_presence() || field.containing_oneof().is_some(),
+            oneof: field.containing_oneof().map(|choice| choice.name().to_string()),
+        })
+        .collect())
+}
+
 /// Frozen permanent field introductions; additions without metadata are unsupported.
 pub const FIELD_LAYERS: &str = include_str!("schema/field_layers.tsv");
