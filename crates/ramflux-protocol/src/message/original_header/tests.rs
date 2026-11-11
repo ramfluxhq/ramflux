@@ -209,6 +209,21 @@ fn edited_group_history_item_drops_wrapper_commitments() -> TestResult {
         ..Default::default()
     };
     let mut retained = group_binding(&group);
+    let retained_bytes = retained.encode_to_vec();
+    for erased in [
+        &group.content_commitment,
+        &group.ciphertext_hash,
+        &group.key_commitment,
+        &group.franking_commitment,
+        &group.nonce,
+        &group.ratchet_public_key,
+        &group.ciphertext,
+    ] {
+        assert!(
+            !retained_bytes.windows(erased.len()).any(|bytes| bytes == erased),
+            "retained erased wrapper bytes"
+        );
+    }
     let encoded = serde_json::to_value(&retained)?;
     assert_eq!(encoded.as_object().ok_or("object")?.len(), 4);
     for forbidden in [

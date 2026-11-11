@@ -319,3 +319,84 @@ fn self_sync_read_order_uses_signed_identity_when_display_timestamps_disagree() 
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn self_sync_publication_allocates_once_across_fanout_and_restart() -> TestResult {
+    let (mut client, root) =
+        client_with_account("self-sync-publication", "principal_sync", "local")?;
+    let update = client.change_self_sync("c", value(7, 0))?;
+    let first = client
+        .account_db()?
+        .write_transaction(|| client.self_sync_publication_inner("c", &update))?;
+    let first_inner = g::Inner::decode(first.as_slice())?;
+    let first_identity = first_inner.identity.ok_or("first identity")?;
+    assert_ne!(first_identity.device_sequence & (1 << 63), 0);
+    let fanout = client
+        .account_db()?
+        .write_transaction(|| client.self_sync_publication_inner("c", &update))?;
+    assert_eq!(first, fanout);
+    client.active_account_db = None;
+    client.unlock_account("acct", b"own-device-sync-test")?;
+    assert_eq!(
+        first,
+        client
+            .account_db()?
+            .write_transaction(|| client.self_sync_publication_inner("c", &update))?
+    );
+    let mut muted = value(6, 0);
+    muted.mute = true;
+    let changed = client.change_self_sync("c", muted)?;
+    assert!(
+        client
+            .account_db()?
+            .write_transaction(|| client.self_sync_publication_inner("c", &update))
+            .is_err()
+    );
+    let next = client
+        .account_db()?
+        .write_transaction(|| client.self_sync_publication_inner("c", &changed))?;
+    assert_eq!(
+        g::Inner::decode(next.as_slice())?.identity.ok_or("next identity")?.device_sequence,
+        first_identity.device_sequence + 1
+    );
+    drop(client);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn self_sync_publication_preserves_exact_body_and_independent_read_register() -> TestResult {
+    let (client, root) =
+        client_with_account("self-sync-exact-publication", "principal_sync", "local")?;
+    let source = client.owned_device_identity()?;
+    let update = value(7, 9);
+    let exact = update.encode_to_vec();
+    assert_eq!(self_sync::decode_stored_body(&exact)?, update);
+    client
+        .account_db()?
+        .write_transaction(|| client.apply_self_sync_exact(&source, "c", &update, &exact))?;
+    let bytes = client
+        .account_db()?
+        .write_transaction(|| client.self_sync_publication_inner("c", &update))?;
+    assert_eq!(g::Inner::decode(bytes.as_slice())?.body, exact);
+    install_read_messages(&client)?;
+    apply(&client, &read("m1", 20))?;
+    let greater_read = read("m2", 5);
+    apply(&client, &greater_read)?;
+    let first = client
+        .account_db()?
+        .write_transaction(|| client.self_sync_publication_inner("c", &greater_read))?;
+    assert_eq!(
+        first,
+        client
+            .account_db()?
+            .write_transaction(|| client.self_sync_publication_inner("c", &greater_read))?
+    );
+    assert_eq!(
+        g::SelfSync::decode(g::Inner::decode(first.as_slice())?.body.as_slice())?,
+        greater_read
+    );
+    drop(client);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

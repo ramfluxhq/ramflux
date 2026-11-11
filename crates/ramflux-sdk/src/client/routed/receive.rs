@@ -868,6 +868,12 @@ impl RamfluxClient {
         local: &str,
         code: &str,
     ) -> Result<(), SdkError> {
+        if matches!(code, "authentication_failed" | "schema_invalid" | "routing_rejected") {
+            return match self.commit_authenticated_refused_transport(entry, local) {
+                Err(error @ SdkError::Storage(_)) => Err(error),
+                _ => Ok(()),
+            };
+        }
         if !code.starts_with("generated_") && code != "typing_durable" {
             return Ok(());
         }
@@ -1081,7 +1087,14 @@ impl RamfluxClient {
                 .map_err(SdkError::from)
         })?;
         let call = opened.routing.kind == Kind::Control && crate::client::call::is_call_body(body);
-        if call || delete_control || erased_reference {
+        let retired_original = self
+            .account_db()?
+            .load_actor_state::<bool>(&format!(
+                "routed/report-opening-retired/{}",
+                opened.routing.message_id
+            ))?
+            .unwrap_or(false);
+        if call || delete_control || erased_reference || retired_original {
             // Reusable X3DH private prekeys can reconstruct a bootstrap chain. Do not retain
             // call ciphertext alongside them: committed replay needs only attribution/hash.
             retained.envelope.encrypted_payload.clear();

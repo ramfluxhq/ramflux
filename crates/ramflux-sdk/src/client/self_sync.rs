@@ -24,6 +24,10 @@ pub struct State {
     pub value: g::SelfSync,
     pub exact_body: Vec<u8>,
     pub tie_break: [u8; 32],
+    #[serde(default)]
+    publication_identity: Option<g::EventIdentity>,
+    #[serde(default)]
+    read_publication_identity: Option<g::EventIdentity>,
     pub read_marker: Option<g::MessageRef>,
     pending_read: Option<PendingRead>,
     #[serde(default)]
@@ -221,6 +225,9 @@ impl RamfluxClient {
                         != pending.as_ref().map(|p| (&p.reference, p.revision, p.tie_break));
                 if changed {
                     state.read_marker = marker;
+                    if state.read_marker_body != read_body {
+                        state.read_publication_identity = None;
+                    }
                     state.read_marker_body = read_body;
                     state.pending_read = pending;
                     state.references = self.self_sync_state_references(
@@ -246,6 +253,8 @@ impl RamfluxClient {
                 value: value.clone(),
                 exact_body: exact_body.to_vec(),
                 tie_break,
+                publication_identity: None,
+                read_publication_identity: None,
                 references: self.self_sync_state_references(
                     conversation,
                     value,
@@ -354,6 +363,7 @@ impl RamfluxClient {
                         (pending.revision, pending.tie_break) > (body.revision, body.tie_break)
                     })
                 {
+                    state.read_publication_identity = None;
                     state.read_marker_body = Some(ReadBody {
                         revision: pending.revision,
                         tie_break: pending.tie_break,
@@ -545,3 +555,5 @@ impl RamfluxClient {
 
 #[cfg(test)]
 mod tests;
+
+mod publication;

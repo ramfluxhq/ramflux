@@ -195,17 +195,31 @@ impl GatewaySessionEngine {
     ) -> Result<ramflux_protocol::ephemeral::EphemeralSubmitResult, SdkError> {
         use ramflux_protocol::ephemeral::{self, GATEWAY_EPHEMERAL_CAPABILITY};
         if !self.config.capability_scope.iter().any(|scope| scope == GATEWAY_EPHEMERAL_CAPABILITY) {
-            return Err(SdkError::GatewaySessionRejected("ephemeral capability unavailable".into()));
+            return Err(SdkError::GatewaySessionRejected(
+                "ephemeral capability unavailable".into(),
+            ));
         }
-        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)
-            .map_err(|_| SdkError::GatewaySessionRejected("clock before epoch".into()))?.as_millis();
-        ephemeral::deadline(&envelope, u64::try_from(now_ms).map_err(|_| SdkError::GatewaySessionRejected("clock overflow".into()))?)
-            .map_err(|error| SdkError::GatewaySessionRejected(error.to_string()))?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SdkError::GatewaySessionRejected("clock before epoch".into()))?
+            .as_millis();
+        ephemeral::deadline(
+            &envelope,
+            u64::try_from(now_ms)
+                .map_err(|_| SdkError::GatewaySessionRejected("clock overflow".into()))?,
+        )
+        .map_err(|error| SdkError::GatewaySessionRejected(error.to_string()))?;
         let id = envelope.envelope_id.clone();
-        let signed_request = self.signed_request("POST", "/gateway/session/submit", "already_authed", &envelope)?;
-        self.write_frame(&GatewayClientFrame::Submit { submit: GatewaySubmitFrame { signed_request, envelope } }).await?;
+        let signed_request =
+            self.signed_request("POST", "/gateway/session/submit", "already_authed", &envelope)?;
+        self.write_frame(&GatewayClientFrame::Submit {
+            submit: GatewaySubmitFrame { signed_request, envelope },
+        })
+        .await?;
         match self.read_reply(super::frame_dispatch::ExpectedReply::Ephemeral).await? {
-            GatewayServerFrame::EphemeralResult { envelope_id, result } if envelope_id == id => Ok(result),
+            GatewayServerFrame::EphemeralResult { envelope_id, result } if envelope_id == id => {
+                Ok(result)
+            }
             GatewayServerFrame::Nack { reason } => Err(SdkError::GatewaySessionRejected(reason)),
             _ => Err(SdkError::GatewaySessionRejected("ephemeral result identity mismatch".into())),
         }

@@ -729,3 +729,21 @@ fn report_mismatch_maps_to_authentication_failed() {
         "crypto error: report opening commitment mismatch"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn refused_first_c_does_not_strand_pair_successor() -> Result<(), SdkError> {
+    let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, mut b) = pair(187, 189)?;
+    let mut bad = seal(&a, &b, message("bad-first-c", "c"), b"must not project")?;
+    // Signed issue time is in C's A0, while the pair AEAD still authenticates this exact ciphertext.
+    bad.envelope.created_at = bad.envelope.created_at.saturating_add(1);
+    resign(&a, &mut bad.envelope)?;
+    let mut next = seal(&a, &b, message("after-first-c-refusal", "c"), b"next message")?;
+    next.inbox_seq = 2;
+    Box::pin(settle_through(&mut b, vec![bad, next])).await?;
+    assert_eq!(b.client.gateway_receive_cursor("bob")?, 2);
+    assert_eq!(projected(&b, "c")?, 1);
+    assert!(b.client.direct_message_by_id("bad-first-c")?.is_none());
+    assert!(b.client.direct_message_by_id("after-first-c-refusal")?.is_some());
+    Ok(())
+}

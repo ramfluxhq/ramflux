@@ -62,6 +62,26 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
         SdkError::Crypto(
             ramflux_crypto::CryptoError::VerifyFailed
             | ramflux_crypto::CryptoError::InvalidSignatureLength(_)
+            | ramflux_crypto::CryptoError::InvalidPublicKeyLength(_)
+            | ramflux_crypto::CryptoError::Base64(_)
+            | ramflux_crypto::CryptoError::IdentityAuthority(_)
+            | ramflux_crypto::CryptoError::DeviceRevoked
+            | ramflux_crypto::CryptoError::BranchProofReplay
+            | ramflux_crypto::CryptoError::TransparencyProofFailed
+            | ramflux_crypto::CryptoError::InvalidHomeNodeMigrationProof(_)
+            | ramflux_crypto::CryptoError::Pairing(_)
+            | ramflux_crypto::CryptoError::SFrame(_)
+            | ramflux_crypto::CryptoError::VoiceRebind(_)
+            | ramflux_crypto::CryptoError::MembershipCommitmentMismatch
+            | ramflux_crypto::CryptoError::ReportFrameTooShort
+            | ramflux_crypto::CryptoError::ReportInnerLengthMismatch
+            | ramflux_crypto::CryptoError::ReportPaddingOrHeaderRefused
+            | ramflux_crypto::CryptoError::ReportInnerTooLarge
+            | ramflux_crypto::CryptoError::ReportA0TooLarge
+            | ramflux_crypto::CryptoError::NodeReportReceiptTooLarge
+            | ramflux_crypto::CryptoError::NodeReportReceiptMismatch
+            | ramflux_crypto::CryptoError::GroupReportOpeningMissing
+            | ramflux_crypto::CryptoError::GroupReportAuthorMissing
             | ramflux_crypto::CryptoError::AeadFailed
             | ramflux_crypto::CryptoError::KeyCommitmentMismatch
             | ramflux_crypto::CryptoError::CommitmentMismatch
@@ -74,7 +94,9 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
             | ramflux_protocol::ProtocolError::SignatureVerificationFailed,
         ) => Some("authentication_failed"),
         SdkError::Protocol(ramflux_protocol::ProtocolError::IJson(_)) => Some("i_json_rejected"),
-        SdkError::Json(_) | SdkError::Protocol(_) => Some("schema_invalid"),
+        SdkError::Crypto(ramflux_crypto::CryptoError::Protocol(_))
+        | SdkError::Json(_)
+        | SdkError::Protocol(_) => Some("schema_invalid"),
         SdkError::InboundRejected(_) | SdkError::CallControlReceiptCapacity { .. } => {
             Some("routing_rejected")
         }
@@ -253,5 +275,35 @@ mod tests {
             assert_eq!(deterministic(&SdkError::Protocol(error)), Some("authentication_failed"));
         }
         assert_eq!(deterministic(&SdkError::IdentityRootMissing), None);
+    }
+}
+
+#[cfg(test)]
+mod immutable_crypto_refusal_tests {
+    use super::deterministic;
+    use crate::SdkError;
+    use ramflux_crypto::CryptoError;
+    #[test]
+    fn malformed_crypto_frames_and_authority_failures_never_become_local_retries() {
+        for error in [
+            CryptoError::ReportFrameTooShort,
+            CryptoError::ReportInnerLengthMismatch,
+            CryptoError::ReportPaddingOrHeaderRefused,
+            CryptoError::InvalidPublicKeyLength(7),
+            CryptoError::IdentityAuthority("scope denied"),
+            CryptoError::DeviceRevoked,
+            CryptoError::GroupReportOpeningMissing,
+            CryptoError::NodeReportReceiptMismatch,
+        ] {
+            assert_eq!(deterministic(&SdkError::Crypto(error)), Some("authentication_failed"));
+        }
+        for error in [
+            CryptoError::GroupLeaseUnavailable,
+            CryptoError::GroupSenderKeyUnavailable,
+            CryptoError::MaxSkipExceeded,
+            CryptoError::RandomUnavailable("local".into()),
+        ] {
+            assert_eq!(deterministic(&SdkError::Crypto(error)), None);
+        }
     }
 }

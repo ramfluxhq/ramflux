@@ -46,6 +46,15 @@ fn inner(sender: &Sender, sequence: u64, content: g::content::Value) -> TestResu
     Ok(g::Inner { layer: 2, kind, identity: Some(identity(sender, sequence)?), body })
 }
 fn evidence(sender: &Sender, inner: &g::Inner, now: u64) -> TestResult<g::HistoryOriginEvidence> {
+    evidence_with_policy(sender, inner, now, "durable", "message")
+}
+fn evidence_with_policy(
+    sender: &Sender,
+    inner: &g::Inner,
+    now: u64,
+    mode: &str,
+    class: &str,
+) -> TestResult<g::HistoryOriginEvidence> {
     let manifest: CustodyManifest =
         ramflux_protocol::custody::decode(&sender.manifest.canonical, 5 * 1024 * 1024)?;
     let mut outer: Value = serde_json::from_str(include_str!(
@@ -53,10 +62,15 @@ fn evidence(sender: &Sender, inner: &g::Inner, now: u64) -> TestResult<g::Histor
     ))?;
     outer = outer["envelope"].take();
     outer["created_at"] = json!(now);
+    outer["delivery_mode"] = json!(mode);
+    outer["delivery_class"] = json!(class);
+    let ttl = if mode == "ephemeral" { 5 } else { 300 };
+    outer["ttl"] = json!(ttl);
+    outer["priority"] = json!(if mode == "ephemeral" { "low" } else { "normal" });
     outer["source_principal_id"] = json!(manifest.publication.record.body.principal_id);
     outer["source_device_id"] = json!(sender.author.device_id);
     outer["ext"] = json!({"source_root_commitment":sender.author.account_anchor});
-    if let Some(commitment) = g::original_header::for_inner(&inner.encode_to_vec(), now, now + 300)?
+    if let Some(commitment) = g::original_header::for_inner(&inner.encode_to_vec(), now, now + ttl)?
     {
         outer["ext"][g::original_header::EXT_KEY] = json!(commitment);
     }
@@ -78,9 +92,19 @@ fn evidence(sender: &Sender, inner: &g::Inner, now: u64) -> TestResult<g::Histor
     })
 }
 fn item(original: &Sender, edit_author: &Sender, now: u64) -> TestResult<g::HistoryItem> {
-    item_with_message(original, edit_author, now, g::Message { text: "retired".into(), ..Default::default() })
+    item_with_message(
+        original,
+        edit_author,
+        now,
+        g::Message { text: "retired".into(), ..Default::default() },
+    )
 }
-fn item_with_message(original: &Sender, edit_author: &Sender, now: u64, message: g::Message) -> TestResult<g::HistoryItem> {
+fn item_with_message(
+    original: &Sender,
+    edit_author: &Sender,
+    now: u64,
+    message: g::Message,
+) -> TestResult<g::HistoryItem> {
     let original_inner = inner(original, 1, g::content::Value::Message(message))?;
     let identity = original_inner.identity.as_ref().ok_or("identity")?;
     let original_evidence = evidence(original, &original_inner, now)?;
@@ -239,9 +263,17 @@ fn edited_import_same_root_other_device_edit_ok() -> TestResult {
 }
 
 fn import_receiver(root: &Root, original: &g::EventIdentity) -> TestResult<RamfluxClient> {
-    import_receiver_with_message(root, original, &g::Message { text:"current local state".into(), ..Default::default() })
+    import_receiver_with_message(
+        root,
+        original,
+        &g::Message { text: "current local state".into(), ..Default::default() },
+    )
 }
-fn import_receiver_with_message(root: &Root, original: &g::EventIdentity, message: &g::Message) -> TestResult<RamfluxClient> {
+fn import_receiver_with_message(
+    root: &Root,
+    original: &g::EventIdentity,
+    message: &g::Message,
+) -> TestResult<RamfluxClient> {
     let mut client = RamfluxClient::new();
     client.create_identity_root("receiver", [53; 32]);
     client.create_device_branch("receiver", "receiver", 1, [54; 32]);
@@ -388,7 +420,10 @@ fn third_edit_keeps_one_original_evidence_and_one_edit_inner() -> TestResult {
     assert_eq!(client.account_db()?.actor_state_keys("routed/original-header/")?.len(), 1);
     let event = g::Inner::decode(third.exact_inner.as_slice())?.identity.ok_or("event identity")?;
     assert_eq!(client.selected_generated_report_evidence(&event.id)?.0, third.exact_inner);
-    assert!(matches!(client.selected_generated_report_evidence(&identity(&a,8)?.id), Err(SdkError::HistoryEvidence(EvidenceError::ReportOpeningRetired))));
+    assert!(matches!(
+        client.selected_generated_report_evidence(&identity(&a, 8)?.id),
+        Err(SdkError::HistoryEvidence(EvidenceError::ReportOpeningRetired))
+    ));
     Ok(())
 }
 
@@ -397,37 +432,112 @@ mod scans;
 
 #[test]
 fn edited_import_refuses_swapped_identity() -> TestResult {
-    let root=Root::new()?; let now=crate::custody::network_now()?; let a=sender(&root,"original",now)?;
-    let mut item=item(&a,&a,now)?; item.exact_original_identity=identity(&a,8)?.encode_to_vec();
-    assert!(matches!(RamfluxClient::new().verify_generated_edited_history_item(&item),Err(SdkError::HistoryEvidence(EvidenceError::OriginCommitmentMismatch))));
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    let mut item = item(&a, &a, now)?;
+    item.exact_original_identity = identity(&a, 8)?.encode_to_vec();
+    assert!(matches!(
+        RamfluxClient::new().verify_generated_edited_history_item(&item),
+        Err(SdkError::HistoryEvidence(EvidenceError::OriginCommitmentMismatch))
+    ));
     Ok(())
 }
 
 #[test]
 fn edited_import_refuses_cross_conversation_replay() -> TestResult {
-    let root=Root::new()?; let now=crate::custody::network_now()?; let a=sender(&root,"original",now)?;
-    let mut item=item(&a,&a,now)?; let mut inner=g::Inner::decode(item.exact_inner.as_slice())?;
-    let mut edit=g::Edit::decode(inner.body.as_slice())?; edit.target.as_mut().ok_or("target")?.conversation_id="another conversation".into();
-    inner.body=edit.encode_to_vec(); item.exact_inner=inner.encode_to_vec(); item.source_evidence=Some(evidence(&a,&inner,now)?);
-    assert!(matches!(RamfluxClient::new().verify_generated_edited_history_item(&item),Err(SdkError::HistoryEvidence(EvidenceError::EditTargetMismatch))));
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    let mut item = item(&a, &a, now)?;
+    let mut inner = g::Inner::decode(item.exact_inner.as_slice())?;
+    let mut edit = g::Edit::decode(inner.body.as_slice())?;
+    edit.target.as_mut().ok_or("target")?.conversation_id = "another conversation".into();
+    inner.body = edit.encode_to_vec();
+    item.exact_inner = inner.encode_to_vec();
+    item.source_evidence = Some(evidence(&a, &inner, now)?);
+    assert!(matches!(
+        RamfluxClient::new().verify_generated_edited_history_item(&item),
+        Err(SdkError::HistoryEvidence(EvidenceError::EditTargetMismatch))
+    ));
     Ok(())
 }
 
 #[test]
 fn edited_item_refuses_invalid_identity_bounds_and_tags_without_edit() -> TestResult {
-    let root=Root::new()?; let now=crate::custody::network_now()?; let a=sender(&root,"original",now)?;
-    let valid=item(&a,&a,now)?;
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    let valid = item(&a, &a, now)?;
     for case in 0..5 {
-        let mut candidate=valid.clone();
+        let mut candidate = valid.clone();
         match case {
-            0 => candidate.exact_original_identity.extend([0x80,0x01,0x01]),
-            1 => { candidate.exact_original_identity.splice(1..2,[0xa0,0x00]); }
-            2 => candidate.exact_original_identity=vec![1;g::original_header::MAX_IDENTITY_BYTES+1],
-            3 => candidate.original_metadata_evidence.as_mut().ok_or("evidence")?.canonical_sender_envelope=vec![1;g::original_header::MAX_OUTER_BYTES+1],
-            4 => candidate.exact_inner=inner(&a,1,g::content::Value::Message(g::Message { text:"not an Edit".into(),..Default::default() }))?.encode_to_vec(),
-            _ => unreachable!(),
+            0 => candidate.exact_original_identity.extend([0x80, 0x01, 0x01]),
+            1 => {
+                candidate.exact_original_identity.splice(1..2, [0xa0, 0x00]);
+            }
+            2 => {
+                candidate.exact_original_identity =
+                    vec![1; g::original_header::MAX_IDENTITY_BYTES + 1];
+            }
+            3 => {
+                candidate
+                    .original_metadata_evidence
+                    .as_mut()
+                    .ok_or("evidence")?
+                    .canonical_sender_envelope = vec![1; g::original_header::MAX_OUTER_BYTES + 1];
+            }
+            4 => {
+                candidate.exact_inner = inner(
+                    &a,
+                    1,
+                    g::content::Value::Message(g::Message {
+                        text: "not an Edit".into(),
+                        ..Default::default()
+                    }),
+                )?
+                .encode_to_vec();
+            }
+            _ => return Err("unexpected retained-evidence test case".into()),
         }
-        assert!(matches!(RamfluxClient::new().verify_generated_edited_history_item(&candidate),Err(SdkError::HistoryEvidence(EvidenceError::OriginCommitmentMismatch))),"invalid retained evidence case {case}");
+        assert!(
+            matches!(
+                RamfluxClient::new().verify_generated_edited_history_item(&candidate),
+                Err(SdkError::HistoryEvidence(EvidenceError::OriginCommitmentMismatch))
+            ),
+            "invalid retained evidence case {case}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn edited_history_never_promotes_ephemeral_or_call_wake_evidence_to_message_mutations() -> TestResult
+{
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    for (mode, class) in [("ephemeral", "message"), ("durable", "call_wake")] {
+        let mut current = item(&a, &a, now)?;
+        let edit = g::Inner::decode(current.exact_inner.as_slice())?;
+        current.source_evidence = Some(evidence_with_policy(&a, &edit, now, mode, class)?);
+        assert!(matches!(
+            RamfluxClient::new().verify_generated_edited_history_item(&current),
+            Err(SdkError::HistoryEvidence(EvidenceError::OriginCommitmentMismatch))
+        ));
+        let mut original = item(&a, &a, now)?;
+        let message = inner(
+            &a,
+            1,
+            g::content::Value::Message(g::Message { text: "retired".into(), ..Default::default() }),
+        )?;
+        let proof = evidence_with_policy(&a, &message, now, mode, class)?;
+        let retained = original.original_metadata_evidence.as_mut().ok_or("original evidence")?;
+        retained.canonical_sender_envelope = proof.canonical_sender_envelope;
+        assert!(matches!(
+            RamfluxClient::new().verify_generated_edited_history_item(&original),
+            Err(SdkError::HistoryEvidence(EvidenceError::OriginCommitmentMismatch))
+        ));
     }
     Ok(())
 }

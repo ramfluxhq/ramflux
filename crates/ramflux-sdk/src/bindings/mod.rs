@@ -128,8 +128,9 @@ pub fn bind_adapter_field(message: &str, json_name: &str) -> Result<BindingField
 /// # Errors
 /// Returns an error when required fields are missing or JSON encoding fails.
 pub fn encode_message_request(request: &g::MessageRequest) -> Result<Value, SdkError> {
-    validate_request(request)?;
-    encode_named("MessageRequest", request)
+    let mut request = request.clone();
+    normalize_request(&mut request)?;
+    encode_named("MessageRequest", &request)
 }
 
 /// Decode a generated request and refuse keys that are not descriptor fields.
@@ -138,8 +139,8 @@ pub fn encode_message_request(request: &g::MessageRequest) -> Result<Value, SdkE
 /// Returns an error for unknown fields, missing action, or invalid JSON.
 pub fn decode_message_request(value: &Value) -> Result<g::MessageRequest, SdkError> {
     reject_unknown_keys("MessageRequest", value)?;
-    let request: g::MessageRequest = serde_json::from_value(value.clone())?;
-    validate_request(&request)?;
+    let mut request: g::MessageRequest = serde_json::from_value(value.clone())?;
+    normalize_request(&mut request)?;
     Ok(request)
 }
 
@@ -148,8 +149,9 @@ pub fn decode_message_request(value: &Value) -> Result<g::MessageRequest, SdkErr
 /// # Errors
 /// Returns an error when conversation id is empty or JSON encoding fails.
 pub fn encode_send_message(send: &g::SendMessage) -> Result<Value, SdkError> {
-    validate_send(send)?;
-    encode_named("SendMessage", send)
+    let mut send = send.clone();
+    normalize_send(&mut send)?;
+    encode_named("SendMessage", &send)
 }
 
 /// Decode a generated send payload and refuse unknown keys.
@@ -158,8 +160,8 @@ pub fn encode_send_message(send: &g::SendMessage) -> Result<Value, SdkError> {
 /// Returns an error for unknown fields or a missing conversation id.
 pub fn decode_send_message(value: &Value) -> Result<g::SendMessage, SdkError> {
     reject_unknown_keys("SendMessage", value)?;
-    let send: g::SendMessage = serde_json::from_value(value.clone())?;
-    validate_send(&send)?;
+    let mut send: g::SendMessage = serde_json::from_value(value.clone())?;
+    normalize_send(&mut send)?;
     Ok(send)
 }
 
@@ -250,19 +252,62 @@ fn validate_request(request: &g::MessageRequest) -> Result<(), SdkError> {
                 Ok(())
             }
         }
-        Some(g::message_request::Action::Typing(_)) => Ok(()),
+        Some(g::message_request::Action::Typing(_)) => Err(invalid("use send.content.typing")),
         None => Err(invalid("MessageRequest requires one action")),
     }
 }
 
-fn validate_send(send: &g::SendMessage) -> Result<(), SdkError> {
-    if send.conversation_id.is_empty() {
-        Err(invalid("SendMessage requires conversation_id"))
-    } else if send.content.is_none() {
-        Err(invalid("SendMessage requires content"))
-    } else {
-        Ok(())
+fn normalize_request(request: &mut g::MessageRequest) -> Result<(), SdkError> {
+    validate_request(request)?;
+    if let Some(g::message_request::Action::Send(send)) = request.action.as_mut() {
+        normalize_send(send)?;
     }
+    Ok(())
+}
+
+fn normalize_send(send: &mut g::SendMessage) -> Result<(), SdkError> {
+    validate_send(send)?;
+    if let Some(g::content::Value::Message(message)) =
+        send.content.as_mut().and_then(|content| content.value.as_mut())
+        && message.reply_to.is_none()
+    {
+        message.reply_to.clone_from(&send.reply_to);
+    }
+    Ok(())
+}
+
+fn validate_send(send: &g::SendMessage) -> Result<(), SdkError> {
+    if send.conversation_id.is_empty() || !(16..=64).contains(&send.operation_id.len()) {
+        return Err(invalid("SendMessage requires conversation_id and a 16..64-byte operation_id"));
+    }
+    let content = send
+        .content
+        .as_ref()
+        .and_then(|content| content.value.as_ref())
+        .ok_or_else(|| invalid("SendMessage requires content"))?;
+    match content {
+        g::content::Value::Message(message) => {
+            if let (Some(outer), Some(inner)) = (&send.reply_to, &message.reply_to)
+                && outer != inner
+            {
+                return Err(invalid("SendMessage reply_to conflicts with Message reply_to"));
+            }
+        }
+        g::content::Value::Typing(typing) => {
+            if typing.expires_at != 0 {
+                return Err(invalid("Typing request expires_at must be zero"));
+            }
+        }
+        g::content::Value::SelfSync(_)
+        | g::content::Value::Surface(_)
+        | g::content::Value::Task(_)
+        | g::content::Value::Call(_) => (),
+        _ => return Err(invalid("content kind is not accepted by SendMessage")),
+    }
+    if send.reply_to.is_some() && !matches!(content, g::content::Value::Message(_)) {
+        return Err(invalid("reply_to is only accepted for Message content"));
+    }
+    Ok(())
 }
 
 fn validate_update(update: &g::MessageUpdate) -> Result<(), SdkError> {

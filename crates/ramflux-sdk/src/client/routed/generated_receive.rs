@@ -117,49 +117,17 @@ impl RamfluxClient {
             }
             Err(_) => return Ok(GeneratedProjection::Native),
         };
-        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
         let inner = g::Inner::decode(bytes).ok();
-        let source_epoch = self
-            .account_db()?
-            .client_device_record(&source)?
-            .and_then(|record| record["device_epoch"].as_u64())
-            .ok_or_else(|| invalid("source epoch missing"))?;
         self.authorize_generated_origin(opened, entry, &scanned)?;
         Self::verify_generated_message_header(entry, bytes)?;
-        if let Some(identity) = inner.as_ref().and_then(|inner| inner.identity.as_ref())
-            && (identity.conversation_id != opened.routing.conversation_id
-                || identity.author.as_ref().is_none_or(|author| {
-                    author.account_anchor != source.root_commitment()
-                        || author.device_id != source.device_id()
-                        || author.device_epoch != source_epoch
-                }))
-        {
-            return Err(SdkError::GeneratedRefused {
-                code: crate::error::GeneratedRefusalCode::Identity,
-                reason: "identity differs from authenticated source or conversation".into(),
-            });
-        }
-        if let Some(identity) = inner.as_ref().and_then(|inner| inner.identity.as_ref()) {
-            g::identity::verify(identity).map_err(|_| SdkError::GeneratedRefused {
-                code: crate::error::GeneratedRefusalCode::Identity,
-                reason: "event id transcript mismatch".into(),
-            })?;
-            let now_ms = crate::client::generated_identity::now_ms();
-            if self.apply_generated_delete_fence(identity)? {
-                return Ok(GeneratedProjection::Handled(None));
-            }
-            self.merge_generated_clock(identity.hlc, now_ms)?;
-            let order = crate::client::generated_identity::order_hlc(identity.hlc, now_ms);
-            self.account_db()?.persist_message_actor_state(
-                &opened.routing.message_id,
-                &format!("routed/generated-order/{}", opened.routing.message_id),
-                &identity.hlc,
-            )?;
-            self.account_db()?.persist_message_actor_state(
-                &opened.routing.message_id,
-                &format!("routed/generated-display-hlc/{}", opened.routing.message_id),
-                &order,
-            )?;
+        if self.prepare_generated_identity(
+            opened,
+            entry,
+            bytes,
+            scanned.kind,
+            inner.as_ref().and_then(|inner| inner.identity.as_ref()),
+        )? {
+            return Ok(GeneratedProjection::Handled(None));
         }
         self.capture_generated_original_header(entry, bytes)?;
         if opened.routing.kind == Kind::GroupMessage && scanned.kind == 1 {
@@ -201,6 +169,81 @@ impl RamfluxClient {
             },
             content,
         )
+    }
+
+    // True means the authenticated identity is already retired, deleted or projected.
+    fn prepare_generated_identity(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        bytes: &[u8],
+        kind: u32,
+        identity: Option<&g::EventIdentity>,
+    ) -> Result<bool, SdkError> {
+        let Some(identity) = identity else {
+            return Ok(false);
+        };
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        let source_epoch = self
+            .account_db()?
+            .client_device_record(&source)?
+            .and_then(|record| record["device_epoch"].as_u64())
+            .ok_or_else(|| invalid("source epoch missing"))?;
+        if identity.conversation_id != opened.routing.conversation_id
+            || identity.author.as_ref().is_none_or(|author| {
+                author.account_anchor != source.root_commitment()
+                    || author.device_id != source.device_id()
+                    || author.device_epoch != source_epoch
+            })
+        {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Identity,
+                reason: "identity differs from authenticated source or conversation".into(),
+            });
+        }
+
+        g::identity::verify(identity).map_err(|_| SdkError::GeneratedRefused {
+            code: crate::error::GeneratedRefusalCode::Identity,
+            reason: "event id transcript mismatch".into(),
+        })?;
+        if self.apply_generated_delete_fence(identity)? {
+            return Ok(true);
+        }
+        // An Edit retires the original payload, including fresh recipient copies.
+        // Authenticate its outer and header before ignoring it without retention.
+        if kind == 1
+            && self
+                .account_db()?
+                .load_actor_state::<bool>(&format!(
+                    "routed/report-opening-retired/{}",
+                    opened.routing.message_id
+                ))?
+                .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+        if kind == 1
+            && let Some(stored) = self.account_db()?.message_content(&opened.routing.message_id)?
+        {
+            if stored != bytes {
+                return Err(SdkError::ReplayMismatch);
+            }
+            return Ok(true);
+        }
+        let now_ms = crate::client::generated_identity::now_ms();
+        self.merge_generated_clock(identity.hlc, now_ms)?;
+        let order = crate::client::generated_identity::order_hlc(identity.hlc, now_ms);
+        self.account_db()?.persist_message_actor_state(
+            &opened.routing.message_id,
+            &format!("routed/generated-order/{}", opened.routing.message_id),
+            &identity.hlc,
+        )?;
+        self.account_db()?.persist_message_actor_state(
+            &opened.routing.message_id,
+            &format!("routed/generated-display-hlc/{}", opened.routing.message_id),
+            &order,
+        )?;
+        Ok(false)
     }
 
     fn verify_generated_message_header(
@@ -348,6 +391,7 @@ impl RamfluxClient {
                 }
                 self.apply_generated_reaction_entry(
                     entry,
+                    identity.as_ref().ok_or_else(|| invalid("Reaction identity missing"))?,
                     &opened.routing.conversation_id,
                     &reaction,
                 )?;
@@ -422,6 +466,7 @@ impl RamfluxClient {
             if Some(group_id) != opened.routing.group_id.as_deref() {
                 return Err(invalid("group identity conflicts with route"));
             }
+            self.require_native_operation(&source, NativeOperation::Group)?;
             self.require_routed_group_member(group_id, entry)?;
             if !self.group_state(group_id)?.members.contains(source.device_id()) {
                 return Err(SdkError::InboundRejected("group author lacks a current role".into()));

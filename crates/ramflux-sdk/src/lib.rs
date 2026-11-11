@@ -129,7 +129,6 @@ pub use bus::{
 #[doc(hidden)]
 pub use bus::{LocalBusStartupRestoreGate, LocalBusStartupRestoreGateControl};
 pub use client::RamfluxClient;
-pub use client::{ReparseProgress, self_sync, typed_messages, typing};
 pub use client::contact::SdkContactSafetyNumber;
 pub use client::conversation::ConversationSummary;
 #[cfg(feature = "itest-fingerprint")]
@@ -140,6 +139,7 @@ pub use client::recovery::{
     SdkRecoveryInitiateRequest, SdkRecoveryQuorumConfiguration, SdkRecoveryQuorumMember,
     recovery_member_public_key_base64url, verify_guardian_accept,
 };
+pub use client::{ReparseProgress, self_sync, typed_messages, typing};
 pub use constants::*;
 pub use dm::{
     SdkDmAttachmentImportResult, SdkDmX3dhHeader, SdkFrankingEvidenceKind,
