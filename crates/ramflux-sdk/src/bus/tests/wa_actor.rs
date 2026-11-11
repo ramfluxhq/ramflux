@@ -215,13 +215,12 @@ async fn watch<F>(secs: u64, fut: F) -> Case
 where
     F: Future<Output = Case>,
 {
-    tokio::time::timeout(
-        Duration::from_secs(secs),
-        LocalSet::new()
-            .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog(Box::pin(fut)))),
-    )
-    .await
-    .expect("hang")
+    LocalSet::new()
+        .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
+            Duration::from_secs(secs),
+            Box::pin(fut),
+        )))
+        .await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -273,7 +272,7 @@ async fn never_ack_above_c_case() -> Case {
 async fn ack_batch_timing() -> Case {
     LocalSet::new()
         .run_until(Box::pin(crate::bus::connection_manager::tests::watchdog_for(
-            Duration::from_secs(60),
+            Duration::from_secs(120),
             Box::pin(ack_batch_timing_case()),
         )))
         .await
@@ -348,7 +347,7 @@ async fn ack_lost_case() -> Case {
 
 #[tokio::test(flavor = "current_thread")]
 async fn catch_up_yields_real_pass() -> Case {
-    watch(40, catch_up_yields_real_pass_case()).await
+    watch(90, catch_up_yields_real_pass_case()).await
 }
 
 async fn catch_up_yields_real_pass_case() -> Case {

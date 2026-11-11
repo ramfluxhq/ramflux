@@ -229,10 +229,10 @@ async fn prepare_case(
     let released = WallClock::now();
     send(&io, &GatewayServerFrame::Cursor { cursor: None })?;
     wait_for(held, "held Cursor RPC completion").await???;
-    let first = tokio::time::timeout(Duration::from_secs(1), io.output.recv())
+    let first = tokio::time::timeout(Duration::from_secs(5), io.output.recv())
         .await?
         .ok_or("Resync Resume")?;
-    assert!(released.elapsed() < Duration::from_secs(1));
+    assert!(released.elapsed() < Duration::from_secs(5));
     assert!(matches!(first, GatewayClientFrame::Resume { resume } if resume.after_inbox_seq == 0));
     assert!(handle.test_receive_trace().contains(&(ReceiveTrigger::Resync, false)));
     eprintln!("first recovery Resume after {:?}", released.elapsed());

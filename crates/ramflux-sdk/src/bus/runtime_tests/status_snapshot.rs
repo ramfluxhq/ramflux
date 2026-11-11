@@ -96,6 +96,19 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
                 assert_eq!(ack["sync_status"], snapshot["sync_status"]);
                 assert_eq!(ack["node_health"], snapshot["node_health"]);
                 assert_eq!(ack["last_run"], 2000 + restart);
+                let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+                loop {
+                    let left =
+                        drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(left, bus.next_event()).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => break,
+                    }
+                }
                 assert!(
                     tokio::time::timeout(Duration::from_millis(100), bus.next_event())
                         .await

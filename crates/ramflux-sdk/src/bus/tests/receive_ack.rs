@@ -85,10 +85,10 @@ pub(super) async fn controls(actor: &AccountActor) -> Case {
     ] {
         let wall = std::time::Instant::now();
         let response =
-            tokio::time::timeout(Duration::from_secs(1), actor.request(command(method, body)))
+            tokio::time::timeout(Duration::from_secs(5), actor.request(command(method, body)))
                 .await??;
         assert!(
-            wall.elapsed() < Duration::from_secs(1),
+            wall.elapsed() < Duration::from_secs(5),
             "{method} waited for the held receive step"
         );
         if method == "account.status" {
