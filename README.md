@@ -79,6 +79,14 @@ An upgrade retains a finite `RAMFLUX_CUSTODY_AUTHENTICATED_POOL` already in
 ceiling. To return to unlimited, run the upgrade with
 `RAMFLUX_CUSTODY_AUTHENTICATED_POOL=` explicitly set to an empty value.
 
+## Design documents
+
+- [Revocation placeholder erasure](docs/design/revocation_placeholder_erasure_v1.md)
+  records the approved selector lifecycle, restore admission and erasure design.
+- [Session push](docs/design/session_push_v1.md) records the approved durable
+  delivery and receive-ledger design. The [node contract](docs/session_push_node.md)
+  describes the current node interface.
+
 ## Security
 
 Do not file public issues for vulnerabilities. See `SECURITY.md` and
