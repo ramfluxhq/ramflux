@@ -28,6 +28,7 @@ pub(crate) mod group_directory;
 mod legacy;
 pub(crate) use group_directory::ReceiveGroupDirectory;
 mod receive;
+mod refused_pair;
 mod report;
 pub(crate) use receive::{Delivery, JoinedW1};
 pub(crate) use report::{SealedRouted, refuse_a0_mismatch};
@@ -411,15 +412,7 @@ impl RamfluxClient {
         self.account_db()?.write_transaction(|| {
             self.authorize_self_sync(&local, &message.conversation_id)?;
             g::self_sync::validate(&value).map_err(|_| invalid("invalid SelfSync body"))?;
-            let identity = self.allocate_generated_identity(
-                &message.conversation_id,
-                crate::client::generated_identity::now_ms(),
-                true,
-            )?;
-            let inner = Self::encode_generated_inner(
-                identity,
-                &g::Content { value: Some(g::content::Value::SelfSync(value.clone())) },
-            )?;
+            let inner = self.self_sync_publication_inner(&message.conversation_id, &value)?;
             let sealed = self.seal_routed_with_route(
                 message,
                 &inner,

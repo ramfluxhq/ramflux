@@ -116,9 +116,20 @@ const DURABLE_INGRESS: &[(&str, Class)] = &[
         Class::NonIngress("in-memory replay-guard primitive; guarded by E6 caller"),
     ),
     ("replay_guard.rs:holds_envelope", Class::NonIngress("in-memory replay-guard read")),
-    ("report_receipt.rs:append_node_report_receipt", Class::NonIngress("signs acceptance evidence on an already admitted candidate; no persistence or delivery")),
-    ("report_receipt.rs:verify_bound_node_report_receipt", Class::NonIngress("pure candidate receipt signature and binding verification")),
-    ("report_receipt.rs:verify_group_report_evidence", Class::NonIngress("pure candidate group opening and native author evidence verification")),
+    (
+        "report_receipt.rs:append_node_report_receipt",
+        Class::NonIngress(
+            "signs acceptance evidence on an already admitted candidate; no persistence or delivery",
+        ),
+    ),
+    (
+        "report_receipt.rs:verify_bound_node_report_receipt",
+        Class::NonIngress("pure candidate receipt signature and binding verification"),
+    ),
+    (
+        "report_receipt.rs:verify_group_report_evidence",
+        Class::NonIngress("pure candidate group opening and native author evidence verification"),
+    ),
     (
         "replay_guard.rs:envelope_replay_tuple_key",
         Class::NonIngress("pure replay-key construction"),

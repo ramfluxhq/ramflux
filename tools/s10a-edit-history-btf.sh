@@ -4,7 +4,7 @@ set -euo pipefail
 : "${RF_LANE_BASE:?run through qa-cargo}"
 saved=$(mktemp -d)
 log=$(mktemp)
-files=(crates/ramflux-sdk/src/client/routed/generated_receive.rs crates/ramflux-sdk/src/client/generated_history.rs crates/ramflux-storage/src/account_db/message_edit_retirement.rs crates/ramflux-protocol/src/message/original_header.rs crates/ramflux-protocol/src/sender_transcript.rs)
+files=(crates/ramflux-sdk/src/client/routed/generated_receive.rs crates/ramflux-sdk/src/client/generated_history.rs crates/ramflux-storage/src/account_db/message_edit_retirement.rs crates/ramflux-protocol/src/message/original_header.rs crates/ramflux-protocol/src/sender_transcript.rs crates/ramflux-storage/src/account_db/message_footprint/erasure.rs)
 for i in "${!files[@]}"; do cp "${files[$i]}" "$saved/$i"; done
 restore_files() { for i in "${!files[@]}"; do cp "$saved/$i" "${files[$i]}"; done; }
 cleanup() { restore_files; rm -rf "$saved"; rm -f "$log"; }
@@ -49,5 +49,34 @@ import sys
 p=Path(sys.argv[1]);s=p.read_text();needle='remove_node_fields(&mut value);';assert s.count(needle)==2;s=s.replace(needle,needle+'\n    if let Some(ext) = value.get_mut("ext").and_then(Value::as_object_mut) { ext.remove("message_metadata_commitment"); }',1);p.write_text(s)
 PY
 expect_failure ramflux-protocol sender_transcript_golden_vectors
+restore_files
+python3 - "${files[3]}" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);s=p.read_text();start=s.index('pub fn for_inner(')
+s=s[:start]+s[start:].replace('        expires_at,','        expires_at: expires_at + message.reply_to.as_ref().map_or(0, |value| value.encode_to_vec().len() as u64),',1);p.write_text(s)
+PY
+expect_failure ramflux-protocol original_header_never_commits_body_fields
+restore_files
+python3 - "${files[3]}" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);s=p.read_text();needle='group_state_hash: group.group_state_hash.clone(),';assert s.count(needle)==1;s=s.replace(needle,'group_state_hash: [group.group_state_hash.clone(), group.content_commitment.clone()].concat(),');p.write_text(s)
+PY
+expect_failure ramflux-protocol edited_group_history_item_drops_wrapper_commitments
+restore_files
+python3 - "${files[5]}" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);s=p.read_text();needle="AND state_kind<>'directory/message/'||NEW.message_id";assert s.count(needle)==1;s=s.replace(needle,needle+" AND state_kind NOT LIKE 'routed/original-header/%'");p.write_text(s)
+PY
+expect_failure ramflux-sdk delete_after_edit_erases_original_evidence_and_fences_reimport
+restore_files
+python3 - "${files[0]}" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);s=p.read_text();needle='if kind == 1';assert s.count(needle)==2;p.write_text(s.replace(needle,'if false && kind == 1',1))
+PY
+expect_failure ramflux-sdk retired_original_redelivery_never_replaces_current_edit
 restore_files
 printf 'EDIT_HISTORY_BTF_OK\n'

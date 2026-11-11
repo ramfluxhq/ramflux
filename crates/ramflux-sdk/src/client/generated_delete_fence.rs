@@ -93,6 +93,10 @@ impl RamfluxClient {
             }
             let source = self.device_identity(&moderator.device)?;
             self.require_cached_root_authority(HeadUse::NewAuthorization, &source)?;
+            self.require_native_operation(
+                &source,
+                crate::client::identity_authority::NativeOperation::Group,
+            )?;
             self.require_generated_group_epoch(&moderator.group, &source, moderator.epoch, true)?;
             return Ok(true);
         }
@@ -146,6 +150,7 @@ impl RamfluxClient {
                 ) => {
                     unresolved.insert(key.clone());
                 }
+                Err(error) if crate::client::inbox_failure::deterministic(&error).is_some() => (),
                 Err(error) => return Err(error),
             }
         }

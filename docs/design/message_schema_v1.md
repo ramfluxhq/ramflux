@@ -4294,7 +4294,7 @@ UnsupportedView replaces Content without exposing secret/raw bytes by default.
 | Delete | message, durable, generic wake | MessageRequest.delete / tombstone; S9 owner edges and raw-copy erase |
 | Reaction | message, durable | MessageRequest.reaction / Content.reaction; principal-scoped add/remove |
 | Receipt | message, durable; notification policy suppresses noisy UI locally | Content.receipt; delivered/read never inferred from transport ACK |
-| Typing | message, ephemeral, low, TTL 5 seconds, no push | MessageRequest.typing / transient Content.typing with expiry; never history |
+| Typing | message, ephemeral, low, TTL 5 seconds active / 1 second clear, no push | MessageRequest.send.content.typing with request expires_at zero / transient Content.typing with signed expiry; never history |
 | Control | message; durable except known live-presence operation | Content.control; all 16 operation/typed-payload mappings in section 3.2, including A2I and object revoke |
 | Surface | message, durable | Content.surface; SurfaceDelivery/ResyncRequest and every section 3.1 command/action/receipt; generated JsonValue data |
 | Task | message, durable | Content.task; every TaskEventBody, approval Request/Decision, Intent/Ack and own-history field in section 3.1 |
@@ -4501,7 +4501,7 @@ Completion definition (every row required):
 | Semantics | All 12 kinds send/receive through generated dispatch; Edit/Delete/Reaction enforce authorization/revision/tombstone rules; same Message/Service identity/order; attachments, groups, receipts, calls, tasks and own history still work |
 | Unknown input | Unknown kind, field, entity, nested signed payload or high layer commits Unsupported plus exact raw and provenance before ACK; bounded quota; no dead letter, NACK or action execution |
 | Privacy | Every raw copy registers transactionally; crash/absence/race tests cover active, prepared, journal, nested group, archived and restored paths; history-container invalidation and object last-owner rules both pass |
-| Typing acceptance | End-to-end typing send/receive uses S6 ephemeral mode, low priority, signed TTL bound 1..5 s and indicator lifetime at most 5 s inside the signed interval; offline/drop/expiry produce no inbox, WAL, spool, retry, dead-letter or push rows |
+| Typing acceptance | End-to-end typing send/receive uses S6 ephemeral mode, low priority, signed TTL exactly 5 s active or 1 s clear and indicator lifetime inside the signed interval; offline/drop/expiry produce no inbox, WAL, spool, retry, dead-letter or push rows |
 | Outer and reports | Exactly message/call_wake, uniform collapse_tag/report_commitment, named signed/AEAD-bound delivery_mode replaces the signed ext.delivery_mode bridge at reset; new profile rejects bridge/dual-field input; updated producers/consumers and node report flow |
 | Local surface | Generated requests/updates on bus, CLI/TUI and exported bindings; stale cursor resync and tombstone cache invalidation, typed errors, no JSON sniff fallback |
 
@@ -4804,7 +4804,7 @@ The following are design choices, not measured limits. Sweep audit r1 replacemen
 | 9 Delete target set | 1–256 targets |
 | 11 Moderator epoch | current owner/admin and permission at the named verified epoch |
 | 13 Edit revision | maximum 1,000,000 |
-| 14 Reactions | 8 present tokens per root/target; 2,048 total keys per target |
+| 14 Reactions | 8 visible present tokens per root/target; 2,048 total register keys per target, including absent markers |
 | 17 Capacity diagnostics | at most 64 content-free rows |
 | 26 Typed history pages | at most 100 rows and 768 KiB encoded |
 | 27 Adapter errors | permanent codes 1–16, per adopted OV2-RD-ERR |
@@ -4835,6 +4835,13 @@ History transfers expire after 60 seconds without a newly accepted page; retries
 Capacity lookahead stays within native ACK-window/ratchet bounds, and a local clock deadline
 is labeled local_retention_deadline_elapsed, never proof of node loss.
 
+
+Reaction register writes compare the immutable signed EventOrder including root,
+device epoch and raw event id. Greater writes advance absent/present order markers
+also when visibility is unchanged. Visible selection takes the greatest signed
+orders per reacting root, breaking equal-order ties by UTF-8 token bytes, and
+retains at most eight; other present registers remain stored. The register cap
+counts absent markers and is an explicit resource refusal, not universal convergence.
 
 ### OV-ORIGIN-SIG amendment (controller adoption of origin-signature audit r1)
 

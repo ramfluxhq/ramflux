@@ -24,7 +24,11 @@ impl AccountDb {
         let key = key(&state.view().group_id);
         let mut heads: Vec<Head> = self.load_actor_state(&key)?.unwrap_or_default();
         heads.retain(|head| head.hash != state.snapshot().state_hash);
-        heads.push(Head { epoch: state.view().epoch, hash: state.snapshot().state_hash.clone(), snapshot: Some(state.snapshot().clone()) });
+        heads.push(Head {
+            epoch: state.view().epoch,
+            hash: state.snapshot().state_hash.clone(),
+            snapshot: Some(state.snapshot().clone()),
+        });
         if heads.len() > RETAINED_HEADS {
             heads.drain(..heads.len() - RETAINED_HEADS);
         }
@@ -33,12 +37,24 @@ impl AccountDb {
     /// Reverify the most recently pinned snapshot at a historical epoch.
     /// # Errors
     /// Returns storage or native signature errors; unknown/evicted snapshots are absent.
-    pub fn shared_group_state_at_epoch(&self, group: &str, epoch: u64) -> Result<Option<ramflux_crypto::VerifiedGroupState>, StorageError> {
+    pub fn shared_group_state_at_epoch(
+        &self,
+        group: &str,
+        epoch: u64,
+    ) -> Result<Option<ramflux_crypto::VerifiedGroupState>, StorageError> {
         let current = self.shared_group_state(group)?;
-        if current.as_ref().is_some_and(|state| state.view().epoch == epoch) { return Ok(current); }
+        if current.as_ref().is_some_and(|state| state.view().epoch == epoch) {
+            return Ok(current);
+        }
         let heads: Vec<Head> = self.load_actor_state(&key(group))?.unwrap_or_default();
-        heads.into_iter().rev().find(|head| head.epoch == epoch).and_then(|head| head.snapshot)
-            .map(ramflux_crypto::verify_group_state_snapshot).transpose().map_err(Into::into)
+        heads
+            .into_iter()
+            .rev()
+            .find(|head| head.epoch == epoch)
+            .and_then(|head| head.snapshot)
+            .map(ramflux_crypto::verify_group_state_snapshot)
+            .transpose()
+            .map_err(Into::into)
     }
     /// # Errors
     /// Returns storage errors; only previously committed verified snapshots are known.

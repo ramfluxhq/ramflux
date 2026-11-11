@@ -809,7 +809,7 @@ pub(crate) fn franking_report_metadata_for_delivery(
         || franking.commitment != envelope.ciphertext.commitment
         || franking.ciphertext_hash != envelope.ciphertext.ciphertext_hash
     {
-        return Err(SdkError::LocalBus(
+        return Err(SdkError::InboundRejected(
             "received franking metadata does not match DM ciphertext".to_owned(),
         ));
     }

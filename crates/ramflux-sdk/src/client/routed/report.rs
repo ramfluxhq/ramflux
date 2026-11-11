@@ -244,7 +244,8 @@ pub(super) fn message_metadata_commitment(
     ttl: u32,
 ) -> Result<Option<String>, SdkError> {
     if !crate::client::target_selection::schema_v1_selected()
-        || ramflux_protocol::message::Inner::decode(body).is_err()
+        || !ramflux_protocol::message::Inner::decode(body)
+            .is_ok_and(|inner| inner.identity.is_some())
     {
         return Ok(None);
     }

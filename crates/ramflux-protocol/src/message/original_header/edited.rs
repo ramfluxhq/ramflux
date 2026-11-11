@@ -47,6 +47,11 @@ pub fn check(item: &g::HistoryItem) -> Result<EditedHeader, EvidenceError> {
     if crate::canonical_json_bytes(&outer).map_err(|_| bad)? != evidence.canonical_sender_envelope {
         return Err(bad);
     }
+    if outer["delivery_mode"].as_str() != Some("durable")
+        || outer["delivery_class"].as_str() != Some("message")
+    {
+        return Err(bad);
+    }
     // Evidence must have no ciphertext key, including an empty one.
     crate::sender_signed_transcript(&outer, crate::SenderTranscriptMode::Evidence)
         .map_err(|_| bad)?;
