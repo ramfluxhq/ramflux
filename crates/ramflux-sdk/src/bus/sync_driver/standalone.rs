@@ -116,6 +116,7 @@ async fn receive_inner(
     .await?;
     applied = apply_leftover(
         account,
+        engine,
         &mut turn,
         generation,
         retries,
@@ -153,6 +154,8 @@ async fn resume_one(
 
 fn legacy_page(after: u64, limit: usize, entries: Vec<GatewayInboxEntry>) -> ResumePage {
     use crate::bus::push_receiver::compat::fallback_deadline;
+    let entries: Vec<GatewayInboxEntry> =
+        entries.into_iter().filter(|entry| entry.inbox_seq > after).take(limit).collect();
     let high = entries.iter().map(|entry| entry.inbox_seq).max().unwrap_or(after);
     let more = !entries.is_empty() && entries.len() == limit;
     let covered = high;
@@ -229,9 +232,15 @@ async fn redrive_held_floor(
         backpressure = next;
         applied = applied.saturating_add(1);
         apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
-        if !backpressure.holds(&record.entry) {
-            emit_engine_ack(account, engine, record.entry.inbox_seq, envelope_ids).await?;
-        }
+        ack_if_terminal(
+            account,
+            engine,
+            &record.entry,
+            record.entry.inbox_seq,
+            &backpressure,
+            envelope_ids,
+        )
+        .await?;
     }
     backpressure.scanned(&account.client, last, count, now)?;
     Ok((backpressure, applied))
@@ -301,9 +310,15 @@ async fn drive_page(
                 backpressure = next;
                 applied = applied.saturating_add(1);
                 apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
-                if !backpressure.holds(&record.entry) {
-                    emit_engine_ack(account, engine, sequence, envelope_ids).await?;
-                }
+                ack_if_terminal(
+                    account,
+                    engine,
+                    &record.entry,
+                    sequence,
+                    &backpressure,
+                    envelope_ids,
+                )
+                .await?;
             }
             ApplyOutcome::NeedFetch { after } => {
                 turn.cursor = after;
@@ -337,6 +352,7 @@ fn take_page_retry(
 #[allow(clippy::too_many_arguments, reason = "standalone leftover apply shares the live handles")]
 async fn apply_leftover(
     account: &mut LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
     turn: &mut ReceiveTurn,
     generation: u64,
     retries: BTreeMap<(String, u64, String), ReceiveEntry>,
@@ -351,6 +367,7 @@ async fn apply_leftover(
         envelope_ids
             .entry(prepared.entry.inbox_seq)
             .or_insert_with(|| prepared.entry.envelope.envelope_id.clone());
+        let entry = prepared.entry.clone();
         prepared.turn = Some(turn.clone());
         let handle_generation = || generation;
         let (_, next) =
@@ -360,9 +377,30 @@ async fn apply_leftover(
         backpressure = next;
         applied = applied.saturating_add(1);
         apply_w1::refresh_cursor(account.client.account_db()?, turn)?;
+        ack_if_terminal(account, engine, &entry, entry.inbox_seq, &backpressure, envelope_ids)
+            .await?;
     }
-    let _ = backpressure;
     Ok(applied)
+}
+
+/// Gateway ACK only after a terminal cover: contact floors and inbox retries
+/// keep the ciphertext (W0 ACK-after-commit).
+async fn ack_if_terminal(
+    account: &LocalBusAccountState,
+    engine: &mut impl GatewayPushAccess,
+    entry: &GatewayInboxEntry,
+    sequence: u64,
+    backpressure: &Backpressure,
+    envelope_ids: &BTreeMap<u64, String>,
+) -> Result<(), SdkError> {
+    if backpressure.holds(entry) {
+        return Ok(());
+    }
+    let key = account.client.inbox_admission_key(entry)?;
+    if account.client.account_db()?.has_inbox_retry(&key)? {
+        return Ok(());
+    }
+    emit_engine_ack(account, engine, sequence, envelope_ids).await
 }
 
 /// Emit one gateway ACK without settling WA. Held contact floors skip this so
