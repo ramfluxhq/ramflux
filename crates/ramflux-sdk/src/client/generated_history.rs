@@ -44,6 +44,9 @@ fn authority(
         device_epoch: author.device_epoch,
     };
     let certified = verified.authorize(&device, "message", issued).map_err(|_| bad)?;
+    if identity.group_id.is_some() {
+        verified.authorize(&device, "group", issued).map_err(|_| bad)?;
+    }
     ramflux_protocol::verify_sender_signature(
         outer,
         ramflux_protocol::SenderTranscriptMode::Evidence,
@@ -75,6 +78,11 @@ fn verify_edit_origin(
     let outer: Value =
         ramflux_protocol::parse_i_json(&evidence.canonical_sender_envelope).map_err(|_| bad)?;
     if ramflux_protocol::canonical_json_bytes(&outer)? != evidence.canonical_sender_envelope {
+        return Err(bad.into());
+    }
+    if outer["delivery_mode"].as_str() != Some("durable")
+        || outer["delivery_class"].as_str() != Some("message")
+    {
         return Err(bad.into());
     }
     let author = authority(

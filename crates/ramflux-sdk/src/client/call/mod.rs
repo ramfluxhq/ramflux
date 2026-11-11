@@ -60,10 +60,11 @@ fn decode(body: &[u8]) -> Result<Option<CallControl>, SdkError> {
 }
 
 pub(crate) fn is_call_body(body: &[u8]) -> bool {
-    body.starts_with(PREFIX) || (crate::client::target_selection::schema_v1_selected()
-        && RamfluxClient::decode_generated_inner(body).is_ok_and(|(_, content)| {
-            matches!(content.value, Some(ramflux_protocol::message::content::Value::Call(_)))
-        }))
+    body.starts_with(PREFIX)
+        || (crate::client::target_selection::schema_v1_selected()
+            && RamfluxClient::decode_generated_inner(body).is_ok_and(|(_, content)| {
+                matches!(content.value, Some(ramflux_protocol::message::content::Value::Call(_)))
+            }))
 }
 impl RamfluxClient {
     pub(crate) fn call_device_identity(

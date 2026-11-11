@@ -28,10 +28,10 @@ impl RamfluxClient {
                 .capability_scope
                 .iter()
                 .any(|scope| scope == GATEWAY_EPHEMERAL_CAPABILITY)
-            || !(1..=5).contains(&message.ttl)
+            || message.ttl != if active { 5 } else { 1 }
         {
             return Err(SdkError::InboundRejected(
-                "typing requires negotiated ephemeral mode and TTL 1..5".into(),
+                "typing requires negotiated ephemeral mode and TTL 5 (active) or 1 (clear)".into(),
             ));
         }
         let source = self.owned_device_identity()?;
@@ -250,7 +250,7 @@ impl RamfluxClient {
             .checked_add(i64::from(envelope.ttl))
             .and_then(|at| u64::try_from(at).ok())
             .ok_or_else(|| invalid("typing deadline overflow"))?;
-        if typing.expires_at != deadline || (!typing.active && envelope.ttl != 1) {
+        if typing.expires_at != deadline || envelope.ttl != if typing.active { 5 } else { 1 } {
             return Err(SdkError::InboundRejected(
                 "typing interval exceeds signed lifetime".into(),
             ));

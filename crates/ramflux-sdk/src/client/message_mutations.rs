@@ -179,73 +179,6 @@ impl RamfluxClient {
             .ok_or_else(|| refused("mutation target has no authenticated origin"))
     }
 
-    /// Apply one idempotent generated reaction using a source-qualified operation id.
-    /// # Errors
-    /// Refuses missing/unbound targets, invalid tokens or an operation id reused with new intent.
-    pub fn apply_generated_reaction_entry(
-        &self,
-        entry: &crate::GatewayInboxEntry,
-        conversation: &str,
-        reaction: &ramflux_protocol::message::Reaction,
-    ) -> Result<bool, SdkError> {
-        ramflux_protocol::message::validation::validate_reaction_token(&reaction.token)
-            .map_err(|_| refused("invalid reaction token"))?;
-        let source = self.authenticated_device_identity(
-            crate::client::identity_authority::HeadUse::NewAuthorization,
-            entry,
-        )?;
-        let target = reaction.target.as_ref().ok_or_else(|| refused("reaction target missing"))?;
-        let id = ramflux_protocol::encode_base64url(&target.id);
-        if target.conversation_id != conversation || reaction.operation_id.is_empty() {
-            return Err(SdkError::InboundRejected(
-                "reaction conversation or operation id missing".into(),
-            ));
-        }
-        let db = self.account_db()?;
-        db.write_transaction(|| {
-            if db.message_is_deleted(&id)? {
-                return Ok(false);
-            }
-            let row = self
-                .direct_message_by_id(&id)?
-                .ok_or_else(|| SdkError::InboundPending("message target missing".into()))?;
-            if row.conversation_id != conversation
-                || target.author_anchor
-                    != self.generated_target_author(conversation, &id, row.is_own)?
-            {
-                return Err(SdkError::InboundRejected("reaction target author mismatch".into()));
-            }
-            let operation = format!(
-                "routed/reaction-operation/{}/{}",
-                source.root_commitment(),
-                ramflux_protocol::encode_base64url(&reaction.operation_id)
-            );
-            if let Some(previous) =
-                db.load_actor_state::<ramflux_protocol::message::Reaction>(&operation)?
-            {
-                if previous != *reaction {
-                    return Err(SdkError::ReplayMismatch);
-                }
-                return Ok(false);
-            }
-            let key = format!(
-                "routed/reaction/{}",
-                ramflux_protocol::encode_base64url(ramflux_protocol::canonical_json_bytes(&(
-                    target,
-                    source.root_commitment(),
-                    &reaction.token
-                ))?,)
-            );
-            if reaction.remove {
-                db.remove_actor_state(&key)?;
-            } else {
-                db.persist_message_actor_state(&id, &key, reaction)?;
-            }
-            db.persist_message_actor_state(&id, &operation, reaction)?;
-            Ok(true)
-        })
-    }
-
     /// Apply an authenticated edit using the exact received replacement bytes.
     /// # Errors
     /// Refuses forged authors/targets. Revisions converge by their event-id tie break;
@@ -303,6 +236,20 @@ impl RamfluxClient {
         {
             return Err(SdkError::InboundRejected("edit requires the original author".into()));
         }
+        if let Some(group) = identity.group_id.as_deref() {
+            self.require_native_operation(
+                source,
+                crate::client::identity_authority::NativeOperation::Group,
+            )?;
+            self.require_generated_group_epoch(
+                group,
+                source,
+                identity
+                    .group_epoch
+                    .ok_or_else(|| SdkError::InboundRejected("Edit group epoch missing".into()))?,
+                false,
+            )?;
+        }
         let target_id = ramflux_protocol::encode_base64url(&target.id);
         let db = self.account_db()?;
         db.write_transaction(|| {
@@ -321,6 +268,11 @@ impl RamfluxClient {
             };
             if author != source.root_commitment() || row.conversation_id != conversation {
                 return Err(SdkError::InboundRejected("edit target author or conversation mismatch".into()));
+            }
+            if db.load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{target_id}"))?
+                .is_some_and(|original| original.group_id != identity.group_id)
+            {
+                return Err(SdkError::InboundRejected("Edit target group differs from event group".into()));
             }
             let state_key = format!("routed/edit-revision/{target_id}");
             let applied = db.load_actor_state::<EditRegister>(&state_key)?;
@@ -589,3 +541,6 @@ impl RamfluxClient {
 
 #[cfg(test)]
 mod tests;
+
+#[path = "message_mutations/reactions.rs"]
+mod reactions;

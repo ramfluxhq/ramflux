@@ -14,11 +14,7 @@ fn author() -> QualifiedDevice {
 }
 
 fn named_ref() -> MessageRef {
-    MessageRef {
-        id: vec![7; 32],
-        conversation_id: "c".into(),
-        author_anchor: "a".into(),
-    }
+    MessageRef { id: vec![7; 32], conversation_id: "c".into(), author_anchor: "a".into() }
 }
 
 fn stream() -> GeneratedEventStream {

@@ -17,7 +17,8 @@ impl RamfluxClient {
         metadata: Option<&MessageMetadata>,
     ) -> Result<Option<Vec<u8>>, SdkError> {
         if crate::client::target_selection::schema_v1_selected()
-            && let super::generated_receive::GeneratedProjection::Handled(projected) = self.project_generated_entry(opened, entry, body, metadata)?
+            && let super::generated_receive::GeneratedProjection::Handled(projected) =
+                self.project_generated_entry(opened, entry, body, metadata)?
         {
             return Ok(projected);
         }

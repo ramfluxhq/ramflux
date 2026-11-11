@@ -41,7 +41,7 @@ fn round_trip_all_surfaces(request: &g::MessageRequest) -> Result<g::MessageRequ
 }
 
 fn sample_send() -> Result<g::MessageRequest, SdkError> {
-    cli::send_text("req-1", "acct-1", "c1", "hello", b"op-1")
+    cli::send_text("req-1", "acct-1", "c1", "hello", b"operation-id-0001")
 }
 
 fn sample_edit() -> g::MessageRequest {
@@ -78,7 +78,14 @@ fn sample_typing() -> g::MessageRequest {
     g::MessageRequest {
         request_id: "req-type".into(),
         account_id: "acct-1".into(),
-        action: Some(g::message_request::Action::Typing(g::Typing { active: true, expires_at: 5 })),
+        action: Some(g::message_request::Action::Send(g::SendMessage {
+            conversation_id: "c1".into(),
+            operation_id: vec![1; 16],
+            content: Some(g::Content {
+                value: Some(g::content::Value::Typing(g::Typing { active: true, expires_at: 0 })),
+            }),
+            ..Default::default()
+        })),
     }
 }
 
@@ -163,7 +170,13 @@ fn assert_request_actions_round_trip() -> TestResult {
     assert!(matches!(reaction.action, Some(g::message_request::Action::Reaction(_))));
 
     let typing = round_trip_all_surfaces(&sample_typing())?;
-    assert!(matches!(typing.action, Some(g::message_request::Action::Typing(_))));
+    assert!(matches!(
+        typing.action,
+        Some(g::message_request::Action::Send(g::SendMessage {
+            content: Some(g::Content { value: Some(g::content::Value::Typing(_)) }),
+            ..
+        }))
+    ));
     Ok(())
 }
 
@@ -210,5 +223,75 @@ fn generated_requests_updates_share_core_across_product_adapters() -> TestResult
     assert_request_actions_round_trip()?;
     assert_updates_and_optional_presence()?;
     assert_hand_maintained_name_fails()?;
+    Ok(())
+}
+
+#[test]
+fn request_typing_uses_send_and_zero_deadline() -> TestResult {
+    assert!(round_trip_all_surfaces(&sample_typing())?.action.is_some());
+    let mut request = sample_typing();
+    request.action =
+        Some(g::message_request::Action::Typing(g::Typing { active: true, expires_at: 0 }));
+    let error =
+        encode_message_request(&request).err().ok_or("target-free typing must be refused")?;
+    assert!(error.to_string().contains("use send.content.typing"));
+    request = sample_typing();
+    if let Some(g::message_request::Action::Send(send)) = request.action.as_mut() {
+        send.content = Some(g::Content {
+            value: Some(g::content::Value::Typing(g::Typing { active: true, expires_at: 5 })),
+        });
+    }
+    assert!(encode_message_request(&request).is_err());
+    Ok(())
+}
+
+#[test]
+fn send_reply_to_is_copied_or_compared_and_refused_for_other_content() -> TestResult {
+    let mut request = sample_send()?;
+    if let Some(g::message_request::Action::Send(send)) = request.action.as_mut() {
+        send.reply_to = Some(named_ref());
+    }
+    let normalized = round_trip_all_surfaces(&request)?;
+    let Some(g::message_request::Action::Send(mut send)) = normalized.action else {
+        return Err("send".into());
+    };
+    let Some(g::content::Value::Message(message)) =
+        send.content.as_mut().and_then(|content| content.value.as_mut())
+    else {
+        return Err("message".into());
+    };
+    assert_eq!(message.reply_to, Some(named_ref()));
+    message.reply_to.as_mut().ok_or("reply")?.id = vec![9; 32];
+    assert!(encode_send_message(&send).is_err());
+    send.content =
+        Some(g::Content { value: Some(g::content::Value::Typing(g::Typing::default())) });
+    assert!(encode_send_message(&send).is_err());
+    Ok(())
+}
+
+#[test]
+fn send_content_allowlist_and_operation_id_bounds_are_shared() -> TestResult {
+    let Some(g::message_request::Action::Send(mut send)) = sample_send()?.action else {
+        return Err("send".into());
+    };
+    for size in [0, 15, 65] {
+        send.operation_id = vec![1; size];
+        assert!(encode_send_message(&send).is_err());
+    }
+    for size in [16, 64] {
+        send.operation_id = vec![1; size];
+        assert!(encode_send_message(&send).is_ok());
+    }
+    for value in [
+        g::content::Value::Service(g::Service::default()),
+        g::content::Value::Receipt(g::Receipt::default()),
+        g::content::Value::Control(g::Control::default()),
+        g::content::Value::Edit(g::Edit::default()),
+        g::content::Value::Delete(g::Delete::default()),
+        g::content::Value::Reaction(g::Reaction::default()),
+    ] {
+        send.content = Some(g::Content { value: Some(value) });
+        assert!(encode_send_message(&send).is_err());
+    }
     Ok(())
 }

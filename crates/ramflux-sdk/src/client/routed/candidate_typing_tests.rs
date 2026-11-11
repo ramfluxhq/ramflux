@@ -26,6 +26,16 @@ fn typing_envelope(
     id: &str,
     ttl: u32,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    typing_envelope_active(a, b, id, ttl, true)
+}
+
+fn typing_envelope_active(
+    a: &Fixture,
+    b: &Fixture,
+    id: &str,
+    ttl: u32,
+    active: bool,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
     let mut config = a.config()?;
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
@@ -35,34 +45,38 @@ fn typing_envelope(
     draft.recipient_device_id = Some(b.id.clone());
     draft.recipient_principal_commitment = Some(b.client.own_account_anchor()?);
     draft.target_delivery_id.clone_from(&b.id);
-    a.client.prepare_typing_delivery(&mut engine, &draft, true)
+    a.client.prepare_typing_delivery(&mut engine, &draft, active)
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn typing_lifetime_at_most_five_seconds_and_ttl_is_bounded() -> Result<(), SdkError> {
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, b) = Box::pin(prepared_pair()).await?;
-    for ttl in [0, 6] {
+    for ttl in [0, 1, 2, 3, 4, 6] {
         assert!(typing_envelope(&a, &b, "refused", ttl).is_err());
     }
-    for ttl in [1, 5] {
-        let envelope = typing_envelope(&a, &b, &format!("event-{ttl}"), ttl)?;
-        assert_eq!(envelope.delivery_mode.as_deref(), Some("ephemeral"));
-        assert_eq!(envelope.priority, ramflux_protocol::Priority::Low);
-        let mut receiver = TypingReceiver::default();
-        let start = Instant::now();
-        assert_eq!(
-            receiver.receive(&b.client, &envelope, &b.id, 100_000, start)?,
-            TypingOutcome::Visible
-        );
-        assert!(receiver.drain_updates().first().is_some_and(|update| update.typing.active));
-        assert_eq!(
-            receiver.receive(&b.client, &envelope, &b.id, 100_001, start)?,
-            TypingOutcome::Duplicate
-        );
-        receiver.poll(100_000 + u64::from(ttl) * 1000, start + Duration::from_secs(u64::from(ttl)));
-        assert!(receiver.drain_updates().first().is_some_and(|update| !update.typing.active));
-    }
+    let ttl = 5;
+    let envelope = typing_envelope(&a, &b, &format!("event-{ttl}"), ttl)?;
+    assert_eq!(envelope.delivery_mode.as_deref(), Some("ephemeral"));
+    assert_eq!(envelope.priority, ramflux_protocol::Priority::Low);
+    let mut receiver = TypingReceiver::default();
+    let start = Instant::now();
+    assert_eq!(
+        receiver.receive(&b.client, &envelope, &b.id, 100_000, start)?,
+        TypingOutcome::Visible
+    );
+    assert!(receiver.drain_updates().first().is_some_and(|update| update.typing.active));
+    assert_eq!(
+        receiver.receive(&b.client, &envelope, &b.id, 100_001, start)?,
+        TypingOutcome::Duplicate
+    );
+    receiver.poll(100_000 + u64::from(ttl) * 1000, start + Duration::from_secs(u64::from(ttl)));
+    assert!(receiver.drain_updates().first().is_some_and(|update| !update.typing.active));
+    assert!(typing_envelope_active(&a, &b, "invalid-clear", 5, false).is_err());
+    let clear = typing_envelope_active(&a, &b, "clear", 1, false)?;
+    let (_, typing) = b.client.open_typing_delivery(&clear, &b.id)?;
+    assert!(!typing.active);
+    assert_eq!(typing.expires_at, 101);
     Ok(())
 }
 
