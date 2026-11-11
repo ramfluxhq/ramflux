@@ -8,6 +8,7 @@ set -euo pipefail
 if ! sudo timeout 10s runuser -u _apt -- getent ahostsv4 archive.ubuntu.com; then
   echo 'apt DNS preflight failed; inspecting and restarting the local resolver'
   ls -l /etc/resolv.conf
+  sudo timeout 10s getent ahostsv4 archive.ubuntu.com || true
   sudo timeout 10s resolvectl status || true
   sudo timeout 20s systemctl restart systemd-resolved
   sudo timeout 10s runuser -u _apt -- getent ahostsv4 archive.ubuntu.com
