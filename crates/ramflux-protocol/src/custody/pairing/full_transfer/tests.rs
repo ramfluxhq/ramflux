@@ -51,6 +51,103 @@ fn manifest() -> SourceManifest {
     }
 }
 
+fn part(hash: &str, wire: &[u8], offset: usize, length: usize) -> DataPacket {
+    DataPacket::Manifest {
+        manifest_hash: hash.into(),
+        offset: U64(offset as u64),
+        total: U64(wire.len() as u64),
+        bytes: SecretBase64::from_bytes(&wire[offset..offset + length]),
+    }
+}
+#[test]
+fn full_transfer_manifest_assembly_is_bounded_canonical_and_retries_exact_prefix_only() -> TestResult
+{
+    let mut source = manifest();
+    let family = source.manifest.families[0].clone();
+    source.manifest.families = (0..2800)
+        .map(|index| {
+            let mut next = family.clone();
+            next.id = format!("{index:04}_{}", "x".repeat(120));
+            next
+        })
+        .collect();
+    let wire = zeroize::Zeroizing::new(source.to_wire_bytes()?);
+    assert!(wire.len() > CHUNK_BYTES as usize * 3 && wire.len() <= MANIFEST_BYTES);
+    let hash = encode_base64url(manifest_hash(&source)?);
+    let mut assembly = ManifestAssembler::default();
+    for (index, bytes) in wire.chunks(CHUNK_BYTES as usize).enumerate() {
+        let packet = part(&hash, &wire, index * CHUNK_BYTES as usize, bytes.len());
+        let result = assembly.push(&packet)?;
+        if index < 3 {
+            assert!(result.is_none());
+            assert!(assembly.push(&packet)?.is_none(), "exact retained prefix was appended twice");
+        } else {
+            assert_eq!(result.ok_or("complete manifest")?, source);
+        }
+    }
+    assert!(
+        assembly.push(&part(&hash, &wire, 0, CHUNK_BYTES as usize)).is_err(),
+        "completed assembler delivered an object twice"
+    );
+    // Short, unaligned consecutive parts are valid in the adopted carrier as well.
+    let mut assembly = ManifestAssembler::default();
+    let mut offset = 0;
+    while offset < wire.len() {
+        let length = if offset == 0 { 17 } else { (wire.len() - offset).min(CHUNK_BYTES as usize) };
+        let result = assembly.push(&part(&hash, &wire, offset, length))?;
+        offset += length;
+        assert_eq!(result.is_some(), offset == wire.len());
+    }
+    for mutation in 0..5 {
+        let mut assembly = ManifestAssembler::default();
+        let first = part(&hash, &wire, 0, CHUNK_BYTES as usize);
+        if mutation != 0 {
+            assembly.push(&first)?;
+        }
+        let mut packet = part(&hash, &wire, CHUNK_BYTES as usize, CHUNK_BYTES as usize);
+        if let DataPacket::Manifest { manifest_hash, offset, total, bytes } = &mut packet {
+            match mutation {
+                0 => {} // Nonzero first offset.
+                1 => *manifest_hash = encode_base64url([99; 32]),
+                2 => total.0 -= 1,
+                3 => offset.0 += u64::from(CHUNK_BYTES),
+                _ => {
+                    offset.0 = 0;
+                    if let DataPacket::Manifest { bytes: value, .. } = &first {
+                        let mut raw = value.decode(CHUNK_BYTES as usize)?;
+                        raw[0] ^= 1;
+                        *bytes = SecretBase64::from_bytes(&raw);
+                    }
+                }
+            }
+        }
+        assert!(assembly.push(&packet).is_err(), "mutation{mutation}");
+        assert!(assembly.push(&first).is_err(), "refused assembler was rearmed");
+    }
+    let small = manifest();
+    let mut noncanonical = small.to_wire_bytes()?;
+    noncanonical.insert(1, b' ');
+    let hash = encode_base64url(manifest_hash(&small)?);
+    assert!(
+        ManifestAssembler::default()
+            .push(&part(&hash, &noncanonical, 0, noncanonical.len()))
+            .is_err()
+    );
+    let canonical = small.to_wire_bytes()?;
+    let wrong_hash = encode_base64url([98; 32]);
+    assert!(
+        ManifestAssembler::default()
+            .push(&part(&wrong_hash, &canonical, 0, canonical.len()))
+            .is_err()
+    );
+    let mut oversized = part(&hash, &canonical, 0, 1);
+    if let DataPacket::Manifest { total, .. } = &mut oversized {
+        total.0 = MANIFEST_BYTES as u64 + 1;
+    }
+    assert!(ManifestAssembler::default().push(&oversized).is_err());
+    Ok(())
+}
+
 #[test]
 fn full_transfer_decimal_counts_are_exact_and_closed() -> TestResult {
     for value in [0, 1, (1_u64 << 53) + 1, u64::MAX] {

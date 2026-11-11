@@ -39,6 +39,57 @@ const SCALAR_RULE: super::FamilyRule = super::FamilyRule {
 };
 
 #[test]
+fn pairing_full_source_manifest_preflight_cannot_hide_unknown_owners_with_peer_zero_counts()
+-> TestResult {
+    let (root, db) = crate::tests::test_db("source-compiled-preflight")?;
+    let (mut record, mut manifest, _) = fixture()?;
+    record.role = PairingRole::Initiator;
+    let private = root.join("source-preflight-private.db");
+    let snapshot = db.pin_full_transfer_cut()?.write_private_snapshot(
+        &private,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
+    let mut stage = db.create_full_stage_for_test(record, 604_900)?;
+    stage.adopt_source_cut(0, &manifest.manifest.snapshot_id, &private, snapshot)?;
+    let rules = super::full_transfer_catalog();
+    let own = stage.source_cut_schema(0, &manifest.manifest.snapshot_id, rules)?;
+    assert!(
+        own.families
+            .iter()
+            .any(|family| family.disposition == Disposition::Transfer && family.source_rows.0 > 0)
+    );
+    manifest.manifest.census_hash = encode_base64url(own.census_hash);
+    manifest.manifest.families = own.families;
+    for family in &mut manifest.manifest.families {
+        family.source_rows = U64(0);
+        family.portable_records = U64(0);
+        family.encoded_bytes = U64(0);
+    }
+    manifest.manifest.total_bytes = U64(0);
+    manifest.manifest.chunk_count = U64(0);
+    manifest.manifest.chunks_root = encode_base64url(RootHasher::new(0)?.finish()?);
+    manifest.source_signature = ramflux_crypto::sign_canonical_bytes_with_seed(
+        &manifest.manifest.signing_bytes()?,
+        [7; 32],
+    );
+    assert!(
+        matches!(
+            stage.retain_source_manifest(&manifest, rules),
+            Err(crate::StorageError::PairingField("UnsupportedRecord"))
+        ),
+        "caller metadata hid actual nonempty cut rows before typed-owner preflight"
+    );
+    assert_eq!(
+        stage
+            .connection
+            .query_row("SELECT count(*) FROM manifest", [], |row| row.get::<_, u64>(0))?,
+        0
+    );
+    assert!(stage.source_cut_estimated_bytes(0, &manifest.manifest.snapshot_id)? > 0);
+    Ok(())
+}
+
+#[test]
 fn pairing_full_source_receipt_requires_exact_local_chain_and_original_destination_signature()
 -> TestResult {
     let (_root, db) = crate::tests::test_db("stage-source-receipt")?;

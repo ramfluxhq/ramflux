@@ -6,7 +6,9 @@
 use super::{DeviceRef, PairingWire, Result, WireError, b32, budget, reference, require};
 use serde::{Deserialize, Serialize};
 
+mod assembly;
 mod binding;
+pub use assembly::ManifestAssembler;
 mod control;
 pub use control::{CONTROL_PACKET_BYTES, FullControlContext, FullControlPayload};
 mod diff;
