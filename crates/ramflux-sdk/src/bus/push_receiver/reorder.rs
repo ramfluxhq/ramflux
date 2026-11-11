@@ -135,6 +135,11 @@ impl CatchUp {
     fn drop_follow_up(&mut self) {
         self.follow_up = false;
     }
+
+    fn clear_scheduled(&mut self) {
+        self.follow_up = false;
+        self.pending = false;
+    }
 }
 
 /// RAM reorder refs after durable W0. Payload never lives only in this map.
@@ -379,6 +384,15 @@ impl ReorderBuffer {
         }
     }
 
+    /// A completed Resync pull already recovered the mailbox. Drop a coalesced
+    /// follow-up so the next loop does not start an immediate Tick pass; leftover
+    /// RAM holes wait on the gap timer (L4).
+    pub(crate) fn finish_resync_pull(&mut self, now_ms: u64) {
+        self.catch_up.clear_scheduled();
+        self.gap_started_at = None;
+        self.finish_catch_up(now_ms);
+    }
+
     /// Absolute origin-ms when the gap timer is due. `None` while a run is in flight or no hole.
     #[must_use]
     pub(crate) fn gap_deadline_ms(&self) -> Option<u64> {
@@ -409,7 +423,9 @@ impl ReorderBuffer {
         if self.local_work {
             // Local work only suppresses a pull it covers. It must not cancel other pending triggers (M1).
             self.local_work = false;
-            if self.hole() {
+            // A leftover hole after a run already armed the gap timer (L4). Do not
+            // also fire an immediate Tick catch-up; that races the Resync pass.
+            if self.hole() && self.gap_started_at.is_none() {
                 self.catch_up.request();
             }
         }

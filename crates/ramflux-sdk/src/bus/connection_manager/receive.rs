@@ -177,6 +177,12 @@ pub(crate) async fn run_anchored(
             if handle.reorder().in_flight() {
                 handle.reorder().note_hint(hint_of(kind));
             }
+            if handle.in_flight_calls() > 0 {
+                if !wait_engine_idle(&handle, &mut stop).await {
+                    break;
+                }
+                continue;
+            }
             let trigger = trigger_of(Some(kind));
             match Box::pin(run_one_anchored(
                 &handle,
@@ -191,7 +197,11 @@ pub(crate) async fn run_anchored(
                 None => break,
                 Some((ok, paused)) => {
                     let finished_ms = handle.receive_now_ms();
-                    handle.reorder().finish_catch_up(finished_ms);
+                    if trigger == ReceiveTrigger::Resync && ok && !paused {
+                        handle.reorder().finish_resync_pull(finished_ms);
+                    } else {
+                        handle.reorder().finish_catch_up(finished_ms);
+                    }
                     if ok {
                         handle.note_catch_up_finished(finished_ms);
                     }
@@ -201,6 +211,12 @@ pub(crate) async fn run_anchored(
             continue;
         }
         if reorder_catch_up_due(&handle, now_ms) {
+            if handle.in_flight_calls() > 0 {
+                if !wait_engine_idle(&handle, &mut stop).await {
+                    break;
+                }
+                continue;
+            }
             let Some(_) = Box::pin(run_one_anchored(
                 &handle,
                 &work,
@@ -257,6 +273,25 @@ fn reorder_catch_up_due(handle: &ConnectionHandle, now_ms: u64) -> bool {
         handle.reorder().tick(now_ms),
         crate::bus::push_receiver::reorder::Tick::CatchUp { .. }
     )
+}
+
+/// Wait until no engine RPC is live. Subscribe before the load so a completion
+/// between the check and the wait still unblocks (Notify permit).
+async fn wait_engine_idle(
+    handle: &ConnectionHandle,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    loop {
+        let idle = handle.shared.call_changed.notified();
+        if handle.in_flight_calls() == 0 {
+            return true;
+        }
+        tokio::select! {
+            biased;
+            _ = stop.changed() => return false,
+            () = idle => {}
+        }
+    }
 }
 
 fn anchored_wait(
@@ -369,7 +404,7 @@ async fn pass(
     Ok(active || more)
 }
 
-/// Candidate catch-up: same Resume pages as live, without the contact-floor rescan.
+/// Candidate catch-up: same Resume pages and contact-floor rescan as live.
 async fn pass_anchored(
     handle: &ConnectionHandle,
     work: &mpsc::Sender<AccountWork>,
@@ -377,9 +412,21 @@ async fn pass_anchored(
     trigger: ReceiveTrigger,
     call_timeout: std::time::Duration,
 ) -> Result<(bool, bool), SdkError> {
-    let (active, paused, _) =
+    let (active, paused, backpressure) =
         Box::pin(catch_up(handle, work, generation, trigger, call_timeout)).await?;
-    Ok((active, paused))
+    if paused {
+        return Ok((active, paused));
+    }
+    let (more, _) = rescan(handle, work, generation, call_timeout, backpressure).await?;
+    flush_acks(
+        handle,
+        work,
+        generation,
+        trigger != ReceiveTrigger::Tick || active || more,
+        call_timeout,
+    )
+    .await?;
+    Ok((active || more, paused))
 }
 
 async fn catch_up(
@@ -493,7 +540,7 @@ pub(crate) async fn test_pass(
     Box::pin(pass(handle, work, generation, trigger, call_timeout)).await
 }
 
-/// Test entry to the activated `pass_anchored` (pages only; no contact-floor rescan).
+/// Test entry to the activated `pass_anchored` (pages and contact-floor rescan).
 #[cfg(test)]
 pub(crate) async fn test_pass_anchored(
     handle: &ConnectionHandle,

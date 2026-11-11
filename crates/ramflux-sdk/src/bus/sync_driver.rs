@@ -214,6 +214,7 @@ pub(crate) fn prepare_receive(
         .collect();
     let backpressure =
         Box::new(super::contact_backpressure::Backpressure::load(&account.client, now)?);
+    let cursor = cursor.max(backpressure.resume_high_water(cursor));
     Ok(super::connection_manager::ReceivePlan { cursor, limit: 64, retries, backpressure, turn })
 }
 

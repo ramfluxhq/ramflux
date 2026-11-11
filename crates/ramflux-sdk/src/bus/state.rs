@@ -413,6 +413,12 @@ impl LocalBusAccountState {
         if config.device_branch.is_none() {
             config.device_branch = self.client.device_branch.clone().map(std::sync::Arc::new);
         }
+        {
+            let now = now_unix_timestamp();
+            let mut backpressure =
+                super::contact_backpressure::Backpressure::load(&self.client, now)?;
+            backpressure.clamp_inactive_resume_to_due_floor(&self.client, &target, now)?;
+        }
         crate::gateway::apply_session_push_advertise(
             &mut config,
             self.client.account_db()?.receive_activation()?,

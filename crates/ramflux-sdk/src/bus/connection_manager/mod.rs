@@ -137,7 +137,6 @@ struct Shared {
     catch_up_yield_progress: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     yield_witness_at: std::sync::atomic::AtomicU32,
-    #[cfg(test)]
     in_flight: std::sync::atomic::AtomicUsize,
 }
 
@@ -196,7 +195,6 @@ fn new_shared(
         catch_up_yield_progress: std::sync::atomic::AtomicU32::new(0),
         #[cfg(test)]
         yield_witness_at: std::sync::atomic::AtomicU32::new(0),
-        #[cfg(test)]
         in_flight: std::sync::atomic::AtomicUsize::new(0),
         stop_reason: std::sync::Mutex::new(None),
         #[cfg(test)]
@@ -249,25 +247,22 @@ struct Call {
     reply: oneshot::Sender<Result<(Erased, u64), SdkError>>,
     cancelled: watch::Receiver<bool>,
     place: OwnedSemaphorePermit,
-    #[cfg(test)]
     _in_flight: InFlight,
 }
 
-#[cfg(test)]
 struct InFlight(Arc<Shared>);
 
-#[cfg(test)]
 impl InFlight {
     fn new(shared: &Arc<Shared>) -> Self {
-        shared.in_flight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        shared.in_flight.fetch_add(1, std::sync::atomic::Ordering::Release);
         Self(Arc::clone(shared))
     }
 }
 
-#[cfg(test)]
 impl Drop for InFlight {
     fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.0.in_flight.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        self.0.call_changed.notify_one();
     }
 }
 
@@ -567,10 +562,9 @@ impl ConnectionHandle {
     pub(crate) fn test_catch_up_yield_progress(&self) -> u32 {
         self.shared.catch_up_yield_progress.load(std::sync::atomic::Ordering::Relaxed)
     }
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn in_flight_calls(&self) -> usize {
-        self.shared.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+        self.shared.in_flight.load(std::sync::atomic::Ordering::Acquire)
     }
     #[cfg(test)]
     pub(crate) fn bump_yield_witness() {
@@ -775,7 +769,6 @@ impl ConnectionHandle {
                 reply,
                 cancelled,
                 place,
-                #[cfg(test)]
                 _in_flight: InFlight::new(&self.shared),
             })
             .map_err(|_| full())?;

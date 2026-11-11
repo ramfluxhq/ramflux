@@ -148,6 +148,52 @@ impl Backpressure {
         }
         Ok(())
     }
+    /// While Inactive, a due contact floor behind the resume cursor is a high-water,
+    /// not a cover. Clamp C to `floor-1` before first-activation so W1 can apply the range.
+    pub fn clamp_inactive_resume_to_due_floor(
+        &mut self,
+        client: &RamfluxClient,
+        target: &str,
+        now: i64,
+    ) -> Result<(), SdkError> {
+        if client.account_db()?.receive_activation()?
+            != ramflux_storage::ReceiveActivation::Inactive
+        {
+            return Ok(());
+        }
+        if self.scan.is_some() || now < self.next_at {
+            return Ok(());
+        }
+        let Some(floor) = self.floor else {
+            return Ok(());
+        };
+        let current = client.gateway_receive_cursor(target)?;
+        let cap = floor.saturating_sub(1);
+        if cap >= current {
+            return Ok(());
+        }
+        let previous = self.clone();
+        self.scan = Some(Scan { cursor: cap, until: current, pending: None, future: None });
+        let checkpoint = crate::dm::gateway_receive_cursor_checkpoint_name(target);
+        let cap_s = cap.to_string();
+        let result = client.account_db()?.write_transaction(|| {
+            self.save(client)?;
+            client.set_projection_checkpoint(&checkpoint, &cap_s)?;
+            Ok::<_, SdkError>(())
+        });
+        if let Err(error) = result {
+            *self = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Resume high-water remembered by [`Self::clamp_inactive_resume_to_due_floor`].
+    #[must_use]
+    pub fn resume_high_water(&self, cover: u64) -> u64 {
+        self.scan.as_ref().filter(|scan| scan.cursor == cover).map_or(0, |scan| scan.until)
+    }
+
     pub fn scan_cursor(
         &mut self,
         client: &RamfluxClient,
@@ -202,4 +248,18 @@ fn requester(entry: &GatewayInboxEntry) -> Option<String> {
     (packet.schema == crate::client::contact_requests::ENVELOPE_SCHEMA)
         .then_some(packet.source_principal_commitment)
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_high_water_only_when_scan_starts_at_cover() {
+        let mut state = Backpressure::default();
+        assert_eq!(state.resume_high_water(0), 0);
+        state.scan = Some(Scan { cursor: 0, until: 100, pending: None, future: None });
+        assert_eq!(state.resume_high_water(0), 100);
+        assert_eq!(state.resume_high_water(50), 0);
+    }
 }

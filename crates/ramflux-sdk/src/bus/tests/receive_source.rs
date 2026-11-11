@@ -98,7 +98,9 @@ async fn redrive_case() -> Case {
     .await??;
     {
         let gateway = gateway.lock().map_err(|_| "gateway")?;
-        assert_eq!(gateway.resumes, [100, 0]);
+        // Catch-up from the live high-water, then the due floor. Compat W1 ACK
+        // lookups may append resume-after(seq-1) frames after that pair.
+        assert!(gateway.resumes.starts_with(&[100, 0]), "resumes={:?}", gateway.resumes);
         assert_eq!(gateway.acked.len(), 2);
         assert_eq!(gateway.protocol_errors, Vec::<String>::new());
     }

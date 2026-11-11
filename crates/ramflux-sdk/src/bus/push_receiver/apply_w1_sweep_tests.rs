@@ -899,6 +899,16 @@ async fn identity_absence_is_nothing_owed() -> Result<(), SdkError> {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn own_copy_does_not_require_a_routed_projection_key() -> Result<(), SdkError> {
+    let mut harness = open()?;
+    queue_own_copy();
+    set_projection_error(SdkError::Crypto(ramflux_crypto::CryptoError::VerifyFailed));
+    let entry = live_dummy(&harness.account);
+    drive(&mut harness.account, entry, || 1).await?;
+    Ok(())
+}
+
 fn own_copy_packet(
     account: &crate::bus::state::LocalBusAccountState,
 ) -> Result<ReceiveEntry, SdkError> {

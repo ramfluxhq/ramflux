@@ -59,37 +59,44 @@ pub(super) async fn catch_up_ledger(job: CatchUp<'_>) -> Result<LedgerCatchUp, S
     let mut pages = 0_u32;
     let mut applied = 0_usize;
     let writer = Writer::new(work.clone(), generation);
-    loop {
-        let page = resume_one(handle, cursor, limit, call_timeout).await?;
-        pages = pages.saturating_add(1);
-        if catch_up_yields(pages) {
-            handle.note_catch_up_yield();
-            tokio::task::yield_now().await;
-            handle.note_catch_up_yield_resumed();
-            pages = 0;
+    let probed_high_water = cursor > turn.cursor;
+    if probed_high_water {
+        // High-water Resume records last_seen. W1 cannot cover that page while C is
+        // the clamped floor; the contact rescan pulls (floor, high-water].
+        resume_one(handle, cursor, limit, call_timeout).await?;
+    } else {
+        loop {
+            let page = resume_one(handle, cursor, limit, call_timeout).await?;
+            pages = pages.saturating_add(1);
+            if catch_up_yields(pages) {
+                handle.note_catch_up_yield();
+                tokio::task::yield_now().await;
+                handle.note_catch_up_yield_resumed();
+                pages = 0;
+            }
+            let more = page.more;
+            let (next_active, next_paused, next_bp, next_applied) = drive_page(
+                handle,
+                work,
+                &writer,
+                &mut turn,
+                generation,
+                &page,
+                &mut retries,
+                call_timeout,
+                backpressure,
+                applied,
+            )
+            .await?;
+            active |= next_active;
+            paused |= next_paused;
+            backpressure = next_bp;
+            applied = next_applied;
+            if paused || !more {
+                break;
+            }
+            cursor = turn.cursor;
         }
-        let more = page.more;
-        let (next_active, next_paused, next_bp, next_applied) = drive_page(
-            handle,
-            work,
-            &writer,
-            &mut turn,
-            generation,
-            &page,
-            &mut retries,
-            call_timeout,
-            backpressure,
-            applied,
-        )
-        .await?;
-        active |= next_active;
-        paused |= next_paused;
-        backpressure = next_bp;
-        applied = next_applied;
-        if paused || !more {
-            break;
-        }
-        cursor = turn.cursor;
     }
     if !paused {
         let (next_active, next_bp) = apply_leftover(

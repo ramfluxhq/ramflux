@@ -171,7 +171,7 @@ async fn apply_once(
             let key = client.inbox_admission_key(entry)?;
             run_fenced(client.account_db()?, handle_generation(), turn, |tx, expected| {
                 client.apply_own_copy_w1_in(tx, entry, &manifest, expected, sequence, &message)?;
-                project_if_committed(tx, client, entry, sequence, expected)?;
+                // Sibling control has no routed DM projection; the outer envelope is not one.
                 ReplyOutbox::prune_marker_in(tx, &key)?;
                 cover_w1_outcome(tx, sequence, false, &[], turn.compat)?;
                 Ok(false)

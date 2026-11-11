@@ -127,6 +127,17 @@ fn resync_survives_local_work() {
 }
 
 #[test]
+fn finish_resync_pull_defers_leftover_hole_to_the_gap_timer() {
+    let mut buffer = buf();
+    assert_eq!(buffer.admit(0, 2, 8, witness(2)), buffered(2));
+    buffer.note_hint(CatchUpHint::Lagged);
+    buffer.finish_resync_pull(12_000);
+    assert_eq!(buffer.tick(12_000), Tick::Idle, "no immediate Tick after Resync");
+    assert_eq!(buffer.tick(12_499), Tick::Idle, "gap waits 500 ms from Resync finish");
+    assert_eq!(buffer.tick(12_500), catch_up(0), "leftover hole pulls at 500 ms");
+}
+
+#[test]
 fn filled_hole_drops_follow_up() {
     let mut buffer = buf();
     assert_eq!(buffer.admit(0, 2, 8, witness(2)), buffered(2));
