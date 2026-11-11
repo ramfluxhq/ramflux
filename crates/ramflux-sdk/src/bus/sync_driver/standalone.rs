@@ -17,7 +17,7 @@ use crate::gateway::push_resume::{PageReply, ResumePage};
 use crate::gateway::session_push::PageEntryRecord;
 use crate::{GatewayInboxEntry, time::now_unix_timestamp};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const PAGE_LIMIT: usize = super::super::connection_manager::receive::RECEIVE_PAGE_LIMIT;
 const YIELD_AFTER: u32 = super::super::connection_manager::receive::RECEIVE_YIELD_AFTER_PAGES;
@@ -70,6 +70,7 @@ async fn receive_inner(
     let mut applied = 0_usize;
     let mut pages = 0_u32;
     let mut envelope_ids = BTreeMap::new();
+    let mut attempted = BTreeSet::new();
     loop {
         let page = resume_one(account, engine, turn.cursor, PAGE_LIMIT).await?;
         pages = pages.saturating_add(1);
@@ -88,11 +89,12 @@ async fn receive_inner(
             backpressure,
             applied,
             &mut envelope_ids,
+            &mut attempted,
         )
         .await?
         {
             PageDrive::Paused { applied } => {
-                flush_live_acks(account, engine, generation, &envelope_ids).await?;
+                flush_live_acks(account, engine, generation, &envelope_ids, &attempted).await?;
                 account.client.retry_pair_resets(engine, now).await?;
                 return Ok((applied, Vec::new()));
             }
@@ -113,6 +115,7 @@ async fn receive_inner(
         backpressure,
         applied,
         &mut envelope_ids,
+        &mut attempted,
         now,
     )
     .await?;
@@ -125,9 +128,10 @@ async fn receive_inner(
         backpressure,
         applied,
         &mut envelope_ids,
+        &mut attempted,
     )
     .await?;
-    flush_live_acks(account, engine, generation, &envelope_ids).await?;
+    flush_live_acks(account, engine, generation, &envelope_ids, &attempted).await?;
     // W0 `receive` flushes due pair-reset work after the page. The actor has a
     // pair-reset courier; standalone `run` is the one-shot driver tests use.
     account.client.retry_pair_resets(engine, now).await?;
@@ -266,6 +270,7 @@ async fn redrive_held_floor(
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
     envelope_ids: &mut BTreeMap<u64, String>,
+    attempted: &mut BTreeSet<u64>,
     now: i64,
 ) -> Result<(Box<Backpressure>, usize), SdkError> {
     let walk = account.client.gateway_receive_cursor(&account.target_delivery_id)?;
@@ -306,6 +311,7 @@ async fn redrive_held_floor(
             None,
             &backpressure,
             envelope_ids,
+            attempted,
         )
         .await?;
     }
@@ -324,6 +330,7 @@ async fn drive_page(
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
     envelope_ids: &mut BTreeMap<u64, String>,
+    attempted: &mut BTreeSet<u64>,
 ) -> Result<PageDrive, SdkError> {
     let records = page.entries.clone();
     loop {
@@ -386,6 +393,7 @@ async fn drive_page(
                     retry_key.as_deref(),
                     &backpressure,
                     envelope_ids,
+                    attempted,
                 )
                 .await?;
             }
@@ -428,6 +436,7 @@ async fn apply_leftover(
     mut backpressure: Box<Backpressure>,
     mut applied: usize,
     envelope_ids: &mut BTreeMap<u64, String>,
+    attempted: &mut BTreeSet<u64>,
 ) -> Result<usize, SdkError> {
     let mut leftover: Vec<_> = retries.into_values().collect();
     leftover.sort_by_key(|entry| entry.entry.inbox_seq);
@@ -456,6 +465,7 @@ async fn apply_leftover(
             retry_key.as_deref(),
             &backpressure,
             envelope_ids,
+            attempted,
         )
         .await?;
     }
@@ -475,6 +485,7 @@ async fn ack_if_terminal(
     retry_key: Option<&str>,
     backpressure: &Backpressure,
     envelope_ids: &BTreeMap<u64, String>,
+    attempted: &mut BTreeSet<u64>,
 ) -> Result<(), SdkError> {
     if backpressure.holds(entry) {
         return Ok(());
@@ -489,7 +500,7 @@ async fn ack_if_terminal(
     if db.has_inbox_retry(&key)? {
         return Ok(());
     }
-    emit_engine_ack(account, engine, generation, sequence, envelope_ids).await
+    emit_engine_ack(account, engine, generation, sequence, envelope_ids, attempted).await
 }
 
 /// Emit one gateway ACK and settle the WA intent. Held contact floors skip this
@@ -501,6 +512,7 @@ async fn emit_engine_ack(
     generation: u64,
     sequence: u64,
     envelope_ids: &BTreeMap<u64, String>,
+    attempted: &mut BTreeSet<u64>,
 ) -> Result<(), SdkError> {
     let Some(envelope_id) = envelope_ids.get(&sequence) else {
         return Ok(());
@@ -514,6 +526,7 @@ async fn emit_engine_ack(
     } else {
         ramflux_storage::ReceiveAckOutcome::Uncertain
     };
+    attempted.insert(sequence);
     let db = account.client.account_db()?;
     let target = account.target_delivery_id.as_str();
     if !apply_w1::is_active(db, target)? {
@@ -539,6 +552,7 @@ async fn flush_live_acks(
     engine: &mut impl GatewayPushAccess,
     generation: u64,
     envelope_ids: &BTreeMap<u64, String>,
+    attempted: &BTreeSet<u64>,
 ) -> Result<(), SdkError> {
     if let Some((handle, work)) = (account.connection.clone()).zip(account.connection_work.clone())
     {
@@ -551,7 +565,7 @@ async fn flush_live_acks(
         )
         .await;
     }
-    flush_engine_acks(account, engine, generation, envelope_ids).await
+    flush_engine_acks(account, engine, generation, envelope_ids, attempted).await
 }
 
 async fn flush_engine_acks(
@@ -559,6 +573,7 @@ async fn flush_engine_acks(
     engine: &mut impl GatewayPushAccess,
     generation: u64,
     envelope_ids: &BTreeMap<u64, String>,
+    attempted: &BTreeSet<u64>,
 ) -> Result<(), SdkError> {
     let db = account.client.account_db()?;
     let target = account.target_delivery_id.as_str();
@@ -577,6 +592,9 @@ async fn flush_engine_acks(
     let mut sent = Vec::new();
     let mut results = Vec::new();
     for seq in sequences {
+        if attempted.contains(&seq) {
+            continue;
+        }
         let envelope_id = envelope_ids
             .get(&seq)
             .cloned()

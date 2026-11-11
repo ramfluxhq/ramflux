@@ -272,9 +272,9 @@ pub(crate) const SITES: &[WriterSite] = &[
         file: "src/bus/sync_driver/standalone.rs",
         symbol: "engine.ack(",
         class: WriterClass::ExecutorOwned,
-        executor: "SourceWa::select then engine.ack (standalone flush)",
+        executor: "emit_engine_ack per terminal cover then flush remaining intents",
         hook: "outgoing ACK",
-        count: 1,
+        count: 2,
     },
     WriterSite {
         file: "src/bus/state.rs",
