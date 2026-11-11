@@ -4,6 +4,8 @@
 //! Shared boot for CLI e2e: mesh certs, four node processes, rf daemons, PTY create.
 #![allow(dead_code)]
 
+mod proc;
+
 use serde::Deserialize as _;
 use serde_json::Value;
 use std::{
@@ -11,7 +13,7 @@ use std::{
     io::{Read, Write as _},
     net::{TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -22,11 +24,14 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 const CEREMONY_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_TIMEOUT: Duration = Duration::from_secs(90);
+const CLI_TIMEOUT: Duration = Duration::from_secs(15);
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const BOOT_ATTEMPTS: u32 = 5;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct ChildGuard {
-    child: Child,
+    group: proc::ProcessGroup,
     name: String,
     log_path: PathBuf,
 }
@@ -42,25 +47,21 @@ impl ChildGuard {
             .try_clone()
             .map_err(|error| format!("clone log {}: {error}", log_path.display()))?;
         command.stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
-        let child = command.spawn().map_err(|error| format!("spawn {name}: {error}"))?;
-        Ok(Self { child, name, log_path })
+        let group = proc::ProcessGroup::spawn(&mut command)
+            .map_err(|error| format!("spawn {name}: {error}"))?;
+        Ok(Self { group, name, log_path })
     }
 
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        Ok(self.child.try_wait()?)
+        Ok(self.group.try_wait()?)
     }
 
     fn exited(&mut self) -> Result<bool> {
         Ok(self.try_wait()?.is_some())
     }
-}
 
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+    fn pid(&self) -> u32 {
+        self.group.id()
     }
 }
 
@@ -68,6 +69,7 @@ pub struct Stack {
     pub root: PathBuf,
     pub discovery_url: String,
     pub gateway_public: String,
+    pub router_mesh: String,
     _servers: Vec<ChildGuard>,
 }
 
@@ -92,22 +94,63 @@ impl Drop for Stack {
     }
 }
 
-impl Drop for Daemon {
+struct RootGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for RootGuard {
     fn drop(&mut self) {
-        let _ = rf_output(&self.socket, &["daemon", "stop"]);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if self.child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(&self.path);
         }
     }
 }
 
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        stop_daemon_process(&self.socket, &mut self.child);
+    }
+}
+
+fn stop_daemon_process(socket: &Path, child: &mut ChildGuard) {
+    let _ = rf_output_timeout(socket, &["daemon", "stop"], STOP_TIMEOUT);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.group.kill_group();
+    let _ = child.group.wait();
+}
+
 pub fn boot_stack() -> Result<Stack> {
+    let mut last = None;
+    for attempt in 1..=BOOT_ATTEMPTS {
+        match boot_stack_once() {
+            Ok(stack) => return Ok(stack),
+            Err(error) if attempt < BOOT_ATTEMPTS && is_addr_in_use(&error) => {
+                last = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| "boot stack retries exhausted".into()))
+}
+
+fn is_addr_in_use(error: &impl std::fmt::Display) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("address already in use")
+        || text.contains("eaddrinuse")
+        || text.contains("addrinuse")
+}
+
+fn boot_stack_once() -> Result<Stack> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!("rf-cli-e2e-{}-{nonce}", std::process::id()));
+    let mut guard = RootGuard { path: root.clone(), keep: false };
     std::fs::create_dir_all(root.join("secrets"))?;
     std::fs::create_dir_all(root.join("state"))?;
     std::fs::create_dir_all(root.join("certs"))?;
@@ -199,7 +242,9 @@ pub fn boot_stack() -> Result<Stack> {
         return Err(format!("discovery gateway_server_name {advertised_name} != localhost").into());
     }
     probe_gateway_tls(&root.join("certs").join("ca.pem"), &gateway_tcp)?;
-    Ok(Stack { root, discovery_url, gateway_public: gateway_tcp, _servers: servers })
+    let router_mesh = mesh.get(1).cloned().ok_or("router mesh address")?;
+    guard.keep = true;
+    Ok(Stack { root, discovery_url, gateway_public: gateway_tcp, router_mesh, _servers: servers })
 }
 
 fn fetch_client_discovery(origin: &str) -> Result<Value> {
@@ -225,7 +270,8 @@ struct CustodyEnv {
 fn init_custody(root: &Path, signing_seed: &Path) -> Result<CustodyEnv> {
     let output_dir = root.join("custody");
     let public = ramflux_crypto::public_key_base64url_from_seed([0xA1; 32]);
-    let output = Command::new(rf_bin())
+    let mut command = Command::new(rf_bin());
+    command
         .args([
             "--socket",
             "/nonexistent/cli-e2e-custody.sock",
@@ -237,8 +283,8 @@ fn init_custody(root: &Path, signing_seed: &Path) -> Result<CustodyEnv> {
         ])
         .arg(signing_seed)
         .args(["--expected-public-key", &public, "--output-dir"])
-        .arg(&output_dir)
-        .output()?;
+        .arg(&output_dir);
+    let output = proc::run_group_output(&mut command, CLI_TIMEOUT)?;
     if !output.status.success() {
         return Err(format!(
             "rf node custody-init failed ({}): stdout={} stderr={}",
@@ -479,6 +525,175 @@ pub fn wait_dm_texts(
     })
 }
 
+pub fn wait_dm_receipt(
+    daemon: &Daemon,
+    owner: &Account,
+    conversation: &str,
+    message_id: &str,
+    peer: &Account,
+) -> Result<Value> {
+    poll_json(
+        daemon,
+        &["dm", "read", "--account", &owner.id, "--conversation", conversation],
+        POLL_TIMEOUT,
+        |value| message_has_peer_receipt(value, message_id, peer),
+    )
+    .map_err(|error| {
+        let log = std::fs::read_to_string(daemon.data_root.join("daemon.log")).unwrap_or_default();
+        format!("Alice receipt JSON missing B's qualified receipt: {error}; daemon_log={log}")
+            .into()
+    })
+}
+
+pub fn message_has_peer_receipt(value: &Value, message_id: &str, peer: &Account) -> bool {
+    for key in ["decrypted_messages", "messages"] {
+        let Some(rows) = value.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for row in rows {
+            if row.get("message_id").and_then(Value::as_str) != Some(message_id)
+                && row.get("id").and_then(Value::as_str) != Some(message_id)
+            {
+                continue;
+            }
+            let Some(receipts) = row.get("receipts").and_then(Value::as_array) else {
+                continue;
+            };
+            if receipts.iter().any(|receipt| receipt_matches_peer(receipt, peer)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn receipt_matches_peer(receipt: &Value, peer: &Account) -> bool {
+    let device = receipt.get("device_id").and_then(Value::as_str);
+    let root = receipt.get("principal_commitment").and_then(Value::as_str);
+    let state = receipt.get("state").and_then(Value::as_str);
+    let delivered = receipt.get("delivered_at").and_then(Value::as_i64);
+    let read = receipt.get("read_at").and_then(Value::as_i64);
+    device == Some(peer.device_id.as_str())
+        && root == Some(peer.principal_commitment.as_str())
+        && matches!(state, Some("delivered" | "read"))
+        && (delivered.is_some_and(|ts| ts > 0) || read.is_some_and(|ts| ts > 0))
+}
+
+pub fn wait_node_observed_ack(
+    stack: &Stack,
+    account: &Account,
+    envelope_id: &str,
+) -> Result<Value> {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let mut last = Value::Null;
+    loop {
+        match mesh_cursor(stack, &account.target_delivery_id) {
+            Ok(cursor) if cursor_has_ack(&cursor, envelope_id) => return Ok(cursor),
+            Ok(cursor) => last = cursor,
+            Err(error) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "node ACK for envelope {envelope_id} not observed: {error}; last={last}"
+                )
+                .into());
+            }
+            Err(_) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "node ACK for envelope {envelope_id} not observed; last cursor={last}"
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn cursor_has_ack(cursor: &Value, envelope_id: &str) -> bool {
+    if cursor.get("last_envelope_id").and_then(Value::as_str) == Some(envelope_id) {
+        return true;
+    }
+    cursor
+        .get("acked_envelope_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(envelope_id)))
+}
+
+fn mesh_cursor(stack: &Stack, target: &str) -> Result<Value> {
+    let certs = stack.root.join("certs");
+    let ca = certs.join("ca.pem");
+    let cert = certs.join("ramflux-gateway.pem");
+    let key = certs.join("ramflux-gateway.key");
+    let path = format!("/mvp0/cursor/{target}");
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        stack.router_mesh
+    );
+    let mut command = Command::new("openssl");
+    command.args([
+        "s_client",
+        "-connect",
+        &stack.router_mesh,
+        "-servername",
+        "ramflux-router",
+        "-CAfile",
+        ca.to_str().ok_or("ca path")?,
+        "-cert",
+        cert.to_str().ok_or("cert path")?,
+        "-key",
+        key.to_str().ok_or("key path")?,
+        "-quiet",
+    ]);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut group = proc::ProcessGroup::spawn(&mut command)?;
+    let child = group.child_mut().ok_or("mesh openssl child")?;
+    let mut stdin = child.stdin.take().ok_or("mesh openssl stdin")?;
+    let stdout = child.stdout.take().ok_or("mesh openssl stdout")?;
+    let stderr = child.stderr.take().ok_or("mesh openssl stderr")?;
+    stdin.write_all(request.as_bytes())?;
+    drop(stdin);
+    let sink = Arc::new(Mutex::new(String::new()));
+    let readers =
+        [proc::drain_pipe(stdout, Arc::clone(&sink)), proc::drain_pipe(stderr, Arc::clone(&sink))];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    let parsed = loop {
+        last.clone_from(&sink.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        if let Some(value) = parse_mesh_cursor_body(&last) {
+            break Some(value);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    group.kill_group();
+    let _ = group.wait();
+    for reader in readers {
+        let _ = reader.join();
+    }
+    parsed.ok_or_else(|| {
+        format!("mesh GET {path} on {} produced no JSON: {last}", stack.router_mesh).into()
+    })
+}
+
+fn parse_mesh_cursor_body(text: &str) -> Option<Value> {
+    if let Ok(value) = parse_json_object(text) {
+        return Some(value);
+    }
+    let body = http_body(text);
+    (body == "null").then_some(Value::Null)
+}
+
+fn http_body(text: &str) -> &str {
+    if let Some((_, rest)) = text.split_once("\r\n\r\n") {
+        return rest.trim();
+    }
+    if let Some((_, rest)) = text.split_once("\n\n") {
+        return rest.trim();
+    }
+    text.trim()
+}
+
 pub fn dm_ack(
     daemon: &Daemon,
     account: &Account,
@@ -509,22 +724,27 @@ pub fn dm_ack(
 }
 
 pub fn envelope_id_from_read(value: &Value) -> Option<String> {
-    for key in ["decrypted_messages", "gateway_entries", "messages"] {
-        let Some(rows) = value.get(key).and_then(Value::as_array) else {
-            continue;
-        };
-        for row in rows {
-            for pointer in ["/entry/envelope/envelope_id", "/envelope/envelope_id"] {
-                if let Some(id) = row.pointer(pointer).and_then(Value::as_str) {
-                    return Some(id.to_owned());
-                }
-            }
-            if let Some(id) = row.get("envelope_id").and_then(Value::as_str) {
-                return Some(id.to_owned());
-            }
+    for key in ["decrypted_messages", "gateway_entries", "messages", "envelope"] {
+        if let Some(id) = nested_envelope_id(value.get(key).unwrap_or(&Value::Null)) {
+            return Some(id);
         }
     }
-    None
+    nested_envelope_id(value)
+}
+
+fn nested_envelope_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            if let Some(id) =
+                map.get("envelope_id").and_then(Value::as_str).filter(|id| !id.is_empty())
+            {
+                return Some(id.to_owned());
+            }
+            map.values().find_map(nested_envelope_id)
+        }
+        Value::Array(rows) => rows.iter().find_map(nested_envelope_id),
+        _ => None,
+    }
 }
 
 pub fn dump_logs(stack: &Stack, daemons: &[&Daemon]) -> String {
@@ -794,17 +1014,35 @@ fn rf_output(socket: &Path, args: &[&str]) -> std::io::Result<std::process::Outp
     rf_output_env(socket, args, &[])
 }
 
+fn rf_output_timeout(
+    socket: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    rf_output_env_timeout(socket, args, &[], timeout)
+}
+
 fn rf_output_env(
     socket: &Path,
     args: &[&str],
     extra: &[(&str, &str)],
+) -> std::io::Result<std::process::Output> {
+    rf_output_env_timeout(socket, args, extra, CLI_TIMEOUT)
+}
+
+fn rf_output_env_timeout(
+    socket: &Path,
+    args: &[&str],
+    extra: &[(&str, &str)],
+    timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
     let mut command = Command::new(rf_bin());
     command.arg("--socket").arg(socket).args(args);
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output()
+    proc::run_group_output(&mut command, timeout)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Result<Value> {
@@ -830,54 +1068,107 @@ fn pty_account_create(socket: &Path, display_name: &str, passphrase: &str) -> Re
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("TERM", "xterm");
-    let mut child = command.spawn()?;
-    let mut stdin = child.stdin.take().ok_or("pty stdin")?;
-    let stdout = child.stdout.take().ok_or("pty stdout")?;
-    let output = Arc::new(Mutex::new(String::new()));
-    let reader_out = Arc::clone(&output);
-    let reader = std::thread::spawn(move || {
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut buf = [0_u8; 1024];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            if let Ok(chunk) = std::str::from_utf8(&buf[..n]) {
-                lock_buf(&reader_out).push_str(chunk);
-            }
+    let mut session = PtySession::spawn(&mut command)?;
+    session.drive_account_create(passphrase, CEREMONY_TIMEOUT)
+}
+
+struct PtySession {
+    group: proc::ProcessGroup,
+    stdin: Option<std::process::ChildStdin>,
+    output: Arc<Mutex<String>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl PtySession {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        let mut group = proc::ProcessGroup::spawn(command)?;
+        let child = group.child_mut().ok_or("pty child")?;
+        let stdin = child.stdin.take().ok_or("pty stdin")?;
+        let stdout = child.stdout.take().ok_or("pty stdout")?;
+        let stderr = child.stderr.take().ok_or("pty stderr")?;
+        let output = Arc::new(Mutex::new(String::new()));
+        let readers = vec![
+            proc::drain_pipe(stdout, Arc::clone(&output)),
+            proc::drain_pipe(stderr, Arc::clone(&output)),
+        ];
+        Ok(Self { group, stdin: Some(stdin), output, readers })
+    }
+
+    fn drive_account_create(&mut self, passphrase: &str, budget: Duration) -> Result<Value> {
+        let deadline = Instant::now() + budget;
+        let mut cursor = 0;
+        cursor = wait_buffer_until(
+            &self.output,
+            "Press Enter after saving the words to hide them:",
+            cursor,
+            deadline,
+        )?;
+        let phrase = recovery_phrase(&lock_buf(&self.output))?;
+        self.write_line("")?;
+        for _ in 0..3 {
+            cursor = wait_buffer_until(&self.output, "Recovery word ", cursor, deadline)?;
+            let prompt =
+                lock_buf(&self.output)[cursor.saturating_sub("Recovery word ".len())..].to_owned();
+            let position = recovery_position(&prompt)?;
+            let word = phrase.get(position.wrapping_sub(1)).ok_or("challenge position")?;
+            self.write_line(word)?;
         }
-    });
-    let mut cursor = 0;
-    cursor = wait_buffer(&output, "Press Enter after saving the words to hide them:", cursor)?;
-    let phrase = recovery_phrase(&lock_buf(&output))?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()?;
-    for _ in 0..3 {
-        cursor = wait_buffer(&output, "Recovery word ", cursor)?;
-        let prompt = lock_buf(&output)[cursor.saturating_sub("Recovery word ".len())..].to_owned();
-        let position = recovery_position(&prompt)?;
-        let word = phrase.get(position.wrapping_sub(1)).ok_or("challenge position")?;
-        stdin.write_all(word.as_bytes())?;
+        cursor = wait_buffer_until(
+            &self.output,
+            "New local data passphrase (hidden):",
+            cursor,
+            deadline,
+        )?;
+        self.write_line(passphrase)?;
+        cursor = wait_buffer_until(
+            &self.output,
+            "Repeat local data passphrase (hidden):",
+            cursor,
+            deadline,
+        )?;
+        self.write_line(passphrase)?;
+        let _ = wait_buffer_until(&self.output, "\"account_id\"", cursor, deadline)?;
+        drop(self.stdin.take());
+        let status = self.wait_exit(deadline)?;
+        let buffer = lock_buf(&self.output).clone();
+        if !status.success() {
+            return Err(format!("account create exited {status}: {buffer}").into());
+        }
+        parse_json_object(&buffer)
+    }
+
+    fn write_line(&mut self, line: &str) -> Result<()> {
+        let stdin = self.stdin.as_mut().ok_or("pty stdin closed")?;
+        stdin.write_all(line.as_bytes())?;
         stdin.write_all(b"\n")?;
         stdin.flush()?;
+        Ok(())
     }
-    cursor = wait_buffer(&output, "New local data passphrase (hidden):", cursor)?;
-    stdin.write_all(passphrase.as_bytes())?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()?;
-    cursor = wait_buffer(&output, "Repeat local data passphrase (hidden):", cursor)?;
-    stdin.write_all(passphrase.as_bytes())?;
-    stdin.write_all(b"\n")?;
-    stdin.flush()?;
-    let _ = wait_buffer(&output, "\"account_id\"", cursor)?;
-    drop(stdin);
-    let status = child.wait()?;
-    let _ = reader.join();
-    let buffer = lock_buf(&output).clone();
-    if !status.success() {
-        return Err(format!("account create exited {status}: {buffer}").into());
+
+    fn wait_exit(&mut self, deadline: Instant) -> Result<std::process::ExitStatus> {
+        loop {
+            if let Some(status) = self.group.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                self.group.kill_group();
+                let _ = self.group.wait();
+                return Err("pty session exceeded its budget".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
-    parse_json_object(&buffer)
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        self.group.kill_group();
+        let _ = self.group.wait();
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+    }
 }
 
 fn lock_buf(output: &Arc<Mutex<String>>) -> std::sync::MutexGuard<'_, String> {
@@ -885,7 +1176,15 @@ fn lock_buf(output: &Arc<Mutex<String>>) -> std::sync::MutexGuard<'_, String> {
 }
 
 fn wait_buffer(output: &Arc<Mutex<String>>, needle: &str, from: usize) -> Result<usize> {
-    let deadline = Instant::now() + CEREMONY_TIMEOUT;
+    wait_buffer_until(output, needle, from, Instant::now() + CEREMONY_TIMEOUT)
+}
+
+fn wait_buffer_until(
+    output: &Arc<Mutex<String>>,
+    needle: &str,
+    from: usize,
+    deadline: Instant,
+) -> Result<usize> {
     loop {
         {
             let buffer = lock_buf(output);
@@ -1026,10 +1325,17 @@ fn assert_discovery_addr(record: &Value, key: &str, expected: &str) -> Result<()
 fn probe_gateway_tls(ca: &Path, addr: &str) -> Result<()> {
     let ca = ca.to_str().ok_or("ca path")?;
     let mut command = Command::new("openssl");
-    command
-        .args(["s_client", "-connect", addr, "-servername", "localhost", "-CAfile", ca, "-brief"])
-        .stdin(Stdio::null());
-    let output = run_deadline(&mut command, Duration::from_secs(5))?;
+    command.args([
+        "s_client",
+        "-connect",
+        addr,
+        "-servername",
+        "localhost",
+        "-CAfile",
+        ca,
+        "-brief",
+    ]);
+    let output = proc::run_group_output(&mut command, Duration::from_secs(5))?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -1045,28 +1351,6 @@ fn probe_gateway_tls(ca: &Path, addr: &str) -> Result<()> {
     }
 }
 
-fn run_deadline(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait()? {
-            Some(_) => return Ok(child.wait_with_output()?),
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let output = child.wait_with_output()?;
-                return Err(format!(
-                    "command timed out: stdout={} stderr={}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                )
-                .into());
-            }
-            None => std::thread::sleep(Duration::from_millis(20)),
-        }
-    }
-}
-
 fn write_seed_file(path: &Path, seed: &[u8; 32]) -> Result<()> {
     std::fs::write(path, ramflux_protocol::encode_base64url(seed))?;
     #[cfg(unix)]
@@ -1078,7 +1362,9 @@ fn write_seed_file(path: &Path, seed: &[u8; 32]) -> Result<()> {
 }
 
 fn openssl(args: &[&str]) -> Result<()> {
-    let output = Command::new("openssl").args(args).output()?;
+    let mut command = Command::new("openssl");
+    command.args(args);
+    let output = proc::run_group_output(&mut command, CLI_TIMEOUT)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1223,4 +1509,79 @@ fn wait_for_log_markers(path: &Path, markers: &[&str], timeout: Duration) -> Res
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Harness proof: a hung CLI child is killed and reaped inside `budget`.
+pub fn prove_hung_command_reaped_within(budget: Duration) -> Result<()> {
+    let mut command = Command::new("sleep");
+    command.arg("60");
+    let started = Instant::now();
+    match proc::run_group_output(&mut command, Duration::from_millis(300)) {
+        Err(error) if error.to_string().contains("timed out") => {}
+        Ok(output) => {
+            return Err(format!("hung command exited {}", output.status).into());
+        }
+        Err(error) => return Err(error),
+    }
+    if started.elapsed() > budget {
+        return Err("hung command cleanup exceeded budget".into());
+    }
+    Ok(())
+}
+
+/// Harness proof: a PTY ceremony that never answers returns inside `budget` with no leftovers.
+pub fn prove_failed_ceremony_reaped_within(budget: Duration) -> Result<()> {
+    let mut command = Command::new("script");
+    if cfg!(target_os = "linux") {
+        command.args(["-q", "-e", "-f", "-c", "sleep 60", "/dev/null"]);
+    } else {
+        command.arg("-q").arg("/dev/null").arg("sleep").arg("60");
+    }
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let session = PtySession::spawn(&mut command)?;
+    let pid = session.group.id();
+    let started = Instant::now();
+    let timed_out = wait_buffer_until(
+        &session.output,
+        "this prompt never appears",
+        0,
+        Instant::now() + Duration::from_millis(400),
+    )
+    .is_err();
+    drop(session);
+    proc::wait_process_group_gone(pid, budget)?;
+    if !timed_out {
+        return Err("failed ceremony produced a prompt".into());
+    }
+    if started.elapsed() > budget {
+        return Err("failed ceremony cleanup exceeded budget".into());
+    }
+    Ok(())
+}
+
+/// Harness proof: Drop of an unresponsive daemon returns inside `budget` with no leftovers.
+pub fn prove_unresponsive_daemon_drop_within(budget: Duration) -> Result<()> {
+    let root = std::env::temp_dir().join(format!(
+        "rf-cli-e2e-hung-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&root)?;
+    let socket = root.join("hung.sock");
+    let data_root = root.join("data");
+    std::fs::create_dir_all(&data_root)?;
+    let mut command = Command::new("sleep");
+    command.arg("60");
+    let child = ChildGuard::spawn("hung-daemon".into(), command, data_root.join("daemon.log"))?;
+    let pid = child.pid();
+    let daemon = Daemon { socket, data_root, child };
+    let started = Instant::now();
+    drop(daemon);
+    let gone = proc::wait_process_group_gone(pid, budget);
+    let _ = std::fs::remove_dir_all(&root);
+    gone?;
+    if started.elapsed() > budget {
+        return Err("unresponsive daemon drop exceeded budget".into());
+    }
+    Ok(())
 }

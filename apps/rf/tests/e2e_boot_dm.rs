@@ -10,7 +10,7 @@ mod e2e;
 use e2e::{
     assert_texts_once_in_order, boot_stack, configure_node, create_account, dm_ack,
     dm_receipt_delivered, dm_send, dump_logs, envelope_id_from_read, exchange_contacts,
-    start_daemon, unique, wait_dm_texts,
+    start_daemon, unique, wait_dm_receipt, wait_dm_texts, wait_node_observed_ack,
 };
 
 #[ignore = "cli e2e: CI job cli-e2e only; not a local lane gate"]
@@ -27,10 +27,19 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     let conversation = unique("e2e-dm");
     let message = unique("msg");
     let body = "hello from Alice over the real wire";
-    dm_send(&alice_d, &alice, &bob, &conversation, &message, body)?;
+    let sent = dm_send(&alice_d, &alice, &bob, &conversation, &message, body)?;
     let received = wait_dm_texts(&bob_d, &bob, &conversation, &[body])?;
     assert_texts_once_in_order(&received, &[body])?;
-    let envelope = envelope_id_from_read(&received).unwrap_or_else(|| message.clone());
+    let envelope =
+        envelope_id_from_read(&received).or_else(|| envelope_id_from_read(&sent)).ok_or_else(
+            || format!("receive JSON missing wire envelope_id; sent={sent} received={received}"),
+        )?;
+    wait_node_observed_ack(&stack, &bob, &envelope).map_err(|error| {
+        format!(
+            "node ACK for envelope {envelope} missing after receive: {error}; logs={}",
+            dump_logs(&stack, &[&alice_d, &bob_d])
+        )
+    })?;
     if let Err(error) = dm_ack(&bob_d, &bob, &conversation, &envelope) {
         return Err(format!(
             "dm_ack envelope={envelope} message={message} received={received} error={error} logs={}",
@@ -47,27 +56,7 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     if receipt.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
         return Err(format!("B receipt delivered was refused: {receipt}").into());
     }
-    let alice_view = wait_dm_texts(&alice_d, &alice, &conversation, &[body])?;
-    if message_id_visible(&alice_view, &message) {
-        Ok(())
-    } else {
-        Err(format!("ACK/receipt path: Alice no longer sees message {message}: {alice_view}")
-            .into())
-    }
-}
-
-fn message_id_visible(value: &serde_json::Value, message: &str) -> bool {
-    for key in ["decrypted_messages", "messages", "gateway_entries"] {
-        if let Some(rows) = value.get(key).and_then(serde_json::Value::as_array) {
-            for row in rows {
-                if row.get("message_id").and_then(serde_json::Value::as_str) == Some(message)
-                    || row.get("id").and_then(serde_json::Value::as_str) == Some(message)
-                    || row.get("envelope_id").and_then(serde_json::Value::as_str) == Some(message)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    e2e::message_texts(value).iter().any(|text| !text.is_empty())
+    wait_dm_receipt(&alice_d, &alice, &conversation, &message, &bob)
+        .map_err(|error| format!("{error}; logs={}", dump_logs(&stack, &[&alice_d, &bob_d])))?;
+    Ok(())
 }

@@ -359,6 +359,29 @@ async fn federated_manifest_gate(
     Ok(ResolvedMessageRecipient { principal_id: Some(device.principal_id), principal_commitment })
 }
 
+/// Selects the cached delivery used for an ID-only `message.ack`.
+///
+/// Zero matches keep the legacy envelope-id ACK so the node still refuses
+/// ambiguity when its own pending set is incomplete. One match supplies that
+/// exact `inbox_seq`. Two or more matches reject before any session/ACK effect.
+fn pending_ack_entry<'a>(
+    pending: &'a [GatewayInboxEntry],
+    envelope_id: &str,
+) -> Result<Option<&'a GatewayInboxEntry>, SdkError> {
+    let mut matches = pending.iter().filter(|entry| entry.envelope.envelope_id == envelope_id);
+    match (matches.next(), matches.next()) {
+        (None, _) => Ok(None),
+        (Some(entry), None) => Ok(Some(entry)),
+        (Some(_), Some(_)) => {
+            let extra = matches.count();
+            Err(SdkError::InboundRejected(format!(
+                "ambiguous envelope id {envelope_id}; {} pending deliveries match (an inbox sequence is required)",
+                extra.saturating_add(2)
+            )))
+        }
+    }
+}
+
 async fn dispatch_message_ack_request(
     request: &LocalBusFrame,
     state: &mut LocalBusDaemonState,
@@ -380,11 +403,9 @@ async fn dispatch_message_ack_request(
     }
     // Receive already ACKs with inbox_seq and keeps the delivery on the RAM page.
     // A later `rf dm ack` must reuse that seq; envelope-id-only ACK misses retired rows.
-    let pending = account
-        .pending_deliveries
-        .iter()
-        .find(|entry| entry.envelope.envelope_id == body.envelope_id)
-        .cloned();
+    // Multiple cached rows with the same sender-chosen id must not pick an arbitrary seq:
+    // reject before opening a session so the node ID-only ambiguity contract stays intact.
+    let pending = pending_ack_entry(&account.pending_deliveries, &body.envelope_id)?.cloned();
     let mut engine = account.session_client().await?;
     let result = if let Some(entry) = pending.as_ref() {
         account.client.ack_gateway_entry(&mut engine, entry, body.received_at).await
@@ -999,6 +1020,88 @@ mod root_tests {
         drop(account);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pending_ack_entry_tests {
+    use super::pending_ack_entry;
+    use crate::GatewayInboxEntry;
+    use crate::SdkError;
+
+    fn entry(
+        envelope_id: &str,
+        inbox_seq: u64,
+        target: &str,
+    ) -> Result<GatewayInboxEntry, SdkError> {
+        serde_json::from_value(serde_json::json!({
+            "inbox_seq": inbox_seq,
+            "target_delivery_id": target,
+            "envelope": {
+                "schema": "ramflux.envelope.v1",
+                "version": 1,
+                "domain": "ramflux.envelope.v1",
+                "ext": {},
+                "signing_key_id": "device",
+                "signature_alg": "ed25519",
+                "signature": "sig",
+                "envelope_id": envelope_id,
+                "source_principal_id": "peer",
+                "source_device_id": "device",
+                "target_delivery_id": target,
+                "routing_set_id": null,
+                "delivery_class": "opaque_event",
+                "priority": "normal",
+                "ttl": 600,
+                "created_at": 1_760_000_000,
+                "encrypted_payload": "opaque",
+                "payload_hash": "hash"
+            }
+        }))
+        .map_err(|error| SdkError::LocalBus(error.to_string()))
+    }
+
+    fn ambiguous(error: SdkError, envelope_id: &str) -> Result<(), SdkError> {
+        match error {
+            SdkError::InboundRejected(message)
+                if message.contains(envelope_id) && message.contains("ambiguous envelope id") =>
+            {
+                Ok(())
+            }
+            other => {
+                Err(SdkError::LocalBus(format!("expected ambiguous envelope refusal, got {other}")))
+            }
+        }
+    }
+
+    #[test]
+    fn zero_matches_keep_the_legacy_id_only_path() -> Result<(), SdkError> {
+        let pending = [entry("other", 1, "t1")?];
+        assert!(pending_ack_entry(&pending, "wanted")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn unique_match_selects_that_inbox_seq_and_is_idempotent() -> Result<(), SdkError> {
+        let pending = [entry("wanted", 7, "t1")?, entry("other", 8, "t2")?];
+        let first =
+            pending_ack_entry(&pending, "wanted")?.ok_or(SdkError::LocalBus("unique".into()))?;
+        let again =
+            pending_ack_entry(&pending, "wanted")?.ok_or(SdkError::LocalBus("repeat".into()))?;
+        assert_eq!(first.inbox_seq, 7);
+        assert_eq!(first.target_delivery_id, "t1");
+        assert_eq!(again.inbox_seq, first.inbox_seq);
+        assert_eq!(again.target_delivery_id, first.target_delivery_id);
+        Ok(())
+    }
+
+    #[test]
+    fn colliding_sender_ids_reject_before_any_ack_effect() -> Result<(), SdkError> {
+        let pending = [entry("wanted", 3, "alice")?, entry("wanted", 9, "mallory")?];
+        match pending_ack_entry(&pending, "wanted") {
+            Err(error) => ambiguous(error, "wanted"),
+            Ok(_) => Err(SdkError::LocalBus("collision must reject before ACK".into())),
+        }
     }
 }
 

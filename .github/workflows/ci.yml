@@ -359,6 +359,7 @@ jobs:
           RAMFLUX_ITEST_BUILD: "1"
         run: |
           cargo build -p ramflux-federation -p ramflux-router -p ramflux-retention -p ramflux-gateway
+          cargo test -p ramflux-rf --test e2e_harness -- --test-threads=1
           cargo test -p ramflux-rf --features itest-memory-vault --test e2e_boot_dm -- --ignored --test-threads=1
           cargo test -p ramflux-rf --features itest-memory-vault --test e2e_resume -- --ignored --test-threads=1
           cargo test -p ramflux-rf --features itest-memory-vault --test e2e_group -- --ignored --test-threads=1
