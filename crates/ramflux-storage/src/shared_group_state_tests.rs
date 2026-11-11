@@ -607,3 +607,69 @@ fn r7_indexed_removal_capacity_rejects_only_the_new_fence_and_prunes_departed_de
 
 #[path = "native_group_backup_tests.rs"]
 mod native_backup;
+
+#[test]
+fn pairing_pruned_floors_use_oldest_retained_signed_attestation() -> Result<(), StorageError> {
+    let (owner_root, owner, actor) = person("owner", "phone", 10)?;
+    let (_, _, peer) = person("peer", "phone", 20)?;
+    let initial = create(&owner_root, &owner, &actor)?;
+    let added = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &initial,
+        GroupStateChange::Add { member: peer.identity.clone(), role: SharedGroupRole::Member },
+    )?;
+    let removed = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &added,
+        GroupStateChange::Remove {
+            root_commitment: peer.identity.root_commitment.clone(),
+            device_id: peer.identity.device_id.clone(),
+        },
+    )?;
+    let renamed = advance_group_state(
+        &owner_root,
+        &owner,
+        &actor,
+        &removed,
+        GroupStateChange::SetName { name: "After removal".into() },
+    )?;
+    let (_source_root, source) = test_db("pairing-denial-source")?;
+    for state in [&initial, &added, &removed, &renamed] {
+        source.commit_shared_group_state(state, &actor)?;
+    }
+    let proofs = source.pruned_group_floor_witnesses("group")?;
+    assert!(!proofs.is_empty());
+    for proof in &proofs {
+        assert_eq!(proof.attesting_epoch, removed.view().epoch);
+        assert_eq!(
+            proof.attesting_hash,
+            ramflux_protocol::custody::object_hash(removed.snapshot())?
+        );
+    }
+    let (_target_root, target) = test_db("pairing-denial-target")?;
+    target.commit_shared_group_state(&added, &actor)?;
+    let genesis = initial.genesis_hash()?;
+    for proof in &proofs {
+        target.accept_pruned_group_floor("group", &genesis, proof)?;
+    }
+    assert!(
+        target.validate_shared_group_removal_continuity(&added).is_err(),
+        "incoming history cannot revive the removed peer"
+    );
+    let mut changed = proofs[0].clone();
+    changed.attesting_hash = ramflux_protocol::encode_base64url([99; 32]);
+    assert!(target.accept_pruned_group_floor("group", &genesis, &changed).is_err());
+    assert!(target.accept_pruned_group_floor("group", "foreign-genesis", &proofs[0]).is_err());
+    source.remove_actor_state(&format!(
+        "group-state/signed-heads/{}",
+        ramflux_protocol::encode_base64url("group")
+    ))?;
+    let after_prune = source.pruned_group_floor_witnesses("group")?;
+    assert_eq!(after_prune.len(), proofs.len());
+    assert!(after_prune.iter().all(|proof| proof.attesting_epoch == renamed.view().epoch));
+    Ok(())
+}
