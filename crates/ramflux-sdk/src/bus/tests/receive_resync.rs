@@ -12,15 +12,34 @@ use crate::client::identity_authority::HeadUse;
 use crate::gateway::frame_dispatch::FrameKind;
 use crate::prelude::*;
 use serde_json::json;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant as WallClock;
 
 #[path = "receive_resync/work.rs"]
 mod work;
 
-// Isolated recovery of 266 entries is ~24 s. A loaded `cargo test --lib bus` pool
-// stretches that past 180 s without tripping recover()'s 10 s silence guard.
-const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(240);
-const DURABLE_RECOVERY_WATCHDOG: Duration = Duration::from_secs(300);
+// Isolated recovery of 266 entries is ~24 s; two of them in parallel is ~36 s.
+// A loaded `cargo test --lib bus` pool stretched one past 240 s with no 10 s
+// silence panic. Durable cases take turns so they do not double-load SQL.
+const DURABLE_RECOVERY_COMPLETION_LIMIT: Duration = Duration::from_secs(360);
+const DURABLE_RECOVERY_WATCHDOG: Duration = Duration::from_secs(420);
+static DURABLE_TURN: AtomicU64 = AtomicU64::new(0);
+static DURABLE_DONE: AtomicU64 = AtomicU64::new(0);
+
+struct DurableTurn;
+impl Drop for DurableTurn {
+    fn drop(&mut self) {
+        DURABLE_DONE.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+async fn wait_durable_turn() -> DurableTurn {
+    let ticket = DURABLE_TURN.fetch_add(1, Ordering::SeqCst);
+    while DURABLE_DONE.load(Ordering::SeqCst) != ticket {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    DurableTurn
+}
 
 struct Recovery {
     started: super::receive_ack::Started,
@@ -65,6 +84,7 @@ async fn resync_trigger_requests_byte_overflow_below_the_entry_cap() -> Case {
     run_mode(9, Some(960 * 1024), true, Completion::Trigger).await
 }
 async fn run(count: usize, frame_bytes: Option<usize>, subscribers: bool) -> Case {
+    let _turn = wait_durable_turn().await;
     run_mode(count, frame_bytes, subscribers, Completion::Durable).await
 }
 async fn run_mode(

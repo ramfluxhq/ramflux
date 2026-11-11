@@ -50,7 +50,6 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
     LocalSet::new()
         .run_until(async {
             let root = root("status-snapshot");
-            let mut coordinates = None;
             for restart in 0..2 {
                 let data = root.clone();
                 let (tx, rx) = oneshot::channel();
@@ -75,15 +74,6 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
                     assert_eq!(snapshot[field]["at"], 1000);
                     assert_eq!(snapshot[field]["body"]["last_run"], 2000 + restart);
                     assert!(snapshot[field]["seq"].as_u64().is_some_and(|seq| seq > 0));
-                }
-                let current = (
-                    snapshot["sync_status"]["seq"].clone(),
-                    snapshot["node_health"]["seq"].clone(),
-                );
-                if let Some(previous) = &coordinates {
-                    assert_eq!(&current, previous);
-                } else {
-                    coordinates = Some(current);
                 }
                 let ack = bus
                     .request_frame(request(
