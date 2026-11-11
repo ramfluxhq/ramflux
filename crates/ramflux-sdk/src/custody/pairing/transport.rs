@@ -3,8 +3,10 @@
 
 //! S2 Prepare→Apply native issuance and the pairing HTTPS client.
 //! Dormant: talks only to pairing routes; grants no account session.
+mod full;
 use crate::SdkError;
 use crate::custody::CustodyConnection;
+pub use full::FullRelayRequest;
 use ramflux_protocol::custody::Envelope;
 use ramflux_protocol::custody::pairing::PairingWire;
 use ramflux_protocol::custody::pairing::full_transfer::lease::{DataLease, LeaseRequest};

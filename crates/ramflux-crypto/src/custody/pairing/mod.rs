@@ -17,7 +17,9 @@ mod tests;
 pub use cleanup::{HpkeSecrets, PairingSecrets};
 #[cfg(test)]
 pub use cleanup::{last_wiped_pairing_bytes, take_pairing_secret_cleanups};
-pub use full_channel::{FULL_PACKET_PLAINTEXT_BYTES, FullDataCipher, FullOpened};
+pub use full_channel::{
+    FULL_PACKET_PLAINTEXT_BYTES, FullConfirmedChannel, FullDataCipher, FullOpened,
+};
 pub use hpke::{FullDataKeys, FullSenderSetup, open_full_receiver, setup_full_sender};
 pub use hpke::{HpkeReceiver, HpkeSender, MAX_HPKE_AEAD_TAG, MAX_HPKE_PLAINTEXT, TransferHpkeAad};
 pub use sas::{

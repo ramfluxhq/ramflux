@@ -218,6 +218,18 @@ impl FullBodySlot {
             state.slots[self.owner.index] = None;
         }
     }
+    /// Charge a borrowed poll transmission without creating another body allocation.
+    /// # Errors
+    /// Refuses retired slot generations, poisoned accounting or byte-rate Busy.
+    pub fn charge_bytes(&self, bytes: usize, now: u64) -> Result<(), PairingRelayError> {
+        let mut state = self.owner.state.lock().map_err(|_| PairingRelayError::busy(now))?;
+        let slot = state.slots[self.owner.index]
+            .as_mut()
+            .filter(|slot| slot.generation == self.owner.generation)
+            .ok_or(PairingRelayError::WrongContext)?;
+        slot.rate.take(bytes, now)
+    }
+
     /// Charge the complete declared body BEFORE extending HTTP buffering past 16 KiB.
     /// Role-token authentication remains mandatory in the caller. One position/direction is
     /// reserved for a bounded control body; full-size data cannot occupy both positions.

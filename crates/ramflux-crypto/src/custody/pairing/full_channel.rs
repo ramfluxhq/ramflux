@@ -3,11 +3,13 @@
 
 //! Bounded exporter-key channel. A lease reconnect must create a wholly new instance/epoch.
 use super::{FullDataKeys, PairingRole};
+mod confirmed;
 use crate::CryptoError;
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce, Tag,
     aead::{AeadInPlace, KeyInit},
 };
+pub use confirmed::FullConfirmedChannel;
 use ramflux_protocol::custody::pairing::full_transfer::PACKETS_PER_KEY;
 use std::collections::VecDeque;
 use zeroize::{Zeroize, Zeroizing};

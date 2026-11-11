@@ -7,10 +7,18 @@
 mod allocations;
 pub use allocations::{PairingAllocation, PairingAllocations};
 mod bytes;
+mod full_auth;
+pub use full_auth::FullAuthorization;
 mod full_budget;
 pub use full_budget::{
     ChargedFullBody, FullBodyBudget, FullBodyBudgetStats, FullBodyPermit, FullBodySlot,
     FullDirection, FullMetadataPermit,
+};
+mod full_resume;
+pub use full_resume::{
+    FullControlFrame, FullDataAccepted, FullDataFrame, FullNativeAdmission, FullResumeChallenge,
+    FullResumeOffer, FullResumeProgress, FullResumeStats, FullResumeToken, FullRoute,
+    FullSendPermit,
 };
 mod http;
 mod limits;
