@@ -701,16 +701,18 @@ pub(crate) async fn submit_reply(
     metadata: Option<&(String, i64)>,
 ) -> anyhow::Result<()> {
     if let Some(expected) = runtime.session_push.as_deref() {
-        let (id, _) = metadata.ok_or(Retired)?;
+        let (observed, _) = metadata.ok_or(Retired)?;
         anyhow::ensure!(
-            response.target_delivery_id != runtime.target_delivery_id || id == expected,
+            response.target_delivery_id != runtime.target_delivery_id || observed == expected,
             Retired
         );
         let inbox_seq = response.inbox_seq.filter(|s| *s > 0).ok_or(Retired)?;
+        // submit_accepted is the sender session T/E. Mesh metadata E is the
+        // recipient inbox and belongs only on the Deliver frame.
         write(
             send,
             &ramflux_node_core::SessionPushServerFrame::SubmitAccepted {
-                incarnation_id: id.clone(),
+                incarnation_id: expected.to_owned(),
                 envelope_id: envelope.envelope_id.clone(),
                 target_delivery_id: response.target_delivery_id.clone(),
                 inbox_seq,

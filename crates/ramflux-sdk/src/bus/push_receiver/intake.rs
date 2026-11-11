@@ -199,7 +199,18 @@ async fn apply_ready(
         apply_one(handle, work, pending, &turn, next).await?;
         turn.cursor = next;
     }
-    Ok(())
+    // Live Deliver with a ledger writes WA in ApplyPage and skips ack_prepared.
+    // run_anchored then waits on planner/gap/receive_wake and never ticks the 1s
+    // ACK flush, so a contiguous first live apply would leave the node cursor at
+    // inbox_seq=0. Force-flush the just-written WA on this same intake pass.
+    crate::bus::connection_manager::receive::flush_acks(
+        handle,
+        work,
+        handle.generation(),
+        true,
+        handle.call_timeout(),
+    )
+    .await
 }
 
 async fn apply_one(

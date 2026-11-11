@@ -44,12 +44,19 @@ fn f1_two_accounts_contact_dm_receive_ack() -> e2e::Result<()> {
     let inbox_seq = inbox_seq_from_read(&received, &envelope).ok_or_else(|| {
         format!("receive JSON missing inbox_seq for {envelope}; received={received}")
     })?;
-    if let Err(error) = dm_ack(&bob_d, &bob, &conversation, &envelope, Some(inbox_seq)) {
-        return Err(format!(
-            "dm_ack envelope={envelope} message={message} received={received} error={error} logs={}",
-            dump_logs(&stack, &[&alice_d, &bob_d])
-        )
-        .into());
+    // Default-on Push installs the receive ledger, so public `message.ack` /
+    // `rf dm ack` is refused with receive_ledger_managed_ack (P25). The node
+    // ACK is the engine ack_batch from live intake (wait_node_observed_ack).
+    match dm_ack(&bob_d, &bob, &conversation, &envelope, Some(inbox_seq)) {
+        Ok(_) => {}
+        Err(error) if error.to_string().contains("receive_ledger_managed_ack") => {}
+        Err(error) => {
+            return Err(format!(
+                "dm_ack envelope={envelope} message={message} received={received} error={error} logs={}",
+                dump_logs(&stack, &[&alice_d, &bob_d])
+            )
+            .into());
+        }
     }
     let receipt = dm_receipt_delivered(&bob_d, &bob, &conversation, &message).map_err(|error| {
         format!(
