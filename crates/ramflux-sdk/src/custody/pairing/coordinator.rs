@@ -1408,6 +1408,9 @@ fn accept_chunk(
 
 fn protocol_fail_code(error: &SdkError) -> Option<&'static str> {
     match error {
+        SdkError::Crypto(CryptoError::Pairing("UpdateRequired"))
+        | SdkError::PairingCode("UpdateRequired")
+        | SdkError::PairingField("UpdateRequired") => Some("UpdateRequired"),
         SdkError::Crypto(CryptoError::Pairing("confirm_mac"))
         | SdkError::PairingCode("SasMismatch") => Some("SasMismatch"),
         SdkError::Crypto(CryptoError::Pairing(_))

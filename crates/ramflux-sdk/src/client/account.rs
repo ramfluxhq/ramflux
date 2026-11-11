@@ -44,8 +44,10 @@ impl RamfluxClient {
     ) -> Result<(), SdkError> {
         let account_index = self.account_index()?;
         let _writer = account_index.acquire_account_writer(account_id)?;
-        let vault_secret = self.vault_secret_source()?.vault_secret(account_id)?;
-        let wrapping_key = account_db_key_encryption_key(&vault_secret, secret);
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(account_id)?);
+        let wrapping_key =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
         let wrapped =
             account_index.load_wrapped_db_key(account_id)?.ok_or(SdkError::AccountDbNotUnlocked)?;
         let key = unwrap_with_vault_secret(&wrapping_key, &wrapped)?;
@@ -149,8 +151,10 @@ impl RamfluxClient {
             return Err(SdkError::CustodySetupInvalid);
         }
         let account_index = self.account_index()?;
-        let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
-        let key_encryption_key = account_db_key_encryption_key(&vault_secret, secret);
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
+        let key_encryption_key =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, secret));
         let key = if let Some(wrapped) = wrapped {
             unwrap_with_vault_secret(&key_encryption_key, &wrapped)?
         } else {
@@ -195,8 +199,10 @@ impl RamfluxClient {
         new_secret: &[u8],
     ) -> Result<(), SdkError> {
         let _writer = self.account_index()?.acquire_account_writer(local_account_id)?;
-        let vault_secret = self.vault_secret_source()?.vault_secret(local_account_id)?;
-        let key_encryption_key = account_db_key_encryption_key(&vault_secret, new_secret);
+        let vault_secret =
+            zeroize::Zeroizing::new(self.vault_secret_source()?.vault_secret(local_account_id)?);
+        let key_encryption_key =
+            zeroize::Zeroizing::new(account_db_key_encryption_key(&vault_secret, new_secret));
         let wrapped = self.account_db()?.wrap_current_db_key(&key_encryption_key)?;
         self.account_index()?.store_wrapped_db_key(local_account_id, &wrapped)?;
         Ok(())
@@ -477,7 +483,7 @@ fn fresh_receive_incarnation() -> Result<String, SdkError> {
 }
 
 pub(crate) fn account_db_key_encryption_key(vault_secret: &[u8; 32], secret: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = zeroize::Zeroizing::new(blake3::Hasher::new());
     hasher.update(b"ramflux.account_db_kek.v2");
     hasher.update(vault_secret);
     hasher.update(secret);

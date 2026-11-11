@@ -54,7 +54,9 @@ impl CustodyService {
         }
         if matches!(
             action,
-            CustodyProofAction::PairingIssue { .. } | CustodyProofAction::PairingCreate { .. }
+            CustodyProofAction::PairingIssue { .. }
+                | CustodyProofAction::PairingCreate { .. }
+                | CustodyProofAction::PairingDataLease { .. }
         ) && self.pairing.is_none()
         {
             return Err(CustodyRefusal::Unsupported);
@@ -287,6 +289,9 @@ impl CustodyService {
             CustodyProofAction::PairingCreate { request } => {
                 self.finish_pairing_create(&proof.body.device_ref, authority, *request)
             }
+            CustodyProofAction::PairingDataLease { request } => {
+                self.finish_pairing_data_lease(&proof.body.device_ref, authority, &request)
+            }
             CustodyProofAction::HomeMigration { control_hash, publication, purpose } => {
                 let session = CustodySession {
                     session_id: String::new(),
@@ -355,6 +360,22 @@ impl CustodyService {
             }
         }
     }
+    fn finish_pairing_data_lease(
+        &self,
+        device_ref: &DeviceRef,
+        authority: &VerifiedRecord,
+        request: &ramflux_protocol::custody::pairing::full_transfer::lease::LeaseRequest,
+    ) -> Result<CustodyServerFrame, super::ProofFailure> {
+        request.validate().map_err(|_| CustodyRefusal::InvalidInput)?;
+        require_current_primary(device_ref, authority, &request.grant.source_ref)?;
+        let store = self.pairing.as_ref().ok_or(CustodyRefusal::Unsupported)?;
+        let mut store = store.lock().map_err(|_| CustodyRefusal::PersistenceUnavailable)?;
+        match store.issue_data_lease(request, authority, &self.node) {
+            Ok(lease) => Ok(CustodyServerFrame::PairingDataLease { lease: Box::new(lease) }),
+            Err(error) => Ok(pairing_failure(error)),
+        }
+    }
+
     fn finish_pairing_issue(
         &self,
         device_ref: &DeviceRef,

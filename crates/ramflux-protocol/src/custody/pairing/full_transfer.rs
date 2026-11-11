@@ -6,11 +6,19 @@
 use super::{DeviceRef, PairingWire, Result, WireError, b32, budget, reference, require};
 use serde::{Deserialize, Serialize};
 
+mod binding;
+mod diff;
 mod integrity;
+pub mod lease;
+mod packet;
 mod preservation;
 mod record;
+pub mod relay;
 mod stream;
+pub use binding::DataBinding;
+pub use diff::{DiffStats, diff_snapshots};
 pub use integrity::{ChainHasher, RootHasher, chunk_digest, chunk_layout, manifest_hash};
+pub use packet::{DataPacket, FullError, SecretBase64};
 pub use preservation::PreservationFull;
 pub use record::{CellType, RecordHeader, RecordOp};
 pub use stream::{StreamError, copy_record_cells, read_record_header, write_record_header};
@@ -192,6 +200,36 @@ impl PairingWire for Manifest {
 pub struct SourceManifest {
     pub manifest: Manifest,
     pub source_signature: String,
+}
+impl Manifest {
+    /// Compare every projection against the local compiled catalog, including zero-row entries.
+    /// Reverse streams select only locally declared restrictive projections.
+    /// # Errors
+    /// Refuses omitted/extra/reordered families or a peer-chosen codec, rule or restrictive flag.
+    pub fn validate_catalog(&self, catalog: &[Family], reverse: bool) -> Result<()> {
+        self.validate()?;
+        let mut expected = catalog.iter().filter(|family| !reverse || family.restrictive);
+        for family in &self.families {
+            let entry = expected.next().ok_or(WireError::Field("SchemaMismatch"))?;
+            require(
+                family.id == entry.id
+                    && family.codec_version == entry.codec_version
+                    && family.restrictive == entry.restrictive
+                    && family.disposition == entry.disposition
+                    && family.rule_hash == entry.rule_hash,
+                "SchemaMismatch",
+            )?;
+        }
+        require(expected.next().is_none(), "SchemaMismatch")
+    }
+
+    /// # Errors
+    /// Rejects invalid manifest fields before its source branch signs the snapshot commitment.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        crate::custody::signing_bytes("ramflux.identity.transfer.manifest.full.v1", self)
+            .map_err(|_| WireError::Json)
+    }
 }
 impl PairingWire for SourceManifest {
     const LIMIT: usize = MANIFEST_BYTES;

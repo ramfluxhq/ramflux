@@ -420,6 +420,7 @@ impl PairingWire for Failure {
                     | "PublicationPending"
                     | "TransferCapacity"
                     | "TransferFloorsTooLarge"
+                    | "LeaseExpired"
                     | "UpdateRequired"
                     | "VaultUnavailable"
                     | "NotFound"

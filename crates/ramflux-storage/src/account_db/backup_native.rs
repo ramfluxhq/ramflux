@@ -157,6 +157,57 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn full_transfer_pinned_cut_does_not_hold_writer_or_capture_later_edits() -> TestResult {
+        let (root, source) = crate::tests::test_db("full-transfer-pinned-cut")?;
+        source.persist_actor_state("draft/pinned-cut", &"before-pin")?;
+        let cut = source.pin_full_transfer_cut()?;
+        // A real committed write completes while the independent read transaction stays pinned.
+        source.persist_actor_state("draft/pinned-cut", &"after-pin")?;
+        let path = root.join("pinned-cut.db");
+        let copied = cut.write_private_snapshot(
+            &path,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )?;
+        let private = rusqlite::Connection::open(&path)?;
+        private.execute_batch(&zeroize::Zeroizing::new(format!(
+            "PRAGMA key=\"x'{}'\";",
+            zeroize::Zeroizing::new(copied.key.sqlcipher_hex()).as_str()
+        )))?;
+        let pinned: Vec<u8> = private.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind='draft/pinned-cut'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(pinned, b"\"before-pin\"");
+        let current: Vec<u8> = source.connection.query_row(
+            "SELECT state_json FROM runtime_actor_state WHERE state_kind='draft/pinned-cut'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(current, b"\"after-pin\"");
+        private.close().map_err(|(_, error)| error)?;
+        Ok(())
+    }
+
+    #[test]
+    fn full_transfer_cut_account_erase_invalidates_without_copying_old_generation() -> TestResult {
+        let (root, source) = crate::tests::test_db("full-transfer-erased-cut")?;
+        let cut = source.pin_full_transfer_cut()?;
+        drop(source);
+        AccountIndex::open(&root)?.erase_account_database("acct")?;
+        let destination = root.join("refused-erased-cut.db");
+        assert!(matches!(
+            cut.write_private_snapshot(
+                &destination,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+            ),
+            Err(StorageError::PairingField("SnapshotInvalidated"))
+        ));
+        assert!(!destination.exists());
+        Ok(())
+    }
+
     fn add_raw_fixture(source: &AccountDb) -> TestResult {
         source.write_transaction(|| {
             source.put_unsupported_raw_copy(crate::RawInnerCopyWrite {

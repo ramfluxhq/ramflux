@@ -114,6 +114,12 @@ pub struct HpkeSecrets {
 }
 
 impl HpkeSecrets {
+    /// Public half to freeze into the SAS context before the secret is consumed by Auth HPKE.
+    #[must_use]
+    pub fn public_key(&self) -> [u8; 32] {
+        x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(self.sk)).to_bytes()
+    }
+
     /// Generate a 32-byte X25519 seed in place. The adapter takes this type by move.
     ///
     /// # Errors

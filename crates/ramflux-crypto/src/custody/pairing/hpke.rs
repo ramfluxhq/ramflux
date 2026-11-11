@@ -24,6 +24,9 @@ use std::convert::Infallible;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
+mod full;
+pub use full::{FullDataKeys, FullSenderSetup, open_full_receiver, setup_full_sender};
+
 type SuiteKem = X25519HkdfSha256;
 type SuiteKdf = HkdfSha256;
 type SuiteAead = AesGcm256;

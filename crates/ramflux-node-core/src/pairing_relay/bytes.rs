@@ -103,6 +103,7 @@ fn issued_heap(issued: &IssuedSlot) -> usize {
 
 fn live_heap(live: &LiveSlot) -> usize {
     let LiveSlot {
+        data_lease,
         ticket,
         descriptor,
         primary_token,
@@ -119,6 +120,7 @@ fn live_heap(live: &LiveSlot) -> usize {
         .saturating_add(direction_payload(initiator))
         .saturating_add(direction_payload(responder))
         .saturating_add(closed_reason.as_ref().map_or(0, heap_str))
+        .saturating_add(data_lease.as_ref().map_or(0, |lease| lease_cache_heap(lease)))
 }
 
 fn envelope_ticket_heap(envelope: &Envelope<CreateTicket>) -> usize {
@@ -237,4 +239,45 @@ fn commit_heap(commit: &Commit) -> usize {
         .saturating_add(heap_str(invitation_id))
         .saturating_add(heap_str(role))
         .saturating_add(heap_str(commitment))
+}
+
+pub(super) fn lease_cache_heap(cache: &super::store::LeaseCache) -> usize {
+    use ramflux_protocol::custody::pairing::full_transfer::lease::{
+        BranchKeys, DataGrant, DataLease,
+    };
+    let super::store::LeaseCache { request_hash, lease } = cache;
+    let _ = request_hash;
+    let Envelope { body, signature } = lease;
+    let DataLease { schema, version, lease_id, grant, issued_at, expires_at } = body;
+    let _ = (version, issued_at, expires_at);
+    let DataGrant {
+        schema: grant_schema,
+        version: grant_version,
+        transfer_id,
+        node_id,
+        source_ref,
+        destination_ref,
+        branch_keys,
+        opaque_commitment,
+        expires_at: grant_expiry,
+    } = grant;
+    let _ = (grant_version, grant_expiry);
+    let BranchKeys { source, destination } = branch_keys;
+    size_of::<super::store::LeaseCache>()
+        + [
+            schema,
+            lease_id,
+            grant_schema,
+            transfer_id,
+            node_id,
+            opaque_commitment,
+            source,
+            destination,
+            signature,
+        ]
+        .into_iter()
+        .map(heap_str)
+        .sum::<usize>()
+        + device_ref_heap(source_ref)
+        + device_ref_heap(destination_ref)
 }

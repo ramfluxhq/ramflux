@@ -1132,3 +1132,5 @@ fn hpke_epoch_setup_exit() -> Result {
         "device_set_epoch",
     )
 }
+
+mod v3;

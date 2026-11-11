@@ -271,3 +271,63 @@ fn full_transfer_exact_cells_stream_with_bounded_scratch_and_validate_types() ->
     assert!(copy_record_cells(&mut text.as_slice(), &mut std::io::sink(), &header).is_err());
     Ok(())
 }
+
+#[test]
+fn full_transfer_packet_canonical_secret_encoding_and_actual_bounds() -> TestResult {
+    let bytes = vec![7; CHUNK_BYTES as usize];
+    let digest = encode_base64url(chunk_digest(0, &bytes)?);
+    let packet = DataPacket::Chunk {
+        manifest_hash: encode_base64url([1; 32]),
+        index: U64(0),
+        length: U64(u64::from(CHUNK_BYTES)),
+        digest,
+        bytes: SecretBase64::from_bytes(&bytes),
+    };
+    let wire = packet.encode_secret()?;
+    assert_eq!(wire.as_slice(), crate::canonical_json_bytes(&packet)?);
+    assert!(DataPacket::from_wire_bytes(&wire).is_ok());
+    assert!(wire.len() <= DataPacket::LIMIT);
+    // Exactly the two base64 layers prescribed by the inner bytes field and outer ciphertext.
+    let ciphertext_len = wire.len() + 16;
+    assert!(ciphertext_len.div_ceil(3) * 4 + 4096 < PACKET_BYTES);
+    let mut damaged = wire.to_vec();
+    let at = damaged.iter().position(|v| *v == b'B').ok_or("base64 fixture")?;
+    damaged[at] = b'C';
+    assert!(DataPacket::from_wire_bytes(&damaged).is_err());
+    let oversized_control = format!(
+        "{{\"credit\":2,\"durable_through\":null,\"kind\":\"receipt\",\"manifest_hash\":\"{}\"}}",
+        "A".repeat(9000)
+    );
+    assert_eq!(
+        DataPacket::from_wire_bytes(oversized_control.as_bytes()).err(),
+        Some(WireError::Size)
+    );
+    let control = DataPacket::Receipt {
+        manifest_hash: encode_base64url([1; 32]),
+        durable_through: None,
+        credit: 2,
+    };
+    assert_eq!(control.encode_secret()?.as_slice(), crate::canonical_json_bytes(&control)?);
+    let invalid = DataPacket::Receipt {
+        manifest_hash: encode_base64url([1; 32]),
+        durable_through: None,
+        credit: 3,
+    };
+    assert!(invalid.encode_secret().is_err());
+    assert!(
+        DataPacket::Stop { code: FullError::Busy, retry_after_ms: Some(1000) }
+            .encode_secret()
+            .is_ok()
+    );
+    assert!(
+        DataPacket::Stop { code: FullError::Busy, retry_after_ms: Some(999) }
+            .encode_secret()
+            .is_err()
+    );
+    assert!(
+        DataPacket::Stop { code: FullError::LeaseExpired, retry_after_ms: Some(1000) }
+            .encode_secret()
+            .is_err()
+    );
+    Ok(())
+}
