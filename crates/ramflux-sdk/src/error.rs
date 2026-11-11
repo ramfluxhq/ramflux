@@ -86,6 +86,8 @@ pub enum SdkError {
     PriorityWriterAccess,
     #[error("gateway_writer_busy: retryable")]
     GatewayWriterBusy,
+    #[error(transparent)]
+    GeneratedApi(#[from] Box<crate::bindings::AdapterError>),
     #[error("receive epoch reconciliation refused: {0}")]
     ReceiveEpochReconcile(#[from] ReceiveEpochReconcileFailure),
     #[error(transparent)]
@@ -372,5 +374,12 @@ mod tests {
                 SdkError::GatewaySessionRejected(_)
             ));
         }
+    }
+}
+
+impl From<crate::bindings::AdapterError> for SdkError {
+    fn from(error: crate::bindings::AdapterError) -> Self {
+        Self::GeneratedApi(Box::new(error))
+
     }
 }

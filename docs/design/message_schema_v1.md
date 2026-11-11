@@ -4375,9 +4375,26 @@ MessageUpdate, Content and all typed nested descriptors directly. Preserve
 request_id/account_id/operation_id and journal cursor across Rust, ProtoJSON,
 UniFFI, C ABI and WASM adapters. Generated wrappers can add transport correlation,
 not a second message schema or a stringly typed “payload” model. Business errors
-remain typed codes (PeerUpgradeRequired, StorageCapacity,
-SchemaResetRequired, authorization and crypto errors), with exact adapter tests;
-Unsupported is a successful typed row/update. Raw retrieval for local reparse is
+use the single OV2-RD-ERR generated error contract `{code, name, message, details}`.
+Codes and lowercase names are permanent across generated adapters:
+
+| Code | Name | Code | Name |
+|---|---|---|---|
+| 1 | invalid_argument | 9 | target_not_found |
+| 2 | invalid_json | 10 | target_deleted |
+| 3 | peer_upgrade_required | 11 | payload_too_large |
+| 4 | storage_capacity | 12 | rate_limited |
+| 5 | schema_reset_required | 13 | ephemeral_unavailable |
+| 6 | resync_required | 14 | crypto_failure |
+| 7 | edit_conflict | 15 | not_connected |
+| 8 | not_authorized | 16 | internal |
+
+Details carry cursor/floor/head for resync, target/expected/received for edit conflicts,
+and scope/source for storage capacity. Diagnostic text never determines a code.
+Generated Message pages return at most 100 rows and 768KiB encoded, descending immutable
+EventOrder, next_before, and snapshot_sequence. Each row carries its own durable last-change
+journal_sequence, retained independently of journal pruning. Local journal sequences are
+not imported from another store during backup merge. Unsupported is a successful typed row/update. Raw retrieval for local reparse is
 privileged, bounded and off the ordinary update/bus path. Native proofs and
 secret control bytes are not indiscriminately rendered into a desktop model.
 DM-FS-V3-02 consumes no application KindIds; its bootstrap is the canonical input

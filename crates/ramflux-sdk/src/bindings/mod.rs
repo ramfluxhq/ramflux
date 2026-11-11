@@ -39,50 +39,10 @@ pub struct BindingVector {
     pub fields: Vec<BindingField>,
 }
 
-/// Shared error model used by CLI, C ABI, `UniFFI` and WASM adapters.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdapterError {
-    /// Matches `RamfluxErrorCode` for the same refusal.
-    pub code: i32,
-    /// Stable error name.
-    pub name: &'static str,
-    /// Human-readable detail.
-    pub message: String,
-}
-
-impl AdapterError {
-    /// Invalid adapter argument (C ABI code 1).
-    pub const INVALID_ARGUMENT: i32 = 1;
-    /// Non-canonical or unknown-field JSON (C ABI code 2).
-    pub const INVALID_JSON: i32 = 2;
-
-    /// Map an SDK refusal onto the shared adapter error surface.
-    #[must_use]
-    pub fn from_sdk(error: &SdkError) -> Self {
-        match error {
-            SdkError::EditConflict { .. } => Self {
-                code: Self::INVALID_ARGUMENT,
-                name: "EditConflict",
-                message: error.to_string(),
-            },
-            SdkError::Json(_) => Self {
-                code: Self::INVALID_JSON,
-                name: "InvalidCanonicalJson",
-                message: error.to_string(),
-            },
-            SdkError::LocalBus(message) if message.contains("unknown adapter field") => Self {
-                code: Self::INVALID_JSON,
-                name: "InvalidCanonicalJson",
-                message: error.to_string(),
-            },
-            _ => Self {
-                code: Self::INVALID_ARGUMENT,
-                name: "InvalidArgument",
-                message: error.to_string(),
-            },
-        }
-    }
-}
+mod errors;
+#[cfg(test)]
+pub(crate) use errors::test_error_vector;
+pub use errors::{AdapterError, ErrorDetails, GeneratedErrorCode};
 
 /// Descriptor-derived field vector. Product adapters must not hand-maintain names.
 ///
@@ -120,7 +80,13 @@ pub fn bind_adapter_field(message: &str, json_name: &str) -> Result<BindingField
         .fields
         .into_iter()
         .find(|field| field.json_name == json_name || field.name == json_name)
-        .ok_or_else(|| invalid(format!("unknown adapter field {message}.{json_name}")))
+        .ok_or_else(|| {
+            AdapterError::new(
+                GeneratedErrorCode::InvalidJson,
+                format!("unknown adapter field {message}.{json_name}"),
+            )
+            .into()
+        })
 }
 
 /// Encode a generated request to `ProtoJSON` using descriptor field names.
@@ -209,7 +175,11 @@ fn encode_named<T: serde::Serialize>(message: &str, value: &T) -> Result<Value, 
 
 fn reject_unknown_keys(message: &str, value: &Value) -> Result<(), SdkError> {
     let Some(object) = value.as_object() else {
-        return Err(invalid(format!("{message} must be a JSON object")));
+        return Err(AdapterError::new(
+            GeneratedErrorCode::InvalidJson,
+            format!("{message} must be a JSON object"),
+        )
+        .into());
     };
     let allowed: BTreeSet<String> = binding_vector(message)?
         .fields
@@ -218,7 +188,11 @@ fn reject_unknown_keys(message: &str, value: &Value) -> Result<(), SdkError> {
         .collect();
     for key in object.keys() {
         if !allowed.contains(key) {
-            return Err(invalid(format!("unknown adapter field {message}.{key}")));
+            return Err(AdapterError::new(
+                GeneratedErrorCode::InvalidJson,
+                format!("unknown adapter field {message}.{key}"),
+            )
+            .into());
         }
         bind_adapter_field(message, key)?;
     }

@@ -54,10 +54,12 @@ impl AccountDb {
         CREATE TABLE IF NOT EXISTS runtime_inbox_retry(envelope_key TEXT PRIMARY KEY,entry_json BLOB NOT NULL,attempts INTEGER NOT NULL,next_at INTEGER NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS runtime_inbox_policy(envelope_key TEXT PRIMARY KEY,source TEXT NOT NULL,trusted INTEGER NOT NULL,first_seen INTEGER NOT NULL,expires_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,failure_class TEXT NOT NULL,subject TEXT NOT NULL,last_redrive INTEGER NOT NULL DEFAULT 0,last_revision INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS runtime_inbox_changes(kind TEXT NOT NULL,subject TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(kind,subject));
+        CREATE TABLE IF NOT EXISTS runtime_message_sequence(message_id TEXT PRIMARY KEY,seq INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS runtime_message_content(message_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,body BLOB NOT NULL);
         CREATE INDEX IF NOT EXISTS runtime_message_content_conversation ON runtime_message_content(conversation_id,message_id);")?;
         self.connection.execute_batch("CREATE TRIGGER IF NOT EXISTS runtime_content_deleted AFTER UPDATE OF deleted ON direct_message_projection WHEN NEW.deleted=1 BEGIN DELETE FROM runtime_message_content WHERE message_id=NEW.message_id; END;
-            CREATE TRIGGER IF NOT EXISTS runtime_content_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_content WHERE message_id=OLD.message_id; END;")?;
+            CREATE TRIGGER IF NOT EXISTS runtime_content_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_content WHERE message_id=OLD.message_id; END;
+            CREATE TRIGGER IF NOT EXISTS runtime_message_sequence_removed AFTER DELETE ON direct_message_projection BEGIN DELETE FROM runtime_message_sequence WHERE message_id=OLD.message_id; END;")?;
         transaction.commit()?;
         Ok(())
     }

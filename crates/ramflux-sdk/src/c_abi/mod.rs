@@ -878,18 +878,13 @@ fn transport_error_code(error: &ramflux_transport::TransportError) -> RamfluxErr
 
 fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
     match error {
+        SdkError::GeneratedApi(error) => legacy_generated_error_code(error),
         SdkError::ReceiveEpochReconcile(reason) => receive_reconcile_code(*reason),
         SdkError::LifecycleShared(source) => sdk_error_code(source),
         SdkError::DirectoryAuthorityUnavailable { source, .. } => sdk_error_code(source),
         SdkError::DataRootInUse => RamfluxErrorCode::AccountBusy,
         SdkError::CustodyForkFenced => RamfluxErrorCode::CustodyForkFenced,
         SdkError::ObjectErased => RamfluxErrorCode::ObjectErased,
-        SdkError::Storage(ramflux_storage::StorageError::ObjectIdentityConflict) => {
-            RamfluxErrorCode::ObjectIdentityConflict
-        }
-        SdkError::Storage(ramflux_storage::StorageError::ObjectOwnershipUnverified { .. }) => {
-            RamfluxErrorCode::ObjectOwnershipUnverified
-        }
         SdkError::HomeMigrationRefused(reason) => migration_error_code(*reason),
         SdkError::Storage(ramflux_storage::StorageError::AccountSchemaTooNew { .. })
         | SdkError::NetworkingPending
@@ -900,13 +895,16 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
             RamfluxErrorCode::PermissionDenied
         }
         SdkError::CustodyRandomUnavailable
+        | SdkError::HistoryEvidence(_)
         | SdkError::Crypto(_)
         | SdkError::SignatureVerificationFailed(_) => RamfluxErrorCode::CryptoFailed,
         SdkError::SurfaceCheckpointMismatch
+        | SdkError::StorageCapacity { .. }
         | SdkError::LegacyBindingChanged
         | SdkError::AccountIndexNotOpen
         | SdkError::AccountDbNotUnlocked => RamfluxErrorCode::StorageFailed,
         SdkError::CustodyConfirmationFailed
+        | SdkError::GeneratedRefused { .. }
         | SdkError::CustodyCapacity { .. }
         | SdkError::CustodyAdmission { .. }
         | SdkError::CustodyNetwork(_)
@@ -945,6 +943,8 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::TaskManifestWorkerCapacity
         | SdkError::TaskForwardWorkerCapacity => RamfluxErrorCode::RateLimited,
         SdkError::OperationReconciliationRequired(_)
+        | SdkError::EditConflict { .. }
+        | SdkError::PinLimitReached
         | SdkError::RestoreSetupRequired
         | SdkError::CustodySetupInvalid
         | SdkError::CustodyExpired
@@ -973,6 +973,30 @@ fn sdk_error_code(error: &SdkError) -> RamfluxErrorCode {
         | SdkError::PairRecoveryRequired
         | SdkError::PairingField(_)
         | SdkError::PairingCode(_) => RamfluxErrorCode::InvalidArgument,
+    }
+}
+
+// Compatibility for pre-generated entrypoints; generated entrypoints return their own codes.
+fn legacy_generated_error_code(error: &crate::bindings::AdapterError) -> RamfluxErrorCode {
+    use crate::bindings::GeneratedErrorCode as G;
+    match G::try_from(error.code) {
+        Ok(
+            G::InvalidArgument
+            | G::ResyncRequired
+            | G::EditConflict
+            | G::TargetNotFound
+            | G::PayloadTooLarge,
+        ) => RamfluxErrorCode::InvalidArgument,
+        Ok(G::InvalidJson) => RamfluxErrorCode::InvalidCanonicalJson,
+        Ok(G::PeerUpgradeRequired) => RamfluxErrorCode::UnsupportedVersion,
+        Ok(G::StorageCapacity) => RamfluxErrorCode::StorageFailed,
+        Ok(G::SchemaResetRequired) => RamfluxErrorCode::SchemaResetRequired,
+        Ok(G::NotAuthorized) => RamfluxErrorCode::PermissionDenied,
+        Ok(G::TargetDeleted) => RamfluxErrorCode::ObjectErased,
+        Ok(G::RateLimited) => RamfluxErrorCode::RateLimited,
+        Ok(G::EphemeralUnavailable | G::NotConnected) => RamfluxErrorCode::TransportUnavailable,
+        Ok(G::CryptoFailure) => RamfluxErrorCode::CryptoFailed,
+        Ok(G::Internal) | Err(_) => RamfluxErrorCode::Internal,
     }
 }
 
