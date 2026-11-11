@@ -66,6 +66,7 @@ pub const COMMITTING_AEAD_HEADER: &str = "ramflux.committing_aead.header.v1";
 pub const COMMITTING_AEAD_AD: &str = "ramflux.committing_aead.ad.v1";
 pub const FRANKING_OPENING: &str = "ramflux.franking_opening.v1";
 pub const FRANKING_NODE_TAG: &str = "ramflux.franking.node_tag.v1";
+pub const FRANKING_NODE_TAG_V2: &str = "ramflux.franking.node_tag.v2";
 pub const REPORT_OPENING: &str = "ramflux.message.report_opening.v1";
 pub const COLLAPSE_KEY: &str = "ramflux.message.collapse_key.v1";
 pub const KEY_VERIFICATION_SAFETY_NUMBER: &str = "ramflux.safety_number.v1";
@@ -184,7 +185,7 @@ pub const DM_FS_V3_RETIREMENT_LIST: &str = "ramflux.dm_bootstrap_fs.retirement_l
 /// Native bootstrap domain `ramflux.dm_bootstrap_fs.request_hash.v1`.
 pub const DM_FS_V3_REQUEST_HASH: &str = "ramflux.dm_bootstrap_fs.request_hash.v1";
 
-pub const ALL: [&str; 157] = [
+pub const ALL: [&str; 158] = [
     EVENT,
     TASK_EVENT,
     ENVELOPE,
@@ -342,6 +343,7 @@ pub const ALL: [&str; 157] = [
     CUSTODY_MESSAGE_LAYER_DECLARATION,
     REPORT_OPENING,
     COLLAPSE_KEY,
+    FRANKING_NODE_TAG_V2,
 ];
 
 pub const USERNAME_BINDING: &str = "ramflux.identity.username_binding.v1";
@@ -370,8 +372,10 @@ mod tests {
         assert_eq!(super::A2UI_ACTION_ARGS, "ramflux.a2ui.action_args.v1");
         assert!(unique.contains(super::REPORT_OPENING));
         assert!(unique.contains(super::COLLAPSE_KEY));
+        assert!(unique.contains(super::FRANKING_NODE_TAG_V2));
         assert_eq!(super::REPORT_OPENING, "ramflux.message.report_opening.v1");
         assert_eq!(super::COLLAPSE_KEY, "ramflux.message.collapse_key.v1");
+        assert_eq!(super::FRANKING_NODE_TAG_V2, "ramflux.franking.node_tag.v2");
     }
     #[test]
     fn registered_domains_are_prefix_free_and_custody_labels_share_the_identity_namespace() {
@@ -397,9 +401,10 @@ mod tests {
         for label in &super::ALL[140..155] {
             assert!(label.starts_with("ramflux.identity."));
         }
-        assert_eq!(super::ALL[155..].len(), 2);
+        assert_eq!(super::ALL[155..].len(), 3);
         assert!(super::ALL[155..].contains(&super::REPORT_OPENING));
         assert!(super::ALL[155..].contains(&super::COLLAPSE_KEY));
+        assert!(super::ALL[155..].contains(&super::FRANKING_NODE_TAG_V2));
         assert_eq!(
             super::CUSTODY_BRANCH_EXPORTER,
             "EXPERIMENTAL-ramflux.identity.branch_proof.exporter.v3"

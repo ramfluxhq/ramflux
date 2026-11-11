@@ -19,6 +19,7 @@ mod franking;
 mod group_sender;
 mod group_state;
 mod report_opening;
+mod report_receipt;
 pub use group_state::{
     GroupChangeRequestInput, GroupStateCreateInput, GroupStateRelation, VerifiedGroupState,
     accept_group_transfer, advance_group_state, advance_native_group_state,
@@ -104,6 +105,10 @@ pub use report_opening::{
     ReportA0, ReportDeliveryClass, ReportDeliveryMode, ReportFrame, ReportPriority,
     assemble_report_opening, collapse_key, collapse_tag, cover_collapse_tag, encode_report_a0,
     frame_report_plaintext, parse_report_plaintext, report_commitment, verify_report_opening,
+};
+pub use report_receipt::{
+    NodeReportReceiptInput, node_report_receipt_preimage, sign_node_report_receipt,
+    sign_node_report_receipt_with_seed, verify_node_report_receipt,
 };
 pub use signing::{
     CanonicalSignatureBatchItem, CanonicalSignatureSingleKeyBatchItem,

@@ -34,6 +34,7 @@ mod gateway_frames;
 mod gateway_state;
 mod home_migration_store;
 mod home_node_migration;
+mod report_receipt;
 pub use home_migration_store::{
     AttestMigration, AttestedHome, CommitMigration, FenceOutcome, FloorObservation, HomeFloor,
     MAX_CACHED_VERDICTS, MAX_FLOOR_ANCHORS, MigrationAdmission, MigrationBacklogCursor,
@@ -177,6 +178,10 @@ pub(crate) use redb_store::{
 };
 pub use relay::*;
 pub use replay_guard::*;
+pub use report_receipt::{
+    GroupReportEvidence, NodeReportReceipt, append_node_report_receipt,
+    verify_bound_node_report_receipt, verify_group_report_evidence,
+};
 pub use retention::*;
 pub use router::*;
 pub use router_store::publication;

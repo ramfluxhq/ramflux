@@ -82,6 +82,7 @@ mod tests {
             encrypted_payload: "payload".to_owned(),
             payload_hash: "hash".to_owned(),
             collapse_tag: ramflux_protocol::encode_base64url([0x22_u8; 32]),
+            report_commitment: ramflux_protocol::encode_base64url([0x33_u8; 32]),
             delivery_mode: NamedDeliveryMode::Durable,
             node_report_receipt: None,
             signed: SignedFields {
