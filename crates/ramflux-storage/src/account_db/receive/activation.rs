@@ -20,7 +20,7 @@ pub const UNKNOWN_ACTIVATION: &str = "receive activation unknown";
 pub const MISSING_EPOCH: &str = "receive activation missing epoch";
 
 /// First-activation switch; already-activated accounts stay on the ledger when disabled.
-pub const FIRST_ACTIVATION_DEFAULT: bool = false;
+pub const FIRST_ACTIVATION_DEFAULT: bool = true;
 
 /// Whether this account DB has committed ledger activation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
