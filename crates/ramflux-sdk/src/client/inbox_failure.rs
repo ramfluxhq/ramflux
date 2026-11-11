@@ -40,6 +40,7 @@ pub(crate) fn deterministic(error: &SdkError) -> Option<&'static str> {
     match error {
         SdkError::DirectoryAuthorityUnavailable { source, .. } => deterministic(source),
         SdkError::ReplayMismatch => Some("replay_mismatch"),
+        SdkError::EditConflict { .. } => Some("edit_conflict"),
         SdkError::Crypto(
             ramflux_crypto::CryptoError::VerifyFailed
             | ramflux_crypto::CryptoError::InvalidSignatureLength(_)

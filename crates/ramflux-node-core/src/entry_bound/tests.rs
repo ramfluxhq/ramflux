@@ -66,6 +66,7 @@ fn bind_candidate_named_fields(envelope: &mut ramflux_protocol::Envelope) {
     if ramflux_protocol::schema_profile::schema_v1_live() {
         envelope.delivery_mode = Some("durable".into());
         envelope.collapse_tag = Some(ramflux_protocol::encode_base64url([0x22_u8; 32]));
+        envelope.report_commitment = Some(ramflux_protocol::encode_base64url([0x23_u8; 32]));
     }
 }
 

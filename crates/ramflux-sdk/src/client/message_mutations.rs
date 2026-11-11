@@ -7,6 +7,173 @@ use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message::registry::{COMPILED_LAYER, PROFILE_FLOOR, kind_binding};
 use ramflux_protocol::message::{DeleteScope, KindId};
 
+/// OV-EDIT-DIGEST transcript over the canonical target and exact content in force.
+/// # Errors
+/// Refuses malformed references, unsupported stored content and oversized fields.
+pub fn previous_content_digest(
+    target: &ramflux_protocol::message::MessageRef,
+    stored_inner: &[u8],
+) -> Result<[u8; 32], SdkError> {
+    use prost::Message as _;
+    let exact = ramflux_protocol::message::exact_content::message_in_force(stored_inner)
+        .map_err(|_| refused("stored message has no exact editable content"))?;
+    if target.id.is_empty() || target.conversation_id.is_empty() || target.author_anchor.is_empty() {
+        return Err(refused("edit target is not source-qualified"));
+    }
+    let reference = target.encode_to_vec();
+    let mut input = Vec::with_capacity(reference.len() + exact.len() + 8);
+    for field in [reference.as_slice(), exact] {
+        let length = u32::try_from(field.len()).map_err(|_| refused("edit digest input too large"))?;
+        input.extend_from_slice(&length.to_be_bytes());
+        input.extend_from_slice(field);
+    }
+    Ok(ramflux_crypto::blake3_256(ramflux_protocol::domain::EDIT_PREVIOUS_CONTENT, &input))
+}
+
+impl RamfluxClient {
+    /// Apply a generated Delete after transport/source authentication.
+    /// # Errors
+    /// Refuses foreign LOCAL scope, forged authors and unsupported moderator proofs.
+    pub fn apply_generated_delete_entry(
+        &self,
+        entry: &crate::GatewayInboxEntry,
+        conversation: &str,
+        delete: &ramflux_protocol::message::Delete,
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(
+            crate::client::identity_authority::HeadUse::NewAuthorization, entry,
+        )?;
+        let scope = DeleteScope::try_from(delete.scope).map_err(|_| refused("delete scope invalid"))?;
+        if delete.targets.is_empty() || delete.tombstone_id.is_empty() || scope == DeleteScope::Unspecified {
+            return Err(SdkError::InboundRejected("delete targets, scope and tombstone are required".into()));
+        }
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            for target in &delete.targets {
+                let id = std::str::from_utf8(&target.id).map_err(|_| refused("delete target unbound"))?;
+                if target.conversation_id != conversation { return Err(SdkError::InboundRejected("delete conversation mismatch".into())); }
+                if db.message_is_deleted(id)? { continue; }
+                let row = self.direct_message_by_id(id)?.ok_or_else(|| refused("delete target missing"))?;
+                let author = self.generated_target_author(conversation, id, row.is_own)?;
+                if row.conversation_id != conversation || author != target.author_anchor {
+                    return Err(SdkError::InboundRejected("delete target author mismatch".into()));
+                }
+                let allowed = match scope {
+                    DeleteScope::Local => source.root_commitment() == self.own_account_anchor()?,
+                    DeleteScope::Everyone => source.root_commitment() == author,
+                    DeleteScope::Unspecified => false,
+                };
+                if !allowed { return Err(SdkError::InboundRejected("delete sender has no target authority".into())); }
+                let tombstone = format!("generated:{}", ramflux_protocol::encode_base64url(
+                    ramflux_protocol::canonical_json_bytes(&(source.root_commitment(), id, &delete.tombstone_id))?,
+                ));
+                db.delete_direct_message(conversation, id,
+                    if scope == DeleteScope::Local { "local" } else { "everyone" }, &tombstone)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn generated_target_author(&self, conversation: &str, id: &str, own: bool) -> Result<String, SdkError> {
+        if own { return self.own_account_anchor(); }
+        self.message_origin(conversation, id)?
+            .and_then(|origin| origin["sender_root_commitment"].as_str().map(str::to_owned))
+            .ok_or_else(|| refused("mutation target has no authenticated origin"))
+    }
+
+    /// Apply one idempotent generated reaction using a source-qualified operation id.
+    /// # Errors
+    /// Refuses missing/unbound targets, invalid tokens or an operation id reused with new intent.
+    pub fn apply_generated_reaction_entry(
+        &self,
+        entry: &crate::GatewayInboxEntry,
+        conversation: &str,
+        reaction: &ramflux_protocol::message::Reaction,
+    ) -> Result<bool, SdkError> {
+        ramflux_protocol::message::validation::validate_reaction_token(&reaction.token)
+            .map_err(|_| refused("invalid reaction token"))?;
+        let source = self.authenticated_device_identity(
+            crate::client::identity_authority::HeadUse::NewAuthorization, entry,
+        )?;
+        let target = reaction.target.as_ref().ok_or_else(|| refused("reaction target missing"))?;
+        let id = std::str::from_utf8(&target.id).map_err(|_| refused("reaction target unbound"))?;
+        if target.conversation_id != conversation || reaction.operation_id.is_empty() {
+            return Err(SdkError::InboundRejected("reaction conversation or operation id missing".into()));
+        }
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if db.message_is_deleted(id)? { return Ok(false); }
+            let row = self.direct_message_by_id(id)?.ok_or_else(|| refused("reaction target missing"))?;
+            if row.conversation_id != conversation || target.author_anchor != self.generated_target_author(conversation, id, row.is_own)? {
+                return Err(SdkError::InboundRejected("reaction target author mismatch".into()));
+            }
+            let operation = format!("routed/reaction-operation/{}/{}", source.root_commitment(), ramflux_protocol::encode_base64url(&reaction.operation_id));
+            if let Some(previous) = db.load_actor_state::<ramflux_protocol::message::Reaction>(&operation)? {
+                if previous != *reaction { return Err(SdkError::ReplayMismatch); }
+                return Ok(false);
+            }
+            let key = format!("routed/reaction/{}", ramflux_protocol::encode_base64url(
+                ramflux_protocol::canonical_json_bytes(&(target, source.root_commitment(), &reaction.token))?,
+            ));
+            if reaction.remove { db.remove_actor_state(&key)?; }
+            else { db.persist_message_actor_state(id, &key, reaction)?; }
+            db.persist_message_actor_state(id, &operation, reaction)?;
+            Ok(true)
+        })
+    }
+
+    /// Apply an authenticated edit using the exact received replacement bytes.
+    /// # Errors
+    /// Refuses forged authors/targets; a gap or digest mismatch returns `EditConflict`.
+    pub fn apply_generated_edit_entry(
+        &self,
+        entry: &crate::GatewayInboxEntry,
+        conversation: &str,
+        exact_inner: &[u8],
+    ) -> Result<bool, SdkError> {
+        use ramflux_protocol::message as g;
+        let source = self.authenticated_device_identity(
+            crate::client::identity_authority::HeadUse::NewAuthorization, entry,
+        )?;
+        let (_, content) = Self::decode_generated_inner(exact_inner)?;
+        let Some(g::content::Value::Edit(edit)) = content.value else {
+            return Err(refused("expected generated Edit"));
+        };
+        let target = edit.target.as_ref().ok_or_else(|| refused("edit target missing"))?;
+        if target.conversation_id != conversation || target.author_anchor != source.root_commitment() {
+            return Err(SdkError::InboundRejected("edit requires the original author".into()));
+        }
+        let target_id = std::str::from_utf8(&target.id).map_err(|_| refused("edit target is unbound"))?;
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            if db.message_is_deleted(target_id)? { return Ok(false); }
+            let row = self.direct_message_by_id(target_id)?.ok_or_else(|| refused("edit target missing"))?;
+            let author = if row.is_own {
+                self.own_account_anchor()?
+            } else {
+                self.message_origin(conversation, target_id)?
+                    .and_then(|origin| origin["sender_root_commitment"].as_str().map(str::to_owned))
+                    .ok_or_else(|| refused("edit target has no authenticated origin"))?
+            };
+            if author != source.root_commitment() || row.conversation_id != conversation {
+                return Err(SdkError::InboundRejected("edit target author or conversation mismatch".into()));
+            }
+            let state_key = format!("routed/edit-revision/{target_id}");
+            let applied = db.load_actor_state::<u64>(&state_key)?.unwrap_or(0);
+            if edit.revision <= applied { return Ok(false); }
+            let expected = applied.checked_add(1).ok_or_else(|| refused("edit revision exhausted"))?;
+            let stored = db.message_content(target_id)?.ok_or_else(|| refused("edit target content missing"))?;
+            let digest = previous_content_digest(target, &stored)?;
+            if edit.revision != expected || edit.previous_content_digest.as_slice() != digest {
+                return Err(SdkError::EditConflict { target: target_id.to_owned(), expected, received: edit.revision });
+            }
+            db.replace_surface_message_content(conversation, target_id, exact_inner)?;
+            db.persist_message_actor_state(target_id, &state_key, &edit.revision)?;
+            Ok(true)
+        })
+    }
+}
+
 /// Who is applying a mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationActor {

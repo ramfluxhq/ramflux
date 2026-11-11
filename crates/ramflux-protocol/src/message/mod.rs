@@ -13,6 +13,7 @@ mod generated;
 pub use generated::*;
 mod canonical;
 pub mod client_class;
+pub mod exact_content;
 pub use client_class::{
     ClientDeliveryClass, ProviderPush, client_class_from_delivery, client_class_from_notification,
     provider_push,
@@ -21,6 +22,7 @@ pub mod outer;
 mod protojson;
 pub mod registry;
 mod scanner;
+pub mod self_sync;
 pub mod validation;
 mod wire;
 pub use protojson::from_protojson;

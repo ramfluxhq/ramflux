@@ -55,6 +55,8 @@ pub enum ReceiveEpochReconcileFailure {
 pub enum SdkError {
     #[error("receive epoch reconciliation refused: {0}")]
     ReceiveEpochReconcile(#[from] ReceiveEpochReconcileFailure),
+    #[error("edit conflict for {target}: expected revision {expected}, received {received}")]
+    EditConflict { target: String, expected: u64, received: u64 },
     #[error("offline retention {0} is outside 3600..=604800 seconds")]
     InvalidOfflineRetention(u64),
     #[error(transparent)]

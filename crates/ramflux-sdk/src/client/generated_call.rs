@@ -6,6 +6,7 @@
 use super::generated_content::GeneratedEventStream;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message as g;
+pub(crate) mod native;
 
 /// Native `CallControl` checks: 13 actions, signer, lease consent/key/rekey.
 /// # Errors
@@ -142,6 +143,17 @@ fn refused(message: &str) -> SdkError {
 }
 
 impl RamfluxClient {
+    /// Convert the signed native call document through the generated model without changing it.
+    /// # Errors
+    /// Refuses incomplete native fields or an invalid generated Inner.
+    pub fn encode_native_call_inner(
+        stream: &mut GeneratedEventStream,
+        event_id: Vec<u8>,
+        control: &ramflux_protocol::CallControl,
+    ) -> Result<Vec<u8>, SdkError> {
+        Self::encode_generated_call(stream, event_id, native::from_native(control))
+    }
+
     /// Encode a generated Call Inner. Does not send or persist.
     /// # Errors
     /// Same as [`validate_generated_call`].

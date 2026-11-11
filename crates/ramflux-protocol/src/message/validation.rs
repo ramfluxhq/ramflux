@@ -182,6 +182,7 @@ pub fn validate_content(content: &Content) -> Result<(), ValidationError> {
         content::Value::Reaction(reaction) => validate_reaction(reaction),
         content::Value::Receipt(receipt) => validate_receipt(receipt),
         content::Value::Service(service) => validate_service(service),
+        content::Value::SelfSync(value) => super::self_sync::validate(value).map(|_| ()),
         content::Value::Control(control) => {
             use prost::Message as _;
             let encoded = control.encode_to_vec();
@@ -262,6 +263,9 @@ pub fn validate_message(message: &Message) -> Result<(), ValidationError> {
 }
 
 fn validate_edit(edit: &Edit) -> Result<(), ValidationError> {
+    if edit.previous_content_digest.len() != 32 || edit.revision == 0 || edit.target.is_none() {
+        return Err(ValidationError::Content);
+    }
     validate_optional_message_ref(edit.target.as_ref())?;
     validate_message(edit.replacement.as_ref().ok_or(ValidationError::Content)?)
 }

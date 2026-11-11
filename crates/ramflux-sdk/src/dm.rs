@@ -517,11 +517,35 @@ pub(crate) fn gateway_envelope_from_sealed(
     gateway_direct_message_envelope_sealed(config, message, franking, committed_a0.as_deref())
 }
 
+pub(crate) fn gateway_ephemeral_envelope_from_sealed(
+    config: &GatewaySessionConfig,
+    message: &mut GatewayDirectMessage,
+    sealed: crate::client::routed::SealedRouted,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    if !crate::client::target_selection::schema_v1_selected() {
+        return Err(SdkError::InboundRejected("generated ephemeral delivery requires schema v1".into()));
+    }
+    let (packet, committed) = sealed.into_parts();
+    message.encrypted_body = serde_json::to_vec(&packet)?;
+    gateway_envelope_with_policy(config, message, None, committed.as_deref(), "ephemeral", ramflux_protocol::Priority::Low)
+}
+
 pub(crate) fn gateway_direct_message_envelope_sealed(
     config: &GatewaySessionConfig,
     message: &GatewayDirectMessage,
     franking: Option<&SdkDmFrankingMetadata>,
     committed_a0: Option<&[u8]>,
+) -> Result<ramflux_protocol::Envelope, SdkError> {
+    gateway_envelope_with_policy(config, message, franking, committed_a0, "durable", ramflux_protocol::Priority::Normal)
+}
+
+fn gateway_envelope_with_policy(
+    config: &GatewaySessionConfig,
+    message: &GatewayDirectMessage,
+    franking: Option<&SdkDmFrankingMetadata>,
+    committed_a0: Option<&[u8]>,
+    mode: &str,
+    priority: ramflux_protocol::Priority,
 ) -> Result<ramflux_protocol::Envelope, SdkError> {
     let encrypted_payload = wire_payload(&message.encrypted_body)?;
     let payload_hash = ramflux_crypto::blake3_256_base64url(
@@ -548,7 +572,7 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
         target_delivery_id: message.target_delivery_id.clone(),
         routing_set_id: None,
         delivery_class: ramflux_protocol::DeliveryClass::OpaqueEvent,
-        priority: ramflux_protocol::Priority::Normal,
+        priority,
         ttl: message.ttl,
         created_at: message.created_at,
         encrypted_payload,
@@ -563,6 +587,9 @@ pub(crate) fn gateway_direct_message_envelope_sealed(
         nested_tag.as_deref(),
         nested_commitment.as_deref(),
     );
+    if crate::client::target_selection::schema_v1_selected() {
+        envelope.delivery_mode = Some(mode.to_owned());
+    }
     if let Some(source) = &config.source_identity {
         if source.device_id() != envelope.source_device_id {
             return Err(SdkError::GatewaySessionRejected(

@@ -403,6 +403,7 @@ fn actor_state_may_reference_message(key: &str) -> bool {
     !key.starts_with("routed/seen/")
         && [
             "routed/",
+            "self-sync/",
             "directory/message/",
             "directory/object/",
             "message/origin/",
