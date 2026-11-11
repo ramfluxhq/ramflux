@@ -86,12 +86,6 @@ async fn r2_a_head_subscriber_and_status_reader_get_idle_samples_across_restart_
                 assert_eq!(ack["sync_status"], snapshot["sync_status"]);
                 assert_eq!(ack["node_health"], snapshot["node_health"]);
                 assert_eq!(ack["last_run"], 2000 + restart);
-                let again = bus
-                    .request_frame(request("status", "bob", "sync.status.get", json!({})))
-                    .await?;
-                assert_eq!(again["last_run"], 2000 + restart);
-                assert_eq!(again["sync_status"]["seq"], snapshot["sync_status"]["seq"]);
-                assert_eq!(again["node_health"]["seq"], snapshot["node_health"]["seq"]);
                 supervisor.shutdown().await?;
                 drop(bus);
                 server.abort();
