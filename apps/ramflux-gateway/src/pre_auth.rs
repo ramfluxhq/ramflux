@@ -6,7 +6,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 /// Preserve the node's IPv6 /64 and IPv4-mapped policy. The well-known NAT64
-/// prefix (64:ff9b::/96) represents the same source as its embedded IPv4 address;
+/// prefix (`64:ff9b::/96`) represents the same source as its embedded IPv4 address;
 /// network-specific translation prefixes are not inferred from arbitrary IPv6.
 #[must_use]
 pub(crate) fn source_key(peer: IpAddr) -> String {
