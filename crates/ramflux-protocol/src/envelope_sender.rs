@@ -7,8 +7,14 @@ use crate::{Envelope, ProtocolError};
 /// # Errors
 /// Returns canonical JSON errors.
 pub fn envelope_sender_signed_bytes(envelope: &Envelope) -> Result<Vec<u8>, ProtocolError> {
-    if envelope.schema == "ramflux.envelope.v2" || crate::schema_profile::ACTIVE_STORAGE_GENERATION == 1 {
-        return Ok(crate::sender_signed_transcript(envelope, crate::SenderTranscriptMode::WithCiphertext)?.bytes);
+    if envelope.schema == "ramflux.envelope.v2"
+        || crate::schema_profile::ACTIVE_STORAGE_GENERATION == 1
+    {
+        return Ok(crate::sender_signed_transcript(
+            envelope,
+            crate::SenderTranscriptMode::WithCiphertext,
+        )?
+        .bytes);
     }
     let mut sender = envelope.clone();
     // Forwarders attach existing root-signed device-set evidence. Its independent signatures
@@ -35,4 +41,26 @@ pub fn candidate_outer_sender_signed_bytes(
     outer: &crate::message::outer::CandidateOuterEnvelope,
 ) -> Result<Vec<u8>, ProtocolError> {
     crate::message::outer::candidate_outer_sender_signed_bytes(outer)
+}
+
+/// Verify a transport envelope through the checked sender transcript.
+/// The signed schema selects its transcript; a failed v2 verification never falls back.
+/// # Errors
+/// Refuses invalid profiles, ciphertext hash mismatches and invalid signatures.
+pub fn verify_envelope_sender_signature(
+    envelope: &Envelope,
+    public_key: &str,
+) -> Result<(), ProtocolError> {
+    if envelope.schema == "ramflux.envelope.v2"
+        || crate::schema_profile::ACTIVE_STORAGE_GENERATION == 1
+    {
+        crate::verify_sender_signature(
+            envelope,
+            crate::SenderTranscriptMode::WithCiphertext,
+            public_key,
+        )?;
+        return Ok(());
+    }
+    let bytes = envelope_sender_signed_bytes(envelope)?;
+    crate::verify_canonical_signature(&bytes, &envelope.signed.signature, public_key)
 }

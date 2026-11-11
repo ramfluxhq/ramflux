@@ -845,6 +845,21 @@ message HistoryItem {
   reserved "origin_evidence";
   HistoryOriginEvidence source_evidence = 16;
   optional Delete tombstone = 3;
+  bytes exact_original_identity = 4;
+  HistoryOriginalMetadataEvidence original_metadata_evidence = 5;
+}
+message HistoryOriginalMetadataEvidence {
+  bytes canonical_sender_envelope = 1;
+  NativeCustodyManifest source_authority = 2;
+  optional NativeGroupSnapshot group_membership = 3;
+  optional OriginalGroupBinding group_binding = 4;
+  uint32 layer = 5; // Original Message layer; never inferred from the Edit.
+}
+message OriginalGroupBinding {
+  string group_id = 1;
+  QualifiedDevice author = 2;
+  uint64 key_epoch = 3;
+  bytes group_state_hash = 4;
 }
 message HistoryOriginEvidence {
   bytes canonical_sender_envelope = 1;
@@ -4837,3 +4852,27 @@ or accepting a signature. Evidence requires the ciphertext key absent, never emp
 ciphertext_bound=false. Evidence binds exact Inner to the signer through C/kf and native proofs;
 it proves no property about absent ciphertext. Keep AEAD A and C/A0 unchanged. The actual
 activation reset drops or re-signs in-flight old signed rows and admits no legacy signature fallback.
+
+
+### OV-EDIT-HISTORY: adopted edit-history audit r1
+
+Original metadata commitment is HEADER-ONLY, domain `ramflux.message.original_header.v1`:
+raw BLAKE3(LP(domain) || LP(u32_be(layer)) || LP(u32_be(kind)) || LP(deterministic
+EventIdentity) || LP(u64_be(issued_at)) || LP(u64_be(expires_at)) || LP(group_binding)).
+Times are signed outer created_at and checked created_at+ttl, in seconds. Group binding
+is empty for DM; otherwise LP(group_id)||LP(canonical QualifiedDevice author)||
+LP(u64_be(key_epoch))||LP(raw group_state_hash). No original body field is committed or retained.
+The ext is required on every Message outer, forbidden on other kinds, recomputed after C
+before any projection or retention, and signed by the v2 sender transcript. A0 is unchanged.
+HistoryItem tags 4/5 carry canonical original identity (<=1 KiB) and body-free original
+metadata evidence (outer <=8 KiB), only with an Edit and no tombstone. Group evidence retains
+only group_id/author/key_epoch/group_state_hash, native manifest and signed group snapshot.
+Verified original and Edit roots must match; target id/conversation/root bind to that original
+identity. Import uses normal (revision,event id) order without previous-digest conflict checks.
+One edit transaction retires every original kf/report opening, group plaintext/opening,
+old body, prepared own-copy and cached page, then installs body-free evidence. C remains safe
+only because kf is retired: knowing I alone does not permit a keyed commitment guess check.
+Original reports fail ReportOpeningRetired. Later edits keep one original metadata proof and
+only the current Edit proof; Delete erases both. Own-sent current-state transfer uses sibling
+attestation without tags 4/5. Full-Message replacement/drop-media cases from this audit override
+older text/entities-only restrictions. Exact rules/tests are OV-EDIT-HISTORY in the decisions file.

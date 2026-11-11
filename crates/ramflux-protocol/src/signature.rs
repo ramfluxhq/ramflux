@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -32,7 +32,7 @@ pub fn verify_canonical_signature(
     let verifying_key = VerifyingKey::from_bytes(&public_key_array)
         .map_err(|_err| ProtocolError::SignatureVerificationFailed)?;
     verifying_key
-        .verify(canonical, &signature)
+        .verify_strict(canonical, &signature)
         .map_err(|_err| ProtocolError::SignatureVerificationFailed)
 }
 

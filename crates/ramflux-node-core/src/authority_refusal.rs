@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum EnvelopeAuthorityReason {
     Revoked,
     AuthorityMismatch,
+    PayloadHashMismatch,
     StaleEpoch,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

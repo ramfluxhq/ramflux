@@ -91,6 +91,8 @@ impl Envelope {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryClass {
+    Message,
+    CallWake,
     OpaqueEvent,
     SelfDeviceControl,
     NotificationWake,

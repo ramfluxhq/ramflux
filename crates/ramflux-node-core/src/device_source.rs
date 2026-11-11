@@ -118,14 +118,15 @@ impl DeviceAuthKeyResponse {
         {
             return Err(reject());
         }
-        let bytes =
-            ramflux_protocol::envelope_sender_signed_bytes(envelope).map_err(|_| reject())?;
-        ramflux_crypto::verify_canonical_signature(
-            &bytes,
-            &envelope.signed.signature,
-            &self.branch_public_key,
-        )
-        .map_err(|_| reject())?;
+        ramflux_protocol::verify_envelope_sender_signature(envelope, &self.branch_public_key)
+            .map_err(|error| match error {
+                ramflux_protocol::ProtocolError::PayloadHashMismatch => {
+                    NodeCoreError::SourceAuthorityRefused {
+                        reason_code: crate::EnvelopeAuthorityReason::PayloadHashMismatch,
+                    }
+                }
+                _ => reject(),
+            })?;
         Ok(source)
     }
     /// Read forwarded public authority only after independently verifying root and sender signatures.

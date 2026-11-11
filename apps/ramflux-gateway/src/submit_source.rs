@@ -20,11 +20,7 @@ pub(crate) fn bind_source(
         ramflux_protocol::message::outer::refuse_live_bridge(&envelope)
             .map_err(|error| anyhow::anyhow!(error))?;
     }
-    ramflux_crypto::verify_canonical_signature(
-        &ramflux_protocol::envelope_sender_signed_bytes(&envelope)?,
-        &envelope.signed.signature,
-        &runtime.branch_public_key,
-    )?;
+    ramflux_protocol::verify_envelope_sender_signature(&envelope, &runtime.branch_public_key)?;
     // The router resolves the current signed set for every submission.
     // A session-open snapshot must never be propagated as current authority.
     Ok(envelope)
