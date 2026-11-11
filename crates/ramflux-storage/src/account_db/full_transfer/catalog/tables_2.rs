@@ -19,10 +19,7 @@ pub(super) const RULE_80: FamilyRule = table_rule!(
         true,
         Transfer,
         Immutable,
-        CodecRule::RequiresOwner {
-            owner: "object_identity_replacement",
-            cell_type: CellType::Utf8
-        }
+        CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
     ),]
 );
 pub(super) const RULE_81: FamilyRule = table_rule!(
@@ -1091,10 +1088,7 @@ pub(super) const RULE_99: FamilyRule = table_rule!(
         true,
         Transfer,
         Immutable,
-        CodecRule::RequiresOwner {
-            owner: "object_segment_reference_veto",
-            cell_type: CellType::Bytes
-        }
+        CodecRule::SqlBytes { length: U64(32), nullable: false }
     ),]
 );
 pub(super) const RULE_100: FamilyRule = table_rule!(

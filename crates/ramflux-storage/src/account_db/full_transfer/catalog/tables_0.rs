@@ -86,10 +86,7 @@ pub(super) const RULE_1: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner {
-                owner: "account_erasure_generation",
-                cell_type: CellType::I64
-            }
+            CodecRule::SqlI64 { min: "1", max: "1", nullable: false }
         ),
         (
             "generation",
@@ -97,7 +94,7 @@ pub(super) const RULE_1: FamilyRule = table_rule!(
             false,
             Transfer,
             RestrictUnion,
-            CodecRule::Scalar { cell_type: CellType::I64 }
+            CodecRule::SqlI64 { min: "0", max: "9223372036854775807", nullable: false }
         ),
     ]
 );

@@ -73,6 +73,22 @@ pub enum CodecRule {
     Scalar {
         cell_type: CellType,
     },
+    /// Raw SQL byte cell with an exact semantic width; never an opaque JSON codec.
+    SqlBytes {
+        length: U64,
+        nullable: bool,
+    },
+    /// SQL text holding canonical unpadded base64url with an exact decoded width.
+    SqlBase64 {
+        decoded_bytes: U64,
+        nullable: bool,
+    },
+    /// Raw SQL signed integer; bounds are canonical decimal strings in the rule hash.
+    SqlI64 {
+        min: &'static str,
+        max: &'static str,
+        nullable: bool,
+    },
     Object {
         fields: &'static [FieldRule],
     },
@@ -171,30 +187,7 @@ impl FamilyRule {
         {
             return Err(unsupported());
         }
-        for (index, cell) in self.cells.iter().enumerate() {
-            if !identifier(cell.name, false)
-                || cell.cell_type == CellType::Null
-                || self.cells[..index].iter().any(|earlier| earlier.name == cell.name)
-            {
-                return Err(unsupported());
-            }
-            let field =
-                self.codec.iter().find(|field| field.name == cell.name).ok_or_else(unsupported)?;
-            if field.disposition != Disposition::Transfer || field.nullable != cell.nullable {
-                return Err(unsupported());
-            }
-            if let CodecRule::Scalar { cell_type } | CodecRule::RequiresOwner { cell_type, .. } =
-                field.codec
-            {
-                if cell_type != cell.cell_type {
-                    return Err(unsupported());
-                }
-            } else if !matches!(field.codec, CodecRule::RequiresOwner { .. })
-                && !matches!(cell.cell_type, CellType::Utf8 | CellType::Bytes)
-            {
-                return Err(unsupported());
-            }
-        }
+        self.validate_cells()?;
         for (index, name) in self.excluded.iter().enumerate() {
             if !identifier(name, false)
                 || self.excluded[..index].contains(name)
@@ -231,6 +224,52 @@ impl FamilyRule {
                 || !path.starts_with('/')
                 || self.restrictive_projection[..index].contains(path)
                 || !projection_exists(self.codec, &mut path[1..].split('/'))
+            {
+                return Err(unsupported());
+            }
+        }
+        Ok(())
+    }
+    fn validate_cells(&self) -> Result<(), StorageError> {
+        if matches!(self.selector, FamilySelector::ActorPrefix(_))
+            && self.codec.iter().any(|field| {
+                matches!(
+                    field.codec,
+                    CodecRule::SqlBytes { .. }
+                        | CodecRule::SqlBase64 { .. }
+                        | CodecRule::SqlI64 { .. }
+                )
+            })
+        {
+            return Err(unsupported());
+        }
+        for (index, cell) in self.cells.iter().enumerate() {
+            if !identifier(cell.name, false)
+                || cell.cell_type == CellType::Null
+                || self.cells[..index].iter().any(|earlier| earlier.name == cell.name)
+            {
+                return Err(unsupported());
+            }
+            let field =
+                self.codec.iter().find(|field| field.name == cell.name).ok_or_else(unsupported)?;
+            if field.disposition != Disposition::Transfer || field.nullable != cell.nullable {
+                return Err(unsupported());
+            }
+            let physical = match field.codec {
+                CodecRule::Scalar { cell_type } | CodecRule::RequiresOwner { cell_type, .. } => {
+                    Some(cell_type)
+                }
+                CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
+                CodecRule::SqlBase64 { .. } => Some(CellType::Utf8),
+                CodecRule::SqlI64 { .. } => Some(CellType::I64),
+                _ => None,
+            };
+            if let Some(cell_type) = physical {
+                if cell_type != cell.cell_type {
+                    return Err(unsupported());
+                }
+            } else if !matches!(field.codec, CodecRule::RequiresOwner { .. })
+                && !matches!(cell.cell_type, CellType::Utf8 | CellType::Bytes)
             {
                 return Err(unsupported());
             }
@@ -335,6 +374,22 @@ fn validate_codec(
     }
     *remaining -= 1;
     match codec {
+        CodecRule::SqlBase64 { decoded_bytes, .. } => {
+            if depth != 1 || decoded_bytes.0 != 32 {
+                return Err(unsupported());
+            }
+        }
+        CodecRule::SqlBytes { length, .. } => {
+            if depth != 1 || length.0 == 0 || length.0 > i64::MAX.cast_unsigned() {
+                return Err(unsupported());
+            }
+        }
+        CodecRule::SqlI64 { min, max, .. } => {
+            if depth != 1 {
+                return Err(unsupported());
+            }
+            sql_i64_bounds(min, max)?;
+        }
         CodecRule::Generated { cell_type, hidden, expression } => {
             if *cell_type == CellType::Null
                 || !matches!(hidden, 2 | 3)
@@ -395,6 +450,14 @@ fn validate_codec(
     }
     Ok(())
 }
+pub(super) fn sql_i64_bounds(min: &str, max: &str) -> Result<(i64, i64), StorageError> {
+    let low = min.parse::<i64>().map_err(|_| unsupported())?;
+    let high = max.parse::<i64>().map_err(|_| unsupported())?;
+    if low > high || low.to_string() != min || high.to_string() != max {
+        return Err(unsupported());
+    }
+    Ok((low, high))
+}
 fn projection_exists(fields: &[FieldRule], parts: &mut dyn Iterator<Item = &str>) -> bool {
     let Some(name) = parts.next() else { return false };
     let Some(field) = fields
@@ -433,11 +496,11 @@ fn projection_codec<'a>(
 // Fresh migrated baseline. Optional/history and typed actor projections are still a
 // required worklist; these declarations alone grant no record-export permission.
 macro_rules! table_rule {
-    ($id:literal, $table:literal, $mode:ident, $merge:ident, $restrictive:literal,
+    ($id:literal, $table:tt, $mode:ident, $merge:ident, $restrictive:literal,
      [$($key:literal),*], [$(($name:literal,$kind:ident,$nullable:literal,$disp:ident,$field_merge:ident,$codec:expr)),* $(,)?]) => {
         FamilyRule {
             cells: table_rule!(@cells [] $(($name,$kind,$nullable,$disp)),*),
-            codec_version: U64(1), disposition: Disposition::$mode,
+            codec_version: table_rule!(@version $table), disposition: Disposition::$mode,
             excluded: table_rule!(@excluded [] $(($name,$disp)),*),
             id: $id, key: &[$($key),*], merge: MergeRule::$merge,
             restrictive: $restrictive, selector: FamilySelector::Table($table),
@@ -446,6 +509,11 @@ macro_rules! table_rule {
             key_grammar_version:U64(1), restrictive_projection:&[],
         }
     };
+    (@version "account_erasure_generation") => { U64(2) };
+    (@version "object_erasure_fence") => { U64(2) };
+    (@version "object_identity_replacement") => { U64(2) };
+    (@version "object_segment_reference_veto") => { U64(2) };
+    (@version $other:literal) => { U64(1) };
     (@cells [$($out:expr,)*]) => { &[$($out,)*] };
     (@cells [$($out:expr,)*] ($name:literal,$kind:ident,$nullable:literal,Transfer) $(,$rest:tt)*) => {
         table_rule!(@cells [$($out,)* CellRule {name:$name,nullable:$nullable,cell_type:CellType::$kind},] $($rest),*)

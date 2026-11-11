@@ -32,36 +32,11 @@ pub fn copy_full_scalar_record(
     reader: &mut impl Read,
     writer: &mut impl Write,
 ) -> Result<(), StorageError> {
-    rule.require_typed_codec()?;
-    header.validate().map_err(|_| invalid())?;
-    if rule.disposition != Disposition::Transfer
-        || header.family != rule.id
-        || header.codec_version != rule.codec_version
-    {
-        return Err(schema());
-    }
-    for cell in rule.cells {
-        let field = rule.codec.iter().find(|field| field.name == cell.name).ok_or_else(schema)?;
-        if !matches!(field.codec, CodecRule::Scalar { .. }) {
-            return Err(invalid());
-        }
-    }
+    validate_scalar_schema(rule, header)?;
     let raw = canonical_key(header)?;
     validate_key_grammar(rule, &raw)?;
     if header.op == RecordOp::Absent {
         return Ok(());
-    }
-    if header.cell_types.len() != rule.cells.len() {
-        return Err(schema());
-    }
-    for ((actual, length), expected) in
-        header.cell_types.iter().zip(&header.cell_lengths).zip(rule.cells)
-    {
-        if (*actual != expected.cell_type && !(*actual == CellType::Null && expected.nullable))
-            || (*actual == CellType::Null && length.0 != 0)
-        {
-            return Err(schema());
-        }
     }
     let mut selected = Vec::with_capacity(rule.key.len());
     let mut key_bytes = 0_u64;
@@ -100,12 +75,29 @@ pub fn copy_full_scalar_record(
             cell_types: vec![*kind],
             cell_lengths: vec![*length],
         });
-        copy_record_cells(reader, &mut tee, &one.0).map_err(|error| match error {
-            ramflux_protocol::custody::pairing::full_transfer::StreamError::Io(error) => {
-                StorageError::Io(error)
-            }
-            _ => invalid(),
-        })?;
+        let codec = &rule
+            .codec
+            .iter()
+            .find(|field| field.name == rule.cells[index].name)
+            .ok_or_else(schema)?
+            .codec;
+        if matches!(codec, CodecRule::SqlI64 { .. } | CodecRule::SqlBase64 { .. })
+            && *kind != CellType::Null
+        {
+            let count = usize::try_from(length.0).map_err(|_| invalid())?;
+            let mut bytes = Zeroizing::new([0; 43]);
+            let value = bytes.get_mut(..count).ok_or_else(invalid)?;
+            reader.read_exact(value)?;
+            validate_sql_value(codec, *kind, value)?;
+            tee.write_all(value)?;
+        } else {
+            copy_record_cells(reader, &mut tee, &one.0).map_err(|error| match error {
+                ramflux_protocol::custody::pairing::full_transfer::StreamError::Io(error) => {
+                    StorageError::Io(error)
+                }
+                _ => invalid(),
+            })?;
+        }
     }
     if rule.key.is_empty() {
         if row_hash.finalize().as_bytes() != &raw[..32] {
@@ -118,6 +110,48 @@ pub fn copy_full_scalar_record(
         .map_err(|_| invalid())?;
         if expected.as_str() != header.key {
             return Err(invalid());
+        }
+    }
+    Ok(())
+}
+fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<(), StorageError> {
+    rule.require_typed_codec()?;
+    header.validate().map_err(|_| invalid())?;
+    if rule.disposition != Disposition::Transfer
+        || header.family != rule.id
+        || header.codec_version != rule.codec_version
+    {
+        return Err(schema());
+    }
+    for cell in rule.cells {
+        let field = rule.codec.iter().find(|field| field.name == cell.name).ok_or_else(schema)?;
+        if !matches!(
+            field.codec,
+            CodecRule::Scalar { .. }
+                | CodecRule::SqlBytes { .. }
+                | CodecRule::SqlBase64 { .. }
+                | CodecRule::SqlI64 { .. }
+        ) {
+            return Err(invalid());
+        }
+    }
+    if header.op == RecordOp::Put {
+        if header.cell_types.len() != rule.cells.len() {
+            return Err(schema());
+        }
+        for (((actual, length), expected), field) in
+            header.cell_types.iter().zip(&header.cell_lengths).zip(rule.cells).zip(
+                rule.cells.iter().map(|cell| {
+                    rule.codec.iter().find(|field| field.name == cell.name).ok_or_else(schema)
+                }),
+            )
+        {
+            if (*actual != expected.cell_type && !(*actual == CellType::Null && expected.nullable))
+                || (*actual == CellType::Null && length.0 != 0)
+            {
+                return Err(schema());
+            }
+            validate_sql_header(&field?.codec, *actual, length.0)?;
         }
     }
     Ok(())
@@ -177,6 +211,12 @@ fn validate_key_grammar(rule: &FamilyRule, mut key: &[u8]) -> Result<(), Storage
             return Err(invalid());
         }
         let field = rule.cells.iter().find(|cell| cell.name == *name).ok_or_else(schema)?;
+        let codec = &rule.codec.iter().find(|field| field.name == *name).ok_or_else(schema)?.codec;
+        validate_sql_value(
+            codec,
+            if kind == 0 { CellType::Null } else { field.cell_type },
+            &key[..length],
+        )?;
         if kind == 0 {
             if !field.nullable || length != 0 {
                 return Err(invalid());
@@ -204,6 +244,49 @@ fn validate_key_grammar(rule: &FamilyRule, mut key: &[u8]) -> Result<(), Storage
     }
     if !key.is_empty() {
         return Err(invalid());
+    }
+    Ok(())
+}
+fn validate_sql_header(codec: &CodecRule, kind: CellType, length: u64) -> Result<(), StorageError> {
+    let valid = match codec {
+        CodecRule::SqlBytes { length: expected, nullable } => {
+            (kind == CellType::Bytes && length == expected.0)
+                || (kind == CellType::Null && *nullable && length == 0)
+        }
+        CodecRule::SqlI64 { nullable, .. } => {
+            (kind == CellType::I64 && length == 8)
+                || (kind == CellType::Null && *nullable && length == 0)
+        }
+        CodecRule::SqlBase64 { decoded_bytes, nullable } => {
+            let expected = decoded_bytes.0.checked_mul(4).ok_or_else(invalid)?.div_ceil(3);
+            (kind == CellType::Utf8 && length == expected)
+                || (kind == CellType::Null && *nullable && length == 0)
+        }
+        _ => true,
+    };
+    if valid { Ok(()) } else { Err(invalid()) }
+}
+fn validate_sql_value(codec: &CodecRule, kind: CellType, bytes: &[u8]) -> Result<(), StorageError> {
+    validate_sql_header(codec, kind, bytes.len() as u64)?;
+    if kind == CellType::Null {
+        return Ok(());
+    }
+    if let CodecRule::SqlBase64 { decoded_bytes, .. } = codec {
+        let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+        let decoded =
+            Zeroizing::new(ramflux_protocol::decode_base64url(text).map_err(|_| invalid())?);
+        if decoded.len() as u64 != decoded_bytes.0
+            || ramflux_protocol::encode_base64url(&decoded) != text
+        {
+            return Err(invalid());
+        }
+    }
+    if let CodecRule::SqlI64 { min, max, .. } = codec {
+        let value = i64::from_be_bytes(bytes.try_into().map_err(|_| invalid())?);
+        let (low, high) = super::catalog::sql_i64_bounds(min, max)?;
+        if value < low || value > high {
+            return Err(invalid());
+        }
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
 {
-  "census_hash": "oa9MBYDb8glS2TSS6uzjRQUN6tZVsbD228nLFNj0VTc",
+  "census_hash": "SXH_VDwhfjwgzOie-lfi4xiBjdeOtkrjqipx5FMJR1c",
   "reference_sha256": "11735f50be9f369cc4148ae41f14ede97de850120e90176e862f8e0907abe139",
   "rule_hashes": [
     {
@@ -7,7 +7,7 @@
       "id": "sql/a2ui_surface_cache"
     },
     {
-      "hash": "TwTDww-uNyn7bOw6kcfpk2NXPhChBDIDb__ldV9KhWM",
+      "hash": "Zi8dDX8HeqXb9bdO10OoePIL8TftxDWl6SBpy-UzDUA",
       "id": "sql/account_erasure_generation"
     },
     {
@@ -311,7 +311,7 @@
       "id": "sql/object_chunk/portable"
     },
     {
-      "hash": "NhB_wEgUV3OElu_SCOMA7_Uh-6nYpQuWsUEDimWiLJY",
+      "hash": "jGD6b-TvuWDW3mDJqdRcnmXlDAiKL-g_6AX6-3CRaO0",
       "id": "sql/object_erasure_fence"
     },
     {
@@ -323,7 +323,7 @@
       "id": "sql/object_erasure_work"
     },
     {
-      "hash": "YAlcXUSLYhmeNyFSh3c4DN7vB0cET1FOnwMaFfgF2K8",
+      "hash": "KkE_BbeyEnD4N0rfcXJgh1-zGW7iRz3WPYm8yzHu3v8",
       "id": "sql/object_identity_replacement"
     },
     {
@@ -399,7 +399,7 @@
       "id": "sql/object_segment_floor"
     },
     {
-      "hash": "3YkKKPALklup_gA2RIpiSQszHeM9NN2YxJBm1sj1pHI",
+      "hash": "Fte8CDGLBTA8_EOhE-y52fWJzGwagCo4MzTdb7elCxY",
       "id": "sql/object_segment_reference_veto"
     },
     {

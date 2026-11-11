@@ -40,6 +40,107 @@ const RULE: FamilyRule = FamilyRule {
     key_grammar_version: U64(1),
     restrictive_projection: &[],
 };
+
+#[test]
+fn pairing_full_erasure_scalar_codecs_check_actual_hash_formats_and_absent_keys() -> TestResult {
+    let commitment = ramflux_crypto::object_erasure_commitment("root", "wire", "manifest");
+    for (table, kind, value) in [
+        ("object_erasure_fence", CellType::Utf8, commitment.as_bytes().to_vec()),
+        ("object_identity_replacement", CellType::Utf8, commitment.as_bytes().to_vec()),
+        ("object_segment_reference_veto", CellType::Bytes, vec![17; 32]),
+    ] {
+        let rule = super::full_transfer_catalog()
+            .iter()
+            .find(|rule| matches!(rule.selector,FamilySelector::Table(name) if name==table))
+            .ok_or("rule")?;
+        assert_eq!(rule.codec_version, U64(2));
+        rule.require_typed_codec().map_err(|error| format!("{table} declaration: {error}"))?;
+        let mut header = RecordHeader {
+            family: rule.id.into(),
+            codec_version: rule.codec_version,
+            key: if rule.key.is_empty() {
+                encode_keyless_row_key([(kind, value.as_slice())], 0)?.to_string()
+            } else {
+                encode_stable_key([(kind, value.as_slice())])?.to_string()
+            },
+            op: RecordOp::Put,
+            cell_types: vec![kind],
+            cell_lengths: vec![U64(value.len() as u64)],
+        };
+        let mut output = Zeroizing::new(Vec::new());
+        copy_full_scalar_record(rule, &header, &mut value.as_slice(), &mut *output)
+            .map_err(|error| format!("{table} put: {error}"))?;
+        assert_eq!(output.as_slice(), value.as_slice());
+        header.op = RecordOp::Absent;
+        header.cell_types.clear();
+        header.cell_lengths.clear();
+        copy_full_scalar_record(rule, &header, &mut [].as_slice(), &mut std::io::sink())
+            .map_err(|error| format!("{table} absent: {error}"))?;
+        for invalid in [vec![], vec![b'A'; 31], vec![b'A'; 44]] {
+            header.key = encode_stable_key([(kind, invalid.as_slice())])?.to_string();
+            assert!(
+                copy_full_scalar_record(rule, &header, &mut [].as_slice(), &mut std::io::sink())
+                    .is_err()
+            );
+        }
+        if kind == CellType::Utf8 {
+            let mut noncanonical = ramflux_protocol::encode_base64url([0; 32]).into_bytes();
+            noncanonical[42] = b'B';
+            header.key = encode_stable_key([(kind, noncanonical.as_slice())])?.to_string();
+            assert!(
+                copy_full_scalar_record(rule, &header, &mut [].as_slice(), &mut std::io::sink())
+                    .is_err()
+            );
+        }
+        header.key = encode_stable_key([(CellType::Null, [].as_slice())])?.to_string();
+        assert!(
+            copy_full_scalar_record(rule, &header, &mut [].as_slice(), &mut std::io::sink())
+                .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn pairing_full_erasure_generation_is_nonnegative_and_singleton_key_is_exact() -> TestResult {
+    let rule = super::full_transfer_catalog()
+        .iter()
+        .find(|rule| rule.id == "sql/account_erasure_generation")
+        .ok_or("generation rule")?;
+    rule.require_typed_codec()?;
+    for (singleton, generation, valid) in
+        [(1_i64, 0_i64, true), (1, i64::MAX, true), (1, -1, false), (2, 0, false)]
+    {
+        let mut bytes = Zeroizing::new(singleton.to_be_bytes().to_vec());
+        bytes.extend_from_slice(&generation.to_be_bytes());
+        let header = RecordHeader {
+            family: rule.id.into(),
+            codec_version: U64(2),
+            key: encode_stable_key([(CellType::I64, singleton.to_be_bytes().as_slice())])?
+                .to_string(),
+            op: RecordOp::Put,
+            cell_types: vec![CellType::I64; 2],
+            cell_lengths: vec![U64(8); 2],
+        };
+        assert_eq!(
+            copy_full_scalar_record(rule, &header, &mut bytes.as_slice(), &mut std::io::sink())
+                .is_ok(),
+            valid
+        );
+        let absent = RecordHeader {
+            op: RecordOp::Absent,
+            cell_types: vec![],
+            cell_lengths: vec![],
+            ..header
+        };
+        assert_eq!(
+            copy_full_scalar_record(rule, &absent, &mut [].as_slice(), &mut std::io::sink())
+                .is_ok(),
+            singleton == 1
+        );
+    }
+    Ok(())
+}
 fn header(key: String, body: usize) -> RecordHeader {
     RecordHeader {
         family: RULE.id.into(),

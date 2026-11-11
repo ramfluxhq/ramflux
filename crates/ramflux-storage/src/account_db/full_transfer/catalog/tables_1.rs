@@ -2533,14 +2533,14 @@ pub(super) const RULE_77: FamilyRule = table_rule!(
     Transfer,
     RestrictUnion,
     true,
-    [],
+    ["commitment"],
     [(
         "commitment",
         Utf8,
         false,
         Transfer,
-        RestrictUnion,
-        CodecRule::RequiresOwner { owner: "object_erasure_fence", cell_type: CellType::Utf8 }
+        Immutable,
+        CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
     ),]
 );
 pub(super) const RULE_78: FamilyRule = table_rule!(
