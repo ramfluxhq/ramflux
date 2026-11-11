@@ -5,6 +5,7 @@
 mod catalog;
 mod inventory;
 mod keys;
+mod native_floor;
 mod scalar;
 mod source_cut;
 mod source_receipt;

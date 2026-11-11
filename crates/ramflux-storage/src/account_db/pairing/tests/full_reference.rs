@@ -31,6 +31,146 @@ fn linked_row() -> TestResult<crate::LiveRow> {
     row.validate()?;
     Ok(row)
 }
+
+fn local_floor_record(
+    base: &Envelope<ramflux_protocol::custody::DeviceSet>,
+    expiry: u64,
+) -> TestResult<ramflux_crypto::custody::pairing::FullResumeRecord> {
+    use ramflux_protocol::custody::{object_hash, pairing::context_v3::TranscriptV3};
+    use zeroize::Zeroizing;
+    let now = base.body.issued_at;
+    let mut record = local_stage_record_fixture()?;
+    let source = base.body.master_certificate.body.primary_device_ref.clone();
+    let destination = ramflux_protocol::custody::DeviceRef {
+        account_anchor: base.body.account_anchor.clone(),
+        device_id: "tail-target".into(),
+        device_epoch: 1,
+    };
+    let destination_key = ramflux_crypto::public_key_base64url_from_seed([10; 32]);
+    record.grant.source_ref = source.clone();
+    record.grant.destination_ref = destination.clone();
+    record.grant.branch_keys.source = base.body.devices[0]
+        .branch_certificate
+        .as_ref()
+        .ok_or("source branch")?
+        .body
+        .branch_signing_public_key
+        .clone();
+    record.grant.branch_keys.destination = destination_key.clone();
+    record.grant.expires_at = expiry;
+    let grant = record.grant.clone();
+    let mut transcript = TranscriptV3::from_wire_bytes(&record.transcript)?;
+    let mut common = transcript.initiator.common.clone();
+    common.account_anchor = base.body.account_anchor.clone();
+    common.master_public_key = base.body.master_certificate.body.master_public_key.clone();
+    common.record_hash = object_hash(base)?;
+    common.device_set_epoch = base.body.device_set_epoch;
+    common.recipient_mode = "new".into();
+    common.destination_ref = None;
+    common.transfer_id = Some(record.transfer_id.clone());
+    common.lease_not_before = now;
+    common.lease_expires_at = expiry;
+    common.expires_at = now + 300;
+    transcript.initiator.common = common.clone();
+    transcript.responder.common = common.clone();
+    transcript.initiator.device_ref = source;
+    transcript.responder.device_ref = destination.clone();
+    transcript.initiator.branch_key = grant.branch_keys.source.clone();
+    transcript.responder.branch_key = destination_key.clone();
+    record.base_record_hash = common.record_hash;
+    record.th = sha2::Sha256::digest(
+        ramflux_protocol::custody::pairing::context_v3::transcript_preimage(&transcript)?,
+    )
+    .into();
+    record.transcript = Zeroizing::new(transcript.to_wire_bytes()?);
+    Ok(record)
+}
+
+#[test]
+fn pairing_full_stage_native_floor_keeps_tail_revocation_across_account_reopen() -> TestResult {
+    use ramflux_crypto::custody::{
+        CooperativeTransferInput, MasterKey, RecoveryPhrase, SelfSigningKey,
+        cooperative_transfer_preserving_devices, pairing::PairingRole, verify_record,
+    };
+    use ramflux_protocol::custody::DeviceSet;
+    use zeroize::Zeroizing;
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../ramflux-crypto/tests/fixtures/custody_v3.json"
+    ))?;
+    let base: Envelope<DeviceSet> =
+        ramflux_protocol::parse_i_json(&canonical_json_bytes(&vectors["record"])?)?;
+    let now = base.body.issued_at;
+    let expiry = now + 604_800;
+    let record = local_floor_record(&base, expiry)?;
+    let grant = record.grant.clone();
+    let destination = grant.destination_ref.clone();
+    let destination_key = grant.branch_keys.destination.clone();
+    // This exercises encrypted floor persistence, not native lease/SAS consent restoration:
+    // the private storage fixture's lease is deliberately not a network-acceptable lease.
+    let (root, db) = crate::tests::test_db("full-tail-native-floor")?;
+    let mut stage = db.create_full_stage_for_test(record, expiry)?;
+    let initial = verify_record(&base, now, None, None)?;
+    assert!(stage.require_full_native_floor(&initial).is_err());
+    let master = MasterKey::from_phrase(&RecoveryPhrase::from_entropy(&[0; 32])?)?;
+    let manager = SelfSigningKey::from_vault_seed(&Zeroizing::new([7; 32]));
+    let mut branch =
+        base.body.devices[0].branch_certificate.as_ref().ok_or("source branch")?.body.clone();
+    branch.device_id = destination.device_id.clone();
+    branch.cert_id = h(10);
+    branch.branch_signing_public_key = destination_key;
+    branch.agreement_identity_public_key = ramflux_protocol::encode_base64url(
+        ramflux_crypto::X25519KeyPair::from_seed([11; 32]).public,
+    );
+    let candidate = cooperative_transfer_preserving_devices(
+        &master,
+        &manager,
+        &initial,
+        CooperativeTransferInput {
+            destination,
+            fresh_destination: Some(branch),
+            highest_observed_range: 1,
+            issued_at: now,
+            master_cert_id: h(70),
+        },
+    )?;
+    let published = verify_record(&candidate, now, None, None)?;
+    assert!(
+        stage.observe_full_native_head(&published).is_err(),
+        "unseeded non-base head was accepted"
+    );
+    assert!(stage.require_full_native_floor(&initial).is_err());
+    stage.observe_full_native_head(&initial)?;
+    stage.observe_full_native_head(&published)?;
+    ramflux_crypto::custody::pairing::verify_full_tail_authority(&grant, &published, now)?;
+    let revoked = manager.revoke_device(&published, &grant.source_ref.device_id, now)?;
+    let revoked = verify_record(&revoked, now, None, None)?;
+    stage.observe_full_native_head(&revoked)?;
+    assert!(
+        ramflux_crypto::custody::pairing::verify_full_tail_authority(&grant, &revoked, now)
+            .is_err()
+    );
+    let mut row = linked_row()?;
+    row.expires_at = expiry;
+    row.context = Some(stage.reference().to_wire_bytes()?);
+    db.put_pairing_live(&row)?;
+    drop(stage);
+    drop(db);
+    let index = AccountIndex::open(&root)?;
+    let db =
+        AccountDb::open(&index, "acct", &AccountDbKey::derive("acct", b"storage-test-secret"))?;
+    let mut stage = db.open_full_transfer_stage(&row.operation_id, PairingRole::Initiator, now)?;
+    // A blind/stale node's data-only predicate would admit this old published roster.
+    // The endpoint's retained job floor must reject it before any import or epoch admission.
+    ramflux_crypto::custody::pairing::verify_full_tail_authority(&grant, &published, now)?;
+    assert!(matches!(
+        stage.observe_full_native_head(&published),
+        Err(crate::StorageError::PairingField("HeadChanged"))
+    ));
+    assert!(stage.require_full_native_floor(&published).is_err());
+    assert!(stage.observe_full_native_head(&initial).is_err());
+    stage.require_full_native_floor(&revoked)?;
+    Ok(())
+}
 #[test]
 fn pairing_full_stage_reference_is_closed_scoped_and_data_only_on_reopen() -> TestResult {
     let (root, db) = crate::tests::test_db("full-stage-reference")?;
