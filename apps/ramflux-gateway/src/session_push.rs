@@ -79,7 +79,6 @@ pub(crate) struct Readiness {
     started: AtomicBool,
     ready: AtomicBool,
     ephemeral: AtomicBool,
-    asserted_boot: Mutex<Option<String>>,
     refused_boot: Mutex<Option<String>>,
     #[cfg(test)]
     clock: Mutex<Option<DiscoveryClock>>,
@@ -269,7 +268,8 @@ async fn reassert_if_boot_changed(
         )
         .await;
         match result {
-            Ok(Ok(_)) => {}
+            Ok(Ok(response)) if response["applied"].as_u64() == u64::try_from(chunk.len()).ok() => {
+            }
             Ok(Err(error)) if crate::registration::gateway_instance_rejection(&error) => {
                 crate::registration::log_gateway_identity_rejection(&error);
                 if let Ok(mut refused_boot) = state.refused_boot.lock() {
@@ -283,11 +283,6 @@ async fn reassert_if_boot_changed(
     }
     if posted > 0 {
         hub.stamp_ephemeral_boot(boot, &items[..posted]).await;
-        if let Ok(mut asserted) = state.asserted_boot.lock()
-            && asserted.as_deref() != Some(boot)
-        {
-            *asserted = Some(boot.to_owned());
-        }
     }
 }
 #[derive(Debug)]

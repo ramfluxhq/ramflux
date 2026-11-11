@@ -23,9 +23,6 @@ pub enum EphemeralReassertionError {
     /// `items` exceeds [`EPHEMERAL_REASSERTION_ITEM_BOUND`].
     #[error("too_many_items")]
     TooManyItems,
-    /// Asserting gateway does not match the live descriptor route.
-    #[error("recipient_unsupported")]
-    RecipientUnsupported,
 }
 
 pub(crate) fn new_router_boot_id() -> String {

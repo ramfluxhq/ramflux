@@ -14,8 +14,11 @@ impl Drop for Child {
     }
 }
 async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
-    let binary = std::env::var_os("RAMFLUX_P17_ROUTER_BINARY")
-        .ok_or_else(|| anyhow::anyhow!("same-tree router binary is required"))?;
+    real_router_with_state(None).await
+}
+async fn real_router_with_state(
+    seed: Option<&ramflux_node_core::RouterCore>,
+) -> anyhow::Result<(Child, GatewayQuicContext)> {
     let root = temp_cert_root("p17-real-router").map_err(|e| anyhow::anyhow!("{e}"))?;
     let gateway = issue_test_ca_and_service_cert(&root, "node-test", "ramflux-gateway")
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -39,17 +42,24 @@ async fn real_router() -> anyhow::Result<(Child, GatewayQuicContext)> {
     )?;
     ramflux_node_core::load_config(&config, "ramflux-router")?;
     drop(udp);
-    let process = std::process::Command::new(binary)
-        .arg("--config")
-        .arg(&config)
-        .env("RUST_LOG", "info")
-        .env("RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR", &endpoint)
-        .env("RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME", "tokio")
-        .env("RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS", "1")
-        .env("RAMFLUX_ROUTER_ASYNC_WORKER_THREADS", "2")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
+    if let Some(seed) = seed {
+        let store = ramflux_node_core::RouterRedbStore::open(root.join("router.redb"))?;
+        store.save_router(seed)?;
+    }
+    let process = std::process::Command::new(
+        std::env::var_os("RAMFLUX_P17_ROUTER_BINARY")
+            .ok_or_else(|| anyhow::anyhow!("same-tree router binary is required"))?,
+    )
+    .arg("--config")
+    .arg(&config)
+    .env("RUST_LOG", "info")
+    .env("RAMFLUX_ROUTER_ASYNC_LISTEN_ADDR", &endpoint)
+    .env("RAMFLUX_ROUTER_ASYNC_INGRESS_RUNTIME", "tokio")
+    .env("RAMFLUX_ROUTER_ASYNC_INGRESS_SOCKETS", "1")
+    .env("RAMFLUX_ROUTER_ASYNC_WORKER_THREADS", "2")
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::inherit())
+    .spawn()?;
     let mut child = Child(process, root);
     let output =
         child.0.stdout.take().ok_or_else(|| anyhow::anyhow!("router output unavailable"))?;
@@ -115,3 +125,6 @@ async fn session_push_capability_negotiation_real_router() -> anyhow::Result<()>
     assert_eq!(issued["issued"][0]["inbox_seq"], 0);
     Ok(())
 }
+
+#[path = "activation_tests.rs"]
+mod activation;

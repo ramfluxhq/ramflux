@@ -43,9 +43,6 @@ pub(crate) struct GatewaySessionHub {
     pub(crate) probe_requests: crate::issued_probe::Requests,
     pub(crate) readiness: Arc<crate::session_push::Readiness>,
     pub(crate) ephemeral_rates: crate::ephemeral::EphemeralRateRegistry,
-    /// Test-only observer for hub-path wake calls; each hub fixture owns its counter.
-    #[cfg(test)]
-    wake_calls: std::sync::atomic::AtomicU64,
     /// Per-hub C4 clock override; production builds always use wall clock.
     #[cfg(test)]
     ephemeral_clock_ms: std::sync::atomic::AtomicU64,
@@ -109,10 +106,6 @@ impl GatewaySessionHub {
         self.snapshot().await.get(target).map(|entry| entry.ephemeral)
     }
 
-    #[cfg(test)]
-    pub(crate) fn wake_count(&self) -> u64 {
-        self.wake_calls.load(std::sync::atomic::Ordering::SeqCst)
-    }
     async fn update<F>(&self, edit: F) -> anyhow::Result<Option<GatewayHubEntry>>
     where
         F: Fn(&mut Index<GatewayHubEntry>) -> Option<GatewayHubEntry>,

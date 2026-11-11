@@ -390,7 +390,7 @@ impl EphemeralEnqueue for HubEnqueue<'_> {
 }
 
 #[cfg(test)]
-mod handler_tests;
+pub(crate) mod handler_tests;
 #[cfg(test)]
 mod session_loop_tests;
 #[cfg(test)]

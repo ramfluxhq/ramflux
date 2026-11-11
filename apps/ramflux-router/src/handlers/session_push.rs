@@ -177,9 +177,6 @@ fn reassert(
         Err(ramflux_node_core::EphemeralReassertionError::TooManyItems) => {
             refused(SessionPushReason::InvalidSeq, None)
         }
-        Err(ramflux_node_core::EphemeralReassertionError::RecipientUnsupported) => {
-            refused(SessionPushReason::RecipientUnsupported, None)
-        }
     }
 }
 

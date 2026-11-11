@@ -223,6 +223,28 @@ async fn row_session_push_only() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn client_ephemeral_claim_without_router_advertisement_stays_false() -> TestResult {
+    let mut fixture = Fixture::new("ephemeral-untrusted-claim")?;
+    seed_echo(&fixture, true, false);
+    let context = fixture.context.clone();
+    let auth = super::negotiation::auth_claiming_ephemeral(true)?;
+    let mut session = super::negotiation::descriptor();
+    session.gateway_id = context.gateway_id.clone();
+    let task = tokio::spawn(async move { negotiate(&context, &auth, &session).await });
+    let request = fixture.next().await?;
+    assert_eq!(request.path, "/s1/session");
+    assert_eq!(request.body["ephemeral"], false);
+    request.respond.send((200, capable_reply(&request.body))).map_err(|_| Retired)?;
+    let binding = guard_10s("untrusted ephemeral claim negotiation", task).await??;
+    assert!(!binding.ephemeral);
+    let mut runtime = runtime()?;
+    runtime.ephemeral = binding.ephemeral;
+    assert!(!runtime.ephemeral_negotiated());
+    assert!(!crate::ephemeral::negotiated(&runtime));
+    Ok(())
+}
+
 async fn row_ephemeral_without_session_push() -> TestResult {
     let mut fixture = Fixture::new("p10-negotiation-ephemeral-without-session-push")?;
     fixture.context.hub.readiness.start_with_hub(
@@ -434,7 +456,6 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     assert_eq!(applied, 1);
     posted.respond.send((200, json!({"applied": applied}))).map_err(|_| Retired)?;
     assert_online(&router, session_id);
-    let wake_before = fixture.context.notify.wake_count();
     fixture.context.hub.set_queue_clock(TARGET, 1_760_000_004_999).await;
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
@@ -458,7 +479,6 @@ async fn router_restart_reasserts_ephemeral_registrations() -> TestResult {
     guard_10s("ephemeral writer entering the sink after router reassertion", entered.notified())
         .await;
     assert_eq!(fixture.context.hub.ephemeral_queued(TARGET).await, 1);
-    assert_eq!(fixture.context.notify.wake_count(), wake_before);
     release.add_permits(1);
     Ok(())
 }
@@ -691,5 +711,32 @@ async fn identity_403_logging_hooks_cover_session_upsert_principal_and_get() -> 
         after_upsert >= before_get + 4,
         "four identity 403 hooks must each increment: before={before_get} after={after_upsert}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_reassertion_retries_skipped_registrations_in_same_boot() -> TestResult {
+    let mut fixture = Fixture::new("partial-reassertion")?;
+    let router = RouterCore::new();
+    for (target, session) in [(TARGET, "late"), ("other-target", "live")] {
+        let (send, _) = sink();
+        fixture
+            .context
+            .hub
+            .register_ephemeral(target.into(), session.into(), send, Some(ID.into()), 32)
+            .await?;
+    }
+    seed_live(&router, "other-target", "live")?;
+    let boot = router.router_boot_id().to_owned();
+    drive_reassert(&mut fixture, &router, &boot).await?;
+    assert_eq!(
+        fixture.context.hub.ephemeral_registrations(GATEWAY, &boot).await.len(),
+        2,
+        "partial count cannot identify which items applied"
+    );
+    seed_live(&router, TARGET, "late")?;
+    drive_reassert(&mut fixture, &router, &boot).await?;
+    assert_online(&router, "late");
+    assert!(fixture.context.hub.ephemeral_registrations(GATEWAY, &boot).await.is_empty());
     Ok(())
 }

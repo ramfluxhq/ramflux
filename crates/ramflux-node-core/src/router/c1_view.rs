@@ -26,6 +26,19 @@ pub struct EphemeralDispatchObservation {
 
 /// Accessors ephemeral modules are allowed to call. Durable persistence
 /// methods on [`RouterCore`] are not visible through this type.
+///
+/// ```compile_fail,E0599
+/// fn write(view: ramflux_node_core::EphemeralRouterView<'_>) {
+///     view.store().begin_write();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// fn publish(view: ramflux_node_core::EphemeralRouterView<'_>) {
+///     let shard = view.target_shard("target");
+///     let _ = shard.inbox.publication;
+/// }
+/// ```
 pub struct EphemeralRouterView<'a> {
     core: &'a RouterCore,
 }

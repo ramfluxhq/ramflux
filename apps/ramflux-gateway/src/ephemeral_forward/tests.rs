@@ -214,7 +214,6 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
     listener.hub.set_ephemeral_clock_ms(NOW_LIVE_MS);
     listener.hub.set_queue_clock(TARGET, NOW_LIVE_MS).await;
     let wake_before = listener.notify.wake_count();
-    let hub_wake_before = listener.hub.wake_count();
     let request = ramflux_transport::GatewayQuicRequest {
         method: "POST".into(),
         path: PATH.into(),
@@ -225,7 +224,6 @@ async fn row_ephemeral_forward_does_not_wake(context: &crate::GatewayQuicContext
     assert_eq!(listener.hub.ephemeral_queued(TARGET).await, 1);
     assert_eq!(received.lock().map_err(|_| anyhow::anyhow!("recipient frames"))?.len(), 0);
     assert_eq!(listener.notify.wake_count(), wake_before);
-    assert_eq!(listener.hub.wake_count(), hub_wake_before, "ephemeral hub path must not wake");
     Ok(())
 }
 

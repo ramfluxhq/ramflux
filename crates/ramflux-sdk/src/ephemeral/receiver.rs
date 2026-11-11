@@ -719,9 +719,8 @@ mod tests {
                 e.envelope_id = id.to_owned();
                 e.encrypted_payload = "x".repeat(mid);
             });
-            let Some(encoded) = complete_frame_bytes(&envelope, EXPIRES_AT_MS) else {
-                break;
-            };
+            let encoded = frame_builds(&envelope, EXPIRES_AT_MS)
+                .unwrap_or_else(|error| panic!("padding frame must encode: {error}"));
             match encoded.len().cmp(&frame_len) {
                 std::cmp::Ordering::Equal => {
                     found = Some(envelope);

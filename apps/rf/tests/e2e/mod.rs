@@ -360,6 +360,19 @@ pub fn shutdown_daemon(daemon: Daemon) -> Result<(PathBuf, PathBuf)> {
     Ok((socket, data_root))
 }
 
+/// Kill the daemon without running its shutdown handlers, preserving its durable data.
+pub fn crash_daemon(mut daemon: Daemon) -> Result<(PathBuf, PathBuf)> {
+    let socket = daemon.socket.clone();
+    let data_root = daemon.data_root.clone();
+    daemon.child.group.kill_group();
+    daemon.child.group.wait()?;
+    drop(daemon);
+    if socket.exists() {
+        std::fs::remove_file(&socket)?;
+    }
+    Ok((socket, data_root))
+}
+
 pub fn start_daemon_at(socket: PathBuf, data_root: PathBuf) -> Result<Daemon> {
     spawn_daemon(socket, data_root)
 }

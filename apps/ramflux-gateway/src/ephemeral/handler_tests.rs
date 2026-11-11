@@ -17,7 +17,7 @@ pub(super) fn unix_now() -> i64 {
 
 /// A correctly signed ephemeral submit from the fixture session; `change` edits the envelope
 /// before it is signed, `tamper` edits the finished frame.
-pub(super) fn submit(
+pub(crate) fn submit(
     runtime: &crate::GatewaySessionRuntime,
     id: &str,
     ttl: u32,

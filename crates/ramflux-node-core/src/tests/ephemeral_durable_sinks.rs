@@ -1175,6 +1175,30 @@ fn c1_view_import_allow_list_refuses_router_store() -> TestResult {
     Ok(())
 }
 
+/// Plant the durable import and call in the actual view, exercising the allow-list first.
+#[test]
+fn c1_view_real_source_refuses_store_and_publication_imports() -> TestResult {
+    let root = workspace_root()?;
+    let rel = EXTRA_READ_ONLY_VIEWS[0];
+    let source = std::fs::read_to_string(root.join(rel))?;
+    let modules = load_crate_modules(&root.join("crates/ramflux-node-core/src"))?;
+    for (path, planted) in [
+        (
+            "crate::router_store::RouterRedbStore",
+            "fn leak(store: &RouterRedbStore) { store.begin_write(); }",
+        ),
+        (
+            "crate::publication::PublicationCore",
+            "fn leak(core: &PublicationCore) { core.reserve(); }",
+        ),
+    ] {
+        let candidate = format!("{source}\nuse {path};\n{planted}\n");
+        let outcome = scan_c1_view(&candidate, &modules);
+        assert_eq!(outcome, Err(format!("import {path} not on the ephemeral allow-list in {rel}")));
+    }
+    Ok(())
+}
+
 #[test]
 fn ephemeral_inventory_discovery() -> TestResult {
     let root = workspace_root()?;
