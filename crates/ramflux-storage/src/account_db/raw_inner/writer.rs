@@ -124,16 +124,16 @@ pub(super) fn put(db: &Connection, write: RawInnerCopyWrite<'_>) -> Result<(), S
         }
         return Err(StorageError::AuthorizationRejected);
     }
-    quota::reserve(db, owner_id, source_anchor, bytes.len() as u64)?;
+    quota::reserve(db, owner_id, source_anchor, (bytes.len() + metadata.len()) as u64)?;
     db.execute(
-        "INSERT INTO raw_inner_owner(owner_id,source_anchor,metadata) VALUES(?1,?2,?3)
+        "INSERT INTO raw_inner_owner(owner_id,source_anchor,metadata) VALUES(?1,?2,x'')
          ON CONFLICT(owner_id) DO NOTHING",
-        params![owner_id, source_anchor, metadata],
+        params![owner_id, source_anchor],
     )?;
     db.execute(
-        "INSERT INTO raw_inner_copy(copy_id,owner_id,copy_kind,raw_digest,raw_bytes)
-         VALUES(?1,?2,?3,?4,?5)",
-        params![copy_id, owner_id, kind.as_sql(), digest.as_slice(), bytes],
+        "INSERT INTO raw_inner_copy(copy_id,owner_id,copy_kind,raw_digest,raw_bytes,copy_metadata)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![copy_id, owner_id, kind.as_sql(), digest.as_slice(), bytes, metadata],
     )?;
     db.execute(
         "INSERT OR IGNORE INTO message_copy_binding(copy_id,message_id) VALUES(?1,?2)",

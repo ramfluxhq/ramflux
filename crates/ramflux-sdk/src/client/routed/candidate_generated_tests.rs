@@ -412,8 +412,10 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     };
     let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
     let (a, mut b) = pair(235, 237)?;
+    let identity = generated_identity(&a, "upgrade-target")?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
     let raw = RamfluxClient::encode_generated_inner(
-        generated_identity(&a, "upgrade-target")?,
+        identity,
         &g::Content {
             value: Some(g::content::Value::Message(g::Message {
                 text: "upgraded content".into(),
@@ -422,33 +424,42 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         },
     )?;
     let entry = seal(&a, &b, message("upgrade-target", "c"), &raw)?;
+    let opened = b.client.open_routed(&entry, &b.id)?;
+    let copy_id = b.client.authenticated_committed_key(HeadUse::HistoricalRead, &entry)?;
+    let receipt = crate::client::routed::Committed {
+        routing: opened.routing.clone(),
+        entry: entry.clone(),
+        projected: true,
+        erasure_targets: Vec::new(),
+    };
     let source = a.client.owned_device_identity()?;
     let metadata = serde_json::to_vec(&Provenance {
         source: source.storage_key().into(),
         conversation: "c".into(),
-        message: "upgrade-target".into(),
+        message: id.clone(),
         envelope_id: entry.envelope.envelope_id.clone(),
         payload_hash: entry.envelope.payload_hash.clone(),
-        expires_at: i64::MAX,
+        expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
         original_mode: "durable".into(),
         source_epoch: 1,
-        original_route: "direct".into(),
-        outer_receipt_key: "upgrade-copy".into(),
-        received_erasure_generation: 0,
+        original_route: serde_json::to_string(&opened.routing)?,
+        outer_receipt_key: copy_id.clone(),
+        received_erasure_generation: b.client.account_db()?.privacy_erasure_generation()?,
     })?;
     let db = b.client.account_db()?;
     db.write_transaction(|| -> Result<(), SdkError> {
+        db.persist_message_actor_state(&id, &copy_id, &receipt)?;
         db.put_unsupported_raw_copy(RawInnerCopyWrite {
-            owner_id: "upgrade-target",
+            owner_id: &id,
             verified_source_anchor: source.root_commitment(),
-            copy_id: "upgrade-copy",
+            copy_id: &copy_id,
             kind: RawInnerCopyKind::OuterInner,
             bytes: &raw,
             bounded_metadata: &metadata,
         })?;
         db.import_direct_message_projection(DirectMessageWrite {
             conversation_id: "c",
-            message_id: "upgrade-target",
+            message_id: &id,
             sender_id: "alice",
             encrypted_body: &[],
             metadata: &MessageMetadata::default(),
@@ -456,24 +467,34 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         })?;
         Ok(())
     })?;
-    assert_eq!(b.client.reparse_raw_inner_page(&mut Vec::new())?.projected, 1);
+    assert_eq!(b.client.reparse_raw_inner_page()?.projected, 1);
+    assert_eq!(b.client.account_db()?.message_content(&id)?.as_deref(), Some(raw.as_slice()));
+    assert_eq!(
+        b.client.direct_message_by_id(&id)?.ok_or_else(|| invalid("projection"))?.encrypted_body,
+        raw
+    );
+    let page = b.client.generated_message_page("c", None, 10)?;
+    assert!(page.messages.first().is_some_and(|row| matches!(
+        row.state.as_ref(),
+        Some(g::message_update::State::Content(_))
+    )));
     let head = b.client.account_db()?.journal_bounds()?.head_seq;
-    assert_eq!(b.client.reparse_raw_inner_page(&mut Vec::new())?.projected, 0);
+    assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
     assert_eq!(b.client.account_db()?.journal_bounds()?.head_seq, head);
-    b.client.delete_direct_message("c", "upgrade-target", "local", "erase-upgrade")?;
+    b.client.delete_direct_message("c", &id, "local", "erase-upgrade")?;
     let db = b.client.account_db()?;
     assert!(
         db.write_transaction(|| db.put_unsupported_raw_copy(RawInnerCopyWrite {
-            owner_id: "upgrade-target",
+            owner_id: &id,
             verified_source_anchor: source.root_commitment(),
-            copy_id: "upgrade-copy",
+            copy_id: &copy_id,
             kind: RawInnerCopyKind::OuterInner,
             bytes: &raw,
             bounded_metadata: &metadata,
         }))
         .is_err()
     );
-    assert_eq!(b.client.reparse_raw_inner_page(&mut Vec::new())?.projected, 0);
+    assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
     Ok(())
 }
 
