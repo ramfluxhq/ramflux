@@ -5,6 +5,7 @@
 mod backup;
 mod codec;
 mod crash;
+mod full_reference;
 mod helpers;
 mod schema;
 

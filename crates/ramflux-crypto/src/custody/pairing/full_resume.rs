@@ -21,6 +21,9 @@ use ramflux_protocol::custody::{
 use ramflux_protocol::{canonical_json_bytes, decode_base64url, encode_base64url};
 use zeroize::Zeroizing;
 
+mod record;
+pub use record::FullResumeRecord;
+
 type Result<T> = std::result::Result<T, CryptoError>;
 /// Created from both-human-confirmed SAS by its owner; saved only in the local encrypted stage.
 /// No Debug/serde: no node response can deserialize into this trust owner.
@@ -31,6 +34,8 @@ pub struct FullResumeTrust {
     lease: Zeroizing<Vec<u8>>,
     base_manifest_hash: String,
     th: [u8; 32],
+    allow_sas_key: bool,
+    lease_expires_at: u64,
 }
 impl FullResumeTrust {
     pub(super) fn from_confirmed(
@@ -44,6 +49,7 @@ impl FullResumeTrust {
         context.validate()?;
         start.validate()?;
         grant.validate()?;
+        lease.body.validate()?;
         let a = &context.initiator;
         let b = &context.responder;
         if start.transfer_id != grant.transfer_id
@@ -64,13 +70,24 @@ impl FullResumeTrust {
             lease: Zeroizing::new(canonical_json_bytes(lease)?),
             base_manifest_hash: start.manifest_hash.clone(),
             th,
+            allow_sas_key: true,
+            lease_expires_at: lease.body.expires_at,
         })
+    }
+    /// Actual verified lease deadline, which may precede the grant deadline.
+    #[must_use]
+    pub const fn lease_expires_at(&self) -> u64 {
+        self.lease_expires_at
     }
     /// Select the still-unused SAS private half, or fresh keys after loss/restart.
     /// # Errors
     /// Refuses a private half that does not match this endpoint's own SAS key.
     pub fn key_owner(&self, mut sas: Option<HpkeSecrets>) -> Result<FullResumeKeyOwner> {
         if let Some(key) = &mut sas {
+            if !self.allow_sas_key {
+                key.cleanup();
+                return Err(CryptoError::Pairing("WrongContext"));
+            }
             let expected = match self.role {
                 PairingRole::Initiator => self.context.initiator.hpke_key.as_deref(),
                 PairingRole::Responder => self.context.responder.hpke_key.as_deref(),
@@ -115,6 +132,17 @@ impl FullResumeTrust {
             base_record_hash: self.context.initiator.common.record_hash.clone(),
             base_manifest_hash: self.base_manifest_hash.clone(),
         };
+        let (frozen_sas, actual) = match self.role {
+            PairingRole::Initiator => {
+                (self.context.initiator.hpke_key.as_deref(), attempt.keys.source.as_str())
+            }
+            PairingRole::Responder => {
+                (self.context.responder.hpke_key.as_deref(), attempt.keys.destination.as_str())
+            }
+        };
+        if !self.allow_sas_key && frozen_sas == Some(actual) {
+            return attempt.fail();
+        }
         let same_lease = received_lease.body.grant == self.grant
             && Zeroizing::new(canonical_json_bytes(received_lease)?).as_slice()
                 == self.lease.as_slice();

@@ -32,8 +32,19 @@ pub enum Admission {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecoveredOutcome {
     Empty,
-    HandshakeCancelled { operation_id: String },
-    CandidateFenced { operation_id: String, candidate_hash: String, head_state: String },
+    /// Data-only owner must verify the separate encrypted stage; this is never a resume grant.
+    DataStageRetained {
+        operation_id: String,
+        stage_id: String,
+    },
+    HandshakeCancelled {
+        operation_id: String,
+    },
+    CandidateFenced {
+        operation_id: String,
+        candidate_hash: String,
+        head_state: String,
+    },
 }
 
 /// Durable pairing rows observed after recover.
@@ -67,6 +78,13 @@ impl RecoveredPairing {
                 operation_id: head.operation_id.clone(),
                 candidate_hash: head.candidate_hash.clone(),
                 head_state: head.state.clone(),
+            }
+        } else if let Some((live, reference)) = live.iter().find_map(|row| {
+            row.full_stage_reference().ok().flatten().map(|reference| (row, reference))
+        }) {
+            RecoveredOutcome::DataStageRetained {
+                operation_id: live.operation_id.clone(),
+                stage_id: reference.stage_id,
             }
         } else if let Some(row) = terminals.iter().find(|row| row.outcome == "cancelled") {
             RecoveredOutcome::HandshakeCancelled { operation_id: row.operation_id.clone() }
@@ -204,6 +222,11 @@ impl AccountDb {
     pub fn recover_pairing(&self) -> Result<RecoveredPairing, StorageError> {
         let head = self.pairing_head()?;
         for live in self.pairing_live_rows()? {
+            // A7/M5: a missing/corrupt separate stage cannot authorize deleting its account
+            // reference or possible-publication key obligations. The data owner reconciles it.
+            if live.full_stage_reference()?.is_some() {
+                continue;
+            }
             if !live_handshake_open(head.as_ref(), &live) {
                 continue;
             }
@@ -284,6 +307,14 @@ impl AccountDb {
     }
 
     fn require_terminal_cleanup(&self, row: &TerminalRow) -> Result<(), StorageError> {
+        if self.pairing_live_rows()?.iter().any(|live| {
+            live.operation_id == row.operation_id
+                && live.full_stage_reference().is_ok_and(|reference| reference.is_some())
+        }) {
+            // Generic v2 cancellation/J8 cannot discharge full-transfer H1/tail obligations.
+            // A dedicated stage/generation owner must prove its positive cleanup preconditions.
+            return Err(field("PublicationPending"));
+        }
         match self.pairing_head()? {
             Some(head) if head.operation_id != row.operation_id => Err(field("operation_id")),
             Some(head) => match head.state.as_str() {

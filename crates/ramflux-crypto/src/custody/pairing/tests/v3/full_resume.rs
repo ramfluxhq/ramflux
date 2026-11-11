@@ -11,6 +11,7 @@ use ramflux_protocol::custody::{
     },
 };
 use ramflux_protocol::decode_base64url;
+use zeroize::Zeroizing;
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 fn b(value: u8) -> String {
     encode_base64url([value; 32])
@@ -419,5 +420,178 @@ fn pairing_full_discovery_foreign_lease_refused_before_signer() -> TestResult {
         signer_calls += 1;
     }
     assert_eq!(signer_calls, 0, "foreign discovery reached branch signer");
+    Ok(())
+}
+
+fn saved_resume_node(now: u64) -> TestResult<crate::custody::VerifiedNodeRecord> {
+    let body = ramflux_protocol::custody::NodeIdentityRecord {
+        schema: ramflux_protocol::domain::CUSTODY_NODE_RECORD.into(),
+        version: 1,
+        node_id: "node.example".into(),
+        node_signing_public_key: crate::public_key_base64url_from_seed([80; 32]),
+        client_tls_certificate_sha256: Some(b(90)),
+        epoch: 1,
+        previous_record_hash: None,
+        issued_at: now,
+        receipt_keys: vec![],
+        revoked_receipt_key_ids: vec![],
+        proxy_keys: vec![],
+        revoked_proxy_key_ids: vec![],
+        channel_binding_modes: vec![ramflux_protocol::custody::BindingMode::DirectExporter],
+    };
+    let signed = crate::custody::sign_node_identity_record(
+        &ed25519_dalek::SigningKey::from_bytes(&[80; 32]),
+        body,
+    )?;
+    Ok(crate::custody::verify_node_identity_record(
+        &signed,
+        "node.example",
+        &crate::public_key_base64url_from_seed([80; 32]),
+        now,
+    )?)
+}
+fn restored_epoch_ready(
+    source: crate::custody::pairing::VerifiedFullResume,
+    mut destination: crate::custody::pairing::VerifiedFullResume,
+    binding: &DataBinding,
+) -> TestResult {
+    let setup = source.setup_sender(binding)?;
+    let keys = destination.open_receiver(&setup.enc, &setup.confirmation, binding)?;
+    let mut source = crate::custody::pairing::FullConfirmedChannel::resume(
+        PairingRole::Initiator,
+        setup.keys,
+        binding.manifest_hash.clone(),
+    )?;
+    let mut destination = crate::custody::pairing::FullConfirmedChannel::resume(
+        PairingRole::Responder,
+        keys,
+        binding.manifest_hash.clone(),
+    )?;
+    let (counter, ready) = destination.seal_ready()?;
+    assert_eq!(counter, 0);
+    source.open_ready(counter, &ready)?;
+    Ok(())
+}
+
+#[test]
+fn pairing_full_saved_resume_record_restores_only_local_scope_with_fresh_keys() -> TestResult {
+    let f = fixture()?;
+    let now = f.lease.body.issued_at;
+    let node = saved_resume_node(now)?;
+    let local_binding = binding(&f);
+    let a = f.a.local_stage_record()?;
+    let b_record = f.b.local_stage_record()?;
+    let local_a = f.context.initiator.device_ref.clone();
+    let local_b = f.context.responder.device_ref.clone();
+    let a_key = f.context.initiator.branch_key.clone();
+    let b_key = f.context.responder.branch_key.clone();
+    let lease = f.lease.clone();
+    drop(f); // The live SAS/channel/key owners do not participate in restoration.
+    let a = FullResumeTrust::restore_local_stage(a, &node, &local_a, &a_key, now)?;
+    let bb = FullResumeTrust::restore_local_stage(b_record, &node, &local_b, &b_key, now)?;
+    assert!(
+        a.key_owner(Some(secret(21))).is_err(),
+        "restart must not accept an old SAS private half"
+    );
+    assert!(
+        a.begin(&lease, secret(21), public(22), b(13)).is_err(),
+        "restart cannot bypass the fresh-key owner with the old SAS half"
+    );
+    let ak = a.key_owner(None)?.next_key()?;
+    let bk = bb.key_owner(None)?.next_key()?;
+    let a_public = ak.public_key();
+    let b_public = bk.public_key();
+    assert_ne!(a_public, public(21));
+    assert_ne!(b_public, public(22));
+    let mut t = template(&lease, 31, 32);
+    t.hpke_keys =
+        BranchKeys { source: encode_base64url(a_public), destination: encode_base64url(b_public) };
+    let mut aa = a.begin(&lease, ak, b_public, t.epoch.clone())?;
+    let mut bb = bb.begin(&lease, bk, a_public, t.epoch.clone())?;
+    let pa = aa.proof_to_sign(&t)?;
+    let pb = bb.proof_to_sign(&t)?;
+    restored_epoch_ready(
+        aa.verify_token(&token(&pa, &pb, 71)?)?,
+        bb.verify_token(&token(&pb, &pa, 70)?)?,
+        &local_binding,
+    )?;
+    for changed in 0..5 {
+        let f = fixture()?;
+        let mut record = f.a.local_stage_record()?;
+        match changed {
+            0 => record.th[0] ^= 1,
+            1 => record.base_record_hash = b(91),
+            2 => {
+                record.grant.branch_keys.destination =
+                    crate::public_key_base64url_from_seed([92; 32]);
+            }
+            3 => record.transfer_id = b(93),
+            _ => record.role = PairingRole::Responder,
+        }
+        assert!(
+            FullResumeTrust::restore_local_stage(record, &node, &local_a, &a_key, now).is_err()
+        );
+    }
+    let f = fixture()?;
+    assert!(
+        FullResumeTrust::restore_local_stage(
+            f.a.local_stage_record()?,
+            &node,
+            &local_a,
+            &a_key,
+            lease.body.expires_at
+        )
+        .is_err()
+    );
+    assert!(
+        FullResumeTrust::restore_local_stage(
+            f.a.local_stage_record()?,
+            &node,
+            &local_b,
+            &b_key,
+            now
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn pairing_full_saved_stage_digest_binds_all_eight_original_operands() -> TestResult {
+    let f = fixture()?;
+    let record = f.a.local_stage_record()?;
+    // Independent concatenated preimage construction, separate from the streaming encoder.
+    let mut bytes = Zeroizing::new(Vec::new());
+    let append = |out: &mut Vec<u8>, value: &[u8]| -> TestResult {
+        out.extend_from_slice(&u32::try_from(value.len())?.to_be_bytes());
+        out.extend_from_slice(value);
+        Ok(())
+    };
+    append(&mut bytes, b"ramflux.full_transfer.resume_record.v1")?;
+    bytes.push(0);
+    append(&mut bytes, &record.transcript)?;
+    bytes.extend_from_slice(&record.th);
+    let grant = Zeroizing::new(ramflux_protocol::canonical_json_bytes(&record.grant)?);
+    append(&mut bytes, &grant)?;
+    append(&mut bytes, &record.lease)?;
+    for hash in [&record.transfer_id, &record.base_manifest_hash, &record.base_record_hash] {
+        bytes.extend_from_slice(&decode_base64url(hash)?);
+    }
+    let expected = *blake3::hash(&bytes).as_bytes();
+    assert_eq!(record.stage_digest()?, expected);
+    for changed in 0..8 {
+        let mut record = f.a.local_stage_record()?;
+        match changed {
+            0 => record.role = PairingRole::Responder,
+            1 => record.transcript[0] ^= 1,
+            2 => record.th[0] ^= 1,
+            3 => record.grant.opaque_commitment = b(94),
+            4 => record.lease[0] ^= 1,
+            5 => record.transfer_id = b(95),
+            6 => record.base_manifest_hash = b(96),
+            _ => record.base_record_hash = b(97),
+        }
+        assert_ne!(record.stage_digest()?, expected);
+    }
     Ok(())
 }
