@@ -71,6 +71,17 @@ impl NodeServiceSigningKey {
         )
     }
 
+    /// Candidate Decision 5 v2 receipt. Does not open Inner.
+    ///
+    /// # Errors
+    /// Returns a crypto error when a transcript field exceeds the length prefix.
+    pub fn sign_node_report_receipt(
+        &self,
+        input: ramflux_crypto::NodeReportReceiptInput<'_>,
+    ) -> Result<String, ramflux_crypto::CryptoError> {
+        ramflux_crypto::sign_node_report_receipt_with_seed(&input, self.seed)
+    }
+
     #[must_use]
     pub fn sign_push_route_control(&self, body: &[u8]) -> String {
         let mut bytes = b"ramflux.notify.route_control.v1\0".to_vec();
