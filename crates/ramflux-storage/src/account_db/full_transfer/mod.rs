@@ -3,7 +3,9 @@
 
 //! Device-local full-transfer staging owners. They grant no native authority.
 mod catalog;
+mod inventory;
 mod keys;
+mod scalar;
 mod source_cut;
 mod stage;
 mod stage_chunks;
@@ -15,8 +17,15 @@ mod stage_tests;
 
 pub use catalog::{
     CellRule, CodecRule, FamilyRule, FamilySelector, FieldRule, MergeRule, VariantRule,
-    full_census_hash,
+    full_census_hash, full_transfer_catalog,
 };
 
 #[cfg(test)]
 mod catalog_tests;
+
+pub use inventory::FullTransferSchema;
+
+pub use scalar::copy_full_scalar_record;
+
+#[cfg(test)]
+mod scalar_tests;

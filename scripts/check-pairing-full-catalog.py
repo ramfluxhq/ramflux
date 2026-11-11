@@ -60,6 +60,24 @@ def generate():
                 changed_nested_disposition_hash=b64(digest(lp(b'ramflux.pairing.full.rule.v1')+jcs(changed))),
                 changed_nested_merge_hash=b64(digest(lp(b'ramflux.pairing.full.rule.v1')+jcs(changed_merge))))
 
+def baseline_vectors():
+    spec=importlib.util.spec_from_file_location('pairing_baseline_blake3_reference',REFERENCE)
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    def digest(value):
+        hasher=module.Hasher()
+        hasher.update(value)
+        return hasher.finalize()
+    rules=json.loads((FIXTURE.parent/'catalog-baseline-rules.json').read_text())
+    assert rules and all(a['id']<b['id'] for a,b in zip(rules,rules[1:]))
+    hashes=[digest(lp(b'ramflux.pairing.full.rule.v1')+jcs(rule)) for rule in rules]
+    preimage=lp(b'ramflux.pairing.full.census.v1')+struct.pack('>I',len(rules))
+    preimage+=b''.join(lp(rule['id'].encode())+value for rule,value in zip(rules,hashes))
+    return dict(reference_sha256=hashlib.sha256(REFERENCE.read_bytes()).hexdigest(),
+        rule_hashes=[dict(id=rule['id'],hash=b64(value)) for rule,value in zip(rules,hashes)],
+        census_hash=b64(digest(preimage)))
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--write',action='store_true')
@@ -70,6 +88,12 @@ def main():
         FIXTURE.write_text(expected)
     elif FIXTURE.read_text()!=expected:
         raise SystemExit('recursive catalog vectors differ; review semantic change before --write')
+    baseline=FIXTURE.parent/'catalog-baseline-vectors.json'
+    expected_baseline=json.dumps(baseline_vectors(),sort_keys=True,indent=2)+'\n'
+    if args.write:
+        baseline.write_text(expected_baseline)
+    elif baseline.read_text()!=expected_baseline:
+        raise SystemExit('baseline catalog vectors differ; review every rule before --write')
     print('PAIRING_FULL_CATALOG_VECTORS_OK')
 
 if __name__=='__main__':

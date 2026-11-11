@@ -161,3 +161,142 @@ fn pairing_full_recursive_rule_refuses_unknown_fields_keys_and_unbounded_descrip
         assert!(rule.rule_hash().is_err());
     }
 }
+
+#[test]
+fn pairing_full_schema_inspection_refuses_incomplete_catalog_and_changed_columns() -> TestResult {
+    use crate::{StorageError, database::Connection};
+    static RULES: [FamilyRule; 2] = [HISTORY, DENIAL];
+    let (root, actual) = crate::tests::test_db("full-schema-inspection")?;
+    assert!(
+        matches!(
+            actual.inspect_full_transfer_schema(&RULES),
+            Err(StorageError::PairingField("UnsupportedRecord"))
+        ),
+        "a partial catalog cannot inspect an actual production account as complete"
+    );
+    let fixture = Connection::open(root.join("schema-only-fixture.db"))?;
+    fixture.execute_batch("CREATE TABLE catalog_vector(row_id INTEGER NOT NULL,body TEXT NOT NULL); INSERT INTO catalog_vector VALUES(1,'{}');")?;
+    let census = super::inventory::inspect(&fixture, &RULES)?;
+    assert_eq!(census.census_hash, full_census_hash(&RULES)?);
+    assert_eq!(
+        census.families.iter().map(|family| family.source_rows.0).collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    assert!(
+        census
+            .families
+            .iter()
+            .all(|family| family.portable_records.0 == 0 && family.encoded_bytes.0 == 0),
+        "schema counts do not certify unvalidated logical rows"
+    );
+    fixture.execute_batch("ALTER TABLE catalog_vector ADD COLUMN private_seed BLOB;")?;
+    assert!(matches!(
+        super::inventory::inspect(&fixture, &RULES),
+        Err(StorageError::PairingField("SchemaMismatch"))
+    ));
+    fixture.execute_batch("CREATE TABLE unclassified_local_credentials(secret BLOB);")?;
+    assert!(matches!(
+        super::inventory::inspect(&fixture, &RULES),
+        Err(StorageError::PairingField("UnsupportedRecord"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn pairing_full_fresh_catalog_covers_all_tables_and_refuses_unimplemented_value_owners()
+-> TestResult {
+    use super::catalog::full_transfer_catalog;
+    use crate::StorageError;
+    let (_root, db) = crate::tests::test_db("fresh-catalog-coverage")?;
+    let rules = full_transfer_catalog();
+    assert_eq!(rules.len(), 159);
+    let census = match db.inspect_full_transfer_schema(rules) {
+        Ok(census) => census,
+        Err(error) => {
+            for rule in rules {
+                if let FamilySelector::Table(table) = rule.selector {
+                    super::inventory::validate_columns(&db.connection, table, rule)
+                        .map_err(|error| format!("compiled table {}: {error}", rule.id))?;
+                }
+            }
+            return Err(error.into());
+        }
+    };
+    let tables = rules
+        .iter()
+        .filter_map(|rule| match rule.selector {
+            FamilySelector::Table(table) => Some(table),
+            FamilySelector::ActorPrefix(_) => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(tables.len(), 155);
+    assert!(
+        matches!(
+            census.require_typed_owners(rules),
+            Err(StorageError::PairingField("UnsupportedRecord"))
+        ),
+        "complete table coverage cannot authorize copying a row whose typed owner is incomplete"
+    );
+    for table in
+        ["pairing_floor", "pairing_live", "pairing_head", "pairing_adoption", "pairing_terminal"]
+    {
+        assert!(
+            rules
+                .iter()
+                .filter(|rule| matches!(rule.selector,FamilySelector::Table(name) if name==table))
+                .all(|rule| rule.disposition != Disposition::Transfer),
+            "local native publication/issuer authority became portable"
+        );
+    }
+    for (id, excluded) in [
+        ("sql/object_index/portable", "ciphertext"),
+        ("sql/object_chunk/portable", "local_path"),
+        ("sql/object_chunk/portable", "chunk_state"),
+        ("sql/guardian_recovery_share_projection/portable", "share_value"),
+        ("sql/account_mac_bundle/portable", "is_current"),
+    ] {
+        let rule = rules.iter().find(|rule| rule.id == id).ok_or("family")?;
+        assert!(rule.excluded.contains(&excluded));
+        assert!(!rule.cells.iter().any(|cell| cell.name == excluded));
+    }
+    db.connection
+        .execute_batch("CREATE TABLE newly_persisted_unclassified_family(secret BLOB);")?;
+    assert!(matches!(
+        db.inspect_full_transfer_schema(rules),
+        Err(StorageError::PairingField("UnsupportedRecord"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn pairing_full_baseline_catalog_rule_and_census_hashes_match_independent_vectors() -> TestResult {
+    let declarations: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../ramflux-protocol/fixtures/full_transfer/catalog-baseline-rules.json"
+    ))?;
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../ramflux-protocol/fixtures/full_transfer/catalog-baseline-vectors.json"
+    ))?;
+    let rules = super::catalog::full_transfer_catalog();
+    assert_eq!(declarations.as_array().ok_or("declarations")?.len(), rules.len());
+    assert_eq!(vectors["rule_hashes"].as_array().ok_or("hashes")?.len(), rules.len());
+    for (index, rule) in rules.iter().enumerate() {
+        assert_eq!(
+            serde_json::to_value(rule)?,
+            declarations[index],
+            "compiled declaration differs from independently hashed input: {}",
+            rule.id
+        );
+        assert_eq!(rule.id, vectors["rule_hashes"][index]["id"].as_str().ok_or("id")?);
+        assert_eq!(
+            encode_base64url(rule.rule_hash()?),
+            vectors["rule_hashes"][index]["hash"].as_str().ok_or("hash")?,
+            "rule hash {}",
+            rule.id
+        );
+    }
+    assert_eq!(
+        encode_base64url(full_census_hash(rules)?),
+        vectors["census_hash"].as_str().ok_or("census")?
+    );
+    Ok(())
+}
