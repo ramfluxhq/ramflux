@@ -101,6 +101,7 @@ pub use account_db::raw_inner::{
 };
 pub use account_db::runtime::{AccountOutboxEntry, OperationLookup};
 pub use account_db::safety_verification::LEGACY_SAFETY_VERIFICATION_MARKER;
+pub use account_db::shared_group_denials::{GroupRemovalFloor, PrunedGroupFloor};
 pub use account_index::AccountIndex;
 pub use clock::{AccountClock, unix_now};
 pub use constants::*;

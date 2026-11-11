@@ -73,6 +73,7 @@ mod replay_markers;
 pub mod runtime;
 pub(crate) mod safety_verification;
 mod shared_group_delivery;
+pub(crate) mod shared_group_denials;
 mod shared_group_floor_index;
 mod shared_group_heads;
 mod shared_group_members;

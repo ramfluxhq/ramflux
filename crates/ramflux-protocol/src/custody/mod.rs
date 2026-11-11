@@ -79,11 +79,12 @@ pub fn framed_hash<T: Serialize>(tag: &str, value: &T) -> Result<String, Protoco
     hash.update(&canonical_json_bytes(value)?);
     Ok(encode_base64url(hash.finalize().as_bytes()))
 }
-/// Hash the entire envelope, including its signature.
+/// Hash an entire signed object as persisted, including its signatures.
+/// Signature and schema admission remain the typed caller's responsibility.
 /// # Errors
 /// Returns canonical serialization failures.
-pub fn object_hash<T: Serialize>(envelope: &Envelope<T>) -> Result<String, ProtocolError> {
-    framed_hash(domain::CUSTODY_OBJECT_HASH, envelope)
+pub fn object_hash<T: Serialize>(signed_object: &T) -> Result<String, ProtocolError> {
+    framed_hash(domain::CUSTODY_OBJECT_HASH, signed_object)
 }
 /// Compute all six section hashes without removing nulls or nested signatures.
 /// # Errors
