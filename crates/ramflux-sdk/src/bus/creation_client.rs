@@ -77,7 +77,7 @@ impl LocalBusCreationClient {
     /// # Errors
     /// Returns socket or peer-policy failures.
     pub async fn connect(socket: impl AsRef<std::path::Path>) -> Result<Self, SdkError> {
-        Ok(Self { stream: UnixStream::connect(socket).await?, sequence: 0 })
+        Ok(Self { stream: crate::platform::listener::connect(socket).await?, sequence: 0 })
     }
 
     /// Begin without caller seeds or identifiers; the daemon allocates all account identifiers.

@@ -166,6 +166,10 @@ async fn daemon_stop_aborts_a_stuck_lifecycle_task_within_five_seconds() -> Case
                     config.lifecycle_gate = Some(gate.clone());
                     let listener = UnixListener::bind(&config.socket_path)?;
                     let uid = std::fs::metadata(&config.socket_path)?.uid();
+                    let listener = crate::platform::listener::UnixBusListener::from_bound(
+                        listener,
+                        &config.socket_path,
+                    );
                     let supervisor = Supervisor::new(config)?;
                     let (shutdown, receiver) = watch::channel(false);
                     let owner = supervisor.clone();
@@ -262,6 +266,10 @@ async fn completed_lifecycle_tasks_are_reaped_while_daemon_is_idle() -> Case {
             let config = LocalBusConfig::new(root.join("bus.sock"), &root);
             let listener = UnixListener::bind(&config.socket_path)?;
             let uid = std::fs::metadata(&config.socket_path)?.uid();
+            let listener = crate::platform::listener::UnixBusListener::from_bound(
+                listener,
+                &config.socket_path,
+            );
             let supervisor = Supervisor::new(config)?;
             let (shutdown, receiver) = watch::channel(false);
             let owner = supervisor.clone();

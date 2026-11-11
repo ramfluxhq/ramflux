@@ -41,7 +41,7 @@ impl LocalBusClient {
     /// # Errors
     /// Returns an error when the Unix socket cannot be opened.
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, SdkError> {
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = crate::platform::listener::connect(socket_path).await?;
         let (mut reader, mut writer) = stream.into_split();
         let (outbound, mut outbound_rx) = mpsc::channel::<OutboundFrame>(64);
         let (events, event_rx) = mpsc::channel(64);

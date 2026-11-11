@@ -3,6 +3,7 @@
 
 //! Remove only the Unix socket inode owned by this listener.
 
+use crate::platform::listener::BusListener;
 use crate::prelude::*;
 
 pub(super) struct SocketFile {
@@ -11,21 +12,17 @@ pub(super) struct SocketFile {
     inode: u64,
 }
 impl SocketFile {
-    pub(super) fn new(listener: &UnixListener) -> Result<Option<Self>, SdkError> {
-        let address = listener.local_addr()?;
-        let Some(path) = address.as_pathname() else {
+    pub(super) fn new(
+        listener: &crate::platform::listener::UnixBusListener,
+    ) -> Result<Option<Self>, SdkError> {
+        let Some((path, device, inode)) = listener.pathname_identity()? else {
             return Ok(None);
         };
-        let metadata = std::fs::metadata(path)?;
-        Ok(Some(Self { path: path.to_path_buf(), device: metadata.dev(), inode: metadata.ino() }))
+        Ok(Some(Self { path, device, inode }))
     }
     pub(super) fn remove(&self) -> Result<(), SdkError> {
-        match std::fs::metadata(&self.path) {
-            Ok(metadata) if metadata.dev() == self.device && metadata.ino() == self.inode => {
-                std::fs::remove_file(&self.path)?;
-            }
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
+        if crate::platform::fs::same_device_inode(&self.path, self.device, self.inode)? {
+            std::fs::remove_file(&self.path)?;
         }
         Ok(())
     }

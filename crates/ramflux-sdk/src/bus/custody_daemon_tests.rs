@@ -115,7 +115,12 @@ async fn daemon_status_reports_schema_generation() -> Result {
     let supervisor =
         crate::bus::supervisor::Supervisor::new(LocalBusConfig::new(&socket, &root.0))?;
     let (stop, receiver) = watch::channel(false);
-    let accept_loop = super::connection::accept(listener, uid, supervisor, receiver);
+    let accept_loop = super::connection::accept(
+        crate::platform::listener::UnixBusListener::from_bound(listener, &socket),
+        uid,
+        supervisor,
+        receiver,
+    );
     let flow = async {
         let mut bus = LocalBusClient::connect(&socket).await?;
         let status = tokio::time::timeout(

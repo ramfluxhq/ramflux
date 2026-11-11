@@ -912,7 +912,7 @@ async fn daemon_stop_cancels_network_flushes_outbox_and_removes_socket() -> Resu
         let actor = supervisor.account_actor("alice").ok_or_else(|| failure("missing actor"))?;
         let socket = root.join("daemon.sock"); let listener = UnixListener::bind(&socket)?;
         let uid = std::fs::metadata(&socket)?.uid(); let (_shutdown,receiver) = watch::channel(false);
-        let server = tokio::task::spawn_local(super::connection::accept(listener,uid,Rc::clone(&supervisor),receiver));
+        let server = tokio::task::spawn_local(super::connection::accept(crate::platform::listener::UnixBusListener::from_bound(listener, &socket),uid,Rc::clone(&supervisor),receiver));
         let client = LocalBusClient::connect(&socket).await?;
         let upload_client = client.clone();
         let mut upload = tokio::task::spawn_local(async move { upload_client.request_frame(request("upload","alice","object.put",serde_json::json!({"object_id":"object","operation_id":"upload-operation","plaintext_base64":ramflux_protocol::encode_base64url(b"durable upload"),"chunk_size":4096,"relay_endpoint":"https://relay.invalid"}))).await });

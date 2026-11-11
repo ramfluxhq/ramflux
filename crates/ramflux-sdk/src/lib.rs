@@ -31,6 +31,7 @@ mod bus;
 #[cfg(feature = "c-abi")]
 pub mod c_abi;
 mod client;
+mod platform;
 pub use client::home_migration::{
     HomeMigrationJournal, MigrationApprovalPlan, MigrationApprovalResult, MigrationIntent,
     MigrationPhase, MigrationProgress, MigrationResumption,

@@ -302,7 +302,15 @@ async fn disconnected_peer_never_stops_the_daemon_accept_loop() -> Result {
         Ok::<_, Box<dyn std::error::Error>>(())
     };
     let (server, flow) = Box::pin(tokio::task::LocalSet::new().run_until(async {
-        tokio::join!(super::connection::accept(listener, uid, supervisor, receiver), flow)
+        tokio::join!(
+            super::connection::accept(
+                crate::platform::listener::UnixBusListener::from_bound(listener, &socket),
+                uid,
+                supervisor,
+                receiver,
+            ),
+            flow,
+        )
     }))
     .await;
     server?;

@@ -66,7 +66,7 @@ impl CustodyBusClient {
     /// # Errors
     /// Returns a local connection error. The socket uses the daemon's same-user peer policy.
     pub async fn connect(socket: impl AsRef<std::path::Path>) -> Result<Self, SdkError> {
-        Ok(Self { stream: UnixStream::connect(socket).await?, sequence: 0 })
+        Ok(Self { stream: crate::platform::listener::connect(socket).await?, sequence: 0 })
     }
     /// # Errors
     /// Rejects disabled setup, an existing account or invalid public intent.

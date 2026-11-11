@@ -60,13 +60,11 @@ pub(crate) fn local_bus_account_manifest_path(data_root: &Path, local_account_id
 }
 
 pub(crate) fn set_owner_only_dir_permissions(path: &Path) -> Result<(), SdkError> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    crate::platform::fs::set_owner_only_dir(path)
 }
 
 pub(crate) fn set_owner_only_file_permissions(path: &Path) -> Result<(), SdkError> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
+    crate::platform::fs::set_owner_only_file(path)
 }
 
 pub(crate) fn read_local_bus_account_manifest(
@@ -127,8 +125,7 @@ pub(crate) fn write_local_bus_account_manifest(
     if tmp_path.exists() {
         std::fs::remove_file(&tmp_path)?;
     }
-    let mut tmp_file =
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp_path)?;
+    let mut tmp_file = crate::platform::fs::create_new_owner_only(&tmp_path)?;
     tmp_file.write_all(&bytes)?;
     tmp_file.sync_all()?;
     drop(tmp_file);
@@ -244,11 +241,10 @@ async fn restore_local_bus_account_impl(
 }
 
 pub(crate) fn verify_local_bus_peer(
-    stream: &UnixStream,
+    stream: &crate::platform::fs::LocalSocketStream,
     expected_uid: u32,
 ) -> Result<(), SdkError> {
-    let peer = stream.peer_cred()?;
-    if peer.uid() == expected_uid { Ok(()) } else { Err(SdkError::LocalBusPermissionDenied) }
+    crate::platform::fs::verify_peer_uid(stream, expected_uid)
 }
 
 pub(crate) struct LocalBusDispatchResult {
@@ -520,7 +516,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let local_set = LocalSet::new();
         let server = local_set.run_until(serve_local_bus_accept_loop(
-            listener,
+            crate::platform::listener::UnixBusListener::from_bound(listener, &socket_path),
             socket_uid,
             test_state(),
             shutdown_rx,

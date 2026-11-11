@@ -3,12 +3,7 @@
 
 //! Cross-process daemon ownership, retained by any detached custody commit worker.
 use crate::SdkError;
-use std::{
-    fs::{File, OpenOptions},
-    os::unix::fs::OpenOptionsExt,
-    path::Path,
-    sync::Arc,
-};
+use std::{fs::File, path::Path, sync::Arc};
 
 pub(crate) struct DataRootLock {
     _file: File,
@@ -16,14 +11,9 @@ pub(crate) struct DataRootLock {
 impl DataRootLock {
     pub(crate) fn acquire(root: &Path) -> Result<Arc<Self>, SdkError> {
         // Never unlink this file: all daemon instances must lock the same inode.
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(root.join("daemon.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+        let path = root.join("daemon.lock");
+        let file = crate::platform::fs::open_owner_only_read_write(&path)?;
+        crate::platform::fs::try_lock_exclusive(&file).map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 SdkError::DataRootInUse
             } else {

@@ -4,6 +4,7 @@
 //! Socket framing, request multiplexing and connection-scoped cancellation.
 
 use super::supervisor::Supervisor;
+use crate::platform::listener::BusListener;
 use crate::prelude::*;
 use tokio::task::JoinSet;
 
@@ -22,9 +23,8 @@ pub(super) async fn serve(
     if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)?;
     }
-    let listener = UnixListener::bind(&config.socket_path)?;
-    set_owner_only_file_permissions(&config.socket_path)?;
-    let uid = std::fs::metadata(&config.socket_path)?.uid();
+    let listener = crate::platform::listener::UnixBusListener::bind(&config.socket_path)?;
+    let uid = listener.owner_uid()?;
     let supervisor = Supervisor::new(config)?;
     *supervisor.root_lease.borrow_mut() = Some(root_lease);
     let mut background = JoinSet::new();
@@ -37,7 +37,7 @@ pub(super) async fn serve(
 }
 
 pub(super) async fn accept(
-    listener: UnixListener,
+    listener: crate::platform::listener::UnixBusListener,
     uid: u32,
     supervisor: Rc<Supervisor>,
     mut shutdown: watch::Receiver<bool>,
@@ -55,7 +55,7 @@ pub(super) async fn accept(
                 if changed.is_err() || *shutdown.borrow() { break; }
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let stream = accepted?;
                 if let Err(error) = verify_local_bus_peer(&stream, uid) {
                     let now = std::time::Instant::now();
                     if last_peer_warning.is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(60)) {
@@ -94,7 +94,7 @@ pub(super) async fn accept(
 }
 
 pub(super) async fn handle(
-    stream: UnixStream,
+    stream: crate::platform::fs::LocalSocketStream,
     supervisor: Rc<Supervisor>,
     id: u64,
 ) -> Result<(), SdkError> {
