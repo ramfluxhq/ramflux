@@ -1,0 +1,46 @@
+# S10a activation amendments: ordinary DM identity and ephemeral boundary
+
+Adopts the final controller dispatches dated 2026-11-11 and their audit addenda.
+
+An ordinary two-root DM uses `dm:` followed by unpadded base64url of the raw
+32-byte BLAKE3 digest of `LP(domain) || LP(A) || LP(B)`, where the domain is
+`ramflux.message.dm_conversation.v1`, LP is u32 big endian byte length followed
+by exact bytes, and A/B are distinct verified canonical unpadded base64url
+32-byte root anchors sorted by their encoded ASCII bytes. The transcript is
+132 bytes (lengths 34/43/43). Neither principal names, device identities,
+primary devices nor home/federation locations enter the transcript. The
+shared protocol implementation and independent golden vector are in
+`message::dm_scope`. Existing directional contact-request IDs are unchanged.
+
+The entire `dm:` namespace is reserved, including malformed suffixes. Groups
+cannot create, link, import, restore or repair into it. Known reserved direct
+IDs must equal the derived pair ID and still satisfy their existing immutable
+kind, group and participant-root bindings. New ordinary direct scopes require
+the canonical ID. Creation and binding are transactional and preserve existing
+erasure state. Same-root own controls and SelfSync may reference scopes;
+they grant no permission to rebind them. Native CONTACT/GROUP_STATE bootstraps
+retain their separate authority checks and cannot allocate conflicting
+reserved scopes. The DM ID is public and offline matchable: it is neither a
+clear routing field nor a replacement for keyed collapse tags.
+
+S6c's no-client-database-write guarantee ends at authenticated ciphertext
+handoff. S10a permits pair-ratchet and incarnation-wide allowance writes, and
+bounded unknown-content retention with original channel and authority. Known
+Typing content remains volatile. Typing operation IDs are validated at 16–64
+bytes, used only for correlation and bounded generation-owned duplicate
+and cadence control, and bypass persistent operation reservation, response
+capture and journal capture. Restart forgets them; duplicates never renew
+signed lifetime. No ephemeral ACK, receipt ledger, durable retry or fallback
+is permitted. Unknown retention charges all copies and metadata atomically
+with ratchet/provenance state against the account and source quotas.
+
+Signed lifetime D is measured in seconds; transport wrapper times are
+milliseconds. Every Typing effect, including inactive clears, is gated by the
+signed start and deadline. The whole pair-incarnation seal allowance never
+refills through durable traffic, receive, submit, ACK, reconnect or elapsed
+time; restore must not combine an older allowance with a newer ratchet.
+`message.transient` uses sequence zero and no journal cursor or replay.
+
+D ends delivery/display; it does not promise cryptographic erasure. Skipped
+keys, backups and retained unknown plaintext can outlive D. Signed outer
+identities, timestamps, mode, TTL and collapse correlation remain visible.

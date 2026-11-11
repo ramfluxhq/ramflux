@@ -786,3 +786,29 @@ fn r6_device_exclusion_survives_a_transferred_sibling_fork() -> Result<(), Crypt
     ));
     Ok(())
 }
+
+#[test]
+fn group_genesis_cannot_squat_reserved_dm_namespace() -> Result<(), CryptoError> {
+    let owner = person("owner", "phone", 11, 12)?;
+    for conversation in ["dm:", "dm:malformed", "dm:kMnoa9jDpfKsJjopJ4NV7ScM259q2dzi2X3NpgG6bFQ"] {
+        assert!(
+            create_group_state(
+                &owner.root,
+                &owner.branch,
+                &owner.actor,
+                GroupStateCreateInput {
+                    group_id: "group",
+                    conversation_id: conversation,
+                    max_members: 200,
+                    new_member_history: "no_history",
+                    name: None,
+                    now: 1000,
+                }
+            )
+            .is_err(),
+            "group squatted {conversation}"
+        );
+    }
+    assert_eq!(create(&owner)?.view().conversation_id, "thread");
+    Ok(())
+}

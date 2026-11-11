@@ -4900,3 +4900,9 @@ Original reports fail ReportOpeningRetired. Later edits keep one original metada
 only the current Edit proof; Delete erases both. Own-sent current-state transfer uses sibling
 attestation without tags 4/5. Full-Message replacement/drop-media cases from this audit override
 older text/entities-only restrictions. Exact rules/tests are OV-EDIT-HISTORY in the decisions file.
+
+### S10a DM identity and ephemeral boundary (final controller addenda)
+
+See [activation amendments](amendments/s10a-dm-ephemeral-boundary.md) for the
+canonical root-pair DM transcript, reserved namespace and Typing operation
+receipt exemption, signed-start gate and privacy boundary.

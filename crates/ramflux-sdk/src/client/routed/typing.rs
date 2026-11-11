@@ -22,6 +22,21 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         active: bool,
     ) -> Result<ramflux_protocol::Envelope, SdkError> {
+        // Load and advance the ratchet under the same writer as the allowance. No two
+        // callers can seal from the same snapshot, and no envelope escapes failed commit.
+        let envelope = self
+            .account_db()?
+            .write_transaction(|| self.prepare_typing_delivery_in(engine, message, active))?;
+        self.finish_pair_retirement()?;
+        Ok(envelope)
+    }
+
+    fn prepare_typing_delivery_in(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: &GatewayDirectMessage,
+        active: bool,
+    ) -> Result<ramflux_protocol::Envelope, SdkError> {
         let (source, remote) = self.typing_sender_target(engine, message, active)?;
         let expires = message
             .created_at
@@ -98,7 +113,6 @@ impl RamfluxClient {
             self.account_db()?.persist_actor_state(&seals_key, &(count + 1))?;
             self.persist_pair(&source, &remote, &bundle, &session)
         })?;
-        self.finish_pair_retirement()?;
         Ok(envelope)
     }
 
