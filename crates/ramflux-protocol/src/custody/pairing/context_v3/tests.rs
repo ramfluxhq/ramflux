@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 use super::*;
+use crate::custody::pairing::WireError;
 use crate::{canonical_json_bytes, domain};
 use serde_json::{Value, json};
 type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -92,5 +93,47 @@ fn pairing_v3_common_preserves_selected_keys_arm_but_full_roles_refuse_it() -> T
     let mut role = RoleContextV3::from_wire_bytes(&canonical_json_bytes(&value["initiator"])?)?;
     role.common = common;
     assert_eq!(role.validate(), Err(super::super::WireError::Field("UpdateRequired")));
+    Ok(())
+}
+
+#[test]
+fn pairing_v3_full_invitation_projection_preserves_bindings_and_refuses_selected_key_upgrade()
+-> TestResult {
+    let transcript = TranscriptV3::from_wire_bytes(&canonical_json_bytes(&fixture()?)?)?;
+    let common = &transcript.initiator.common;
+    let mut invitation = super::super::native::Invitation {
+        schema: "ramflux.pairing.Invitation.v2".into(),
+        version: 2,
+        invitation_id: common.invitation_id.clone(),
+        issuer_seq: common.issuer_seq,
+        request_id: crate::encode_base64url([31; 32]),
+        node_key: crate::encode_base64url([32; 32]),
+        public_origin: "https://relay.example:443".into(),
+        account_anchor: common.account_anchor.clone(),
+        primary_ref: transcript.initiator.device_ref.clone(),
+        base_record_hash: common.record_hash.clone(),
+        base_epoch: common.device_set_epoch,
+        purpose: common.purpose.clone(),
+        recipient_mode: common.recipient_mode.clone(),
+        destination_ref: common.destination_ref.clone(),
+        capabilities: common.capabilities.clone(),
+        lease_not_before: common.lease_not_before,
+        lease_expires_at: common.lease_expires_at,
+        data_selection: Vec::new(),
+        transfer_id: common.transfer_id.clone(),
+        created_at: common.expires_at - 300,
+        expires_at: common.expires_at,
+    };
+    assert_eq!(
+        CommonV3::from_full_invitation(&invitation, common.master_public_key.clone())?,
+        *common
+    );
+    invitation
+        .data_selection
+        .push(DataSelection { key_id: "history".into(), purpose: "history".into() });
+    assert_eq!(
+        CommonV3::from_full_invitation(&invitation, common.master_public_key.clone()),
+        Err(WireError::Field("UpdateRequired"))
+    );
     Ok(())
 }

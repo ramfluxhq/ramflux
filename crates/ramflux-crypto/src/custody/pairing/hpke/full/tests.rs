@@ -94,7 +94,7 @@ fn full_auth_hpke_exports_direction_keys_and_exact_packet_context() -> TestResul
     for bytes in [[9; 32], [2; 32], [3; 32], [4; 32]] {
         expected.extend_from_slice(&bytes);
     }
-    assert_eq!(exported.packet_context, expected);
+    assert_eq!(exported.packet_context.as_slice(), expected);
     let another = setup_full_sender(
         HpkeSecrets::from_seed(&mut [21; 32]),
         &receiver.public,

@@ -11,7 +11,7 @@ fn keys(epoch: u8) -> FullDataKeys {
     FullDataKeys {
         initiator: Zeroizing::new([6; 32]),
         responder: Zeroizing::new([7; 32]),
-        packet_context: context,
+        packet_context: Zeroizing::new(context),
     }
 }
 fn pair() -> (FullDataCipher, FullDataCipher) {

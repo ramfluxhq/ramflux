@@ -103,6 +103,27 @@ pub fn read_http_request_with_route_limits(
     is_pairing: impl Fn(&str, &str) -> bool,
     accepted_at: std::time::Instant,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+    let Some((line, limits)) =
+        classify_request_line(stream, ordinary, pairing, is_pairing, accepted_at)?
+    else {
+        return Ok(None);
+    };
+    let Some(classified) = read_classified_headers(stream, limits, accepted_at, line)? else {
+        return Ok(None);
+    };
+    finish_http_request(stream, limits, accepted_at, classified)
+}
+
+mod full_admission;
+pub use full_admission::{AdmittedHttpRequest, read_http_request_with_full_admission};
+
+fn classify_request_line(
+    stream: &mut TcpStream,
+    ordinary: HttpRequestLimits,
+    pairing: HttpRequestLimits,
+    is_pairing: impl Fn(&str, &str) -> bool,
+    accepted_at: std::time::Instant,
+) -> Result<Option<(RequestLine, HttpRequestLimits)>, NodeCoreError> {
     let line_deadline = accepted_at
         .checked_add(ordinary.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
@@ -120,12 +141,7 @@ pub fn read_http_request_with_route_limits(
     let (method, path) = parse_http_request_line(&raw)?;
     let pairing_route = is_pairing(&method, &path);
     let limits = if pairing_route { pairing } else { ordinary };
-    finish_classified_request(
-        stream,
-        limits,
-        accepted_at,
-        RequestLine { raw, method, path, pairing_route },
-    )
+    Ok(Some((RequestLine { raw, method, path, pairing_route }, limits)))
 }
 
 struct RequestLine {
@@ -143,12 +159,12 @@ struct ClassifiedHttp {
     parsed: ParsedHttpHeaders,
 }
 
-fn finish_classified_request(
+fn read_classified_headers(
     stream: &mut TcpStream,
     limits: HttpRequestLimits,
     accepted_at: std::time::Instant,
     line: RequestLine,
-) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+) -> Result<Option<ClassifiedHttp>, NodeCoreError> {
     let deadline = accepted_at
         .checked_add(limits.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
@@ -170,12 +186,7 @@ fn finish_classified_request(
     let mut lines = header.lines();
     let _ = lines.next();
     let parsed = parse_http_header_fields(lines, limits.max_body_bytes, line.pairing_route)?;
-    finish_http_request(
-        stream,
-        limits,
-        accepted_at,
-        ClassifiedHttp { raw, header_end, method: line.method, path: line.path, parsed },
-    )
+    Ok(Some(ClassifiedHttp { raw, header_end, method: line.method, path: line.path, parsed }))
 }
 
 fn parse_http_request_line(raw: &[u8]) -> Result<(String, String), NodeCoreError> {
@@ -245,6 +256,16 @@ fn finish_http_request(
     accepted_at: std::time::Instant,
     classified: ClassifiedHttp,
 ) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
+    finish_http_request_with_capacity(stream, limits, accepted_at, classified, false)
+}
+
+fn finish_http_request_with_capacity(
+    stream: &mut TcpStream,
+    limits: HttpRequestLimits,
+    accepted_at: std::time::Instant,
+    classified: ClassifiedHttp,
+    reserve_body: bool,
+) -> Result<Option<NodeHttpRequest>, NodeCoreError> {
     let deadline = accepted_at
         .checked_add(limits.request_timeout)
         .ok_or_else(|| rejected("400 Bad Request"))?;
@@ -254,8 +275,14 @@ fn finish_http_request(
     let parsed = classified.parsed;
     let body_start =
         classified.header_end + http_header_separator_len(&classified.raw, classified.header_end);
-    let mut body =
-        classified.raw[body_start..].iter().take(parsed.length).copied().collect::<Vec<_>>();
+    let initial = &classified.raw[body_start..];
+    let mut body = if reserve_body {
+        let mut charged = Vec::with_capacity(parsed.length);
+        charged.extend_from_slice(&initial[..initial.len().min(parsed.length)]);
+        charged
+    } else {
+        initial.iter().take(parsed.length).copied().collect::<Vec<_>>()
+    };
     let mut chunk = [0u8; 512];
     while body.len() < parsed.length {
         let remaining = (parsed.length - body.len()).min(chunk.len());

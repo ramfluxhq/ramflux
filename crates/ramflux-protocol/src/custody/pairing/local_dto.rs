@@ -13,6 +13,9 @@ fn local_base(id: &str, generation: u64) -> Result<()> {
     integer(generation, "generation")?;
     require(generation >= 1, "generation")
 }
+mod full;
+pub use full::FullTransferBegin;
+
 fn name(v: &str) -> Result<()> {
     require(v.len() <= 128 && crate::text_safety::free_text_is_safe(v), "display_name")
 }

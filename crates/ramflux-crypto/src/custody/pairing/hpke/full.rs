@@ -16,7 +16,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub struct FullDataKeys {
     pub(crate) initiator: Zeroizing<[u8; 32]>,
     pub(crate) responder: Zeroizing<[u8; 32]>,
-    pub(crate) packet_context: Vec<u8>,
+    pub(crate) packet_context: Zeroizing<Vec<u8>>,
 }
 pub struct FullSenderSetup {
     pub enc: [u8; 32],
@@ -65,10 +65,12 @@ fn export_keys(
     binding: &DataBinding,
 ) -> Result<FullDataKeys, CryptoError> {
     let packet_tag = b"ramflux.pairing.full.packet.v1";
-    let mut packet_context = u32::try_from(packet_tag.len())
-        .map_err(|_| CryptoError::Pairing("packet_context"))?
-        .to_be_bytes()
-        .to_vec();
+    let mut packet_context = Zeroizing::new(Vec::with_capacity(4 + packet_tag.len() + 128));
+    packet_context.extend_from_slice(
+        &u32::try_from(packet_tag.len())
+            .map_err(|_| CryptoError::Pairing("packet_context"))?
+            .to_be_bytes(),
+    );
     packet_context.extend_from_slice(packet_tag);
     packet_context.extend_from_slice(th);
     packet_context.extend_from_slice(&b32(&binding.transfer_id)?);
@@ -106,7 +108,7 @@ pub fn setup_full_sender(
             &mut rng,
         )
         .map_err(|_| CryptoError::Pairing("hpke_setup"))?;
-        let aad = binding.to_wire_bytes()?;
+        let aad = Zeroizing::new(binding.to_wire_bytes()?);
         // Exact AAD as the confirmation plaintext; TH is independently authenticated by info.
         let confirmation =
             context.seal(&aad, &aad).map_err(|_| CryptoError::Pairing("hpke_aead"))?;
@@ -146,11 +148,11 @@ pub fn open_full_receiver(
             &info(th, binding)?,
         )
         .map_err(|_| CryptoError::Pairing("hpke_setup"))?;
-        let aad = binding.to_wire_bytes()?;
+        let aad = Zeroizing::new(binding.to_wire_bytes()?);
         let opened = Zeroizing::new(
             context.open(confirmation, &aad).map_err(|_| CryptoError::Pairing("hpke_open"))?,
         );
-        if opened.as_slice() != aad {
+        if opened.as_slice() != aad.as_slice() {
             return Err(CryptoError::Pairing("hpke_confirmation"));
         }
         export_keys(

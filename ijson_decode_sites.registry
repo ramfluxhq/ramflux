@@ -354,6 +354,8 @@ crates/ramflux-protocol/src/custody/mod.rs | decode | 2 | E | excluded=target ty
 crates/ramflux-protocol/src/custody/pairing/full_transfer/packet.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded decrypted original-byte full-data packet before root/census/staging validation
 crates/ramflux-protocol/src/custody/pairing/full_transfer/packet.rs | from_wire_bytes | 2 | A | strict=parse_i_json_secret; admission=selected bounded full-data packet after original-byte kind and control limit check
 crates/ramflux-protocol/src/custody/pairing/full_transfer/relay.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=bounded secret v3 StartFull control before HPKE setup and lease-opening validation
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/send.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=owned endpoint full-data Send after bounded strict borrowed preflight
+crates/ramflux-protocol/src/custody/pairing/full_transfer/relay/send.rs | from_wire_bytes | 2 | A | strict=parse_i_json_secret; admission=borrowed original full-data Send bytes within charged node body budget
 crates/ramflux-protocol/src/custody/pairing/mod.rs | from_wire_bytes | 1 | A | strict=parse_i_json_secret; admission=original-byte I-JSON and closed typed pairing schemas; no secret Value tree
 crates/ramflux-protocol/src/custody/pairing/sas_context.rs | require_context_version | 1 | A | strict=parse_i_json_secret; admission=bounded original-byte I-JSON version check before the selected closed SAS context decoder
 crates/ramflux-protocol/src/device_address.rs | parse_qualified_device_id | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure

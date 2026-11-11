@@ -5,6 +5,8 @@
 use super::{PairingWire, Result, U64, WireError, b32, budget, require};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
+mod send;
+pub use send::{BorrowedPacket, BorrowedSendFull, SendFull};
 
 /// Private control sent only after both SAS confirmations on the v3 channel.
 /// Field declaration order is JCS order, allowing direct secret serialization.
@@ -73,11 +75,11 @@ impl PairingWire for StartFull {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptedPacket {
-    pub lease_id: String,
-    pub epoch: String,
-    pub role: String,
-    pub counter: U64,
     pub ciphertext: String,
+    pub counter: U64,
+    pub epoch: String,
+    pub lease_id: String,
+    pub role: String,
 }
 impl PairingWire for EncryptedPacket {
     // Reserve the approved relay metadata budget within the complete 512-KiB HTTP body.
@@ -91,7 +93,8 @@ impl PairingWire for EncryptedPacket {
         let bytes = crate::decode_base64url(&self.ciphertext)
             .map_err(|_| WireError::Field("ciphertext"))?;
         require(
-            bytes.len() >= 16 && crate::encode_base64url(&bytes) == self.ciphertext,
+            (16..=super::PACKET_CIPHERTEXT_BYTES).contains(&bytes.len())
+                && crate::encode_base64url(&bytes) == self.ciphertext,
             "ciphertext",
         )?;
         budget(self, Self::LIMIT)
