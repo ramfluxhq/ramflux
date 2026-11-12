@@ -13,6 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod deadline_tests;
 mod rate;
 mod send;
 pub(crate) mod sender;
@@ -383,6 +385,44 @@ impl RamfluxClient {
         monotonic: Instant,
     ) -> Result<TypingOutcome, SdkError> {
         self.typing_receiver.borrow_mut().receive(self, envelope, local_device, now_ms, monotonic)
+    }
+
+    pub(crate) fn clear_transient_indicators(&self) {
+        let mut receiver = self.typing_receiver.borrow_mut();
+        let keys = receiver.indicators.keys().cloned().collect::<Vec<_>>();
+        for (root, _, conversation) in keys {
+            receiver.clear_author(&root, &conversation);
+        }
+    }
+
+    pub(crate) fn next_transient_deadline(
+        &self,
+        now_ms: u64,
+        monotonic: Instant,
+    ) -> Option<Instant> {
+        let receiver = self.typing_receiver.borrow();
+        receiver
+            .indicators
+            .values()
+            .chain(receiver.pending_clears.values())
+            .map(|indicator| {
+                let wall_expiry = monotonic
+                    .checked_add(Duration::from_millis(
+                        indicator.update.expires_at_ms.saturating_sub(now_ms),
+                    ))
+                    .unwrap_or(monotonic);
+                let mut deadline = indicator.expires.min(wall_expiry);
+                if !indicator.visible {
+                    let start = monotonic
+                        .checked_add(Duration::from_millis(
+                            indicator.starts_at_ms.saturating_sub(now_ms),
+                        ))
+                        .unwrap_or(monotonic);
+                    deadline = deadline.min(indicator.hold_until).min(start);
+                }
+                deadline
+            })
+            .min()
     }
 
     /// Poll and drain only this account's live generated updates. Sequence is always zero.

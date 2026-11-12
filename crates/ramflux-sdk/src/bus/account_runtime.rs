@@ -10,6 +10,8 @@ use crate::prelude::*;
 use std::sync::{Arc, Mutex as RoutingMutex};
 
 mod commands;
+mod transient;
+pub(super) use transient::TransientHost;
 mod connection;
 #[cfg(test)]
 pub(crate) use connection::apply_ack_flush;
@@ -63,6 +65,7 @@ struct AccountRuntime {
     connection_sender: mpsc::Sender<super::connection_manager::AccountWork>,
     connection_work: mpsc::Receiver<super::connection_manager::AccountWork>,
     ledger: Option<super::push_receiver::executor::LedgerExecutor>,
+    transient: TransientHost,
     #[cfg(test)]
     receive_gate_hook: Option<ReceiveGateHook>,
     #[cfg(test)]
@@ -137,6 +140,7 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
         connection_sender,
         connection_work,
         ledger: None,
+        transient: TransientHost::default(),
         #[cfg(test)]
         receive_gate_hook: None,
         #[cfg(test)]
@@ -299,7 +303,10 @@ impl AccountRuntime {
             .ok()
     }
 
-    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+    async fn initialize_actor(
+        &mut self,
+        ready: std::sync::mpsc::SyncSender<()>,
+    ) -> Result<bool, SdkError> {
         self.initialize_readers()?;
         self.start_connection()?;
         self.start_courier();
@@ -313,8 +320,15 @@ impl AccountRuntime {
         );
         let mut shutdown = self.shutdown.clone();
         tokio::select! {
-            _ = shutdown.changed() => return Ok(()),
+            _ = shutdown.changed() => return Ok(false),
             result = self.publish(&restore) => result?,
+        }
+        Ok(true)
+    }
+
+    async fn serve(&mut self, ready: std::sync::mpsc::SyncSender<()>) -> Result<(), SdkError> {
+        if !self.initialize_actor(ready).await? {
+            return Ok(());
         }
         let mut schedule = super::sync_driver::Schedule {
             min: self.timeouts.receive_min,
@@ -324,6 +338,9 @@ impl AccountRuntime {
         let mut next = tokio::time::Instant::now() + schedule.min;
         let mut checkpoints = 0_u8;
         loop {
+            self.refresh_transient_host().await;
+            self.publish_transient_updates();
+            let transient_deadline = self.transient_deadline();
             if let Some(command) = self.queued_command(&mut checkpoints) {
                 if Box::pin(self.apply(command)).await? {
                     break;
@@ -345,6 +362,16 @@ impl AccountRuntime {
                     }
                     continue;
                 },
+                frame = self.transient.next(&self.state, &self.id) => {
+                    self.apply_transient_frame(frame);
+                    continue;
+                },
+                () = async {
+                    match transient_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => { self.publish_transient_updates(); continue; },
                 command = self.receiver.recv() => command,
                 outcome = async {
                     match self.courier.as_mut() {

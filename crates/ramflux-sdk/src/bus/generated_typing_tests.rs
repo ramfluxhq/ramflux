@@ -155,8 +155,9 @@ async fn typing_generated_send_bypasses_durable_operation_capture() -> TestResul
         ramflux_protocol::GATEWAY_SESSION_PUSH_CAPABILITY.into(),
         ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into(),
     ]);
-    let engine =
+    let mut engine =
         GatewaySessionEngine::with_test_transport(config, Box::new(Transport(capture.clone())));
+    engine.ephemeral_negotiated = true;
     let root = a.root.0.clone();
     let source =
         LocalBusAccountState::new(a.client, engine, a.manifest.principal_commitment.clone());

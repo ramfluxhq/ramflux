@@ -262,6 +262,15 @@ fn edited_import_same_root_other_device_edit_ok() -> TestResult {
     Ok(())
 }
 
+fn empty_import_receiver(root: &Root) -> TestResult<RamfluxClient> {
+    let mut client = RamfluxClient::new();
+    client.create_identity_root("receiver", [53; 32]);
+    client.create_device_branch("receiver", "receiver", 1, [54; 32]);
+    client.open_account_index(root.0.join("receiver"))?;
+    client.create_account("receiver", &client.own_account_anchor()?)?;
+    client.unlock_account("receiver", b"history-import-test")?;
+    Ok(client)
+}
 fn import_receiver(root: &Root, original: &g::EventIdentity) -> TestResult<RamfluxClient> {
     import_receiver_with_message(
         root,
@@ -274,12 +283,7 @@ fn import_receiver_with_message(
     original: &g::EventIdentity,
     message: &g::Message,
 ) -> TestResult<RamfluxClient> {
-    let mut client = RamfluxClient::new();
-    client.create_identity_root("receiver", [53; 32]);
-    client.create_device_branch("receiver", "receiver", 1, [54; 32]);
-    client.open_account_index(root.0.join("receiver"))?;
-    client.create_account("receiver", &client.own_account_anchor()?)?;
-    client.unlock_account("receiver", b"history-import-test")?;
+    let client = empty_import_receiver(root)?;
     let id = ramflux_protocol::encode_base64url(&original.id);
     let old = g::Inner {
         layer: 2,
@@ -313,17 +317,22 @@ fn apply_claim(client: &RamfluxClient, item: &g::HistoryItem) -> TestResult<bool
         inbox_seq: 1,
         target_delivery_id: "unused-by-authorized-executor".into(),
     };
-    Ok(client.apply_generated_edit_authorized(
-        super::super::message_mutations::EditContext {
-            entry: &entry,
-            source: &author.device,
-            imported: Some(item),
-            own_sent: false,
-        },
-        &original.conversation_id,
-        &item.exact_inner,
-        None,
-    )?)
+    client.account_db()?.write_transaction(|| -> TestResult<bool> {
+        if !client.bootstrap_generated_edited_target(item, &original)? {
+            return Ok(false);
+        }
+        Ok(client.apply_generated_edit_authorized(
+            super::super::message_mutations::EditContext {
+                entry: &entry,
+                source: &author.device,
+                imported: Some(item),
+                own_sent: false,
+            },
+            &original.conversation_id,
+            &item.exact_inner,
+            None,
+        )?)
+    })
 }
 
 fn revise(
@@ -757,5 +766,85 @@ fn reparse_preserves_original_channel_and_authority() -> TestResult {
         );
         assert_eq!(client.reparse_raw_inner_page()?.projected, 0);
     }
+    Ok(())
+}
+
+#[test]
+fn edited_history_bootstraps_empty_receiver_without_retired_body() -> TestResult {
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    let first = item(&a, &a, now)?;
+    let original = g::original_header::decode_identity(&first.exact_original_identity)?;
+    let client = empty_import_receiver(&root)?;
+    let id = ramflux_protocol::encode_base64url(&original.id);
+    assert!(client.direct_message_by_id(&id)?.is_none());
+    assert!(
+        apply_claim(&client, &first)?,
+        "verified edited history must bootstrap its body-free target"
+    );
+    let db = client.account_db()?;
+    assert_eq!(db.message_content(&id)?, Some(first.exact_inner.clone()));
+    assert_eq!(
+        db.load_actor_state::<g::EventIdentity>(&format!("routed/generated-identity/{id}"))?,
+        Some(original.clone())
+    );
+    assert_eq!(
+        db.load_actor_state::<bool>(&format!("routed/report-opening-retired/{id}"))?,
+        Some(true)
+    );
+    assert!(!apply_claim(&client, &first)?);
+    assert!(apply_claim(&client, &revise(&a, &first, 9, now)?)?);
+    assert!(!apply_claim(&client, &revise(&a, &first, 8, now)?)?);
+    assert!(matches!(
+        client.selected_generated_report_evidence(&original.id),
+        Err(SdkError::HistoryEvidence(EvidenceError::ReportOpeningRetired))
+    ));
+    Ok(())
+}
+
+#[test]
+fn unknown_history_direct_scope_requires_derived_root_pair() -> TestResult {
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    let client = empty_import_receiver(&root)?;
+    let mut original = identity(&a, 1)?;
+    assert!(client.authorize_history_message_scope(&original).is_err());
+    original.conversation_id =
+        g::dm_scope::derive(&client.own_account_anchor()?, &a.author.account_anchor)?;
+    client.authorize_history_message_scope(&original)?;
+    let roots = json!({"kind":"direct", "group_id":null,
+        "participant_roots":[client.own_account_anchor()?, a.author.account_anchor]});
+    client.account_db()?.persist_client_record("conversation", "legacy", &roots)?;
+    original.conversation_id = "legacy".into();
+    client.authorize_history_message_scope(&original)?;
+    client.account_db()?.persist_client_record("conversation", "legacy", &json!({
+        "kind":"direct", "group_id":null, "participant_roots":["foreign", a.author.account_anchor]}))?;
+    assert!(client.authorize_history_message_scope(&original).is_err());
+    Ok(())
+}
+
+#[test]
+fn edited_history_bootstrap_rolls_back_projection_and_evidence() -> TestResult {
+    let root = Root::new()?;
+    let now = crate::custody::network_now()?;
+    let a = sender(&root, "original", now)?;
+    let first = item(&a, &a, now)?;
+    let original = g::original_header::decode_identity(&first.exact_original_identity)?;
+    let client = empty_import_receiver(&root)?;
+    let id = ramflux_protocol::encode_base64url(&original.id);
+    let db = client.account_db()?;
+    let result = db.write_transaction(|| -> TestResult {
+        assert!(apply_claim(&client, &first)?);
+        Err("injected import writer failure".into())
+    });
+    assert!(result.is_err());
+    assert!(client.direct_message_by_id(&id)?.is_none());
+    assert!(db.message_content(&id)?.is_none());
+    assert!(!db.actor_state_exists(&format!("routed/original-header/{id}"))?);
+    assert!(!db.actor_state_exists(&format!("routed/edit-revision/{id}"))?);
+    assert!(db.raw_inner_copy(&format!("history/current-edit/{id}"))?.is_none());
+    assert!(apply_claim(&client, &first)?);
     Ok(())
 }

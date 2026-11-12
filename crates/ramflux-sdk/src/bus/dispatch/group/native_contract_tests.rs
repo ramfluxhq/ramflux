@@ -32,7 +32,7 @@ async fn request(
     );
     let (outbound, _receiver) = mpsc::channel(8);
     let mut connection = LocalBusConnectionState::new(1, outbound);
-    crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection).await
+    Box::pin(crate::bus::daemon::dispatch_local_bus_request(&frame, state, &mut connection)).await
 }
 
 fn install_lease(

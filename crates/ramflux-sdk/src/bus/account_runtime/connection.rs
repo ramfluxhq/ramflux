@@ -44,6 +44,8 @@ impl AccountRuntime {
         Ok(())
     }
     pub(super) async fn stop_connection(&mut self) {
+        self.clear_transient_host();
+        self.transient = super::transient::TransientHost::default();
         if let Some(handle) =
             self.state.accounts.get_mut(&self.id).and_then(|account| account.connection.take())
         {

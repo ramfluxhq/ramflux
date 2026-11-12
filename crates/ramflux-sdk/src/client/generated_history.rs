@@ -6,6 +6,7 @@ use crate::{RamfluxClient, SdkError};
 use prost::Message as _;
 use ramflux_protocol::message::{self as g, original_header::EvidenceError};
 use serde_json::Value;
+mod bootstrap;
 mod import;
 mod ordinary;
 mod pending;
@@ -123,6 +124,11 @@ impl RamfluxClient {
         item: &g::HistoryItem,
     ) -> Result<g::EventIdentity, SdkError> {
         let checked = g::original_header::edited::check(item)?;
+        if checked.identity.device_sequence & (1 << 63) != 0
+            || checked.edit_identity.device_sequence & (1 << 63) != 0
+        {
+            return Err(EvidenceError::OriginCommitmentMismatch.into());
+        }
         let original_evidence =
             item.original_metadata_evidence.as_ref().ok_or(EvidenceError::OriginEvidenceMissing)?;
         let original = authority(
@@ -300,6 +306,7 @@ impl RamfluxClient {
             return Err(EvidenceError::EditAuthorMismatch.into());
         }
         self.require_native_operation(&sibling, NativeOperation::Sync)?;
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
         let original = self.verify_generated_edited_history_item(item)?;
         let inner: g::Inner = prost::Message::decode(item.exact_inner.as_slice())
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
@@ -307,17 +314,24 @@ impl RamfluxClient {
             item,
             inner.identity.as_ref().ok_or(EvidenceError::OriginCommitmentMismatch)?,
         )?;
-        self.apply_generated_edit_authorized(
-            super::message_mutations::EditContext {
-                entry,
-                source: &edit_author.device,
-                imported: Some(item),
-                own_sent: false,
-            },
-            &original.conversation_id,
-            &item.exact_inner,
-            None,
-        )
+        let db = self.account_db()?;
+        db.write_transaction(|| {
+            self.authorize_history_message_scope(&original)?;
+            if !self.bootstrap_generated_edited_target(item, &original)? {
+                return Ok(false);
+            }
+            self.apply_generated_edit_authorized(
+                super::message_mutations::EditContext {
+                    entry,
+                    source: &edit_author.device,
+                    imported: Some(item),
+                    own_sent: false,
+                },
+                &original.conversation_id,
+                &item.exact_inner,
+                None,
+            )
+        })
     }
 
     pub(crate) fn store_generated_edited_evidence(

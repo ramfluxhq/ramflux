@@ -144,6 +144,7 @@ impl AccountSessionHarness {
             connection_sender,
             connection_work,
             ledger: None,
+            transient: crate::bus::account_runtime::TransientHost::default(),
             #[cfg(test)]
             receive_gate_hook: None,
             #[cfg(test)]

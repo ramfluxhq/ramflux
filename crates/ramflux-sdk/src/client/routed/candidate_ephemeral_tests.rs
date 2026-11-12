@@ -254,6 +254,7 @@ async fn typing_native_endpoint_lifetime_has_no_unexpected_table_writes() -> Tes
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.ephemeral_negotiated = true;
     let local = a.client.owned_device_identity()?;
     let remote = b.client.owned_device_identity()?;
     let session = a.client.sendable_pair(&local, &remote)?.ok_or("pair")?.0;
@@ -472,6 +473,7 @@ async fn account_transient_generation_reset_and_durable_message_clear() -> TestR
     let mut config = a.config.clone();
     config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
     let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    engine.ephemeral_negotiated = true;
     let first = draft(&a, &b, "held-before-generation-end", 5)?;
     let envelope = a.client.prepare_typing_delivery(&mut engine, &first, true)?;
     let now = u64::try_from(first.created_at)? * 1000;
@@ -518,5 +520,21 @@ async fn account_transient_generation_reset_and_durable_message_clear() -> TestR
         Vec::<g::MessageUpdate>::new()
     );
     assert_tables_unchanged(&b.client, &[], &before)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn typing_missing_negotiated_echo_refuses_before_ratchet_or_allowance_write() -> TestResult {
+    let _guard = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+    let (a, b) = Box::pin(native_pair()).await?;
+    let mut config = a.config.clone();
+    config.capability_scope.push(ramflux_protocol::ephemeral::GATEWAY_EPHEMERAL_CAPABILITY.into());
+    let mut engine = GatewaySessionEngine::with_test_transport(config, Box::new(NoNetwork));
+    let before = a.client.account_db()?.test_table_fingerprints(&[])?;
+    assert!(
+        a.client.prepare_typing_delivery(&mut engine, &draft(&a, &b, "no-echo", 5)?, true).is_err()
+    );
+    assert_tables_unchanged(&a.client, &[], &before)?;
+    assert_eq!(engine.wire_writes, 0);
     Ok(())
 }

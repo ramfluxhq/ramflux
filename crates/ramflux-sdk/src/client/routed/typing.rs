@@ -164,11 +164,12 @@ impl RamfluxClient {
             )
             .into());
         }
-        if !engine
-            .config()
-            .capability_scope
-            .iter()
-            .any(|scope| scope == GATEWAY_EPHEMERAL_CAPABILITY)
+        if !engine.ephemeral_negotiated()
+            || !engine
+                .config()
+                .capability_scope
+                .iter()
+                .any(|scope| scope == GATEWAY_EPHEMERAL_CAPABILITY)
         {
             return Err(typing_unavailable("typing requires negotiated ephemeral mode"));
         }
