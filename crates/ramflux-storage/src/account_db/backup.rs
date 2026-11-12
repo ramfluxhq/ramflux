@@ -28,7 +28,7 @@ pub struct AccountBackupSnapshot {
     pub counts: BackupCounts,
 }
 
-/// A-only pinned encrypted read view. Pinning and copying are separate operations so
+/// Device-local pinned encrypted read view. Pinning and copying are separate operations so
 /// the generation/writer owner releases queued writes before any bulk disk work.
 /// Neither its source key nor the eventual database file belongs on the pairing wire.
 pub struct FullTransferCut {
