@@ -64,6 +64,8 @@ pub(crate) struct Provenance {
     pub source_epoch: u64,
     pub original_route: String,
     pub outer_receipt_key: String,
+    #[serde(default)]
+    pub source_evidence_copy: Option<String>,
     pub received_erasure_generation: i64,
 }
 
@@ -636,6 +638,11 @@ impl RamfluxClient {
             }
         }
         let copy_id = self.authenticated_committed_key(HeadUse::NewAuthorization, entry)?;
+        let origin = self.capture_retained_origin(opened, entry)?;
+        let origin_copy = origin
+            .as_ref()
+            .map(super::super::raw_inner_origin::RetainedOrigin::copy_id)
+            .transpose()?;
         let provenance = Provenance {
             source: source.storage_key().to_owned(),
             conversation: opened.routing.conversation_id.clone(),
@@ -651,6 +658,7 @@ impl RamfluxClient {
                 .ok_or_else(|| invalid("source epoch missing"))?,
             original_route: serde_json::to_string(&opened.routing)?,
             outer_receipt_key: copy_id.clone(),
+            source_evidence_copy: origin_copy.clone(),
             received_erasure_generation: self.account_db()?.privacy_erasure_generation()?,
         };
         let db = self.account_db()?;
@@ -658,6 +666,15 @@ impl RamfluxClient {
             self.merge_routed_group_link(group, &opened.routing.conversation_id)?;
         } else {
             self.ensure_generated_direct_conversation(opened, entry)?;
+        }
+        if let (Some(origin), Some(origin_copy)) = (origin.as_ref(), origin_copy.as_ref()) {
+            self.retain_raw_origin_copy(
+                &opened.routing.message_id,
+                source.root_commitment(),
+                origin_copy,
+                origin,
+                target.as_ref(),
+            )?;
         }
         db.put_unsupported_raw_copy(RawInnerCopyWrite {
             owner_id: &opened.routing.message_id,

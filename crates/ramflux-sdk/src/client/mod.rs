@@ -67,6 +67,7 @@ mod own_group_lazy_authority;
 mod own_sent_delivery;
 pub(crate) mod own_sent_message;
 mod private_prekeys;
+pub(crate) mod raw_inner_origin;
 mod raw_inner_reparse;
 mod receipt_bindings;
 pub mod recovery;

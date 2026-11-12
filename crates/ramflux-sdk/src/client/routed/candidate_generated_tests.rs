@@ -444,6 +444,7 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
         source_epoch: 1,
         original_route: serde_json::to_string(&opened.routing)?,
         outer_receipt_key: copy_id.clone(),
+        source_evidence_copy: None,
         received_erasure_generation: b.client.account_db()?.privacy_erasure_generation()?,
     })?;
     let db = b.client.account_db()?;
@@ -480,8 +481,10 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     )));
     assert_schema_update_cursor(&b.client, &id)?;
     let head = b.client.account_db()?.journal_bounds()?.head_seq;
+    retain_redundant_reparse_copy(&b.client, &id, source.root_commitment(), &raw, &metadata)?;
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
     assert_eq!(b.client.account_db()?.journal_bounds()?.head_seq, head);
+    assert!(b.client.account_db()?.raw_inner_copy("redundant-known-copy")?.is_none());
     b.client.delete_direct_message("c", &id, "local", "erase-upgrade")?;
     let db = b.client.account_db()?;
     assert!(
@@ -497,6 +500,27 @@ async fn reparse_is_idempotent_and_erased_raw_stays_tombstoned() -> Result<(), S
     );
     assert_eq!(b.client.reparse_raw_inner_page()?.projected, 0);
     Ok(())
+}
+
+fn retain_redundant_reparse_copy(
+    client: &RamfluxClient,
+    id: &str,
+    source: &str,
+    raw: &[u8],
+    metadata: &[u8],
+) -> Result<(), SdkError> {
+    let db = client.account_db()?;
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(ramflux_storage::RawInnerCopyWrite {
+            owner_id: id,
+            verified_source_anchor: source,
+            copy_id: "redundant-known-copy",
+            kind: ramflux_storage::RawInnerCopyKind::OuterInner,
+            bytes: raw,
+            bounded_metadata: metadata,
+        })
+        .map_err(SdkError::from)
+    })
 }
 
 fn assert_schema_update_cursor(client: &RamfluxClient, id: &str) -> Result<(), SdkError> {
