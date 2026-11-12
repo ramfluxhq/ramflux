@@ -95,3 +95,15 @@ mod sibling;
 
 #[path = "native_test_support/authored.rs"]
 mod authored;
+
+mod authored_edit;
+
+mod authored_epoch;
+
+mod authored_group;
+
+mod authored_edit_erasure;
+
+mod live_own_copy;
+
+mod generated_routes;

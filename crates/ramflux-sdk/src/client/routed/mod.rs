@@ -44,6 +44,7 @@ mod reset_work;
 pub(crate) use reset_prepare::with_fixed_pair_control_id;
 pub(crate) use reset_prepare::{PairControlDraft, PairControlKind};
 mod ephemeral_content;
+mod generated_transport;
 mod send_candidate;
 mod session;
 mod typing;
@@ -524,7 +525,7 @@ impl RamfluxClient {
         pair: SealPair<'_>,
     ) -> Result<SealedRouted, SdkError> {
         self.account_db()?
-            .write_transaction(|| self.seal_routed_with_route_in(message, body, route, pair))
+            .write_transaction(|| self.seal_routed_with_route_in(message, body, route, pair, None))
     }
 
     fn seal_routed_with_route_in(
@@ -533,37 +534,32 @@ impl RamfluxClient {
         body: &[u8],
         route: Route,
         pair: SealPair<'_>,
+        outer_profile: Option<(&'static str, u32)>,
     ) -> Result<SealedRouted, SdkError> {
         self.require_backup_outbound_ready()?;
         let SealPair { local, remote, session, header, bundle } = pair;
         let remote = self.device_reference(remote)?;
         let wire_remote =
             crate::client::identity_authority::device_namespace::wire_device_id(&remote)?;
-        let mut route = routing(message, route);
-        if route.kind == Kind::GroupMessage {
-            route.group_message_id = Some(
-                self.outgoing_group_logical_id(&message.message_id)?
-                    .unwrap_or_else(|| message.message_id.clone()),
-            );
-        }
-        if route.kind == Kind::GroupControl
-            && let Some(group) = route.group_id.as_deref()
-            && let Some(link) = self.account_db()?.client_record("group", group)?
-            && let Some(conversation) =
-                link.get("conversation_id").and_then(serde_json::Value::as_str)
-        {
-            conversation.clone_into(&mut route.conversation_id);
-        }
-        bind_generated_route_identity(&mut route, body);
-        let inner = zeroize::Zeroizing::new(serde_json::to_vec(&Plaintext {
-            routing: route.clone(),
-            body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(body)),
-        })?);
+        let route = self.prepare_seal_routing(message, body, route)?;
+        let inner = generated_transport::seal_plaintext(body, &route)?;
         let report = if crate::client::target_selection::schema_v1_selected()
             && !report::omit_direct_report()
         {
             let recipient = self.device_identity(&remote)?;
-            Some(report::assemble_direct_report(self, message, session, &inner, local, &recipient)?)
+            Some(report::assemble_report_with_policy(
+                self,
+                message,
+                session,
+                &inner,
+                &recipient,
+                &report::ReportPolicy {
+                    local_device_id: local,
+                    mode: "durable",
+                    priority: ramflux_protocol::Priority::Normal,
+                    outer_profile,
+                },
+            )?)
         } else {
             None
         };
@@ -631,6 +627,31 @@ impl RamfluxClient {
         })
     }
 
+    fn prepare_seal_routing(
+        &self,
+        message: &GatewayDirectMessage,
+        body: &[u8],
+        route: Route,
+    ) -> Result<Routing, SdkError> {
+        let mut route = routing(message, route);
+        if route.kind == Kind::GroupMessage {
+            route.group_message_id = Some(
+                self.outgoing_group_logical_id(&message.message_id)?
+                    .unwrap_or_else(|| message.message_id.clone()),
+            );
+        }
+        if route.kind == Kind::GroupControl
+            && let Some(group) = route.group_id.as_deref()
+            && let Some(link) = self.account_db()?.client_record("group", group)?
+            && let Some(conversation) =
+                link.get("conversation_id").and_then(serde_json::Value::as_str)
+        {
+            conversation.clone_into(&mut route.conversation_id);
+        }
+        bind_generated_route_identity(&mut route, body);
+        Ok(route)
+    }
+
     pub(crate) fn open_routed(
         &self,
         entry: &GatewayInboxEntry,
@@ -658,7 +679,13 @@ impl RamfluxClient {
             session.decrypt_with_franking_keys(&envelope.ciphertext, &aad)?,
         );
         let inner = report::opened_inner_plaintext(&entry.envelope, &decrypted.plaintext)?;
-        let plaintext: Plaintext = serde_json::from_slice(&inner)?;
+        let plaintext: Plaintext = if crate::client::target_selection::schema_v1_selected()
+            && generated_transport::identified_inner(&inner).is_some()
+        {
+            generated_transport::generated_plaintext(&inner)?
+        } else {
+            serde_json::from_slice(&inner)?
+        };
         report::refuse_direct_candidate_opening(
             &entry.envelope,
             &session,
@@ -669,6 +696,12 @@ impl RamfluxClient {
         }
         let body = ramflux_protocol::decode_base64url(&plaintext.body_base64)
             .map_err(|_| invalid("invalid routed body"))?;
+        if crate::client::target_selection::schema_v1_selected()
+            && generated_transport::identified_inner(&body).is_some()
+            && inner.as_slice() != body.as_slice()
+        {
+            return Err(invalid("generated Inner cannot use the routed JSON carrier"));
+        }
         let logical_id = if crate::client::target_selection::schema_v1_selected() {
             use prost::Message as _;
             ramflux_protocol::message::Inner::decode(body.as_slice())

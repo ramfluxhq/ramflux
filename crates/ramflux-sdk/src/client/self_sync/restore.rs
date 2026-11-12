@@ -16,6 +16,15 @@ pub(crate) struct RefreshClock {
 }
 
 impl RamfluxClient {
+    /// Only authenticated connection observations start the uninterrupted live interval.
+    pub(crate) fn note_self_sync_live_session(&self, generation: Option<u64>) {
+        if self.self_sync_live_generation.replace(generation) != generation
+            && let Some(clock) = self.self_sync_restore_clock.borrow_mut().as_mut()
+        {
+            clock.since = Instant::now();
+        }
+    }
+
     /// Called inside the fresh restore activation transaction. These markers are
     /// durable; the monotonic waiting clock restarts conservatively after a reboot.
     pub(crate) fn mark_self_sync_restore_refresh(&self) -> Result<(), SdkError> {
@@ -39,7 +48,10 @@ impl RamfluxClient {
         if clock.generation != generation {
             *clock = RefreshClock { generation, since: now, last_peer: None };
         }
-        if now.duration_since(clock.since) < QUIET || clock.last_peer.is_some() {
+        if now.duration_since(clock.since) < QUIET
+            || clock.last_peer.is_some()
+            || self.self_sync_live_generation.get().is_none()
+        {
             return Err(SdkError::InboundPending(
                 "self sync: restored scope needs a sibling refresh".into(),
             ));
@@ -87,6 +99,7 @@ mod tests {
         assert_eq!(own.client.change_self_sync("c", mute())?.revision, 1);
         let db = own.client.account_db()?;
         db.write_transaction(|| own.client.mark_self_sync_restore_refresh())?;
+        own.client.note_self_sync_live_session(Some(1));
         assert!(matches!(
             own.client.change_self_sync("c", mute()),
             Err(SdkError::InboundPending(_))
@@ -117,18 +130,76 @@ mod tests {
     async fn self_sync_restore_restart_at_twenty_nine_seconds_restarts_the_barrier() -> TestResult {
         let mut own = Fixture::new("self-sync-restore-restart").await?;
         let mute = || g::SelfSync { operation: 6, revision: 1, mute: true, ..Default::default() };
-        own.client.account_db()?.write_transaction(|| own.client.mark_self_sync_restore_refresh())?;
-        assert!(matches!(own.client.change_self_sync("new-scope", mute()), Err(SdkError::InboundPending(_))));
+        own.client
+            .account_db()?
+            .write_transaction(|| own.client.mark_self_sync_restore_refresh())?;
+        own.client.note_self_sync_live_session(Some(1));
+        assert!(matches!(
+            own.client.change_self_sync("new-scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
         tokio::time::advance(Duration::from_secs(29)).await;
         let account = own.client.account_db()?.local_account_id.clone();
         own.client.active_account_db = None;
         own.client.unlock_account(&account, b"native fixture data passphrase")?;
-        assert!(matches!(own.client.change_self_sync("another-new-scope", mute()), Err(SdkError::InboundPending(_))));
+        own.client.note_self_sync_live_session(Some(2));
+        assert!(matches!(
+            own.client.change_self_sync("another-new-scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(matches!(own.client.change_self_sync("another-new-scope", mute()), Err(SdkError::InboundPending(_))));
+        assert!(matches!(
+            own.client.change_self_sync("another-new-scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
         tokio::time::advance(Duration::from_secs(29)).await;
         assert_eq!(own.client.change_self_sync("another-new-scope", mute())?.revision, 1);
         Ok(())
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn self_sync_restore_requires_uninterrupted_live_time_and_incomplete_peer_never_clears()
+    -> TestResult {
+        let mut own = Fixture::new("self-sync-restore-live").await?;
+        let sibling = own.enroll_sibling("self-sync-live-sibling", "sibling").await?;
+        let mute = || g::SelfSync { operation: 6, revision: 1, mute: true, ..Default::default() };
+        own.client
+            .account_db()?
+            .write_transaction(|| own.client.mark_self_sync_restore_refresh())?;
+        assert!(matches!(
+            own.client.change_self_sync("scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(matches!(
+            own.client.change_self_sync("scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
+        own.client.note_self_sync_live_session(Some(1));
+        tokio::time::advance(Duration::from_secs(29)).await;
+        own.client.note_self_sync_live_session(None);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(matches!(
+            own.client.change_self_sync("scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
+        own.client.note_self_sync_live_session(Some(2));
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(matches!(
+            own.client.change_self_sync("new-scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(own.client.change_self_sync("scope", mute())?.revision, 1);
+        own.client
+            .account_db()?
+            .write_transaction(|| own.client.mark_self_sync_restore_refresh())?;
+        own.client.note_self_sync_sibling_reachable(&sibling.client.owned_device_identity()?)?;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(matches!(
+            own.client.change_self_sync("scope", mute()),
+            Err(SdkError::InboundPending(_))
+        ));
+        Ok(())
+    }
 }

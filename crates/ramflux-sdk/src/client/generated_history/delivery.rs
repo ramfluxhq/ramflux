@@ -224,15 +224,18 @@ impl RamfluxClient {
             let inner = zeroize::Zeroizing::new(inner);
             plan.message.conversation_id.clone_from(&built.conversation);
             plan.message.message_id = ramflux_protocol::encode_base64url(&identity.id);
-            let sealed = self.seal_routed_prepared(
+            let sealed = self.seal_generated_routed_prepared(
                 config,
                 &plan.message,
                 &inner,
                 Route::control(),
                 material,
             )?;
-            let envelope =
-                crate::dm::gateway_envelope_from_sealed(config, &mut plan.message, sealed, None)?;
+            let envelope = crate::dm::gateway_generated_envelope_from_sealed(
+                config,
+                &mut plan.message,
+                sealed,
+            )?;
             let page = page_key(&row.target);
             db.persist_actor_state(
                 &page,

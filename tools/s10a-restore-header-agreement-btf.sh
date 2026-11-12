@@ -20,7 +20,7 @@ pattern = r'\s*'.join(re.escape(c) for c in old if not c.isspace())
 matches = list(re.finditer(pattern, s))
 assert len(matches) == 1, len(matches)
 match = matches[0]
-new = '(ours != theirs && false)'
+new = 'ours != theirs && false'
 p.write_text(s[:match.start()] + new + s[match.end():])
 PY
 if timeout 300 cargo test -p ramflux-sdk --lib "$named" >"$log_file" 2>&1; then

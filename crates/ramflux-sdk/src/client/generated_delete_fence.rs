@@ -190,3 +190,46 @@ impl RamfluxClient {
         Ok(true)
     }
 }
+
+impl RamfluxClient {
+    /// Erasure-only lookup after source/Inner authentication; it grants no target authority.
+    pub(crate) fn generated_edit_reference_erased(&self, bytes: &[u8]) -> Result<bool, SdkError> {
+        use prost::Message as _;
+        let Ok(inner) = g::Inner::decode(bytes) else { return Ok(false) };
+        let inner = if inner.kind == 8 {
+            let Ok(control) = g::Control::decode(inner.body.as_slice()) else { return Ok(false) };
+            let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload else {
+                return Ok(false);
+            };
+            let Some(g::own_message_copy::Payload::Sent(sent)) = copy.payload else {
+                return Ok(false);
+            };
+            let Ok(nested) = g::Inner::decode(sent.exact_inner.as_slice()) else {
+                return Ok(false);
+            };
+            nested
+        } else {
+            inner
+        };
+        if inner.kind != 3 {
+            return Ok(false);
+        }
+        let Ok(edit) = g::Edit::decode(inner.body.as_slice()) else { return Ok(false) };
+        let Some(target) = edit.target else { return Ok(false) };
+        let db = self.account_db()?;
+        for key in db.actor_state_keys(&pending_prefix(&target.id))? {
+            let Some(fence) = db.load_actor_state::<Fence>(&key)? else { continue };
+            if fence.target == target
+                && fence.conversation == target.conversation_id
+                && fence.moderator.is_none()
+                && ((fence.scope == g::DeleteScope::Everyone as i32
+                    && fence.source_root == target.author_anchor)
+                    || (fence.scope == g::DeleteScope::Local as i32
+                        && fence.source_root == self.own_account_anchor()?))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}

@@ -64,9 +64,9 @@ impl RamfluxClient {
             let inner =
                 self.encode_own_message_copy_inner(&draft, &sibling, &body, identity.clone())?;
             let sealed =
-                self.seal_routed_prepared(config, &message, &inner, Route::control(), material)?;
+                self.seal_generated_routed_prepared(config, &message, &inner, Route::control(), material)?;
             let envelope =
-                crate::dm::gateway_envelope_from_sealed(config, &mut message, sealed, None)?;
+                crate::dm::gateway_generated_envelope_from_sealed(config, &mut message, sealed)?;
             envelopes.push((sibling.device_id, envelope));
         }
         Ok(envelopes)

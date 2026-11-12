@@ -173,7 +173,10 @@ impl RamfluxClient {
             .map_err(|_| EvidenceError::OriginCommitmentMismatch)?;
         // Only plaintext Message/Edit attestations contain the message body needed by
         // this private owner. Deletes settle without retaining an enclosing body copy.
-        if !matches!(inner.kind, 1 | 3) || db.message_is_deleted(owner)? {
+        if !matches!(inner.kind, 1 | 3)
+            || db.message_is_deleted(owner)?
+            || self.generated_edit_reference_erased(&sent.exact_inner)?
+        {
             return Ok(());
         }
         if inner.kind == 1

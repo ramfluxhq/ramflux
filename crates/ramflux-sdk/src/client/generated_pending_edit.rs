@@ -148,3 +148,31 @@ impl RamfluxClient {
         Ok(())
     }
 }
+
+impl RamfluxClient {
+    pub(crate) fn retire_pending_generated_edit_for_delete(
+        &self,
+        target: &g::MessageRef,
+    ) -> Result<(), SdkError> {
+        let owner = ramflux_protocol::encode_base64url(&target.id);
+        let db = self.account_db()?;
+        let pending_key = key(&owner, &target.author_anchor);
+        let Some(pending) = db.load_actor_state::<Pending>(&pending_key)? else { return Ok(()) };
+        let proof = format!(
+            "routed/own-sent-attestation/{owner}/{}",
+            ramflux_protocol::encode_base64url(&pending.event_id)
+        );
+        db.retire_message_copies(
+            &owner,
+            &[
+                ("raw_inner".into(), pending.copy_id),
+                ("raw_inner".into(), proof.clone()),
+                ("actor".into(), proof),
+                ("actor".into(), pending.committed_key.clone()),
+                ("event".into(), format!("gateway/delivery/v2/{}", pending.committed_key)),
+                ("actor".into(), pending_key),
+            ],
+        )?;
+        Ok(())
+    }
+}

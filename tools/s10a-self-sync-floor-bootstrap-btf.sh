@@ -15,7 +15,7 @@ from pathlib import Path
 import sys
 import re
 p = Path(sys.argv[1]); s = p.read_text()
-old = '        Err(SdkError::InboundPending("self sync: authenticated floor/erase bootstrap is unavailable".into()))'
+old = '        Err(SdkError::InboundPending("self sync: authenticated floor/erase bootstrap is unavailable".into(),))'
 pattern = r'\s*'.join(re.escape(c) for c in old if not c.isspace())
 matches = list(re.finditer(pattern, s))
 assert len(matches) == 1, len(matches)

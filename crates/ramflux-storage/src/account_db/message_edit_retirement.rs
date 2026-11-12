@@ -41,6 +41,30 @@ impl AccountDb {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Retire explicitly selected indexed copies without erasing other authors' pending data.
+    /// # Errors
+    /// Requires the enclosing authorized writer transaction and returns SQL failures.
+    pub fn retire_message_copies(
+        &self,
+        message: &str,
+        copies: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let message = message.to_owned();
+        let copies = copies.to_vec();
+        self.connection.call(move |db| {
+            let write = || {
+                if db.is_autocommit() { return Err(StorageError::AuthorizationRejected); }
+                for (kind, locator) in copies {
+                    let registered: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM message_footprint WHERE message_id=?1 AND kind=?2 AND locator=?3)", params![message,kind,locator], |row| row.get(0))?;
+                    if registered { retire_copy(db, &kind, &locator, &[])?; }
+                }
+                db.execute("INSERT INTO runtime_privacy_maintenance VALUES(1,1) ON CONFLICT(singleton) DO UPDATE SET erasure_pending=1", [])?;
+                Ok(())
+            };
+            Ok(write())
+        }).map_err(StorageError::from)?
+    }
+
     /// Retire indexed old payload copies without deleting the logical Message identity.
     /// `keep_actors` must name only separately verified body-free metadata or sanitized receipts.
     /// The caller writes replacement content and immutable original evidence in this transaction.

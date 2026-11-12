@@ -178,3 +178,53 @@ fn edit_delete_retire_private_revision_nonce_copies_and_rollback() -> TestResult
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn selected_copy_retirement_is_scoped_and_rolls_back_atomically() -> TestResult {
+    let (root, db) = crate::tests::test_db("selected-copy-retirement")?;
+    db.write_transaction(|| {
+        db.persist_message_actor_state(
+            "selected",
+            "pending/selected",
+            &json!({"body":"selected-private"}),
+        )?;
+        db.persist_message_actor_state(
+            "foreign",
+            "pending/foreign",
+            &json!({"body":"foreign-private"}),
+        )?;
+        db.put_unsupported_raw_copy(crate::RawInnerCopyWrite {
+            owner_id: "selected",
+            verified_source_anchor: "source",
+            copy_id: "selected-raw",
+            kind: crate::RawInnerCopyKind::OuterInner,
+            bytes: b"selected-private",
+            bounded_metadata: b"{}",
+        })?;
+        Ok::<_, StorageError>(())
+    })?;
+    let copies = [
+        ("actor".into(), "pending/selected".into()),
+        ("actor".into(), "pending/foreign".into()),
+        ("raw_inner".into(), "selected-raw".into()),
+    ];
+    assert!(matches!(
+        db.retire_message_copies("selected", &copies),
+        Err(StorageError::AuthorizationRejected)
+    ));
+    let rollback: Result<(), StorageError> = db.write_transaction(|| {
+        db.retire_message_copies("selected", &copies)?;
+        Err(StorageError::AuthorizationRejected)
+    });
+    assert!(rollback.is_err());
+    assert!(db.actor_state_exists("pending/selected")?);
+    assert!(db.raw_inner_copy("selected-raw")?.is_some());
+    db.write_transaction(|| db.retire_message_copies("selected", &copies))?;
+    assert!(!db.actor_state_exists("pending/selected")?);
+    assert!(db.raw_inner_copy("selected-raw")?.is_none());
+    assert!(db.actor_state_exists("pending/foreign")?);
+    scan(&db, b"selected-private")?;
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

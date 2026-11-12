@@ -14,6 +14,7 @@ pub(super) const CAPTURE: &str = "own-history/capture/";
 pub(super) struct Captured {
     pub target: Vec<u8>,
     pub current: Vec<u8>,
+    pub original: g::EventIdentity,
     pub sent: g::OwnSentMessage,
 }
 
@@ -36,7 +37,10 @@ impl RamfluxClient {
         let local = self.owned_device_identity()?;
         let author = identity.author.as_ref().ok_or_else(|| invalid("authored source missing"))?;
         if author.account_anchor != local.root_commitment()
+            || identity.device_sequence & (1 << 63) != 0
             || author.device_id != local.device_id()
+            || author.device_epoch
+                != self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch
             || identity.conversation_id != input.conversation
             || identity.group_id.as_deref() != input.group
         {
@@ -63,14 +67,17 @@ impl RamfluxClient {
         let sent = packet.to_generated()?;
         self.validate_own_context_namespace(&packet.context)?;
         packet.validate_route(input.envelope, input.conversation, input.group)?;
-        let captured = Captured { target: target.clone(), current: identity.id, sent };
         let owner = ramflux_protocol::encode_base64url(&target);
         let db = self.account_db()?;
         let key = format!("{CAPTURE}{owner}");
+        let old = db.load_actor_state::<Captured>(&key)?;
+        let original =
+            self.authored_original_identity(scanned.kind, &identity, &target, old.as_ref())?;
+        let captured = Captured { target, current: identity.id, original, sent };
         if db.message_is_deleted(&owner)? {
             return Ok(());
         }
-        if let Some(old) = db.load_actor_state::<Captured>(&key)? {
+        if let Some(old) = old {
             if old.current == captured.current {
                 if old.sent.exact_inner != captured.sent.exact_inner {
                     return Err(invalid("authored event changed its exact plaintext"));
@@ -100,6 +107,35 @@ impl RamfluxClient {
         self.retire_authored_history_for_owner(&owner)?;
         db.persist_message_actor_state(&owner, &key, &captured)?;
         Ok(())
+    }
+
+    fn authored_original_identity(
+        &self,
+        kind: u32,
+        identity: &g::EventIdentity,
+        target: &[u8],
+        old: Option<&Captured>,
+    ) -> Result<g::EventIdentity, SdkError> {
+        let original = if kind == 1 {
+            identity.clone()
+        } else if let Some(old) = old {
+            old.original.clone()
+        } else {
+            self.account_db()?
+                .load_actor_state::<g::EventIdentity>(&format!(
+                    "routed/generated-identity/{}",
+                    ramflux_protocol::encode_base64url(target)
+                ))?
+                .ok_or_else(|| invalid("authored Edit original identity unavailable"))?
+        };
+        let root = self.own_account_anchor()?;
+        if original.id != target
+            || original.conversation_id != identity.conversation_id
+            || original.author.as_ref().is_none_or(|author| author.account_anchor != root)
+        {
+            return Err(invalid("authored Edit original identity mismatch"));
+        }
+        Ok(original)
     }
 
     pub(crate) fn capture_own_authored_direct(
