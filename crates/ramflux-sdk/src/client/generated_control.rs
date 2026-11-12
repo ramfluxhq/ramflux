@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Span Brain
 
 //! Dormant generated Control Inner conversion and native payload checks (S10a P15).
-//! This module neither sends a carrier nor admits a stored event.
+//! Native adapters retain their authority checks; all receive effects join W1.
+mod receive;
 use super::generated_content::GeneratedEventStream;
 use crate::{RamfluxClient, SdkError};
 use ramflux_protocol::message as g;

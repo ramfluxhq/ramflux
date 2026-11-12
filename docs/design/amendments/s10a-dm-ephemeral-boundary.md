@@ -97,3 +97,11 @@ nonce, zero device sequence/HLC and no group fields. Both `MessageUpdate` and th
 this topic only after the subscribe acknowledgement; it has no journal replay.
 The journal's central insertion path refuses this topic. Transient queue overflow
 is lossy, preserves its subscriber and never changes the client's durable cursor.
+
+Controller OV-GROUP-OPENING (FINAL, audit r1 PASS 0/0/0, 2026-11-12) pins ordinary group-history
+`group_opening` to exactly 64 raw bytes, opening_key[32] || commitment_key[32].
+One shared native verifier recomputes every native franking hash/commitment over
+the exact nested Message, signed sealed-group ciphertext/header and native AAD.
+It wipes the supplied temporary opening on success and every refusal; no master
+key or new author authority is conveyed. Edited original evidence still contains
+no group opening or plaintext. The final audit requires native header byte equality and the native session-id:counter event id; AAD is reconstructed from the authenticated wrapper, never supplied by the caller. Its full signed-history/import/report/restore acceptance matrix remains mandatory.

@@ -1656,3 +1656,6 @@ async fn early_edit_register_is_qualified_by_original_author_root() -> Result<()
 
 #[path = "candidate_reparse_edit_tests.rs"]
 mod reparse_edit;
+
+#[path = "candidate_control_executor_tests.rs"]
+mod control_executor;
