@@ -1,0 +1,416 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Win32 calls for the named-pipe carrier: SIDs, token facts, security descriptors, pipe
+//! instances, and owner lookups. Every `unsafe` block of the carrier lives in this file.
+#![allow(unsafe_code)]
+
+use std::ffi::{OsStr, c_void};
+use std::fs::File;
+use std::io;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::path::Path;
+
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
+};
+use windows_sys::Win32::Foundation::{
+    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT, SE_KERNEL_OBJECT, SE_OBJECT_TYPE,
+};
+use windows_sys::Win32::Security::{
+    CopySid, GetLengthSid, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    IsValidSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf,
+    SECURITY_ATTRIBUTES, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    TokenIntegrityLevel, TokenIsAppContainer, TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, SECURITY_IDENTIFICATION,
+};
+use windows_sys::Win32::System::Pipes::{GetNamedPipeServerProcessId, ImpersonateNamedPipeClient};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken, OpenThreadToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
+
+/// `SECURITY_MAX_SID_SIZE`: the largest binary SID.
+const MAX_SID_BYTES: usize = 68;
+
+/// `SECURITY_MANDATORY_MEDIUM_RID`: the integrity RID of a normal desktop process.
+pub(super) const MEDIUM_INTEGRITY_RID: u32 = 0x2000;
+
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+struct SidBytes([u8; MAX_SID_BYTES]);
+
+/// Owned binary SID. Equality is binary equality of the valid prefix, which is what `EqualSid`
+/// compares.
+#[derive(Clone, Copy)]
+pub(crate) struct Sid {
+    len: usize,
+    bytes: SidBytes,
+}
+
+impl PartialEq for Sid {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for Sid {}
+
+impl Sid {
+    fn as_bytes(&self) -> &[u8] {
+        self.bytes.0.get(..self.len).unwrap_or(&[])
+    }
+
+    /// Copy a SID the system returned.
+    ///
+    /// # Safety
+    /// `source` must be null or point at memory readable as a SID.
+    unsafe fn copy_from(source: PSID) -> io::Result<Self> {
+        if source.is_null() {
+            return Err(io::Error::other("null SID"));
+        }
+        // SAFETY: the caller guarantees `source` is readable as a SID; `IsValidSid` checks the
+        // revision and sub-authority count before the length is trusted.
+        unsafe {
+            if IsValidSid(source) == 0 {
+                return Err(io::Error::other("invalid SID"));
+            }
+            let len = usize::try_from(GetLengthSid(source)).map_err(io::Error::other)?;
+            if len == 0 || len > MAX_SID_BYTES {
+                return Err(io::Error::other("SID length out of range"));
+            }
+            let mut bytes = SidBytes([0; MAX_SID_BYTES]);
+            let capacity = u32::try_from(MAX_SID_BYTES).map_err(io::Error::other)?;
+            if CopySid(capacity, bytes.0.as_mut_ptr().cast(), source) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { len, bytes })
+        }
+    }
+
+    fn as_psid(&self) -> PSID {
+        self.bytes.0.as_ptr().cast_mut().cast()
+    }
+
+    /// The `S-1-…` string form.
+    ///
+    /// # Errors
+    /// Returns the OS error when the SID cannot be converted.
+    pub(super) fn to_sddl_string(&self) -> io::Result<String> {
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: `self` holds a SID validated by `copy_from`; on success `text` is a
+        // NUL-terminated buffer the system allocated, released below with `LocalFree`.
+        unsafe {
+            if ConvertSidToStringSidW(self.as_psid(), &raw mut text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut len = 0_usize;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let value = String::from_utf16(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            value.map_err(io::Error::other)
+        }
+    }
+}
+
+/// What the carrier needs to know about a token.
+#[derive(Clone, Copy)]
+pub(crate) struct TokenFacts {
+    pub(super) user: Sid,
+    pub(super) integrity_rid: u32,
+    pub(super) app_container: bool,
+}
+
+/// Buffer for fixed-size token information classes; aligned for the pointer the structures hold.
+#[repr(C, align(8))]
+struct TokenBuffer([u8; 128]);
+
+fn token_information(
+    token: &OwnedHandle,
+    class: TOKEN_INFORMATION_CLASS,
+) -> io::Result<TokenBuffer> {
+    let mut buffer = TokenBuffer([0; 128]);
+    let mut returned = 0_u32;
+    let capacity = u32::try_from(buffer.0.len()).map_err(io::Error::other)?;
+    // SAFETY: `token` is an open token handle with TOKEN_QUERY; the buffer and its length match.
+    let ok = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            class,
+            buffer.0.as_mut_ptr().cast(),
+            capacity,
+            &raw mut returned,
+        )
+    };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(buffer) }
+}
+
+fn token_facts(token: &OwnedHandle) -> io::Result<TokenFacts> {
+    let user_buffer = token_information(token, TokenUser)?;
+    // SAFETY: a successful TokenUser query fills a TOKEN_USER whose SID pointer points into the
+    // same buffer, which is alive and suitably aligned.
+    let user = unsafe { Sid::copy_from((*user_buffer.0.as_ptr().cast::<TOKEN_USER>()).User.Sid)? };
+
+    let label_buffer = token_information(token, TokenIntegrityLevel)?;
+    // SAFETY: a successful TokenIntegrityLevel query fills a TOKEN_MANDATORY_LABEL whose SID
+    // points into the buffer; the SID is validated before its last sub-authority is read.
+    let integrity_rid = unsafe {
+        let label = (*label_buffer.0.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid;
+        if label.is_null() || IsValidSid(label) == 0 {
+            return Err(io::Error::other("token has no integrity label"));
+        }
+        let count = *GetSidSubAuthorityCount(label);
+        if count == 0 {
+            return Err(io::Error::other("integrity label has no RID"));
+        }
+        *GetSidSubAuthority(label, u32::from(count) - 1)
+    };
+
+    let container_buffer = token_information(token, TokenIsAppContainer)?;
+    let mut flag = [0_u8; 4];
+    flag.copy_from_slice(container_buffer.0.get(..4).unwrap_or(&[0; 4]));
+    Ok(TokenFacts { user, integrity_rid, app_container: u32::from_ne_bytes(flag) != 0 })
+}
+
+/// Facts about this process's own token.
+///
+/// # Errors
+/// Returns the OS error when the process token cannot be opened or queried.
+pub(super) fn process_facts() -> io::Result<TokenFacts> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle of the current process is always valid; `token` receives an
+    // owned handle on success.
+    let token = unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::from_raw_handle(token)
+    };
+    token_facts(&token)
+}
+
+/// Facts about the token of the client connected to `pipe`.
+///
+/// The calling thread impersonates the client only inside this function. It does not yield, and
+/// it reverts before returning. A failed revert ends the process, because the thread would keep
+/// running as the client.
+///
+/// # Errors
+/// Returns the OS error when the client cannot be impersonated or its token cannot be read.
+pub(super) fn client_facts(pipe: &NamedPipeServer) -> io::Result<TokenFacts> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `pipe` is the open server end of a connected instance. The thread token is opened
+    // with the process identity (`openasself`), because an identification-level token cannot
+    // open objects itself.
+    let opened = unsafe {
+        if ImpersonateNamedPipeClient(pipe.as_raw_handle()) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let opened = if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &raw mut token) == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(OwnedHandle::from_raw_handle(token))
+        };
+        if RevertToSelf() == 0 {
+            std::process::abort();
+        }
+        opened
+    };
+    token_facts(&opened?)
+}
+
+/// Self-relative security descriptor allocated by the system.
+pub(crate) struct SecurityDescriptor {
+    raw: PSECURITY_DESCRIPTOR,
+}
+
+// SAFETY: the descriptor is an immutable heap block owned by this value and freed once in `Drop`.
+unsafe impl Send for SecurityDescriptor {}
+// SAFETY: shared references only read the immutable block.
+unsafe impl Sync for SecurityDescriptor {}
+
+impl Drop for SecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: `raw` came from ConvertStringSecurityDescriptorToSecurityDescriptorW, whose
+        // result is released with LocalFree, and is freed only here.
+        unsafe {
+            LocalFree(self.raw);
+        }
+    }
+}
+
+impl SecurityDescriptor {
+    /// # Errors
+    /// Returns the OS error when the SDDL string is rejected.
+    pub(super) fn from_sddl(sddl: &str) -> io::Result<Self> {
+        let wide = wide(OsStr::new(sddl));
+        let mut raw: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; `raw` receives an allocation
+        // owned by the returned value.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut raw,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || raw.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { raw })
+    }
+
+    fn attributes(&self) -> io::Result<SECURITY_ATTRIBUTES> {
+        Ok(SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).map_err(io::Error::other)?,
+            lpSecurityDescriptor: self.raw,
+            bInheritHandle: 0,
+        })
+    }
+}
+
+fn wide(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Create one byte-mode, duplex, local-only pipe instance with an explicit security descriptor.
+/// `first` requests `FILE_FLAG_FIRST_PIPE_INSTANCE`.
+///
+/// # Errors
+/// Returns the OS error; `ERROR_ACCESS_DENIED` when `first` is set and the name already exists.
+pub(super) fn create_instance(
+    name: &OsStr,
+    descriptor: &SecurityDescriptor,
+    first: bool,
+) -> io::Result<NamedPipeServer> {
+    let mut attributes = descriptor.attributes()?;
+    let mut options = ServerOptions::new();
+    options
+        .first_pipe_instance(first)
+        .reject_remote_clients(true)
+        .pipe_mode(PipeMode::Byte)
+        .access_inbound(true)
+        .access_outbound(true);
+    // SAFETY: `attributes` is a valid SECURITY_ATTRIBUTES whose descriptor outlives the call.
+    unsafe {
+        options.create_with_security_attributes_raw(name, (&raw mut attributes).cast::<c_void>())
+    }
+}
+
+/// Open the client end. The server may identify this process but not act as it:
+/// `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` (the runtime adds `SECURITY_SQOS_PRESENT`).
+///
+/// # Errors
+/// Returns the OS error when the pipe cannot be opened.
+pub(super) fn open_client(name: &OsStr) -> io::Result<NamedPipeClient> {
+    let mut options = ClientOptions::new();
+    options.security_qos_flags(SECURITY_IDENTIFICATION).pipe_mode(PipeMode::Byte);
+    options.open(name)
+}
+
+fn owner_of(handle: RawHandle, kind: SE_OBJECT_TYPE) -> io::Result<Sid> {
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `handle` is open with READ_CONTROL. On success `owner` points into `descriptor`,
+    // which is copied from and then released with LocalFree.
+    unsafe {
+        let status = GetSecurityInfo(
+            handle,
+            kind,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        );
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(
+                i32::try_from(status).map_err(io::Error::other)?,
+            ));
+        }
+        let copied = Sid::copy_from(owner);
+        LocalFree(descriptor);
+        copied
+    }
+}
+
+/// Owner SID of the pipe object behind an open client end.
+///
+/// # Errors
+/// Returns the OS error when the owner cannot be read.
+pub(super) fn pipe_owner(pipe: &NamedPipeClient) -> io::Result<Sid> {
+    owner_of(pipe.as_raw_handle(), SE_KERNEL_OBJECT)
+}
+
+/// Owner SID of an open file.
+///
+/// # Errors
+/// Returns the OS error when the owner cannot be read.
+pub(super) fn file_owner(file: &File) -> io::Result<Sid> {
+    owner_of(file.as_raw_handle(), SE_FILE_OBJECT)
+}
+
+/// User SID of the process that created the server end of `pipe`.
+///
+/// # Errors
+/// Returns the OS error when the server process or its token cannot be opened.
+pub(super) fn server_process_user(pipe: &NamedPipeClient) -> io::Result<Sid> {
+    let mut pid = 0_u32;
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `pipe` is an open pipe handle; each returned handle is owned and closed on drop.
+    let token = unsafe {
+        if GetNamedPipeServerProcessId(pipe.as_raw_handle(), &raw mut pid) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let process = OwnedHandle::from_raw_handle(process);
+        if OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &raw mut token) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        OwnedHandle::from_raw_handle(token)
+    };
+    Ok(token_facts(&token)?.user)
+}
+
+/// Create a new file for writing with an explicit security descriptor. Fails if the path exists.
+///
+/// # Errors
+/// Returns the OS error; `AlreadyExists` when the path exists.
+pub(super) fn create_new_file(path: &Path, descriptor: &SecurityDescriptor) -> io::Result<File> {
+    let wide = wide(path.as_os_str());
+    let attributes = descriptor.attributes()?;
+    // SAFETY: `wide` is NUL-terminated; `attributes` and its descriptor outlive the call; the
+    // returned handle is owned by the `File`.
+    unsafe {
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            &raw const attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(File::from_raw_handle(handle))
+    }
+}
+
+#[cfg(test)]
+pub(super) mod test_tokens;
