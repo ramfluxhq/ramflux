@@ -486,3 +486,62 @@ fn pairing_full_stop_requires_explicit_nullable_retry() -> TestResult {
     DataPacket::from_wire_bytes(br#"{"code":"Busy","kind":"stop","retry_after_ms":1000}"#)?;
     Ok(())
 }
+
+fn successor(previous: &SourceManifest, kind: ManifestKind, total: u64) -> Result<SourceManifest> {
+    let mut next = previous.clone();
+    next.manifest.kind = kind;
+    next.manifest.previous_cut = Some(previous.manifest.snapshot_cut);
+    next.manifest.snapshot_cut = U64(previous.manifest.snapshot_cut.0 + 1);
+    next.manifest.parent_manifest_hash = Some(encode_base64url(manifest_hash(previous)?));
+    next.manifest.total_bytes = U64(total);
+    next.manifest.chunk_count = U64(chunk_layout(total)?.0);
+    next.manifest.families[0].encoded_bytes = U64(total);
+    Ok(next)
+}
+#[test]
+fn full_transfer_final_prepublication_delta_is_signed_stop_rule_and_base_never_authorizes_tail()
+-> TestResult {
+    let base = manifest();
+    assert!(!base.manifest.is_last_prepublication_delta());
+    assert!(
+        successor(&base, ManifestKind::Tail, 0)?.verify_predecessor(&base).is_err(),
+        "base-only tail accepted"
+    );
+    let first = successor(&base, ManifestKind::Delta, 0)?;
+    first.verify_predecessor(&base)?;
+    assert!(first.manifest.is_last_prepublication_delta(), "empty delta_1 was not final");
+    assert!(
+        successor(&first, ManifestKind::Delta, 0)?.verify_predecessor(&first).is_err(),
+        "delta after signed stop accepted"
+    );
+    successor(&first, ManifestKind::Tail, 0)?.verify_predecessor(&first)?;
+    for total in [PREPUBLICATION_DELTA_STOP_BYTES, PREPUBLICATION_DELTA_STOP_BYTES + 1] {
+        let large = successor(&base, ManifestKind::Delta, total)?;
+        large.verify_predecessor(&base)?;
+        assert_eq!(
+            large.manifest.is_last_prepublication_delta(),
+            total == PREPUBLICATION_DELTA_STOP_BYTES
+        );
+        let delta = successor(&large, ManifestKind::Delta, 0)?;
+        let tail = successor(&large, ManifestKind::Tail, 0)?;
+        assert_eq!(
+            delta.verify_predecessor(&large).is_ok(),
+            total > PREPUBLICATION_DELTA_STOP_BYTES
+        );
+        assert_eq!(
+            tail.verify_predecessor(&large).is_ok(),
+            total <= PREPUBLICATION_DELTA_STOP_BYTES
+        );
+    }
+    let mut eighth = successor(&base, ManifestKind::Delta, PREPUBLICATION_DELTA_STOP_BYTES + 1)?;
+    eighth.manifest.previous_cut = Some(U64(7));
+    eighth.manifest.snapshot_cut = U64(8);
+    eighth.validate()?;
+    assert!(eighth.manifest.is_last_prepublication_delta());
+    successor(&eighth, ManifestKind::Tail, 0)?.verify_predecessor(&eighth)?;
+    assert!(
+        successor(&eighth, ManifestKind::Delta, 0)?.verify_predecessor(&eighth).is_err(),
+        "ninth delta accepted"
+    );
+    Ok(())
+}

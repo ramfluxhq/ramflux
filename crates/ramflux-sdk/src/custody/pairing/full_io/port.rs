@@ -74,6 +74,113 @@ impl FullLocalIoLoan {
     }
 }
 impl FullLocalIoPort {
+    /// Pin the current source view and release its DB loan before bulk copying/encoding.
+    /// # Errors
+    /// Refuses wrong phase/scope, missing DV, a final cut, lock or cancellation.
+    pub async fn source_successor_work(
+        &mut self,
+    ) -> Result<Box<ramflux_storage::FullSourceSuccessorWork>, SdkError> {
+        let FullLocalResult::SourceDelta(super::source_delta::Applied::Work(work)) = self
+            .request(FullLocalAction::SourceDelta(super::source_delta::Action::Prepare))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(work)
+    }
+    /// Bind the off-loan result back to the same original source ceremony before signing.
+    /// # Errors
+    /// Refuses foreign encoded work, changed role/key/digest or a stopped owner.
+    pub fn source_delta_draft(
+        &self,
+        proof: ramflux_storage::FullSourceDeltaDraft,
+    ) -> Result<super::FullDeltaManifestDraft, SdkError> {
+        super::FullDeltaManifestDraft::new(proof, &self.scope)
+    }
+    /// Retain an exact originally signed successor before transmission.
+    /// # Errors
+    /// Refuses changed scope/body/cut, expiry or failed durable retention.
+    pub async fn retain_source_delta(
+        &mut self,
+        draft: super::FullDeltaManifestDraft,
+        manifest: &SourceManifest,
+    ) -> Result<(), SdkError> {
+        let FullLocalResult::SourceDelta(super::source_delta::Applied::Retained) = self
+            .request(FullLocalAction::SourceDelta(super::source_delta::Action::Retain {
+                draft: Box::new(draft),
+                manifest: Box::new(manifest.clone()),
+            }))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(())
+    }
+    /// Apply the signed successor to the same private B contribution owner.
+    /// # Errors
+    /// Refuses changed B, foreign chain, malformed input or stale private materialization.
+    pub async fn project_receiver_delta(
+        &mut self,
+        copy: Box<ramflux_storage::FullReceiverBaseCopy>,
+        hash: &str,
+    ) -> Result<Box<ramflux_storage::FullReceiverBaseCopy>, SdkError> {
+        let FullLocalResult::ReceiverProjected(copy) =
+            self.request(FullLocalAction::ProjectReceiverDelta { copy, hash: hash.into() }).await?
+        else {
+            return Err(wrong());
+        };
+        Ok(copy)
+    }
+    /// Apply only new-B's neutral reverse through A's actual writer before its DV.
+    /// # Errors
+    /// Refuses wrong mode/scope, nonempty input, expiry or failed durable application.
+    pub async fn prepare_reverse_data_verified(
+        &mut self,
+    ) -> Result<Box<super::FullApplicationDraft>, SdkError> {
+        let FullLocalResult::Semantic(super::application::Applied::ReversePrepared(draft)) = self
+            .request(FullLocalAction::Semantic(super::application::Action::PrepareReverse))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(draft)
+    }
+    /// Persist the exact original-A signed reverse receipt before transmission.
+    /// # Errors
+    /// Refuses stale application/scope, foreign signatures or failed durable commit.
+    pub async fn record_reverse_data_verified(
+        &mut self,
+        draft: Box<super::FullApplicationDraft>,
+        packet: &ramflux_protocol::custody::pairing::full_transfer::DataPacket,
+    ) -> Result<(), SdkError> {
+        let FullLocalResult::Semantic(super::application::Applied::Reverse) = self
+            .request(FullLocalAction::Semantic(super::application::Action::RecordReverse {
+                draft,
+                packet: Box::new(packet.clone()),
+            }))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(())
+    }
+    /// B independently validates and persists the original-A reverse application signature.
+    /// # Errors
+    /// Refuses another body/key/scope, expired inputs or failed durability.
+    pub async fn record_reverse_source_data_verified(
+        &mut self,
+        packet: ramflux_protocol::custody::pairing::full_transfer::DataPacket,
+    ) -> Result<(), SdkError> {
+        let FullLocalResult::Semantic(super::application::Applied::Reverse) = self
+            .request(FullLocalAction::Semantic(super::application::Action::ReverseSource(
+                Box::new(packet),
+            )))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(())
+    }
     /// Commit a receiver application through its actual ordinary writer before signing DV.
     /// # Errors
     /// Refuses changed B/scope, invalid prepared bytes, expiry or failed durability.
@@ -174,6 +281,20 @@ impl FullLocalIoPort {
             return Err(wrong());
         };
         Ok(())
+    }
+    pub(crate) async fn verify_duplex(
+        &mut self,
+        copy: Option<Box<ramflux_storage::FullReceiverBaseCopy>>,
+    ) -> Result<
+        (ramflux_storage::FullDuplexReceipt, Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
+        SdkError,
+    > {
+        let FullLocalResult::Duplex(proof, copy) =
+            self.request(FullLocalAction::VerifyDuplex(copy)).await?
+        else {
+            return Err(wrong());
+        };
+        Ok((proof, copy))
     }
     async fn request(&mut self, action: FullLocalAction) -> Result<FullLocalResult, SdkError> {
         self.scope.live()?;

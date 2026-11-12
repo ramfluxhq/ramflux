@@ -123,11 +123,7 @@ impl SourceContext<'_> {
         if filename != expected {
             return Err(context());
         }
-        let live_schema: u64 = self.db.connection.query_row(
-            "SELECT max(schema_version) FROM schema_migration",
-            [],
-            |row| row.get(0),
-        )?;
+        let live_schema: u64 = self.guard.schema_generation()?;
         if live_schema != schema {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }
@@ -152,11 +148,7 @@ impl SourceContext<'_> {
         let output = read(&input)?;
         drop(input);
         drop(key);
-        let live_schema: u64 = self.db.connection.query_row(
-            "SELECT max(schema_version) FROM schema_migration",
-            [],
-            |row| row.get(0),
-        )?;
+        let live_schema: u64 = self.guard.schema_generation()?;
         if live_schema != schema {
             return Err(StorageError::PairingField("SnapshotInvalidated"));
         }

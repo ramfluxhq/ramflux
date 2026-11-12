@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Span Brain
+
+//! Pre-G2 private successors retain independent B provenance and all union/max restrictions.
+use super::*;
+use ramflux_protocol::custody::pairing::full_transfer::ManifestKind;
+impl FullReceiverBaseCopy {
+    /// Apply one consecutive retained delta to the SAME private B generation.
+    /// Every input is reindexed/root checked, restrictive puts run first, and an absence
+    /// removes only the source's content contribution. B's rows and vetoes survive.
+    /// This grants no DV/publication and selects no live paths. Changed live B needs rebase.
+    /// # Errors
+    /// Refuses a foreign stage/chain, changed B, malformed input or inconsistent actual rows.
+    pub fn project_delta(
+        &mut self,
+        stage: &FullTransferStage<'_>,
+        hash: &str,
+    ) -> Result<FullScalarInputCounts, StorageError> {
+        self.verify_materialization(stage)?;
+        let previous = stage.forward_manifest(&self.hash)?;
+        let next = stage.forward_manifest(hash)?;
+        if next.manifest.kind != ManifestKind::Delta {
+            return Err(wrong());
+        }
+        next.verify_predecessor(&previous).map_err(|_| wrong())?;
+        let counts =
+            stage.index_forward_scalar_records(hash, super::super::full_transfer_catalog())?;
+        self.projected = None;
+        self.union = None;
+        let mut private = BackupDatabase::open_full_receiver_copy(
+            &self.scratch.path.join("private.db"),
+            &self.key,
+        )?;
+        let encoding = self.contributions.advance(
+            &self.scratch.path.join("contributions.db"),
+            &self.key,
+            &mut private,
+            stage,
+            hash,
+        )?;
+        super::super::receiver_materialization::Verification {
+            directory: &self.scratch.path,
+            key: &self.key,
+            encoding: &encoding,
+            owners: &self.contributions.owners,
+            private: &private,
+            private_key: &self.key,
+            stage,
+        }
+        .run()?;
+        self.observation.require_current(stage.db)?;
+        hash.clone_into(&mut self.hash);
+        self.projected = Some(counts);
+        self.union = Some(encoding);
+        Ok(counts)
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -170,6 +170,27 @@ impl FullTransferStage<'_> {
         Ok(())
     }
 
+    /// Read the exact original-A signed manifest named by the last durable B receipt.
+    /// This is data-only local metadata, not a new consent, epoch, signing or tail grant.
+    /// # Errors
+    /// Refuses a locked/wrong-role owner or corrupt/inconsistent retained metadata.
+    pub fn source_last_verified_manifest(&self) -> Result<Option<SourceManifest>, StorageError> {
+        let Some(DataPacket::DataVerified { manifest_hash: hash, .. }) =
+            self.source_last_data_verified()?
+        else {
+            return Ok(None);
+        };
+        let manifest = self.forward_manifest(&hash)?;
+        let record = self.resume_record()?;
+        ramflux_crypto::verify_canonical_signature(
+            &manifest.manifest.signing_bytes().map_err(|_| mismatch())?,
+            &manifest.source_signature,
+            &record.grant.branch_keys.source,
+        )
+        .map_err(|_| mismatch())?;
+        Ok(Some(manifest))
+    }
+
     /// Read A's exact last durable B-signed receipt, for Idle/retry reconciliation.
     /// This restores no epoch keys, local approval, native authority or cut-retirement grant.
     /// # Errors

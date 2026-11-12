@@ -22,6 +22,8 @@ use std::{
 };
 use zeroize::{Zeroize as _, Zeroizing};
 
+mod delta;
+
 pub(super) struct Contributions {
     pub(super) nonce: [u8; 32],
     pub(super) owners: [String; 2],
@@ -163,6 +165,19 @@ impl Contributions {
             super::copy_full_scalar_record(rule, &header.0, &mut input, &mut *record)?;
             retain(&tx, &self.nonce, &self.owners[0], &record)?;
         }
+        let encoding = self.root(&tx, private, stage)?;
+        tx.commit()?;
+        drop(db);
+        std::fs::File::open(path)?.sync_all()?;
+        std::fs::File::open(path.parent().ok_or_else(invalid)?)?.sync_all()?;
+        Ok(encoding)
+    }
+    fn root(
+        &self,
+        tx: &Connection,
+        private: &BackupDatabase,
+        stage: &FullTransferStage<'_>,
+    ) -> Result<FullUnionEncoding, StorageError> {
         // The only mutable fixed base owner is the declared erasure-generation maximum.
         // Both contribution records must describe the actual normalized prepared value.
         let rule = compiled("sql/account_erasure_generation")?;
@@ -175,14 +190,14 @@ impl Contributions {
         tx.execute("UPDATE full_union_record SET record=?1 WHERE generation_nonce=?2 AND family='sql/account_erasure_generation'",params![normalized.as_slice(),self.nonce.as_slice()])?;
         let guard = SourceGuard::new(stage.db, Some(stage.source_cancelled.clone()));
         let (records, total) = super::union_encoding::visit(
-            &tx,
+            tx,
             &self.nonce,
             &self.owners,
             &mut std::io::sink(),
             &guard,
         )?;
         let mut rooted = Rooted::new(std::io::sink(), total)?;
-        if super::union_encoding::visit(&tx, &self.nonce, &self.owners, &mut rooted, &guard)?
+        if super::union_encoding::visit(tx, &self.nonce, &self.owners, &mut rooted, &guard)?
             != (records, total)
         {
             return Err(invalid());
@@ -190,10 +205,6 @@ impl Contributions {
         let root = rooted.finish(total)?.1;
         tx.execute("INSERT INTO full_union_encoding(generation_nonce,records,total_bytes,chunks_root) VALUES(?1,?2,?3,?4) ON CONFLICT(generation_nonce) DO UPDATE SET records=excluded.records,total_bytes=excluded.total_bytes,chunks_root=excluded.chunks_root",params![self.nonce.as_slice(),records,total,root.as_slice()])?;
         stage.require_io()?;
-        tx.commit()?;
-        drop(db);
-        std::fs::File::open(path)?.sync_all()?;
-        std::fs::File::open(path.parent().ok_or_else(invalid)?)?.sync_all()?;
         Ok(FullUnionEncoding {
             generation_nonce: self.nonce,
             records,

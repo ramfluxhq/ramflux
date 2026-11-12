@@ -3,6 +3,8 @@
 
 //! Device-local full-transfer staging owners. They grant no native authority.
 mod catalog;
+mod duplex;
+pub use duplex::FullDuplexReceipt;
 mod fixed_union;
 mod inventory;
 pub(in crate::account_db) use inventory::inspect as inspect_pinned_full_transfer;
@@ -14,17 +16,23 @@ pub use local_unlock::FullLocalUnlockGuard;
 mod native_floor;
 mod receiver_contributions;
 mod receiver_copy;
-pub use receiver_copy::{FullPinnedReceiverBase, FullReceiverApplication, FullReceiverBaseCopy};
+pub use receiver_copy::{
+    FullAppliedDataReceipt, FullPinnedReceiverBase, FullPreparedReceiverDatabase,
+    FullReceiverBaseCopy, FullReceiverDatabaseWork,
+};
 mod receiver_input;
 mod receiver_materialization;
 mod receiver_projection;
 mod receiver_scratch;
+mod reverse_application;
 mod reverse_manifest;
 mod scalar;
 mod scalar_sql;
 mod source_base;
 mod source_cut;
 mod source_delta;
+mod source_successor;
+pub use source_successor::{FullSourceDeltaDraft, FullSourceSuccessorWork};
 mod source_owner;
 mod source_preparation;
 mod source_receipt;

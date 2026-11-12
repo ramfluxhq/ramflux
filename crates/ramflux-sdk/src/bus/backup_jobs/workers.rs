@@ -301,6 +301,9 @@ impl BackupJobs {
         )
         .map_err(|_| failure(BackupFailureCode::Interrupted))?;
         Self::authorize_archive_publication(captured.actor.as_ref(), captured.erasure_generation)?;
+        // The authenticated private snapshot is complete. Release the live generation
+        // before publishing Done, so a following restore can drain/reclaim its old DB.
+        drop(captured.reader);
         #[cfg(test)]
         self.install_checkpoint(super::test_install::InstallPoint::ArchiveAuthorized, &temporary)
             .map_err(|_| failure(BackupFailureCode::Interrupted))?;

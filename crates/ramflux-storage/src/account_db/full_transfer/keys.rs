@@ -212,21 +212,9 @@ impl FullStageKey<'_> {
         path: &std::path::Path,
     ) -> Result<crate::database::Connection, StorageError> {
         self.db.require_full_stage_unlock()?;
-        let connection = crate::database::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        crate::encryption::apply_key(&connection, &self.key)?;
-        let mode = crate::encryption::current_encryption_mode(&connection);
-        if mode != crate::EncryptionMode::SqlCipher && !super::super::insecure_test_sqlite_allowed()
-        {
-            return Err(StorageError::EncryptionUnavailable { mode });
-        }
-        connection.execute_batch(
-            "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA locking_mode=EXCLUSIVE; PRAGMA temp_store=MEMORY;",
-        )?;
-        Ok(connection)
+        open_metadata_with_key(path, &self.key)
     }
+
     fn cipher(
         &self,
         manifest: &[u8; 32],
@@ -310,3 +298,49 @@ fn chunk_aad(manifest: &[u8; 32], index: u64, length: usize) -> Result<Vec<u8>, 
 #[cfg(test)]
 #[path = "keys_tests.rs"]
 mod tests;
+
+/// Root-drained local source work only. Its methods require the original weak unlock.
+/// It enters no DTO/vault and must never be retained across a network await.
+pub(super) struct FullSourceMetadataKey {
+    key: AccountDbKey,
+    guard: super::source_scalar::SourceGuard,
+}
+impl FullStageKey<'_> {
+    pub(super) fn source_job_key(
+        &self,
+        guard: super::source_scalar::SourceGuard,
+    ) -> Result<FullSourceMetadataKey, StorageError> {
+        self.require_live()?;
+        guard.require()?;
+        Ok(FullSourceMetadataKey { key: self.key.clone(), guard })
+    }
+}
+impl super::source_owner::SourceMetadataKey for FullSourceMetadataKey {
+    fn open_source_metadata(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<crate::database::Connection, StorageError> {
+        self.guard.require()?;
+        let connection = open_metadata_with_key(path, &self.key)?;
+        self.guard.require()?;
+        Ok(connection)
+    }
+}
+fn open_metadata_with_key(
+    path: &std::path::Path,
+    key: &AccountDbKey,
+) -> Result<crate::database::Connection, StorageError> {
+    let connection = crate::database::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    crate::encryption::apply_key(&connection, key)?;
+    let mode = crate::encryption::current_encryption_mode(&connection);
+    if mode != crate::EncryptionMode::SqlCipher && !super::super::insecure_test_sqlite_allowed() {
+        return Err(StorageError::EncryptionUnavailable { mode });
+    }
+    connection.execute_batch(
+            "PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA locking_mode=EXCLUSIVE; PRAGMA temp_store=MEMORY;",
+        )?;
+    Ok(connection)
+}

@@ -13,8 +13,10 @@ pub use account_db::backup_edit_register::PARKED_EDIT_REVIEW;
 pub use account_db::backup_merge::{BackupItemRefusal, BackupMergeReport};
 pub use account_db::restore_floor::{FloorPolicy, admit_floor};
 mod account_erase;
+mod account_generation;
 mod account_index;
 mod account_writer;
+pub use account_generation::GenerationReclamationLease;
 pub use account_writer::AccountWriterLease;
 #[cfg(test)]
 mod account_writer_tests;
@@ -87,13 +89,14 @@ mod sqlite_work;
 pub use account_db::AccountDb;
 pub use account_db::full_transfer::{
     CellRule, CodecRule, EncryptedStageChunk, FamilyRule, FamilySelector, FieldRule,
-    FullBaseSourceEncoding, FullForwardReader, FullLocalUnlockGuard, FullPinnedReceiverBase,
-    FullReceiverApplication, FullReceiverBaseCopy, FullScalarInputCounts, FullScalarSourceCounts,
-    FullSourcePreparation, FullSourcePreparationCancel, FullStageIoCancel, FullStageKey,
-    FullTargetObservation, FullTransferSchema, FullTransferStage, FullUnionEncoding,
-    FullUnionEncodingBuilder, MergeRule, PreparedFullSource, StageDirection, VariantRule,
-    WrappedFullStageKey, copy_full_scalar_record, full_census_hash, full_transfer_catalog,
-    write_full_scalar_sql_row,
+    FullAppliedDataReceipt, FullBaseSourceEncoding, FullDuplexReceipt, FullForwardReader,
+    FullLocalUnlockGuard, FullPinnedReceiverBase, FullPreparedReceiverDatabase,
+    FullReceiverBaseCopy, FullReceiverDatabaseWork, FullScalarInputCounts, FullScalarSourceCounts,
+    FullSourceDeltaDraft, FullSourcePreparation, FullSourcePreparationCancel,
+    FullSourceSuccessorWork, FullStageIoCancel, FullStageKey, FullTargetObservation,
+    FullTransferSchema, FullTransferStage, FullUnionEncoding, FullUnionEncodingBuilder, MergeRule,
+    PreparedFullSource, StageDirection, VariantRule, WrappedFullStageKey, copy_full_scalar_record,
+    full_census_hash, full_transfer_catalog, write_full_scalar_sql_row,
 };
 pub use account_db::home_migration::{HomeMigrationStateRow, HomeMigrationWrite};
 pub use account_db::journal::{

@@ -18,10 +18,10 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 impl LocalPairingParticipant {
-    /// Sign only a durably applied receiver's exact data receipt with its original branch.
+    /// Sign only a durably applied endpoint's exact data receipt with its original branch.
     /// # Errors
     /// Refuses expired/retired/foreign scope or changed original branch keys.
-    pub fn sign_receiver_data_verified(
+    pub fn sign_application_data_verified(
         &self,
         draft: &crate::custody::pairing::FullApplicationDraft,
     ) -> Result<ramflux_protocol::custody::pairing::full_transfer::DataPacket, SdkError> {
@@ -89,6 +89,40 @@ impl LocalPairingParticipant {
                     .to_bytes(),
             ))
         })
+    }
+    /// Sign only the same source ceremony's locally encoded immutable successor.
+    /// # Errors
+    /// Refuses foreign scope/key, stale unlock or expired encoded work.
+    pub fn sign_delta_manifest(
+        &self,
+        draft: &crate::custody::pairing::FullDeltaManifestDraft,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::SourceManifest, SdkError> {
+        draft.sign_with(self, |manifest, expected_key| {
+            self.sign_data_manifest(manifest, expected_key)
+        })
+    }
+    fn sign_data_manifest(
+        &self,
+        manifest: &ramflux_protocol::custody::pairing::full_transfer::Manifest,
+        expected_key: &str,
+    ) -> Result<String, SdkError> {
+        let vault_ref = self.full_branch_vault_ref(&manifest.source_ref)?;
+        let branch =
+            self.vault.load_branch(&vault_ref, &manifest.account_anchor, &manifest.source_ref)?;
+        if encode_base64url(branch.signing.signing_key.verifying_key().to_bytes()) != expected_key {
+            return Err(wrong());
+        }
+        Ok(encode_base64url(
+            branch
+                .signing
+                .signing_key
+                .sign(
+                    &manifest
+                        .signing_bytes()
+                        .map_err(|error| super::super::transport::wire(&error))?,
+                )
+                .to_bytes(),
+        ))
     }
     fn full_selected_db(&self, db: &AccountDb, anchor: Option<&str>) -> Result<(), SdkError> {
         if db.local_account_id != self.account_id {

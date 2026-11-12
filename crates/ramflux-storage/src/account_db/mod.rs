@@ -127,8 +127,13 @@ impl AccountDb {
         // A concurrent erase may have tombstoned the account since the first read.
         let account = index.account(local_account_id)?;
         crate::account_erase::refuse_removed(&account)?;
-        let path = index.root().join(account.db_relative_path);
+        let path = index.root().join(&account.db_relative_path);
         let connection = Connection::open_account_writer(&path, writer)?;
+        // If G2 raced between selecting the path and capturing this worker's epoch,
+        // refuse before its first SQL (including migrations) can touch the old file.
+        if index.account(local_account_id)? != account {
+            return Err(StorageError::PairingField("Busy"));
+        }
         apply_key(&connection, key)?;
         crate::schema_generation::validate_worker(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL;")?;

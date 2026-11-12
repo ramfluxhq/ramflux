@@ -49,6 +49,7 @@ enum MarkerAuthoritySource {
 pub struct BackupDatabase {
     pub(crate) db: rusqlite::Connection,
     original_input: BackupInputObservation,
+    _generation_reader: Option<crate::account_generation::GenerationReadLease>,
 }
 impl BackupDatabase {
     /// Open only the receiver owner's freshly copied CURRENT-schema B database.
@@ -81,7 +82,7 @@ impl BackupDatabase {
         }
         super::backup_native::full_transfer_snapshot_preflight(&db)?;
         let original_input = observation::capture(&db, false)?;
-        Ok(Self { db, original_input })
+        Ok(Self { db, original_input, _generation_reader: None })
     }
 
     /// Opens a private snapshot or an owner-guarded generation for restore checks.
@@ -150,6 +151,11 @@ impl BackupDatabase {
         mode: BackupOpenMode,
         source: MarkerAuthoritySource,
     ) -> Result<Self, StorageError> {
+        let generation_reader = if matches!(source, MarkerAuthoritySource::LiveAccountKey) {
+            Some(crate::account_generation::GenerationReadLease::acquire(path)?)
+        } else {
+            None
+        };
         let mut db = rusqlite::Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch(&format!("PRAGMA key=\"x'{}'\"; PRAGMA cache_size=-2048; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;",key.sqlcipher_hex()))?;
@@ -213,7 +219,7 @@ impl BackupDatabase {
             return Err(StorageError::ObjectOwnershipUnverified { schema_version: input_version });
         }
         super::attachment_retirement::recount_archive(&db)?;
-        let opened = Self { db, original_input };
+        let opened = Self { db, original_input, _generation_reader: generation_reader };
         opened.ensure_missing_manifest()?;
         opened.db.execute_batch(crate::schema_contact_requests::HELD_MESSAGE_FENCES)?;
         opened.db.execute_batch(crate::schema_contact_requests::CONSENT_DECISIONS)?;

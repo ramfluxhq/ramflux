@@ -44,6 +44,8 @@ pub const MIN_J3_LEASE_SECONDS: u64 = 86_400;
 pub const MAX_TAIL_BYTES: u64 = 1_073_741_824;
 /// Base cut0, at most eight pre-J3 deltas, then exactly one possible tail.
 pub const MAX_PREPUBLICATION_DELTAS: u64 = 8;
+/// Signed delta stop rule; the base never qualifies, including an empty base.
+pub const PREPUBLICATION_DELTA_STOP_BYTES: u64 = 67_108_864;
 pub const PACKETS_PER_KEY: u64 = 65_536;
 
 /// Full-profile counts are exact decimal strings, including values above JSON's safe integer.
@@ -155,6 +157,18 @@ pub struct Manifest {
     pub chunk_count: U64,
     pub chunks_root: String,
     pub attachment_policy: String,
+}
+impl Manifest {
+    /// Both endpoints derive the last pre-J3 cut from signed fields (OVP-31).
+    /// This predicate grants no receipt, publication or tail admission by itself.
+    #[must_use]
+    pub const fn is_last_prepublication_delta(&self) -> bool {
+        matches!(self.kind, ManifestKind::Delta)
+            && self.snapshot_cut.0 > 0
+            && self.snapshot_cut.0 <= MAX_PREPUBLICATION_DELTAS
+            && (self.total_bytes.0 <= PREPUBLICATION_DELTA_STOP_BYTES
+                || self.snapshot_cut.0 == MAX_PREPUBLICATION_DELTAS)
+    }
 }
 impl PairingWire for Manifest {
     const LIMIT: usize = MANIFEST_BYTES;
@@ -291,6 +305,11 @@ impl SourceManifest {
         require(
             current.kind != ManifestKind::Base
                 && parent.kind != ManifestKind::Tail
+                && match current.kind {
+                    ManifestKind::Base => false,
+                    ManifestKind::Delta => !parent.is_last_prepublication_delta(),
+                    ManifestKind::Tail => parent.is_last_prepublication_delta(),
+                }
                 && current.previous_cut == Some(parent.snapshot_cut)
                 && current.parent_manifest_hash.as_deref()
                     == Some(crate::encode_base64url(manifest_hash(previous)?).as_str())

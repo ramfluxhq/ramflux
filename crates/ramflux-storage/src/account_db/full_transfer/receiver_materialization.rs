@@ -29,6 +29,7 @@ pub(super) struct Verification<'a, 'db> {
     pub(super) encoding: &'a FullUnionEncoding,
     pub(super) owners: &'a [String; 2],
     pub(super) private: &'a BackupDatabase,
+    pub(super) private_key: &'a AccountDbKey,
     pub(super) stage: &'a FullTransferStage<'db>,
 }
 impl Verification<'_, '_> {
@@ -103,10 +104,10 @@ impl Verification<'_, '_> {
     }
     fn actual(&self, db: &Connection) -> Result<(), StorageError> {
         let read = crate::database::Connection::open_with_flags(
-            self.directory.join("private.db"),
+            Path::new(self.private.db.path().ok_or_else(mismatch)?),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        crate::encryption::apply_key(&read, self.key)?;
+        crate::encryption::apply_key(&read, self.private_key)?;
         read.execute_batch("PRAGMA query_only=ON; BEGIN;")?;
         let schema = super::inventory::inspect(&read, full_transfer_catalog())?;
         schema.require_typed_owners(full_transfer_catalog())?;

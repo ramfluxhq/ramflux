@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Receiver-owned private copy provenance. No semantic receipt or generation selection.
+//! Receiver-owned qualified private generation; selection requires its separate owner.
 use super::{
     FullScalarInputCounts, FullTargetObservation, FullTransferStage, receiver_scratch::Scratch,
 };
@@ -9,7 +9,10 @@ use crate::{AccountDbKey, BackupDatabase, StorageError, account_db::backup::Full
 use std::sync::{Arc, atomic::AtomicBool};
 
 pub(super) mod application;
-pub use application::FullReceiverApplication;
+mod delta;
+mod generation;
+pub use application::FullAppliedDataReceipt;
+pub use generation::{FullPreparedReceiverDatabase, FullReceiverDatabaseWork};
 
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
@@ -143,6 +146,7 @@ impl FullReceiverBaseCopy {
             encoding,
             owners: &self.contributions.owners,
             private: &private,
+            private_key: &self.key,
             stage,
         }
         .run()?;
@@ -182,6 +186,7 @@ impl FullReceiverBaseCopy {
             encoding: &union,
             owners: &self.contributions.owners,
             private: &private,
+            private_key: &self.key,
             stage,
         }
         .run()?;

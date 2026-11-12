@@ -96,9 +96,8 @@ impl FullSourcePreparation<'_> {
         Ok(SourceContext {
             key: &self.key,
             connection: &self.connection,
-            db: self.db,
+            guard: super::source_scalar::SourceGuard::new(self.db, Some(self.cancelled.clone())),
             directory: &self.directory,
-            cancelled: Some(self.cancelled.clone()),
         })
     }
     /// Pin and copy the base through the existing generation/writer owner. Cancellation

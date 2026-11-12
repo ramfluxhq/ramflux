@@ -367,3 +367,5 @@ fn pairing_full_local_group_upgrade_marker_is_exact_canonical_integer_metadata()
     ));
     Ok(())
 }
+
+mod required;

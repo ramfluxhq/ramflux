@@ -8,12 +8,16 @@ use ramflux_crypto::custody::pairing::{FullResumeTrust, PairingRole};
 use ramflux_protocol::custody::pairing::full_transfer::{
     CHUNK_BYTES, Family, Manifest, SourceManifest, chunk_digest,
 };
-use ramflux_storage::{AccountDb, AccountIndex, FullStageIoCancel, full_transfer_catalog};
+use ramflux_storage::{
+    AccountDb, AccountIndex, FullStageIoCancel, FullTransferStage, full_transfer_catalog,
+};
 use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
 mod application;
+mod source_delta;
 pub use application::FullApplicationDraft;
+pub use source_delta::FullDeltaManifestDraft;
 mod port;
 pub use port::{FullLocalIoLoan, FullLocalIoPort, FullLocalIoService};
 
@@ -28,6 +32,7 @@ struct FullLocalIoScope {
     digest: [u8; 32],
     transfer_id: String,
     destination_key: String,
+    source_key: String,
     lease_expires_at: u64,
     cancelled: FullStageIoCancel,
     unlocked: Arc<ramflux_storage::FullLocalUnlockGuard>,
@@ -54,6 +59,7 @@ impl FullLocalIoScope {
             transfer_id: record.transfer_id,
             lease_expires_at: trust.lease_expires_at().min(record.grant.expires_at),
             destination_key: record.grant.branch_keys.destination,
+            source_key: record.grant.branch_keys.source,
             cancelled,
             runtime,
             unlocked: Arc::new(db.full_local_unlock_guard()?),
@@ -108,7 +114,10 @@ struct FullLocalIoRequest {
     action: FullLocalAction,
 }
 enum FullLocalAction {
+    VerifyDuplex(Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Action),
+    SourceDelta(source_delta::Action),
+    ProjectReceiverDelta { copy: Box<ramflux_storage::FullReceiverBaseCopy>, hash: String },
     ObservePrepublication(Box<ramflux_crypto::custody::VerifiedRecord>),
     ReadSourceChunk { hash: String, index: u64 },
     PrepareEmptyReverse,
@@ -121,7 +130,9 @@ enum FullLocalAction {
 }
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
+    Duplex(ramflux_storage::FullDuplexReceipt, Option<Box<ramflux_storage::FullReceiverBaseCopy>>),
     Semantic(application::Applied),
+    SourceDelta(source_delta::Applied),
     NativeObserved,
     SourceChunk(Zeroizing<Vec<u8>>),
     UnsignedReverse(Box<Manifest>),
@@ -136,15 +147,20 @@ fn wrong() -> SdkError {
 }
 impl FullLocalIoRequest {
     /// The owner chooses its actual current account; no DB key or stage key leaves this call.
-    /// No result is semantic `DataVerified` or an install/authority approval.
+    /// Semantic receipts require their durable typed application; no result is approval.
     fn apply(self, db: &AccountDb) -> Result<FullLocalIoReply, SdkError> {
         let _local = self.scope.runtime.local_work()?;
         let row = self.scope.require_db(db)?;
         if matches!(
             &self.action,
             FullLocalAction::PrepareEmptyReverse
+                | FullLocalAction::SourceDelta(_)
+                | FullLocalAction::ProjectReceiverDelta { .. }
                 | FullLocalAction::Semantic(
-                    application::Action::Prepare(_) | application::Action::Record { .. }
+                    application::Action::Prepare(_)
+                        | application::Action::Record { .. }
+                        | application::Action::PrepareReverse
+                        | application::Action::RecordReverse { .. }
                 )
         ) && (row.phase != "mutually_confirmed"
             || row.candidate_id.is_some()
@@ -157,84 +173,112 @@ impl FullLocalIoRequest {
             self.scope.role,
             custody::network_now()?,
         )?;
+        stage.bind_local_io_cancellation(&self.scope.cancelled)?;
         if stage.resume_record()?.stage_digest()? != self.scope.digest {
             return Err(wrong());
         }
-        let result = match self.action {
-            FullLocalAction::Semantic(action) => {
-                FullLocalResult::Semantic(application::apply(action, &self.scope, &mut stage)?)
-            }
-            FullLocalAction::ObservePrepublication(current) => {
-                // Retain rollback/revocation/fork observations even when the current
-                // native role/key predicate refuses further data work.
-                stage.observe_full_native_head(&current)?;
-                ramflux_crypto::custody::pairing::verify_full_prepublication_authority(
-                    &stage.resume_record()?.grant,
-                    &current,
-                    custody::network_now()?,
-                )?;
-                FullLocalResult::NativeObserved
-            }
-            FullLocalAction::PrepareEmptyReverse => {
-                if self.scope.role != PairingRole::Responder {
-                    return Err(wrong());
-                }
-                FullLocalResult::UnsignedReverse(Box::new(stage.prepare_empty_reverse_manifest()?))
-            }
-            FullLocalAction::RetainReverseManifest { manifest } => {
-                let catalog = full_transfer_catalog()
-                    .iter()
-                    .map(ramflux_storage::FamilyRule::manifest_family)
-                    .collect::<Result<Vec<_>, _>>()?;
-                stage.retain_reverse_manifest(&manifest, &catalog)?;
-                FullLocalResult::ReverseManifestRetained
-            }
-            FullLocalAction::ReadSourceChunk { hash, index } => {
-                if self.scope.role != PairingRole::Initiator {
-                    return Err(wrong());
-                }
-                FullLocalResult::SourceChunk(stage.read_source_wire_chunk(&hash, index)?)
-            }
-            FullLocalAction::RetainManifest { manifest } => {
-                if self.scope.role != PairingRole::Responder {
-                    return Err(wrong());
-                }
-                retain_forward_manifest(&mut stage, &manifest)?
-            }
-            FullLocalAction::RetainChunk { hash, index, digest, bytes } => {
-                if self.scope.role != PairingRole::Responder
-                    || bytes.len() > CHUNK_BYTES as usize
-                    || chunk_digest(index, &bytes).map_err(|error| wire(&error))? != digest
-                {
-                    return Err(wrong());
-                }
-                stage.retain_forward_chunk(&hash, index, &bytes)?;
-                FullLocalResult::DurablePrefix(stage.revalidate_forward_prefix(&hash)?)
-            }
-            FullLocalAction::PinReceiverBase { hash } => {
-                if self.scope.role != PairingRole::Responder {
-                    return Err(wrong());
-                }
-                FullLocalResult::ReceiverPinned(Box::new(stage.pin_receiver_base(&hash)?))
-            }
-            FullLocalAction::ProjectReceiverBase { mut copy } => {
-                if self.scope.role != PairingRole::Responder {
-                    return Err(wrong());
-                }
-                copy.project(&stage)?;
-                FullLocalResult::ReceiverProjected(copy)
-            }
-            FullLocalAction::VerifyForwardRoot { hash } => {
-                if self.scope.role != PairingRole::Responder {
-                    return Err(wrong());
-                }
-                stage.verify_forward_root(&hash)?;
-                FullLocalResult::ForwardRootChecked
-            }
-        };
+        let result = apply_action(self.action, &self.scope, stage)?;
         self.scope.require_db(db)?;
         Ok(FullLocalIoReply(result))
     }
+}
+
+fn apply_action(
+    action: FullLocalAction,
+    scope: &FullLocalIoScope,
+    mut stage: FullTransferStage<'_>,
+) -> Result<FullLocalResult, SdkError> {
+    Ok(match action {
+        FullLocalAction::VerifyDuplex(copy) => {
+            if (scope.role == PairingRole::Responder) != copy.is_some() {
+                return Err(wrong());
+            }
+            if let Some(copy) = &copy {
+                copy.verify_materialization(&stage)?;
+            }
+            FullLocalResult::Duplex(stage.verified_duplex(custody::network_now()?)?, copy)
+        }
+        FullLocalAction::SourceDelta(action) => {
+            FullLocalResult::SourceDelta(source_delta::apply(action, scope, stage)?)
+        }
+        FullLocalAction::ProjectReceiverDelta { mut copy, hash } => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            copy.project_delta(&stage, &hash)?;
+            FullLocalResult::ReceiverProjected(copy)
+        }
+        FullLocalAction::Semantic(action) => {
+            FullLocalResult::Semantic(application::apply(action, scope, &mut stage)?)
+        }
+        FullLocalAction::ObservePrepublication(current) => {
+            // Retain rollback/revocation/fork observations even when the current
+            // native role/key predicate refuses further data work.
+            stage.observe_full_native_head(&current)?;
+            ramflux_crypto::custody::pairing::verify_full_prepublication_authority(
+                &stage.resume_record()?.grant,
+                &current,
+                custody::network_now()?,
+            )?;
+            FullLocalResult::NativeObserved
+        }
+        FullLocalAction::PrepareEmptyReverse => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            FullLocalResult::UnsignedReverse(Box::new(stage.prepare_empty_reverse_manifest()?))
+        }
+        FullLocalAction::RetainReverseManifest { manifest } => {
+            let catalog = full_transfer_catalog()
+                .iter()
+                .map(ramflux_storage::FamilyRule::manifest_family)
+                .collect::<Result<Vec<_>, _>>()?;
+            stage.retain_reverse_manifest(&manifest, &catalog)?;
+            FullLocalResult::ReverseManifestRetained
+        }
+        FullLocalAction::ReadSourceChunk { hash, index } => {
+            if scope.role != PairingRole::Initiator {
+                return Err(wrong());
+            }
+            FullLocalResult::SourceChunk(stage.read_source_wire_chunk(&hash, index)?)
+        }
+        FullLocalAction::RetainManifest { manifest } => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            retain_forward_manifest(&mut stage, &manifest)?
+        }
+        FullLocalAction::RetainChunk { hash, index, digest, bytes } => {
+            if scope.role != PairingRole::Responder
+                || bytes.len() > CHUNK_BYTES as usize
+                || chunk_digest(index, &bytes).map_err(|error| wire(&error))? != digest
+            {
+                return Err(wrong());
+            }
+            stage.retain_forward_chunk(&hash, index, &bytes)?;
+            FullLocalResult::DurablePrefix(stage.revalidate_forward_prefix(&hash)?)
+        }
+        FullLocalAction::PinReceiverBase { hash } => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            FullLocalResult::ReceiverPinned(Box::new(stage.pin_receiver_base(&hash)?))
+        }
+        FullLocalAction::ProjectReceiverBase { mut copy } => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            copy.project(&stage)?;
+            FullLocalResult::ReceiverProjected(copy)
+        }
+        FullLocalAction::VerifyForwardRoot { hash } => {
+            if scope.role != PairingRole::Responder {
+                return Err(wrong());
+            }
+            stage.verify_forward_root(&hash)?;
+            FullLocalResult::ForwardRootChecked
+        }
+    })
 }
 
 fn retain_forward_manifest(

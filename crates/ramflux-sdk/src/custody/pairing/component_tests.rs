@@ -1224,6 +1224,28 @@ fn receiver_scratch_count(path: &std::path::Path) -> Result<usize, std::io::Erro
     })
 }
 
+fn last_verified_manifest(
+    db: &ramflux_storage::AccountDb,
+    operation: &str,
+    now: u64,
+) -> Result<
+    ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+    Box<dyn std::error::Error>,
+> {
+    let stage = db.open_full_transfer_stage(
+        operation,
+        ramflux_crypto::custody::pairing::PairingRole::Initiator,
+        now,
+    )?;
+    let manifest = stage.source_last_verified_manifest()?.ok_or("last signed DV manifest")?;
+    assert!(
+        manifest.manifest.is_last_prepublication_delta(),
+        "owned stream stopped before its mandatory final delta"
+    );
+    assert!(manifest.manifest.snapshot_cut.0 >= 1, "base-only stream counted as catch-up");
+    Ok(manifest)
+}
+
 async fn assert_disk_status_totals(
     rig: &mut Rig,
     operation: &str,
@@ -1245,7 +1267,7 @@ async fn assert_disk_status_totals(
         assert_eq!(value.cut, manifest.manifest.snapshot_cut);
         assert_eq!(
             value.stage,
-            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::AwaitingReverse
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::AwaitingPrepare
         );
         assert_eq!(
             value.tail_status,
@@ -1313,7 +1335,9 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
         );
     }
     let manifest = rig.primary.full_source_manifest_for_test()?;
-    assert_disk_status_totals(&mut rig, &operation, &manifest).await?;
+    let final_manifest =
+        last_verified_manifest(rig.source.client.account_db()?, &operation, rig.now)?;
+    assert_disk_status_totals(&mut rig, &operation, &final_manifest).await?;
     let hash = ramflux_protocol::encode_base64url(
         ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
     );
@@ -1417,8 +1441,13 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
         }
     }
     assert!(complete, "installed relay pumps did not complete the actual disk phase: {last}");
-    Box::pin(assert_full_bus_disk_status([&participant_a, &participant_b], &operation, &manifest))
-        .await?;
+    let final_manifest = last_verified_manifest(source.client.account_db()?, &operation, now)?;
+    Box::pin(assert_full_bus_disk_status(
+        [&participant_a, &participant_b],
+        &operation,
+        &final_manifest,
+    ))
+    .await?;
     assert!(!ordinary_session_admitted_for_participant(&participant_b)?);
     assert!(participant_a.db.lock().map_err(|_| "source DB handback")?.is_none());
     {
@@ -1542,7 +1571,7 @@ async fn assert_full_bus_disk_status(
         assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
         assert_eq!(
             value.stage,
-            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::AwaitingReverse
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::AwaitingPrepare
         );
     }
     Ok(())

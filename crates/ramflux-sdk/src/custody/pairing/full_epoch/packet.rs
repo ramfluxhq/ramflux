@@ -97,6 +97,19 @@ impl FullEpoch {
     }
 }
 impl FullPacketEpoch {
+    pub(crate) fn allow_verified_duplex(
+        &mut self,
+        proof: &ramflux_storage::FullDuplexReceipt,
+    ) -> Result<(), SdkError> {
+        if proof.role() != self.role
+            || proof.lease_id() != self.lease_id
+            || crate::custody::network_now()? >= proof.expires_at()
+        {
+            return Err(wrong());
+        }
+        self.channel()?.allow_controls_after_verified_duplex(false);
+        Ok(())
+    }
     fn channel(&mut self) -> Result<&mut FullConfirmedChannel, SdkError> {
         if crate::custody::network_now()? >= self.expires_at {
             self.retire();

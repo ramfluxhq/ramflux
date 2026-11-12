@@ -11,6 +11,7 @@ use ramflux_protocol::{
     encode_base64url,
 };
 use tokio::time::Duration;
+mod catchup;
 
 fn mismatch() -> SdkError {
     SdkError::PairingCode("ManifestMismatch")
@@ -81,10 +82,9 @@ impl FullStreamWork {
     }
     pub(super) async fn source(
         mut self,
-        manifest: SourceManifest,
+        mut manifest: SourceManifest,
     ) -> Result<FullStreamFinished, SdkError> {
         self.fresh().await?;
-        let hash = hash(&manifest)?;
         self.packet.send_manifest(self.relay.as_ref(), &self.origin, &manifest).await?;
         // The responder's first data object MUST be its actual restrictive manifest,
         // even for a new empty target. A receipt cannot replace that position.
@@ -94,61 +94,38 @@ impl FullStreamWork {
         if reverse.manifest.chunk_count.0 != 0 || reverse.manifest.total_bytes.0 != 0 {
             return Err(SdkError::PairingCode("UnsupportedRecord"));
         }
-        let chunks = manifest.manifest.chunk_count.0;
-        let DataPacket::Receipt { manifest_hash, durable_through, credit } = self.receive().await?
-        else {
-            return Err(wrong());
-        };
-        if manifest_hash != hash
-            || credit == 0
-            || durable_through.is_some_and(|prefix| prefix.0 >= chunks)
-        {
-            return Err(mismatch());
-        }
-        let mut next = durable_through.map_or(0, |prefix| prefix.0 + 1);
-        self.note_durable(&manifest, next)?;
-        while next < chunks {
-            self.fresh().await?;
-            let encrypted = {
-                let bytes = self.io.read_source_chunk(&hash, next).await?;
-                let digest = chunk_digest(next, &bytes).map_err(|error| wire(&error))?;
-                let packet = DataPacket::Chunk {
-                    manifest_hash: hash.clone(),
-                    index: U64(next),
-                    length: U64(bytes.len() as u64),
-                    digest: encode_base64url(digest),
-                    bytes: SecretBase64::from_bytes(&bytes),
-                };
-                self.packet.seal_packet(&packet)?
-            };
-            // No chunk plaintext, database loan or stage key survives the relay await.
-            self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
-            let DataPacket::Receipt { manifest_hash, durable_through, credit } =
-                self.receive().await?
-            else {
-                return Err(wrong());
-            };
-            if manifest_hash != hash || durable_through != Some(U64(next)) || credit == 0 {
-                return Err(mismatch());
+        let draft = self.io.prepare_reverse_data_verified().await?;
+        let participant = self.participant.clone();
+        let (draft, verified) = self
+            .runtime
+            .clone()
+            .run_blocking(move || {
+                let verified = participant.sign_application_data_verified(&draft)?;
+                Ok((draft, verified))
+            })
+            .await?;
+        self.fresh().await?;
+        self.io.record_reverse_data_verified(draft, &verified).await?;
+        let encrypted = self.packet.seal_packet(&verified)?;
+        self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
+        loop {
+            self.transfer_source_input(&manifest).await?;
+            if manifest.manifest.is_last_prepublication_delta() {
+                break;
             }
-            next += 1;
-            self.note_durable(&manifest, next)?;
-        }
-        self.runtime.require_live()?;
-        let verified = self.receive().await?;
-        if !matches!(verified, DataPacket::DataVerified { .. }) {
-            return Err(wrong());
+            manifest = self.next_source_manifest().await?;
+            self.packet.send_manifest(self.relay.as_ref(), &self.origin, &manifest).await?;
         }
         self.fresh().await?;
-        self.io.record_source_data_verified(verified).await?;
+        let (proof, _) = self.io.verify_duplex(None).await?;
+        self.packet.allow_verified_duplex(&proof)?;
         // A signed DV still grants neither publication nor immutable-cut deletion.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
     }
     pub(super) async fn destination(mut self) -> Result<FullStreamFinished, SdkError> {
-        let manifest = self.receive_manifest().await?;
+        let mut manifest = self.receive_manifest().await?;
         self.fresh().await?;
-        let hash = hash(&manifest)?;
-        let prefix = self.io.retain_manifest(&manifest).await?;
+        let mut prefix = self.io.retain_manifest(&manifest).await?;
         let draft = self.io.prepare_empty_reverse().await?;
         let participant = self.participant.clone();
         let reverse = self
@@ -159,65 +136,48 @@ impl FullStreamWork {
         self.io.retain_reverse_manifest(&reverse).await?;
         self.fresh().await?;
         self.packet.send_manifest(self.relay.as_ref(), &self.origin, &reverse).await?;
-        let chunks = manifest.manifest.chunk_count.0;
-        if prefix.is_some_and(|index| index >= chunks) {
-            return Err(mismatch());
-        }
-        let mut next = prefix.map_or(0, |prefix| prefix + 1);
-        if next == chunks {
-            self.io.verify_forward_root(&hash).await?;
-        }
-        self.note_durable(&manifest, next)?;
-        self.receipt(&hash, prefix).await?;
-        while next < chunks {
-            let DataPacket::Chunk { manifest_hash, index, length, digest, bytes } =
-                self.receive().await?
-            else {
-                return Err(wrong());
-            };
-            if manifest_hash != hash || index.0 != next {
-                return Err(mismatch());
-            }
-            let bytes = bytes.decode(CHUNK_BYTES as usize).map_err(|error| wire(&error))?;
-            if bytes.len() as u64 != length.0
-                || encode_base64url(chunk_digest(next, &bytes).map_err(|error| wire(&error))?)
-                    != digest
-            {
-                return Err(SdkError::PairingCode("ChunkMismatch"));
-            }
+        let mut receiver = None;
+        loop {
+            self.receive_forward_input(&manifest, prefix).await?;
+            let hash = hash(&manifest)?;
+            self.runtime.require_live()?;
             self.fresh().await?;
-            if self.io.retain_chunk(&hash, next, bytes).await? != Some(next) {
-                return Err(mismatch());
+            let prepared = if let Some(copy) = receiver.take() {
+                self.io.project_receiver_delta(copy, &hash).await?
+            } else {
+                let pinned = self.io.pin_receiver_base(&hash).await?;
+                let copy =
+                    self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
+                self.fresh().await?;
+                self.io.project_receiver_base(copy).await?
+            };
+            let (copy, draft) = self.io.prepare_data_verified(prepared).await?;
+            let participant = self.participant.clone();
+            let (draft, verified) = self
+                .runtime
+                .clone()
+                .run_blocking(move || {
+                    let verified = participant.sign_application_data_verified(&draft)?;
+                    Ok((draft, verified))
+                })
+                .await?;
+            self.fresh().await?;
+            let copy = self.io.record_data_verified(copy, draft, &verified).await?;
+            let encrypted = self.packet.seal_packet(&verified)?;
+            self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
+            self.runtime.require_live()?;
+            receiver = Some(copy);
+            if manifest.manifest.is_last_prepublication_delta() {
+                break;
             }
-            if next + 1 == chunks {
-                self.io.verify_forward_root(&hash).await?;
-            }
-            self.note_durable(&manifest, next + 1)?;
-            self.receipt(&hash, Some(next)).await?;
-            next += 1;
+            manifest = self.receive_manifest().await?;
+            self.fresh().await?;
+            prefix = self.io.retain_manifest(&manifest).await?;
         }
-        self.runtime.require_live()?;
         self.fresh().await?;
-        let pinned = self.io.pin_receiver_base(&hash).await?;
-        let copy = self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
-        self.fresh().await?;
-        let receiver = self.io.project_receiver_base(copy).await?;
-        let (receiver, draft) = self.io.prepare_data_verified(receiver).await?;
-        let participant = self.participant.clone();
-        let (draft, verified) = self
-            .runtime
-            .clone()
-            .run_blocking(move || {
-                let verified = participant.sign_receiver_data_verified(&draft)?;
-                Ok((draft, verified))
-            })
-            .await?;
-        self.fresh().await?;
-        let receiver = self.io.record_data_verified(receiver, draft, &verified).await?;
-        let encrypted = self.packet.seal_packet(&verified)?;
-        self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
-        self.runtime.require_live()?;
-        // DV certifies this input application; generation selection/publication remain fenced.
-        Ok(FullStreamFinished { packet: self.packet, manifest, receiver: Some(receiver) })
+        let (proof, receiver) = self.io.verify_duplex(receiver).await?;
+        self.packet.allow_verified_duplex(&proof)?;
+        // Final signed input and reverse application precede user preparation/publication.
+        Ok(FullStreamFinished { packet: self.packet, manifest, receiver })
     }
 }

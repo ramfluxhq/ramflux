@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Owned base transport with ordinary-owner local requests. Completion is disk-only;
-//! semantic verification, linked-target reverse merge and publication are separate gates.
+//! Owned prepublication data exchange with ordinary-owner local requests.
+//! Durable duplex opens controls; linked reverse and publication remain separate gates.
 use super::cancel::FullRuntimeCancel;
 use crate::{
     SdkError,
@@ -125,8 +125,8 @@ impl PairingActor {
     }
     /// Service at most one local request against the ordinary owner's actual writer.
     /// Call between async operations; no DB or stage key enters the background job.
-    /// This first driver supports the new-recipient base/empty-reverse disk phase only.
-    /// Linked reverse, semantic DV, deltas and publication remain unavailable here.
+    /// The new-recipient driver applies base, neutral reverse and signed catch-up deltas.
+    /// Original endpoints commit semantic DV before the local durable duplex control gate.
     /// # Errors
     /// Refuses retired/foreign writers, unsupported linked targets or failed local I/O.
     pub fn service_full_transfer(
