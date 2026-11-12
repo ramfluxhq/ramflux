@@ -2,12 +2,12 @@
 // Copyright (c) 2026 Span Brain
 
 //! Connection-local secret ceremony, deliberately bypassing actors, retry journals and events.
+#[cfg(not(windows))]
+use crate::custody::NativePrimaryVault;
 use crate::{
     LocalBusConfig, LocalBusFrame, SdkError,
     custody::{CreateInput, CreationCeremony},
 };
-#[cfg(not(windows))]
-use crate::custody::NativePrimaryVault;
 use serde::Serialize;
 use std::{path::Path, sync::Arc};
 use zeroize::Zeroizing;
