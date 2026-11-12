@@ -40,9 +40,11 @@ pub struct BindingVector {
 }
 
 mod errors;
+mod transient;
 #[cfg(test)]
 pub(crate) use errors::test_error_vector;
 pub use errors::{AdapterError, ErrorDetails, GeneratedErrorCode};
+pub use transient::transient_message_frame;
 
 /// Descriptor-derived field vector. Product adapters must not hand-maintain names.
 ///

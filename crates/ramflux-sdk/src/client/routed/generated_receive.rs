@@ -602,7 +602,6 @@ impl RamfluxClient {
         if !crate::client::target_selection::schema_v1_selected() {
             return Ok(());
         }
-        self.typing_sender.borrow_mut().received(opened.remote_device.storage_key());
         if matches!(opened.routing.kind, Kind::Direct | Kind::GroupMessage) {
             self.resolve_generated_pending_edit(
                 &opened.routing.conversation_id,

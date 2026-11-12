@@ -86,6 +86,7 @@ pub mod typing;
 use crate::prelude::*;
 
 pub struct RamfluxClient {
+    pub(crate) typing_receiver: std::cell::RefCell<typing::TypingReceiver>,
     pub(crate) typing_sender: std::cell::RefCell<typing::sender::Sender>,
     pub(crate) native_head_freshness: std::cell::RefCell<identity_authority::NativeHeadFreshness>,
     pub(crate) born_v3_account: Option<Box<crate::custody::BornAccount>>,
@@ -113,6 +114,7 @@ pub struct RamfluxClient {
 impl Default for RamfluxClient {
     fn default() -> Self {
         Self {
+            typing_receiver: std::cell::RefCell::default(),
             typing_sender: std::cell::RefCell::default(),
             native_head_freshness: std::cell::RefCell::default(),
             born_v3_account: None,

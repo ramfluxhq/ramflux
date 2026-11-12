@@ -31,6 +31,9 @@ pub mod validation;
 mod wire;
 pub use protojson::from_protojson;
 
+/// Native local-bus Typing updates; never a durable journal topic or cursor.
+pub const TRANSIENT_TOPIC: &str = "message.transient";
+
 /// Exact descriptor shared by protobuf, `ProtoJSON` and binding generators.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("descriptor.bin");
 
