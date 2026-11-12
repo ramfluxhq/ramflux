@@ -289,7 +289,7 @@ impl AccountSessionHarness {
             target_delivery_id: target.into(),
             encrypted_body: Vec::new(),
             created_at: crate::prelude::now_unix_timestamp(),
-            ttl: 300,
+            ttl: account.client.content_ttl()?,
         };
         Box::pin(account.client.send_plaintext_direct_message_via_gateway(
             &mut session,

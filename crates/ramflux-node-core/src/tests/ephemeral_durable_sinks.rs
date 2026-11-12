@@ -1105,6 +1105,13 @@ fn ephemeral_modules_have_no_durable_sinks() -> TestResult {
         ))
         .into());
     }
+    let sdk = root.join("crates/ramflux-sdk/src");
+    scan_sdk_transient_transport(
+        &std::fs::read_to_string(sdk.join("gateway/engine.rs"))?,
+        &load_crate_modules(&sdk)?,
+    )
+    .map_err(io::Error::other)?;
+
     Ok(())
 }
 
@@ -1215,6 +1222,70 @@ fn c1_view_real_source_refuses_store_and_publication_imports() -> TestResult {
     Ok(())
 }
 
+/// The broad engine stays outside the transient module. Its one-shot transport glue may
+/// call only these four framing operations, with no owner alias or field capability escape.
+fn scan_sdk_transient_transport(source: &str, modules: &BTreeSet<String>) -> Result<(), String> {
+    let source = normalised_items(source);
+    let signature = "async fn exchange_ephemeral(";
+    if source.matches(signature).count() != 1 {
+        return Err("expected one SDK transient transport implementation".into());
+    }
+    let function = source.find(signature).ok_or("transient transport function missing")?;
+    let open = function + source[function..].find('{').ok_or("transport body missing")?;
+    let end = skip_delimited(&source, open, '{', '}');
+    let body = &source[open..end];
+    scan_transient_receiver_uses(body)?;
+    let imports =
+        "use crate::{GatewayClientFrame, GatewayServerFrame, GatewaySubmitFrame, SdkError};\n";
+    let guarded = format!("{imports}{body}");
+    let hits = scan_file(
+        &guarded,
+        "crates/ramflux-sdk/src/gateway/engine.rs#exchange_ephemeral",
+        "crate::gateway::engine",
+        modules,
+    )?;
+    if !hits.is_empty() {
+        return Err(format!("SDK transient transport names forbidden sinks: {hits:?}"));
+    }
+    Ok(())
+}
+
+fn scan_transient_receiver_uses(body: &str) -> Result<(), String> {
+    for (at, _) in body.match_indices("self") {
+        if body[..at].chars().next_back().is_some_and(is_ident_char)
+            || body[at + 4..].chars().next().is_some_and(is_ident_char)
+        {
+            continue;
+        }
+        let dot = skip_ws(body, at + 4);
+        if !body[dot..].starts_with('.') {
+            return Err("SDK transient transport exposes its engine owner".into());
+        }
+        let start = skip_ws(body, dot + 1);
+        let end = start
+            + body[start..]
+                .chars()
+                .take_while(|c| is_ident_char(*c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        let method = &body[start..end];
+        if !body[skip_ws(body, end)..].starts_with('(')
+            || ![
+                "signed_request",
+                "write_frame",
+                "read_raw_gateway_frame",
+                "dispatch_frame_for_request",
+            ]
+            .contains(&method)
+        {
+            return Err(format!(
+                "SDK transient transport reaches unapproved engine member {method}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn sdk_ephemeral_refuses_durable_engine_traversal() -> TestResult {
     let root = workspace_root()?;
@@ -1228,6 +1299,28 @@ fn sdk_ephemeral_refuses_durable_engine_traversal() -> TestResult {
         scan_file(&candidate, rel, "crate::gateway::ephemeral", &modules),
         Err(format!("import crate::GatewaySessionEngine not on the ephemeral allow-list in {rel}"))
     );
+
+    let transport = std::fs::read_to_string(root.join("crates/ramflux-sdk/src/gateway/engine.rs"))?;
+    assert_eq!(scan_sdk_transient_transport(&transport, &modules), Ok(()));
+    let anchor = "        let envelope_id = envelope.envelope_id.clone();";
+    let function = transport.find("    async fn exchange_ephemeral(").ok_or("transport missing")?;
+    let (prefix, function_and_tail) = transport.split_at(function);
+    let candidate = format!("{prefix}{}", function_and_tail.replacen(anchor,
+        "        let _ = self.submit_envelope_classified(envelope.clone()).await;\n        let envelope_id = envelope.envelope_id.clone();", 1));
+    assert_eq!(
+        scan_sdk_transient_transport(&candidate, &modules),
+        Err("SDK transient transport reaches unapproved engine member submit_envelope_classified"
+            .into())
+    );
+    for (candidate, reason) in [
+        ("let engine = self;", "SDK transient transport exposes its engine owner"),
+        (
+            "let state = self.config;",
+            "SDK transient transport reaches unapproved engine member config",
+        ),
+    ] {
+        assert_eq!(scan_transient_receiver_uses(candidate), Err(reason.into()));
+    }
 
     Ok(())
 }
