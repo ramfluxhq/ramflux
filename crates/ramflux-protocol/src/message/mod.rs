@@ -27,6 +27,7 @@ mod protojson;
 pub mod registry;
 mod scanner;
 pub mod self_sync;
+pub mod unsupported;
 pub mod validation;
 mod wire;
 pub use protojson::from_protojson;

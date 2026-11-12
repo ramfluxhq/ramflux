@@ -82,6 +82,7 @@ pub(crate) mod target_selection;
 pub(crate) mod task;
 pub mod typed_messages;
 pub mod typing;
+mod unsupported_view;
 
 use crate::prelude::*;
 

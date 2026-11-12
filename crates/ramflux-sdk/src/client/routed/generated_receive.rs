@@ -687,23 +687,7 @@ impl RamfluxClient {
         if let Some(target) = target {
             db.bind_raw_inner_copy(&copy_id, &ramflux_protocol::encode_base64url(target.id))?;
         }
-        let raw = db
-            .raw_inner_copy(&copy_id)?
-            .ok_or_else(|| invalid("raw copy missing before commit"))?;
-        let view = g::UnsupportedView {
-            layer: scanned.layer,
-            kind: scanned.kind,
-            raw_digest: raw.digest.to_vec(),
-            raw_length: u32::try_from(raw.bytes.len())
-                .map_err(|_| invalid("raw length overflow"))?,
-            raw_handle: copy_id.as_bytes().to_vec(),
-            reason: "UnsupportedSchema".into(),
-        };
-        db.persist_message_actor_state(
-            &opened.routing.message_id,
-            &format!("routed/unsupported/{}", opened.routing.message_id),
-            &view,
-        )?;
+        self.persist_generated_unsupported_view(&opened.routing.message_id, &copy_id, scanned)?;
         db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
             conversation_id: &opened.routing.conversation_id,
             message_id: &opened.routing.message_id,
