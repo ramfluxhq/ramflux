@@ -17,6 +17,8 @@ pub(crate) const LIMIT: usize = 4096;
 pub(crate) const PENDING_CAP: usize = 3;
 const ID_MAX: usize = 128;
 const SCHEMA: &str = "ramflux.pairing.Install.v2";
+mod full;
+pub use full::{FullInstall, PriorGeneration};
 
 /// Closed T(Install) record. Public refs and hashes only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +40,8 @@ pub struct Install {
     pub state: String,
     pub cleanup_ref: Option<String>,
     pub cleanup_owner_ref: Option<DeviceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "full::present")]
+    pub full_transfer: Option<FullInstall>,
 }
 
 fn field(name: &'static str) -> SdkError {
@@ -96,8 +100,18 @@ impl Install {
     /// # Errors
     /// Returns the exact invalid field.
     pub fn validate(&self) -> Result<(), SdkError> {
-        require(self.schema == SCHEMA, "schema")?;
-        require(self.version == 2, "version")?;
+        match (self.schema.as_str(), self.version, &self.full_transfer) {
+            (SCHEMA, 2, None) => {}
+            ("ramflux.pairing.Install.v3", 3, Some(full)) => {
+                require(self.install_purpose == "transfer_destination", "install_purpose")?;
+                full.validate()?;
+            }
+            (SCHEMA, 2, Some(_)) | ("ramflux.pairing.Install.v3", 3, None) => {
+                return Err(field("full_transfer"));
+            }
+            (SCHEMA | "ramflux.pairing.Install.v3", _, _) => return Err(field("version")),
+            _ => return Err(field("schema")),
+        }
         ident(&self.account_id, "account_id")?;
         b32(&self.account_anchor, "account_anchor")?;
         b32(&self.operation_id, "operation_id")?;
@@ -409,3 +423,6 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod full_tests;

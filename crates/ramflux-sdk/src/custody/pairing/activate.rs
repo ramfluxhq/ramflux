@@ -60,7 +60,11 @@ pub(crate) fn install_exact(
     let mut row = saved
         .or(installed.filter(|row| row.operation_id == install.operation_id))
         .ok_or(SdkError::PairingField("operation_id"))?;
-    if row.account_anchor != install.account_anchor
+    if row.schema != install.schema
+        || row.version != install.version
+        || row.install_purpose != install.install_purpose
+        || row.full_transfer != install.full_transfer
+        || row.account_anchor != install.account_anchor
         || row.recipient_ref != install.recipient_ref
         || row.branch_vault_ref != install.branch_vault_ref
         || row.data_vault_ref != install.data_vault_ref
@@ -172,6 +176,7 @@ pub fn refresh_authority(
             state: "adopt_prepared".into(),
             cleanup_ref: None,
             cleanup_owner_ref: None,
+            full_transfer: None,
         };
         custody::verify_pairing_local(&row, authority, vault, now)?;
         install_store::write_pending(root, &row)?;
