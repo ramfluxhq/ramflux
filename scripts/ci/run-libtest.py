@@ -14,7 +14,16 @@ import xml.etree.ElementTree as ET
 
 def junit(output, status):
     clean = re.sub(r"\x1b\[[0-9;]*m", "", output)
-    cases = re.findall(r"(?:^|\n)test (\S+) \.\.\. (ok|FAILED|ignored)\b", clean)
+    starts = list(re.finditer(r"(?:^|\n)test (\S+) \.\.\. ", clean))
+    cases = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(clean)
+        # Child processes inherit the test's output streams. D-Bus diagnostics can
+        # interrupt the prefix, and a daemon can omit its trailing newline.
+        block = clean[start.end():end].split("test result:", 1)[0]
+        states = re.findall(r"(ok|FAILED|ignored)(?:, [^\n]*)?[ \t]*$", block, re.MULTILINE)
+        if states:
+            cases.append((start.group(1), states[-1]))
     summaries = re.findall(
         r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;", clean
     )
@@ -71,6 +80,19 @@ class Tests(unittest.TestCase):
         suite, valid = junit("test a ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;", 101)
         self.assertTrue(valid)
         self.assertEqual(suite.get("failures"), "1")
+
+    def test_real_dbus_output_interrupts_test_result(self):
+        text = (
+            "test custody::init ... dbus-daemon[3040]: Activating service\n"
+            "dbus-daemon[3040]: Successfully activated service\n"
+            "discover_other_daemon: 1ok\n"
+            "test custody::cleanup ... ok\n"
+            "test result: ok. 2 passed; 0 failed; 0 ignored;\n"
+        )
+        suite, valid = junit(text, 0)
+        self.assertTrue(valid)
+        self.assertEqual(suite.get("tests"), "2")
+        self.assertEqual(suite.get("failures"), "0")
 
     def test_process_status_and_stale_output(self):
         with tempfile.TemporaryDirectory() as directory:

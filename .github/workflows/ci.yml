@@ -262,7 +262,7 @@ jobs:
     timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: ci-speed-01-linux-x64
+      SCCACHE_GHA_VERSION: ci-speed-01-r2-linux-x64
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
@@ -325,7 +325,7 @@ jobs:
     timeout-minutes: 30
     env:
       SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_VERSION: ci-speed-01-linux-x64
+      SCCACHE_GHA_VERSION: ci-speed-01-r2-linux-x64
     steps:
       - name: Checkout
         uses: actions/checkout@b9e0990d219a03df7633c93f6f005a8fecbcab22
