@@ -5,9 +5,9 @@
 //! the frame codec and its limits are the callers', only the byte stream and the peer check
 //! differ. Identity is the token's user SID; a process id is never used for authorization.
 
+use std::ffi::{OsStr, OsString};
 #[cfg(test)]
 use std::future::Future;
-use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -235,7 +235,9 @@ impl BusListener for PipeBusListener {
             match pending.connect().await {
                 Ok(()) => break,
                 // The client opened and closed before the connect: recycle the instance.
-                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => pending.disconnect()?,
+                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {
+                    pending.disconnect()?
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -285,8 +287,9 @@ pub(super) async fn connect_named(
             }
             // A published name with no pipe behind it is a stopped daemon, like a stale socket.
             Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, error)
-                    .into());
+                return Err(
+                    std::io::Error::new(std::io::ErrorKind::ConnectionRefused, error).into()
+                );
             }
             Err(error) => return Err(error.into()),
         }

@@ -14,8 +14,7 @@ use windows_sys::Win32::Security::{
     DuplicateTokenEx, GetLengthSid, ImpersonateLoggedOnUser, LOGON32_LOGON_INTERACTIVE,
     LOGON32_PROVIDER_DEFAULT, LogonUserW, PSID, RevertToSelf, SID_AND_ATTRIBUTES,
     SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_DUPLICATE,
-    TOKEN_IMPERSONATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation,
-    TokenIntegrityLevel,
+    TOKEN_IMPERSONATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
