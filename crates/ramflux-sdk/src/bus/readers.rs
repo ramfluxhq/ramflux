@@ -626,3 +626,63 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod read_model_selector_tests {
+    use super::*;
+    use crate::bindings::{AdapterError, GeneratedErrorCode};
+    use serde_json::json;
+
+    #[test]
+    fn read_model_selectors_are_exclusive_typed_and_durable_on_an_empty_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _gate = ramflux_protocol::schema_profile::SchemaV1LiveGuard::enter();
+        let (client, root) = crate::client::own_device_sync::tests::client_with_account(
+            "reader-selectors",
+            "principal_sync",
+            "local",
+        )?;
+        for (body, code) in [
+            (
+                json!({"conversation_id":"c","message_id":"x","after_sequence":1}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (json!({"conversation_id":"c","message_id":"short"}), GeneratedErrorCode::InvalidArgument),
+            (
+                json!({"conversation_id":"c","after_sequence":0,"limit":0}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"conversation_id":"c","after_sequence":0,"limit":101}),
+                GeneratedErrorCode::InvalidArgument,
+            ),
+            (json!({"conversation_id":"c","unknown":1}), GeneratedErrorCode::InvalidJson),
+        ] {
+            let error = generated_page(&client, &body).err().ok_or("request accepted")?;
+            assert_eq!(AdapterError::from_sdk(&error).code, code as i32, "{body}");
+        }
+        let missing = ramflux_protocol::encode_base64url([3_u8; 32]);
+        let error = generated_page(&client, &json!({"conversation_id":"c","message_id":missing}))
+            .err()
+            .ok_or("missing message served")?;
+        assert_eq!(
+            AdapterError::from_sdk(&error).code,
+            GeneratedErrorCode::TargetNotFound as i32
+        );
+
+        let changes = generated_page(&client, &json!({"conversation_id":"c","after_sequence":0}))?;
+        assert_eq!(changes["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+        assert_eq!(changes["changes"], json!([]));
+        assert_eq!(changes["more"], false);
+        assert_eq!(changes["next_after"], changes["snapshot_sequence"]);
+        let page = generated_page(&client, &json!({"conversation_id":"c","read_model":true}))?;
+        assert_eq!(page["schema"], crate::typed_read_model::READ_MODEL_SCHEMA);
+        assert_eq!(page["messages"], json!([]));
+        assert!(page["next_before"].is_null());
+        let bare = generated_page(&client, &json!({"conversation_id":"c"}))?;
+        assert!(bare.get("schema").is_none(), "bare generated page keeps its existing shape");
+        drop(client);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
