@@ -104,7 +104,7 @@ impl NodePins {
         ));
         create(&temp, &serde_json::to_vec(next.hash())?)?;
         fs::rename(temp, head)?;
-        fs::File::open(&self.root)?.sync_all()?;
+        crate::platform::fs::sync_path(&self.root)?;
         Ok(next)
     }
     fn history(&self, hash: &str, now: u64) -> Result<VerifiedNodeRecord, SdkError> {
@@ -222,7 +222,7 @@ impl NodePins {
         }
         create(&temp, &bytes)?;
         fs::rename(temp, path)?;
-        fs::File::open(&self.root)?.sync_all()?;
+        crate::platform::fs::sync_path(&self.root)?;
         Ok(())
     }
 }

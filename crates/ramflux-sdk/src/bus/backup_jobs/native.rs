@@ -253,9 +253,9 @@ impl BackupJobs {
         let marker = serde_json::to_vec(
             &serde_json::json!({"schema":"ramflux.local.native_data_generation.v1","local_account_id":id,"account_anchor":native.anchor()}),
         )?;
-        std::fs::File::open(&target)?.sync_all()?;
-        std::fs::File::open(&generation)?.sync_all()?;
-        std::fs::File::open(&parent)?.sync_all()?;
+        crate::platform::fs::sync_path(&target)?;
+        crate::platform::fs::sync_path(&generation)?;
+        crate::platform::fs::sync_path(&parent)?;
         super::reclamation::remember(&generation, Some(&previous))?;
         #[cfg(test)]
         self.install_checkpoint(super::test_install::InstallPoint::BeforeCommit, &generation)?;

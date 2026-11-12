@@ -89,10 +89,34 @@ pub(crate) fn file_device_inode(file: &File) -> std::io::Result<(u64, u64)> {
 #[must_use]
 pub(crate) fn same_metadata_identity(
     metadata: &std::fs::Metadata,
+    _path: &Path,
     device: u64,
     inode: u64,
 ) -> bool {
     metadata.dev() == device && metadata.ino() == inode
+}
+
+/// Rename `from` to `to` only if `to` does not exist.
+///
+/// # Errors
+/// `AlreadyExists` when `to` exists; otherwise the OS error.
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        from,
+        rustix::fs::CWD,
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(Into::into)
+}
+
+/// Flush a file, or a directory after an entry in it changed.
+///
+/// # Errors
+/// Returns the OS error when the path cannot be opened or flushed.
+pub(crate) fn sync_path(path: impl AsRef<Path>) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
 }
 
 pub(crate) fn file_owner_uid(path: &Path) -> Result<u32, SdkError> {

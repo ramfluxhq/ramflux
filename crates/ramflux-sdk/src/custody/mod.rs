@@ -28,6 +28,8 @@ pub use vault::{
     BranchCredentials, CustodyVaultReason, NativePrimaryVault, PrimaryVault,
     VAULT_CLASS_LOGIN_KEYCHAIN, VAULT_CLASS_PROTECTED,
 };
+#[cfg(windows)]
+pub use vault::{VAULT_CLASS_WINDOWS_DPAPI, WindowsDpapiVault};
 
 #[cfg(any(target_os = "linux", test))]
 pub use vault::linux::{

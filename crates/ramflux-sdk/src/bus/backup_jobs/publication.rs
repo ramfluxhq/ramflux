@@ -27,14 +27,7 @@ pub(super) fn publish_cancellable(
     )
 }
 fn exclusive_rename(from: &Path, to: &Path) -> io::Result<()> {
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        from,
-        rustix::fs::CWD,
-        to,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
-    .map_err(Into::into)
+    crate::platform::fs::rename_no_replace(from, to)
 }
 #[cfg(test)]
 fn publish_with_link(
@@ -101,7 +94,7 @@ fn copy_exclusive(
         destination.write_all(&buffer[..n])?;
     }
     destination.sync_all()?;
-    std::fs::File::open(parent)?.sync_all()?;
+    crate::platform::fs::sync_path(parent)?;
     if let Some(stage) = stage {
         super::output_ownership::forget(stage)?;
     }

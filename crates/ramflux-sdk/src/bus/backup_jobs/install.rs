@@ -163,13 +163,13 @@ impl BackupJobs {
         drop(db);
         let ca = generation.join("ca.pem");
         std::fs::write(&ca, &metadata.ca_pem)?;
-        std::fs::File::open(&ca)?.sync_all()?;
+        crate::platform::fs::sync_path(&ca)?;
         metadata.identity.legacy_mut()?.gateway.ca_cert = ca;
         let wrapped = wrap_installed_key(&self.data_root, &metadata, &installed_key)?;
         let manifest = Zeroizing::new(serde_json::to_vec(metadata.identity.legacy()?)?);
-        std::fs::File::open(&target)?.sync_all()?;
-        std::fs::File::open(&generation)?.sync_all()?;
-        std::fs::File::open(&parent)?.sync_all()?;
+        crate::platform::fs::sync_path(&target)?;
+        crate::platform::fs::sync_path(&generation)?;
+        crate::platform::fs::sync_path(&parent)?;
         super::reclamation::remember(&generation, previous.as_ref())?;
         #[cfg(test)]
         self.install_checkpoint(super::test_install::InstallPoint::BeforeCommit, &generation)?;

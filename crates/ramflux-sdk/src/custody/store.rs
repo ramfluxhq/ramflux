@@ -559,7 +559,7 @@ pub(crate) fn reconcile_incomplete_markers(
                 "quarantined inconsistent custody account; other accounts remain available");
         }
     }
-    fs::File::open(parent)?.sync_all()?;
+    crate::platform::fs::sync_path(parent)?;
     Ok(())
 }
 fn reconcile_marker(
@@ -576,7 +576,7 @@ fn reconcile_marker(
             fs::remove_file(entry.path())?;
         }
     }
-    fs::File::open(path)?.sync_all()?;
+    crate::platform::fs::sync_path(path)?;
     match index.account(id) {
         Ok(_) => Ok(()),
         Err(ramflux_storage::StorageError::AccountNotFound(_))
@@ -999,7 +999,7 @@ impl BornAccount {
         ));
         create_private_temp(&temp, &bytes)?;
         fs::rename(temp, dir.join("authority.json"))?;
-        fs::File::open(&dir)?.sync_all()?;
+        crate::platform::fs::sync_path(&dir)?;
         self.stored.state = CreationState::Live;
         self.stored.networking_reason = None;
         self.stored.capacity_retry_at = None;
