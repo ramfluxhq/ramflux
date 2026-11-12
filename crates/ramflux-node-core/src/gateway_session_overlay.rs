@@ -107,6 +107,7 @@ impl GatewayRedbStore {
             }
         }
         write.commit().map_err(redb_error)?;
+        #[cfg(any(test, feature = "durability-test-hooks"))]
         self.record_incremental_commit();
         Ok(())
     }
@@ -157,8 +158,10 @@ impl GatewayRedbStore {
                     .map_err(redb_error)?;
             }
         }
+        #[cfg(any(test, feature = "durability-test-hooks"))]
         self.before_admission_commit()?;
         write.commit().map_err(redb_error)?;
+        #[cfg(any(test, feature = "durability-test-hooks"))]
         self.record_incremental_commit();
         Ok(())
     }

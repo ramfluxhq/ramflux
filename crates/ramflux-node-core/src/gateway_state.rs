@@ -800,11 +800,13 @@ impl GatewayRedbStore {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "durability-test-hooks"))]
     fn record_incremental_commit(&self) {
         #[cfg(any(test, feature = "durability-test-hooks"))]
         self.durable_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    #[cfg(any(test, feature = "durability-test-hooks"))]
     fn before_admission_commit(&self) -> Result<(), NodeCoreError> {
         #[cfg(any(test, feature = "durability-test-hooks"))]
         {

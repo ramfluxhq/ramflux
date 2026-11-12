@@ -327,6 +327,7 @@ impl GatewayRedbStore {
                     .map_err(|e| NodeCoreError::Redb(e.to_string()))?;
             }
         }
+        #[cfg(any(test, feature = "durability-test-hooks"))]
         self.before_admission_commit()?;
         write.commit().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         #[cfg(any(test, feature = "durability-test-hooks"))]
