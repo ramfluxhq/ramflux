@@ -11,16 +11,22 @@ use std::{
 pub(super) struct Scratch {
     pub(super) path: PathBuf,
     lock: Option<fs::File>,
+    retained: bool,
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
         self.lock.take();
-        let _ = fs::remove_dir_all(&self.path);
+        if !self.retained {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }
 impl Scratch {
-    pub(super) fn create(stage: &Path) -> Result<Self, StorageError> {
-        reclaim(stage)?;
+    pub(super) fn retain(&mut self) {
+        self.retained = true;
+    }
+    pub(super) fn create(stage: &Path, retained: Option<&str>) -> Result<Self, StorageError> {
+        reclaim(stage, retained)?;
         let path = stage.join(format!(
             "receiver-{}",
             ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
@@ -32,7 +38,7 @@ impl Scratch {
         }
         #[cfg(not(unix))]
         return Err(super::stage::context());
-        let mut scratch = Self { path, lock: None };
+        let mut scratch = Self { path, lock: None, retained: false };
         let lock = super::stage::create_file(&scratch.path.join("owner.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)?;
         scratch.lock = Some(lock);
@@ -41,7 +47,7 @@ impl Scratch {
         Ok(scratch)
     }
 }
-fn reclaim(stage: &Path) -> Result<(), StorageError> {
+fn reclaim(stage: &Path, retained: Option<&str>) -> Result<(), StorageError> {
     for entry in fs::read_dir(stage)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -64,6 +70,10 @@ fn reclaim(stage: &Path) -> Result<(), StorageError> {
         }
         // A pin always holds stage.lock while creating this file. A live bulk-copy
         // owner retains its independent lock even after releasing the stage loan.
+        if retained == name.to_str() {
+            drop(super::stage::open_regular(&entry.path().join("owner.lock"), true)?);
+            continue;
+        }
         let lock = match super::stage::open_regular(&entry.path().join("owner.lock"), true) {
             Ok(lock) => lock,
             Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -92,14 +102,14 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let root = crate::tests::temp_root("receiver-scratch-owner");
         fs::DirBuilder::new().mode(0o700).create(&root)?;
-        let first = Scratch::create(&root)?;
+        let first = Scratch::create(&root, None)?;
         let orphan =
             root.join(format!("receiver-{}", ramflux_protocol::encode_base64url([17; 32])));
         fs::DirBuilder::new().mode(0o700).create(&orphan)?;
         super::super::stage::create_file(&orphan.join("owner.lock"))?.sync_all()?;
         let retained = root.join("stage.key");
         fs::write(&retained, b"retained reconciliation metadata")?;
-        let second = Scratch::create(&root)?;
+        let second = Scratch::create(&root, None)?;
         assert!(first.path.exists(), "active owner was reclaimed");
         assert!(!orphan.exists(), "unlocked lost-key workspace survived");
         assert!(retained.exists(), "retained stage metadata was removed");
@@ -107,7 +117,7 @@ mod tests {
         fs::DirBuilder::new().mode(0o700).create(&outside)?;
         let alias = root.join(format!("receiver-{}", ramflux_protocol::encode_base64url([19; 32])));
         symlink(&outside, &alias)?;
-        assert!(Scratch::create(&root).is_err(), "scratch symlink was accepted");
+        assert!(Scratch::create(&root, None).is_err(), "scratch symlink was accepted");
         assert!(outside.exists());
         drop(first);
         drop(second);

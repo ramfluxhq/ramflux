@@ -215,6 +215,32 @@ impl PairingActor {
         Ok(())
     }
     #[cfg(test)]
+    pub(crate) fn hold_receiver_application_for_test(
+        &mut self,
+        db: &ramflux_storage::AccountDb,
+    ) -> Result<Option<crate::custody::pairing::FullLocalIoLoan>, SdkError> {
+        if !self.full_base_stream_started_for_test() {
+            self.service_full_transfer(db)?;
+        }
+        let Some(loan) = self
+            .ceremony
+            .as_mut()
+            .and_then(|c| c.full.as_mut())
+            .and_then(|full| full.bootstrap.as_mut())
+            .and_then(|state| state.stream.as_mut())
+            .and_then(|stream| stream.service.as_mut())
+            .and_then(FullLocalIoService::try_receive)
+        else {
+            return Ok(None);
+        };
+        if loan.is_receiver_application() {
+            Ok(Some(loan))
+        } else {
+            loan.apply(db)?;
+            Ok(None)
+        }
+    }
+    #[cfg(test)]
     pub(crate) fn full_receiver_base_projected_for_test(&self) -> bool {
         self.ceremony
             .as_ref()

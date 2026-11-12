@@ -57,6 +57,7 @@ fn pairing_full_receiver_copy_is_own_pinned_b_and_rejects_changed_writer() -> Te
         )?,
         0
     );
+    assert_prepared_bytes_rechecked(&copy, &stage)?;
     seed(&b, 31, 10)?;
     assert!(copy.project(&stage).is_err(), "changed B was accepted");
     assert!(copy.projected_input().is_none() && copy.union_encoding().is_none());
@@ -119,5 +120,36 @@ fn assert_qualified_union(copy: &FullReceiverBaseCopy, original_bundle: &str) ->
         current, original_bundle,
         "private opener rotated or discarded B's current MAC owner"
     );
+    Ok(())
+}
+
+fn assert_prepared_bytes_rechecked(
+    copy: &FullReceiverBaseCopy,
+    stage: &FullTransferStage<'_>,
+) -> TestResult {
+    copy.verify_materialization(stage)?;
+    let private =
+        BackupDatabase::open_full_receiver_copy(&copy.scratch.path.join("private.db"), &copy.key)?;
+    let before = copy.union_encoding().ok_or("root")?.chunks_root;
+    let old = ramflux_protocol::encode_base64url([21; 32]);
+    let replacement = ramflux_protocol::encode_base64url([99; 32]);
+    private.db.execute(
+        "UPDATE object_payload_dependency SET parent_commitment=?1 WHERE parent_commitment=?2",
+        rusqlite::params![replacement, old],
+    )?;
+    assert!(
+        copy.verify_materialization(stage).is_err(),
+        "same-count replacement of prepared B data was accepted"
+    );
+    assert_eq!(
+        copy.union_encoding().ok_or("root")?.chunks_root,
+        before,
+        "test changed metadata rather than prepared bytes"
+    );
+    private.db.execute(
+        "UPDATE object_payload_dependency SET parent_commitment=?1 WHERE parent_commitment=?2",
+        rusqlite::params![old, replacement],
+    )?;
+    copy.verify_materialization(stage)?;
     Ok(())
 }

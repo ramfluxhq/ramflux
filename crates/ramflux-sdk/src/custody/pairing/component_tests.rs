@@ -1245,7 +1245,7 @@ async fn assert_disk_status_totals(
         assert_eq!(value.cut, manifest.manifest.snapshot_cut);
         assert_eq!(
             value.stage,
-            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::AwaitingReverse
         );
         assert_eq!(
             value.tail_status,
@@ -1308,8 +1308,8 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
             rig.now,
         )?;
         assert!(
-            stage.source_last_data_verified()?.is_none(),
-            "disk receipt retired an unverified cut"
+            stage.source_last_data_verified()?.is_some(),
+            "source did not persist B's signed applied-input receipt"
         );
     }
     let manifest = rig.primary.full_source_manifest_for_test()?;
@@ -1348,8 +1348,8 @@ async fn pairing_full_owned_base_stream_uses_credit_and_actual_writer_services()
     assert!(!rig.secondary.full_receiver_base_projected_for_test());
     assert_eq!(
         receiver_scratch_count(&target_stage)?,
-        0,
-        "account lock retained private receiver data"
+        1,
+        "account lock removed a generation whose key and DV are committed"
     );
     hold.finish().await?;
     Ok(())
@@ -1542,7 +1542,7 @@ async fn assert_full_bus_disk_status(
         assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
         assert_eq!(
             value.stage,
-            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::AwaitingReverse
         );
     }
     Ok(())
@@ -1584,4 +1584,121 @@ async fn pairing_full_expiry_keeps_public_status_after_secret_owners_drop() -> T
         "expired status retained SAS confirmation"
     );
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn pairing_full_receipt_does_not_retire_unverified_cut() -> TestResult {
+    let hold = ClockHold::new();
+    let (mut rig, operation, _) = Box::pin(bootstrap_full_rig()).await?;
+    rig.primary.sync_relay().await?;
+    rig.participant_a.return_client(&mut rig.source.client)?;
+    let loan = Box::pin(hold_application_request(&mut rig)).await?;
+    for _ in 0..8 {
+        rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+        rig.primary.sync_relay().await?;
+        rig.primary.settle_full_local_jobs_for_test().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    }
+    let manifest = rig.primary.full_source_manifest_for_test()?;
+    let hash = ramflux_protocol::encode_base64url(
+        ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+    );
+    let request = ramflux_protocol::custody::pairing::local_dto::StatusRequest {
+        schema: "ramflux.pairing.StatusRequest.v2".into(),
+        version: 2,
+        operation_id: operation.clone(),
+        generation: 1,
+    };
+    let Outcome::FullStatus { value } = rig.primary.transfer_status(&request).await?.outcome else {
+        return Err("source progress".into());
+    };
+    assert_eq!(
+        value.bytes_durable, manifest.manifest.total_bytes,
+        "source had not consumed the actual disk receipt"
+    );
+    assert_eq!(
+        value.stage,
+        ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
+    );
+    assert_source_cut_retained(&rig, &operation, &hash, false)?;
+    {
+        let slot = rig.participant_b.db.lock().map_err(|_| "target writer")?;
+        loan.apply(slot.as_ref().ok_or("target DB")?)?;
+    }
+    Box::pin(finish_owned_stream(&mut rig)).await?;
+    assert_source_cut_retained(&rig, &operation, &hash, true)?;
+    assert!(!ordinary_session_admitted_for_participant(&rig.participant_b)?);
+    rig.primary.lock().await?;
+    rig.secondary.lock().await?;
+    hold.finish().await?;
+    Ok(())
+}
+
+fn assert_source_cut_retained(
+    rig: &Rig,
+    operation: &str,
+    hash: &str,
+    verified: bool,
+) -> TestResult {
+    let stage = rig.source.client.account_db()?.open_full_transfer_stage(
+        operation,
+        ramflux_crypto::custody::pairing::PairingRole::Initiator,
+        rig.now,
+    )?;
+    assert_eq!(
+        stage.source_last_data_verified()?.is_some(),
+        verified,
+        "disk receipt was confused with semantic DV"
+    );
+    assert!(
+        !stage.read_source_wire_chunk(hash, 0)?.is_empty(),
+        "receipt retired the immutable source before its successor diff"
+    );
+    Ok(())
+}
+async fn hold_application_request(
+    rig: &mut Rig,
+) -> Result<FullLocalIoLoan, Box<dyn std::error::Error>> {
+    for _ in 0..256 {
+        rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+        {
+            let slot = rig.participant_b.db.lock().map_err(|_| "target writer")?;
+            if let Some(loan) = rig
+                .secondary
+                .hold_receiver_application_for_test(slot.as_ref().ok_or("target DB")?)?
+            {
+                return Ok(loan);
+            }
+        }
+        rig.primary.sync_relay().await?;
+        rig.secondary.sync_relay().await?;
+        settle_stream_work(rig).await;
+    }
+    Err("receiver never requested its actual semantic application".into())
+}
+async fn finish_owned_stream(rig: &mut Rig) -> TestResult {
+    for _ in 0..256 {
+        rig.primary.service_full_transfer(rig.source.client.account_db()?)?;
+        {
+            let slot = rig.participant_b.db.lock().map_err(|_| "target writer")?;
+            rig.secondary.service_full_transfer(slot.as_ref().ok_or("target DB")?)?;
+        }
+        rig.primary.sync_relay().await?;
+        rig.secondary.sync_relay().await?;
+        if rig.primary.full_base_disk_complete_for_test()
+            && rig.secondary.full_base_disk_complete_for_test()
+        {
+            return Ok(());
+        }
+        settle_stream_work(rig).await;
+    }
+    Err("stream did not complete signed DV after application".into())
+}
+async fn settle_stream_work(rig: &Rig) {
+    tokio::task::yield_now().await;
+    rig.primary.settle_full_local_jobs_for_test().await;
+    rig.secondary.settle_full_local_jobs_for_test().await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_millis(500)).await;
 }

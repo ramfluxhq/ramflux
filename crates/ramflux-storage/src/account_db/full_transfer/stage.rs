@@ -141,6 +141,7 @@ impl AccountDb {
         }
         connection.execute_batch(super::source_receipt::SCHEMA)?;
         connection.execute_batch(super::receiver_input::SCHEMA)?;
+        connection.execute_batch(super::receiver_copy::application::SCHEMA)?;
         connection.execute_batch(super::union_encoding::SCHEMA)?;
         connection.execute_batch(super::source_scalar::SCHEMA)?;
         connection.execute_batch(super::native_floor::SCHEMA)?;
@@ -338,6 +339,7 @@ pub(super) fn initialize_record(
         tx.execute_batch(super::source_cut::SCHEMA)?;
         tx.execute_batch(super::source_receipt::SCHEMA)?;
         tx.execute_batch(super::receiver_input::SCHEMA)?;
+        tx.execute_batch(super::receiver_copy::application::SCHEMA)?;
         tx.execute_batch(super::union_encoding::SCHEMA)?;
         tx.execute_batch(super::source_scalar::SCHEMA)?;
         tx.execute_batch(super::native_floor::SCHEMA)?;

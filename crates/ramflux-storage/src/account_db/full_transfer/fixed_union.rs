@@ -19,13 +19,13 @@ fn conflict() -> StorageError {
     StorageError::PairingField("TransferConflict")
 }
 
-struct Cells {
+pub(super) struct Cells {
     bytes: Zeroizing<[u8; 1024]>,
     ranges: [std::ops::Range<usize>; 3],
     count: usize,
 }
 impl Cells {
-    fn read(
+    pub(super) fn read(
         rule: &FamilyRule,
         header: &RecordHeader,
         input: &mut impl Read,
@@ -56,13 +56,13 @@ impl Cells {
         }
         Ok(value)
     }
-    fn bytes(&self, index: usize) -> Result<&[u8], StorageError> {
+    pub(super) fn bytes(&self, index: usize) -> Result<&[u8], StorageError> {
         if index >= self.count {
             return Err(unsupported());
         }
         self.bytes.get(self.ranges[index].clone()).ok_or_else(unsupported)
     }
-    fn text(&self, index: usize) -> Result<&str, StorageError> {
+    pub(super) fn text(&self, index: usize) -> Result<&str, StorageError> {
         std::str::from_utf8(self.bytes(index)?).map_err(|_| unsupported())
     }
     fn integer(&self, index: usize) -> Result<i64, StorageError> {

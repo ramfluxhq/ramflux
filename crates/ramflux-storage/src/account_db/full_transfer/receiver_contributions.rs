@@ -24,7 +24,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 pub(super) struct Contributions {
     pub(super) nonce: [u8; 32],
-    owners: [String; 2],
+    pub(super) owners: [String; 2],
 }
 fn invalid() -> StorageError {
     StorageError::PairingField("UnsupportedRecord")
@@ -43,7 +43,7 @@ impl Drop for Header {
     }
 }
 
-fn open(path: &Path, key: &AccountDbKey) -> Result<Connection, StorageError> {
+pub(super) fn open(path: &Path, key: &AccountDbKey) -> Result<Connection, StorageError> {
     drop(super::stage::open_regular(path, true)?);
     let db = Connection::open(path)?;
     let hex = Zeroizing::new(key.sqlcipher_hex());

@@ -12,6 +12,8 @@ use ramflux_storage::{AccountDb, AccountIndex, FullStageIoCancel, full_transfer_
 use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
+mod application;
+pub use application::FullApplicationDraft;
 mod port;
 pub use port::{FullLocalIoLoan, FullLocalIoPort, FullLocalIoService};
 
@@ -106,6 +108,7 @@ struct FullLocalIoRequest {
     action: FullLocalAction,
 }
 enum FullLocalAction {
+    Semantic(application::Action),
     ObservePrepublication(Box<ramflux_crypto::custody::VerifiedRecord>),
     ReadSourceChunk { hash: String, index: u64 },
     PrepareEmptyReverse,
@@ -118,6 +121,7 @@ enum FullLocalAction {
 }
 struct FullLocalIoReply(FullLocalResult);
 enum FullLocalResult {
+    Semantic(application::Applied),
     NativeObserved,
     SourceChunk(Zeroizing<Vec<u8>>),
     UnsignedReverse(Box<Manifest>),
@@ -136,10 +140,15 @@ impl FullLocalIoRequest {
     fn apply(self, db: &AccountDb) -> Result<FullLocalIoReply, SdkError> {
         let _local = self.scope.runtime.local_work()?;
         let row = self.scope.require_db(db)?;
-        if matches!(&self.action, FullLocalAction::PrepareEmptyReverse)
-            && (row.phase != "mutually_confirmed"
-                || row.candidate_id.is_some()
-                || row.proposal_hash.is_some())
+        if matches!(
+            &self.action,
+            FullLocalAction::PrepareEmptyReverse
+                | FullLocalAction::Semantic(
+                    application::Action::Prepare(_) | application::Action::Record { .. }
+                )
+        ) && (row.phase != "mutually_confirmed"
+            || row.candidate_id.is_some()
+            || row.proposal_hash.is_some())
         {
             return Err(wrong());
         }
@@ -152,6 +161,9 @@ impl FullLocalIoRequest {
             return Err(wrong());
         }
         let result = match self.action {
+            FullLocalAction::Semantic(action) => {
+                FullLocalResult::Semantic(application::apply(action, &self.scope, &mut stage)?)
+            }
             FullLocalAction::ObservePrepublication(current) => {
                 // Retain rollback/revocation/fork observations even when the current
                 // native role/key predicate refuses further data work.
