@@ -25,7 +25,7 @@ struct Prepared {
     origin: Option<(ramflux_storage::RawInnerCopy, super::raw_inner_origin::RetainedOrigin)>,
 }
 // Bump when executable reparse policy changes without a descriptor change.
-const REPARSE_POLICY: &str = "original-channel-3";
+const REPARSE_POLICY: &str = "original-channel-4";
 fn decoder_marker() -> String {
     format!(
         "{}/{}/{}",
@@ -55,6 +55,7 @@ impl RamfluxClient {
                     snapshot.copy.kind,
                     ramflux_storage::RawInnerCopyKind::OuterInner
                         | ramflux_storage::RawInnerCopyKind::SourceEvidence
+                        | ramflux_storage::RawInnerCopyKind::NestedGroup
                 ) && !db
                     .actor_state_exists(&format!("routed/unsupported/{}", snapshot.copy.owner_id))?
                     && db.message_content(&snapshot.copy.owner_id)?.is_some()
@@ -94,7 +95,7 @@ impl RamfluxClient {
         } else {
             self.require_cached_root_authority(HeadUse::HistoricalRead, &prepared.source)?;
         }
-        if !self.raw_reparse_scope_allowed(&prepared.source, &prepared.provenance.conversation)? {
+        if !self.raw_reparse_origin_scope_allowed(&prepared.source, &prepared.identity)? {
             return Ok(false);
         }
         if !self.raw_reparse_policy(snapshot, &prepared)? {
@@ -115,6 +116,17 @@ impl RamfluxClient {
         }
         match prepared.content.value.as_ref() {
             Some(g::content::Value::Message(message)) if message.sealed_group.is_none() => (),
+            Some(g::content::Value::Message(_)) if prepared.identity.group_id.is_some() => {
+                let Some((_, origin)) = prepared.origin.as_ref() else {
+                    return Ok(false);
+                };
+                let nested = &origin.evidence.group_plaintext;
+                if validation::scan_message("Message", nested, g::registry::COMPILED_LAYER)
+                    != Ok(ScanOutcome::Supported)
+                {
+                    return Ok(false);
+                }
+            }
             Some(g::content::Value::Delete(delete)) if prepared.origin.is_some() => {
                 // A failed peer authorization rolls back only this copy's effects,
                 // preserving its attempted marker and progress for other sources.
@@ -180,11 +192,26 @@ impl RamfluxClient {
             &identity,
         )?;
         if let Some((copy, origin)) = origin.as_ref() {
-            db.persist_message_actor_state(
-                &provenance.message,
-                &format!("routed/origin-evidence/{}", provenance.message),
-                origin,
-            )?;
+            self.persist_known_origin(&provenance.message, origin)?;
+            if identity.group_id.is_some() {
+                let message = <g::Message as prost::Message>::decode(
+                    origin.evidence.group_plaintext.as_slice(),
+                )
+                .map_err(|_| {
+                    SdkError::InboundRejected("retained group plaintext changed".into())
+                })?;
+                db.persist_message_actor_state(
+                    &provenance.message,
+                    &format!("routed/group-projection/{}", provenance.message),
+                    &message,
+                )?;
+                db.persist_message_actor_state(
+                    &provenance.message,
+                    &format!("routed/group-content/{}", provenance.message),
+                    &origin.evidence.group_plaintext,
+                )?;
+                db.finish_raw_inner_reparse(&format!("{}/nested-group", snapshot.copy.copy_id))?;
+            }
             db.finish_raw_inner_reparse(&copy.copy_id)?;
         }
         self.remove_generated_unsupported_view(&provenance.message)?;
@@ -254,8 +281,6 @@ impl RamfluxClient {
         if !matches!(provenance.original_mode.as_str(), "durable" | "ephemeral")
             || snapshot.copy.kind != ramflux_storage::RawInnerCopyKind::OuterInner
             || snapshot.copy.copy_id != provenance.outer_receipt_key
-            || identity.group_id.is_some()
-            || identity.group_epoch.is_some()
             || (scanned.kind != 7 && g::identity::verify(&identity).is_err())
             || provenance.message != snapshot.copy.owner_id
             || provenance.message != ramflux_protocol::encode_base64url(&identity.id)
@@ -284,7 +309,8 @@ impl RamfluxClient {
                 return Ok(None);
             };
             let envelope = &verified.outer;
-            if route.kind != Kind::Direct
+            if route.kind
+                != if identity.group_id.is_some() { Kind::GroupMessage } else { Kind::Direct }
                 || (scanned.kind == 1
                     && envelope.delivery_class != ramflux_protocol::DeliveryClass::Message)
                 || origin.routing != route
@@ -306,7 +332,10 @@ impl RamfluxClient {
             }
             (verified.author.device, Some((copy, origin)))
         } else {
-            if ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION >= 1 {
+            if ramflux_protocol::schema_profile::ACTIVE_STORAGE_GENERATION >= 1
+                || identity.group_id.is_some()
+                || identity.group_epoch.is_some()
+            {
                 return Ok(None);
             }
             let Some(source) = self.legacy_raw_reparse_source(snapshot, &identity, &provenance)?
@@ -315,7 +344,7 @@ impl RamfluxClient {
             };
             (source, None)
         };
-        if !self.raw_reparse_scope_allowed(&source, &provenance.conversation)? {
+        if !self.raw_reparse_origin_scope_allowed(&source, &identity)? {
             return Ok(None);
         }
         Ok(Some(Prepared { identity, content, provenance, source, origin }))
@@ -375,6 +404,31 @@ impl RamfluxClient {
         }
         Ok(Some(source))
     }
+    fn raw_reparse_origin_scope_allowed(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        identity: &g::EventIdentity,
+    ) -> Result<bool, SdkError> {
+        let Some(group) = identity.group_id.as_ref() else {
+            return self.raw_reparse_scope_allowed(source, &identity.conversation_id);
+        };
+        let db = self.account_db()?;
+        let Some(state) = db.shared_group_state(group)? else {
+            return Ok(false);
+        };
+        let local = self.owned_device_identity()?;
+        if state.snapshot().genesis.conversation_id != identity.conversation_id
+            || state.view().effective_role(local.root_commitment(), local.device_id()).is_none()
+            || state.view().effective_role(source.root_commitment(), source.device_id()).is_none()
+        {
+            return Ok(false);
+        }
+        let Some(thread) = db.client_record("conversation", &identity.conversation_id)? else {
+            return Ok(false);
+        };
+        Ok(thread["kind"] == "group" && thread["group_id"].as_str() == Some(group.as_str()))
+    }
+
     pub(crate) fn raw_reparse_scope_allowed(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,

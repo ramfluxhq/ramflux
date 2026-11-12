@@ -61,7 +61,9 @@ pub use voice_rebind::{verify_voice_rebind_tag, voice_rebind_response, voice_reb
 #[cfg(test)]
 mod zeroize_tests;
 
-pub use double_ratchet::{DmCiphertext, DmDecryptionOutput, DmSession, DmSessionSnapshot};
+pub use double_ratchet::{
+    DmCiphertext, DmDecryptionOutput, DmEncryptionOutput, DmSession, DmSessionSnapshot,
+};
 pub use error::CryptoError;
 pub use franking::{
     FrankingCommitment, FrankingCommitmentInput, franking_commitment, franking_node_tag_preimage,

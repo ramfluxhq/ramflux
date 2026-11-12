@@ -76,7 +76,7 @@ pub(crate) fn to_native(
     })
 }
 
-fn from_native(
+pub(crate) fn from_native(
     value: SdkGroupEncryptedEnvelope,
     author: g::QualifiedDevice,
 ) -> Result<g::Message, SdkError> {

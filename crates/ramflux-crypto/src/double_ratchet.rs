@@ -173,6 +173,19 @@ pub struct DmCiphertext {
     pub ciphertext_hash: String,
 }
 
+/// Encryption and its private per-message opening. Key fields zeroize on drop.
+/// This is not a signing authority or an ordinary transport/update payload.
+pub struct DmEncryptionOutput {
+    pub ciphertext: DmCiphertext,
+    pub opening_key: Zeroizing<[u8; 32]>,
+    pub commitment_key: Zeroizing<[u8; 32]>,
+}
+impl std::fmt::Debug for DmEncryptionOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DmEncryptionOutput { [redacted] }")
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct DmDecryptionOutput {
     pub plaintext: Vec<u8>,
@@ -485,6 +498,17 @@ impl DmSession {
         plaintext: &[u8],
         associated_data: &[u8],
     ) -> Result<DmCiphertext, CryptoError> {
+        Ok(self.encrypt_with_franking_keys(plaintext, associated_data)?.ciphertext)
+    }
+
+    /// Encrypt once while retaining the native per-message opening for private evidence.
+    /// # Errors
+    /// Returns an error when encryption, canonical header encoding or KDF expansion fails.
+    pub fn encrypt_with_franking_keys(
+        &mut self,
+        plaintext: &[u8],
+        associated_data: &[u8],
+    ) -> Result<DmEncryptionOutput, CryptoError> {
         let counter = self.send_counter;
         let ratchet_public_key = self.dhs_public;
         let previous_chain_length = self.previous_sending_chain_length;
@@ -529,23 +553,27 @@ impl DmSession {
         });
         self.sending_chain_key = Secret32::new(next_chain);
         self.send_counter = self.send_counter.saturating_add(1);
-        Ok(DmCiphertext {
-            session_id: self.session_id.clone(),
-            counter,
-            nonce: message_keys.nonce,
-            ciphertext,
-            ratchet_public_key,
-            previous_chain_length,
-            sender_device_id_hash: self.sender_device_id_hash,
-            recipient_device_id_hash: self.recipient_device_id_hash,
-            device_epoch: self.device_epoch_local,
-            message_event_id: header.message_event_id,
-            canonical_header_bytes: canonical,
-            header_hash: commitments.header_hash,
-            key_commitment: commitments.key_commitment,
-            franking_commitment: commitments.franking_commitment,
-            commitment: commitments.commitment,
-            ciphertext_hash: commitments.ciphertext_hash,
+        Ok(DmEncryptionOutput {
+            opening_key: Zeroizing::new(message_keys.opening_key),
+            commitment_key: Zeroizing::new(message_keys.commitment_key),
+            ciphertext: DmCiphertext {
+                session_id: self.session_id.clone(),
+                counter,
+                nonce: message_keys.nonce,
+                ciphertext,
+                ratchet_public_key,
+                previous_chain_length,
+                sender_device_id_hash: self.sender_device_id_hash,
+                recipient_device_id_hash: self.recipient_device_id_hash,
+                device_epoch: self.device_epoch_local,
+                message_event_id: header.message_event_id,
+                canonical_header_bytes: canonical,
+                header_hash: commitments.header_hash,
+                key_commitment: commitments.key_commitment,
+                franking_commitment: commitments.franking_commitment,
+                commitment: commitments.commitment,
+                ciphertext_hash: commitments.ciphertext_hash,
+            },
         })
     }
 
@@ -1280,3 +1308,7 @@ mod redaction_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "double_ratchet_group_opening_tests.rs"]
+mod group_opening_tests;

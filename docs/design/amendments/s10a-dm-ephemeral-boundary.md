@@ -105,3 +105,18 @@ the exact nested Message, signed sealed-group ciphertext/header and native AAD.
 It wipes the supplied temporary opening on success and every refusal; no master
 key or new author authority is conveyed. Edited original evidence still contains
 no group opening or plaintext. The final audit requires native header byte equality and the native session-id:counter event id; AAD is reconstructed from the authenticated wrapper, never supplied by the caller. Its full signed-history/import/report/restore acceptance matrix remains mandatory.
+
+Group receipt captures both native per-message keys on the successful decrypt;
+re-decryption is a replay, not an evidence-recovery operation. The original
+v2 signature, custody authority, signed group snapshot, outer C and native
+opening are checked together. Reparse uses that retained proof and exact nested
+Message, without keeping a sender chain merely for reparse. It rechecks current
+local/author group roles and the immutable conversation binding inside its writer.
+
+Known content keeps private origin evidence under ordinary local-history policy;
+Unsupported copies include it in their existing raw quota. Both use registered
+message owners. Edit retirement removes the original origin, nested content,
+prepared copies and whole cached pages in the same writer; a late original
+opening cannot pass the retired-opening fence. Delete remains a sticky fence.
+Original signed evidence may be selected only through explicit history/report
+APIs; ordinary updates carry no report or group opening.
