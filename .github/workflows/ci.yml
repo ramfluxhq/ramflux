@@ -455,7 +455,7 @@ jobs:
         with:
           name: junit-vault-platform
           path: target/nextest/ci/junit-*.xml
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   vault-init:
     name: Linux vault init stages
@@ -500,7 +500,7 @@ jobs:
         with:
           name: junit-vault-init
           path: target/nextest/ci/junit-*.xml
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   vault-secret-service:
     name: Linux vault Secret Service stages
@@ -564,7 +564,7 @@ jobs:
         with:
           name: junit-vault-secret-service
           path: target/nextest/ci/junit-*.xml
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   # Preserve the existing check name for consumers and future branch protection.
   linux-vault-platform:

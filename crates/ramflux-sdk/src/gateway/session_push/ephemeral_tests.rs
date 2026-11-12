@@ -69,7 +69,7 @@ async fn poll_pending(future: std::pin::Pin<&mut impl Future>) {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ephemeral_session_host_carries_raw_events_during_correlated_reply() -> TestResult {
     let now = i64::try_from(wall_ms() / 1_000)?;
     let incoming = frame(envelope(now, "received")?)?;
@@ -91,7 +91,9 @@ async fn ephemeral_session_host_carries_raw_events_during_correlated_reply() -> 
     );
     let authority = source()?;
     let mut authority = Some(authority);
-    let received = consumer.next(|_| authority.take()).await;
+    let received = timeout(Duration::from_secs(5), consumer.next(|_| authority.take()))
+        .await
+        .map_err(|_| "correlated reply completed but the ephemeral consumer stalled")?;
     let (bytes, _) = received.ok_or("consumer closed")?;
     assert_eq!(bytes, incoming);
     assert_eq!(engine.ephemeral_inbox.observation().0, 1, "in-flight counts once");
