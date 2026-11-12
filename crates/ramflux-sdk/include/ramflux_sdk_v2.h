@@ -50,6 +50,34 @@
  *   host that falls behind receives a terminal record {"kind":"lagged","last_seq":"N"} and
  *   subscribes again from the last sequence it applied. Sequence numbers are decimal
  *   strings.
+ *
+ * Disposition of the major-1 symbols
+ * ----------------------------------
+ * Major 1 is unchanged in this build and keeps its own backend. A host that moves to
+ * major 2 replaces each symbol as follows; nothing below is removed yet.
+ *   ramflux_sdk_abi_version_major, _minor, ramflux_sdk_protocol_version
+ *       kept, still report major 1. Major 2 is reported by ramflux_v2_abi_version.
+ *   ramflux_client_new, ramflux_client_close, ramflux_client_free
+ *       ramflux_v2_core_new, ramflux_v2_core_start, ramflux_v2_core_close,
+ *       ramflux_v2_core_free. Construction attaches to the one supervisor of the data
+ *       root; it is not a second account runtime.
+ *   ramflux_buffer_free
+ *       kept and shared by both majors.
+ *   ramflux_client_event_queue_new, ramflux_event_queue_poll, ramflux_event_queue_free
+ *       ramflux_v2_subscribe, ramflux_v2_subscription_poll, ramflux_v2_subscription_free.
+ *       Events are the supervisor's; there are no synthetic accepted or completed records.
+ *   ramflux_client_negotiate_capabilities
+ *       ramflux_v2_abi_version and the host ABI fields of RamfluxV2Config.
+ *   ramflux_client_unlock_account, ramflux_client_validate_mcp_grant,
+ *   ramflux_client_put_object
+ *       ramflux_v2_execute with the supervisor's own methods (account.unlock, the MCP
+ *       methods, the bounded object-transfer methods).
+ *   ramflux_client_create_device_session
+ *       no major-2 symbol. It already returns UnsupportedVersion and stays so.
+ *   ramflux_client_append_event, ramflux_client_read_projection,
+ *   ramflux_client_submit_envelope
+ *       no major-2 symbol. They are raw bypass interfaces; use message.submit and the
+ *       typed read methods through ramflux_v2_execute.
  */
 
 #ifndef RAMFLUX_SDK_V2_H
