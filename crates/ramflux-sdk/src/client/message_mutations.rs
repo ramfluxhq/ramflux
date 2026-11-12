@@ -72,6 +72,19 @@ impl RamfluxClient {
             crate::client::identity_authority::HeadUse::NewAuthorization,
             entry,
         )?;
+        self.apply_generated_delete_authorized(&source, identity, conversation, delete)
+    }
+
+    /// The caller has verified the original source evidence; historical author authority
+    /// survives revocation. LOCAL and moderator effects still require current permission.
+    pub(crate) fn apply_generated_delete_authorized(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        identity: &ramflux_protocol::message::EventIdentity,
+        conversation: &str,
+        delete: &ramflux_protocol::message::Delete,
+    ) -> Result<(), SdkError> {
+        Self::verify_delete_authority(source, identity, conversation, delete)?;
         let scope =
             DeleteScope::try_from(delete.scope).map_err(|_| refused("delete scope invalid"))?;
         if delete.targets.is_empty()
@@ -84,7 +97,7 @@ impl RamfluxClient {
         }
         if scope == DeleteScope::Local {
             self.require_native_operation(
-                &source,
+                source,
                 crate::client::identity_authority::NativeOperation::Sync,
             )?;
             self.require_native_operation(
@@ -122,7 +135,7 @@ impl RamfluxClient {
                         if let (Some(group), Some(epoch)) =
                             (identity.group_id.as_ref(), identity.group_epoch)
                         {
-                            self.require_generated_group_epoch(group, &source, epoch, true)?;
+                            self.require_generated_group_epoch(group, source, epoch, true)?;
                             moderator = Some(crate::client::generated_delete_fence::Moderator {
                                 group: group.clone(),
                                 epoch,
@@ -163,6 +176,29 @@ impl RamfluxClient {
             }
             Ok(())
         })
+    }
+
+    fn verify_delete_authority(
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        identity: &ramflux_protocol::message::EventIdentity,
+        conversation: &str,
+        delete: &ramflux_protocol::message::Delete,
+    ) -> Result<(), SdkError> {
+        use ramflux_protocol::message as g;
+        if g::identity::verify(identity).is_err()
+            || identity.conversation_id != conversation
+            || identity.author.as_ref().is_none_or(|author| {
+                author.account_anchor != source.root_commitment()
+                    || author.device_id != source.device_id()
+            })
+            || !delete.native_group_authorization.is_empty()
+            || delete.tombstone_id.as_slice()
+                != g::identity::delete_tombstone(&identity.id)
+                    .map_err(|_| refused("Delete identity invalid"))?
+        {
+            return Err(refused("Delete identity or authority mismatch"));
+        }
+        Ok(())
     }
 
     fn generated_target_author(
