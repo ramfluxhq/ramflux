@@ -41,7 +41,7 @@ async fn history_staging_refuses_the_local_device_and_a_foreign_root() -> TestRe
         "history pages never leave the account root"
     );
     assert_eq!(own.client.account_db()?.actor_state_keys("history-out/")?, Vec::<String>::new());
-    assert_eq!(own.client.stage_generated_history_transfers()?, 0, "no sibling, no transfer");
+    assert_eq!(own.client.start_generated_history_transfers()?, 0, "no sibling, no transfer");
     Ok(())
 }
 
