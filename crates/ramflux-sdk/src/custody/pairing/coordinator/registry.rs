@@ -20,6 +20,7 @@ pub(super) struct Entry {
     pub(super) actor: tokio::sync::Mutex<PairingActor>,
     cancelled: AtomicBool,
     native: Option<Arc<dyn PairingNative>>,
+    full_runtime: Arc<super::full::cancel::FullRuntimeCancel>,
 }
 impl Entry {
     pub(super) fn require_live(&self) -> Result<(), SdkError> {
@@ -51,11 +52,13 @@ pub fn install_actor(root: &Path, account_id: String, actor: PairingActor) -> Re
         return Err(SdkError::PairingCode("Busy"));
     }
     let native = actor.native.clone();
+    let full_runtime = actor.full_runtime.clone();
     owners.insert(
         key,
         Arc::new(Entry {
             actor: tokio::sync::Mutex::new(actor),
             native,
+            full_runtime,
             cancelled: AtomicBool::new(false),
         }),
     );
@@ -75,6 +78,7 @@ pub fn remove_actor(root: &Path, account_id: &str) -> Result<(), SdkError> {
     if let Some(entry) = entry {
         crate::custody::pairing::cancel_credential(&key.0, account_id);
         entry.cancelled.store(true, Ordering::Release);
+        entry.full_runtime.stop();
         if let Some(native) = &entry.native {
             native.close();
         }

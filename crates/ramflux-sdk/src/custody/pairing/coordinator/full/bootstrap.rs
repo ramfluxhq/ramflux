@@ -148,6 +148,7 @@ impl PairingActor {
             Ok((trust, cancel))
         })
         .await?;
+        self.full_runtime.register_stage(cancel.clone())?;
         self.with_ceremony_mut(|c| {
             c.expires_at = trust.lease_expires_at();
             let full = c.full.as_mut().ok_or_else(wrong)?;
@@ -164,6 +165,7 @@ impl PairingActor {
     pub(in crate::custody::pairing::coordinator) async fn advance_full_bootstrap(
         &mut self,
     ) -> Result<(), SdkError> {
+        self.full_runtime.require_live()?;
         let participant =
             self.participant.clone().ok_or(SdkError::PairingCode("UpdateRequired"))?;
         let initialize = self.with_ceremony(|c| {
