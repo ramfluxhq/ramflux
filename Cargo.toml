@@ -30,6 +30,7 @@ members = [
     "crates/ramflux-transport",
     "crates/ramflux-sync",
     "crates/ramflux-sdk",
+    "crates/ramflux-ffi",
     "crates/ramflux-node-core",
     "apps/rf",
     "apps/ramflux-agent-host",
