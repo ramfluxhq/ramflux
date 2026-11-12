@@ -84,3 +84,16 @@ attempts one volatile clear for the old conversation. The account preference
 target for 60 seconds or until authenticated peer progress; neither event resets
 the pair allowance. Typing never triggers generic command network preparation,
 courier wake, outbox publication, gateway-resume persistence or response capture.
+
+The SDK account owns volatile receive state. Its live-source owner resets held,
+visible, deduplication and queued updates on source-generation loss; unlock also
+starts empty. A successfully committed durable Message clears the verified
+original author's visible indicators in its conversation. A failed writer
+transaction cannot clear them or count as received peer progress.
+
+The shared transient binding codec accepts only Typing content, a 32-byte opaque
+nonce, zero device sequence/HLC and no group fields. Both `MessageUpdate` and the
+`message.transient` event carry sequence zero. Live stream subscriptions register
+this topic only after the subscribe acknowledgement; it has no journal replay.
+The journal's central insertion path refuses this topic. Transient queue overflow
+is lossy, preserves its subscriber and never changes the client's durable cursor.

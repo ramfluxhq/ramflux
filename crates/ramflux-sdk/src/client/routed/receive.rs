@@ -470,6 +470,7 @@ impl RamfluxClient {
                 contact_held: held,
             }),
         )?;
+        self.finish_routed_volatile(&opened, &body, plaintext.is_some());
         if JOINING {
             self.finish_pair_retirement()?;
         }
@@ -483,6 +484,25 @@ impl RamfluxClient {
             Finish { opened, body, plaintext, refs, import, background, consume_erased },
         )
         .await
+    }
+
+    // Both persist callbacks complete their outer writer before this hook. Volatile
+    // changes must not survive a failed SQLite commit.
+    fn finish_routed_volatile(&self, opened: &Opened, body: &[u8], projected: bool) {
+        if !crate::client::target_selection::schema_v1_selected() {
+            return;
+        }
+        self.typing_sender.borrow_mut().received(opened.remote_device.storage_key());
+        if projected
+            && Self::decode_generated_inner(body).is_ok_and(|(_, content)| {
+                matches!(content.value, Some(ramflux_protocol::message::content::Value::Message(_)))
+            })
+        {
+            self.typing_receiver.borrow_mut().clear_author(
+                opened.remote_device.root_commitment(),
+                &opened.routing.conversation_id,
+            );
+        }
     }
 
     fn routed_attachment_refs<'a>(

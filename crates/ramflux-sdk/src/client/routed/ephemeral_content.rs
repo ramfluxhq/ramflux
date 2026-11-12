@@ -38,9 +38,10 @@ impl RamfluxClient {
                 &opened.bundle_hash,
                 &opened.session,
             )?;
-            Ok::<_, SdkError>(result)
+            Ok::<_, SdkError>((result, opened.remote_device.storage_key().to_owned()))
         })?;
-        Ok(result)
+        self.typing_sender.borrow_mut().received(&result.1);
+        Ok(result.0)
     }
 
     fn open_ephemeral_inner(
