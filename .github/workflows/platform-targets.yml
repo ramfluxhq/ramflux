@@ -35,8 +35,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Crates every client host links, below the SDK.
-  CORE_PACKAGES: -p ramflux-core -p ramflux-protocol -p ramflux-crypto -p ramflux-transport
 
 jobs:
   android:
@@ -92,7 +90,8 @@ jobs:
           shared-key: platform-${{ matrix.target }}
 
       - name: Check core and transport
-        run: cargo check --locked $CORE_PACKAGES --target "${{ matrix.target }}"
+        # The crates every client host links below the SDK.
+        run: cargo check --locked -p ramflux-core -p ramflux-protocol -p ramflux-crypto -p ramflux-transport --target "${{ matrix.target }}"
 
       - name: Check SDK
         run: cargo check --locked -p ramflux-sdk --target "${{ matrix.target }}"
@@ -130,7 +129,8 @@ jobs:
           shared-key: platform-${{ matrix.target }}
 
       - name: Check core and transport
-        run: cargo check --locked $CORE_PACKAGES --target "${{ matrix.target }}"
+        # The crates every client host links below the SDK.
+        run: cargo check --locked -p ramflux-core -p ramflux-protocol -p ramflux-crypto -p ramflux-transport --target "${{ matrix.target }}"
 
       - name: Check SDK
         run: cargo check --locked -p ramflux-sdk --target "${{ matrix.target }}"
