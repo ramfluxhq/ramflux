@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 mod bootstrap;
 pub(crate) mod delivery;
 mod fence;
+mod refresh;
 mod retirement;
 
 pub const SELF_SYNC_MAX_PINS_PER_CONVERSATION: usize = 100;
@@ -188,6 +189,8 @@ impl RamfluxClient {
         exact_body: &[u8],
     ) -> Result<bool, SdkError> {
         self.authorize_self_sync(source, conversation)?;
+        // A register is applied only under a roster at or beyond the refresh barrier.
+        self.enter_self_sync_refresh()?;
         let operation =
             self_sync::validate(value).map_err(|_| refused("invalid operation payload"))?;
         let state_key = key(source.root_commitment(), conversation, value)?;
@@ -617,6 +620,8 @@ impl RamfluxClient {
     }
 }
 
+#[cfg(test)]
+mod refresh_tests;
 #[cfg(test)]
 mod tests;
 
