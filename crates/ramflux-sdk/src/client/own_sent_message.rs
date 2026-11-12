@@ -64,44 +64,6 @@ impl SentMessage {
     }
 }
 
-fn generated_context(context: &OwnContext) -> g::OwnContext {
-    g::OwnContext {
-        conversation_id: context.conversation_id.clone(),
-        participants: context.participants.clone(),
-        group: context.group.as_ref().and_then(|group| {
-            serde_json::to_value(group).ok().and_then(|value| serde_json::from_value(value).ok())
-        }),
-        friend: context.friend.as_ref().map(|friend| g::FriendLinkRecord {
-            link_id: friend.link_id.clone(),
-            requester_id: friend.requester_id.clone(),
-            target_id: friend.target_id.clone(),
-            state: friend.state.clone(),
-            remove_scope: friend.remove_scope.clone(),
-            blocked: friend.blocked,
-            capability_revoked_at: friend.capability_revoked_at,
-        }),
-    }
-}
-
-fn surface_context(context: &g::OwnContext) -> OwnContext {
-    OwnContext {
-        conversation_id: context.conversation_id.clone(),
-        participants: context.participants.clone(),
-        group: context.group.as_ref().and_then(|group| {
-            serde_json::to_value(group).ok().and_then(|value| serde_json::from_value(value).ok())
-        }),
-        friend: context.friend.as_ref().map(|friend| ramflux_storage::FriendLinkRecord {
-            link_id: friend.link_id.clone(),
-            requester_id: friend.requester_id.clone(),
-            target_id: friend.target_id.clone(),
-            state: friend.state.clone(),
-            remove_scope: friend.remove_scope.clone(),
-            blocked: friend.blocked,
-            capability_revoked_at: friend.capability_revoked_at,
-        }),
-    }
-}
-
 impl SentMessage {
     fn to_generated(&self) -> Result<g::OwnSentMessage, SdkError> {
         let body = ramflux_protocol::decode_base64url(&self.body_base64)
@@ -124,7 +86,7 @@ impl SentMessage {
             sender_id: self.sender_id.clone(),
             original_recipients: self.original_recipients.clone(),
             ciphertext_digest,
-            context: Some(generated_context(&self.context)),
+            context: Some(g::OwnContext::try_from(&self.context)?),
             authored_at: self.authored_at,
             exact_inner: body,
         })
@@ -146,7 +108,8 @@ impl SentMessage {
             context: sent
                 .context
                 .as_ref()
-                .map(surface_context)
+                .map(OwnContext::try_from)
+                .transpose()?
                 .ok_or_else(|| invalid("own sent message context mismatch"))?,
             authored_at: sent.authored_at,
             body_base64: zeroize::Zeroizing::new(ramflux_protocol::encode_base64url(

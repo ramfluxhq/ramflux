@@ -216,6 +216,43 @@ impl RamfluxClient {
         })
     }
 
+    fn own_sent_matches_stored_group(
+        &self,
+        stored: &[u8],
+        plaintext_inner: &[u8],
+        identity: &g::EventIdentity,
+    ) -> Result<bool, SdkError> {
+        let Some(group) = identity.group_id.as_ref() else { return Ok(false) };
+        let mut original =
+            g::Inner::decode(stored).map_err(|_| invalid("stored group Inner malformed"))?;
+        let wrapper = g::Message::decode(original.body.as_slice())
+            .map_err(|_| invalid("stored group Message malformed"))?;
+        if original.kind != 1
+            || original.identity.as_ref() != Some(identity)
+            || !wrapper.sealed_group.as_ref().is_some_and(|sealed| {
+                &sealed.group_id == group
+                    && sealed.author == identity.author
+                    && Some(sealed.key_epoch) == identity.group_epoch
+            })
+        {
+            return Ok(false);
+        }
+        let id = ramflux_protocol::encode_base64url(&identity.id);
+        let Some(body) = self
+            .account_db()?
+            .load_actor_state::<Vec<u8>>(&format!("routed/group-content/{id}"))?
+        else {
+            return Ok(false);
+        };
+        // This is the exact plaintext authenticated when the stored sealed Message
+        // was received. Preserve the original wrapper and evidence on duplicate copy.
+        let body = zeroize::Zeroizing::new(body);
+        original.body = body.to_vec();
+        let encoded = zeroize::Zeroizing::new(original.encode_to_vec());
+        zeroize::Zeroize::zeroize(&mut original.body);
+        Ok(encoded.as_slice() == plaintext_inner)
+    }
+
     pub(super) fn bind_generated_own_sent_context(
         &self,
         packet: &SentMessage,
@@ -286,7 +323,9 @@ impl RamfluxClient {
             return Ok(());
         }
         if let Some(stored) = db.message_content(&id)? {
-            if stored != sent.exact_inner {
+            if stored != sent.exact_inner
+                && !self.own_sent_matches_stored_group(&stored, &sent.exact_inner, identity)?
+            {
                 return Err(SdkError::ReplayMismatch);
             }
             return Ok(());

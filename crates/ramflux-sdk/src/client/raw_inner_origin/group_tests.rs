@@ -428,3 +428,76 @@ async fn native_history_message_import_preserves_original_proof_and_delete_fence
     assert!(owner.client.export_generated_history_item(&id).is_err());
     Ok(())
 }
+
+#[tokio::test]
+async fn own_group_copy_of_received_original_matches_exact_authenticated_plaintext() -> TestResult {
+    let (owner, inner, origin) = fixture().await?;
+    let source = owner.client.owned_device_identity()?;
+    let identity = inner.identity.as_ref().ok_or("identity")?;
+    let id = ramflux_protocol::encode_base64url(&identity.id);
+    let item = g::HistoryItem {
+        exact_inner: inner.encode_to_vec(),
+        source_evidence: Some(origin.evidence.clone()),
+        ..Default::default()
+    };
+    assert!(owner.client.import_generated_history_message(&source, &item)?);
+    let group = owner
+        .client
+        .own_device_group_snapshot("origin-group", source.device_id())?
+        .ok_or("own group context")?;
+    let context = crate::client::surface::OwnContext {
+        conversation_id: "origin-thread".into(),
+        participants: Vec::new(),
+        group: Some(group),
+        friend: None,
+    };
+    let mut plaintext = inner.clone();
+    plaintext.body = origin.evidence.group_plaintext.clone();
+    let mut sent = g::OwnSentMessage {
+        envelope_id: "copy-envelope".into(),
+        message_id: id.clone(),
+        sender_id: source.device_id().into(),
+        original_recipients: vec![source.device_id().into()],
+        exact_inner: plaintext.encode_to_vec(),
+        context: Some(g::OwnContext::try_from(&context)?),
+        ..Default::default()
+    };
+    let vectors: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../ramflux-protocol/src/sender_transcript_vectors.json"
+    ))?;
+    let entry = crate::GatewayInboxEntry {
+        envelope: serde_json::from_value(vectors["envelope"].clone())?,
+        forwarded: false,
+        inbox_seq: 1,
+        target_delivery_id: "copy-test".into(),
+    };
+    let mut forged = sent.clone();
+    let mut changed_inner = plaintext.clone();
+    let mut changed_body = g::Message::decode(changed_inner.body.as_slice())?;
+    changed_body.text.push('!');
+    changed_inner.body = changed_body.encode_to_vec();
+    forged.exact_inner = changed_inner.encode_to_vec();
+    assert!(
+        matches!(
+            owner.client.receive_generated_own_sent(&entry, &source, 42, &forged),
+            Err(SdkError::ReplayMismatch)
+        ),
+        "a copy cannot replace received group plaintext"
+    );
+    assert!(owner.client.receive_generated_own_sent(&entry, &source, 42, &sent)?);
+    assert_eq!(
+        owner.client.account_db()?.message_content(&id)?,
+        Some(inner.encode_to_vec()),
+        "duplicate copy preserves first-hand signed group wrapper"
+    );
+    owner.client.export_generated_history_item(&identity.id)?;
+    let mut message = g::Message::decode(plaintext.body.as_slice())?;
+    message.text.push('!');
+    plaintext.body = message.encode_to_vec();
+    sent.exact_inner = plaintext.encode_to_vec();
+    assert!(matches!(
+        owner.client.receive_generated_own_sent(&entry, &source, 42, &sent),
+        Err(SdkError::ReplayMismatch)
+    ));
+    Ok(())
+}
