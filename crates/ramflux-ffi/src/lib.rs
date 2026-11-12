@@ -11,12 +11,14 @@
 //! - `error.rs`    the error enum (stable numeric codes)
 //! - `listener.rs` the host-implemented update listener
 //! - `ramflux_core.rs` the `RamfluxCore` object
+//! - `ceremony.rs` the `AccountCeremony` object
 //! - `wait.rs`     the `CancelHandle` object
 //! - `subscription.rs` the `Subscription` object
 //! - `version.rs`  version functions
 //!
 //! Nothing in this crate executes account logic. Every call goes through one [`CorePort`].
 
+mod ceremony;
 #[cfg(feature = "embedded")]
 mod embedded;
 mod error;
@@ -33,8 +35,11 @@ mod tests;
 
 pub use crate::ramflux_core::RamfluxCore;
 pub use crate::error::{CoreError, ErrorDetail, code};
-pub use crate::listener::UpdateListener;
-pub use crate::port::{CorePort, PortRequest, PortSubscription, UpdateSink};
+pub use crate::listener::{ListenerError, UpdateListener};
+pub use crate::ceremony::{AccountCeremony, CreatedAccount, PendingCeremony};
+pub use crate::port::{
+    CeremonyPort, CorePort, PortFuture, PortRequest, PortSubscription, UpdateSink,
+};
 pub use crate::subscription::Subscription;
 pub use crate::types::{
     ApiVersion, CoreConfig, CoreRequest, CoreResponse, CoreState, ExecuteOutcome, HostHandshake,

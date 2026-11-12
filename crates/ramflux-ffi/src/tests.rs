@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::port::{CorePort, PortRequest, PortSubscription, UpdateSink};
 use crate::{
     CancelHandle, ClaimKind, CoreConfig, CoreError, CoreRequest, CoreResponse, CoreState,
-    ExecuteOutcome, HostHandshake, NetworkChange, RamfluxCore, SubscribeFilter, SubscriptionEnd,
+    ExecuteOutcome, HostHandshake, ListenerError, NetworkChange, RamfluxCore, SubscribeFilter, SubscriptionEnd,
     SuspendEvidence, UpdateListener, UpdateRow, UpdateState, WaiterEnd, binding_api_version, code,
     descriptor_fingerprint,
 };
@@ -258,6 +258,9 @@ async fn completed_reply_and_refused_admission_keep_their_types() -> Result<(), 
     Ok(())
 }
 
+/// A row the recording listener refuses, to exercise the failure path.
+const POISON_ROW: u64 = 666;
+
 enum Seen {
     Rows(Vec<u64>),
     Lag(u64, u64),
@@ -266,20 +269,30 @@ enum Seen {
 
 struct Recorder(Mutex<Sender<Seen>>);
 impl UpdateListener for Recorder {
-    fn on_updates(&self, rows: Vec<UpdateRow>) {
+    fn on_updates(&self, rows: Vec<UpdateRow>) -> Result<(), ListenerError> {
+        if rows.iter().any(|row| row.journal_sequence == POISON_ROW) {
+            return Err(ListenerError::Failed { message: "poison".to_owned() });
+        }
         if let Ok(sender) = self.0.lock() {
             let _ = sender.send(Seen::Rows(rows.iter().map(|row| row.journal_sequence).collect()));
         }
+        Ok(())
     }
-    fn on_lag(&self, resume_after_journal_sequence: u64, skipped_rows: u64) {
+    fn on_lag(
+        &self,
+        resume_after_journal_sequence: u64,
+        skipped_rows: u64,
+    ) -> Result<(), ListenerError> {
         if let Ok(sender) = self.0.lock() {
             let _ = sender.send(Seen::Lag(resume_after_journal_sequence, skipped_rows));
         }
+        Ok(())
     }
-    fn on_end(&self, end: SubscriptionEnd) {
+    fn on_end(&self, end: SubscriptionEnd) -> Result<(), ListenerError> {
         if let Ok(sender) = self.0.lock() {
             let _ = sender.send(Seen::End(end));
         }
+        Ok(())
     }
 }
 
@@ -371,6 +384,24 @@ fn a_full_queue_reports_lag_with_the_journal_resume_point_instead_of_dropping_si
     sink.offer(row(6));
     stream.grant(4);
     assert!(matches!(seen.recv_timeout(WAIT), Ok(Seen::Rows(rows)) if rows == vec![6]));
+    Ok(())
+}
+
+#[test]
+fn a_failing_listener_ends_the_stream_as_failed_and_cancels_the_core_side()
+-> Result<(), CoreError> {
+    let port = Arc::new(ScriptedPort::default());
+    let core = core(&port, 4)?;
+    let (listener, seen) = recorder();
+    let stream = core.subscribe(filter(4), listener)?;
+    let sink = port.sinks.lock().ok().and_then(|sinks| sinks.first().cloned());
+    let Some(sink) = sink else {
+        return Err(CoreError::plain(code::INTERNAL, "no sink"));
+    };
+    sink.offer(row(POISON_ROW));
+    assert!(matches!(seen.recv_timeout(WAIT), Ok(Seen::End(SubscriptionEnd::Failed))));
+    assert!(stream.is_ended());
+    assert_eq!(port.cancelled_streams.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

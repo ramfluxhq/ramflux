@@ -6,9 +6,12 @@
 //! The binding owns no account state and executes nothing itself. Everything goes through one
 //! `CorePort`, which is the embedded supervisor in a phone app and a scripted fake in tests.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::error::CoreError;
+use crate::ceremony::{CreatedAccount, PendingCeremony};
+use crate::error::{CoreError, code};
 use crate::types::{
     CoreRequest, CoreState, NetworkChange, SubscribeFilter, SubscriptionEnd, SuspendEvidence,
     UpdateRow,
@@ -40,6 +43,17 @@ pub trait UpdateSink: Send + Sync {
 pub trait PortSubscription: Send + Sync {
     /// Stop producing rows. Idempotent.
     fn cancel(&self);
+}
+
+/// A boxed future returned by the asynchronous port methods.
+pub type PortFuture<T> = Pin<Box<dyn Future<Output = Result<T, CoreError>> + Send>>;
+
+/// Core side of one account-creation ceremony, bound to its own dedicated connection.
+pub trait CeremonyPort: Send + Sync {
+    fn show_once(&self) -> PortFuture<String>;
+    fn hidden_challenge(&self) -> PortFuture<Vec<u8>>;
+    fn confirm(&self, words: Vec<String>, passphrase: String) -> PortFuture<CreatedAccount>;
+    fn cancel(&self) -> PortFuture<()>;
 }
 
 /// An in-process core.
@@ -88,4 +102,21 @@ pub trait CorePort: Send + Sync {
         filter: SubscribeFilter,
         sink: Arc<dyn UpdateSink>,
     ) -> Result<Box<dyn PortSubscription>, CoreError>;
+
+    /// Begin an account-creation ceremony on a dedicated connection.
+    ///
+    /// The default refuses: a port offers creation only when its core can carry the
+    /// ceremony without putting secrets into ordinary request frames.
+    fn begin_account(
+        &self,
+        _display_name: String,
+        _node_id: Option<String>,
+    ) -> PortFuture<(PendingCeremony, Arc<dyn CeremonyPort>)> {
+        Box::pin(async {
+            Err(CoreError::plain(
+                code::CAPABILITY_REJECTED,
+                "this core does not offer the account-creation ceremony on this carrier",
+            ))
+        })
+    }
 }

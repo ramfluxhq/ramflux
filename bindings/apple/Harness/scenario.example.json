@@ -1,0 +1,99 @@
+{
+  "display_name": "Harness Alice",
+  "passphrase": "harness-only-passphrase-not-a-real-secret",
+  "variables": {
+    "node_url": "https://localhost:8443",
+    "peer_card": "REPLACED-BY-run-m3-acceptance.sh",
+    "peer_principal_id": "REPLACED-BY-run-m3-acceptance.sh",
+    "peer_target_delivery_id": "REPLACED-BY-run-m3-acceptance.sh",
+    "conversation_id": "REPLACED-BY-run-m3-acceptance.sh"
+  },
+  "setup": [
+    {
+      "method": "node.add",
+      "body": { "url": "${node_url}" },
+      "save": { "node_id": "node_id" }
+    },
+    {
+      "method": "node.confirm",
+      "body": { "node_id": "${node_id}" }
+    }
+  ],
+  "after_create": [
+    {
+      "method": "account.status",
+      "account": "${account_id}",
+      "save": { "principal_id": "principal_id", "device_id": "device_id" }
+    },
+    {
+      "method": "contact.add",
+      "account": "${account_id}",
+      "operation_id": "harness-contact-1",
+      "body": { "card": "${peer_card}" }
+    },
+    {
+      "method": "message.submit",
+      "account": "${account_id}",
+      "operation_id": "harness-send-1",
+      "body": {
+        "conversation_id": "${conversation_id}",
+        "message_id": "harness-message-1",
+        "envelope_id": "harness-envelope-1",
+        "source_principal_id": "${principal_id}",
+        "sender_id": "${device_id}",
+        "recipient_device_id": null,
+        "target_delivery_id": "${peer_target_delivery_id}",
+        "encrypted_body_base64": "",
+        "plaintext_body_base64": "aGVsbG8gZnJvbSB0aGUgaU9TIGhhcm5lc3M",
+        "created_at": 0,
+        "ttl": 300
+      }
+    }
+  ],
+  "after_restart": [
+    {
+      "method": "message.read",
+      "account": "${account_id}",
+      "body": { "conversation_id": "${conversation_id}" },
+      "expect": { "messages.0.message_id": "harness-message-1" }
+    },
+    {
+      "method": "message.submit",
+      "account": "${account_id}",
+      "operation_id": "harness-send-2",
+      "body": {
+        "conversation_id": "${conversation_id}",
+        "message_id": "harness-message-2",
+        "envelope_id": "harness-envelope-2",
+        "source_principal_id": "${principal_id}",
+        "sender_id": "${device_id}",
+        "recipient_device_id": null,
+        "target_delivery_id": "${peer_target_delivery_id}",
+        "encrypted_body_base64": "",
+        "plaintext_body_base64": "YWZ0ZXIgdGhlIGtpbGw",
+        "created_at": 0,
+        "ttl": 300
+      }
+    }
+  ],
+  "after_resume": [
+    {
+      "method": "message.submit",
+      "account": "${account_id}",
+      "operation_id": "harness-send-${uuid}",
+      "body": {
+        "conversation_id": "${conversation_id}",
+        "message_id": "harness-message-${now}",
+        "envelope_id": "harness-envelope-${now}",
+        "source_principal_id": "${principal_id}",
+        "sender_id": "${device_id}",
+        "recipient_device_id": null,
+        "target_delivery_id": "${peer_target_delivery_id}",
+        "encrypted_body_base64": "",
+        "plaintext_body_base64": "YWZ0ZXIgcmVzdW1l",
+        "created_at": 0,
+        "ttl": 300
+      }
+    }
+  ]
+}
