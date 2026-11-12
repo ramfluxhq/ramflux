@@ -236,6 +236,9 @@ fn drop_local_raw(db: &rusqlite::Connection, copy_id: &str) -> rusqlite::Result<
 }
 
 fn keep_keys(db: &rusqlite::Connection, target: &str) -> Result<Vec<String>, StorageError> {
+    if !super::message_footprint::table_exists(db, "message_footprint")? {
+        return Ok(Vec::new());
+    }
     let mut query = db.prepare(
         "SELECT locator FROM main.message_footprint WHERE message_id=?1 AND kind='actor'",
     )?;
