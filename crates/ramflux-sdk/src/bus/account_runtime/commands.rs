@@ -16,11 +16,14 @@ async fn wait_receive_gate(hook: Option<super::ReceiveGateHook>) {
 }
 
 impl AccountRuntime {
-    async fn cancel_native_unlock(&mut self) {
+    async fn cancel_native_unlock(&mut self) -> Result<(), SdkError> {
         self.stop_connection().await;
         self.stop_courier().await;
         self.close_readers().await;
+        crate::custody::pairing::remove_actor_and_drain(&self.state.config.data_root, &self.id)
+            .await?;
         self.state.accounts.remove(&self.id);
+        Ok(())
     }
 
     fn authorize_backup(&self, generation: i64) -> Result<(), SdkError> {
@@ -99,7 +102,7 @@ impl AccountRuntime {
                         home_node_id,
                     );
                     if reply.is_closed() {
-                        self.cancel_native_unlock().await;
+                        self.cancel_native_unlock().await?;
                         return Ok(());
                     }
                     let result = match self.initialize_readers() {

@@ -16,7 +16,7 @@ impl PairingActor {
         if let Some(participant) = self.participant.clone() {
             let runtime = self.full_runtime.clone();
             self.actor_generation = self.actor_generation.max(
-                block(move || {
+                block(self.full_runtime.clone(), move || {
                     let _local = runtime.local_work()?;
                     let generation = participant.next_generation()?;
                     runtime.require_live()?;
@@ -35,7 +35,7 @@ impl PairingActor {
         let Some(participant) = self.participant.clone() else { return Ok(None) };
         let runtime = self.full_runtime.clone();
         Ok(Some(
-            block(move || {
+            block(self.full_runtime.clone(), move || {
                 let _local = runtime.local_work()?;
                 let keys = participant.public_keys(&reference)?;
                 runtime.require_live()?;
@@ -118,7 +118,8 @@ impl PairingActor {
                 && c.enrollment.is_none()
         }) {
             let context = self.participant_context()?;
-            let proposal = block(move || participant.proposal(&context)).await?;
+            let proposal =
+                block(self.full_runtime.clone(), move || participant.proposal(&context)).await?;
             self.with_ceremony_mut(|c| {
                 c.displayed_proposal = Some(object_hash(&proposal)?);
                 c.enrollment = Some(proposal.clone());
@@ -181,7 +182,10 @@ impl PairingActor {
                 .map_err(|_| SdkError::PairingCode("WrongContext"))?;
                 let context = self.participant_context()?;
                 let saved = proposal.clone();
-                block(move || participant.save_context(&context, &saved)).await?;
+                block(self.full_runtime.clone(), move || {
+                    participant.save_context(&context, &saved)
+                })
+                .await?;
                 self.with_ceremony_mut(|c| {
                     c.displayed_proposal = Some(object_hash(&proposal)?);
                     c.enrollment = Some(proposal);
@@ -204,8 +208,10 @@ impl PairingActor {
             Payload::Published { operation_id, record_hash, device_set_epoch, recipient_ref } => {
                 let context = self.participant_context()?;
                 let hash = record_hash.clone();
-                block(move || participant.install_enrollment(&context, &hash, device_set_epoch))
-                    .await?;
+                block(self.full_runtime.clone(), move || {
+                    participant.install_enrollment(&context, &hash, device_set_epoch)
+                })
+                .await?;
                 self.with_ceremony_mut(|c| {
                     c.phase = "locally_installed".into();
                     c.record_hash = Some(record_hash.clone());
@@ -221,7 +227,8 @@ impl PairingActor {
             Payload::Installed { operation_id, record_hash, .. } => {
                 let op = operation_id.clone();
                 let hash = record_hash.clone();
-                block(move || participant.finish_install(&op, &hash)).await?;
+                block(self.full_runtime.clone(), move || participant.finish_install(&op, &hash))
+                    .await?;
                 self.queue_channel(Payload::Completed {
                     operation_id,
                     record_hash,
@@ -234,7 +241,10 @@ impl PairingActor {
                 })?;
             }
             Payload::Completed { operation_id, record_hash, .. } => {
-                block(move || participant.finish_install(&operation_id, &record_hash)).await?;
+                block(self.full_runtime.clone(), move || {
+                    participant.finish_install(&operation_id, &record_hash)
+                })
+                .await?;
                 self.with_ceremony_mut(|c| {
                     c.phase = "completed".into();
                     c.cleanup = "done".into();
@@ -262,7 +272,10 @@ impl PairingActor {
         })?;
         self.flush_send().await?;
         let recipient_ref = context.transcript.responder.device_ref.clone();
-        let published = block(move || participant.publish_enrollment(&context, &proposal)).await?;
+        let published = block(self.full_runtime.clone(), move || {
+            participant.publish_enrollment(&context, &proposal)
+        })
+        .await?;
         self.identity.base_record_hash.clone_from(&published.record_hash);
         self.identity.base_epoch = published.epoch;
         self.with_ceremony_mut(|c| {
@@ -324,9 +337,8 @@ impl PairingActor {
 }
 
 async fn block<T: std::marker::Send + 'static>(
+    runtime: Arc<super::FullRuntimeCancel>,
     work: impl FnOnce() -> Result<T, SdkError> + std::marker::Send + 'static,
 ) -> Result<T, SdkError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| SdkError::PairingCode("VaultUnavailable"))?
+    runtime.run_blocking(work).await
 }

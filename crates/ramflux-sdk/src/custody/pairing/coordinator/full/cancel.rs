@@ -9,12 +9,16 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod local_jobs;
+
 #[derive(Default)]
 pub(crate) struct FullRuntimeCancel {
     stopped: AtomicBool,
     local_workers: Mutex<usize>,
+    local_jobs: Mutex<Vec<local_jobs::LocalJob>>,
     idle: Condvar,
     stage: Mutex<Option<FullStageIoCancel>>,
+    preparation: Mutex<Option<ramflux_storage::FullSourcePreparationCancel>>,
     job: Mutex<Option<tokio::task::AbortHandle>>,
 }
 /// A synchronous local key/DB use only. Never hold this permit across an await.
@@ -52,6 +56,20 @@ impl FullRuntimeCancel {
             Ok(())
         }
     }
+    pub(crate) fn register_preparation(
+        &self,
+        preparation: ramflux_storage::FullSourcePreparationCancel,
+    ) -> Result<(), SdkError> {
+        let mut slot = self.preparation.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = self.require_live() {
+            preparation.cancel();
+            return Err(error);
+        }
+        if let Some(old) = slot.replace(preparation) {
+            old.cancel();
+        }
+        Ok(())
+    }
     pub(crate) fn register_stage(&self, stage: FullStageIoCancel) -> Result<(), SdkError> {
         let mut slot = self.stage.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(error) = self.require_live() {
@@ -85,6 +103,12 @@ impl FullRuntimeCancel {
         {
             stage.cancel();
         }
+        if let Some(preparation) =
+            self.preparation.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+        {
+            preparation.cancel();
+        }
+        self.abort_local_jobs();
         self.drain_local_work();
     }
 }

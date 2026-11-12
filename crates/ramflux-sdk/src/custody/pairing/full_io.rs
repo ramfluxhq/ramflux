@@ -12,6 +12,9 @@ use ramflux_storage::{AccountDb, AccountIndex, FullStageIoCancel, full_transfer_
 use std::{path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
+mod port;
+pub use port::{FullLocalIoLoan, FullLocalIoPort, FullLocalIoService};
+
 #[derive(Clone)]
 struct FullLocalIoScope {
     root: PathBuf,

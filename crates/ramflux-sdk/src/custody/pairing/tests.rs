@@ -272,18 +272,17 @@ async fn pairing_bad_mac_is_terminal() -> TestResult {
 }
 
 async fn joined(fx: &mut Fixture) -> TestResult<(String, u64)> {
-    let begun = begin_result(fx.primary.begin(begin_body()).await?)?;
+    let begun = begin_result(Box::pin(fx.primary.begin(begin_body())).await?)?;
     let op = begun.operation_id.clone();
     let generation = begun.generation;
-    fx.recipient
-        .join(Join {
-            schema: "ramflux.pairing.Join.v2".into(),
-            version: 2,
-            token: begun.invite_token,
-            display_name: "Recipient".into(),
-        })
-        .await?;
-    drive_sas(fx, &op, generation).await?;
+    Box::pin(fx.recipient.join(Join {
+        schema: "ramflux.pairing.Join.v2".into(),
+        version: 2,
+        token: begun.invite_token,
+        display_name: "Recipient".into(),
+    }))
+    .await?;
+    Box::pin(drive_sas(fx, &op, generation)).await?;
     Ok((op, generation))
 }
 

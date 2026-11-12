@@ -120,11 +120,18 @@ impl LocalPairingParticipant {
     pub fn prepare_full_source(
         &self,
     ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
+        self.prepare_full_source_with_cancel(|_| Ok(()))
+    }
+    pub(crate) fn prepare_full_source_with_cancel(
+        &self,
+        register: impl FnOnce(FullSourcePreparationCancel) -> Result<(), SdkError>,
+    ) -> Result<(PreparedFullSource, FullSourcePreparationCancel), SdkError> {
         let slot = self.db.lock().map_err(|_| SdkError::PairingCode("Busy"))?;
         let db = slot.as_ref().ok_or(SdkError::AccountDbNotUnlocked)?;
         self.full_selected_db(db, None)?;
         let mut source = db.prepare_full_transfer_source()?;
         let cancel = source.cancel_handle();
+        register(cancel.clone())?;
         let snapshot = encode_base64url(ramflux_crypto::random_32()?);
         source.capture_base_cut(&snapshot)?;
         source.encode_fixed_base_source(&snapshot, std::io::sink())?;

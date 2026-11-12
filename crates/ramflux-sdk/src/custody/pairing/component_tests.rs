@@ -715,7 +715,14 @@ fn assert_declared_full_source(participant: &LocalPairingParticipant) -> TestRes
 }
 
 async fn assert_full_cancel_fences_stage(rig: &mut Rig, operation: &str) -> TestResult {
-    rig.secondary.lock().await?;
+    rig.secondary
+        .cancel(&ramflux_protocol::custody::pairing::local_dto::Cancel {
+            schema: "ramflux.pairing.Cancel.v2".into(),
+            version: 2,
+            operation_id: operation.into(),
+            generation: rig.secondary.actor_generation(),
+        })
+        .await?;
     {
         let slot = rig.participant_b.db.lock().map_err(|_| "DB")?;
         let db = slot.as_ref().ok_or("DB")?;
@@ -936,7 +943,8 @@ async fn assert_full_local_io_after_handback(rig: &mut Rig, operation: &str) -> 
     source.read_source_chunk(db, &hash, 0)?;
     rig.participant_a.take_client(&mut rig.source.client)?;
     rig.primary.lock().await?;
-    rig.participant_a.return_client(&mut rig.source.client)?;
+    assert!(rig.participant_a.db.lock().map_err(|_| "locked source")?.is_none());
+    rig.source.client.unlock_account(&rig.participant_a.account_id, b"fresh-source-data")?;
     assert!(
         source.read_source_chunk(rig.source.client.account_db()?, &hash, 0).is_err(),
         "cancelled stage capability revived"
@@ -1088,5 +1096,99 @@ async fn pairing_full_sas_base_retains_new_native_floor_before_refusal_and_reope
         )?,
         object_hash(&next.publication.record)?
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_full_account_lock_drains_epoch_and_keeps_data_only_resume() -> TestResult {
+    use ramflux_crypto::custody::pairing::PairingRole;
+    let (
+        Rig {
+            mut primary,
+            mut source,
+            participant_a,
+            now,
+            _clock,
+            _node_root,
+            recipient_root: _recipient_root,
+            secondary: _secondary,
+            ..
+        },
+        operation,
+        _,
+    ) = Box::pin(bootstrap_full_rig()).await?;
+    primary.sync_relay().await?;
+    assert!(primary.full_epoch_in_flight_for_test(), "lock fixture did not own an epoch job");
+    participant_a.return_client(&mut source.client)?;
+    let unlocked = source.client.account_db()?.full_local_unlock_guard()?;
+    install_actor(&participant_a.root, participant_a.account_id.clone(), primary)?;
+    remove_actor_and_drain(&participant_a.root, &participant_a.account_id).await?;
+    assert!(participant_a.db.lock().map_err(|_| "source loan")?.is_none());
+    source.client.active_account_db = None;
+    assert!(unlocked.require_unlocked().is_err(), "retired epoch retained the actual writer");
+    source.client.unlock_account(&participant_a.account_id, b"fresh-source-data")?;
+    let db = source.client.account_db()?;
+    let row = db
+        .pairing_live_rows()?
+        .into_iter()
+        .find(|row| row.operation_id == operation)
+        .ok_or("retained data journal")?;
+    assert_eq!(row.phase, "mutually_confirmed", "account lock cancelled the data-only lease");
+    let stage = db.open_full_transfer_stage(&operation, PairingRole::Initiator, now)?;
+    assert_eq!(stage.resume_record()?.role, PairingRole::Initiator);
+    assert!(db.pairing_head()?.is_none() && db.pairing_adoption()?.is_none());
+    assert!(
+        matches!(
+            handle_bus(
+                &participant_a.root,
+                &participant_a.account_id,
+                "device.pair.status",
+                serde_json::Value::Null
+            )
+            .await,
+            Err(SdkError::PairingCode("NotFound"))
+        ),
+        "data reopen restored an approved frontend actor"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pairing_full_private_io_port_uses_short_original_writer_loans() -> TestResult {
+    let (rig, _, _) = Box::pin(bootstrap_full_rig()).await?;
+    let manifest = rig.primary.full_source_manifest_for_test()?;
+    let hash = ramflux_protocol::encode_base64url(
+        ramflux_protocol::custody::pairing::full_transfer::manifest_hash(&manifest)?,
+    );
+    // The actual source writer starts in the participant's ordinary SDK owner.
+    let (mut port, mut service) = {
+        let slot = rig.participant_a.db.lock().map_err(|_| "source owner")?;
+        rig.primary.full_transfer_local_io(slot.as_ref().ok_or("source DB")?)?.into_port()
+    };
+    let requested = hash.clone();
+    let worker = tokio::spawn(async move {
+        let bytes = port.read_source_chunk(&requested, 0).await;
+        (port, bytes)
+    });
+    let loan = service.receive().await.ok_or("source request")?;
+    // No DB/mutex loan survives either receive or the worker's subsequent relay wait.
+    {
+        let slot = rig.participant_a.db.lock().map_err(|_| "source owner")?;
+        loan.apply(slot.as_ref().ok_or("source DB")?)?;
+    }
+    let (mut port, bytes) = worker.await?;
+    assert!(!bytes?.is_empty(), "actual signed source chunk was not read");
+    let worker = tokio::spawn(async move { port.read_source_chunk(&hash, 0).await });
+    let loan = service.receive().await.ok_or("cancelled source request")?;
+    worker.abort();
+    assert!(worker.await.is_err(), "worker receiver remained live after cancellation");
+    {
+        let slot = rig.participant_a.db.lock().map_err(|_| "source owner")?;
+        assert!(matches!(
+            loan.apply(slot.as_ref().ok_or("source DB")?),
+            Err(SdkError::PairingCode("Retired"))
+        ));
+    }
+    assert!(service.receive().await.is_none(), "cancelled worker retained a sender");
     Ok(())
 }

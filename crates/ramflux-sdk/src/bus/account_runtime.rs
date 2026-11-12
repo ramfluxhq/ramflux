@@ -159,7 +159,12 @@ pub(super) async fn run_async(bootstrap: Bootstrap) -> Result<(), SdkError> {
     );
     let flushed = account.publish(&request).await;
     account.close_readers().await;
-    result.and(flushed)
+    let pairing = crate::custody::pairing::remove_actor_and_drain(
+        &account.state.config.data_root,
+        &account.id,
+    )
+    .await;
+    result.and(flushed).and(pairing)
 }
 
 impl AccountRuntime {

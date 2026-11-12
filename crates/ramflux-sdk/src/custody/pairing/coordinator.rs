@@ -34,7 +34,7 @@ mod full;
 pub(super) use full::cancel::FullRuntimeCancel;
 mod registry;
 mod workflow;
-pub use registry::{install_actor, remove_actor};
+pub use registry::{install_actor, remove_actor, remove_actor_and_drain};
 
 const LIVE_CAP: usize = 3;
 const _: () = assert!(LIVE_CAP >= 1);
@@ -253,11 +253,10 @@ impl PairingActor {
         let keys = self.load_public_keys(self.identity.local_ref.clone()).await?;
         if let Some(participant) = self.participant.clone() {
             let invitation = invite_envelope.clone();
-            tokio::task::spawn_blocking(move || {
-                participant.record_invitation(&invitation, generation)
-            })
-            .await
-            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??;
+            self.full_runtime
+                .clone()
+                .run_blocking(move || participant.record_invitation(&invitation, generation))
+                .await?;
         }
         let mut ceremony = Self::open_ceremony(CeremonyOpen {
             operation_id: request_id.clone(),
@@ -348,7 +347,7 @@ impl PairingActor {
             display_name: join.display_name,
         });
         self.ceremony = Some(ceremony);
-        self.sync_relay().await
+        Box::pin(self.sync_relay()).await
     }
 
     /// Local SAS match bound to the currently displayed transcript. Never a peer boolean.
@@ -514,6 +513,16 @@ impl PairingActor {
     pub async fn lock(&mut self) -> Result<LocalResult, SdkError> {
         self.frontend_generation = self.frontend_generation.saturating_add(1);
         self.actor_generation = self.actor_generation.saturating_add(1);
+        if self.ceremony.as_ref().is_some_and(|c| c.full.is_some()) {
+            self.retire_owned_runtime().await;
+            self.with_ceremony_mut(|c| {
+                c.phase = "cancelled".into();
+                c.result = Some("Retired".into());
+                c.cleanup = "pending".into();
+                Ok(())
+            })?;
+            return self.status_update();
+        }
         self.fail("cancelled", "Retired").await
     }
 
@@ -919,11 +928,12 @@ impl PairingActor {
         let generation = self.frontend_generation;
         let ceremony_generation = self.actor_generation;
         Ok(Some(
-            tokio::task::spawn_blocking(move || {
-                staging.stage_with_generation(&invite, generation, ceremony_generation)
-            })
-            .await
-            .map_err(|_| SdkError::PairingCode("VaultUnavailable"))??,
+            self.full_runtime
+                .clone()
+                .run_blocking(move || {
+                    staging.stage_with_generation(&invite, generation, ceremony_generation)
+                })
+                .await?,
         ))
     }
 
@@ -1096,7 +1106,48 @@ impl PairingActor {
         }
     }
 
+    /// Root removal erases memory and joins owned work without turning an encrypted
+    /// data-resume journal into approval or deleting uncertain publication operands.
+    async fn retire_owned_runtime(&mut self) {
+        self.full_runtime.stop();
+        if let Some(native) = &self.native {
+            native.close();
+        }
+        let epoch = self
+            .ceremony
+            .as_mut()
+            .and_then(|c| c.full.as_mut())
+            .and_then(full::FullCeremony::take_epoch_job);
+        if let Some(c) = self.ceremony.as_mut() {
+            c.full.take();
+            match &mut c.sas {
+                SasHold::Pending(sas) => sas.cleanup(),
+                SasHold::Established(sas) => sas.cleanup(),
+                SasHold::None => {}
+            }
+            c.sas = SasHold::None;
+            c.token.zeroize();
+            c.outbound.clear();
+            c.channels.clear();
+            c.emoji = None;
+            c.displayed_th = None;
+            c.displayed_proposal = None;
+        }
+        if let Some(epoch) = epoch {
+            epoch.abort_and_drain().await;
+        }
+        self.full_runtime.drain_local_jobs().await;
+        if let Some(participant) = &self.participant {
+            participant.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        }
+    }
+
     async fn fail(&mut self, phase: &str, code: &'static str) -> Result<LocalResult, SdkError> {
+        let epoch = self
+            .ceremony
+            .as_mut()
+            .and_then(|c| c.full.as_mut())
+            .and_then(full::FullCeremony::take_epoch_job);
         if let Some(native) = &self.native {
             native.close();
         }
@@ -1135,6 +1186,10 @@ impl PairingActor {
                 },
             )
         });
+        if let Some(epoch) = epoch {
+            epoch.abort_and_drain().await;
+        }
+        self.full_runtime.drain_local_jobs().await;
         self.full_runtime.drain_local_work();
         // Full owners/caches/readers were cancelled above, before waiting for the DB loan.
         // Preserve candidate and stage metadata even when publication might have escaped.
@@ -1142,11 +1197,12 @@ impl PairingActor {
             (full_terminal, self.participant.clone())
         {
             let phase = phase.to_owned();
-            tokio::task::spawn_blocking(move || {
-                participant.mark_full_data_terminal(&operation, generation, &phase)
-            })
-            .await
-            .unwrap_or_else(|_| Err(SdkError::PairingCode("VaultUnavailable")))
+            self.full_runtime
+                .clone()
+                .run_blocking(move || {
+                    participant.mark_full_data_terminal(&operation, generation, &phase)
+                })
+                .await
         } else {
             Ok(())
         };
@@ -1401,16 +1457,16 @@ pub async fn handle_bus(
     let mut actor = entry.actor.lock().await;
     entry.require_live()?;
     let result = match method {
-        "device.pair.begin" => actor.begin(bus_body(body)?).await,
-        "device.pair.join" => actor.join(bus_body(body)?).await,
-        "device.pair.confirm" => actor.confirm(&bus_body(body)?).await,
-        "device.pair.approve" => actor.approve(&bus_body(body)?).await,
-        "device.pair.cancel" => actor.cancel(&bus_body(body)?).await,
-        "device.pair.status" => actor.status(&bus_body(body)?).await,
+        "device.pair.begin" => Box::pin(actor.begin(bus_body(body)?)).await,
+        "device.pair.join" => Box::pin(actor.join(bus_body(body)?)).await,
+        "device.pair.confirm" => Box::pin(actor.confirm(&bus_body(body)?)).await,
+        "device.pair.approve" => Box::pin(actor.approve(&bus_body(body)?)).await,
+        "device.pair.cancel" => Box::pin(actor.cancel(&bus_body(body)?)).await,
+        "device.pair.status" => Box::pin(actor.status(&bus_body(body)?)).await,
         _ => Err(SdkError::LocalBus(format!("unsupported local bus method: {method}"))),
     };
     if entry.require_live().is_err() {
-        let _ = actor.lock().await;
+        actor.retire_owned_runtime().await;
         return Err(SdkError::PairingCode("Retired"));
     }
     result
