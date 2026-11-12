@@ -741,7 +741,12 @@ impl RamfluxClient {
             }
             _ => self.prepare_shared_group_receive(engine, opened, entry, body).await?,
         };
-        let legacy = if opened.routing.kind == Kind::GroupControl && shared.is_none() {
+        let generated_control = shared.is_none()
+            && self.authorize_generated_group_control_body(entry, &opened.routing, body)?;
+        let legacy = if opened.routing.kind == Kind::GroupControl
+            && shared.is_none()
+            && !generated_control
+        {
             if let Some(super::ReceiveGroupDirectory::Legacy(evidence)) = directory {
                 self.prepare_legacy_group_with_directory(engine.config(), opened, entry, evidence)?
             } else {
@@ -1016,11 +1021,9 @@ impl RamfluxClient {
             return Ok((None, Vec::new(), false));
         }
         let mut admitted = Vec::new();
-        if let Some(shared) = shared_group {
-            self.apply_prepared_shared_group(
-                shared,
-                local_target.ok_or_else(|| invalid("group receive target is absent"))?,
-            )?;
+        let deferred_group = deferred_generated_group(shared_group, body);
+        if let Some(shared) = shared_group.filter(|_| deferred_group.is_none()) {
+            self.apply_authorized_prepared_shared_group(shared, opened, entry, local_target)?;
         }
         if let Some((event, key)) = membership {
             self.apply_bootstrap_group_member_join_event(
@@ -1071,6 +1074,10 @@ impl RamfluxClient {
             }
             self.project_routed(opened, entry, body, metadata)?
         };
+        // Generated control origin/identity/route authority precedes its native effect.
+        if let Some(shared) = deferred_group {
+            self.apply_authorized_prepared_shared_group(shared, opened, entry, local_target)?;
+        }
         self.finish_generated_projection(opened, entry)?;
         self.commit_routed_pair_context(opened, entry, body)?;
         self.remember_typing_conversation(opened, entry)?;
@@ -1094,6 +1101,21 @@ impl RamfluxClient {
             commit_fault::take(commit_fault::projection(&opened.routing.kind))?;
         }
         Ok((plaintext, admitted, pending))
+    }
+
+    fn apply_authorized_prepared_shared_group(
+        &self,
+        shared: &crate::client::shared_group::PreparedSharedGroup,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        local_target: Option<&str>,
+    ) -> Result<(), SdkError> {
+        self.authorize_prepared_shared_group(shared, entry, &opened.routing)?;
+        self.apply_prepared_shared_group(
+            shared,
+            local_target.ok_or_else(|| invalid("group receive target is absent"))?,
+        )?;
+        Ok(())
     }
 
     fn persist_routed_marker(
@@ -1158,6 +1180,18 @@ impl RamfluxClient {
         )?;
         self.persist_routed_seen(entry)
     }
+}
+
+fn deferred_generated_group<'a>(
+    shared: Option<&'a crate::client::shared_group::PreparedSharedGroup>,
+    body: &[u8],
+) -> Option<&'a crate::client::shared_group::PreparedSharedGroup> {
+    shared.filter(|shared| {
+        matches!(shared, crate::client::shared_group::PreparedSharedGroup::Control(_))
+            && crate::client::target_selection::schema_v1_selected()
+            && ramflux_protocol::message::validation::scan_inner(body)
+                .is_ok_and(|scanned| scanned.kind == 8)
+    })
 }
 
 fn routed_message_metadata(

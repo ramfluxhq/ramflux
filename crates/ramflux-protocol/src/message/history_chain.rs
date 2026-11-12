@@ -81,6 +81,27 @@ pub fn verify_page(bytes: &[u8]) -> Result<super::HistoryPage, ValidationError> 
     super::HistoryPage::decode(bytes).map_err(|_| ValidationError::Malformed)
 }
 
+/// Verify an own-history Control without normalizing its exact nested item bytes.
+/// # Errors
+/// Refuses a non-history operation, duplicate operation/page fields or invalid page digest.
+pub fn verify_control(bytes: &[u8]) -> Result<super::HistoryPage, ValidationError> {
+    let mut input = bytes;
+    let (mut operation, mut page) = (None, None);
+    while !input.is_empty() {
+        let field = super::wire::field(&mut input)?;
+        match (field.tag, field.wire) {
+            (1, 0) if operation.is_none() => operation = Some(field.scalar),
+            (22, 2) if page.is_none() => page = Some(field.bytes),
+            (1 | 16..=31, _) => return Err(ValidationError::Content),
+            _ => (),
+        }
+    }
+    if operation != Some(7) {
+        return Err(ValidationError::Content);
+    }
+    verify_page(page.ok_or(ValidationError::Content)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +128,16 @@ mod tests {
         bytes.extend_from_slice(&item);
         let decoded = verify_page(&bytes)?;
         assert_eq!(decoded.items.len(), 1);
+        let mut control = vec![8, 7, 0xb2, 1];
+        prost::encoding::encode_varint(u64::try_from(bytes.len())?, &mut control);
+        control.extend_from_slice(&bytes);
+        assert_eq!(verify_control(&control)?, decoded);
+        let mut duplicate = control.clone();
+        duplicate.extend_from_slice(&[8, 7]);
+        assert!(verify_control(&duplicate).is_err());
+        let mut wrong_operation = control;
+        wrong_operation[1] = 6;
+        assert!(verify_control(&wrong_operation).is_err());
         assert!(
             verify_page(&decoded.encode_to_vec()).is_err(),
             "normalization dropped signed item bytes"

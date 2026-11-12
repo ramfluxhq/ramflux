@@ -55,7 +55,7 @@ impl RamfluxClient {
                 "sender_device_id": verified.author.device.device_id(),
                 "sender_root_commitment": verified.author.root,
                 "sender_device_display": verified.author.device.storage_key(),
-                "direction": "incoming",
+                "direction": if verified.author.root == self.own_account_anchor()? { "outgoing" } else { "incoming" },
             }),
         )?;
         db.persist_message_actor_state(

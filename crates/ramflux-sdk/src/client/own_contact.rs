@@ -262,6 +262,7 @@ impl RamfluxClient {
         Ok(result)
     }
     pub(crate) fn stage_contact_backfill_batch(&self) -> Result<usize, SdkError> {
+        self.stage_native_self_sync_bootstrap()?;
         self.stage_contact_backfill_batch_at(crate::time::now_unix_timestamp())
     }
     fn stage_contact_backfill_batch_at(&self, now: i64) -> Result<usize, SdkError> {

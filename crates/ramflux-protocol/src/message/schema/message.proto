@@ -1080,12 +1080,17 @@ message GroupControlBodyDeviceSet {
 message GroupControlBodyTransfer {
   TransferControl control = 1;
 }
+message GroupControlBodySnapshot {
+  NativeGroupSnapshot snapshot = 1;
+  optional GroupKeyDistribution distribution = 2;
+}
 message GroupControlBody {
   oneof value {
     GroupControlBodyRequest request = 1;
     GroupControlBodyResult result = 2;
     GroupControlBodyDeviceSet device_set = 3;
     GroupControlBodyTransfer transfer = 4;
+    GroupControlBodySnapshot snapshot = 5;
   }
 }
 message TransferDevice {

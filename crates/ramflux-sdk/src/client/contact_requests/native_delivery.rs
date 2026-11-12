@@ -20,6 +20,8 @@ pub(crate) struct Approved {
     epoch: u64,
     signing_key: String,
     agreement_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generated_inner: Option<Vec<u8>>,
 }
 
 pub(super) struct ApprovalRequest {
@@ -56,6 +58,7 @@ impl ApprovalPlan {
                     epoch: request.epoch,
                     signing_key: request.signing_key,
                     agreement_key: request.agreement_key,
+                    generated_inner: None,
                 })
             })
             .await
@@ -69,11 +72,23 @@ pub(super) fn approval_bytes(approved: &Approved) -> Result<Zeroizing<Vec<u8>>, 
 pub(super) fn save_approval(
     client: &RamfluxClient,
     intent: &mut Intent,
-    approved: Approved,
+    mut approved: Approved,
 ) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-    let bytes = approval_bytes(&approved)?;
-    intent.native_approval = Some(approved);
-    client.account_db()?.persist_actor_state(&key(intent), intent)?;
+    let (bytes, updated) = client.account_db()?.write_transaction(|| -> Result<_, SdkError> {
+        let bytes = if crate::client::target_selection::schema_v1_selected() {
+            let bytes = client
+                .generated_contact_inner(&approved.consent, approved.generated_inner.as_deref())?;
+            approved.generated_inner = Some(bytes.to_vec());
+            bytes
+        } else {
+            approval_bytes(&approved)?
+        };
+        let mut updated = intent.clone();
+        updated.native_approval = Some(approved);
+        client.account_db()?.persist_actor_state(&key(&updated), &updated)?;
+        Ok((bytes, updated))
+    })?;
+    *intent = updated;
     Ok(bytes)
 }
 pub(super) async fn approve(

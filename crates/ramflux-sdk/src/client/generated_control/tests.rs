@@ -341,7 +341,13 @@ fn a2i_domains_and_group_native() -> TestResult {
         request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
         federation: None,
     }))?;
-    assert!(RamfluxClient::validate_generated_control(&no_route).is_err());
+    RamfluxClient::validate_generated_control(&no_route)?;
+    let incomplete_route =
+        group_state(group_control_body::Value::Request(GroupControlBodyRequest {
+            request: Some(NativeGroupChangeRequest { canonical: canonical("req") }),
+            federation: Some(LocalBusFederationRoute { federation_url: String::new(), ..route() }),
+        }))?;
+    assert!(RamfluxClient::validate_generated_control(&incomplete_route).is_err());
     RamfluxClient::validate_generated_control(&group_state(group_control_body::Value::Result(
         GroupControlBodyResult {
             result: Some(NativeGroupChangeResult { canonical: canonical("res") }),

@@ -32,29 +32,33 @@ pub(super) fn mutation_erasure_targets(
     if !crate::client::target_selection::schema_v1_selected() {
         return (false, Vec::new());
     }
-    let Ok((_, content)) = RamfluxClient::decode_generated_inner(bytes) else {
+    let Ok(inner) = g::Inner::decode(bytes) else {
         return (false, Vec::new());
     };
-    let references = match content.value {
-        Some(g::content::Value::Edit(edit)) => edit.target.into_iter().collect::<Vec<_>>(),
-        Some(g::content::Value::Reaction(reaction)) => reaction.target.into_iter().collect(),
-        Some(g::content::Value::Delete(_)) => return (true, Vec::new()),
-        Some(g::content::Value::Control(control)) => {
-            if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload {
+    if matches!(inner.kind, 3..=5) {
+        return nested_erasure_targets(bytes);
+    }
+    if inner.kind == 8
+        && let Ok(control) = g::Control::decode(inner.body.as_slice())
+    {
+        match control.payload {
+            Some(g::control::Payload::OwnMessageCopy(copy)) => {
                 return own_copy_erasure_targets(&copy);
             }
-            Vec::new()
+            Some(g::control::Payload::OwnHistory(page)) => {
+                let mut targets = Vec::new();
+                let mut delete = false;
+                for item in page.items {
+                    let (is_delete, owners) = nested_erasure_targets(&item.exact_inner);
+                    delete |= is_delete;
+                    targets.extend(owners);
+                }
+                return (delete, targets);
+            }
+            _ => (),
         }
-        _ => Vec::new(),
-    };
-    (
-        false,
-        references
-            .into_iter()
-            .map(|reference| ramflux_protocol::encode_base64url(reference.id))
-            .map(|message_id| super::committed::ErasureTarget { message_id })
-            .collect(),
-    )
+    }
+    (false, Vec::new())
 }
 
 // These are ownership hints only. The caller commits them only after native own-root
@@ -67,6 +71,10 @@ fn own_copy_erasure_targets(
         Some(g::own_message_copy::Payload::Sent(sent)) => sent.exact_inner.as_slice(),
         None => return (false, Vec::new()),
     };
+    nested_erasure_targets(bytes)
+}
+
+fn nested_erasure_targets(bytes: &[u8]) -> (bool, Vec<super::committed::ErasureTarget>) {
     let Ok(inner) = g::Inner::decode(bytes) else {
         return (false, Vec::new());
     };
@@ -410,6 +418,17 @@ impl RamfluxClient {
         crate::client::generated_control::validate_control_native(control)?;
         if matches!(control.operation, 1 | 2) {
             self.apply_generated_pair_control(opened, entry, identity, control, bytes)?;
+        } else if matches!(control.payload.as_ref(), Some(g::control::Payload::ContactControl(_))) {
+            self.receive_generated_contact_control(entry, &opened.routing, bytes)?;
+        } else if matches!(control.payload.as_ref(), Some(g::control::Payload::GroupState(_))) {
+            // Authenticate before W1 applies the separately prepared native effect.
+            if !self.authorize_generated_group_control_body(entry, &opened.routing, bytes)? {
+                return Err(invalid("native group control preparation missing"));
+            }
+        } else if matches!(control.payload.as_ref(), Some(g::control::Payload::OwnHistory(_))) {
+            let scanned = validation::scan_inner(bytes)
+                .map_err(|_| invalid("history Control Inner missing"))?;
+            self.receive_generated_history_page(entry, scanned.body)?;
         } else if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
             self.receive_generated_own_message_copy(opened, entry, copy)?;
         } else if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref()
@@ -689,47 +708,68 @@ impl RamfluxClient {
             self.require_native_operation(&source, NativeOperation::Sync)?;
         }
         if scanned.kind == 8 {
-            let control = g::Control::decode(scanned.body)
-                .map_err(|_| invalid("control authority fields missing"))?;
-            if (1..=16).contains(&control.operation)
-                && crate::client::generated_control::validate_control_operation(&control).is_err()
-            {
-                return Err(SdkError::GeneratedRefused {
-                    code: crate::error::GeneratedRefusalCode::Content,
-                    reason: "known Control operation/payload mismatch".into(),
-                });
-            }
+            self.authorize_generated_control_fields(opened, entry, scanned)?;
+        }
+        Ok(())
+    }
 
-            if matches!(control.operation, 6 | 7 | 13 | 14 | 15) {
-                if source.root_commitment() != self.own_account_anchor()? {
-                    return Err(SdkError::InboundRejected("own control requires same root".into()));
-                }
-                self.require_native_operation(&source, NativeOperation::Sync)?;
-                self.require_native_operation(
-                    &self.owned_device_identity()?,
-                    NativeOperation::Sync,
-                )?;
+    fn authorize_generated_control_fields(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        scanned: &validation::ScannedInner<'_>,
+    ) -> Result<(), SdkError> {
+        let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+
+        let control = g::Control::decode(scanned.body)
+            .map_err(|_| invalid("control authority fields missing"))?;
+        if (1..=16).contains(&control.operation)
+            && crate::client::generated_control::validate_control_operation(&control).is_err()
+        {
+            return Err(SdkError::GeneratedRefused {
+                code: crate::error::GeneratedRefusalCode::Content,
+                reason: "known Control operation/payload mismatch".into(),
+            });
+        }
+
+        if matches!(control.operation, 6 | 7 | 13 | 14 | 15) {
+            if source.root_commitment() != self.own_account_anchor()? {
+                return Err(SdkError::InboundRejected("own control requires same root".into()));
             }
-            if matches!(control.operation, 1 | 2) {
-                self.authorize_generated_pair_control(opened, entry)?;
-            }
-            if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
-                self.authorize_generated_friend_control(&source, friend)?;
-            }
-            if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref() {
-                self.authorize_generated_own_contact(contact)?;
-            }
-            if let Some(g::control::Payload::OwnContactTombstone(tombstone)) =
-                control.payload.as_ref()
-            {
-                self.authorize_generated_contact_tombstone(tombstone)?;
-            }
-            if let Some(g::control::Payload::OwnGroupConsent(consent)) = control.payload.as_ref() {
-                self.authorize_generated_own_group_consent(&source, consent)?;
-            }
-            if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
-                self.authorize_generated_own_message_copy(opened, entry, copy)?;
-            }
+            self.require_native_operation(&source, NativeOperation::Sync)?;
+            self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
+        }
+        if matches!(control.payload.as_ref(), Some(g::control::Payload::ContactControl(_))) {
+            self.verify_contact_control(entry, &opened.routing, scanned.exact_inner)?;
+        }
+        if matches!(control.payload.as_ref(), Some(g::control::Payload::GroupState(_))) {
+            self.authorize_generated_group_control_body(
+                entry,
+                &opened.routing,
+                scanned.exact_inner,
+            )?;
+        }
+        if matches!(control.operation, 1 | 2) {
+            self.authorize_generated_pair_control(opened, entry)?;
+        }
+        if matches!(control.payload.as_ref(), Some(g::control::Payload::OwnHistory(_))) {
+            self.authorize_generated_history_page(&source, scanned.body)?;
+        }
+        if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
+            self.authorize_generated_friend_control(&source, friend)?;
+        }
+        if let Some(g::control::Payload::OwnContactSync(contact)) = control.payload.as_ref() {
+            self.authorize_generated_own_contact(contact)?;
+        }
+        if let Some(g::control::Payload::OwnContactTombstone(tombstone)) = control.payload.as_ref()
+        {
+            self.authorize_generated_contact_tombstone(tombstone)?;
+        }
+        if let Some(g::control::Payload::OwnGroupConsent(consent)) = control.payload.as_ref() {
+            self.authorize_generated_own_group_consent(&source, consent)?;
+        }
+        if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
+            self.authorize_generated_own_message_copy(opened, entry, copy)?;
         }
         Ok(())
     }
@@ -771,6 +811,23 @@ impl RamfluxClient {
         supplied_origin: Option<&crate::client::raw_inner_origin::RetainedOrigin>,
     ) -> Result<(), SdkError> {
         let source = self.authenticated_device_identity(HeadUse::NewAuthorization, entry)?;
+        let private = source.root_commitment() == self.own_account_anchor()?
+            && (scanned.kind == 12
+                || scanned.kind == 8
+                    && g::Control::decode(scanned.body)
+                        .is_ok_and(|control| matches!(control.operation, 6 | 7 | 13 | 14 | 15)));
+        let nonchat = private
+            || scanned.kind == 8
+                && g::Control::decode(scanned.body)
+                    .is_ok_and(|control| matches!(control.operation, 3 | 4));
+        let (_, private_targets) = if private {
+            mutation_erasure_targets(scanned.exact_inner)
+        } else {
+            (false, Vec::new())
+        };
+        if private && self.retired_private_original(scanned)? {
+            return Ok(());
+        }
         let target = match scanned.kind {
             3 => g::Edit::decode(scanned.body).ok().and_then(|edit| edit.target),
             5 => g::Reaction::decode(scanned.body).ok().and_then(|reaction| reaction.target),
@@ -792,29 +849,15 @@ impl RamfluxClient {
         let origin = supplied_origin.or(captured_origin.as_ref());
         let origin_copy =
             origin.map(super::super::raw_inner_origin::RetainedOrigin::copy_id).transpose()?;
-        let provenance = Provenance {
-            source: source.storage_key().to_owned(),
-            conversation: opened.routing.conversation_id.clone(),
-            message: opened.routing.message_id.clone(),
-            envelope_id: entry.envelope.envelope_id.clone(),
-            payload_hash: entry.envelope.payload_hash.clone(),
-            expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
-            original_mode: entry.envelope.delivery_mode.clone().unwrap_or_else(|| "durable".into()),
-            source_epoch: self
-                .account_db()?
-                .client_device_record(&source)?
-                .and_then(|record| record["device_epoch"].as_u64())
-                .ok_or_else(|| invalid("source epoch missing"))?,
-            original_route: serde_json::to_string(&opened.routing)?,
-            outer_receipt_key: copy_id.clone(),
-            source_evidence_copy: origin_copy.clone(),
-            received_erasure_generation: self.account_db()?.privacy_erasure_generation()?,
-        };
+        let provenance =
+            self.generated_provenance(opened, entry, &source, &copy_id, origin_copy.clone())?;
         let db = self.account_db()?;
-        if let Some(group) = opened.routing.group_id.as_deref() {
-            self.merge_routed_group_link(group, &opened.routing.conversation_id)?;
-        } else {
-            self.ensure_generated_direct_conversation(opened, entry)?;
+        if !nonchat {
+            if let Some(group) = opened.routing.group_id.as_deref() {
+                self.merge_routed_group_link(group, &opened.routing.conversation_id)?;
+            } else {
+                self.ensure_generated_direct_conversation(opened, entry)?;
+            }
         }
         if let (Some(origin), Some(origin_copy)) = (origin, origin_copy.as_ref()) {
             self.retain_raw_origin_copy(
@@ -836,6 +879,15 @@ impl RamfluxClient {
         if let Some(target) = target {
             db.bind_raw_inner_copy(&copy_id, &ramflux_protocol::encode_base64url(target.id))?;
         }
+        for target in private_targets {
+            db.bind_raw_inner_copy(&copy_id, &target.message_id)?;
+            if let Some(origin_copy) = origin_copy.as_ref() {
+                db.bind_raw_inner_copy(origin_copy, &target.message_id)?;
+            }
+        }
+        if nonchat {
+            return Ok(());
+        }
         self.persist_generated_unsupported_view(&opened.routing.message_id, &copy_id, scanned)?;
         db.import_direct_message_projection(ramflux_storage::DirectMessageWrite {
             conversation_id: &opened.routing.conversation_id,
@@ -851,6 +903,74 @@ impl RamfluxClient {
             entry,
         )?;
         Ok(())
+    }
+
+    fn generated_provenance(
+        &self,
+        opened: &Opened,
+        entry: &GatewayInboxEntry,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        copy_id: &str,
+        origin_copy: Option<String>,
+    ) -> Result<Provenance, SdkError> {
+        Ok(Provenance {
+            source: source.storage_key().to_owned(),
+            conversation: opened.routing.conversation_id.clone(),
+            message: opened.routing.message_id.clone(),
+            envelope_id: entry.envelope.envelope_id.clone(),
+            payload_hash: entry.envelope.payload_hash.clone(),
+            expires_at: entry.envelope.created_at.saturating_add(i64::from(entry.envelope.ttl)),
+            original_mode: entry.envelope.delivery_mode.clone().unwrap_or_else(|| "durable".into()),
+            source_epoch: self
+                .account_db()?
+                .client_device_record(source)?
+                .and_then(|record| record["device_epoch"].as_u64())
+                .ok_or_else(|| invalid("source epoch missing"))?,
+            original_route: serde_json::to_string(&opened.routing)?,
+            outer_receipt_key: copy_id.to_owned(),
+            source_evidence_copy: origin_copy,
+            received_erasure_generation: self.account_db()?.privacy_erasure_generation()?,
+        })
+    }
+
+    fn retired_private_original(
+        &self,
+        scanned: &validation::ScannedInner<'_>,
+    ) -> Result<bool, SdkError> {
+        if scanned.kind != 8 {
+            return Ok(false);
+        }
+        let control =
+            g::Control::decode(scanned.body).map_err(|_| invalid("private Control missing"))?;
+        let originals = match control.payload {
+            Some(g::control::Payload::OwnHistory(page)) => {
+                page.items.into_iter().map(|item| item.exact_inner).collect::<Vec<_>>()
+            }
+            Some(g::control::Payload::OwnMessageCopy(copy)) => match copy.payload {
+                Some(g::own_message_copy::Payload::Item(item)) => vec![item.exact_inner],
+                Some(g::own_message_copy::Payload::Sent(sent)) => vec![sent.exact_inner],
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        for exact in originals {
+            let inner = g::Inner::decode(exact.as_slice())
+                .map_err(|_| invalid("private original Inner missing"))?;
+            if inner.kind == 1
+                && let Some(identity) = inner.identity
+            {
+                let id = ramflux_protocol::encode_base64url(&identity.id);
+                let db = self.account_db()?;
+                if db.message_is_deleted(&id)?
+                    || db
+                        .load_actor_state::<bool>(&format!("routed/report-opening-retired/{id}"))?
+                        .unwrap_or(false)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn validate_generated_direct_scope(

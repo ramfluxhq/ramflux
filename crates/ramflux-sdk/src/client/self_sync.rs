@@ -12,7 +12,9 @@ use ramflux_protocol::message::{
 };
 use serde::{Deserialize, Serialize};
 
+mod bootstrap;
 mod fence;
+mod retirement;
 
 pub const SELF_SYNC_MAX_PINS_PER_CONVERSATION: usize = 100;
 const SELF_SYNC_MAX_UNSEEN_CONVERSATIONS: usize = 4096;
@@ -88,13 +90,13 @@ impl RamfluxClient {
         value: &g::SelfSync,
         envelope: &ramflux_protocol::Envelope,
     ) -> Result<(), SdkError> {
-        self.account_db()?.persist_actor_state(
+        let references = self.self_sync_references(conversation, value)?;
+        self.persist_self_sync_owned_state(
             &format!("self-sync/pending/{}", envelope.envelope_id),
             &serde_json::json!({
-                "conversation_id": conversation,
-                "envelope": envelope,
-                "references": self.self_sync_references(conversation, value)?,
-            }),
+                "conversation_id": conversation, "scope":key(&self.own_account_anchor()?, conversation, value)?,
+                "envelope": envelope, "references": references,
+            }), &references,
         )?;
         Ok(())
     }
@@ -224,6 +226,7 @@ impl RamfluxClient {
                     || state.pending_read.as_ref().map(|p| (&p.reference, p.revision, p.tie_break))
                         != pending.as_ref().map(|p| (&p.reference, p.revision, p.tie_break));
                 if changed {
+                    self.retire_self_sync_publications(&state_key)?;
                     state.read_marker = marker;
                     if state.read_marker_body != read_body {
                         state.read_publication_identity = None;
@@ -236,15 +239,21 @@ impl RamfluxClient {
                         state.read_marker.as_ref(),
                         state.pending_read.as_ref(),
                     )?;
+                    self.remember_self_sync_revision(
+                        conversation,
+                        &state_key,
+                        state.value.revision,
+                    )?;
                     db.persist_actor_state(&state_key, &state)?;
                 }
-                if value.revision < state.value.revision {
+                if (value.revision, tie_break) < (state.value.revision, state.tie_break) {
                     self.queue_self_sync_repair(source, &state_key, &state)?;
                 }
                 return Ok(changed);
             }
             return Ok(false);
         }
+        self.retire_self_sync_publications(&state_key)?;
         self.remember_self_sync_revision(conversation, &state_key, value.revision)?;
         db.persist_actor_state(
             &state_key,
@@ -363,6 +372,7 @@ impl RamfluxClient {
                         (pending.revision, pending.tie_break) > (body.revision, body.tie_break)
                     })
                 {
+                    self.retire_self_sync_publications(&key)?;
                     state.read_publication_identity = None;
                     state.read_marker_body = Some(ReadBody {
                         revision: pending.revision,
@@ -380,6 +390,7 @@ impl RamfluxClient {
                     state.read_marker.as_ref(),
                     state.pending_read.as_ref(),
                 )?;
+                self.remember_self_sync_revision(conversation, &key, state.value.revision)?;
                 db.persist_actor_state(&key, &state)?;
             }
         }
@@ -394,6 +405,7 @@ impl RamfluxClient {
             return Err(refused("foreign bootstrap target"));
         }
         self.require_native_operation(sibling, NativeOperation::Sync)?;
+        self.require_native_operation(&self.owned_device_identity()?, NativeOperation::Sync)?;
         let db = self.account_db()?;
         db.write_transaction(|| {
             for scope in db.actor_state_keys("self-sync/state/")? {
@@ -435,6 +447,17 @@ impl RamfluxClient {
         let db = self.account_db()?;
         let epoch = if source == &self.owned_device_identity()? {
             self.device_branch.as_ref().ok_or(SdkError::IdentityRootMissing)?.device_epoch
+        } else if let Some(authority) = self
+            .current_custody_authority(source.root_commitment(), crate::custody::network_now()?)?
+        {
+            authority
+                .envelope()
+                .body
+                .devices
+                .iter()
+                .find(|entry| entry.device_id == source.device_id())
+                .map(|entry| entry.device_epoch)
+                .ok_or_else(|| refused("repair target epoch missing"))?
         } else {
             db.client_device_record(source)?
                 .and_then(|record| record["device_epoch"].as_u64())
@@ -445,16 +468,22 @@ impl RamfluxClient {
             source.storage_key(),
             epoch,
             state.value.revision,
+            state.tie_break,
+            state.read_marker_body.as_ref().map(|body| (body.revision, body.tie_break)),
         ))?);
         let sent = format!("self-sync/repair-sent/{id}");
-        if db.load_actor_state::<bool>(&sent)?.unwrap_or(false) {
+        if db.actor_state_exists(&sent)? {
             return Ok(());
         }
-        db.persist_actor_state(&format!("self-sync/repair/{id}"), &serde_json::json!({
-            "conversation_id": state.conversation_id, "target": source.storage_key(), "exact_body": state.exact_body,
+        let marker = serde_json::json!({
+            "conversation_id": state.conversation_id, "scope":scope, "references":state.references,
+        });
+        self.persist_self_sync_owned_state(&format!("self-sync/repair/{id}"), &serde_json::json!({
+            "conversation_id": state.conversation_id, "scope":scope, "target": source.storage_key(),
+            "exact_body": state.exact_body, "references": state.references,
             "read_marker_body": state.read_marker_body.as_ref().map(|body| &body.exact_body),
-        }))?;
-        db.persist_actor_state(&sent, &true)?;
+        }), &state.references)?;
+        self.persist_self_sync_owned_state(&sent, &marker, &state.references)?;
         Ok(())
     }
 
