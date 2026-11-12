@@ -69,11 +69,14 @@ impl RamfluxClient {
                 if db.client_device_record(&sibling)?.is_none() {
                     continue;
                 }
+                // One marker per certified incarnation: a restored or re-activated sibling
+                // advances its epoch and is bootstrapped again even under a retained certificate.
                 let marker = format!(
-                    "self-sync/bootstrap/{}/{}/{}/{}",
+                    "self-sync/bootstrap/{}/{}/{}/{}/{}",
                     local.storage_key(),
                     local_entry.device_epoch,
                     sibling.storage_key(),
+                    entry.device_epoch,
                     certificate.cert_id
                 );
                 if enrollment_only && db.load_actor_state::<bool>(&marker)?.unwrap_or(false) {
