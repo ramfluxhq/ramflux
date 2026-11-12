@@ -52,6 +52,8 @@ struct Listener {
     config: WebIngressConfig,
     acceptor: tokio_rustls::TlsAcceptor,
     admission: Arc<Admission>,
+    /// Custody admission pool of this listener only; never shared with QUIC or TCP+TLS.
+    custody: Arc<ramflux_node_core::CustodyIngressLimiter>,
     context: GatewayListenerContext,
 }
 
@@ -122,6 +124,7 @@ pub(crate) fn start(
     let listener = Arc::new(Listener {
         acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(server_config)),
         admission: Admission::new(Limits::default()),
+        custody: ramflux_node_core::CustodyPoolSettings::from_env()?.limiter(),
         config,
         context,
     });
@@ -234,10 +237,7 @@ async fn session(
     mut frames: tokio::sync::mpsc::Receiver<Vec<u8>>,
     slot: Slot,
 ) -> Option<CloseCode> {
-    let Some(pools) = listener.context.custody.as_ref() else {
-        return Some(CloseCode::NodeUnavailable);
-    };
-    let Ok(capacity) = pools.web.acquire(peer.ip(), None, Instant::now()) else {
+    let Ok(capacity) = listener.custody.acquire(peer.ip(), None, Instant::now()) else {
         return Some(CloseCode::RateLimited);
     };
     let Ok(binding) = listener.binding(origin) else {

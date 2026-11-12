@@ -132,6 +132,7 @@ fn exercise(
     let mut proxy = Proxy {
         node,
         signer: Some(proxy_key),
+        web: None,
         connection: ramflux_protocol::encode_base64url([11; 32]),
         mode: BindingMode::HomeRelayReceipt,
         session_ids: BTreeSet::new(),
@@ -494,10 +495,12 @@ fn native_handoff_is_one_use_and_requires_the_exact_live_registered_authority() 
     let grant = || GatewayGrant {
         session: session.clone(),
         deadline: std::time::Instant::now() + Duration::from_secs(100),
+        web: false,
     };
     let mut proxy = Proxy {
         node,
         signer: None,
+        web: None,
         connection: ramflux_protocol::encode_base64url([33; 32]),
         mode: BindingMode::HomeRelayReceipt,
         session_ids: BTreeSet::from([session.session_id.clone()]),

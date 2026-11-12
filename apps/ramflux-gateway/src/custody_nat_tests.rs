@@ -79,6 +79,7 @@ impl Client {
             proxy: Proxy {
                 node: node.clone(),
                 signer: Some(ed25519_dalek::SigningKey::from_bytes(&[9; 32])),
+                web: None,
                 connection: ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?),
                 mode: BindingMode::HomeRelayReceipt,
                 session_ids: BTreeSet::new(),

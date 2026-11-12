@@ -8,7 +8,7 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn generated() -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), rcgen::Error> {
     let certified = rcgen::generate_simple_self_signed(vec!["gw.example.org".to_owned()])?;
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()));
     Ok((certified.cert.der().clone(), key))
 }
 

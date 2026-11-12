@@ -324,9 +324,6 @@ type Limiter = std::sync::Arc<ramflux_node_core::CustodyIngressLimiter>;
 pub(crate) struct Pools {
     pub(crate) tcp: Limiter,
     pub(crate) quic: Limiter,
-    /// Separate admission pool for the web listener, sized like a native listener.
-    #[cfg(feature = "web-ingress")]
-    pub(crate) web: Limiter,
 }
 #[cfg(feature = "web-ingress")]
 #[path = "custody_web.rs"]
@@ -334,17 +331,13 @@ pub(crate) mod web;
 pub(crate) fn initialize() -> anyhow::Result<Option<Pools>> {
     initialize_if_configured(std::env::var_os("RAMFLUX_CUSTODY_NODE_PUBLIC_KEY").as_deref(), || {
         let settings = ramflux_node_core::CustodyPoolSettings::from_env()?;
+        // The web listener owns a third pool of the same size (see `web_ingress::start`).
         #[cfg(feature = "web-ingress")]
         let listeners = 2 + usize::from(crate::web_ingress::configured());
         #[cfg(not(feature = "web-ingress"))]
         let listeners = 2;
         ramflux_node_core::custody_listener_resources(settings, listeners)?;
-        Ok(Pools {
-            tcp: settings.limiter(),
-            quic: settings.limiter(),
-            #[cfg(feature = "web-ingress")]
-            web: settings.limiter(),
-        })
+        Ok(Pools { tcp: settings.limiter(), quic: settings.limiter() })
     })
 }
 fn initialize_if_configured(
