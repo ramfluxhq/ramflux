@@ -183,6 +183,7 @@ impl RamfluxClient {
             if !applied {
                 return Err(invalid("own sent message context mismatch"));
             }
+            self.retain_received_own_sent_attestation(opened, entry, sent)?;
             super::ReceiptScope::Private {
                 private_scope: db.own_sent_receipt_scope(&context.source, local.device_id())?,
             }

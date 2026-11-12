@@ -72,40 +72,50 @@ impl RamfluxClient {
                 return Err(bad.into());
             }
         } else {
-            let author = identity.author.as_ref().ok_or(bad)?;
-            g::dm_scope::validate_direct(
-                &identity.conversation_id,
-                &self.own_account_anchor()?,
-                &author.account_anchor,
-            )
-            .map_err(|_| bad)?;
-            if let Some(thread) = db.client_record("conversation", &identity.conversation_id)? {
-                let expected = std::collections::BTreeSet::from([
-                    self.own_account_anchor()?,
-                    author.account_anchor.clone(),
-                ]);
-                let roots = thread["participant_roots"]
-                    .as_array()
-                    .filter(|roots| roots.len() == 2)
-                    .map(|roots| {
-                        roots
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect::<std::collections::BTreeSet<_>>()
-                    });
-                if thread["kind"] != "direct"
-                    || !thread["group_id"].is_null()
-                    || roots.as_ref() != Some(&expected)
-                {
-                    return Err(bad.into());
-                }
-            } else if identity.conversation_id
-                != g::dm_scope::derive(&self.own_account_anchor()?, &author.account_anchor)
-                    .map_err(|_| bad)?
+            self.authorize_direct_history_scope(identity)?;
+        }
+        Ok(())
+    }
+
+    fn authorize_direct_history_scope(&self, identity: &g::EventIdentity) -> Result<(), SdkError> {
+        let bad = EvidenceError::OriginCommitmentMismatch;
+        let author = identity.author.as_ref().ok_or(bad)?;
+        let own = self.own_account_anchor()?;
+        let thread = self.account_db()?.client_record("conversation", &identity.conversation_id)?;
+        let roots = thread
+            .as_ref()
+            .and_then(|thread| thread["participant_roots"].as_array())
+            .filter(|roots| roots.len() == 2)
+            .map(|roots| {
+                roots
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<std::collections::BTreeSet<_>>()
+            });
+        // A genuine original outgoing envelope has the local root as its author.
+        // Its peer scope must already be established by native contact bootstrap;
+        // an own-root history forwarder cannot invent a new relationship here.
+        let peer = if author.account_anchor == own {
+            roots
+                .as_ref()
+                .filter(|roots| roots.len() == 2 && roots.contains(&own))
+                .and_then(|roots| roots.iter().find(|root| *root != &own))
+                .cloned()
+                .ok_or(bad)?
+        } else {
+            author.account_anchor.clone()
+        };
+        g::dm_scope::validate_direct(&identity.conversation_id, &own, &peer).map_err(|_| bad)?;
+        if let Some(thread) = thread {
+            if thread["kind"] != "direct"
+                || !thread["group_id"].is_null()
+                || roots != Some(std::collections::BTreeSet::from([own, peer]))
             {
                 return Err(bad.into());
             }
+        } else if identity.conversation_id != g::dm_scope::derive(&own, &peer).map_err(|_| bad)? {
+            return Err(bad.into());
         }
         Ok(())
     }
@@ -140,7 +150,8 @@ impl RamfluxClient {
         db.persist_message_actor_state(&id, &format!("routed/generated-identity/{id}"), identity)?;
         db.persist_message_actor_state(&id, &crate::client::delivery_receipts::origin_key(&identity.conversation_id, &id)?, &serde_json::json!({
             "sender_device_id": verified.author.device.device_id(), "sender_root_commitment": verified.author.root,
-            "sender_device_display": verified.author.device.storage_key(), "direction": "incoming",
+            "sender_device_display": verified.author.device.storage_key(),
+            "direction": if verified.author.root == self.own_account_anchor()? { "outgoing" } else { "incoming" },
         }))?;
         self.install_history_original_header(&id, &item.exact_inner, origin)?;
         db.persist_message_actor_state(

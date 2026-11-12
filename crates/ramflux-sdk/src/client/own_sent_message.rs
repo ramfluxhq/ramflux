@@ -8,6 +8,7 @@ use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod attestation;
 mod generated;
 mod replay;
 

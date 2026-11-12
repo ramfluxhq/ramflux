@@ -537,7 +537,7 @@ async fn send_one(
         format!("contact_{}", ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?));
     let mut message = GatewayDirectMessage {
         conversation_id: conversation(&intent.requester_root, &intent.target_root)?,
-        message_id: id.clone(),
+        message_id: super::generated::message_id(body, &id)?,
         envelope_id: id,
         source_principal_id: engine.config().principal_id.clone(),
         sender_id: engine.config().device_id.clone(),

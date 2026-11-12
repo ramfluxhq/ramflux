@@ -9,7 +9,7 @@ use super::{
 use crate::client::identity_authority::{HeadUse, NativeOperation};
 use prost::Message as _;
 
-fn own_sent_erasure_owners(
+pub(super) fn own_sent_erasure_owners(
     identity: &g::EventIdentity,
     content: &g::Content,
 ) -> Result<Vec<String>, SdkError> {

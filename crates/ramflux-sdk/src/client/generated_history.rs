@@ -9,6 +9,7 @@ use serde_json::Value;
 mod bootstrap;
 mod import;
 mod ordinary;
+mod page;
 mod pending;
 
 pub(crate) struct Author {
