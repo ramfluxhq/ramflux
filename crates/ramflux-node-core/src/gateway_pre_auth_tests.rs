@@ -68,6 +68,7 @@ fn preauth_boundary_matrix() -> Result {
     expiry_boundaries()?;
     capacity_and_hot_debt()?;
     restart_rollback_and_failed_commit()?;
+    disabled_admission_preserves_durable_time_floor()?;
     bounded_snapshots_and_legacy()?;
     configuration_bounds()?;
     mounted_key_rotation_and_resume()?;
@@ -149,6 +150,37 @@ fn restart_rollback_and_failed_commit() -> Result {
     assert_eq!(persisted.pre_auth_handshakes_by_source_ip, state.pre_auth_handshakes_by_source_ip);
     fixture.store.save_pre_auth_hot(&restored)?;
     assert_eq!(fixture.restored()?.pre_auth_time_floor, 200);
+    Ok(())
+}
+fn disabled_admission_preserves_durable_time_floor() -> Result {
+    let fixture = Store::new()?;
+    let mut state = GatewayState::new();
+    assert!(!state.pre_auth_policy.enabled);
+    state.observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(100))?;
+    fixture.store.save_state(&state)?;
+    let mut restored = fixture.restored()?;
+    let before = restored.admission_bytes()?;
+    assert!(matches!(
+        restored.check_pre_auth_system_time(&source(1), None, UNIX_EPOCH + Duration::from_secs(99)),
+        Err(NodeCoreError::PreAuthClockRollback)
+    ));
+    assert!(matches!(
+        restored.check_pre_auth_system_time(&source(1), None, UNIX_EPOCH - Duration::from_secs(1)),
+        Err(NodeCoreError::PreAuthClockInvalid)
+    ));
+    assert_eq!(
+        restored.admission_bytes()?,
+        before,
+        "disabled quota must not permit clock rollback before pruning"
+    );
+    assert_eq!(
+        restored.check_pre_auth_system_time(
+            &source(1),
+            None,
+            UNIX_EPOCH + Duration::from_secs(100)
+        )?,
+        Decision::Accepted
+    );
     Ok(())
 }
 fn bounded_snapshots_and_legacy() -> Result {

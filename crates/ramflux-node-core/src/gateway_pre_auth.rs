@@ -98,12 +98,10 @@ impl GatewayState {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| NodeCoreError::PreAuthClockInvalid)?
             .as_secs();
-        if self.pre_auth_policy.enabled && now < self.pre_auth_time_floor {
+        if now < self.pre_auth_time_floor {
             return Err(NodeCoreError::PreAuthClockRollback);
         }
-        if self.pre_auth_policy.enabled {
-            self.pre_auth_time_floor = now;
-        }
+        self.pre_auth_time_floor = now;
         Ok(now)
     }
 
@@ -115,9 +113,6 @@ impl GatewayState {
         cookie: Option<&str>,
         time: SystemTime,
     ) -> Result<crate::GatewayPreAuthDecision, NodeCoreError> {
-        if !self.pre_auth_policy.enabled {
-            return Ok(crate::GatewayPreAuthDecision::Accepted);
-        }
         let now = self.observe_pre_auth_time(time)?;
         self.check_pre_auth(source, cookie, now)
     }
