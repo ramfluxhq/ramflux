@@ -2,16 +2,14 @@
 // Copyright (c) 2026 Span Brain
 
 //! Generated Typing requests take no durable operation receipt or response capture path.
+use crate::EphemeralSendOutcome;
 use crate::client::identity_authority::HeadUse;
 use crate::{
-    GatewayDirectMessage, GatewaySessionEngine, RamfluxClient, SdkError,
+    GatewayDirectMessage, GatewaySessionAccess, RamfluxClient, SdkError,
     bindings::{AdapterError, GeneratedErrorCode},
 };
 use prost::Message as _;
-use ramflux_protocol::{
-    ephemeral::{EphemeralDropReason, EphemeralSubmitOutcome},
-    message as g,
-};
+use ramflux_protocol::{ephemeral::EphemeralDropReason, message as g};
 use std::time::Instant;
 fn refused(code: GeneratedErrorCode, reason: &str) -> SdkError {
     AdapterError::new(code, reason).into()
@@ -44,7 +42,7 @@ impl RamfluxClient {
     /// Returns typed argument, focus/consent, rate, capability, crypto or transport errors.
     pub async fn send_generated_typing_request(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         request: &g::MessageRequest,
     ) -> Result<g::MessageUpdate, SdkError> {
         let mut request = crate::bindings::round_trip_request(request)?;
@@ -86,7 +84,7 @@ impl RamfluxClient {
 
     async fn submit_generated_typing(
         &self,
-        engine: &mut GatewaySessionEngine,
+        engine: &mut impl GatewaySessionAccess,
         send: &g::SendMessage,
         active: bool,
         targets: Vec<ramflux_crypto::RootQualifiedDeviceRef>,
@@ -112,12 +110,12 @@ impl RamfluxClient {
             }
             let result = engine.submit_ephemeral(envelope).await;
             match result {
-                Ok(result) if result.outcome() == EphemeralSubmitOutcome::Accepted => {
+                Ok(EphemeralSendOutcome::Delivered) => {
                     if response.is_none() {
                         response = Some(update);
                     }
                 }
-                Ok(result) if result.reason() == Some(EphemeralDropReason::Offline) => self
+                Ok(EphemeralSendOutcome::Dropped(EphemeralDropReason::Offline)) => self
                     .typing_sender
                     .borrow_mut()
                     .offline(&send.conversation_id, target.storage_key(), now),

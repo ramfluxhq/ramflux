@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 mod generated;
+mod replay;
 
 const PREFIX: &[u8] = b"ramflux.own_sent_message.v1\n";
 #[derive(Serialize, Deserialize)]

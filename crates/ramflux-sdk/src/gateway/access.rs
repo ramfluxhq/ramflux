@@ -48,6 +48,12 @@ pub trait GatewaySessionAccess: Send + sealed::ClassifiedSubmit {
     fn config(&self) -> &GatewaySessionConfig;
     /// Returns the authenticated session metadata captured for this caller's generation.
     fn session(&self) -> &GatewaySessionState;
+    /// True only when this session generation received the required transient echo.
+    /// Implementations without a negotiated transient port refuse before sealing.
+    fn ephemeral_negotiated(&self) -> bool {
+        false
+    }
+
     /// Returns the authenticated mailbox target.
     fn target_delivery_id(&self) -> &str {
         &self.config().target_delivery_id
@@ -176,6 +182,9 @@ impl GatewaySessionAccess for GatewaySessionEngine {
     }
     fn session(&self) -> &GatewaySessionState {
         self.session()
+    }
+    fn ephemeral_negotiated(&self) -> bool {
+        self.ephemeral_negotiated
     }
     fn heartbeat(&mut self) -> GatewayCallFuture<'_, ()> {
         Box::pin(GatewaySessionEngine::heartbeat(self))

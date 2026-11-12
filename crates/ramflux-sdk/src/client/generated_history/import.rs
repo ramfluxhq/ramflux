@@ -100,6 +100,11 @@ impl RamfluxClient {
                 {
                     return Err(bad.into());
                 }
+            } else if identity.conversation_id
+                != g::dm_scope::derive(&self.own_account_anchor()?, &author.account_anchor)
+                    .map_err(|_| bad)?
+            {
+                return Err(bad.into());
             }
         }
         Ok(())
@@ -191,7 +196,7 @@ impl RamfluxClient {
 }
 
 impl RamfluxClient {
-    fn bind_history_message_conversation(
+    pub(super) fn bind_history_message_conversation(
         &self,
         identity: &g::EventIdentity,
         verified: &VerifiedOrigin,

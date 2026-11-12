@@ -4,7 +4,6 @@
 //! Dormant Edit/Delete/Reaction authorization and layer admission (S10a P14).
 //! This module neither sends a carrier nor admits a stored event.
 use crate::{RamfluxClient, SdkError};
-use prost::Message as _;
 use ramflux_protocol::message::registry::{COMPILED_LAYER, kind_binding};
 use ramflux_protocol::message::{DeleteScope, KindId};
 
@@ -347,19 +346,18 @@ impl RamfluxClient {
             let applied = db.load_actor_state::<EditRegister>(&state_key)?;
             let incoming = (edit.revision, identity.id.as_slice());
             let old_pair = applied.as_ref().map(|state| (state.revision, state.event_id.as_slice()));
-            let Some(stored) = db.message_content(&target_id)? else {
+            let stored = db.message_content(&target_id)?;
+            if stored.is_none() && imported.is_none() {
                 self.park_waiting_generated_edit(authorization, &identity, &edit, exact_inner)?;
                 return Ok(false);
-            };
-            let original_content = if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
-                nested
-            } else { ramflux_protocol::message::exact_content::message_in_force(&stored)
-                .map_err(|_| refused("Edit target must be a Message"))?.to_vec() };
-            g::Message::decode(original_content.as_slice()).map_err(|_| refused("Edit target has invalid Message content"))?;
+            }
             edit.replacement.as_ref().ok_or_else(|| refused("Edit replacement missing"))?;
-            let digest = if historical { [0;32] } else if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
-                digest_exact_content(target, &nested)?
-            } else { previous_content_digest(target, &stored)? };
+            let digest = if historical { [0; 32] } else {
+                let stored = stored.as_deref().ok_or_else(|| refused("Edit target content missing"))?;
+                if let Some(nested) = db.load_actor_state::<Vec<u8>>(&format!("routed/group-content/{target_id}"))? {
+                    digest_exact_content(target, &nested)?
+                } else { previous_content_digest(target, stored)? }
+            };
             let old_revision = applied.as_ref().map_or(0, |state| state.revision);
             let fork = (old_revision == edit.revision && old_pair != Some(incoming))
                 || (!historical && edit.revision == old_revision.saturating_add(1) && edit.previous_content_digest.as_slice() != digest);

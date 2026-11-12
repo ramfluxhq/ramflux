@@ -116,7 +116,6 @@ impl FrameKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExpectedReply {
-    Ephemeral,
     Heartbeat,
     Submit,
     EphemeralSubmit,
@@ -141,7 +140,6 @@ impl ExpectedReply {
             return true;
         }
         match self {
-            Self::Ephemeral => matches!(kind, FrameKind::EphemeralResult),
             Self::Heartbeat => matches!(kind, FrameKind::Heartbeat),
             Self::Submit => matches!(kind, FrameKind::ForwardAck),
             Self::EphemeralSubmit => matches!(kind, FrameKind::EphemeralResult),

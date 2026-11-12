@@ -47,17 +47,23 @@ pub(super) async fn run(mut context: SessionContext, work: mpsc::Sender<AccountW
             .call(
                 |engine| {
                     Box::pin(async move {
-                        Ok((engine.config.clone(), engine.session().clone(), engine.mode.clone()))
+                        Ok((
+                            engine.config.clone(),
+                            engine.session().clone(),
+                            engine.mode.clone(),
+                            engine.ephemeral_negotiated,
+                        ))
                     })
                 },
                 context.call_deadline(),
             )
             .await;
-        let Ok((config, session, mode)) = metadata else {
+        let Ok((config, session, mode, ephemeral_negotiated)) = metadata else {
             break;
         };
         let outcome = AccountWork::Metadata {
             metadata: Box::new(super::SessionMetadata {
+                ephemeral_negotiated,
                 config,
                 session,
                 mode,
