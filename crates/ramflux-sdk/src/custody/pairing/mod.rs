@@ -6,7 +6,9 @@ mod activate;
 pub(crate) mod admission;
 mod coordinator;
 mod full_bootstrap;
-pub use full_bootstrap::{FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest};
+pub use full_bootstrap::{
+    FullBootstrap, FullBootstrapFrame, FullGrantSigningRequest, FullSourceManifestSigningRequest,
+};
 mod native_ports;
 mod participant;
 pub use activate::{Installation, PairingAuthorityQuery, activate_recipient, refresh_authority};

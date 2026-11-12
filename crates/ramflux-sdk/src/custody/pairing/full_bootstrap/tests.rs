@@ -227,3 +227,5 @@ fn pairing_full_bootstrap_rebuilds_grant_before_signer_and_enforces_original_exp
     assert_eq!(unexpected.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+mod source;

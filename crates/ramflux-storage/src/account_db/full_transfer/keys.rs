@@ -80,22 +80,9 @@ impl AccountDb {
         role: PairingRole,
     ) -> Result<(FullStageKey<'_>, WrappedFullStageKey), StorageError> {
         self.require_full_stage_unlock()?;
-        let key = AccountDbKey::generate()?;
-        let nonce = fresh_nonce()?;
-        let mut ciphertext = Zeroizing::new(Vec::with_capacity(48));
-        ciphertext.extend_from_slice(key.bytes());
-        ChaCha20Poly1305::new(Key::from_slice(self.current_key.bytes()))
-            .encrypt_in_place(
-                Nonce::from_slice(&nonce),
-                &wrap_aad(&self.local_account_id, transfer, role)?,
-                &mut *ciphertext,
-            )
-            .map_err(|_| invalid())?;
-        let wrapped = WrappedFullStageKey {
-            nonce,
-            ciphertext: ciphertext.as_slice().try_into().map_err(|_| invalid())?,
-        };
-        Ok((FullStageKey { db: self, key }, wrapped))
+        let owner = FullStageKey { db: self, key: AccountDbKey::generate()? };
+        let wrapped = owner.wrap_for(transfer, role)?;
+        Ok((owner, wrapped))
     }
     /// Open only with this actual unlocked DB key and its exact local account/transfer/role.
     /// # Errors
@@ -197,6 +184,28 @@ impl EncryptedStageChunk {
 impl FullStageKey<'_> {
     pub(super) fn require_live(&self) -> Result<(), StorageError> {
         self.db.require_full_stage_unlock()
+    }
+    pub(super) fn wrap_for(
+        &self,
+        transfer: &[u8; 32],
+        role: PairingRole,
+    ) -> Result<WrappedFullStageKey, StorageError> {
+        self.require_live()?;
+        let nonce = fresh_nonce()?;
+        let mut ciphertext = Zeroizing::new(Vec::with_capacity(48));
+        ciphertext.extend_from_slice(self.key.bytes());
+        ChaCha20Poly1305::new(Key::from_slice(self.db.current_key.bytes()))
+            .encrypt_in_place(
+                Nonce::from_slice(&nonce),
+                &wrap_aad(&self.db.local_account_id, transfer, role)?,
+                &mut *ciphertext,
+            )
+            .map_err(|_| invalid())?;
+        let wrapped = WrappedFullStageKey {
+            nonce,
+            ciphertext: ciphertext.as_slice().try_into().map_err(|_| invalid())?,
+        };
+        Ok(wrapped)
     }
     pub(super) fn open_metadata(
         &self,

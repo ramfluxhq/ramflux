@@ -16,6 +16,8 @@ use zeroize::{Zeroize as _, Zeroizing};
 #[derive(Clone)]
 pub struct FullBaseSourceEncoding {
     pub schema: FullTransferSchema,
+    pub storage_generation: u64,
+    pub source_erasure_generation: u64,
     pub total_bytes: u64,
     pub chunk_count: u64,
     pub chunks_root: [u8; 32],
@@ -40,6 +42,21 @@ impl SourceContext<'_> {
         let rules = full_transfer_catalog();
         let mut schema = self.source_cut_schema(0, snapshot_id, rules)?;
         schema.require_typed_owners(rules)?;
+        let (storage_generation, source_erasure_generation) =
+            self.with_source_cut(0, snapshot_id, |input| {
+                Ok((
+                    input.query_row(
+                        "SELECT max(schema_version) FROM schema_migration",
+                        [],
+                        |row| row.get::<_, u64>(0),
+                    )?,
+                    input.query_row(
+                        "SELECT generation FROM account_erasure_generation WHERE singleton=1",
+                        [],
+                        |row| row.get::<_, u64>(0),
+                    )?,
+                ))
+            })?;
         for family in &schema.families {
             if family.disposition == Disposition::Transfer && family.source_rows.0 > 0 {
                 super::source_scalar::compiled(&family.id)?;
@@ -89,6 +106,8 @@ impl SourceContext<'_> {
             output.writer,
             FullBaseSourceEncoding {
                 schema,
+                storage_generation,
+                source_erasure_generation,
                 total_bytes: total,
                 chunk_count: chunk_layout(total).map_err(|_| invalid())?.0,
                 chunks_root: root,

@@ -23,7 +23,7 @@ impl FullTransferStage<'_> {
             connection: &self.connection,
             db: self.db,
             directory: &self.directory,
-            cancelled: None,
+            cancelled: Some(self.source_cancelled.clone()),
         })
     }
 }

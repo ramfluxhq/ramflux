@@ -25,6 +25,20 @@ pub struct PreparedFullSource {
     cancelled: Arc<AtomicBool>,
 }
 impl PreparedFullSource {
+    /// Immutable local data identity, not a network credential or signature permission.
+    #[must_use]
+    pub const fn fingerprint(&self) -> [u8; 32] {
+        self.digest
+    }
+    /// Local source account selected by the datastore owner, never a peer-supplied locator.
+    #[must_use]
+    pub fn local_account_id(&self) -> &str {
+        &self.local_account_id
+    }
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
     /// Read-only source operands. They convey no signing, publication or resume permission.
     #[must_use]
     pub const fn encoding(&self) -> &FullBaseSourceEncoding {
@@ -43,7 +57,7 @@ fn digest(
 ) -> Result<[u8; 32], StorageError> {
     let mut hash = blake3::Hasher::new();
     for bytes in [
-        b"ramflux.full.source.preparation.v1".as_slice(),
+        b"ramflux.full.source.preparation.v2".as_slice(),
         db.local_account_id.as_bytes(),
         db.principal_commitment.as_bytes(),
     ] {
@@ -53,6 +67,8 @@ fn digest(
     hash.update(&raw32(id)?);
     hash.update(&raw32(snapshot)?);
     hash.update(&encoding.schema.census_hash);
+    hash.update(&encoding.storage_generation.to_be_bytes());
+    hash.update(&encoding.source_erasure_generation.to_be_bytes());
     hash.update(&encoding.total_bytes.to_be_bytes());
     hash.update(&encoding.chunk_count.to_be_bytes());
     hash.update(&encoding.chunks_root);
@@ -123,6 +139,10 @@ impl AccountDb {
             &wrapped,
         )?;
         let connection = key.open_metadata(&directory.join("stage.db"))?;
+        let bound:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name IN ('stage','resume'))",[],|row|row.get(0))?;
+        if bound {
+            return Err(context());
+        }
         let stored: [u8; 32] = connection.query_row(
             "SELECT digest FROM source_preparation_ready WHERE singleton=1",
             [],
@@ -133,7 +153,7 @@ impl AccountDb {
         }
         let owner = FullSourcePreparation {
             connection,
-            _lock: lock,
+            lock,
             key,
             db: self,
             directory,

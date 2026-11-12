@@ -34,6 +34,7 @@ pub struct FullTransferStage<'db> {
     pub(super) db: &'db AccountDb,
     pub(super) directory: PathBuf,
     reference: FullStageReference,
+    pub(super) source_cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // One coordinator owns the local file/SQL commit order. A shared reference cannot
     // concurrently replace a manifest while another thread reads or receipts its slots.
     _serial: PhantomData<Cell<()>>,
@@ -68,7 +69,7 @@ impl AccountDb {
         expires_at: u64,
     ) -> Result<FullTransferStage<'_>, StorageError> {
         self.require_full_stage_unlock()?;
-        let digest = record.stage_digest()?;
+        record.stage_digest()?;
         let transfer = raw32(&record.transfer_id)?;
         let directory = stage_directory(self, &record.transfer_id, true)?;
         let (key, wrapped) = self.create_full_stage_key(&transfer, record.role)?;
@@ -77,42 +78,7 @@ impl AccountDb {
         write_new_atomic(&directory, "stage.key", &wrapped.to_file_bytes()?)?;
         create_file(&directory.join("stage.db"))?.sync_all()?;
         let connection = key.open_metadata(&directory.join("stage.db"))?;
-        let reference = FullStageReference {
-            kind: FULL_STAGE_REFERENCE_KIND.into(),
-            lease_expires_at: U64(expires_at),
-            record_digest: ramflux_protocol::encode_base64url(digest),
-            stage_id: record.transfer_id.clone(),
-        };
-        reference.validate().map_err(|_| context())?;
-        let local = self.local_account_id.clone();
-        let grant = Zeroizing::new(record.grant.to_wire_bytes().map_err(|_| context())?);
-        let role = role_number(record.role);
-        connection.call(move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            tx.execute_batch(SCHEMA)?;
-            tx.execute_batch(super::source_cut::SCHEMA)?;
-            tx.execute_batch(super::source_receipt::SCHEMA)?;
-            tx.execute_batch(super::source_scalar::SCHEMA)?;
-            tx.execute_batch(super::native_floor::SCHEMA)?;
-            tx.execute(
-                "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
-                params![local, role, expires_at, digest.as_slice()],
-            )?;
-            tx.execute(
-                "INSERT INTO resume VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    role,
-                    record.transcript.as_slice(),
-                    record.th.as_slice(),
-                    grant.as_slice(),
-                    record.lease.as_slice(),
-                    record.transfer_id,
-                    record.base_manifest_hash,
-                    record.base_record_hash
-                ],
-            )?;
-            tx.commit()
-        })?;
+        let reference = initialize_record(&connection, &self.local_account_id, record, expires_at)?;
         sync_stage(&directory)?;
         self.require_full_stage_unlock()?;
         Ok(FullTransferStage {
@@ -122,6 +88,7 @@ impl AccountDb {
             db: self,
             directory,
             reference,
+            source_cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _serial: PhantomData,
         })
     }
@@ -177,6 +144,7 @@ impl AccountDb {
             db: self,
             directory,
             reference,
+            source_cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _serial: PhantomData,
         };
         let record = stage.resume_record()?;
@@ -338,4 +306,78 @@ pub(super) fn sync_stage(directory: &Path) -> Result<(), StorageError> {
     open_regular(&directory.join("stage.db"), false)?.sync_all()?;
     fs::File::open(directory)?.sync_all()?;
     Ok(())
+}
+
+pub(super) fn initialize_record(
+    connection: &Connection,
+    local_account_id: &str,
+    record: FullResumeRecord,
+    expires_at: u64,
+) -> Result<FullStageReference, StorageError> {
+    let digest = record.stage_digest()?;
+    let reference = FullStageReference {
+        kind: FULL_STAGE_REFERENCE_KIND.into(),
+        lease_expires_at: U64(expires_at),
+        record_digest: ramflux_protocol::encode_base64url(digest),
+        stage_id: record.transfer_id.clone(),
+    };
+    reference.validate().map_err(|_| context())?;
+    let local = local_account_id.to_owned();
+    let grant = Zeroizing::new(record.grant.to_wire_bytes().map_err(|_| context())?);
+    let role = role_number(record.role);
+    connection.call(move |db| {
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(super::source_cut::SCHEMA)?;
+        tx.execute_batch(super::source_receipt::SCHEMA)?;
+        tx.execute_batch(super::source_scalar::SCHEMA)?;
+        tx.execute_batch(super::native_floor::SCHEMA)?;
+        tx.execute(
+            "INSERT INTO stage VALUES(1,1,?1,?2,?3,?4)",
+            params![local, role, expires_at, digest.as_slice()],
+        )?;
+        tx.execute(
+            "INSERT INTO resume VALUES(1,?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                role,
+                record.transcript.as_slice(),
+                record.th.as_slice(),
+                grant.as_slice(),
+                record.lease.as_slice(),
+                record.transfer_id,
+                record.base_manifest_hash,
+                record.base_record_hash
+            ],
+        )?;
+        tx.commit()
+    })?;
+    Ok(reference)
+}
+
+impl<'db> FullTransferStage<'db> {
+    pub(super) fn finish_prepared_source(
+        parts: super::source_preparation::SourceBindParts<'db>,
+        record: FullResumeRecord,
+        expires_at: u64,
+        sas_base: &ramflux_crypto::custody::VerifiedRecord,
+        manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+    ) -> Result<Self, StorageError> {
+        let reference =
+            initialize_record(&parts.connection, &parts.db.local_account_id, record, expires_at)?;
+        let mut stage = Self {
+            connection: parts.connection,
+            _lock: parts.lock,
+            key: parts.key,
+            db: parts.db,
+            directory: parts.directory,
+            reference,
+            source_cancelled: parts.cancelled,
+            _serial: PhantomData,
+        };
+        stage.observe_full_native_head(sas_base)?;
+        stage.retain_source_manifest(manifest, super::full_transfer_catalog())?;
+        sync_stage(&stage.directory)?;
+        stage.source_context()?.require_source_live()?;
+        Ok(stage)
+    }
 }

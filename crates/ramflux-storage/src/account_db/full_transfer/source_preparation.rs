@@ -35,7 +35,7 @@ impl FullSourcePreparationCancel {
 /// must bind a separately attended full ceremony before any network data operation.
 pub struct FullSourcePreparation<'db> {
     pub(super) connection: Connection,
-    pub(super) _lock: std::fs::File,
+    pub(super) lock: std::fs::File,
     pub(super) key: FullStageKey<'db>,
     pub(super) db: &'db AccountDb,
     pub(super) directory: PathBuf,
@@ -66,7 +66,7 @@ impl AccountDb {
         self.require_full_stage_unlock()?;
         Ok(FullSourcePreparation {
             connection,
-            _lock: lock,
+            lock,
             key,
             db: self,
             directory,
@@ -153,3 +153,6 @@ impl FullSourcePreparation<'_> {
 
 mod checkpoint;
 pub use checkpoint::PreparedFullSource;
+
+mod bind;
+pub(super) use bind::SourceBindParts;
