@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2026 Span Brain -->
+<resources>
+    <!-- Fixed text. A notification never names a sender and never shows content. -->
+    <string name="ramflux_push_generic_text">You have a new Ramflux update.</string>
+    <string name="ramflux_push_channel_name">Updates</string>
+</resources>

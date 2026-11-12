@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!-- Copyright (c) 2026 Span Brain -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- The gateway session. No other permission is needed by the core. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- ConnectivityManager.registerDefaultNetworkCallback, for the reconnect policy. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+        Merged into the consuming application. Account data must leave the device only
+        through the explicit recovery export:
+          - allowBackup=false stops cloud backup;
+          - on Android 12 and newer allowBackup=false alone does not stop device-to-device
+            transfer, so dataExtractionRules excludes everything for both modes;
+          - fullBackupContent is the same exclusion for Android 11 and older.
+        An application manifest that sets a different value fails the manifest merge
+        unless it overrides these attributes explicitly, so backup is never re-enabled
+        silently.
+    -->
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/ramflux_data_extraction_rules"
+        android:fullBackupContent="@xml/ramflux_backup_rules"
+        android:networkSecurityConfig="@xml/ramflux_network_security_config"
+        tools:targetApi="31" />
+</manifest>

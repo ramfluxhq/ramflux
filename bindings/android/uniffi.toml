@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Span Brain
+#
+# Kotlin generator settings for crates/ramflux-ffi, passed with `--config`. The interface
+# itself lives in that crate and is shared with Swift; nothing here changes it.
+
+[bindings.kotlin]
+package_name = "org.ramflux.sdk.ffi"
+cdylib_name = "ramflux_ffi"
+android = true
+generate_immutable_records = true
+
+# Generated objects implement AutoCloseable, whose `close()` releases the foreign handle.
+# The core's own `close()` (stop the supervisor) would collide with it, so it is exposed
+# to Kotlin as `shutdown()`.
+[bindings.kotlin.rename]
+"RamfluxCore.close" = "shutdown"
