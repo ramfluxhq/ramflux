@@ -39,6 +39,12 @@ pub(super) fn mutation_erasure_targets(
         Some(g::content::Value::Edit(edit)) => edit.target.into_iter().collect::<Vec<_>>(),
         Some(g::content::Value::Reaction(reaction)) => reaction.target.into_iter().collect(),
         Some(g::content::Value::Delete(_)) => return (true, Vec::new()),
+        Some(g::content::Value::Control(control)) => {
+            if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload {
+                return own_copy_erasure_targets(&copy);
+            }
+            Vec::new()
+        }
         _ => Vec::new(),
     };
     (
@@ -47,6 +53,46 @@ pub(super) fn mutation_erasure_targets(
             .into_iter()
             .map(|reference| ramflux_protocol::encode_base64url(reference.id))
             .map(|message_id| super::committed::ErasureTarget { message_id })
+            .collect(),
+    )
+}
+
+// These are ownership hints only. The caller commits them only after native own-root
+// transport and original-item authority succeed in the same writer transaction.
+fn own_copy_erasure_targets(
+    copy: &g::OwnMessageCopy,
+) -> (bool, Vec<super::committed::ErasureTarget>) {
+    let bytes = match copy.payload.as_ref() {
+        Some(g::own_message_copy::Payload::Item(item)) => item.exact_inner.as_slice(),
+        Some(g::own_message_copy::Payload::Sent(sent)) => sent.exact_inner.as_slice(),
+        None => return (false, Vec::new()),
+    };
+    let Ok(inner) = g::Inner::decode(bytes) else {
+        return (false, Vec::new());
+    };
+    let ids = match inner.kind {
+        1 => inner.identity.into_iter().map(|identity| identity.id).collect::<Vec<_>>(),
+        3 => g::Edit::decode(inner.body.as_slice())
+            .ok()
+            .and_then(|edit| edit.target)
+            .into_iter()
+            .map(|target| target.id)
+            .collect(),
+        4 => return (true, Vec::new()),
+        5 => g::Reaction::decode(inner.body.as_slice())
+            .ok()
+            .and_then(|reaction| reaction.target)
+            .into_iter()
+            .map(|target| target.id)
+            .collect(),
+        _ => Vec::new(),
+    };
+    (
+        false,
+        ids.into_iter()
+            .map(|id| super::committed::ErasureTarget {
+                message_id: ramflux_protocol::encode_base64url(id),
+            })
             .collect(),
     )
 }
@@ -615,6 +661,9 @@ impl RamfluxClient {
                 .map_err(|_| invalid("control authority fields missing"))?;
             if let Some(g::control::Payload::Friend(friend)) = control.payload.as_ref() {
                 self.authorize_generated_friend_control(&source, friend)?;
+            }
+            if let Some(g::control::Payload::OwnMessageCopy(copy)) = control.payload.as_ref() {
+                self.authorize_generated_own_message_copy(opened, entry, copy)?;
             }
             if matches!(control.operation, 6 | 7 | 13 | 14 | 15) {
                 if source.root_commitment() != self.own_account_anchor()? {

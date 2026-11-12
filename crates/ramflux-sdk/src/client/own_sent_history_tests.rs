@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Generated `OwnSentMessage` eight-field codec, source-bound aliases and restore fences (S10a P18).
+//! Legacy projection and generated eight-field conversion, aliases and restore fences (S10a P18).
 #![allow(clippy::too_many_lines, clippy::expect_used)]
 use super::*;
 use crate::client::own_device_sync::tests::{bundle, client_with_account, envelope};
@@ -61,7 +61,17 @@ fn receive_generated(
     at: i64,
     sent: &g::OwnSentMessage,
 ) -> Result<bool, SdkError> {
-    client.receive_generated_own_sent(&source(client, device)?, conversation, None, at, sent)
+    // This fixture exercises the retiring legacy projection, not native generated admission.
+    // Activated generated receive has independent native-authority tests.
+    let packet = SentMessage::from_generated(sent)?;
+    client.apply_own_sent_packet(
+        &source(client, device)?,
+        &packet.envelope_id,
+        conversation,
+        None,
+        at,
+        &packet,
+    )
 }
 
 fn alias_for(

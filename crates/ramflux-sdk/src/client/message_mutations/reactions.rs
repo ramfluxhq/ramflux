@@ -25,18 +25,28 @@ impl RamfluxClient {
         conversation: &str,
         reaction: &g::Reaction,
     ) -> Result<bool, SdkError> {
+        let source = self.authenticated_device_identity(
+            crate::client::identity_authority::HeadUse::NewAuthorization,
+            entry,
+        )?;
+        self.apply_generated_reaction_authorized(&source, identity, conversation, reaction)
+    }
+
+    pub(crate) fn apply_generated_reaction_authorized(
+        &self,
+        source: &ramflux_crypto::RootQualifiedDeviceRef,
+        identity: &g::EventIdentity,
+        conversation: &str,
+        reaction: &g::Reaction,
+    ) -> Result<bool, SdkError> {
         g::validation::validate_reaction_token(&reaction.token)
             .map_err(|_| refused("invalid reaction token"))?;
         g::identity::verify(identity).map_err(|_| refused("invalid reaction identity"))?;
         let order =
             g::identity::order_key(identity).map_err(|_| refused("reaction order missing"))?;
-        let source = self.authenticated_device_identity(
-            crate::client::identity_authority::HeadUse::NewAuthorization,
-            entry,
-        )?;
         let source_epoch = self
             .account_db()?
-            .client_device_record(&source)?
+            .client_device_record(source)?
             .and_then(|record| record["device_epoch"].as_u64())
             .ok_or_else(|| refused("reaction source epoch unavailable"))?;
         let target = reaction.target.as_ref().ok_or_else(|| refused("reaction target missing"))?;

@@ -105,3 +105,76 @@ fn scan(db: &AccountDb, forbidden: &[u8]) -> Result<(), StorageError> {
         Ok(check())
     }).map_err(StorageError::from)?
 }
+
+#[test]
+fn edit_delete_retire_private_revision_nonce_copies_and_rollback() -> TestResult {
+    let (root, db) = crate::tests::test_db("edit-private-nonce-retirement")?;
+    populate(&db)?;
+    let nonce = [117_u8; 32];
+    let mut bytes = b"\x0a\x03yes\x8a\x01\x20".to_vec();
+    bytes.extend_from_slice(&nonce);
+    db.write_transaction(|| {
+        db.replace_generated_message_content(
+            "conversation",
+            "target",
+            &bytes,
+            &crate::MessageMetadata::default(),
+        )?;
+        db.put_known_content_evidence(
+            "target",
+            "conversation",
+            &bytes,
+            b"nonce-provenance",
+            &OPENING,
+        )?;
+        Ok::<_, StorageError>(())
+    })?;
+    for actor in ["routed/origin-evidence/target", "own-copy/prepared/nonce", "history/page/nonce"]
+    {
+        db.persist_message_actor_state(
+            "target",
+            actor,
+            &json!({"exact_inner":bytes,"erasure_nonce":nonce}),
+        )?;
+    }
+    db.write_transaction(|| {
+        db.put_unsupported_raw_copy(crate::RawInnerCopyWrite {
+            owner_id: "target",
+            verified_source_anchor: "verified-source",
+            copy_id: "nonce-copy",
+            kind: crate::RawInnerCopyKind::OuterInner,
+            bytes: &bytes,
+            bounded_metadata: b"nonce-owned",
+        })?;
+        Ok::<_, StorageError>(())
+    })?;
+    let aborted: Result<(), StorageError> = db.write_transaction(|| {
+        db.retire_message_payload_copies("target", &[])?;
+        Err(StorageError::AuthorizationRejected)
+    });
+    assert!(aborted.is_err());
+    assert_eq!(db.message_content("target")?, Some(bytes.clone()));
+    assert!(db.raw_inner_copy("nonce-copy")?.is_some());
+    assert!(db.actor_state_exists("history/page/nonce")?);
+    let replacement_nonce = [118_u8; 32];
+    let mut replacement = b"\x0a\x03new\x8a\x01\x20".to_vec();
+    replacement.extend_from_slice(&replacement_nonce);
+    replace(&db, &replacement)?;
+    assert!(db.raw_inner_copy("nonce-copy")?.is_none());
+    for forbidden in [
+        nonce.to_vec(),
+        serde_json::to_vec(&nonce)?,
+        ramflux_protocol::encode_base64url(nonce).into_bytes(),
+        bytes,
+    ] {
+        scan(&db, &forbidden)?;
+    }
+    assert!(!db.actor_state_exists("history/page/nonce")?);
+    assert_eq!(db.message_content("target")?, Some(replacement));
+    db.delete_direct_message("conversation", "target", "local", "erase-replacement")?;
+    scan(&db, &replacement_nonce)?;
+    assert!(db.message_content("target")?.is_none());
+    drop(db);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}

@@ -79,12 +79,31 @@ impl RamfluxClient {
         if identity.id.len() != 32 {
             return Err(invalid("generated event id must be source-qualified"));
         }
-        validation::validate_content(content).map_err(content_error)?;
-        let (kind, body) = registry::encode_body(content).map_err(content_error)?;
+        let mut content = content.clone();
+        Self::prepare_generated_revision(&mut content)?;
+        validation::validate_content(&content).map_err(content_error)?;
+        let (kind, body) = registry::encode_body(&content).map_err(content_error)?;
         let inner = g::Inner { layer: COMPILED_LAYER, kind, identity: Some(identity), body };
         let bytes = inner.encode_to_vec();
         check_wire(&bytes)?;
         Ok(bytes)
+    }
+
+    /// Prepare once per logical revision, before recipient fan-out. Reuse the resulting
+    /// content or exact Inner for every recipient; never regenerate it per envelope.
+    pub(crate) fn prepare_generated_revision(content: &mut g::Content) -> Result<(), SdkError> {
+        let message = match content.value.as_mut() {
+            Some(g::content::Value::Message(message)) => Some(message),
+            Some(g::content::Value::Edit(edit)) => edit.replacement.as_mut(),
+            _ => None,
+        };
+        if let Some(message) = message
+            && message.sealed_group.is_none()
+            && message.erasure_nonce.is_empty()
+        {
+            message.erasure_nonce = ramflux_crypto::random_32()?.to_vec();
+        }
+        Ok(())
     }
 
     /// Encode a Message body on a shared event stream.
@@ -95,6 +114,9 @@ impl RamfluxClient {
         event_id: Vec<u8>,
         message: g::Message,
     ) -> Result<Vec<u8>, SdkError> {
+        if !message.erasure_nonce.is_empty() {
+            return Err(invalid("new Message input cannot select private revision entropy"));
+        }
         let identity = stream.next(event_id)?;
         Self::encode_generated_inner(
             identity,
@@ -125,6 +147,9 @@ impl RamfluxClient {
         event_id: Vec<u8>,
         edit: g::Edit,
     ) -> Result<Vec<u8>, SdkError> {
+        if edit.replacement.as_ref().is_some_and(|message| !message.erasure_nonce.is_empty()) {
+            return Err(invalid("new Edit input cannot select private revision entropy"));
+        }
         let identity = stream.next(event_id)?;
         Self::encode_generated_inner(
             identity,

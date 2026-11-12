@@ -6,6 +6,7 @@
 use super::super::*;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
+#[prost(skip_debug)]
 pub struct HistoryItem {
     #[prost(bytes = "vec", tag = "1")]
     pub exact_inner: ::prost::alloc::vec::Vec<u8>,

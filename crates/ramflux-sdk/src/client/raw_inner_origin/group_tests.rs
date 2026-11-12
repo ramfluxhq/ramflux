@@ -27,8 +27,12 @@ async fn fixture() -> TestResult<(Fixture, g::Inner, RetainedOrigin)> {
         device_id: source.device_id().into(),
         device_epoch: 1,
     };
-    let plaintext =
-        g::Message { text: "original group content".into(), ..Default::default() }.encode_to_vec();
+    let plaintext = g::Message {
+        text: "original group content".into(),
+        erasure_nonce: vec![42; 32],
+        ..Default::default()
+    }
+    .encode_to_vec();
     let mut session = ramflux_crypto::DmSession::initiator([1; 32], [2; 32], [3; 32], [4; 32])?;
     let aad = crate::group::group_key_associated_data(
         "origin-group",
@@ -158,8 +162,9 @@ async fn group_origin_signed_wrapper_rejects_altered_plaintext_and_missing_evide
         let mut modified = origin.clone();
         match change {
             "plaintext" => {
-                let last = modified.evidence.group_plaintext.last_mut().ok_or("text")?;
-                *last ^= 1;
+                let mut message = g::Message::decode(modified.evidence.group_plaintext.as_slice())?;
+                message.text.push('!');
+                modified.evidence.group_plaintext = message.encode_to_vec();
             }
             "opening" => modified.evidence.group_opening.clear(),
             "membership" => modified.evidence.group_membership = None,
@@ -218,7 +223,11 @@ async fn group_opening_is_captured_during_native_first_decrypt() -> TestResult {
     )?;
     let source = owner.client.owned_device_identity()?;
     for counter in 0..2 {
-        let message = g::Message { text: format!("message {counter}"), ..Default::default() };
+        let message = g::Message {
+            text: format!("message {counter}"),
+            erasure_nonce: vec![50 + counter; 32],
+            ..Default::default()
+        };
         let wrapper = owner.client.encrypt_generated_group_message(
             "opening-group",
             &owner.config.device_id,
@@ -365,5 +374,57 @@ fn retire_and_fence_group_opening(
         db.write_transaction(|| owner.client.persist_known_origin(id, origin)).is_err(),
         "Delete accepted a stale group opening"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_history_message_import_preserves_original_proof_and_delete_fence() -> TestResult {
+    let (owner, inner, origin) = fixture().await?;
+    let source = owner.client.owned_device_identity()?;
+    let item = g::HistoryItem {
+        exact_inner: inner.encode_to_vec(),
+        source_evidence: Some(origin.evidence.clone()),
+        ..Default::default()
+    };
+    let id = inner.identity.as_ref().ok_or("identity")?.id.clone();
+    let key = ramflux_protocol::encode_base64url(&id);
+    assert!(owner.client.import_generated_history_message(&source, &item)?);
+    assert!(
+        !owner.client.import_generated_history_message(&source, &item)?,
+        "same original is idempotent"
+    );
+    assert_eq!(owner.client.export_generated_history_item(&id)?.exact_inner, item.exact_inner);
+    let row = owner.client.direct_message_by_id(&key)?.ok_or("row")?;
+    let update = owner.client.generated_message_update(&row, "origin-thread", 0)?;
+    let Some(g::message_update::State::Content(g::Content {
+        value: Some(g::content::Value::Message(public)),
+    })) = update.state
+    else {
+        return Err("public message missing".into());
+    };
+    assert!(public.erasure_nonce.is_empty(), "private entropy must never enter history updates");
+    assert_eq!(public.text, "original group content");
+    let mut forged = item.clone();
+    forged.source_evidence.as_mut().ok_or("evidence")?.group_plaintext[2] ^= 1;
+    assert!(
+        owner.client.import_generated_history_message(&source, &forged).is_err(),
+        "duplicate optimization must not skip original proof verification"
+    );
+    owner.client.account_db()?.delete_direct_message(
+        "origin-thread",
+        &key,
+        "self",
+        "native-history-delete",
+    )?;
+    assert!(!owner.client.import_generated_history_message(&source, &item)?);
+    assert!(owner.client.account_db()?.message_content(&key)?.is_none());
+    assert!(
+        owner
+            .client
+            .account_db()?
+            .load_actor_state::<RetainedOrigin>(&format!("routed/origin-evidence/{key}"))?
+            .is_none()
+    );
+    assert!(owner.client.export_generated_history_item(&id).is_err());
     Ok(())
 }

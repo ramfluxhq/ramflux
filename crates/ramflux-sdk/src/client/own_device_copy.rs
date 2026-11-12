@@ -18,6 +18,7 @@ pub(crate) const TOO_LARGE: &str = "own-device message byte budget exceeded";
 pub(crate) mod receipts;
 pub(crate) use receipts::MAX_DELIVERY_ROWS;
 mod generated;
+mod generated_authority;
 mod receive;
 pub(crate) mod w1;
 pub(super) const RECEIPTS: &str = "own-device/message-receipt/";
@@ -265,8 +266,6 @@ pub(crate) struct OwnCopyDraft {
     pub(super) source: ramflux_protocol::message::QualifiedDevice,
     pub(super) siblings: Vec<ramflux_protocol::message::QualifiedDevice>,
     pub(super) conversation: String,
-    pub(super) group: Option<String>,
-    pub(super) message_id: String,
     pub(super) created_at: i64,
     pub(super) expires_at: i64,
 }
@@ -377,8 +376,6 @@ impl RamfluxClient {
             source: generated::qualified(&context.root, &source, source_epoch),
             siblings,
             conversation: context.conversation.clone(),
-            group: context.group.clone(),
-            message_id: context.message.clone(),
             created_at: input.created_at,
             expires_at,
         }))

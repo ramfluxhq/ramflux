@@ -8,6 +8,8 @@ use ramflux_protocol::message as g;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod generated;
+
 const PREFIX: &[u8] = b"ramflux.own_sent_message.v1\n";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,7 +38,9 @@ impl SentMessage {
             ramflux_protocol::message::dm_scope::validate_group(&self.context.conversation_id)
                 .map_err(|_| invalid("reserved DM conversation namespace"))?;
         }
-        if self.envelope_id != envelope
+        if self.envelope_id.is_empty()
+            || self.envelope_id.len() > 256
+            || self.envelope_id != envelope
             || self.context.conversation_id != conversation
             || self.context.group.as_ref().map(|g| g.group_id.as_str()) != group
             || self.message_id.is_empty()
@@ -473,18 +477,6 @@ impl RamfluxClient {
         let Some(json) = bytes.strip_prefix(PREFIX) else { return Ok(false) };
         let packet: SentMessage = ramflux_protocol::parse_i_json(json)?;
         self.apply_own_sent_packet(source, envelope, conversation, group, at, &packet)
-    }
-
-    pub(super) fn receive_generated_own_sent(
-        &self,
-        source: &ramflux_crypto::RootQualifiedDeviceRef,
-        conversation: &str,
-        group: Option<&str>,
-        at: i64,
-        sent: &g::OwnSentMessage,
-    ) -> Result<bool, SdkError> {
-        let packet = SentMessage::from_generated(sent)?;
-        self.apply_own_sent_packet(source, &packet.envelope_id, conversation, group, at, &packet)
     }
 
     #[allow(clippy::too_many_arguments)]

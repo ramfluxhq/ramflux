@@ -22,7 +22,9 @@ fn unsupported_reasons_use_adopted_priority_without_exposing_bytes() -> Result<(
 {
     assert_eq!(diagnose(registry::COMPILED_LAYER + 1, 900, vec![0xff])?, "layer_above_supported");
     assert_eq!(diagnose(registry::COMPILED_LAYER, 900, vec![0xff])?, "unknown_kind");
-    let mut body = g::Message { text: "hello".into(), ..Default::default() }.encode_to_vec();
+    let mut body =
+        g::Message { text: "hello".into(), erasure_nonce: vec![42; 32], ..Default::default() }
+            .encode_to_vec();
     body.extend_from_slice(&[0xa0, 0x06, 1]); // unknown tag 100, canonical order
     assert_eq!(diagnose(registry::COMPILED_LAYER, 1, body)?, "unknown_field");
     let body = g::Receipt { state: 999, ..Default::default() }.encode_to_vec();
@@ -32,6 +34,7 @@ fn unsupported_reasons_use_adopted_priority_without_exposing_bytes() -> Result<(
     assert_eq!(diagnose(registry::COMPILED_LAYER, 6, combined)?, "unknown_field");
     let body = g::Message {
         text: "hello".into(),
+        erasure_nonce: vec![42; 32],
         entities: vec![g::Entity { offset: 0, length: 1, kind: 999, value: None }],
         ..Default::default()
     }
@@ -46,7 +49,12 @@ fn body_and_missing_identity_have_distinct_non_authoritative_reasons() -> Result
         layer: registry::COMPILED_LAYER,
         kind: 1,
         identity: None,
-        body: g::Message { text: "hello".into(), ..Default::default() }.encode_to_vec(),
+        body: g::Message {
+            text: "hello".into(),
+            erasure_nonce: vec![42; 32],
+            ..Default::default()
+        }
+        .encode_to_vec(),
     }
     .encode_to_vec();
     assert_eq!(reason(&validation::scan_inner(&bytes)?), "identity_undecodable");

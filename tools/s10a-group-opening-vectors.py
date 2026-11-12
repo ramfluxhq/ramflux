@@ -35,7 +35,7 @@ aad = native_hash(b"ramflux.committing_aead.ad.v1", aad_bytes)
 ciphertext = native_hash(aead, bytes([4]) * 32)
 common = bytes([5]) * 32 + native_event + header + aad
 key = blake3(aead + common + ciphertext, key=bytes([2]) * 32).digest()
-franking = blake3(b"ramflux.franking_opening.v1" + b"\x0a\x05hello" + common,
+franking = blake3(b"ramflux.franking_opening.v1" + b"\x0a\x05hello\x8a\x01\x20" + bytes([42])*32 + common,
                   key=bytes([1]) * 32).digest()
 result = {
     "canonical_header": b64(canonical).decode(),

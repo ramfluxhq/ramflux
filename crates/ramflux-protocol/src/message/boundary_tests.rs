@@ -30,8 +30,8 @@ fn scalar(tag: u32, value: u64) -> Vec<u8> {
 #[test]
 fn every_interleaved_oneof_has_a_field_order_encoder() -> TestResult {
     let pool = descriptors()?;
-    assert_eq!(pool.all_messages().filter(|message| !message.is_map_entry()).count(), 253);
-    assert_eq!(pool.all_messages().count(), 254);
+    assert_eq!(pool.all_messages().filter(|message| !message.is_map_entry()).count(), 255);
+    assert_eq!(pool.all_messages().count(), 256);
     let mut interleaved = Vec::new();
     for message in pool.all_messages() {
         for choice in message.oneofs().filter(|choice| !choice.is_synthetic()) {

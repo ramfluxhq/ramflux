@@ -117,7 +117,7 @@ fn edit_reaction_delete_authorization() -> TestResult {
 
 #[test]
 fn stale_declaration_target_receives_and_executes_delete_and_edit() -> TestResult {
-    assert_eq!(PROFILE_FLOOR, 2, "S10a floor is 2; F=1 would refuse Delete or send Edit as text");
+    assert_eq!(PROFILE_FLOOR, 3, "private revision entropy requires the new floor-3 profile");
     assert_eq!(mutation_first_layer(KindId::KindEdit), Some(2));
     assert_eq!(mutation_first_layer(KindId::KindDelete), Some(2));
     for expired in [false, true] {
@@ -141,9 +141,14 @@ fn stale_declaration_target_receives_and_executes_delete_and_edit() -> TestResul
 #[test]
 fn erasure_fields_require_floor_raise_and_profile_reset() -> TestResult {
     for (name, tag, layer) in ERASURE_FIELDS {
-        assert_eq!(*layer, PROFILE_FLOOR, "{name} field {tag} is a floor-2 erasure field");
+        assert!(
+            *layer <= PROFILE_FLOOR,
+            "{name} field {tag} must be admitted by the profile floor"
+        );
         admit_erasure_field(*layer, PROFILE_FLOOR)?;
     }
+    assert!(ERASURE_FIELDS.contains(&("Message", 17, 3)));
+    assert!(admit_erasure_field(3, 2).is_err(), "nonce must never enter the old erasure profile");
     assert!(
         admit_erasure_field(PROFILE_FLOOR + 1, PROFILE_FLOOR).is_err(),
         "new erasure field above F without a floor raise must fail"
