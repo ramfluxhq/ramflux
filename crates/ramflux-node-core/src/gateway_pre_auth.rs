@@ -204,9 +204,42 @@ impl GatewayState {
         }
     }
 
+    /// Exact final floor after all request owners have drained; releases the future reservation.
+    #[must_use]
+    pub fn final_admission_checkpoint(&self, now: u64) -> GatewayAdmissionCheckpoint {
+        let mut checkpoint = self.admission_checkpoint(now);
+        checkpoint.deadline = checkpoint.admission.high_water_unix_seconds;
+        checkpoint
+    }
+    /// Decide whether startup must wait for a crash reservation, without evaluating admission.
+    /// # Errors
+    /// Refuses a host clock below the committed floor, invalid time or a malformed reservation.
+    pub fn admission_startup_delay(
+        &self,
+        time: SystemTime,
+    ) -> Result<std::time::Duration, NodeCoreError> {
+        let now = time
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| NodeCoreError::PreAuthClockInvalid)?
+            .as_secs();
+        if now < self.pre_auth_committed_floor {
+            return Err(NodeCoreError::PreAuthClockRollback);
+        }
+        let barrier = UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(self.pre_auth_time_floor))
+            .ok_or(NodeCoreError::PreAuthSnapshotInvalid)?;
+        let delay = barrier.duration_since(time).unwrap_or(std::time::Duration::ZERO);
+        if delay > std::time::Duration::from_secs(PRE_AUTH_CHECKPOINT_SECONDS) {
+            return Err(NodeCoreError::PreAuthSnapshotInvalid);
+        }
+        Ok(delay)
+    }
+
     /// Publish a committed reservation; concurrent debt stays in memory.
     pub fn install_admission_checkpoint(&mut self, checkpoint: &GatewayAdmissionCheckpoint) {
         if self.pre_auth_policy_revision == checkpoint.revision {
+            self.pre_auth_committed_floor =
+                self.pre_auth_committed_floor.max(checkpoint.admission.high_water_unix_seconds);
             self.pre_auth_runtime_deadline = Some(checkpoint.deadline);
             self.pre_auth_checkpoint_stalled = false;
         }
@@ -308,15 +341,6 @@ impl GatewayRedbStore {
         let read = self.db.begin_read().map_err(|e| NodeCoreError::Redb(e.to_string()))?;
         let table =
             read.open_table(GATEWAY_STATE_TABLE).map_err(|e| NodeCoreError::Redb(e.to_string()))?;
-        for obsolete in [
-            "pre_auth_legacy_clock_v1",
-            crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY,
-            crate::GATEWAY_PRE_AUTH_METRICS_KEY,
-        ] {
-            if table.get(obsolete).map_err(|e| NodeCoreError::Redb(e.to_string()))?.is_some() {
-                return Err(NodeCoreError::GatewayStateResetRequired);
-            }
-        }
         if let Some(raw) = table.get(KEY).map_err(|e| NodeCoreError::Redb(e.to_string()))? {
             if raw.value().len() > MAX_BYTES {
                 return Err(NodeCoreError::PreAuthSnapshotInvalid);
@@ -325,6 +349,7 @@ impl GatewayRedbStore {
                 .map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
             validate_snapshot(&snapshot, 60)?;
             state.pre_auth_time_floor = snapshot.high_water_unix_seconds;
+            state.pre_auth_committed_floor = snapshot.high_water_unix_seconds;
             state.pre_auth_handshakes_by_source_ip = snapshot.buckets;
             state.pre_auth_metrics = snapshot.metrics;
         }
@@ -344,8 +369,15 @@ impl GatewayRedbStore {
                 return Err(NodeCoreError::PreAuthSnapshotInvalid);
             }
             state.pre_auth_time_floor = state.pre_auth_time_floor.max(floor);
-            state.pre_auth_restart_until = prior_cooldown
-                .max(floor.saturating_add(window.max(state.pre_auth_policy.window_seconds)));
+            if floor > state.pre_auth_committed_floor.saturating_add(PRE_AUTH_CHECKPOINT_SECONDS) {
+                return Err(NodeCoreError::PreAuthSnapshotInvalid);
+            }
+            state.pre_auth_restart_until = if floor == state.pre_auth_committed_floor {
+                prior_cooldown
+            } else {
+                prior_cooldown
+                    .max(floor.saturating_add(window.max(state.pre_auth_policy.window_seconds)))
+            };
         }
         state.pre_auth_handshakes_by_source_ip.retain(|_, events| !events.is_empty());
         state.pre_auth_expiry = state

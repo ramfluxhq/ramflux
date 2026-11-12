@@ -101,55 +101,26 @@ fn gateway_rejects_root_claim_and_committed_key_substitution_before_recording_re
 
 #[test]
 fn replay_protection_survives_restart() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "gateway-replay-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = temp_store_path("gateway-replay-durable")?;
     let open = gateway_open_frame("bob", "restart-nonce");
     let auth = gateway_auth_frame(&open, "restart-request", 1_760_000_000)?;
     let registered = gateway_registered_key(&open)?;
-    let mut state = GatewayState::new();
     {
         let store = GatewayRedbStore::open(&path)?;
+        store.configure_replay(GatewayReplayConfig::small_node(), 1_760_000_001)?;
+        store.write_guard()?.authenticate_gateway(&open, &auth, &registered, 1_760_000_001)?;
+    }
+    for now in [1_760_000_002, 1_760_000_003] {
+        let store = GatewayRedbStore::open(&path)?;
+        store.configure_replay(GatewayReplayConfig::small_node(), now)?;
+        let mut state = store.load_state()?.ok_or("missing state")?;
+        assert!(state.replay_guard_state_mut().is_empty(), "startup materialized replay evidence");
+        assert!(matches!(
+            store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now),
+            Err(NodeCoreError::ReplayGuard(_))
+        ));
         store.save_state(&state)?;
-        let source = validate_gateway_auth_with_replay(
-            &open,
-            &auth,
-            1_760_000_001,
-            state.replay_guard_state_mut(),
-            &registered,
-        )?;
-        store.save_auth_replay(&source, &auth.signed_request, 1_760_000_001)?;
     }
-    {
-        let store = GatewayRedbStore::open(&path)?;
-        let mut restored = store.load_state()?.ok_or("missing state")?;
-        assert!(
-            validate_gateway_auth_with_replay(
-                &open,
-                &auth,
-                1_760_000_002,
-                restored.replay_guard_state_mut(),
-                &registered
-            )
-            .is_err()
-        );
-        // A subsequent whole checkpoint cannot overwrite the journal's replay evidence.
-        store.save_state(&restored)?;
-    }
-    let store = GatewayRedbStore::open(&path)?;
-    let mut restored = store.load_state()?.ok_or("missing checkpoint")?;
-    assert!(
-        validate_gateway_auth_with_replay(
-            &open,
-            &auth,
-            1_760_000_003,
-            restored.replay_guard_state_mut(),
-            &registered
-        )
-        .is_err()
-    );
-    drop(store);
     std::fs::remove_file(path)?;
     Ok(())
 }
@@ -161,6 +132,7 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
         ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
     ));
     let store = GatewayRedbStore::open(&path)?;
+    store.configure_replay(GatewayReplayConfig::small_node(), 1_760_000_000)?;
     let mut state = GatewayState::new();
     store.save_state(&state)?;
     let snapshots = store.full_snapshot_commit_count();
@@ -170,7 +142,7 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
         let open = gateway_open_frame("bob", &format!("nonce-{index}"));
         let auth = gateway_auth_frame(&open, &format!("request-{index}"), now)?;
         let registered = gateway_registered_key(&open)?;
-        store.authenticate(&mut state, &open, &auth, now + 1, &registered)?;
+        store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now + 1)?;
         let resume = state.issue_resume_token(GatewayResumeIssueInput {
             session_id: &format!("session-{index}"),
             target_delivery_id: "target",
@@ -220,21 +192,33 @@ fn auth_does_not_rewrite_whole_gateway_state() -> Result<(), Box<dyn std::error:
 #[test]
 fn signed_request_capacity_is_root_scoped_and_survives_restore()
 -> Result<(), Box<dyn std::error::Error>> {
-    let open = gateway_open_frame("bob", "capacity-nonce");
-    let auth = gateway_auth_frame(&open, "capacity-request", 1_760_000_000)?;
-    let bob = replay_source("bob")?;
-    let mut guard = NodeReplayGuardState::new();
-    for index in 0..crate::replay_guard::GATEWAY_REPLAY_SHARE {
-        let mut request = auth.signed_request.clone();
-        request.request_id = format!("capacity-{index}");
-        guard.check_gateway_signed_request(&bob, &request, 1_760_000_001)?;
+    let path = temp_store_path("gateway-small-shares")?;
+    let config = GatewayReplayConfig {
+        root_budget: 2,
+        per_root_share: 4,
+        storage_budget_bytes: 128 * 1024 * 1024,
+    };
+    let now = 1_760_000_000;
+    let (open, auth, registered, _) = rooted_auth(1, "bob", "initial", now)?;
+    {
+        let store = GatewayRedbStore::open(&path)?;
+        store.configure_replay(config, now)?;
+        for index in 0..4 {
+            let (open, auth, registered, _) =
+                rooted_auth(1, "bob", &format!("capacity-{index}"), now)?;
+            store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now)?;
+        }
     }
-    let mut guard: NodeReplayGuardState = serde_json::from_slice(&serde_json::to_vec(&guard)?)?;
-    assert!(guard.check_gateway_signed_request(&bob, &auth.signed_request, 1_760_000_001).is_err());
-    let root = ramflux_crypto::create_identity_root("mallory", [0xa1; 32]);
-    let branch = ramflux_crypto::create_device_branch("mallory", "bob", 1, [0xa2; 32]);
-    let mallory = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-    guard.check_gateway_signed_request(&mallory, &auth.signed_request, 1_760_000_001)?;
+    let store = GatewayRedbStore::open(&path)?;
+    store.configure_replay(config, now + 1)?;
+    assert!(matches!(
+        store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now + 1),
+        Err(NodeCoreError::GatewayReplayCapacity)
+    ));
+    let (open, auth, registered, _) = rooted_auth(2, "bob", "other-root", now)?;
+    store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now + 1)?;
+    drop(store);
+    std::fs::remove_file(path)?;
     Ok(())
 }
 
@@ -262,74 +246,102 @@ fn router_envelopes_ignore_gateway_replay_capacity() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+type RootedAuth = (
+    GatewayOpenFrame,
+    GatewayAuthFrame,
+    DeviceAuthKeyResponse,
+    ramflux_crypto::RootQualifiedDeviceRef,
+);
+
+fn rooted_auth(
+    seed: u8,
+    device: &str,
+    nonce: &str,
+    now: i64,
+) -> Result<RootedAuth, Box<dyn std::error::Error>> {
+    let open = gateway_open_frame(device, nonce);
+    let devices = ["bob", "device-1", "device-2", "device-3"].map(str::to_owned);
+    let registered = crate::test_support::federation_fixtures::gateway_registered_key_for_devices(
+        &open, [seed; 32], &devices,
+    )?;
+    let source = registered.authenticated_device_identity_for("register", u64::try_from(now)?)?;
+    let mut auth = gateway_auth_frame(&open, nonce, now)?;
+    auth.device_proof
+        .ext
+        .ext
+        .insert("source_root_commitment".into(), source.root_commitment().into());
+    auth.device_proof.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
+        &auth.device_proof,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    )?;
+    auth.signed_request.device_proof_hash = ramflux_crypto::blake3_256_base64url(
+        GATEWAY_DEVICE_PROOF_HASH_DOMAIN,
+        &ramflux_protocol::canonical_json_bytes(&auth.device_proof)?,
+    );
+    auth.signed_request.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
+        &auth.signed_request,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    )?;
+    Ok((open, auth, registered, source))
+}
+
 #[test]
-fn gateway_root_admission_preserves_honest_auth_and_submit_after_saturation()
+pub(crate) fn gateway_root_admission_preserves_honest_auth_and_submit_after_saturation()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!(
-        "gateway-root-shares-{}.redb",
-        ramflux_protocol::encode_base64url(ramflux_crypto::random_32()?)
-    ));
+    let path = temp_store_path("gateway-more-than64-roots")?;
+    let config = GatewayReplayConfig {
+        root_budget: 70,
+        per_root_share: 4,
+        storage_budget_bytes: 128 * 1024 * 1024,
+    };
     let now = 1_760_000_000;
-    let open = gateway_open_frame("bob", "honest-initial");
-    let auth = gateway_auth_frame(&open, "honest-initial", now)?;
-    let registered = gateway_registered_key(&open)?;
-    let mut state = GatewayState::new();
     let store = GatewayRedbStore::open(&path)?;
-    let honest = store.authenticate(&mut state, &open, &auth, now + 1, &registered)?;
-    for index in 0..crate::replay_guard::GATEWAY_REPLAY_ROOTS - 1 {
-        let seed = u8::try_from(index + 80)?;
-        let root = ramflux_crypto::create_identity_root("admitted-attacker", [seed; 32]);
-        let branch =
-            ramflux_crypto::create_device_branch("admitted-attacker", "bob", 1, [seed; 32]);
-        let source = ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&root, &branch)?;
-        let mut request = auth.signed_request.clone();
-        request.request_id = format!("attacker-{index}");
-        state.replay_guard_state_mut().check_gateway_signed_request(&source, &request, now + 1)?;
-        store.save_auth_replay(&source, &request, now + 1)?;
+    store.configure_replay(config, now)?;
+    let (open, auth, registered, honest) = rooted_auth(0, "bob", "honest-initial", now)?;
+    store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now)?;
+    for root in 1..70 {
+        for (slot, device) in ["bob", "device-1", "device-2", "device-3"].iter().enumerate() {
+            let (open, auth, registered, _) =
+                rooted_auth(u8::try_from(root)?, device, &format!("root-{root}-slot-{slot}"), now)?;
+            store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now)?;
+        }
+        let (open, auth, registered, _) =
+            rooted_auth(u8::try_from(root)?, "bob", &format!("root-{root}-exhausted"), now)?;
+        assert!(matches!(
+            store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now),
+            Err(NodeCoreError::GatewayReplayCapacity)
+        ));
     }
-    let outsider_root = ramflux_crypto::create_identity_root("unallocated", [241; 32]);
-    let outsider_branch = ramflux_crypto::create_device_branch("unallocated", "bob", 1, [242; 32]);
-    let outsider =
-        ramflux_crypto::RootQualifiedDeviceRef::for_owned_device(&outsider_root, &outsider_branch)?;
+    let (open, auth, registered, _) = rooted_auth(71, "bob", "outsider", now)?;
     assert!(matches!(
-        state.replay_guard_state_mut().check_gateway_signed_request(
-            &outsider,
-            &auth.signed_request,
-            now + 1
-        ),
+        store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now),
         Err(NodeCoreError::GatewayReplayCapacity)
     ));
-    let next_open = gateway_open_frame("bob", "honest-reauth");
-    let next_auth = gateway_auth_frame(&next_open, "honest-reauth", now)?;
-    store.authenticate(&mut state, &next_open, &next_auth, now + 1, &registered)?;
+    let (open, auth, registered, _) = rooted_auth(0, "bob", "honest-reauth", now)?;
+    store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now)?;
     let mut submit = auth.signed_request.clone();
     submit.request_id = "honest-submit".into();
-    submit.path = "/gateway/session/own-device-fanout".into();
-    state.replay_guard_state_mut().check_gateway_signed_request(&honest, &submit, now + 1)?;
-    store.save_auth_replay(&honest, &submit, now + 1)?;
+    submit.nonce = "honest-submit".into();
+    submit.path = "/gateway/session/submit".into();
+    submit.signed.signature = ramflux_crypto::sign_protocol_object_with_seed(
+        &submit,
+        ramflux_crypto::FIXTURE_SIGNING_KEY_BYTES,
+    )?;
+    ramflux_crypto::verify_canonical_signature(
+        &ramflux_protocol::signed_bytes(&submit)?,
+        &submit.signed.signature,
+        &registered.branch_public_key,
+    )?;
+    store.save_auth_replay(&honest, &submit, now)?;
     drop(store);
     let store = GatewayRedbStore::open(&path)?;
-    let mut restored = store.load_state()?.ok_or("root shares missing")?;
-    let late = now + ramflux_protocol::MAX_ENVELOPE_TTL_SECONDS + 1;
-    let mut fresh = submit.clone();
-    fresh.created_at = late;
-    fresh.expires_at = late + 60;
-    fresh.request_id = "honest-after-expiry".into();
+    store.configure_replay(config, now + 1)?;
     assert!(matches!(
-        restored.replay_guard_state_mut().check_gateway_signed_request(&outsider, &fresh, late),
-        Err(NodeCoreError::GatewayReplayCapacity)
+        store.save_auth_replay(&honest, &submit, now + 1),
+        Err(NodeCoreError::ReplayGuard(_))
     ));
-    restored.replay_guard_state_mut().check_gateway_signed_request(&honest, &fresh, late)?;
-    store.save_auth_replay(&honest, &fresh, late)?;
-    drop(store);
-    let store = GatewayRedbStore::open(&path)?;
-    let mut restored = store.load_state()?.ok_or("reserved roots lost on restart")?;
-    assert!(matches!(
-        restored.replay_guard_state_mut().check_gateway_signed_request(&outsider, &fresh, late),
-        Err(NodeCoreError::GatewayReplayCapacity)
-    ));
-    fresh.request_id = "honest-after-second-restart".into();
-    restored.replay_guard_state_mut().check_gateway_signed_request(&honest, &fresh, late)?;
+    let (open, auth, registered, _) = rooted_auth(0, "bob", "honest-after-restart", now)?;
+    store.write_guard()?.authenticate_gateway(&open, &auth, &registered, now + 1)?;
     drop(store);
     std::fs::remove_file(path)?;
     Ok(())

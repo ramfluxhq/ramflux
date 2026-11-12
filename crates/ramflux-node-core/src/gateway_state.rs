@@ -3,6 +3,13 @@
 
 #![allow(unused_imports)]
 
+#[path = "gateway_replay_policy.rs"]
+mod replay_policy;
+pub use replay_policy::{
+    GATEWAY_REPLAY_MEMORY_LIMIT_BYTES, GATEWAY_REPLAY_PAGE_CACHE_BYTES, GatewayReplayConfig,
+};
+#[path = "gateway_replay_gc.rs"]
+mod replay_gc;
 #[path = "gateway_replay_journal.rs"]
 mod replay_journal;
 #[path = "gateway_session_overlay.rs"]
@@ -15,11 +22,11 @@ mod store_format;
 pub use pre_auth_state::GatewayAdmissionCheckpoint;
 
 use crate::{
-    GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_PRE_AUTH_METRICS_KEY, GATEWAY_PRE_AUTH_POLICY_KEY,
-    GATEWAY_PRE_AUTH_RATE_STATE_KEY, GATEWAY_STATE_TABLE, GatewayPreAuthChallengeResponse,
-    GatewayPreAuthDecision, GatewayPreAuthMetrics, GatewayPreAuthPolicy, NodeCoreError,
-    NodeReplayGuardState, PRE_AUTH_PROTOCOL_VERSION, PreAuthChallenge, load_snapshot,
-    open_redb_with_table, save_snapshot, save_snapshot_batch, serialize_snapshot_value,
+    GATEWAY_CHALLENGE_STATE_KEY, GATEWAY_PRE_AUTH_POLICY_KEY, GATEWAY_STATE_TABLE,
+    GatewayPreAuthChallengeResponse, GatewayPreAuthDecision, GatewayPreAuthMetrics,
+    GatewayPreAuthPolicy, NodeCoreError, NodeReplayGuardState, PRE_AUTH_PROTOCOL_VERSION,
+    PreAuthChallenge, load_snapshot, open_redb_with_table, save_snapshot, save_snapshot_batch,
+    serialize_snapshot_value,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use redb::{ReadableDatabase, TableDefinition};
@@ -108,6 +115,8 @@ pub struct GatewayState {
     pre_auth_handshakes_by_source_ip: BTreeMap<String, Vec<u64>>,
     #[serde(skip)]
     pre_auth_policy_revision: u64,
+    #[serde(skip)]
+    pre_auth_committed_floor: u64,
     #[serde(skip)]
     pre_auth_checkpoint_stalled: bool,
     #[serde(skip)]
@@ -635,7 +644,12 @@ fn write_len_prefixed(output: &mut Vec<u8>, bytes: &[u8]) {
 
 pub struct GatewayRedbStore {
     db: redb::Database,
+    path: PathBuf,
+    replay_config: std::sync::Mutex<Option<GatewayReplayConfig>>,
     write_gate: std::sync::Mutex<()>,
+    async_write_pending: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    writer_attempt: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     #[cfg(any(test, feature = "durability-test-hooks"))]
     admission_commit_pause: std::sync::Mutex<Option<AdmissionCommitPause>>,
     #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -650,6 +664,18 @@ pub struct GatewayRedbStore {
 struct AdmissionCommitPause {
     started: std::sync::mpsc::Sender<()>,
     release: std::sync::mpsc::Receiver<()>,
+}
+
+pub const GATEWAY_NETWORK_WRITE_LIMIT: usize = 8;
+
+/// One bounded queued/running network write; dropping it releases admission even after failure.
+pub struct GatewayWriteAdmission {
+    store: std::sync::Arc<GatewayRedbStore>,
+}
+impl Drop for GatewayWriteAdmission {
+    fn drop(&mut self) {
+        self.store.async_write_pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// Acquire before the gateway state mutex; durable I/O then happens after releasing state.
@@ -699,15 +725,62 @@ impl GatewayStoreWriter<'_> {
 }
 
 impl GatewayRedbStore {
+    /// Bound queued/running network offloads per store before spawning blocking work.
+    /// # Errors
+    /// Returns a typed retryable busy result; callers must not spawn work after refusal.
+    pub fn try_admit_async_write(
+        self: &std::sync::Arc<Self>,
+    ) -> Result<GatewayWriteAdmission, NodeCoreError> {
+        self.async_write_pending
+            .try_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |pending| {
+                    pending.checked_add(1).filter(|count| *count <= GATEWAY_NETWORK_WRITE_LIMIT)
+                },
+            )
+            .map_err(|_| NodeCoreError::GatewayWriterBusy)?;
+        Ok(GatewayWriteAdmission { store: std::sync::Arc::clone(self) })
+    }
+    /// Current number of bounded queued/running network writes.
+    #[must_use]
+    pub fn pending_network_writes(&self) -> usize {
+        self.async_write_pending.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Serialize durable writers without blocking ordinary state operations on disk I/O.
     /// # Errors
     /// Returns an error if a writer panicked while owning the serialization gate.
     pub fn write_guard(&self) -> Result<GatewayStoreWriter<'_>, NodeCoreError> {
+        #[cfg(any(test, feature = "durability-test-hooks"))]
+        if let Some(observer) = self
+            .writer_attempt
+            .lock()
+            .map_err(|_| NodeCoreError::Redb("writer observer poisoned".into()))?
+            .take()
+        {
+            let _ = observer.send(());
+        }
         let guard = self
             .write_gate
             .lock()
             .map_err(|_| NodeCoreError::Redb("gateway writer poisoned".into()))?;
         Ok(GatewayStoreWriter { store: self, _guard: guard })
+    }
+
+    /// Observe the next writer acquisition attempt, before it can wait for the gate.
+    /// # Errors
+    /// Returns a poisoned test-observer error.
+    #[cfg(any(test, feature = "durability-test-hooks"))]
+    pub fn observe_next_writer_attempt(
+        &self,
+        observer: std::sync::mpsc::Sender<()>,
+    ) -> Result<(), NodeCoreError> {
+        *self
+            .writer_attempt
+            .lock()
+            .map_err(|_| NodeCoreError::Redb("writer observer poisoned".into()))? = Some(observer);
+        Ok(())
     }
 
     /// Pause one real checkpoint after its writes and before its durable commit.
@@ -735,9 +808,6 @@ impl GatewayRedbStore {
     fn before_admission_commit(&self) -> Result<(), NodeCoreError> {
         #[cfg(any(test, feature = "durability-test-hooks"))]
         {
-            if self.fail_pre_auth_commit.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                return Err(NodeCoreError::Redb("injected pre-auth commit failure".into()));
-            }
             let pause = self
                 .admission_commit_pause
                 .lock()
@@ -753,6 +823,9 @@ impl GatewayRedbStore {
                     .recv()
                     .map_err(|_| NodeCoreError::Redb("checkpoint release gone".into()))?;
             }
+            if self.fail_pre_auth_commit.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return Err(NodeCoreError::Redb("injected pre-auth commit failure".into()));
+            }
         }
         Ok(())
     }
@@ -760,10 +833,16 @@ impl GatewayRedbStore {
     /// # Errors
     /// Returns an error when validation, serialization, storage, or state checks fail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NodeCoreError> {
-        let db = store_format::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let db = store_format::open(&path)?;
         Ok(Self {
             db,
+            path,
+            replay_config: std::sync::Mutex::new(None),
             write_gate: std::sync::Mutex::new(()),
+            async_write_pending: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "durability-test-hooks"))]
+            writer_attempt: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "durability-test-hooks"))]
             admission_commit_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "durability-test-hooks"))]
@@ -870,6 +949,7 @@ impl GatewayRedbStore {
             pre_auth_time_floor: 0,
             pre_auth_cookie_key: None,
             pre_auth_policy_revision: 0,
+            pre_auth_committed_floor: 0,
             pre_auth_checkpoint_stalled: false,
             retention_cursors: [None, None, None],
             pre_auth_expiry: BTreeSet::new(),
@@ -884,12 +964,11 @@ impl GatewayRedbStore {
         } else if pre_auth_state::validate_policy(&state.pre_auth_policy).is_err() {
             state.configure_pre_auth_policy(&crate::GatewayPreAuthConfig::default())?;
         }
-        self.load_replay_journal(&mut state)?;
         self.load_pre_auth_admission(&mut state)?;
         state.trim_pre_auth_debt();
         if !initialized
             && state.sessions_by_id.is_empty()
-            && state.replay_guard_state.is_empty()
+            && !self.has_replay_entries()?
             && state.pre_auth_time_floor == 0
             && state.pre_auth_handshakes_by_source_ip.is_empty()
             && state.pre_auth_metrics == GatewayPreAuthMetrics::default()

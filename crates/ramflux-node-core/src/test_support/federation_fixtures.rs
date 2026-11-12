@@ -16,7 +16,15 @@ use ramflux_protocol::{DeliveryClass, Envelope, Ext, Priority, SignatureAlg, Sig
 pub fn gateway_registered_key(
     open: &GatewayOpenFrame,
 ) -> Result<DeviceAuthKeyResponse, ramflux_crypto::CryptoError> {
-    let root = ramflux_crypto::create_identity_root("alice", [0x91; 32]);
+    gateway_registered_key_for_devices(open, [0x91; 32], std::slice::from_ref(&open.device_id))
+}
+
+pub fn gateway_registered_key_for_devices(
+    open: &GatewayOpenFrame,
+    root_seed: [u8; 32],
+    devices: &[String],
+) -> Result<DeviceAuthKeyResponse, ramflux_crypto::CryptoError> {
+    let root = ramflux_crypto::create_identity_root("alice", root_seed);
     let agreement = ramflux_crypto::X25519KeyPair::from_seed([0x92; 32]);
     let keys = ramflux_crypto::device_key_commitments(
         &ramflux_crypto::fixture_public_key_base64url(),
@@ -27,14 +35,17 @@ pub fn gateway_registered_key(
         ramflux_crypto::DeviceSetSigningInput {
             principal_kind: ramflux_protocol::PrincipalKind::Human,
             device_set_epoch: 1,
-            devices: vec![ramflux_protocol::SignedDeviceSetEntry {
-                device_id: open.device_id.clone(),
-                device_epoch: 1,
-                signing_key_commitment: keys.0,
-                agreement_key_commitment: keys.1,
-                status: ramflux_protocol::DeviceSetStatus::Active,
-                revoked_at: None,
-            }],
+            devices: devices
+                .iter()
+                .map(|device| ramflux_protocol::SignedDeviceSetEntry {
+                    device_id: device.clone(),
+                    device_epoch: 1,
+                    signing_key_commitment: keys.0.clone(),
+                    agreement_key_commitment: keys.1.clone(),
+                    status: ramflux_protocol::DeviceSetStatus::Active,
+                    revoked_at: None,
+                })
+                .collect(),
         },
     )?;
     Ok(DeviceAuthKeyResponse {

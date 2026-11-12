@@ -90,8 +90,6 @@ pub(crate) const GATEWAY_STATE_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("gateway_state_v1");
 pub(crate) const GATEWAY_CHALLENGE_STATE_KEY: &str = "challenge_state";
 pub(crate) const GATEWAY_PRE_AUTH_POLICY_KEY: &str = "pre_auth_policy";
-pub(crate) const GATEWAY_PRE_AUTH_METRICS_KEY: &str = "pre_auth_metrics";
-pub(crate) const GATEWAY_PRE_AUTH_RATE_STATE_KEY: &str = "pre_auth_rate_state";
 
 pub(crate) fn open_redb_with_table(
     path: impl AsRef<Path>,

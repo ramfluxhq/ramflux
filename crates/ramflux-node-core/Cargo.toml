@@ -27,6 +27,7 @@ itest-provider-single-key = []
 itest-redb-cache-probe = ["redb/cache_metrics"]
 
 [dependencies]
+fs2 = "0.4"
 blake3.workspace = true
 ed25519-dalek = { workspace = true }
 aes-gcm = { workspace = true }

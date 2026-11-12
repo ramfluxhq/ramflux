@@ -84,7 +84,16 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
         let store = ramflux_node_core::GatewayRedbStore::open(redb_path)?;
         let mut state = pre_auth::restore(&store, config.gateway.as_ref())?;
         pre_auth::configure(&mut state, config.gateway.as_ref())?;
-        let now = state.observe_pre_auth_time(std::time::SystemTime::now())?;
+        let now = startup_admission::wait(&mut state)?;
+        store.configure_replay(
+            config
+                .gateway
+                .as_ref()
+                .map_or_else(ramflux_node_core::GatewayReplayConfig::default, |gateway| {
+                    gateway.replay
+                }),
+            i64::try_from(now)?,
+        )?;
         state.prune_retained_sessions(
             now,
             session::gateway_resume_window_seconds(),
@@ -123,12 +132,14 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
             })?;
         }
         if std::env::args().any(|arg| arg == "--once") {
+            startup_admission::final_checkpoint(&state, &store)?;
             return Ok(());
         }
         return shutdown
             .wait_and_finalize(move || {
                 ramflux_node_core::ensure_exclusive_service_owner(&state)?;
                 ramflux_node_core::ensure_exclusive_service_owner(&store)?;
+                startup_admission::final_checkpoint(&state, &store)?;
                 drop((router, notify, state, store));
                 Ok(())
             })
@@ -142,3 +153,5 @@ fn run_service(service: &'static str) -> anyhow::Result<()> {
 }
 
 mod device_set_limit;
+mod durable_work;
+mod startup_admission;

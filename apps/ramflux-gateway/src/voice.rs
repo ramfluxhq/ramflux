@@ -54,7 +54,7 @@ async fn issue(
     runtime: &GatewaySessionRuntime,
     request: &VoiceLeaseFrame,
 ) -> Result<VoiceLeaseResponse, VoiceIssueError> {
-    crate::session::validate_gateway_session_signed_request(
+    crate::session::validate_gateway_session_signed_request_async(
         context,
         runtime,
         &request.signed_request,
@@ -62,6 +62,7 @@ async fn issue(
         "/voice/v1/lease",
         &request.body,
     )
+    .await
     .map_err(|error| refused(VoiceCallFailureReason::AuthorityRefused, error))?;
     let scope = scope(&request.body);
     ramflux_node_core::validate_voice_scope(scope)

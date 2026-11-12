@@ -70,7 +70,7 @@ fn preauth_boundary_matrix() -> Result {
     capacity_and_hot_debt()?;
     restart_rollback_and_failed_commit()?;
     disabled_admission_preserves_durable_time_floor()?;
-    bounded_snapshots_and_legacy()?;
+    bounded_snapshots()?;
     configuration_bounds()?;
     mounted_key_rotation_and_resume()?;
     Ok(())
@@ -189,7 +189,7 @@ fn disabled_admission_preserves_durable_time_floor() -> Result {
     );
     Ok(())
 }
-fn bounded_snapshots_and_legacy() -> Result {
+fn bounded_snapshots() -> Result {
     let fixture = Store::new()?;
     let mut state = state()?;
     state.check_pre_auth(&source(1), None, 100)?;
@@ -222,17 +222,6 @@ fn bounded_snapshots_and_legacy() -> Result {
     }
     fixture.replace(&vec![b' '; MAX_BYTES + 1])?;
     assert!(matches!(fixture.store.load_state(), Err(NodeCoreError::PreAuthSnapshotInvalid)));
-    let tx = fixture.store.db.begin_write()?;
-    {
-        let mut table = tx.open_table(GATEWAY_STATE_TABLE)?;
-        table.remove(KEY)?;
-        table.insert(
-            crate::GATEWAY_PRE_AUTH_RATE_STATE_KEY,
-            b"{\"legacy-client-claim\":[100]}".as_slice(),
-        )?;
-    }
-    tx.commit()?;
-    assert!(matches!(fixture.store.load_state(), Err(NodeCoreError::GatewayStateResetRequired)));
 
     Ok(())
 }

@@ -22,6 +22,7 @@ fn preauth_optional_runtime_policy_preserves_or_overrides_storage() -> anyhow::R
     for config in [
         None,
         Some(ramflux_node_core::GatewayConfig {
+            replay: ramflux_node_core::GatewayReplayConfig::small_node(),
             pre_auth: None,
             public_listen_addr: "127.0.0.1:0".into(),
         }),
@@ -31,6 +32,7 @@ fn preauth_optional_runtime_policy_preserves_or_overrides_storage() -> anyhow::R
         assert_eq!(restored.pre_auth_policy().per_source_ip_handshake_rate, 1);
     }
     let config = ramflux_node_core::GatewayConfig {
+        replay: ramflux_node_core::GatewayReplayConfig::small_node(),
         pre_auth: Some(ramflux_node_core::GatewayPreAuthConfig::default()),
         public_listen_addr: "127.0.0.1:0".into(),
     };

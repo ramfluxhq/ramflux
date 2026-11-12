@@ -3,10 +3,16 @@
 
 #[derive(Debug, thiserror::Error)]
 pub enum NodeCoreError {
+    #[error("gateway_writer_busy: retryable")]
+    GatewayWriterBusy,
+    #[error(
+        "gateway_replay_budget_unfunded: configure and provision replay storage before admission"
+    )]
+    GatewayReplayUnfunded,
     #[error("gateway_replay_capacity")]
     GatewayReplayCapacity,
     #[error(
-        "unsupported gateway state format; stop the gateway, back up then remove its gateway redb file and sidecars, and restart to create format v2 (do not remove account or other service stores)"
+        "unsupported gateway state format; stop the gateway, back up then remove its gateway redb file and sidecars, and restart to create format v3 (do not remove account or other service stores)"
     )]
     GatewayStateResetRequired,
     #[error("checkpoint_unavailable")]

@@ -184,3 +184,17 @@ fn is_well_formed_gateway_close_frame(response: &[u8]) -> bool {
 fn invalid_tls_data(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
+
+#[cfg(unix)]
+#[test]
+fn crash_restart_waits_then_serves_in_disabled_mode() -> Result<(), Box<dyn std::error::Error>> {
+    configured_shutdown::gateway_restart::crash_restart(
+        env!("CARGO_BIN_EXE_ramflux-gateway"),
+        false,
+    )
+}
+#[cfg(unix)]
+#[test]
+fn crash_restart_waits_then_serves_in_enabled_mode() -> Result<(), Box<dyn std::error::Error>> {
+    configured_shutdown::gateway_restart::crash_restart(env!("CARGO_BIN_EXE_ramflux-gateway"), true)
+}

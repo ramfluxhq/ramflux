@@ -49,19 +49,24 @@ and serialization do not grow with the session count. Retention visits at most 6
 entries per metadata family per pass and prunes bounded indexed session/token rows.
 No whole-state snapshot runs on the timer.
 
-The committed reservation endpoint is a strict restart clock barrier in both
-enabled and disabled modes. Startup below it is refused, even if the previous
-process served an Open after its checkpoint. Correct the clock and wait for the
-endpoint before restarting. Equal seconds are accepted. Enabled mode separately
-retains a restart debt cooldown through the reservation plus the larger saved or
-configured rate window, preserving any longer prior cooldown. Restart cannot
-reset unknown sources' uncheckpointed rate debt.
+The committed reservation endpoint fences admission in both enabled and disabled
+modes. Graceful shutdown commits the exact observed floor and releases the future
+reservation; a clean restart starts immediately. After a crash, startup waits
+through the committed endpoint before listening, for at most 30 seconds, logging
+one aggregate wait message. A host clock below the committed floor itself is a
+true rollback and fails with the typed clock error. Equal seconds are accepted.
+Enabled mode separately preserves unknown-source debt cooldown through a crash
+reservation plus the larger saved/configured window, including any longer prior
+cooldown. No admission is evaluated before the committed endpoint.
 
 Opens perform no disk write. An Open beyond the committed reservation fails with
 `checkpoint_unavailable` in either mode until another checkpoint succeeds. Failed
 commits leave the previous reservation in force. A stalled writer never owns the
 global state mutex: established sessions can continue heartbeat/read activity.
-Operations requiring persistence wait on the separate writer gate. Recovery is
+Network writes acquire one of eight bounded asynchronous offload permits before
+waiting for the writer gate or fsync. Excess requests receive retryable
+`gateway_writer_busy`; cancellation keeps the permit until the actual blocking
+work finishes. No uncommitted signed operation is acknowledged. Recovery is
 automatic after a successful checkpoint. `checkpoint_failures` counts failed
 checkpoints; `checkpoint_outages` counts observed outage episodes. A separate
 observer emits at most one aggregate warning each 10-second interval and a
@@ -76,9 +81,9 @@ are unchanged. Cookies are reusable within TTL for the observed source, includin
 port rebinding, and are not a hard handshake quota. Admission follows transport
 handshake establishment and cannot prevent transport handshake floods.
 
-## Gateway format 2 and controller reset
+## Gateway format 3 and controller reset
 
-Gateway stores now require the `gateway_state_format` marker `2`. Every existing
+Gateway stores now require the `gateway_state_format` marker `3`. Every existing
 file without that marker is refused at startup with `GatewayStateResetRequired`,
 before publishing state or adding tables/markers. There is no old replay snapshot
 reader, ownerless accounting, legacy clock import or session snapshot migration.
@@ -87,7 +92,7 @@ Downgrade is unsupported.
 At the next deployment the controller resets demo gateway state: stop every
 gateway using the configured gateway redb file, back up that file and its own
 sidecars, then remove only that gateway database and its sidecars. Restart to
-create a fresh format 2 store. This deliberately retires gateway sessions, resume
+create a fresh format 3 store. This deliberately retires gateway sessions, resume
 tokens, replay evidence and admission debt. Preserve account, router and other
 service stores. Rotate the admission cookie key if the reset also discards a clock
 fence. Never reset a running database or edit redb bytes. The implementation does
@@ -97,30 +102,54 @@ not perform this deployment/reset itself.
 
 Gateway signed-request validity remains at most seven days (604800 seconds),
 with 120 seconds allowed future clock skew. Quotas apply to signed gateway
-requests only, never router envelope admission. Each admitted account ROOT owns
-32768 replay entries shared by all its devices. At most 64 roots are admitted,
-for total capacity 64 × 32768 = 2097152. Root reservations persist until an explicit
-store reset, even after their entries expire, so another root cannot steal an
-existing root's allocation. A new root beyond the budget, or an exhausted root,
-receives the typed `GatewayReplayCapacity` error. Live evidence is never evicted
-and validity is never shortened retroactively.
+requests only, never router envelope admission. Each admitted account ROOT owns a configured share S (default32768)
+across all devices. Configured root budget R defaults to4096; maximum live
+identities are R×S=134217728. Exhaustion returns typed `GatewayReplayCapacity`.
+Live evidence is never evicted and accepted validity is never shortened.
 
-These are **OPEN-VALUE** sizing choices for security review: a share supports two
-combined signed operations per minute throughout the full validity plus skew,
-2 × (604800 + 120) / 60 = 20164 entries, leaving headroom below 32768. Higher
-sustained workloads and the 64-root deployment budget require explicit resizing.
+Reservations are allocated only with the first committed identity, and released
+when no identity remains live (expiry equal to fenced server time is still live).
+All root membership, counts, generation and expiry indexes are transactional disk
+authority. Failed writes install nothing. The writer gate serializes pending
+commits with reclamation. An expired generation's remaining rows cannot charge or
+resurrect a subsequent reservation. Cleanup examines at most64 expiry candidates
+per transaction, deletes bodies only at matching expiry, and reconciles expired
+root metadata before admission on reopen. An active root's own expiry index takes
+priority over unrelated expired-body backlog so others cannot occupy its share.
 
-Authentication persists one root-owned replay row and expiry-index row before
-acknowledgment, outside the global state mutex. Replacement removes the prior
-expiry index in the same transaction. Each prune processes at most 64 expired
-index rows and deletes a replay body only when its current expiry equals that
-index expiry; obsolete index rows are always removed. The inclusive expiry second
-remains protected. Session establishment writes its session/token pair; expiry
-cleanup uses current per-row tables rather than snapshots or compatibility overlays.
+No evidence is materialized at startup or cached in application maps. redb's page
+cache is limited to8MiB, leaving headroom within the64MiB replay-cache budget for
+allocation overhead; eviction never removes disk evidence. Cleanup holds at most64
+small candidates. Full checkpoints never serialize the replay ledger.
+
+These **OPEN-VALUE** allocations retain the declared full-validity traffic profile:
+two combined signed operations/minute for604800+120 seconds require20164 live
+identities, below32768. Higher profiles require corresponding share/storage
+increases. Default planning uses512 logical bytes/identity and256/root:
+64GiB+1MiB, with128GiB initial backing storage. These are planning allowances,
+not measured physical bounds. Startup rejects zero/overflowed/unfunded budgets,
+checks available filesystem capacity plus the existing store against the declared
+storage budget, and refuses a share reduction while roots remain live. Storage is
+not preallocated; operators must retain the configured backing capacity. A smaller
+profile R256/S32768 plans4GiB+64KiB and provisions8GiB. Explicit configuration:
+
+```toml
+[gateway.replay]
+root_budget = 4096
+per_root_share = 32768
+storage_budget_bytes = 137438953472
+```
+
+`disk_replay_storage_measurement_and_bounded_restore` records actual file growth
+and replay-tree page bytes for4096 committed identities; deployment sizing must
+include every index, page overhead and database working space. Its measurements
+are evidence for that fixture, not a physical upper bound for arbitrary workloads.
+Authentication and each signed operation commit one root-owned identity and its
+indexes outside the global state mutex. Establishment commits a session/token pair.
 
 The shared router replay guard retains its pre-existing v2 key isolation/lookup
 until the separate legacy-removal work removes the router store upgrader. Gateway
-format 2 never imports those rows and does not charge ownerless rows to roots.
+format 3 never imports those rows and does not charge ownerless rows to roots.
 
 The test-feature HTTP policy POST remains a CARRY: its existing unauthenticated
 administrative full-state save can hold the global lock during commit. It acquires

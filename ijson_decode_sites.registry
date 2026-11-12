@@ -217,6 +217,10 @@ crates/ramflux-node-core/src/foreign_device_store.rs | observe_inner | 1 | E | e
 crates/ramflux-node-core/src/gateway_pre_auth.rs | load_pre_auth_admission | 1 | E | excluded=bounded local admission metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
 crates/ramflux-node-core/src/gateway_pre_auth.rs | load_pre_auth_admission | 2 | E | excluded=bounded local admission metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
 crates/ramflux-node-core/src/gateway_pre_auth.rs | load_pre_auth_admission | 3 | E | excluded=bounded local admission metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
+crates/ramflux-node-core/src/gateway_pre_auth.rs | save_admission_checkpoint_unlocked | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
+crates/ramflux-node-core/src/gateway_replay_journal.rs | decode_entry | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
+crates/ramflux-node-core/src/gateway_replay_journal.rs | decode_root | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
+crates/ramflux-node-core/src/gateway_session_overlay.rs | decode | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
 crates/ramflux-node-core/src/home_migration_store.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/home_migration_store/drain.rs | read_drain | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-node-core/src/http_support.rs | parse_json_response | 1 | B | strict=parse_i_json; admission=B ingress boundary
@@ -879,8 +883,3 @@ crates/ramflux-transport/src/quic_gateway.rs | decode_quic_gateway_response | 1 
 crates/ramflux-transport/src/quic_gateway.rs | read_gateway_session_json | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
 crates/ramflux-transport/src/quic_gateway.rs | read_quic_json_frame | 1 | B | strict=parse_i_json; admission=B ingress boundary
-crates/ramflux-node-core/src/gateway_pre_auth.rs | save_admission_checkpoint_unlocked | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
-crates/ramflux-node-core/src/gateway_replay_journal.rs | save_auth_replay_unlocked | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
-crates/ramflux-node-core/src/gateway_replay_journal.rs | save_auth_replay_unlocked | 2 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
-crates/ramflux-node-core/src/gateway_replay_journal.rs | load_replay_journal | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted
-crates/ramflux-node-core/src/gateway_session_overlay.rs | decode | 1 | E | excluded=bounded local gateway metadata outside Envelope/Ack/Nack containment; no signed envelope is admitted

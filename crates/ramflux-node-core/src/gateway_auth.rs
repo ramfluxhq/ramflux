@@ -115,6 +115,20 @@ pub fn validate_gateway_auth_with_replay(
     replay_guard: &mut NodeReplayGuardState,
     registered: &DeviceAuthKeyResponse,
 ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+    let source = validate_gateway_auth_source(open, auth, now, registered)?;
+    replay_guard.check_signed_request(&source, &auth.signed_request, now)?;
+    Ok(source)
+}
+
+/// Resolve the verified source without creating tentative in-memory replay ownership.
+/// # Errors
+/// Rejects invalid signatures, device authority, time and root substitution.
+pub fn validate_gateway_auth_source(
+    open: &GatewayOpenFrame,
+    auth: &GatewayAuthFrame,
+    now: i64,
+    registered: &DeviceAuthKeyResponse,
+) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
     validate_gateway_auth(open, auth, now, registered)?;
     let trusted_now = u64::try_from(now)
         .map_err(|_| NodeCoreError::ItestHttp("trusted gateway time unavailable".into()))?;
@@ -124,6 +138,5 @@ pub fn validate_gateway_auth_with_replay(
     {
         return Err(NodeCoreError::ItestHttp("gateway root identity mismatch".into()));
     }
-    replay_guard.check_gateway_signed_request(&source, &auth.signed_request, now)?;
     Ok(source)
 }

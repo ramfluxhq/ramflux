@@ -400,10 +400,9 @@ async fn gateway_transport_auth_does_not_snapshot_state() -> anyhow::Result<()> 
         fixture.context.store.pause_next_admission_commit(entered, waiting)?;
         let listener = support::listener_context(&fixture.context);
         let worker = std::thread::spawn(move || {
-            crate::retention::checkpoint_once_at(
-                &listener,
-                UNIX_EPOCH + Duration::from_secs(now + 10),
-            )
+            crate::retention::checkpoint_once_at(&listener, || {
+                UNIX_EPOCH + Duration::from_secs(now + 10)
+            })
             .map_err(|error| error.to_string())
         });
         observed.recv_timeout(Duration::from_secs(10))?;
@@ -464,3 +463,5 @@ async fn gateway_transport_auth_does_not_snapshot_state() -> anyhow::Result<()> 
     })
     .await?
 }
+
+mod writer_outage;

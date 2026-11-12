@@ -25,7 +25,7 @@ mod signaling_gateway;
 mod stores;
 
 mod contact_directory;
-mod root_identity_replay;
+pub(crate) mod root_identity_replay;
 
 mod root_mailbox;
 

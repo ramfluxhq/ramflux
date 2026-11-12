@@ -1708,6 +1708,11 @@ allowed_service_ids = ["ramflux-gateway", "ramflux-relay", "ramflux-router", "ra
 [gateway]
 public_listen_addr = "{gateway_public}"
 
+[gateway.replay]
+root_budget = 256
+per_root_share = 32768
+storage_budget_bytes = 8589934592
+
 [signaling]
 turn_udp_addr = "127.0.0.1:0"
 turn_tcp_addr = "127.0.0.1:0"

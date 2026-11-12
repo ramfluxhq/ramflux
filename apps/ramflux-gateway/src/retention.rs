@@ -4,14 +4,14 @@
 //! Keep live sinks while expiring disconnected session metadata and resume checkpoints.
 pub(crate) fn checkpoint_once_at(
     context: &crate::serve::GatewayListenerContext,
-    time: std::time::SystemTime,
+    clock: impl FnOnce() -> std::time::SystemTime,
 ) -> anyhow::Result<()> {
     // Writer ordering precedes state capture; a blocked writer never owns the state mutex.
     let writer = context.store.write_guard()?;
     let active = context.hub.retention_snapshot();
     let (checkpoint, now) = {
         let mut state = crate::gateway_state(&context.state)?;
-        let now = state.observe_pre_auth_time(time)?;
+        let now = state.observe_pre_auth_time(clock())?;
         state.prune_retained_sessions_bounded(
             now,
             crate::session::gateway_resume_window_seconds(),
@@ -23,6 +23,7 @@ pub(crate) fn checkpoint_once_at(
         );
         (state.admission_checkpoint(now), now)
     };
+    writer.prune_replay(i64::try_from(now)?)?;
     writer.save_admission_checkpoint(&checkpoint)?;
     crate::gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
     writer.prune_session_rows(now, crate::session::gateway_resume_window_seconds())?;
@@ -52,7 +53,7 @@ pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Re
     })?;
     ramflux_node_core::spawn_service_worker("gateway-retention", move |_| {
         while ramflux_node_core::service_shutdown_sleep(std::time::Duration::from_secs(10)) {
-            if checkpoint_once_at(&context, std::time::SystemTime::now()).is_err()
+            if checkpoint_once_at(&context, std::time::SystemTime::now).is_err()
                 && let Ok(mut state) = crate::gateway_state(&context.state)
             {
                 state.record_admission_checkpoint_failure();
@@ -65,6 +66,59 @@ pub(crate) fn start(context: crate::serve::GatewayListenerContext) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use ramflux_node_core::{GatewaySession, GatewaySessionLifecycle, GatewayState};
+
+    #[test]
+    fn checkpoint_samples_clock_after_writer_wait_and_preserves_real_rollback() -> anyhow::Result<()>
+    {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering},
+                mpsc,
+            },
+            time::{Duration, UNIX_EPOCH},
+        };
+        let context = crate::session::tests::test_gateway_context()?;
+        let listener = crate::pre_auth_transport_tests::support::listener_context(&context);
+        let checkpoint = crate::gateway_state(&context.state)?.admission_checkpoint(100);
+        context.store.save_admission_checkpoint(&checkpoint)?;
+        crate::gateway_state(&context.state)?.install_admission_checkpoint(&checkpoint);
+        let writer = context.store.write_guard()?;
+        let (attempted, observed) = mpsc::channel();
+        context.store.observe_next_writer_attempt(attempted)?;
+        let clock = Arc::new(AtomicU64::new(120));
+        let worker_clock = Arc::clone(&clock);
+        let worker = std::thread::spawn(move || {
+            super::checkpoint_once_at(&listener, || {
+                UNIX_EPOCH + Duration::from_secs(worker_clock.load(Ordering::SeqCst))
+            })
+            .map_err(|error| error.to_string())
+        });
+        observed.recv_timeout(Duration::from_secs(10))?;
+        assert!(
+            crate::pre_auth::admit_with_clock("source", None, &context.state, || UNIX_EPOCH
+                + Duration::from_secs(121))?
+            .is_none()
+        );
+        clock.store(122, Ordering::SeqCst);
+        drop(writer);
+        let committed = worker.join().map_err(|_| anyhow::anyhow!("checkpoint worker panicked"))?;
+        assert!(
+            committed.is_ok(),
+            "checkpoint sampled before waiting for the writer: {committed:?}"
+        );
+        assert_eq!(
+            crate::gateway_state(&context.state)?
+                .observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(122))?,
+            122
+        );
+        assert!(matches!(
+            crate::gateway_state(&context.state)?
+                .observe_pre_auth_time(UNIX_EPOCH + Duration::from_secs(121)),
+            Err(ramflux_node_core::NodeCoreError::PreAuthClockRollback)
+        ));
+        Ok(())
+    }
 
     #[test]
     fn slow_checkpoint_commit_does_not_block_authenticated_activity_and_recovers()
@@ -109,7 +163,7 @@ mod tests {
         let (release, waiting) = mpsc::channel();
         context.store.pause_next_admission_commit(entered, waiting)?;
         let worker = std::thread::spawn(move || {
-            super::checkpoint_once_at(&listener, UNIX_EPOCH + Duration::from_secs(120))
+            super::checkpoint_once_at(&listener, || UNIX_EPOCH + Duration::from_secs(120))
                 .map_err(|error| error.to_string())
         });
         // A semantic write-transaction barrier; timeout is only a deadlock watchdog.

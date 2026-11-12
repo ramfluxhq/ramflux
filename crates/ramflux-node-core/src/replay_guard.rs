@@ -9,57 +9,25 @@ use crate::NodeCoreError;
 #[path = "replay_guard/legacy_replay.rs"]
 mod legacy_replay;
 
-/// Admission caps retain the protocol's full seven-day validity; exhaustion rejects
-/// new requests rather than forgetting any unexpired identity.
-pub const GATEWAY_REPLAY_SHARE: usize = 32_768;
-pub const GATEWAY_REPLAY_ROOTS: usize = 64;
-/// Two signed operations/minute for seven days plus 120s skew = 20,164, below each reserved share.
-pub const GATEWAY_REPLAY_CAPACITY: usize = GATEWAY_REPLAY_SHARE * GATEWAY_REPLAY_ROOTS;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct GatewayReplayLimits {
-    share: usize,
-    roots: usize,
-}
-impl Default for GatewayReplayLimits {
-    fn default() -> Self {
-        Self { share: GATEWAY_REPLAY_SHARE, roots: GATEWAY_REPLAY_ROOTS }
-    }
-}
 const PRUNE_BATCH: usize = 64;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(from = "ReplaySnapshot")]
 pub struct NodeReplayGuardState {
     accepted_by_key: BTreeMap<String, i64>,
-    root_by_key: BTreeMap<String, String>,
     #[serde(skip)]
     expiry_order: BTreeSet<(i64, String)>,
-    #[serde(skip)]
-    count_by_root: BTreeMap<String, usize>,
-    admitted_roots: BTreeSet<String>,
-    #[serde(skip)]
-    gateway_limits: GatewayReplayLimits,
 }
 
 #[derive(Default, Deserialize)]
 struct ReplaySnapshot {
     #[serde(default, deserialize_with = "legacy_replay::deserialize_entries")]
     accepted_by_key: BTreeMap<String, i64>,
-    #[serde(default)]
-    root_by_key: BTreeMap<String, String>,
-    #[serde(default)]
-    admitted_roots: BTreeSet<String>,
 }
 
 impl From<ReplaySnapshot> for NodeReplayGuardState {
     fn from(snapshot: ReplaySnapshot) -> Self {
-        let mut state = Self {
-            accepted_by_key: snapshot.accepted_by_key,
-            root_by_key: snapshot.root_by_key,
-            admitted_roots: snapshot.admitted_roots,
-            ..Self::default()
-        };
+        let mut state = Self { accepted_by_key: snapshot.accepted_by_key, ..Self::default() };
         state.rebuild_indexes();
         state
     }
@@ -93,30 +61,6 @@ impl NodeReplayGuardState {
         }
         self.insert_entry(key, request.expires_at);
         Ok(())
-    }
-
-    /// Gateway-only signed-request admission with durable reserved account-root shares.
-    /// # Errors
-    /// Rejects invalid/replayed requests or exhaustion of this root's reserved share/root budget.
-    pub fn check_gateway_signed_request(
-        &mut self,
-        source: &ramflux_crypto::RootQualifiedDeviceRef,
-        request: &ramflux_protocol::SignedRequest,
-        now: i64,
-    ) -> Result<(), NodeCoreError> {
-        let mut validation = ramflux_protocol::ReplayGuard::new();
-        validation
-            .check_signed_request(source, request, now)
-            .map_err(|error| NodeCoreError::ReplayGuard(error.to_string()))?;
-        self.prune(now);
-        let key = request
-            .replay_tuple_key(source)
-            .map_err(|error| NodeCoreError::ReplayGuard(error.to_string()))?;
-        self.accept_gateway_request_key(
-            key,
-            source.root_commitment().to_owned(),
-            request.expires_at,
-        )
     }
 
     /// # Errors
@@ -254,28 +198,6 @@ impl NodeReplayGuardState {
         }
     }
 
-    fn accept_gateway_request_key(
-        &mut self,
-        key: String,
-        owner: String,
-        expiry: i64,
-    ) -> Result<(), NodeCoreError> {
-        if self.accepted_by_key.contains_key(&key) {
-            return Err(NodeCoreError::ReplayGuard(format!("replay: {key}")));
-        }
-        if self.count_by_root.get(&owner).copied().unwrap_or(0) >= self.gateway_limits.share
-            || (!self.admitted_roots.contains(&owner)
-                && self.admitted_roots.len() >= self.gateway_limits.roots)
-        {
-            return Err(NodeCoreError::GatewayReplayCapacity);
-        }
-        self.admitted_roots.insert(owner.clone());
-        self.root_by_key.insert(key.clone(), owner.clone());
-        *self.count_by_root.entry(owner).or_default() += 1;
-        self.insert_entry(key, expiry);
-        Ok(())
-    }
-
     fn insert_entry(&mut self, key: String, expiry: i64) {
         if let Some(old) = self.accepted_by_key.insert(key.clone(), expiry) {
             self.expiry_order.remove(&(old, key.clone()));
@@ -287,36 +209,11 @@ impl NodeReplayGuardState {
         if let Some(expiry) = self.accepted_by_key.remove(key) {
             self.expiry_order.remove(&(expiry, key.to_owned()));
         }
-        if let Some(owner) = self.root_by_key.remove(key)
-            && let Some(count) = self.count_by_root.get_mut(&owner)
-        {
-            *count -= 1;
-            if *count == 0 {
-                self.count_by_root.remove(&owner);
-            }
-        }
     }
 
     fn rebuild_indexes(&mut self) {
         self.expiry_order =
             self.accepted_by_key.iter().map(|(key, expiry)| (*expiry, key.clone())).collect();
-        self.root_by_key.retain(|key, _| self.accepted_by_key.contains_key(key));
-        self.count_by_root.clear();
-        for owner in self.root_by_key.values() {
-            *self.count_by_root.entry(owner.clone()).or_default() += 1;
-        }
-    }
-
-    pub(crate) fn restore_owned_request(&mut self, key: String, owner: String, expiry: i64) {
-        self.remove_entry(&key);
-        self.admitted_roots.insert(owner.clone());
-        self.root_by_key.insert(key.clone(), owner.clone());
-        *self.count_by_root.entry(owner).or_default() += 1;
-        self.insert_entry(key, expiry);
-    }
-
-    pub(crate) fn restore_gateway_root(&mut self, root: String) {
-        self.admitted_roots.insert(root);
     }
 }
 

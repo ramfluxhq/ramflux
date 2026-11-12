@@ -1,49 +1,114 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Span Brain
 
-//! Incremental root-owned replay evidence with expiry-safe replacement.
-use super::{GatewayRedbStore, GatewayState};
-use crate::{GATEWAY_STATE_TABLE, NodeCoreError, serialize_snapshot_value};
+//! Disk-authoritative replay admission; no identity or membership map is loaded at startup.
+use super::{GatewayRedbStore, GatewayReplayConfig, GatewayStoreWriter, replay_gc};
+use crate::{NodeCoreError, serialize_snapshot_value};
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-const REPLAY: TableDefinition<&str, &[u8]> = TableDefinition::new("gateway_replay_entries_v2");
-const EXPIRY: TableDefinition<(i64, &str), u8> = TableDefinition::new("gateway_replay_expiry_v2");
-const ROOTS: TableDefinition<&str, u8> = TableDefinition::new("gateway_replay_roots_v2");
+pub(super) const REPLAY: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("gateway_replay_entries_v3");
+pub(super) const EXPIRY: TableDefinition<(i64, &str), u8> =
+    TableDefinition::new("gateway_replay_expiry_v3");
+pub(super) const ROOTS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("gateway_replay_roots_v3");
+pub(super) const ROOT_EXPIRY: TableDefinition<(i64, &str), u64> =
+    TableDefinition::new("gateway_replay_root_expiry_v3");
+pub(super) const OWN_EXPIRY: TableDefinition<(&str, u64, i64, &str), u8> =
+    TableDefinition::new("gateway_replay_owner_expiry_v3");
+const META: TableDefinition<&str, u64> = TableDefinition::new("gateway_replay_metadata_v3");
 
 #[derive(Serialize, Deserialize)]
-struct ReplayEntry {
-    owner: String,
-    expiry: i64,
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplayEntry {
+    pub owner: String,
+    pub expiry: i64,
+    pub generation: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RootReservation {
+    pub generation: u64,
+    pub count: u64,
+    pub latest_expiry: i64,
+}
+pub(super) fn decode_entry(bytes: &[u8]) -> Result<ReplayEntry, NodeCoreError> {
+    if bytes.len() > 256 {
+        return Err(NodeCoreError::PreAuthSnapshotInvalid);
+    }
+    serde_json::from_slice(bytes).map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)
+}
+pub(super) fn decode_root(bytes: &[u8]) -> Result<RootReservation, NodeCoreError> {
+    if bytes.len() > 256 {
+        return Err(NodeCoreError::PreAuthSnapshotInvalid);
+    }
+    let root: RootReservation =
+        serde_json::from_slice(bytes).map_err(|_| NodeCoreError::PreAuthSnapshotInvalid)?;
+    if root.count == 0 || root.generation == 0 {
+        return Err(NodeCoreError::PreAuthSnapshotInvalid);
+    }
+    Ok(root)
+}
+fn fence(write: &redb::WriteTransaction, now: i64) -> Result<(), NodeCoreError> {
+    let now = u64::try_from(now).map_err(|_| NodeCoreError::PreAuthClockInvalid)?;
+    let mut meta = write.open_table(META).map_err(error)?;
+    if meta.get("fenced_now").map_err(error)?.is_some_and(|old| old.value() > now) {
+        return Err(NodeCoreError::PreAuthClockRollback);
+    }
+    meta.insert("fenced_now", now).map_err(error)?;
+    Ok(())
 }
 
 impl GatewayRedbStore {
-    /// Validate and durably record a gateway authentication before session establishment.
+    /// Fund the configured allocation and reconcile expired root leases before serving signed work.
     /// # Errors
-    /// Rejects invalid auth, replay/capacity exhaustion and failed durable writes.
-    #[cfg(test)]
-    pub(crate) fn authenticate(
+    /// Refuses unfunded budgets, reductions of existing shares, rollback and storage failures.
+    pub fn configure_replay(
         &self,
-        state: &mut GatewayState,
-        open: &crate::GatewayOpenFrame,
-        auth: &crate::GatewayAuthFrame,
+        config: GatewayReplayConfig,
         now: i64,
-        registered: &crate::DeviceAuthKeyResponse,
-    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
-        let source = crate::validate_gateway_auth_with_replay(
-            open,
-            auth,
-            now,
-            state.replay_guard_state_mut(),
-            registered,
-        )?;
-        self.save_auth_replay(&source, &auth.signed_request, now)?;
-        Ok(source)
+    ) -> Result<(), NodeCoreError> {
+        config.require_funded(&self.path)?;
+        let _writer = self.write_guard()?;
+        loop {
+            let write = self.db.begin_write().map_err(error)?;
+            fence(&write, now)?;
+            replay_gc::prune(&write, now, 64, None)?;
+            write.commit().map_err(error)?;
+            let pending = {
+                let read = self.db.begin_read().map_err(error)?;
+                let index = read.open_table(ROOT_EXPIRY).map_err(error)?;
+                index
+                    .iter()
+                    .map_err(error)?
+                    .next()
+                    .transpose()
+                    .map_err(error)?
+                    .is_some_and(|(key, _)| key.value().0 < now)
+            };
+            if !pending {
+                break;
+            }
+        }
+        let write = self.db.begin_write().map_err(error)?;
+        {
+            let roots = write.open_table(ROOTS).map_err(error)?.len().map_err(error)?;
+            let mut meta = write.open_table(META).map_err(error)?;
+            let old_share = meta.get("share").map_err(error)?.map(|raw| raw.value()).unwrap_or(0);
+            if roots > config.root_budget || (roots > 0 && config.per_root_share < old_share) {
+                return Err(NodeCoreError::GatewayReplayUnfunded);
+            }
+            meta.insert("share", config.per_root_share).map_err(error)?;
+            meta.insert("root_budget", config.root_budget).map_err(error)?;
+        }
+        write.commit().map_err(error)?;
+        *self.replay_config.lock().map_err(error)? = Some(config);
+        Ok(())
     }
-
-    /// Durably record one already-validated auth before acknowledging it.
+    /// Persist already authenticated signed work before acknowledging it.
     /// # Errors
-    /// Returns storage or serialization errors; callers must refuse authentication.
+    /// Refuses replay, unfunded/full allocations, rollback and failed commits.
     pub fn save_auth_replay(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
@@ -52,120 +117,168 @@ impl GatewayRedbStore {
     ) -> Result<(), NodeCoreError> {
         self.write_guard()?.save_auth_replay(source, request, now)
     }
-
     pub(super) fn save_auth_replay_unlocked(
         &self,
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         request: &ramflux_protocol::SignedRequest,
         now: i64,
     ) -> Result<(), NodeCoreError> {
+        let config = self
+            .replay_config
+            .lock()
+            .map_err(error)?
+            .ok_or(NodeCoreError::GatewayReplayUnfunded)?;
+        ramflux_protocol::ReplayGuard::new()
+            .check_signed_request(source, request, now)
+            .map_err(|error| NodeCoreError::ReplayGuard(error.to_string()))?;
         let key = request
             .replay_tuple_key(source)
-            .map_err(|e| NodeCoreError::ReplayGuard(e.to_string()))?;
-        let bytes = serialize_snapshot_value(&ReplayEntry {
-            owner: source.root_commitment().to_owned(),
-            expiry: request.expires_at,
-        })?;
-        let write = self.db.begin_write().map_err(redb_error)?;
+            .map_err(|error| NodeCoreError::ReplayGuard(error.to_string()))?;
+        if key.len() != 54 || source.root_commitment().len() != 43 {
+            return Err(NodeCoreError::PreAuthSnapshotInvalid);
+        }
+        let write = self.db.begin_write().map_err(error)?;
+        fence(&write, now)?;
+        replay_gc::prune(&write, now, 63, Some(source.root_commitment()))?;
         {
-            let mut entries = write.open_table(REPLAY).map_err(redb_error)?;
-            let mut expiry = write.open_table(EXPIRY).map_err(redb_error)?;
+            let mut entries = write.open_table(REPLAY).map_err(error)?;
+            let mut expiry = write.open_table(EXPIRY).map_err(error)?;
+            let mut own_expiry = write.open_table(OWN_EXPIRY).map_err(error)?;
             let previous = entries
                 .get(key.as_str())
-                .map_err(redb_error)?
-                .map(|raw| serde_json::from_slice::<ReplayEntry>(raw.value()))
-                .transpose()
-                .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?;
-            if let Some(previous) = previous {
-                if previous.owner != source.root_commitment()
-                    || previous.expiry > request.expires_at
-                {
-                    return Err(NodeCoreError::ReplayGuard("stale replay commit".into()));
-                }
-                expiry.remove((previous.expiry, key.as_str())).map_err(redb_error)?;
-            }
-            let mut roots = write.open_table(ROOTS).map_err(redb_error)?;
-            if roots.get(source.root_commitment()).map_err(redb_error)?.is_none()
-                && roots.len().map_err(redb_error)?
-                    >= crate::replay_guard::GATEWAY_REPLAY_ROOTS as u64
+                .map_err(error)?
+                .map(|raw| decode_entry(raw.value()))
+                .transpose()?;
+            if previous
+                .as_ref()
+                .is_some_and(|entry| entry.expiry >= now || entry.owner != source.root_commitment())
             {
+                return Err(NodeCoreError::ReplayGuard("signed request replay".into()));
+            }
+            let mut roots = write.open_table(ROOTS).map_err(error)?;
+            let mut root_expiry = write.open_table(ROOT_EXPIRY).map_err(error)?;
+            let mut root = roots
+                .get(source.root_commitment())
+                .map_err(error)?
+                .map(|raw| decode_root(raw.value()))
+                .transpose()?;
+            // One additional expiry candidate, keeping the transaction total <=64.
+            if let Some(old) = root.as_ref().filter(|root| root.latest_expiry < now) {
+                roots.remove(source.root_commitment()).map_err(error)?;
+                root_expiry.remove((old.latest_expiry, source.root_commitment())).map_err(error)?;
+                root = None;
+            }
+            let mut root = match root {
+                Some(root) => root,
+                None => {
+                    if roots.len().map_err(error)? >= config.root_budget {
+                        return Err(NodeCoreError::GatewayReplayCapacity);
+                    }
+                    let mut meta = write.open_table(META).map_err(error)?;
+                    let generation = meta
+                        .get("generation")
+                        .map_err(error)?
+                        .map(|raw| raw.value())
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(NodeCoreError::GatewayReplayCapacity)?;
+                    meta.insert("generation", generation).map_err(error)?;
+                    RootReservation { generation, count: 0, latest_expiry: request.expires_at }
+                }
+            };
+            if let Some(previous) = previous {
+                expiry.remove((previous.expiry, key.as_str())).map_err(error)?;
+                own_expiry
+                    .remove((
+                        previous.owner.as_str(),
+                        previous.generation,
+                        previous.expiry,
+                        key.as_str(),
+                    ))
+                    .map_err(error)?;
+                if previous.generation == root.generation {
+                    root.count =
+                        root.count.checked_sub(1).ok_or(NodeCoreError::PreAuthSnapshotInvalid)?;
+                }
+            }
+            if root.count >= config.per_root_share {
                 return Err(NodeCoreError::GatewayReplayCapacity);
             }
-            roots.insert(source.root_commitment(), 0).map_err(redb_error)?;
-            let stale = expiry
-                .iter()
-                .map_err(redb_error)?
-                .take(64)
-                .map(|row| {
-                    row.map(|(key, _)| {
-                        let (at, key) = key.value();
-                        (at, key.to_owned())
-                    })
-                    .map_err(redb_error)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for (at, key) in stale {
-                if at >= now {
-                    break;
-                }
-                let current_expiry = entries
-                    .get(key.as_str())
-                    .map_err(redb_error)?
-                    .map(|raw| serde_json::from_slice::<ReplayEntry>(raw.value()))
-                    .transpose()
-                    .map_err(|error| NodeCoreError::ItestJson(error.to_string()))?
-                    .map(|entry| entry.expiry);
-                if current_expiry == Some(at) {
-                    entries.remove(key.as_str()).map_err(redb_error)?;
-                }
-                expiry.remove((at, key.as_str())).map_err(redb_error)?;
-            }
-            entries.insert(key.as_str(), bytes.as_slice()).map_err(redb_error)?;
-            expiry.insert((request.expires_at, key.as_str()), 0).map_err(redb_error)?;
+            root_expiry.remove((root.latest_expiry, source.root_commitment())).map_err(error)?;
+            root.count = root.count.checked_add(1).ok_or(NodeCoreError::GatewayReplayCapacity)?;
+            root.latest_expiry = root.latest_expiry.max(request.expires_at);
+            roots
+                .insert(source.root_commitment(), serialize_snapshot_value(&root)?.as_slice())
+                .map_err(error)?;
+            root_expiry
+                .insert((root.latest_expiry, source.root_commitment()), root.generation)
+                .map_err(error)?;
+            let entry = ReplayEntry {
+                owner: source.root_commitment().to_owned(),
+                expiry: request.expires_at,
+                generation: root.generation,
+            };
+            entries
+                .insert(key.as_str(), serialize_snapshot_value(&entry)?.as_slice())
+                .map_err(error)?;
+            expiry.insert((request.expires_at, key.as_str()), 0).map_err(error)?;
+            own_expiry
+                .insert(
+                    (source.root_commitment(), root.generation, request.expires_at, key.as_str()),
+                    0,
+                )
+                .map_err(error)?;
         }
-        write.commit().map_err(redb_error)?;
-        #[cfg(any(test, feature = "durability-test-hooks"))]
-        self.durable_commits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.before_admission_commit()?;
+        write.commit().map_err(error)?;
+        self.record_incremental_commit();
         Ok(())
     }
-
-    pub(super) fn load_replay_journal(
-        &self,
-        state: &mut GatewayState,
-    ) -> Result<(), NodeCoreError> {
-        let read_roots = self.db.begin_read().map_err(redb_error)?;
-        let roots = read_roots.open_table(ROOTS).map_err(redb_error)?;
-        for row in roots.iter().map_err(redb_error)? {
-            let (root, _) = row.map_err(redb_error)?;
-            state.replay_guard_state.restore_gateway_root(root.value().to_owned());
-        }
-        let read = self.db.begin_read().map_err(redb_error)?;
-        let table = read.open_table(REPLAY).map_err(redb_error)?;
-        for row in table.iter().map_err(redb_error)? {
-            let (key, value) = row.map_err(redb_error)?;
-            let entry: ReplayEntry = serde_json::from_slice(value.value())
-                .map_err(|e| NodeCoreError::ItestJson(e.to_string()))?;
-            state.replay_guard_state.restore_owned_request(
-                key.value().to_owned(),
-                entry.owner,
-                entry.expiry,
-            );
-        }
-        Ok(())
+    pub(super) fn has_replay_entries(&self) -> Result<bool, NodeCoreError> {
+        let read = self.db.begin_read().map_err(error)?;
+        Ok(!read.open_table(REPLAY).map_err(error)?.is_empty().map_err(error)?)
+    }
+    pub(super) fn prune_replay_unlocked(&self, now: i64) -> Result<(), NodeCoreError> {
+        let write = self.db.begin_write().map_err(error)?;
+        fence(&write, now)?;
+        replay_gc::prune(&write, now, 64, None)?;
+        write.commit().map_err(error)
     }
 }
-
-fn redb_error(error: impl std::fmt::Display) -> NodeCoreError {
+impl GatewayStoreWriter<'_> {
+    /// Verify root binding and signatures, then atomically admit the durable replay identity.
+    /// # Errors
+    /// Refuses invalid signatures, replay/capacity, rollback and failed commits.
+    pub fn authenticate_gateway(
+        &self,
+        open: &crate::GatewayOpenFrame,
+        auth: &crate::GatewayAuthFrame,
+        registered: &crate::DeviceAuthKeyResponse,
+        now: i64,
+    ) -> Result<ramflux_crypto::RootQualifiedDeviceRef, NodeCoreError> {
+        let source = crate::validate_gateway_auth_source(open, auth, now, registered)?;
+        self.save_auth_replay(&source, &auth.signed_request, now)?;
+        Ok(source)
+    }
+    /// Bound replay cleanup independently of the total evidence count.
+    /// # Errors
+    /// Refuses rollback and storage failures.
+    pub fn prune_replay(&self, now: i64) -> Result<(), NodeCoreError> {
+        self.store.prune_replay_unlocked(now)
+    }
+}
+fn error(error: impl std::fmt::Display) -> NodeCoreError {
     NodeCoreError::Redb(error.to_string())
 }
-
 pub(super) fn initialize_tables(write: &redb::WriteTransaction) -> Result<(), NodeCoreError> {
-    write.open_table(REPLAY).map_err(redb_error)?;
-    write.open_table(EXPIRY).map_err(redb_error)?;
-    write.open_table(ROOTS).map_err(redb_error)?;
+    write.open_table(REPLAY).map_err(error)?;
+    write.open_table(EXPIRY).map_err(error)?;
+    write.open_table(ROOTS).map_err(error)?;
+    write.open_table(ROOT_EXPIRY).map_err(error)?;
+    write.open_table(OWN_EXPIRY).map_err(error)?;
+    write.open_table(META).map_err(error)?;
     Ok(())
 }
-
 #[cfg(test)]
 #[path = "gateway_replay_journal_tests.rs"]
 mod tests;

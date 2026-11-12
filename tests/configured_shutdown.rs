@@ -187,6 +187,11 @@ retention = "{mesh_addr}"
 [gateway]
 public_listen_addr = "{gateway_addr}"
 
+[gateway.replay]
+root_budget = 256
+per_root_share = 32768
+storage_budget_bytes = 8589934592
+
 [signaling]
 turn_udp_addr = "{signaling_addr}"
 turn_tcp_addr = "127.0.0.1:0"
@@ -1065,3 +1070,6 @@ fn signal_and_wait(
     };
     Ok((status, started.elapsed()))
 }
+
+#[path = "configured_gateway_restart.rs"]
+pub mod gateway_restart;

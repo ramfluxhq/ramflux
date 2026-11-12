@@ -41,6 +41,8 @@ pub struct MeshConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct GatewayConfig {
+    #[serde(default)]
+    pub replay: crate::GatewayReplayConfig,
     pub public_listen_addr: String,
     #[serde(default)]
     pub pre_auth: Option<crate::gateway_frames::GatewayPreAuthConfig>,

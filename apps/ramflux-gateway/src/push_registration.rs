@@ -110,15 +110,19 @@ pub(crate) async fn admit(
     let checked = match &intent {
         RouteIntent::Register(frame) => {
             bind_session(context, runtime, PUSH_ROUTE_PATH, &frame.signed_request, &frame.body)
+                .await
                 .and_then(|()| Ok(frame.body.validate()?))
         }
-        RouteIntent::Deregister(frame) => bind_session(
-            context,
-            runtime,
-            ramflux_node_core::PUSH_ROUTE_DELETE_PATH,
-            &frame.signed_request,
-            &frame.body,
-        ),
+        RouteIntent::Deregister(frame) => {
+            bind_session(
+                context,
+                runtime,
+                ramflux_node_core::PUSH_ROUTE_DELETE_PATH,
+                &frame.signed_request,
+                &frame.body,
+            )
+            .await
+        }
     };
     match checked {
         Ok(()) => queue.submit(intent).await,
@@ -126,7 +130,17 @@ pub(crate) async fn admit(
             tracing::warn!(%error, "push route control refused");
             reply_or_log(
                 send,
-                &refused(intent.request_id().to_owned(), PushRouteRefusal::Rejected),
+                &refused(
+                    intent.request_id().to_owned(),
+                    if matches!(
+                        error.downcast_ref::<ramflux_node_core::NodeCoreError>(),
+                        Some(ramflux_node_core::NodeCoreError::GatewayWriterBusy)
+                    ) {
+                        PushRouteRefusal::Unavailable
+                    } else {
+                        PushRouteRefusal::Rejected
+                    },
+                ),
             )
             .await;
         }
@@ -190,21 +204,22 @@ enum Answer {
     Refused(PushRouteRefusal),
 }
 
-fn bind_session<T: serde::Serialize>(
+async fn bind_session<T: serde::Serialize>(
     context: &GatewayQuicContext,
     runtime: &GatewaySessionRuntime,
     path: &str,
     signed_request: &ramflux_protocol::SignedRequest,
     body: &T,
 ) -> anyhow::Result<()> {
-    crate::session::validate_gateway_session_signed_request(
+    crate::session::validate_gateway_session_signed_request_async(
         context,
         runtime,
         signed_request,
         "POST",
         path,
         body,
-    )?;
+    )
+    .await?;
     anyhow::ensure!(
         signed_request.ext.ext.get("session_id").and_then(serde_json::Value::as_str)
             == Some(runtime.session_id.as_str()),
