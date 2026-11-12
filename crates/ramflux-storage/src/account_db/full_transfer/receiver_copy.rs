@@ -8,6 +8,9 @@ use super::{
 use crate::{AccountDbKey, BackupDatabase, StorageError, account_db::backup::FullTransferCut};
 use std::sync::{Arc, atomic::AtomicBool};
 
+pub(super) mod application;
+pub use application::FullReceiverApplication;
+
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
 }
@@ -60,7 +63,8 @@ impl FullTransferStage<'_> {
         let (cut, observation) = self.db.pin_full_transfer_target()?;
         let (schema, _, _) = cut.inspect_full_profile_cut()?;
         schema.require_typed_owners(super::full_transfer_catalog())?;
-        let scratch = Scratch::create(&self.directory)?;
+        let scratch =
+            Scratch::create(&self.directory, self.retained_receiver_workspace()?.as_deref())?;
         self.require_io()?;
         observation.require_current(self.db)?;
         Ok(FullPinnedReceiverBase {
@@ -115,6 +119,35 @@ impl FullReceiverBaseCopy {
     pub const fn projected_input(&self) -> Option<FullScalarInputCounts> {
         self.projected
     }
+    /// Recompute the qualified root and compare every actual prepared portable row.
+    /// This grants no semantic receipt, generation selection or publication permission.
+    /// # Errors
+    /// Refuses changed B, wrong stage, missing/extra/altered private rows or a changed ledger.
+    pub fn verify_materialization(
+        &self,
+        stage: &FullTransferStage<'_>,
+    ) -> Result<(), StorageError> {
+        stage.require_io()?;
+        self.observation.require_current(stage.db)?;
+        if stage.resume_record()?.stage_digest()? != self.stage_digest {
+            return Err(wrong());
+        }
+        let encoding = self.union.as_ref().ok_or_else(wrong)?;
+        let private = BackupDatabase::open_full_receiver_copy(
+            &self.scratch.path.join("private.db"),
+            &self.key,
+        )?;
+        super::receiver_materialization::Verification {
+            directory: &self.scratch.path,
+            key: &self.key,
+            encoding,
+            owners: &self.contributions.owners,
+            private: &private,
+            stage,
+        }
+        .run()?;
+        self.observation.require_current(stage.db)
+    }
     /// Recheck the original B writer and exact stage before applying retained signed bytes.
     /// The typed restrictive-first projection is atomic and keeps live B untouched. This
     /// establishes neither complete contribution provenance nor semantic/DV acceptance.
@@ -143,6 +176,15 @@ impl FullReceiverBaseCopy {
             stage,
             &self.hash,
         )?;
+        super::receiver_materialization::Verification {
+            directory: &self.scratch.path,
+            key: &self.key,
+            encoding: &union,
+            owners: &self.contributions.owners,
+            private: &private,
+            stage,
+        }
+        .run()?;
         self.observation.require_current(stage.db)?;
         self.union = Some(union);
         self.projected = Some(counts);

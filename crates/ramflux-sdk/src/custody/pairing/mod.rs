@@ -10,8 +10,8 @@ mod full_epoch;
 mod full_io;
 pub use full_epoch::{FullEpoch, FullPacketEpoch, FullResumeProofSigningRequest};
 pub use full_io::{
-    FullLocalIoLoan, FullLocalIoPort, FullLocalIoService, FullReverseManifestDraft,
-    FullTransferLocalIo,
+    FullApplicationDraft, FullLocalIoLoan, FullLocalIoPort, FullLocalIoService,
+    FullReverseManifestDraft, FullTransferLocalIo,
 };
 pub mod full_generation;
 pub use full_bootstrap::{

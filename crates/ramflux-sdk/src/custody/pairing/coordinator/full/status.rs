@@ -89,9 +89,11 @@ impl PairingActor {
             operation_id: c.operation_id.clone(),
             result: c.full_error,
             role: c.role.as_str().into(),
-            // The current driver only proves disk durability. Semantic DV and all
-            // subsequent publication/install stages have independent gates.
-            stage: if state.stream.is_some() {
+            // A committed forward DV still awaits reverse proof and catch-up; no
+            // candidate, publication or installation is implied by completed totals.
+            stage: if state.stream.as_ref().is_some_and(|stream| stream.complete.is_some()) {
+                FullStatusStage::AwaitingReverse
+            } else if state.stream.is_some() {
                 FullStatusStage::Streaming
             } else {
                 FullStatusStage::Snapshot

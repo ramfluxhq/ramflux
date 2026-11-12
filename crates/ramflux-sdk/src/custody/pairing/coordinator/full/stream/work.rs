@@ -135,8 +135,13 @@ impl FullStreamWork {
             self.note_durable(&manifest, next)?;
         }
         self.runtime.require_live()?;
-        // Receipt frees no immutable cut and authorizes no candidate. Keep the exact
-        // cipher for the future semantic/DV workflow; never synthesize a peer DV here.
+        let verified = self.receive().await?;
+        if !matches!(verified, DataPacket::DataVerified { .. }) {
+            return Err(wrong());
+        }
+        self.fresh().await?;
+        self.io.record_source_data_verified(verified).await?;
+        // A signed DV still grants neither publication nor immutable-cut deletion.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver: None })
     }
     pub(super) async fn destination(mut self) -> Result<FullStreamFinished, SdkError> {
@@ -195,10 +200,24 @@ impl FullStreamWork {
         self.fresh().await?;
         let pinned = self.io.pin_receiver_base(&hash).await?;
         let copy = self.runtime.clone().run_blocking(move || Ok(Box::new(pinned.copy()?))).await?;
+        self.fresh().await?;
         let receiver = self.io.project_receiver_base(copy).await?;
+        let (receiver, draft) = self.io.prepare_data_verified(receiver).await?;
+        let participant = self.participant.clone();
+        let (draft, verified) = self
+            .runtime
+            .clone()
+            .run_blocking(move || {
+                let verified = participant.sign_receiver_data_verified(&draft)?;
+                Ok((draft, verified))
+            })
+            .await?;
+        self.fresh().await?;
+        let receiver = self.io.record_data_verified(receiver, draft, &verified).await?;
+        let encrypted = self.packet.seal_packet(&verified)?;
+        self.packet.send(self.relay.as_ref(), &self.origin, encrypted).await?;
         self.runtime.require_live()?;
-        // Typed projection into B's own private copy is complete. Contribution/root and
-        // semantic/DV validation still precede any receipt, publication or selection.
+        // DV certifies this input application; generation selection/publication remain fenced.
         Ok(FullStreamFinished { packet: self.packet, manifest, receiver: Some(receiver) })
     }
 }

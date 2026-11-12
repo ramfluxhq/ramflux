@@ -18,6 +18,45 @@ fn wrong() -> SdkError {
     SdkError::PairingCode("WrongContext")
 }
 impl LocalPairingParticipant {
+    /// Sign only a durably applied receiver's exact data receipt with its original branch.
+    /// # Errors
+    /// Refuses expired/retired/foreign scope or changed original branch keys.
+    pub fn sign_receiver_data_verified(
+        &self,
+        draft: &crate::custody::pairing::FullApplicationDraft,
+    ) -> Result<ramflux_protocol::custody::pairing::full_transfer::DataPacket, SdkError> {
+        draft.sign_with(self, |packet, expected_key| {
+            let ramflux_protocol::custody::pairing::full_transfer::DataPacket::DataVerified {
+                destination_ref,
+                ..
+            } = packet
+            else {
+                return Err(wrong());
+            };
+            let vault_ref = self.full_branch_vault_ref(destination_ref)?;
+            let branch = self.vault.load_branch(
+                &vault_ref,
+                &destination_ref.account_anchor,
+                destination_ref,
+            )?;
+            if encode_base64url(branch.signing.signing_key.verifying_key().to_bytes())
+                != expected_key
+            {
+                return Err(wrong());
+            }
+            Ok(encode_base64url(
+                branch
+                    .signing
+                    .signing_key
+                    .sign(
+                        &packet
+                            .data_verified_signing_bytes()
+                            .map_err(|e| super::super::transport::wire(&e))?,
+                    )
+                    .to_bytes(),
+            ))
+        })
+    }
     /// Sign only the opaque new recipient's actual empty reverse-cut draft.
     /// No database loan is retained by the draft or borrowed during vault signing.
     /// # Errors

@@ -53,6 +53,13 @@ impl FullLocalIoService {
     }
 }
 impl FullLocalIoLoan {
+    #[cfg(test)]
+    pub(crate) fn is_receiver_application(&self) -> bool {
+        matches!(
+            self.0.request.action,
+            FullLocalAction::Semantic(super::application::Action::Prepare(_))
+        )
+    }
     /// Execute and destroy the local request before returning to async/network work.
     /// A cancelled worker is refused before opening a stage or decrypting any bytes.
     /// # Errors
@@ -67,6 +74,62 @@ impl FullLocalIoLoan {
     }
 }
 impl FullLocalIoPort {
+    /// Commit a receiver application through its actual ordinary writer before signing DV.
+    /// # Errors
+    /// Refuses changed B/scope, invalid prepared bytes, expiry or failed durability.
+    pub async fn prepare_data_verified(
+        &mut self,
+        copy: Box<ramflux_storage::FullReceiverBaseCopy>,
+    ) -> Result<
+        (Box<ramflux_storage::FullReceiverBaseCopy>, Box<super::FullApplicationDraft>),
+        SdkError,
+    > {
+        let FullLocalResult::Semantic(super::application::Applied::Prepared { copy, draft }) = self
+            .request(FullLocalAction::Semantic(super::application::Action::Prepare(copy)))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok((copy, draft))
+    }
+    /// Persist a receiver signature atomically with input verification before transmission.
+    /// # Errors
+    /// Refuses stale proofs, changed B/generation, wrong signatures or failed durable commit.
+    pub async fn record_data_verified(
+        &mut self,
+        copy: Box<ramflux_storage::FullReceiverBaseCopy>,
+        draft: Box<super::FullApplicationDraft>,
+        packet: &ramflux_protocol::custody::pairing::full_transfer::DataPacket,
+    ) -> Result<Box<ramflux_storage::FullReceiverBaseCopy>, SdkError> {
+        let FullLocalResult::Semantic(super::application::Applied::Receiver(copy)) = self
+            .request(FullLocalAction::Semantic(super::application::Action::Record {
+                copy,
+                draft,
+                packet: Box::new(packet.clone()),
+            }))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(copy)
+    }
+    /// Verify and durably retain the original B's receipt against A's actual signed cut.
+    /// # Errors
+    /// Refuses a foreign chain/branch/signature, expiry, wrong role or failed durable commit.
+    pub async fn record_source_data_verified(
+        &mut self,
+        packet: ramflux_protocol::custody::pairing::full_transfer::DataPacket,
+    ) -> Result<(), SdkError> {
+        let FullLocalResult::Semantic(super::application::Applied::Source) = self
+            .request(FullLocalAction::Semantic(super::application::Action::Source(Box::new(
+                packet,
+            ))))
+            .await?
+        else {
+            return Err(wrong());
+        };
+        Ok(())
+    }
     /// Pin the actual target through its ordinary owner's short local loan.
     /// Copy the returned view in a root-owned blocking worker after the loan ends.
     /// # Errors

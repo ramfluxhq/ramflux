@@ -65,6 +65,7 @@ For an existing full-transfer stage, `rf pairing --account <id> transfer-status
 --operation-id <id> --generation <n>` reads `device.transfer.status` through the
 same SDK coordinator. The response contains only the role, stage, cut, lease,
 byte totals, missing-attachment count, tail status and an exact typed error. Its
-64-bit counters use decimal JSON strings. During the current disk-only phase,
-completed byte totals still show `streaming`; they do not claim semantic
-verification or installation. `pairing status` keeps the legacy ceremony view.
+64-bit counters use decimal JSON strings. Disk totals alone still show `streaming`.
+After the receiver commits and signs an applied-input receipt, both peers show
+`awaiting_reverse`; reverse proof, catch-up and installation are separate steps.
+`pairing status` keeps the legacy ceremony view.
