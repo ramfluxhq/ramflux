@@ -45,7 +45,7 @@ fn receipt_actor(name: &str) -> Result<ramflux_crypto::RootQualifiedDeviceRef, S
     )?)
 }
 
-#[cfg(not(feature = "sqlcipher"))]
+#[cfg(not(any(feature = "sqlcipher", feature = "insecure-test-sqlite")))]
 #[test]
 fn account_db_open_fails_closed_without_sqlcipher() -> Result<(), StorageError> {
     let root = temp_root("no-sqlcipher-fail-closed");
@@ -870,7 +870,7 @@ fn sqlcipher_patched_runtime_reopens_keyed_account() -> Result<(), StorageError>
     assert_eq!(reopened.encryption_mode(), EncryptionMode::SqlCipher);
     let payload: Vec<u8> = reopened.connection.query_row(
         "SELECT event_body FROM local_event_log WHERE event_id = ?1",
-        ["cipher-upgrade"],
+        rusqlite::params!["cipher-upgrade"],
         |row| row.get(0),
     )?;
     assert_eq!(payload, b"persisted");
