@@ -18,6 +18,11 @@ pub(crate) fn verify_local(
     now: u64,
 ) -> Result<(), SdkError> {
     install.validate()?;
+    // Full installs additionally need immutable generation/adoption/index agreement.
+    // The legacy authority-only owner must remain closed until that owner is wired.
+    if install.full_transfer.is_some() {
+        return Err(SdkError::PairingCode("PublicationPending"));
+    }
     let verified = ramflux_crypto::custody::verify_publication(authority, now)?;
     let body = &verified.envelope().body;
     if body.account_anchor != install.account_anchor
@@ -147,7 +152,8 @@ pub(crate) fn write_authority(
 }
 
 pub(crate) fn matches_install(account: &BornAccount, install: &Install) -> Result<bool, SdkError> {
-    Ok(object_hash(account.record())?.as_str() == install.record_hash.as_deref().unwrap_or("")
+    Ok(install.full_transfer.is_none()
+        && object_hash(account.record())?.as_str() == install.record_hash.as_deref().unwrap_or("")
         && account.local_account_id() == install.account_id
         && account.local_device_id()? == install.recipient_ref.device_id
         && account.record().body.account_anchor == install.account_anchor

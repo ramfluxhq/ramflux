@@ -547,6 +547,7 @@ fn reserved_install(
         state: "reserved".into(),
         cleanup_ref: None,
         cleanup_owner_ref: None,
+        full_transfer: None,
     };
     install.validate()?;
     Ok(install)
