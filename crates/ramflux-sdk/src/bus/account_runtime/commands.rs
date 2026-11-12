@@ -233,13 +233,20 @@ impl AccountRuntime {
                     );
                 let _ = reply.send(Err(error));
             }
-            if let Err(error) = self.publish(&command.request).await {
-                tracing::warn!(account_id = %self.id, %error,
-                    "cancelled request publication deferred; account remains open");
-            }
+            self.publish_after_cancel(&command.request).await;
             return Ok(false);
         }
         self.complete_command(&command, result, reply).await
+    }
+
+    async fn publish_after_cancel(&self, request: &LocalBusFrame) {
+        if super::super::generated_typing::is_transient(&request.method, &request.body) {
+            return;
+        }
+        if let Err(error) = self.publish(request).await {
+            tracing::warn!(account_id = %self.id, %error,
+                "cancelled request publication deferred; account remains open");
+        }
     }
 
     async fn complete_command(
@@ -248,6 +255,13 @@ impl AccountRuntime {
         result: Result<super::super::actor::ActorResponse, SdkError>,
         reply: tokio::sync::oneshot::Sender<Result<super::super::actor::ActorResponse, SdkError>>,
     ) -> Result<bool, SdkError> {
+        if super::super::generated_typing::is_transient(
+            &command.request.method,
+            &command.request.body,
+        ) {
+            let _ = reply.send(result);
+            return Ok(false);
+        }
         let result = match self.initialize_readers() {
             Ok(()) => result,
             Err(error) => Err(error),

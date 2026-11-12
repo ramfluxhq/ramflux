@@ -1065,4 +1065,4 @@ fn legacy_override_cannot_admit_v1_with_an_active_pair() -> Result<(), SdkError>
     Ok(())
 }
 #[path = "candidate_ephemeral_tests.rs"]
-mod candidate_ephemeral;
+pub(super) mod candidate_ephemeral;

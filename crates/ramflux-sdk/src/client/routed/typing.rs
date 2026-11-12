@@ -20,12 +20,18 @@ impl RamfluxClient {
         message: &GatewayDirectMessage,
         active: bool,
     ) -> Result<ramflux_protocol::Envelope, SdkError> {
-        // Load and advance the ratchet under the same writer as the allowance. No two
-        // callers can seal from the same snapshot, and no envelope escapes failed commit.
-        let envelope = self
-            .account_db()?
-            .write_transaction(|| self.prepare_typing_delivery_in(engine, message, active))?;
-        Ok(envelope)
+        Ok(self.prepare_typing_update_delivery(engine, message, active)?.0)
+    }
+
+    pub(crate) fn prepare_typing_update_delivery(
+        &self,
+        engine: &mut impl GatewaySessionAccess,
+        message: &GatewayDirectMessage,
+        active: bool,
+    ) -> Result<(ramflux_protocol::Envelope, g::MessageUpdate), SdkError> {
+        // No ciphertext or transient response escapes a failed writer commit.
+        self.account_db()?
+            .write_transaction(|| self.prepare_typing_delivery_in(engine, message, active))
     }
 
     fn prepare_typing_delivery_in(
@@ -33,15 +39,27 @@ impl RamfluxClient {
         engine: &mut impl GatewaySessionAccess,
         message: &GatewayDirectMessage,
         active: bool,
-    ) -> Result<ramflux_protocol::Envelope, SdkError> {
+    ) -> Result<(ramflux_protocol::Envelope, g::MessageUpdate), SdkError> {
         let (source, remote) = self.typing_sender_target(engine, message, active)?;
         let expires = message
             .created_at
             .checked_add(i64::from(message.ttl))
             .and_then(|at| u64::try_from(at).ok())
             .ok_or_else(|| invalid("typing deadline overflow"))?;
-        let inner = self.encode_typing_inner(message, &source, active, expires)?;
-        self.seal_ephemeral_inner(engine, message, &source, &remote, &inner)
+        let (inner, identity, typing) =
+            self.encode_typing_inner(message, &source, active, expires)?;
+        let envelope = self.seal_ephemeral_inner(engine, message, &source, &remote, &inner)?;
+        Ok((
+            envelope,
+            g::MessageUpdate {
+                account_id: self.account_db()?.local_account_id.clone(),
+                journal_sequence: 0,
+                identity: Some(identity),
+                state: Some(g::message_update::State::Content(g::Content {
+                    value: Some(g::content::Value::Typing(typing)),
+                })),
+            },
+        ))
     }
 
     pub(super) fn seal_ephemeral_inner(
@@ -169,6 +187,26 @@ impl RamfluxClient {
             }
             other => other,
         })?;
+        let scope = self
+            .account_db()?
+            .client_record("conversation", &message.conversation_id)?
+            .ok_or_else(|| {
+                typing_unavailable("typing requires an established conversation scope")
+            })?;
+        if scope["kind"] == "group" || !scope["group_id"].is_null() {
+            return Err(AdapterError::new(
+                GeneratedErrorCode::InvalidArgument,
+                "Typing is DM only",
+            )
+            .into());
+        }
+        if !self.raw_reparse_scope_allowed(&remote, &message.conversation_id)? {
+            return Err(AdapterError::new(
+                GeneratedErrorCode::NotAuthorized,
+                "Typing requires an immutable direct root binding",
+            )
+            .into());
+        }
         if remote.root_commitment() == source.root_commitment()
             || !self.friend_link_peer_is_accepted(remote.root_commitment())?
         {
@@ -203,7 +241,7 @@ impl RamfluxClient {
         source: &ramflux_crypto::RootQualifiedDeviceRef,
         active: bool,
         expires_at: u64,
-    ) -> Result<Vec<u8>, SdkError> {
+    ) -> Result<(Vec<u8>, g::EventIdentity, g::Typing), SdkError> {
         let identity = g::EventIdentity {
             id: ramflux_crypto::random_32()?.to_vec(),
             conversation_id: message.conversation_id.clone(),
@@ -218,12 +256,12 @@ impl RamfluxClient {
             }),
             ..Default::default()
         };
-        Self::encode_generated_inner(
-            identity,
-            &g::Content {
-                value: Some(g::content::Value::Typing(g::Typing { active, expires_at })),
-            },
-        )
+        let typing = g::Typing { active, expires_at };
+        let bytes = Self::encode_generated_inner(
+            identity.clone(),
+            &g::Content { value: Some(g::content::Value::Typing(typing)) },
+        )?;
+        Ok((bytes, identity, g::Typing { active, expires_at }))
     }
 
     pub(crate) fn typing_conversation_before_decrypt(
