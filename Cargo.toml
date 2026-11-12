@@ -40,6 +40,8 @@ members = [
     "apps/ramflux-relay",
     "apps/ramflux-signaling",
     "apps/ramflux-retention",
+    # Browser binding (wasm32-unknown-unknown). Not a default member: native builds are unchanged.
+    "bindings/web",
 ]
 
 [workspace.package]

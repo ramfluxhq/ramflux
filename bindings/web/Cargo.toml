@@ -1,0 +1,58 @@
+[package]
+name = "ramflux-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.0"
+license.workspace = true
+repository = "https://github.com/ramfluxhq/ramflux"
+publish = false
+description = "Browser host for a linked secondary ramflux device (wasm32-unknown-unknown)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Marker features that a browser build must never carry. Each one is a compile error on
+# `target_family = "wasm"` (see `src/role.rs`); they exist so that a workspace-wide
+# `--all-features` build of the wasm target fails loudly instead of silently linking
+# primary-authority code.
+primary-authority = []
+account-recovery = []
+
+[dependencies]
+ramflux-protocol = { workspace = true }
+ramflux-crypto = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = { workspace = true }
+thiserror = "2.0"
+zeroize = { workspace = true, features = ["derive"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# Randomness seam: every getrandom major in the dependency tree needs its browser backend.
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom-02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[lints.rust]
+warnings = "deny"
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "deny"
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
