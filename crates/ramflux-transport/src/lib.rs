@@ -12,8 +12,13 @@ mod candidate_outer;
 mod compio_gateway;
 #[cfg(all(target_os = "linux", feature = "compio-mesh"))]
 mod compio_mesh;
+mod connection_policy;
 mod error;
+mod gateway_dial;
 mod gateway_frame_reader;
+mod gateway_websocket;
+#[cfg(all(feature = "http-connect-proxy", not(windows)))]
+mod http_connect_proxy;
 mod loopback;
 mod mesh_http;
 mod mesh_quic;
@@ -52,7 +57,25 @@ pub use compio_mesh::{
     CompioMeshQuicPostcardAcceptedRequest, CompioMeshQuicServer,
     compio_mesh_quic_post_json_with_peer_ca_pems,
 };
+pub use connection_policy::{
+    AUTO_RACE_STAGGER, CarrierKind, DialInputs, DialLeg, DialPlan, NETWORK_CHANGE_PROBE_DEADLINE,
+    NetworkDigest, PATH_MEMORY_MAX_NETWORKS, PATH_MEMORY_TTL, PathMemory,
+    SESSION_KEEP_ALIVE_INTERVAL, SESSION_MAX_IDLE_TIMEOUT, STREAM_HEARTBEAT_INTERVAL,
+    STREAM_HEARTBEAT_MISSED_LIMIT, bind_addr_for_peer,
+};
 pub use error::TransportError;
+pub use gateway_dial::{
+    DialError, DialedGateway, GatewayDialTarget, WebSocketDialTarget, dial_gateway,
+};
+pub use gateway_websocket::{
+    GATEWAY_WEBSOCKET_ALPN, GATEWAY_WEBSOCKET_MAX_FRAGMENTS,
+    GATEWAY_WEBSOCKET_MAX_RESPONSE_HEAD_BYTES, GATEWAY_WEBSOCKET_PATH,
+    GATEWAY_WEBSOCKET_SUBPROTOCOL, WebSocketTlsGatewayBidiStream, WebSocketTlsGatewayClient,
+};
+#[cfg(all(feature = "http-connect-proxy", not(windows)))]
+pub use http_connect_proxy::{
+    HTTP_CONNECT_MAX_RESPONSE_HEAD_BYTES, HttpConnectProxy, ProxyCredentials,
+};
 pub use loopback::transport_submit_result;
 pub use mesh_http::{
     MeshHttpClient, close_mesh_server_stream, mesh_http_get_json, mesh_http_post_json,
@@ -108,6 +131,7 @@ pub use relay_quic_pool::{
 };
 pub use tls_config::{
     mesh_server_config, quic_gateway_client_config, quic_gateway_server_config,
+    quic_gateway_session_client_config,
     tcp_gateway_client_config, tcp_gateway_server_config,
 };
 pub use types::{
