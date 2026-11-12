@@ -10,6 +10,8 @@ const REQUESTS: usize = 8;
 struct State {
     bytes: usize,
     requests: usize,
+    #[cfg(test)]
+    reservation_attempts: u64,
 }
 #[derive(Clone, Default)]
 pub(crate) struct FullListenerScratch(Arc<Mutex<State>>);
@@ -22,6 +24,10 @@ impl FullListenerScratch {
         static OWNER: OnceLock<FullListenerScratch> = OnceLock::new();
         OWNER.get_or_init(Self::default).clone()
     }
+    #[cfg(test)]
+    pub(crate) fn reservation_attempts(&self) -> Result<u64, &'static str> {
+        self.0.lock().map(|state| state.reservation_attempts).map_err(|_| "scratch accounting lock")
+    }
     pub(crate) fn reserve(
         &self,
         request: usize,
@@ -32,6 +38,10 @@ impl FullListenerScratch {
             .ok_or(PairingRelayError::Busy { retry_after_ms: 1000 })?;
         let mut state =
             self.0.lock().map_err(|_| PairingRelayError::Busy { retry_after_ms: 1000 })?;
+        #[cfg(test)]
+        {
+            state.reservation_attempts += 1;
+        }
         let total = state
             .bytes
             .checked_add(bytes)

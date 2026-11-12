@@ -18,7 +18,7 @@ mod receiver_contributions;
 mod receiver_copy;
 pub use receiver_copy::{
     FullAppliedDataReceipt, FullPinnedReceiverBase, FullPreparedReceiverDatabase,
-    FullReceiverBaseCopy, FullReceiverDatabaseWork,
+    FullReceiverBaseCopy, FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
 };
 mod receiver_input;
 mod receiver_materialization;

@@ -171,6 +171,9 @@ fn pairing_full_private_delta_preserves_independent_b_and_vetoes_and_rejects_old
     let (manifest, bytes) = delta(&mut source, &base, &next_id)?;
     let hash = retain(&mut target, &manifest, &bytes)?;
     copy.project_delta(&target, &hash)?;
+    // Advance the actual durable generation first. Otherwise the old SQL row alone
+    // rejects this retry and never exercises the current input/root proof boundary.
+    let _latest_application = copy.commit_application(&mut target, 1000)?;
     assert!(
         copy.record_data_verified(&mut target, &old, &old_packet, 1000).is_err(),
         "old input proof certified the successor generation"
@@ -245,6 +248,10 @@ fn pairing_full_duplex_requires_both_durable_original_receipts_and_final_delta()
         [7; 32],
     ))?;
     source.record_reverse_application_receipt(&proof, &reverse_packet, 1000)?;
+    a.connection.execute(
+        "DELETE FROM object_payload_dependency WHERE parent_commitment=?1",
+        params![h(11)],
+    )?;
     let next_id = h(71);
     capture(&source, &a, &aroot, 1, &next_id)?;
     let (manifest, bytes) = delta(&mut source, &base, &next_id)?;
@@ -264,20 +271,56 @@ fn pairing_full_duplex_requires_both_durable_original_receipts_and_final_delta()
     assert_eq!(own.manifest_chain_hash(), peer.manifest_chain_hash());
     assert_eq!(own.data_verified_hash(), peer.data_verified_hash());
     assert_eq!(own.target_restrictions_root(), peer.target_restrictions_root());
-    let prepared = prepared_database(copy, &target, &broot)?;
+    let mut rebased = rebase_current_b(copy, &mut target, &b)?;
+    retain_rebased_atomically(&mut rebased, &target)?;
+    let prepared = prepared_database(rebased, &target, &broot)?;
     target.connection.execute("UPDATE reverse_source_receipt SET bytes=x'7b7d'", [])?;
     assert!(target.verified_duplex(1000).is_err(), "corrupt reverse receipt opened controls");
     source
         .connection
         .execute("UPDATE source_receipt SET bytes=x'7b7d' WHERE manifest_hash=?1", params![hash])?;
     assert!(source.verified_duplex(1000).is_err(), "corrupt forward receipt opened controls");
-    drop(prepared);
+    let selected = select_prepared(prepared, &target, &reverse_packet)?;
+    drop(selected);
     drop(source);
     drop(target);
     drop(a);
     drop(b);
     std::fs::remove_dir_all(aroot)?;
     std::fs::remove_dir_all(broot)?;
+    Ok(())
+}
+
+fn retain_rebased_atomically(
+    copy: &mut FullReceiverBaseCopy,
+    stage: &FullTransferStage<'_>,
+) -> TestResult {
+    let old: (Vec<u8>, String, Vec<u8>) = stage.connection.query_row(
+        "SELECT generation_nonce,workspace,private_key FROM receiver_generation",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let receipt: Vec<u8> = stage.connection.query_row(
+        "SELECT bytes FROM receiver_receipt WHERE manifest_hash=?1",
+        params![copy.hash],
+        |row| row.get(0),
+    )?;
+    stage.connection.execute_batch("CREATE TRIGGER refuse_receipt_rebind BEFORE UPDATE ON receiver_receipt BEGIN SELECT RAISE(ABORT,'forced receipt rebind failure'); END;")?;
+    assert!(
+        copy.retain_for_installation(stage, 1000).is_err(),
+        "G1 ignored receipt transaction failure"
+    );
+    let unchanged: bool = stage.connection.query_row(
+        "SELECT generation_nonce=?1 AND workspace=?2 AND private_key=?3 FROM receiver_generation",
+        params![old.0, old.1, old.2],
+        |row| row.get(0),
+    )?;
+    assert!(unchanged, "failed receipt rebind changed durable generation");
+    stage.connection.execute_batch("DROP TRIGGER refuse_receipt_rebind;")?;
+    copy.retain_for_installation(stage, 1000)?;
+    let retained: bool=stage.connection.query_row("SELECT EXISTS(SELECT 1 FROM receiver_generation g JOIN receiver_receipt r ON g.manifest_hash=r.manifest_hash AND g.generation_nonce=r.generation_nonce WHERE g.generation_nonce=?1 AND g.workspace=?2 AND r.bytes=?3)",params![copy.union_encoding().ok_or("union")?.generation_nonce.as_slice(),copy.scratch.path.file_name().and_then(|name|name.to_str()).ok_or("workspace")?,receipt],|row|row.get(0))?;
+    assert!(retained, "G1 lost its qualified generation or changed the original signed input");
+    stage.verified_duplex(1000)?;
     Ok(())
 }
 
@@ -328,4 +371,151 @@ fn prepared_database(
         "G1 trusted the scratch root without checking copied rows"
     );
     Ok(prepared)
+}
+
+fn rebase_current_b(
+    old: FullReceiverBaseCopy,
+    stage: &mut FullTransferStage<'_>,
+    b: &crate::AccountDb,
+) -> TestResult<FullReceiverBaseCopy> {
+    let before = stage.verified_duplex(1000)?;
+    // A removed this dependency in its signed delta. B independently acquired
+    // the identical key after that cut, so replaying A's absence must keep B.
+    for n in [11, 93] {
+        b.connection.execute(
+            "INSERT INTO object_payload_dependency VALUES(?1,?2)",
+            params![h(n), h(n + 1)],
+        )?;
+    }
+    assert!(old.verify_materialization(stage).is_err(), "changed B reused its old observation");
+    let base = stage.resume_record()?.base_manifest_hash;
+    let mut copy = stage.pin_receiver_base(&base)?.copy()?;
+    copy.project_retained_chain(stage, 1000)?;
+    drop(old);
+    let private =
+        BackupDatabase::open_full_receiver_copy(&copy.scratch.path.join("private.db"), &copy.key)?;
+    for n in [11, 93] {
+        assert_eq!(private.db.query_row("SELECT count(*) FROM object_payload_dependency WHERE parent_commitment=?1 AND child_commitment=?2",params![h(n),h(n+1)],|row|row.get::<_,u64>(0))?,1,"rebase lost an independent intervening B write");
+    }
+    drop(private);
+    let (_, packet) = receipt(&mut copy, stage)?;
+    assert_eq!(
+        encode_base64url(packet.data_verified_hash()?),
+        before.data_verified_hash(),
+        "B rebase changed the frozen source receipt"
+    );
+    refuse_selected_repin(stage, b, &base)?;
+    Ok(copy)
+}
+fn refuse_selected_repin(
+    stage: &FullTransferStage<'_>,
+    b: &crate::AccountDb,
+    base: &str,
+) -> TestResult {
+    // A marker alone is not G2 proof; even this incomplete marker must fail
+    // closed instead of allowing the same imported A to be relabeled as B.
+    for origin in ["full_transfer", "unknown"] {
+        let bytes = ramflux_protocol::canonical_json_bytes(
+            &serde_json::json!({"origin":origin,"full_transfer":{"stage_id":stage.reference().stage_id}}),
+        )?;
+        b.account_index.connection.execute("INSERT INTO account_backup_generation VALUES('acct',?1) ON CONFLICT(local_account_id) DO UPDATE SET manifest_json=excluded.manifest_json",params![bytes])?;
+        assert!(
+            stage.pin_receiver_base(base).is_err(),
+            "selected full generation was repinned as independent B"
+        );
+    }
+    b.account_index
+        .connection
+        .execute("DELETE FROM account_backup_generation WHERE local_account_id='acct'", [])?;
+    Ok(())
+}
+
+fn select_prepared(
+    prepared: crate::FullPreparedReceiverDatabase,
+    stage: &FullTransferStage<'_>,
+    reverse: &DataPacket,
+) -> TestResult<crate::FullSelectedReceiverGeneration> {
+    stage.connection.execute(
+        "UPDATE reverse_source_receipt SET bytes=?1",
+        params![reverse.encode_secret()?.as_slice()],
+    )?;
+    let b = stage.db;
+    let root = b.account_index.root();
+    let private = BackupDatabase::open_full_receiver_copy(prepared.path(), &b.current_key)?;
+    for n in [11, 93] {
+        private.db.execute(
+            "UPDATE object_payload_dependency SET child_commitment=?1 WHERE parent_commitment=?2",
+            params![h(n + 1), h(n)],
+        )?;
+    }
+    let (nonce,initial):(String,String)=private.db.query_row("SELECT full_generation_nonce,full_initial_union_root FROM pairing_adoption WHERE account_id='acct'",[],|row|Ok((row.get(0)?,row.get(1)?)))?;
+    drop(private);
+    prepared.verify(stage)?;
+    let object_dir = prepared.path().parent().ok_or("generation parent")?.join("objects");
+    std::fs::write(object_dir.join("unaccounted-payload"), b"must never be silently omitted")?;
+    assert!(prepared.verify(stage).is_err(), "unaccounted object payload was admitted");
+    std::fs::remove_file(object_dir.join("unaccounted-payload"))?;
+    let old = b.account_index.account("acct")?;
+    let prepared_path = prepared.path().to_owned();
+    let path = prepared_path.strip_prefix(root)?.to_str().ok_or("database relative path")?;
+    let objects = object_dir.strip_prefix(root)?.to_str().ok_or("object relative path")?;
+    let mut marker = serde_json::json!({
+        "schema":"ramflux.local.native_data_generation.v1","origin":"full_transfer",
+        "local_account_id":"acct","account_anchor":b.principal_commitment,"operation_id":h(89),"record_hash":h(90),
+        "full_transfer":{
+            "chain_hash":stage.verified_duplex(1000)?.manifest_chain_hash(),"stage_id":stage.reference().stage_id,
+            "generation_nonce":nonce,"initial_union_root":initial,"db_relative_path":path,"object_relative_path":objects,
+            "expected_prior_generation":{"db_relative_path":old.db_relative_path,"object_relative_path":old.object_dir_relative_path},
+            "expected_prior_privacy_epoch":"0"
+        }
+    });
+    let wrapped = b.wrap_current_db_key(&[91; 32])?;
+    b.account_index.store_wrapped_db_key("acct", &wrapped)?;
+    marker["full_transfer"]["initial_union_root"] = h(92).into();
+    let bad = ramflux_protocol::canonical_json_bytes(&marker)?;
+    let index_install = crate::BackupIndexInstall {
+        account_id: "acct",
+        principal_commitment: &b.principal_commitment,
+        db_relative_path: path,
+        object_relative_path: objects,
+        manifest_json: &bad,
+        wrapped_key: &wrapped,
+    };
+    assert!(
+        prepared.commit_index_selection(stage, &index_install, 1000).is_err(),
+        "foreign G2 root selected G1"
+    );
+    assert_eq!(b.account_index.account("acct")?, old);
+    marker["full_transfer"]["initial_union_root"] = initial.into();
+    let good = ramflux_protocol::canonical_json_bytes(&marker)?;
+    let data = prepared.select(
+        stage,
+        &crate::BackupIndexInstall { manifest_json: &good, ..index_install },
+        1000,
+    )?;
+    assert!(
+        b.connection.execute("DELETE FROM object_payload_dependency", []).is_err(),
+        "old B writer survived G2"
+    );
+    assert!(root.join(old.db_relative_path).exists(), "G2 reclaimed the old generation before G3");
+    let selected = data.open()?;
+    assert_eq!(selected.path, prepared_path);
+    assert_eq!(
+        selected.pairing_adoption()?.ok_or("selected adoption")?.full_generation_nonce.as_deref(),
+        Some(nonce.as_str())
+    );
+    assert_eq!(
+        selected.connection.query_row(
+            "SELECT count(*) FROM object_payload_dependency",
+            [],
+            |row| row.get::<_, u64>(0)
+        )?,
+        2,
+        "G2 lost independent B rows"
+    );
+    data.require_database(&selected)?;
+    drop(selected);
+    stage.io_cancel_handle().cancel();
+    assert!(data.open().is_err(), "G2 handback revived a generation after root lock");
+    Ok(data)
 }

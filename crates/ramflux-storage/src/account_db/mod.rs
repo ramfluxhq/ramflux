@@ -191,6 +191,12 @@ impl AccountDb {
         }
     }
 
+    /// Root of this account's selected-generation index, with no key or authority.
+    #[must_use]
+    pub fn account_index_root(&self) -> &std::path::Path {
+        self.account_index.root()
+    }
+
     #[must_use]
     pub const fn encryption_mode(&self) -> EncryptionMode {
         self.mode

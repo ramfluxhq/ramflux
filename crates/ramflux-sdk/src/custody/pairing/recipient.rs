@@ -177,6 +177,17 @@ pub fn ordinary_session_admitted(
 ) -> Result<bool, SdkError> {
     let root = client.account_index()?.root();
     let adoption = client.account_db()?.pairing_adoption()?;
+    let installed = install_store::read_installed(root, account_id)?;
+    if let (Some(install), Some(adoption)) = (&installed, &adoption)
+        && install.full_transfer.is_some()
+    {
+        let account =
+            crate::custody::load_data_account(root, account_id, crate::custody::network_now()?)?;
+        return Ok(super::full_generation::require_completed_full_generation(
+            root, &account, install, adoption,
+        )
+        .is_ok());
+    }
     if !ordinary_session_admitted_at(
         root,
         account_id,

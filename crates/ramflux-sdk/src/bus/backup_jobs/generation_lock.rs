@@ -11,7 +11,12 @@ use std::{
 };
 #[derive(Clone, Default)]
 pub(crate) struct GenerationLocks(Arc<Mutex<BTreeMap<String, Weak<AtomicBool>>>>);
-pub(crate) struct GenerationLease(Arc<AtomicBool>);
+pub(crate) struct GenerationLease {
+    slot: Arc<AtomicBool>,
+    // A live lease must keep the canonical-root registry owner alive even when
+    // its short-lived creator/service has gone away.
+    _owner: GenerationLocks,
+}
 impl GenerationLocks {
     /// Share one generation owner across backup services and pairing at the same root.
     pub(crate) fn for_root(root: &std::path::Path) -> Result<Self, crate::SdkError> {
@@ -45,12 +50,12 @@ impl GenerationLocks {
         Ok(slot
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| GenerationLease(slot)))
+            .map(|_| GenerationLease { slot, _owner: self.clone() }))
     }
 }
 impl Drop for GenerationLease {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.slot.store(false, Ordering::Release);
     }
 }
 

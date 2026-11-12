@@ -23,6 +23,27 @@ pub(crate) fn verify_local(
     if install.full_transfer.is_some() {
         return Err(SdkError::PairingCode("PublicationPending"));
     }
+    verify_keys_and_record(install, authority, vault, now)
+}
+/// Data preparation only: no authority file, selection or ordinary admission is changed.
+pub(crate) fn verify_generation_keys(
+    install: &Install,
+    authority: &CustodyAuthority,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<(), SdkError> {
+    install.validate()?;
+    if install.full_transfer.is_none() {
+        return Err(SdkError::PairingCode("WrongContext"));
+    }
+    verify_keys_and_record(install, authority, vault, now)
+}
+fn verify_keys_and_record(
+    install: &Install,
+    authority: &CustodyAuthority,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<(), SdkError> {
     let verified = ramflux_crypto::custody::verify_publication(authority, now)?;
     let body = &verified.envelope().body;
     if body.account_anchor != install.account_anchor
@@ -68,6 +89,30 @@ pub(crate) fn write_authority(
     now: u64,
 ) -> Result<(), SdkError> {
     verify_local(install, authority, vault, now)?;
+    write_verified_authority(root, install, authority, vault, now)
+}
+pub(crate) fn write_generation_authority(
+    local: &crate::custody::pairing::Installation<'_>,
+    install: &Install,
+    authority: &CustodyAuthority,
+    selected: &ramflux_storage::FullSelectedReceiverGeneration,
+) -> Result<(), SdkError> {
+    selected.require_database(local.db)?;
+    let adoption =
+        local.db.pairing_adoption()?.ok_or(SdkError::PairingCode("PublicationPending"))?;
+    crate::custody::pairing::full_generation::require_selected_full_generation(
+        local.root, install, &adoption,
+    )?;
+    verify_generation_keys(install, authority, local.vault, local.now)?;
+    write_verified_authority(local.root, install, authority, local.vault, local.now)
+}
+fn write_verified_authority(
+    root: &Path,
+    install: &Install,
+    authority: &CustodyAuthority,
+    vault: &dyn PrimaryVault,
+    now: u64,
+) -> Result<(), SdkError> {
     let dir = directory(root, &install.account_id)?;
     super::genesis::require_owned_reservation(
         root,
@@ -152,8 +197,19 @@ pub(crate) fn write_authority(
 }
 
 pub(crate) fn matches_install(account: &BornAccount, install: &Install) -> Result<bool, SdkError> {
-    Ok(install.full_transfer.is_none()
-        && object_hash(account.record())?.as_str() == install.record_hash.as_deref().unwrap_or("")
+    Ok(install.full_transfer.is_none() && matches_authority_owners(account, install)?)
+}
+pub(crate) fn matches_generation_install(
+    account: &BornAccount,
+    install: &Install,
+) -> Result<bool, SdkError> {
+    if install.full_transfer.is_none() {
+        return Ok(false);
+    }
+    matches_authority_owners(account, install)
+}
+fn matches_authority_owners(account: &BornAccount, install: &Install) -> Result<bool, SdkError> {
+    Ok(object_hash(account.record())?.as_str() == install.record_hash.as_deref().unwrap_or("")
         && account.local_account_id() == install.account_id
         && account.local_device_id()? == install.recipient_ref.device_id
         && account.record().body.account_anchor == install.account_anchor
@@ -168,6 +224,11 @@ pub(super) fn require_installed_marker(root: &Path, account: &BornAccount) -> Re
         return Err(SdkError::PairingCode("PublicationPending"));
     }
     match install_store::read_installed(root, id)? {
+        Some(row) if row.full_transfer.is_some() => {
+            crate::custody::pairing::full_generation::require_installed_native_generation(
+                root, account, &row,
+            )?;
+        }
         Some(row) if row.state != "installed" || !matches_install(account, &row)? => {
             return Err(SdkError::PairingCode("PublicationPending"));
         }

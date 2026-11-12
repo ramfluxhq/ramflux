@@ -871,3 +871,75 @@ fn pairing_full_unknown_token_reaches_real_native_admit_over_mesh_before_public_
     assert_eq!(node.store.lock().map_err(|_| "store lock")?.stats().full, 0);
     Ok(())
 }
+
+/// Real public reader and TLS mesh: invalid framing never reaches either owner.
+#[test]
+fn pairing_full_chunked_or_oversize_refused_before_reservation() -> TestResult {
+    let _env = enable_pairing();
+    let node = spawn_node_mesh()?;
+    let (context, _root) = live_context(&node, vec![localhost()])?;
+    let scratch = context.pairing.as_ref().ok_or("full HTTP surface")?.full_scratch.clone();
+    let token = id(97);
+    let auth = format!(
+        "{}Authorization: PairingFull {}.{}.initiator.{token}\r\n",
+        proxy_headers("203.0.113.11"),
+        id(95),
+        id(96)
+    );
+    let cases = [
+        ("send", "Transfer-Encoding: chunked\r\n".to_owned()),
+        ("send", "Transfer-Encoding: chunked\r\nContent-Length: 32\r\n".to_owned()),
+        (
+            "send",
+            format!(
+                "Content-Length: {}\r\n",
+                ramflux_protocol::custody::pairing::full_transfer::PACKET_BYTES + 1
+            ),
+        ),
+        ("send_control", "Content-Length: 8193\r\n".to_owned()),
+        ("send", "Content-Length: 0\r\n".to_owned()),
+        ("send", "Content-Length: 32\r\nContent-Length: 32\r\n".to_owned()),
+    ];
+    for (arm, framing) in cases {
+        // No body bytes and the connection stays open. A response therefore also
+        // proves that the listener did not read/buffer the declared payload.
+        let raw = format!(
+            "POST {PAIRING_SEND_PATH} HTTP/1.1\r\nHost: localhost\r\nX-Ramflux-Pairing-Arm: {arm}\r\n{auth}{framing}\r\n"
+        );
+        let response =
+            exchange(raw.as_bytes(), context.clone(), crate::http_limits::defaults(true))?;
+        assert!(
+            response.starts_with("HTTP/1.1 400")
+                || response.starts_with("HTTP/1.1 413")
+                || decode_http::<Failure>(&response)
+                    .is_ok_and(|failure| failure.code == "WrongContext"),
+            "invalid framing did not receive a closed refusal"
+        );
+        assert!(!response.contains(&token), "framing refusal exposed the role capability");
+        assert_eq!(
+            node.full_admit_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "invalid framing reached native reservation"
+        );
+        assert_eq!(
+            scratch.reservation_attempts()?,
+            0,
+            "invalid framing reached listener reservation"
+        );
+        assert_eq!(node.store.lock().map_err(|_| "native store")?.stats().full, 0);
+    }
+    // Positive routing leg: a correctly framed request MUST reach the real TLS
+    // native admission and receive its token refusal, rather than always rejecting.
+    let raw = format!(
+        "POST {PAIRING_SEND_PATH} HTTP/1.1\r\nHost: localhost\r\nX-Ramflux-Pairing-Arm: send\r\n{auth}Content-Length: 32\r\n\r\n"
+    );
+    let response = exchange(raw.as_bytes(), context, crate::http_limits::defaults(true))?;
+    assert_eq!(decode_http::<Failure>(&response)?.code, "WrongContext");
+    assert_eq!(
+        node.full_admit_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "valid framing never reached native admission"
+    );
+    assert_eq!(scratch.reservation_attempts()?, 0, "invalid token reserved listener payload bytes");
+    Ok(())
+}

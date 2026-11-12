@@ -5,6 +5,9 @@
 use super::{FullReceiverBaseCopy, FullTransferStage, wrong};
 use crate::{AccountDbKey, AdoptionRow, BackupDatabase, StorageError};
 use rusqlite::params;
+mod objects;
+mod selection;
+pub use selection::FullSelectedReceiverGeneration;
 use std::{
     path::PathBuf,
     sync::{
@@ -32,7 +35,7 @@ impl FullReceiverBaseCopy {
     /// # Errors
     /// Refuses changed B, missing DV, foreign adoption, unsafe paths or lost unlock.
     pub fn into_generation_database_work(
-        self,
+        mut self,
         stage: &FullTransferStage<'_>,
         path: PathBuf,
         adoption: AdoptionRow,
@@ -70,6 +73,7 @@ impl FullReceiverBaseCopy {
         {
             return Err(wrong());
         }
+        self.retain_for_installation(stage, now)?;
         Ok(FullReceiverDatabaseWork {
             copy: self,
             key: stage.db.current_key.clone(),
@@ -106,6 +110,7 @@ impl FullReceiverDatabaseWork {
         }
         result?;
         self.live()?;
+        objects::prepare(&self.path)?;
         Ok(FullPreparedReceiverDatabase(self))
     }
     fn write(&self, source: &BackupDatabase) -> Result<(), StorageError> {
@@ -135,6 +140,7 @@ impl FullReceiverDatabaseWork {
                 }
             }
         }
+        objects::require_supported(&target)?;
         let row = &self.adoption;
         let tx = target.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute(
@@ -162,6 +168,8 @@ impl FullPreparedReceiverDatabase {
         self.0.live()?;
         self.0.copy.verify_materialization(stage)?;
         let private = BackupDatabase::open_full_receiver_copy(&self.0.path, &self.0.key)?;
+        objects::require_supported(&private.db)?;
+        objects::verify(&self.0.path)?;
         let row = &self.0.adoption;
         let matches:bool=private.db.query_row("SELECT EXISTS(SELECT 1 FROM pairing_adoption WHERE account_id=?1 AND operation_id=?2 AND record_hash=?3 AND local_ref=?4 AND local_role=?5 AND branch_vault_ref=?6 AND data_vault_ref=?7 AND primary_vault_ref IS ?8 AND full_generation_nonce=?9 AND full_initial_union_root=?10)",params![row.account_id,row.operation_id,row.record_hash,row.local_ref,row.local_role,row.branch_vault_ref,row.data_vault_ref,row.primary_vault_ref,row.full_generation_nonce,row.full_initial_union_root],|row|row.get(0))?;
         if !matches {

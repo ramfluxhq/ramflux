@@ -16,6 +16,7 @@ use ramflux_protocol::custody::{CustodyAuthority, Publication, object_hash};
 use std::sync::{Arc, Mutex};
 
 mod full_relay;
+mod generation;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -89,17 +90,23 @@ struct ComponentSource {
     client: crate::RamfluxClient,
     vault: Arc<crate::custody::tests::TestVault>,
     root: crate::custody::tests::Root,
+    phrase: Option<zeroize::Zeroizing<String>>,
 }
 impl ComponentSource {
     async fn open(full: bool, now: u64) -> Result<Self, Box<dyn std::error::Error>> {
         if !full {
             let fixture =
                 crate::client::native_test_support::Fixture::new("component-source").await?;
-            return Ok(Self { client: fixture.client, vault: fixture.vault, root: fixture.root });
+            return Ok(Self {
+                client: fixture.client,
+                vault: fixture.vault,
+                root: fixture.root,
+                phrase: None,
+            });
         }
         let root = crate::custody::tests::Root::new()?;
         let vault = Arc::new(crate::custody::tests::TestVault::default());
-        let account = crate::custody::tests::create_with_device(
+        let (account, phrase) = crate::custody::tests::create_with_device_and_phrase(
             &root.0,
             "component-source",
             "primary",
@@ -114,7 +121,7 @@ impl ComponentSource {
             b"fresh-source-data",
         )?;
         client.unlock_account("component-source", b"fresh-source-data")?;
-        Ok(Self { client, vault, root })
+        Ok(Self { client, vault, root, phrase: Some(phrase) })
     }
 }
 

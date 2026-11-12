@@ -11,8 +11,11 @@ use std::sync::{Arc, atomic::AtomicBool};
 pub(super) mod application;
 mod delta;
 mod generation;
+mod rebase;
 pub use application::FullAppliedDataReceipt;
-pub use generation::{FullPreparedReceiverDatabase, FullReceiverDatabaseWork};
+pub use generation::{
+    FullPreparedReceiverDatabase, FullReceiverDatabaseWork, FullSelectedReceiverGeneration,
+};
 
 fn wrong() -> StorageError {
     StorageError::PairingField("WrongContext")
@@ -55,6 +58,7 @@ impl FullTransferStage<'_> {
     pub fn pin_receiver_base(&self, hash: &str) -> Result<FullPinnedReceiverBase, StorageError> {
         self.require_io()?;
         let record = self.resume_record()?;
+        rebase::require_before_selection(self)?;
         let manifest = self.forward_manifest(hash)?;
         if record.role != ramflux_crypto::custody::pairing::PairingRole::Responder
             || record.grant.destination_ref.account_anchor != self.db.principal_commitment
@@ -112,6 +116,12 @@ impl FullPinnedReceiverBase {
     }
 }
 impl FullReceiverBaseCopy {
+    /// Original B's pinned paths and privacy version; data-only, never a reservation.
+    #[must_use]
+    pub const fn target_observation(&self) -> &super::FullTargetObservation {
+        &self.observation
+    }
+
     /// Qualified normalized fixed-base stream, still requiring semantic/install validation.
     #[must_use]
     pub const fn union_encoding(&self) -> Option<&super::FullUnionEncoding> {
