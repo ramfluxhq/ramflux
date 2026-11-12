@@ -52,6 +52,7 @@ pub fn write_full_scalar_sql_row(
         let codec =
             &rule.codec.iter().find(|field| field.name == cell.name).ok_or_else(unsupported)?.codec;
         let width = match codec {
+            CodecRule::SqlMacSubkeys => 192,
             CodecRule::SqlI64 { .. } => 8,
             CodecRule::SqlBase64 { decoded_bytes: U64(32), .. } => 43,
             CodecRule::SqlBytes { length, .. } => {

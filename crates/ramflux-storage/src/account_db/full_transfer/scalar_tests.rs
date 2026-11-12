@@ -362,3 +362,116 @@ fn pairing_full_sql_source_rows_use_actual_types_and_refuse_before_output() -> T
     }
     Ok(())
 }
+
+#[test]
+fn pairing_full_sql_erasure_links_validate_both_columns_and_composite_absent_keys() -> TestResult {
+    let db = rusqlite::Connection::open_in_memory()?;
+    let lookup = ramflux_crypto::object_erasure_lookup("root", "wire");
+    let commitment = ramflux_crypto::object_erasure_commitment("root", "wire", "manifest");
+    for (family, first, second) in [
+        ("sql/object_erasure_lookup", lookup.as_str(), commitment.as_str()),
+        ("sql/object_payload_dependency", commitment.as_str(), lookup.as_str()),
+    ] {
+        let rule =
+            super::full_transfer_catalog().iter().find(|rule| rule.id == family).ok_or("rule")?;
+        assert_eq!(rule.codec_version, U64(2));
+        let mut query = db.prepare(&format!(
+            "SELECT ?1 AS {},?2 AS {}",
+            rule.cells[0].name, rule.cells[1].name
+        ))?;
+        let mut rows = query.query([first, second])?;
+        let mut output = Zeroizing::new(Vec::new());
+        super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("row")?, &mut *output)?;
+        let mut input = output.as_slice();
+        let header = read_record_header(&mut input)?.ok_or("header")?;
+        copy_full_scalar_record(rule, &header, &mut input, &mut std::io::sink())?;
+        assert_eq!(input, b"");
+        let expected = if rule.key.len() == 2 {
+            encode_stable_key([
+                (CellType::Utf8, first.as_bytes()),
+                (CellType::Utf8, second.as_bytes()),
+            ])?
+        } else {
+            encode_stable_key([(CellType::Utf8, first.as_bytes())])?
+        };
+        assert_eq!(header.key, expected.as_str());
+        let mut absent = RecordHeader {
+            op: RecordOp::Absent,
+            cell_types: vec![],
+            cell_lengths: vec![],
+            ..header
+        };
+        copy_full_scalar_record(rule, &absent, &mut [].as_slice(), &mut std::io::sink())?;
+        if rule.key.len() == 2 {
+            absent.key = encode_stable_key([(CellType::Utf8, first.as_bytes())])?.to_string();
+            assert!(
+                copy_full_scalar_record(rule, &absent, &mut [].as_slice(), &mut std::io::sink())
+                    .is_err()
+            );
+        }
+        drop(rows);
+        let mut noncanonical = ramflux_protocol::encode_base64url([0; 32]).into_bytes();
+        noncanonical[42] = b'B';
+        let noncanonical = std::str::from_utf8(&noncanonical)?;
+        for values in [[noncanonical, second], [first, noncanonical]] {
+            let mut rows = query.query(values)?;
+            output.clear();
+            assert!(
+                super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("row")?, &mut *output)
+                    .is_err()
+            );
+            assert!(output.is_empty());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pairing_full_sql_mac_subkeys_require_their_exact_bundle_id_and_exclude_current_flag()
+-> TestResult {
+    let db = rusqlite::Connection::open_in_memory()?;
+    let rule = super::full_transfer_catalog()
+        .iter()
+        .find(|rule| rule.id == "sql/account_mac_bundle/portable")
+        .ok_or("MAC rule")?;
+    let keys = Zeroizing::new([165_u8; 192]);
+    let id = super::super::mac_subkeys::bundle_id(keys.as_slice());
+    assert_eq!(id, "mnymtMasQSG9iueQpJZpmop3htW8Uo5fgM2n-4N1QT4"); // Independent Python hashlib.sha256 vector.
+    let mut query = db.prepare("SELECT ?1 AS bundle_id,?2 AS subkeys")?;
+    let mut rows = query.query(rusqlite::params![id, keys.as_slice()])?;
+    let mut output = Zeroizing::new(Vec::new());
+    super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("row")?, &mut *output)?;
+    let mut input = output.as_slice();
+    let header = read_record_header(&mut input)?.ok_or("header")?;
+    assert_eq!(header.cell_types, [CellType::Utf8, CellType::Bytes]);
+    assert_eq!(input.len(), 43 + 192);
+    assert_eq!(&input[43..], keys.as_slice());
+    copy_full_scalar_record(rule, &header, &mut input, &mut std::io::sink())?;
+    assert_eq!(input, b"");
+    drop(rows);
+    let mut changed = Zeroizing::new(*keys);
+    changed[191] ^= 1;
+    let foreign_id = ramflux_protocol::encode_base64url([0; 32]);
+    for (identifier, secret) in [
+        (id.as_str(), changed.as_slice()),
+        (id.as_str(), &keys[..191]),
+        (foreign_id.as_str(), keys.as_slice()),
+    ] {
+        let mut rows = query.query(rusqlite::params![identifier, secret])?;
+        output.clear();
+        assert!(
+            super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("bad row")?, &mut *output)
+                .is_err()
+        );
+        assert!(output.is_empty());
+    }
+    let mut extra = db.prepare("SELECT ?1 AS bundle_id,?2 AS subkeys,1 AS is_current")?;
+    let mut rows = extra.query(rusqlite::params![id, keys.as_slice()])?;
+    output.clear();
+    assert!(
+        super::write_full_scalar_sql_row(rule, rows.next()?.ok_or("extra row")?, &mut *output)
+            .is_err()
+    );
+    assert!(output.is_empty());
+    Ok(())
+}

@@ -172,16 +172,9 @@ pub(super) const RULE_4: FamilyRule = table_rule!(
             true,
             Transfer,
             Immutable,
-            CodecRule::RequiresOwner { owner: "account_mac_bundle", cell_type: CellType::Utf8 }
+            CodecRule::SqlBase64 { decoded_bytes: U64(32), nullable: false }
         ),
-        (
-            "subkeys",
-            Bytes,
-            false,
-            Transfer,
-            ImportedBundle,
-            CodecRule::Scalar { cell_type: CellType::Bytes }
-        ),
+        ("subkeys", Bytes, false, Transfer, ImportedBundle, CodecRule::SqlMacSubkeys),
         (
             "is_current",
             I64,

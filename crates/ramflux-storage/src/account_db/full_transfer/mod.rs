@@ -8,6 +8,7 @@ mod keys;
 mod native_floor;
 mod scalar;
 mod scalar_sql;
+mod source_base;
 mod source_cut;
 mod source_receipt;
 mod source_scalar;
@@ -16,6 +17,7 @@ mod stage_chunks;
 mod stage_reader;
 mod stage_validation;
 pub use keys::{EncryptedStageChunk, FullStageKey, StageDirection, WrappedFullStageKey};
+pub use source_base::FullBaseSourceEncoding;
 pub use source_scalar::FullScalarSourceCounts;
 pub use stage::FullTransferStage;
 pub use stage_reader::FullForwardReader;
@@ -41,3 +43,6 @@ mod scalar_tests;
 
 #[cfg(test)]
 mod source_scalar_tests;
+
+#[cfg(test)]
+mod source_base_tests;

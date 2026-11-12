@@ -6,6 +6,7 @@
 use crate::StorageError;
 use ramflux_protocol::custody::pairing::full_transfer::{CellType, Disposition, Family, U64};
 use serde::Serialize;
+pub(super) mod local_actor;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +74,8 @@ pub enum CodecRule {
     Scalar {
         cell_type: CellType,
     },
+    /// Exactly 192 account MAC subkey bytes, SHA256-bound to the `bundle_id` key.
+    SqlMacSubkeys,
     /// Raw SQL byte cell with an exact semantic width; never an opaque JSON codec.
     SqlBytes {
         length: U64,
@@ -174,6 +177,17 @@ impl FamilyRule {
                 }
             }
         }
+        if self.codec.iter().any(|field| matches!(field.codec, CodecRule::SqlMacSubkeys))
+            && (!matches!(self.selector, FamilySelector::Table("account_mac_bundle"))
+                || self.id != "sql/account_mac_bundle/portable"
+                || self.key != ["bundle_id"]
+                || self.merge != MergeRule::ImportedBundle
+                || self.codec.iter().any(|field| {
+                    matches!(field.codec, CodecRule::SqlMacSubkeys) && field.name != "subkeys"
+                }))
+        {
+            return Err(unsupported());
+        }
         let mut remaining = 4096;
         validate_fields(self.codec, 0, &mut remaining)?;
         if self.cells.len() > 256 || self.excluded.len() > 256 || self.key.len() > 256 {
@@ -235,7 +249,8 @@ impl FamilyRule {
             && self.codec.iter().any(|field| {
                 matches!(
                     field.codec,
-                    CodecRule::SqlBytes { .. }
+                    CodecRule::SqlMacSubkeys
+                        | CodecRule::SqlBytes { .. }
                         | CodecRule::SqlBase64 { .. }
                         | CodecRule::SqlI64 { .. }
                 )
@@ -259,7 +274,7 @@ impl FamilyRule {
                 CodecRule::Scalar { cell_type } | CodecRule::RequiresOwner { cell_type, .. } => {
                     Some(cell_type)
                 }
-                CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
+                CodecRule::SqlMacSubkeys | CodecRule::SqlBytes { .. } => Some(CellType::Bytes),
                 CodecRule::SqlBase64 { .. } => Some(CellType::Utf8),
                 CodecRule::SqlI64 { .. } => Some(CellType::I64),
                 _ => None,
@@ -374,6 +389,11 @@ fn validate_codec(
     }
     *remaining -= 1;
     match codec {
+        CodecRule::SqlMacSubkeys => {
+            if depth != 1 {
+                return Err(unsupported());
+            }
+        }
         CodecRule::SqlBase64 { decoded_bytes, .. } => {
             if depth != 1 || decoded_bytes.0 != 32 {
                 return Err(unsupported());
@@ -500,7 +520,7 @@ macro_rules! table_rule {
      [$($key:literal),*], [$(($name:literal,$kind:ident,$nullable:literal,$disp:ident,$field_merge:ident,$codec:expr)),* $(,)?]) => {
         FamilyRule {
             cells: table_rule!(@cells [] $(($name,$kind,$nullable,$disp)),*),
-            codec_version: table_rule!(@version $table), disposition: Disposition::$mode,
+            codec_version: table_rule!(@version $table,$mode), disposition: Disposition::$mode,
             excluded: table_rule!(@excluded [] $(($name,$disp)),*),
             id: $id, key: &[$($key),*], merge: MergeRule::$merge,
             restrictive: $restrictive, selector: FamilySelector::Table($table),
@@ -509,11 +529,15 @@ macro_rules! table_rule {
             key_grammar_version:U64(1), restrictive_projection:&[],
         }
     };
-    (@version "account_erasure_generation") => { U64(2) };
-    (@version "object_erasure_fence") => { U64(2) };
-    (@version "object_identity_replacement") => { U64(2) };
-    (@version "object_segment_reference_veto") => { U64(2) };
-    (@version $other:literal) => { U64(1) };
+    (@version "account_erasure_generation",$mode:ident) => { U64(2) };
+    (@version "object_erasure_fence",$mode:ident) => { U64(2) };
+    (@version "object_erasure_lookup",$mode:ident) => { U64(2) };
+    (@version "object_payload_dependency",$mode:ident) => { U64(2) };
+    (@version "object_identity_replacement",$mode:ident) => { U64(2) };
+    (@version "object_segment_reference_veto",$mode:ident) => { U64(2) };
+    (@version "account_mac_bundle",Transfer) => { U64(2) };
+    (@version "runtime_inbox_recovery",$mode:ident) => { U64(2) };
+    (@version $other:literal,$mode:ident) => { U64(1) };
     (@cells [$($out:expr,)*]) => { &[$($out,)*] };
     (@cells [$($out:expr,)*] ($name:literal,$kind:ident,$nullable:literal,Transfer) $(,$rest:tt)*) => {
         table_rule!(@cells [$($out,)* CellRule {name:$name,nullable:$nullable,cell_type:CellType::$kind},] $($rest),*)
@@ -541,6 +565,8 @@ pub const fn full_transfer_catalog() -> &'static [FamilyRule] {
     TABLE_CATALOG
 }
 static TABLE_CATALOG: &[FamilyRule] = &[
+    local_actor::GROUP_RULE,
+    local_actor::SAFETY_RULE,
     tables_0::RULE_0,   // sql/a2ui_surface_cache
     tables_0::RULE_1,   // sql/account_erasure_generation
     tables_0::RULE_2,   // sql/account_key_check

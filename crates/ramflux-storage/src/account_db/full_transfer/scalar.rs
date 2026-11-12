@@ -81,14 +81,23 @@ pub fn copy_full_scalar_record(
             .find(|field| field.name == rule.cells[index].name)
             .ok_or_else(schema)?
             .codec;
-        if matches!(codec, CodecRule::SqlI64 { .. } | CodecRule::SqlBase64 { .. })
-            && *kind != CellType::Null
+        if matches!(
+            codec,
+            CodecRule::SqlI64 { .. } | CodecRule::SqlBase64 { .. } | CodecRule::SqlMacSubkeys
+        ) && *kind != CellType::Null
         {
             let count = usize::try_from(length.0).map_err(|_| invalid())?;
-            let mut bytes = Zeroizing::new([0; 43]);
+            let mut bytes = Zeroizing::new([0; 192]);
             let value = bytes.get_mut(..count).ok_or_else(invalid)?;
             reader.read_exact(value)?;
             validate_sql_value(codec, *kind, value)?;
+            if matches!(codec, CodecRule::SqlMacSubkeys)
+                && (raw.len() != 48
+                    || raw[..5] != [3, 0, 0, 0, 43]
+                    || super::super::mac_subkeys::bundle_id(value).as_bytes() != &raw[5..])
+            {
+                return Err(invalid());
+            }
             tee.write_all(value)?;
         } else {
             copy_record_cells(reader, &mut tee, &one.0).map_err(|error| match error {
@@ -128,6 +137,7 @@ fn validate_scalar_schema(rule: &FamilyRule, header: &RecordHeader) -> Result<()
         if !matches!(
             field.codec,
             CodecRule::Scalar { .. }
+                | CodecRule::SqlMacSubkeys
                 | CodecRule::SqlBytes { .. }
                 | CodecRule::SqlBase64 { .. }
                 | CodecRule::SqlI64 { .. }
@@ -249,6 +259,7 @@ fn validate_key_grammar(rule: &FamilyRule, mut key: &[u8]) -> Result<(), Storage
 }
 fn validate_sql_header(codec: &CodecRule, kind: CellType, length: u64) -> Result<(), StorageError> {
     let valid = match codec {
+        CodecRule::SqlMacSubkeys => kind == CellType::Bytes && length == 192,
         CodecRule::SqlBytes { length: expected, nullable } => {
             (kind == CellType::Bytes && length == expected.0)
                 || (kind == CellType::Null && *nullable && length == 0)
