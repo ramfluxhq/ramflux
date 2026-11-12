@@ -42,7 +42,7 @@ pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::rc::Rc;
 pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use tokio::net::{UnixListener, UnixStream};
 pub(crate) use tokio::sync::{Mutex, mpsc, watch};
 pub(crate) use tokio::task::LocalSet;

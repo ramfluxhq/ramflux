@@ -328,7 +328,7 @@ pub fn remove_pending(root: &Path, account_id: &str, operation_id: &str) -> Resu
         Ok(()) => {}
     }
     if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
+        crate::platform::fs::sync_path(parent)?;
     }
     Ok(())
 }
@@ -398,7 +398,7 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), SdkError> {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        File::open(parent)?.sync_all()?;
+        crate::platform::fs::sync_path(parent)?;
         Ok(())
     })();
     if result.is_err() {

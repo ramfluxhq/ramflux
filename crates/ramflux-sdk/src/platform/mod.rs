@@ -9,6 +9,9 @@ pub(crate) mod fs;
 pub(crate) mod listener;
 
 #[cfg(windows)]
+#[path = "fs_windows.rs"]
+pub(crate) mod fs;
+#[cfg(windows)]
 pub(crate) mod pipe;
 #[cfg(windows)]
 pub(crate) use pipe::listener;

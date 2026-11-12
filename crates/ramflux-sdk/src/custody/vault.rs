@@ -8,6 +8,11 @@ pub(super) mod linux;
 mod reason;
 pub use reason::CustodyVaultReason;
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{VAULT_CLASS_WINDOWS_DPAPI, WindowsDpapiVault};
+
 use super::HomeAuthorizationRequest;
 use crate::SdkError;
 use ramflux_crypto::custody::SelfSigningKey;
