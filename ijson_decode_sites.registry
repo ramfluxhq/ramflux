@@ -658,6 +658,8 @@ crates/ramflux-sdk/src/client/routed/legacy.rs | legacy_routing_binding | 1 | E 
 crates/ramflux-sdk/src/client/routed/mod.rs | decode | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/mod.rs | decode | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/mod.rs | open_routed | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/routed/native_control/a2i.rs | json_to_native | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
+crates/ramflux-sdk/src/client/routed/native_control/a2i.rs | to_native | 1 | D | admitted-before-persist; stored row is not an ingress decoder
 crates/ramflux-sdk/src/client/routed/own_history.rs | routed_own_history_envelope | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/own_history.rs | routed_own_history_envelope | 2 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
 crates/ramflux-sdk/src/client/routed/project.rs | authorize_routed_receipt | 1 | E | excluded=target type is outside Envelope/Ack/Nack containment closure
