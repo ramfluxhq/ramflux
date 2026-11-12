@@ -1366,27 +1366,8 @@ async fn pairing_full_root_pump_and_ordinary_writer_services_complete_disk_phase
         }
     }
     assert!(complete, "installed relay pumps did not complete the actual disk phase: {last}");
-    for participant in [&participant_a, &participant_b] {
-        let status = super::coordinator::handle_bus(
-            &participant.root,
-            &participant.account_id,
-            "device.transfer.status",
-            serde_json::json!({
-                "schema":"ramflux.pairing.StatusRequest.v2", "version":2,
-                "operation_id":operation, "generation":1,
-            }),
-        )
+    Box::pin(assert_full_bus_disk_status([&participant_a, &participant_b], &operation, &manifest))
         .await?;
-        let Outcome::FullStatus { value } = status.outcome else {
-            return Err("bus full status".into());
-        };
-        assert_eq!(value.bytes_durable, manifest.manifest.total_bytes);
-        assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
-        assert_eq!(
-            value.stage,
-            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
-        );
-    }
     assert!(!ordinary_session_admitted_for_participant(&participant_b)?);
     assert!(participant_a.db.lock().map_err(|_| "source DB handback")?.is_none());
     {
@@ -1482,6 +1463,35 @@ async fn pairing_full_background_refusal_keeps_exact_code_and_valid_legacy_statu
         assert_eq!(
             value.stage,
             ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Snapshot
+        );
+    }
+    Ok(())
+}
+
+async fn assert_full_bus_disk_status(
+    participants: [&LocalPairingParticipant; 2],
+    operation: &str,
+    manifest: &ramflux_protocol::custody::pairing::full_transfer::SourceManifest,
+) -> TestResult {
+    for participant in participants {
+        let status = super::coordinator::handle_bus(
+            &participant.root,
+            &participant.account_id,
+            "device.transfer.status",
+            serde_json::json!({
+                "schema":"ramflux.pairing.StatusRequest.v2", "version":2,
+                "operation_id":operation, "generation":1,
+            }),
+        )
+        .await?;
+        let Outcome::FullStatus { value } = status.outcome else {
+            return Err("bus full status".into());
+        };
+        assert_eq!(value.bytes_durable, manifest.manifest.total_bytes);
+        assert_eq!(value.bytes_total, manifest.manifest.total_bytes);
+        assert_eq!(
+            value.stage,
+            ramflux_protocol::custody::pairing::local_dto::FullStatusStage::Streaming
         );
     }
     Ok(())
