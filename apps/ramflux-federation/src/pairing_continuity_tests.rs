@@ -121,7 +121,7 @@ async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
     drop(fx);
 
     let mut fx = Continuity::open()?;
-    let (op, _) = joined(&mut fx).await?;
+    let (op, _) = Box::pin(joined(&mut fx)).await?;
     let mut bad = confirm_ok(&fx.primary, &op)?;
     bad.r#match = false;
     let mismatch = update(fx.primary.confirm(&bad).await?)?;
@@ -132,7 +132,7 @@ async fn pairing_two_local_confirmations_precede_approval() -> TestResult {
     drop(fx);
 
     let mut fx = Continuity::open()?;
-    let _ = joined(&mut fx).await?;
+    let _ = Box::pin(joined(&mut fx)).await?;
     let changed = update(fx.primary.note_head_change().await?)?;
     assert_eq!(
         (changed.phase.as_str(), changed.result.as_deref()),
@@ -219,7 +219,7 @@ async fn pairing_forged_invitation_is_refused() -> TestResult {
 #[tokio::test]
 async fn pairing_stale_generation_is_refused() -> TestResult {
     let mut fx = Continuity::open()?;
-    let (op, generation) = joined(&mut fx).await?;
+    let (op, generation) = Box::pin(joined(&mut fx)).await?;
     let mut stale = confirm_ok(&fx.primary, &op)?;
     stale.generation = generation.saturating_add(1);
     match fx.primary.confirm(&stale).await {
