@@ -310,9 +310,11 @@ pub(crate) enum KnownFolder {
 /// # Errors
 /// Returns an error when the shell does not report the folder.
 pub(crate) fn known_folder(folder: KnownFolder) -> io::Result<PathBuf> {
+    static LOCAL: windows_sys::core::GUID = FOLDERID_LocalAppData;
+    static ROAMING: windows_sys::core::GUID = FOLDERID_RoamingAppData;
     let id = match folder {
-        KnownFolder::LocalAppData => &raw const FOLDERID_LocalAppData,
-        KnownFolder::RoamingAppData => &raw const FOLDERID_RoamingAppData,
+        KnownFolder::LocalAppData => &raw const LOCAL,
+        KnownFolder::RoamingAppData => &raw const ROAMING,
     };
     let mut text: *mut u16 = std::ptr::null_mut();
     // SAFETY: `id` points at a constant GUID; a null token asks for the current user. The
