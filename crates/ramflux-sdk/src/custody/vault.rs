@@ -126,26 +126,36 @@ pub const VAULT_CLASS_PROTECTED: &str = "software_os_credential_non_synchronizin
 pub const VAULT_CLASS_LOGIN_KEYCHAIN: &str = "software_os_credential_login_keychain";
 /// Software OS credential vault. This is not a nonexportable hardware Ed25519 key.
 /// macOS uses its protected, explicitly non-synchronizing keychain, or the login keychain
-/// when the process has no data-protection entitlement (ad hoc signing). Other platforms
-/// fail closed until their primary provider is implemented and reviewed.
+/// when the process has no data-protection entitlement (ad hoc signing). iOS uses its
+/// keychain with after-first-unlock, this-device-only items and no fallback. Other
+/// platforms fail closed until their primary provider is implemented and reviewed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativePrimaryVault;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod native;
-#[cfg(any(target_os = "macos", test))]
+/// Pin the vault to one keychain access group before the first vault call (iOS only).
+/// Without a pinned group Security stores items in the app's first access group.
+///
+/// # Errors
+/// Refuses a malformed group, and a second call that names a different group.
+#[cfg(target_os = "ios")]
+pub fn set_keychain_access_group(group: &str) -> Result<(), SdkError> {
+    native::set_access_group(group)
+}
+#[cfg(any(any(target_os = "macos", target_os = "ios"), test))]
 mod presence;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(any(target_os = "macos", target_os = "ios"), test))]
 mod primary_items;
 impl PrimaryVault for NativePrimaryVault {
     fn vault_class(&self) -> &'static str {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if native::backend().ok() == Some(native::Backend::LoginKeychain) {
             return VAULT_CLASS_LOGIN_KEYCHAIN;
         }
         VAULT_CLASS_PROTECTED
     }
     fn home_authorization_preflight(&self) -> Result<(), SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             // User presence requires SecAccessControl, which only the protected store has.
             match native::backend() {
@@ -153,7 +163,7 @@ impl PrimaryVault for NativePrimaryVault {
                 _ => Err(super::home_authorization::unavailable()),
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             Err(super::home_authorization::unavailable())
         }
@@ -166,7 +176,7 @@ impl PrimaryVault for NativePrimaryVault {
         ramflux_protocol::home_migration::Signed<ramflux_protocol::home_migration::Authorization>,
         SdkError,
     > {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             let primary = presence::approved_primary(
                 &native::KeychainItems::PROTECTED,
@@ -176,18 +186,18 @@ impl PrimaryVault for NativePrimaryVault {
             let now = super::home_authorization::now()?.max(request.requested_at);
             request.sign_once(&primary, now)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = request;
             Err(super::home_authorization::unavailable())
         }
     }
     fn delete(&self, reference: &str) -> Result<(), SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             native::delete(reference)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = reference;
             Err(SdkError::CustodyVaultUnavailable)
@@ -199,7 +209,7 @@ impl PrimaryVault for NativePrimaryVault {
         principal: &str,
         device: &ramflux_protocol::custody::DeviceRef,
     ) -> Result<BranchCredentials, SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             let bytes = native::get_branch(reference)?;
             let mut seeds = Zeroizing::new([0; 64]);
@@ -209,7 +219,7 @@ impl PrimaryVault for NativePrimaryVault {
             seeds.copy_from_slice(&bytes);
             BranchCredentials::from_vault_seeds(principal, device, &seeds)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = (reference, principal, device);
             Err(SdkError::CustodyVaultUnavailable)
@@ -217,28 +227,28 @@ impl PrimaryVault for NativePrimaryVault {
     }
 
     fn preflight(&self) -> Result<(), SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             native::preflight()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             Err(SdkError::CustodyVaultUnavailable)
         }
     }
     fn store_new(&self, reference: &str, key: &SelfSigningKey) -> Result<(), SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             native::store_primary(reference, &*key.vault_seed())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = (reference, key);
             Err(SdkError::CustodyVaultUnavailable)
         }
     }
     fn load_primary(&self, reference: &str) -> Result<SelfSigningKey, SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             let bytes = native::get_primary(reference)?;
             let mut seed = Zeroizing::new([0; 32]);
@@ -248,40 +258,40 @@ impl PrimaryVault for NativePrimaryVault {
             seed.copy_from_slice(&bytes);
             Ok(SelfSigningKey::from_vault_seed(&seed))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = reference;
             Err(SdkError::CustodyVaultUnavailable)
         }
     }
     fn store_branch(&self, reference: &str, seeds: &Zeroizing<[u8; 64]>) -> Result<(), SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             native::store_branch(reference, &**seeds)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = (reference, seeds);
             Err(SdkError::CustodyVaultUnavailable)
         }
     }
     fn store_provisioning_secret(&self, reference: &str, secret: &[u8]) -> Result<(), SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             native::put(reference, secret)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = (reference, secret);
             Err(SdkError::CustodyVaultUnavailable)
         }
     }
     fn load_provisioning_secret(&self, reference: &str) -> Result<Zeroizing<Vec<u8>>, SdkError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             native::get(reference)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
             let _ = reference;
             Err(SdkError::CustodyVaultUnavailable)
